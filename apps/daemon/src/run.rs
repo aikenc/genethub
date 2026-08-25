@@ -48,7 +48,7 @@ pub async fn run() -> Result<Exit> {
     tracing::info!("log: {}", paths.log_file().display());
     tracing::info!(
         event = "daemon_started",
-        version = env!("CARGO_PKG_VERSION"),
+        version = crate::version::product_version(),
         channel = crate::channel::PRODUCT,
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
@@ -72,6 +72,14 @@ pub async fn run() -> Result<Exit> {
         _ = asked.notified() => tracing::info!("a local client asked us to stop"),
         _ = reload.notified() => {
             tracing::info!("a signed guest update was applied; reloading in place");
+            // The `update.download` answer rides one of the connections this
+            // shutdown is about to tear down. Give the transport a moment to
+            // flush it first — the reload that follows spends seconds
+            // recompiling the component anyway, and without the window the
+            // click that asked for the update reads as a dropped connection.
+            // Correctness never relied on the reply: a client that missed it
+            // re-dials and reads the state afresh.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             daemon.shutdown().await;
             return Ok(Exit::Reload);
         }

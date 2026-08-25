@@ -803,12 +803,17 @@ async fn dispatch(
             Err(message) => Handled::err(ErrorCode::Unsupported, message),
         },
 
-        Request::UpdateAppCheck => {
-            let manifest_url = state.config.read().await.update_manifest_url.clone();
-            Handled::ok(Reply::Update(
-                crate::updates::check(&manifest_url, &state.version).await,
-            ))
-        }
+            Request::UpdateAppCheck => {
+                let manifest_url = state.config.read().await.update_manifest_url.clone();
+                // The App check compares the App's own build version, not the
+                // component's: a Live release moves the component past the App
+                // line, and the question here is whether the machine's
+                // binaries need replacing.
+                let app_version = crate::version::app_version();
+                Handled::ok(Reply::Update(
+                    crate::updates::check(&manifest_url, &app_version).await,
+                ))
+            }
 
         Request::UpdateDownload => match crate::host_update::apply("web") {
             Ok(()) => {

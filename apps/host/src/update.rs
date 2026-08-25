@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
 use crate::abi;
-use crate::artifact::{ArtifactVerifier, SignedArtifact};
+use crate::artifact::{sha256_hex, ArtifactVerifier, SignedArtifact};
 use crate::bindings::genehub::host::component_update as wit;
 use crate::channel;
 use crate::keys;
@@ -65,6 +65,63 @@ struct Runtime {
 }
 
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
+
+/// Where this build looks for signed component releases. Released channels
+/// stamp their URLs at build time; a debug build additionally honours
+/// `GENEHUB_COMPONENT_MANIFEST_URL` so the release specialty tests can point
+/// a local build at a loopback release service. The variable is compiled out
+/// of release builds, where a pre-settable update URL would be a back door.
+fn manifest_urls() -> Vec<String> {
+    #[cfg(debug_assertions)]
+    if let Ok(url) = std::env::var("GENEHUB_COMPONENT_MANIFEST_URL") {
+        if !url.is_empty() {
+            return vec![url];
+        }
+    }
+    channel::COMPONENT_MANIFEST_URLS
+        .iter()
+        .map(|url| (*url).to_string())
+        .collect()
+}
+
+/// Whether this build may consult the activation store and a release
+/// manifest at all. A source build without an update source keeps its
+/// file-watcher loop and never lets a downloaded component override the
+/// checkout; naming an update source is what opts a debug build in.
+pub fn has_update_source() -> bool {
+    !manifest_urls().is_empty()
+}
+
+/// The version of the component this process actually loaded, recorded at
+/// instantiate time from the signed envelope. Raw unsigned builds report
+/// nothing, which the guest surfaces as a source build.
+static RUNNING_VERSION: OnceLock<Mutex<Option<ProductVersion>>> = OnceLock::new();
+
+pub fn note_running_component(bytes: &[u8]) {
+    let version = SignedArtifact::from_single_file(bytes)
+        .ok()
+        .and_then(|signed| ProductVersion::parse(signed.envelope.release_version()).ok());
+    let lock = RUNNING_VERSION.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = lock.lock() {
+        *guard = version;
+    }
+}
+
+fn running_version() -> Option<ProductVersion> {
+    RUNNING_VERSION
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
+/// What the guest should report as the product version: the running
+/// component's envelope version, or `0.0.0` for an unsigned source build.
+pub fn running_version_string() -> String {
+    running_version()
+        .map(|version| version.to_string())
+        .unwrap_or_else(|| "0.0.0".to_string())
+}
 
 fn runtime() -> Result<&'static Mutex<Runtime>> {
     if let Some(runtime) = RUNTIME.get() {
@@ -148,7 +205,7 @@ pub fn check() -> Result<wit::Status> {
         .lock()
         .map_err(|_| anyhow!("component update lock was poisoned"))?;
     let current = current_version(&guard)?;
-    if channel::COMPONENT_MANIFEST_URLS.is_empty() {
+    if !has_update_source() {
         return Ok(wit::Status {
             current_version: current,
             latest_version: None,
@@ -199,7 +256,7 @@ pub fn check() -> Result<wit::Status> {
 }
 
 pub fn apply(_request_id: &str) -> Result<()> {
-    if channel::COMPONENT_MANIFEST_URLS.is_empty() {
+    if !has_update_source() {
         bail!("这个通道没有签名组件更新源");
     }
     let manifest = fetch_manifest()?;
@@ -221,21 +278,39 @@ pub fn apply(_request_id: &str) -> Result<()> {
     }
     let manifest_version = ProductVersion::parse(&manifest.release_version)
         .map_err(|_| anyhow!("更新清单携带了非规范版本号"))?;
+    // The high-water mark only fences versions the store has seen; a fresh
+    // store has none, so a stale mirror could still serve a first download
+    // older than what is running. The running line is the other fence: an
+    // update must move past it, and an equal version is no update either.
+    let runtime = runtime()?;
+    let guard = runtime
+        .lock()
+        .map_err(|_| anyhow!("component update lock was poisoned"))?;
+    if let Ok(running) = ProductVersion::parse(&current_version(&guard)?) {
+        if manifest_version <= running {
+            bail!(
+                "更新清单的 {} 不比正在运行的 {} 新",
+                manifest_version,
+                running
+            );
+        }
+    }
     let bytes = download_artifact(&manifest)?;
+    // The manifest's artifact digest describes the downloaded bytes — the
+    // signed file — so transport corruption is caught before the envelope is
+    // even parsed. The envelope's own sha256/size cover the component inside
+    // it, a different scale, and the signature binds the two together.
+    if sha256_hex(&bytes) != manifest.artifact.sha256 || bytes.len() as u64 != manifest.artifact.size {
+        bail!("downloaded artifact does not match the signed manifest");
+    }
     let signed = SignedArtifact::from_single_file(&bytes).map_err(|error| anyhow!("{error}"))?;
     if signed.envelope.release_version() != manifest.release_version
-        || signed.envelope.sha256() != manifest.artifact.sha256
-        || signed.envelope.size() != manifest.artifact.size
         || signed.envelope.app_abi_hash() != manifest.app_abi_hash
         || signed.envelope.web_protocol() != manifest.web_protocol
         || signed.envelope.channel() != manifest.channel
     {
         bail!("downloaded artifact does not match the signed manifest");
     }
-    let runtime = runtime()?;
-    let guard = runtime
-        .lock()
-        .map_err(|_| anyhow!("component update lock was poisoned"))?;
     let verified = {
         let (key_id, key) = keys::trusted_key()?;
         ArtifactVerifier::new(
@@ -248,13 +323,10 @@ pub fn apply(_request_id: &str) -> Result<()> {
         .and_then(|verifier| verifier.verify(&signed))
         .map_err(|error| anyhow!("{error}"))?
     };
-    if verified.digest() != manifest.artifact.sha256 {
-        bail!(
-            "verified artifact {} digest {} does not match the signed manifest",
-            verified.artifact_id(),
-            verified.digest()
-        );
-    }
+    // The verified digest covers the component inside the envelope while the
+    // manifest digest covers the signed file on the wire; the signature
+    // already proved they belong together, so there is nothing left to
+    // cross-check here.
     guard
         .store
         .stage(&verified)
@@ -295,6 +367,11 @@ pub fn load_active_bytes() -> Result<Option<Vec<u8>>> {
 }
 
 fn current_version(runtime: &Runtime) -> Result<String> {
+    // The running component's own envelope version is the honest answer; the
+    // store and the bundled baseline only describe what *could* run.
+    if let Some(running) = running_version() {
+        return Ok(running.to_string());
+    }
     let highest = runtime
         .store
         .highest_version()
@@ -310,8 +387,8 @@ fn current_version(runtime: &Runtime) -> Result<String> {
 
 fn fetch_manifest() -> Result<ComponentManifest> {
     let mut last_error = None;
-    for url in channel::COMPONENT_MANIFEST_URLS {
-        match get_bytes(url, MAX_MANIFEST_BYTES) {
+    for url in manifest_urls() {
+        match get_bytes(&url, MAX_MANIFEST_BYTES) {
             Ok(bytes) => {
                 let manifest: ComponentManifest = serde_json::from_slice(&bytes)
                     .with_context(|| format!("parsing the release manifest from {url}"))?;
@@ -389,12 +466,20 @@ impl crate::load::Host {
 }
 
 impl wit::Host for crate::load::Host {
+    // Both verbs do blocking network and store IO (reqwest::blocking carries
+    // its own runtime, which panics if it is dropped inside this async
+    // context), so the work runs on the blocking pool rather than on the
+    // executor that is driving the guest.
     async fn check(&mut self) -> Result<wit::Status, String> {
-        check().map_err(|error| error.to_string())
+        tokio::task::spawn_blocking(|| check().map_err(|error| error.to_string()))
+            .await
+            .map_err(|error| format!("component update check task: {error}"))?
     }
 
     async fn apply(&mut self, request_id: String) -> Result<(), String> {
-        apply(&request_id).map_err(|error| error.to_string())
+        tokio::task::spawn_blocking(move || apply(&request_id).map_err(|error| error.to_string()))
+            .await
+            .map_err(|error| format!("component update apply task: {error}"))?
     }
 }
 

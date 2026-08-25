@@ -62,9 +62,11 @@ jobs:
         with:
           node-version: 22
       # A broken classifier must never produce output: its own contract tests
-      # run in this job, before any classification is trusted.
+      # run in this job, before any classification is trusted. The release
+      # policy scripts ride along: the version grammar and the channel table
+      # are cheap to keep honest and expensive to discover broken.
       - name: The classifier must pass its own contract tests
-        run: node --test scripts/ci-classify.test.mjs scripts/ci-native-fingerprint.test.mjs scripts/ci-wit-digest.test.mjs
+        run: node --test scripts/ci-classify.test.mjs scripts/ci-native-fingerprint.test.mjs scripts/ci-wit-digest.test.mjs scripts/product-version.test.mjs scripts/channel.test.mjs
       - id: filter
         shell: bash
         run: |

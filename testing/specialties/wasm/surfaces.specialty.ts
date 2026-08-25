@@ -5,10 +5,8 @@ import {
   BlockedError,
   defineSpecialty,
   agentHostProcesses,
-  procCmdline,
   tryLocateDaemonComponent,
   tryLocateHost,
-  type CaseContext,
 } from "../../framework/public.ts";
 
 function requireWasm(openRoot: string): void {

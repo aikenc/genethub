@@ -171,7 +171,7 @@ impl AppState {
             terminals,
             processes,
             diagnostics,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: crate::version::product_version(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,
             link: std::sync::OnceLock::new(),

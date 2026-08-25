@@ -11,7 +11,6 @@ import {
   runGenet,
   tryLocateDaemonComponent,
   tryLocateHost,
-  type CaseContext,
 } from "../../framework/public.ts";
 
 function requireWasm(openRoot: string): { host: string; component: string } {

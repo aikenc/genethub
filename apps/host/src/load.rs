@@ -265,6 +265,7 @@ fn build_instance(
                 | crate::channel::ENV_CWD
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
+                | "GENEHUB_COMPONENT_VERSION"
         ) {
             wasi.env(key, crate::guest_paths::env_value_for_guest(value));
         }
@@ -313,6 +314,16 @@ fn build_instance(
             crate::guest_paths::env_value_for_guest(component.to_string_lossy()),
         );
     }
+    // Version facts the guest cannot learn on its own: the product version is
+    // the loaded component envelope's release version (a Live release moves
+    // it without touching any binary), and the App version is this binary's
+    // own. Both are this process' assertions about itself, set after the
+    // inheritance pass so a pre-set value never wins.
+    wasi.env(
+        "GENEHUB_COMPONENT_VERSION",
+        crate::update::running_version_string(),
+    );
+    wasi.env("GENEHUB_APP_VERSION", crate::version::app_version());
 
     let store = Store::new(
         engine,
@@ -383,18 +394,20 @@ fn build_instance(
 
 /// Compile in memory from the bytes we just read. No file cache.
 fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
-    // Source builds keep their file-watcher loop and never consult a release
-    // activation store. Published channels are compile-time identities and
-    // are the only binaries that may select a downloaded signed guest.
-    let active = if crate::channel::CHANNEL == "local" {
-        None
-    } else {
+    // Builds without an update source keep their file-watcher loop and never
+    // consult a release activation store. Naming an update source — stamped
+    // on released channels, an explicit debug-build variable otherwise — is
+    // what lets a downloaded signed guest override the file on disk.
+    let active = if crate::update::has_update_source() {
         crate::update::load_active_bytes()?
+    } else {
+        None
     };
     let bytes = match active {
         Some(active) => active,
         None => std::fs::read(path).with_context(|| format!("reading {}", path.display()))?,
     };
+    crate::update::note_running_component(&bytes);
     crate::abi::assert_digest_if_present(&bytes)?;
     debug_log(&format!("compiling {}-byte component", bytes.len()));
     let component = Component::from_binary(engine, &bytes)

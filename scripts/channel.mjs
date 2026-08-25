@@ -26,7 +26,7 @@
 //   node scripts/channel.mjs --show                  print the channel the tree is stamped for
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -586,25 +586,40 @@ function fromRef() {
   return "";
 }
 
-const arg = process.argv[2] ?? "";
-if (["local", "dev", "beta", "stable"].includes(arg)) {
-  stamp(arg);
-} else if (arg === "--from-tag") {
-  const channel = fromRef();
-  if (!channel) {
-    console.log(`not a release tag (GITHUB_REF_NAME=${process.env.GITHUB_REF_NAME ?? "unset"}), leaving the tree as it is`);
+// Exported for `channel.test.mjs`: the table and the tag mapping are the
+// channel policy, and they deserve direct assertions instead of discovery by
+// a broken release.
+export { fromRef, TABLE };
+
+const invokedDirectly =
+  typeof process.argv[1] === "string" &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+
+if (invokedDirectly) {
+  main();
+}
+
+function main() {
+  const arg = process.argv[2] ?? "";
+  if (["local", "dev", "beta", "stable"].includes(arg)) {
+    stamp(arg);
+  } else if (arg === "--from-tag") {
+    const channel = fromRef();
+    if (!channel) {
+      console.log(`not a release tag (GITHUB_REF_NAME=${process.env.GITHUB_REF_NAME ?? "unset"}), leaving the tree as it is`);
+    } else {
+      stamp(channel);
+    }
+  } else if (arg === "--detect") {
+    // Just the answer, without touching the tree — the workflow's first job
+    // asks this to decide what the later jobs build and publish. A rehearsal
+    // run is not a release tag, so it builds local, matching the tree.
+    process.stdout.write(fromRef() || "local");
+  } else if (arg === "--show") {
+    const body = readFileSync(join(repo, "packages/frontdoor/src/channel.rs"), "utf8");
+    process.stdout.write(body.match(/pub const CHANNEL: &str = "(.*)";/)[1]);
   } else {
-    stamp(channel);
+    usage();
+    process.exit(2);
   }
-} else if (arg === "--detect") {
-  // Just the answer, without touching the tree — the workflow's first job
-  // asks this to decide what the later jobs build and publish. A rehearsal
-  // run is not a release tag, so it builds local, matching the tree.
-  process.stdout.write(fromRef() || "local");
-} else if (arg === "--show") {
-  const body = readFileSync(join(repo, "packages/frontdoor/src/channel.rs"), "utf8");
-  process.stdout.write(body.match(/pub const CHANNEL: &str = "(.*)";/)[1]);
-} else {
-  usage();
-  process.exit(2);
 }

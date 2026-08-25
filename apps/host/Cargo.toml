@@ -19,6 +19,7 @@ sha2 = "0.10"
 # a session message. Linking the schema for that put every session-protocol edit
 # on the Windows and macOS build matrix (`docs/cli-thin-forwarder.md` §6).
 genehub-identity = { path = "../../packages/identity" }
+genet-frontdoor = { path = "../../packages/frontdoor" }
 genet-native = { path = "../../packages/native" }
 
 anyhow.workspace = true

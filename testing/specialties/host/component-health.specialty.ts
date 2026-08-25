@@ -65,7 +65,7 @@ defineSpecialty(
       const onChunk = (chunk: Buffer) => {
         combined += chunk.toString("utf8");
         const match = combined.match(/listening\s+(127\.0\.0\.1:\d+)/);
-        if (match) {
+        if (match?.[1]) {
           clearTimeout(timer);
           resolve(match[1]);
         }

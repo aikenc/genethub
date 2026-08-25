@@ -34,5 +34,6 @@ pub mod paths;
 pub mod perms;
 pub mod proof;
 pub mod selectors;
+pub mod version;
 
 pub use paths::Paths;

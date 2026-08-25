@@ -243,7 +243,7 @@ async fn fetch(url: &str) -> Result<Manifest> {
             format!(
                 "{}/{}",
                 crate::channel::CLI_BINARY,
-                env!("CARGO_PKG_VERSION")
+                crate::version::app_version()
             ),
         )
         .send()
@@ -322,7 +322,10 @@ fn status(current: &str, manifest: &Manifest) -> UpdateStatus {
         // manifest never gets to put an executable URL into an API response.
         url: manifest.page.clone(),
         download_url: None,
-        problem: Some("自动更新尚未启用：请从官方发布页手动下载，并核对 SHA256SUMS".to_string()),
+        // A reached manifest is a healthy check: `problem` is reserved for
+        // "we could not find out", and the UI carries the manual-download
+        // guidance on the `newer` branch instead.
+        problem: None,
     }
 }
 
@@ -381,46 +384,25 @@ fn platform_key() -> String {
 
 /// Whether `latest` is a later version than `current`.
 ///
-/// Compared as numbers rather than as text, because "0.1.9" sorts *after*
-/// "0.1.10" as a string — and that is the exact pair this repository was next in
-/// line to ship.
+/// Compared with the one shared Product Version implementation, because this
+/// answer decides whether a person is told to reinstall: a prerelease must
+/// order before its release (0.8.0-beta.1 < 0.8.0), and "0.1.9" must sort
+/// before "0.1.10" rather than after it as text would.
 fn is_newer(current: &str, latest: &str) -> bool {
     // A build the release workflow never stamped calls itself 0.0.0
     // (`scripts/stamp-version.mjs`), and it is behind nothing: whoever compiled it has
     // the source in front of them, and pointing that person at an installer is
     // telling them to replace their own tree with an older one.
-    if parts(current).iter().all(|piece| *piece == 0) {
+    if current == "0.0.0" {
         return false;
     }
-    let mine = parts(current);
-    let theirs = parts(latest);
-    let width = mine.len().max(theirs.len());
-    // Zero-padded to one width so that 0.2 and 0.2.0 are the same version
-    // instead of the shorter one losing.
-    let pad = |mut version: Vec<u64>| {
-        version.resize(width, 0);
-        version
+    let Ok(mine) = genet_frontdoor::version::ProductVersion::parse(current) else {
+        return false;
     };
-    pad(theirs) > pad(mine)
-}
-
-/// The leading numbers of a version. Anything else — a `-rc1`, a `+build` — is
-/// dropped rather than ranked: this compares releases, and the tags this
-/// repository publishes are numbers all the way down.
-fn parts(version: &str) -> Vec<u64> {
-    version
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .map(|piece| {
-            piece
-                .chars()
-                .take_while(|character| character.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .unwrap_or(0)
-        })
-        .collect()
+    let Ok(theirs) = genet_frontdoor::version::ProductVersion::parse(latest) else {
+        return false;
+    };
+    theirs > mine
 }
 
 /// How long a whole download may take. Generous: an installer is tens of
@@ -594,7 +576,7 @@ async fn fetch_installer(
             format!(
                 "{}/{}",
                 crate::channel::CLI_BINARY,
-                env!("CARGO_PKG_VERSION")
+                crate::version::app_version()
             ),
         )
         .send()
@@ -791,7 +773,10 @@ mod tests {
             Some("https://example.test/releases/tag/v9")
         );
         assert!(status.download_url.is_none());
-        assert!(status.problem.as_deref().unwrap().contains("SHA256SUMS"));
+        // A reached manifest is a healthy check: the UI carries the
+        // manual-download guidance on the `newer` branch, and `problem` is
+        // reserved for "we could not find out".
+        assert!(status.problem.is_none());
     }
 
     /// With no independently trusted page, an installer URL from the unsigned
@@ -803,7 +788,18 @@ mod tests {
         let status = status("0.1.17", &manifest);
         assert!(status.url.is_none());
         assert!(status.download_url.is_none());
-        assert!(status.problem.is_some());
+        assert!(status.problem.is_none());
+    }
+
+    /// A prerelease orders before its release: a beta App must hear about the
+    /// stable line shipping, and a stable build must never be told to
+    /// downgrade into the beta line.
+    #[test]
+    fn a_prerelease_is_older_than_its_release() {
+        assert!(is_newer("0.8.0-beta.1", "0.8.0"));
+        assert!(!is_newer("0.8.0", "0.8.0-beta.1"));
+        assert!(is_newer("0.8.0-beta.1", "0.8.0-beta.2"));
+        assert!(!is_newer("0.8.0-beta.2", "0.8.0-beta.1"));
     }
 
     /// The manifest is the release's, not ours: it will grow fields, and a daemon

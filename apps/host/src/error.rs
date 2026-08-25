@@ -22,3 +22,12 @@ pub enum ArtifactError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
+
+impl From<genet_frontdoor::version::VersionParseError> for ArtifactError {
+    fn from(error: genet_frontdoor::version::VersionParseError) -> Self {
+        ArtifactError::EnvelopeField {
+            field: "releaseVersion",
+            reason: error.to_string(),
+        }
+    }
+}

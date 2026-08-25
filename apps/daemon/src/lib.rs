@@ -48,6 +48,7 @@ pub mod speech;
 pub mod state;
 pub mod transport;
 pub mod updates;
+pub mod version;
 pub mod workspace;
 
 use anyhow::Result;

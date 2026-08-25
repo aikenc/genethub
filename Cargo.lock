@@ -1241,6 +1241,7 @@ dependencies = [
  "ed25519-dalek",
  "fs2",
  "genehub-identity",
+ "genet-frontdoor",
  "genet-native",
  "http",
  "http-body-util",
