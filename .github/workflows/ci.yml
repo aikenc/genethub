@@ -4,10 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-# Release calls this on the tag and classifies against the previous tag, the
-# same incremental question an MR answers. force_full remains for rehearsals
-# only; ordinary push/PR never set it.
-workflow_call:
+  # Release calls this on the tag and classifies against the previous tag, the
+  # same incremental question an MR answers. force_full remains for rehearsals
+  # only; ordinary push/PR never set it.
+  workflow_call:
     inputs:
       force_full:
         description: Run every job regardless of changed paths
