@@ -5,11 +5,17 @@ name: Release
 # the packaging tool of the platform it targets.
 #
 # Three lines ship from this one workflow (`docs/version-management.md` in
-# genethub-cloud): a plain `v0.22.2` tag builds the stable line, a
+# genethub-cloud): a plain `v0.22.0` tag builds the stable line, a
 # `v0.23.0-beta.4` tag the beta line, a `v0.0.0-dev.4` tag the dev
 # (internal) line. The tag decides everything — the names the binaries carry,
 # the Hub the build points at, the release it publishes to — because a channel
 # chosen by a dropdown in the Actions tab is a channel somebody picks wrong.
+#
+# This workflow only packs an App Release: installers, tarballs, the GitHub
+# release. Activating the component manifest and the website is the local
+# Live chain's job (`scripts/publish-component.mjs --commit --web`), which
+# needs no runner, no secrets and no queue — and is where the Live digit
+# moves between App Releases.
 on:
   push:
     tags: ["v*"]
@@ -29,34 +35,6 @@ jobs:
   # tag instead of paying for the full matrix on every release.
   verify:
     uses: ./.github/workflows/ci.yml
-
-  cloud_source:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    outputs:
-      repository: ${{ steps.pin.outputs.repository }}
-      sha: ${{ steps.pin.outputs.sha }}
-    env:
-      CLOUD_REPOSITORY: ${{ vars.CLOUD_REPO || format('{0}/genethub-cloud', github.repository_owner) }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          repository: ${{ env.CLOUD_REPOSITORY }}
-          ref: main
-          token: ${{ secrets.GENEHUB_CLOUD_READ_TOKEN }}
-          path: genethub-cloud
-      - id: pin
-        shell: bash
-        working-directory: genethub-cloud
-        run: |
-          set -euo pipefail
-          [[ "$CLOUD_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
-            echo "::error::CLOUD_REPO must be an owner/repository name"
-            exit 2
-          }
-          printf 'repository=%s\n' "$CLOUD_REPOSITORY" >> "$GITHUB_OUTPUT"
-          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   # What this run is. Every later job reads the answers from here rather than
   # re-deriving them, so there is exactly one place where the tag's shape
@@ -709,69 +687,3 @@ jobs:
           prerelease: true
           files: dist/*
 
-  publish_component_website:
-    needs: [channel, cloud_source, signed_component, publish]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: [self-hosted, linux, genehub-publisher]
-    concurrency:
-      group: genehub-component-${{ needs.channel.outputs.name }}
-      cancel-in-progress: false
-    permissions:
-      contents: read
-    env:
-      STABLE_STAGE: ${{ vars.GENEHUB_STABLE_STAGE }}
-      BETA_STAGE: ${{ vars.GENEHUB_BETA_STAGE }}
-      DEV_STAGE: ${{ vars.GENEHUB_DEV_STAGE }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          ref: ${{ github.sha }}
-          path: genethub
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-          repository: ${{ needs.cloud_source.outputs.repository }}
-          ref: ${{ needs.cloud_source.outputs.sha }}
-          token: ${{ secrets.GENEHUB_CLOUD_READ_TOKEN }}
-          path: genethub-cloud
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: guest-wasm-release
-          path: release-input/component
-      - name: Read back the signed release bytes and activate the component manifest
-        shell: bash
-        env:
-          CHANNEL: ${{ needs.channel.outputs.name }}
-          PUBLIC_ORIGIN: ${{ needs.channel.outputs.hub_url }}
-          CLOUD_SHA: ${{ needs.cloud_source.outputs.sha }}
-        run: |
-          set -euo pipefail
-          case "$CHANNEL" in
-            stable) stage="$STABLE_STAGE" ;;
-            beta) stage="$BETA_STAGE" ;;
-            dev) stage="$DEV_STAGE" ;;
-            *) echo "unexpected release channel $CHANNEL" >&2; exit 1 ;;
-          esac
-          test -n "$stage" || { echo "publisher stage is not configured for $CHANNEL" >&2; exit 1; }
-          identity="$GITHUB_WORKSPACE/release-input/component/component-identity.json"
-          abi="$(node -e 'const i=require(process.argv[1]); process.stdout.write(String(i.appAbiHash))' "$identity")"
-          command=(
-            node "$GITHUB_WORKSPACE/genethub-cloud/publisher/publish-prepared-component.mjs"
-            --commit
-            --cloud-root "$GITHUB_WORKSPACE/genethub-cloud"
-            --open-root "$GITHUB_WORKSPACE/genethub"
-            --open-sha "$GITHUB_SHA"
-            --cloud-sha "$CLOUD_SHA"
-            --channel "$CHANNEL"
-            --store "$stage/artifacts"
-            --public-origin "$PUBLIC_ORIGIN"
-            --component "$GITHUB_WORKSPACE/release-input/component/genehub_guest.wasm"
-            --component-identity "$identity"
-            --app-release "${GITHUB_REF_NAME#v}"
-            --app-abi-hash "$abi"
-          )
-          if [ "$CHANNEL" = stable ]; then
-            command+=(--github-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/genehub_guest.wasm")
-          fi
-          "${command[@]}"
