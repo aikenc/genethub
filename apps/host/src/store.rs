@@ -125,9 +125,19 @@ impl ArtifactStore {
     }
 
     /// Completes the only recoverable crash point: the high-water mark was
-    /// durable but candidate -> active had not yet become visible.
+    /// durable but candidate -> active had not yet become visible. A
+    /// candidate that no longer verifies — corrupted, or signed for another
+    /// App ABI — is discarded rather than fatal: it was never activated, so
+    /// nothing is lost by dropping it.
     pub fn recover_candidate(&self) -> Result<bool> {
-        let Some(candidate) = self.load_candidate()? else {
+        let candidate = match self.load_candidate() {
+            Ok(candidate) => candidate,
+            Err(_) => {
+                self.discard_candidate()?;
+                return Ok(false);
+            }
+        };
+        let Some(candidate) = candidate else {
             return Ok(false);
         };
         if Some(&candidate.envelope().version()) != self.highest_version()?.as_ref() {
@@ -136,6 +146,13 @@ impl ArtifactStore {
         }
         self.commit_candidate(&candidate.envelope().version())?;
         Ok(true)
+    }
+
+    /// Drops the active file if it can be dropped; a failure to delete is
+    /// logged by the caller's context and never blocks a fallback.
+    pub fn discard_active_quietly(&self) {
+        let _ = remove_if_present(&self.active);
+        let _ = sync_directory(&self.root);
     }
 
     #[cfg(test)]

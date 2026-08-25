@@ -356,11 +356,21 @@ pub fn load_active_bytes() -> Result<Option<Vec<u8>>> {
     let guard = runtime
         .lock()
         .map_err(|_| anyhow!("component update lock was poisoned"))?;
-    let Some(active) = guard
-        .store
-        .load_active()
-        .map_err(|error| anyhow!("loading the active signed component: {error}"))?
-    else {
+    // The store is a cache and the bundled component is the floor: an active
+    // that no longer verifies — corrupted, or signed for another App ABI
+    // after an App upgrade — must not keep the machine from starting. Fall
+    // back to the bundled component and drop the unusable file.
+    let active = match guard.store.load_active() {
+        Ok(active) => active,
+        Err(error) => {
+            crate::load::debug_log(&format!(
+                "the stored active component is unusable ({error}); falling back to the bundled one"
+            ));
+            let _ = guard.store.discard_active_quietly();
+            return Ok(None);
+        }
+    };
+    let Some(active) = active else {
         return Ok(None);
     };
     if let Some(baseline) = &guard.baseline_version {

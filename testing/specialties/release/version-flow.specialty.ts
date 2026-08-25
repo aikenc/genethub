@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1191,6 +1191,100 @@ defineSpecialty(
     } finally {
       await service.close();
       rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.app-upgrade-fences-foreign-abi-component",
+    "An App upgrade fences the downloaded component from the old ABI generation",
+    "with the store active signed for another App ABI, the daemon boots on the bundled component instead of failing",
+    [
+      "a stored component from the old App generation makes the upgraded App unable to start",
+      "the ABI fence is bypassed and an incompatible component is instantiated",
+    ],
+  ),
+  async (t) => {
+    const { host, guest } = requireArtifacts(t.openRoot);
+    const dir = mkdtempSync(path.join(tmpdir(), "genehub-release-pack-"));
+    const service = await startReleaseService();
+    try {
+      const signedCurrent = packComponent(host, guest, COMPONENT_VERSION, dir);
+      // A component from another App generation: honestly signed, but its
+      // envelope names an ABI digest this host was not built for.
+      const foreignAbi = "f".repeat(64);
+      const signedForeign = path.join(dir, "genehub_guest-foreign.wasm");
+      const packed = spawnSync(
+        host,
+        ["pack", guest, signedForeign, "local", "0.7.0-beta.5"],
+        { encoding: "utf8", env: { ...process.env, GENEHUB_ABI_DIGEST: foreignAbi } },
+      );
+      if (packed.status !== 0) throw new Error(`pack foreign-abi failed: ${packed.stderr}`);
+      plantStore(t, { active: signedForeign, highest: "0.7.0-beta.5" });
+      const handle = await startReleaseDaemon(t, {
+        wasm: signedCurrent,
+        env: { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` },
+      });
+      try {
+        t.assertions.assert(
+          handle.client.identity?.daemonVersion === COMPONENT_VERSION,
+          `the foreign-ABI active was not fenced: ${handle.client.identity?.daemonVersion}`,
+        );
+        const storeFiles = readdirSync(path.join(t.env.data, "component"));
+        t.assertions.assert(
+          !storeFiles.includes("active.wasm"),
+          `the fenced active was not discarded: ${storeFiles}`,
+        );
+      } finally {
+        await stopReleaseDaemon(handle);
+      }
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.local-default-has-no-update-source",
+    "A source build without any injection is off every release scale",
+    "with no manifest URLs configured, update.check and update.appCheck answer not-on-the-scale and update.download refuses",
+    [
+      "a local build silently dials a release feed and lets a published component replace the checkout",
+      "the no-source answer reads as a network failure instead of a deliberate stance",
+    ],
+  ),
+  async (t) => {
+    const { guest } = requireArtifacts(t.openRoot);
+    // No GENEHUB_COMPONENT_MANIFEST_URL, no updateManifestUrl: the defaults a
+    // plain `cargo build` runs with.
+    const handle = await startReleaseDaemon(t, { wasm: guest });
+    try {
+      const check = await handle.client.call({ type: "update.check" });
+      t.assertions.assert(check?.type === "update", `update.check answered ${check?.type}`);
+      if (check?.type === "update") {
+        t.assertions.assert(check.data.newer === false, "a source build looked outdated");
+        t.assertions.assert(
+          check.data.problem?.includes("没有签名组件更新源") ?? false,
+          `the no-source stance read as: ${check.data.problem}`,
+        );
+      }
+      const appCheck = await handle.client.call({ type: "update.appCheck" });
+      t.assertions.assert(appCheck?.type === "update", `appCheck answered ${appCheck?.type}`);
+      if (appCheck?.type === "update") {
+        t.assertions.assert(appCheck.data.newer === false, "a source build's App looked outdated");
+      }
+      let refused: unknown = null;
+      try {
+        await handle.client.call({ type: "update.download" });
+      } catch (error) {
+        refused = error;
+      }
+      t.assertions.assert(refused !== null, "a source build accepted a component download");
+    } finally {
+      await stopReleaseDaemon(handle);
     }
   },
 );

@@ -434,7 +434,7 @@ fn require_product_digest(bytes: &[u8], engine: &Engine, component: &Component) 
 /// Progress is silent by default: this process' stderr belongs to the guest's
 /// owner, and a daemon adapter that reads a crashed agent's last words should
 /// never find the shell's compile log there. `GENEHUB_HOST_DEBUG=1` opts in.
-fn debug_log(message: &str) {
+pub(crate) fn debug_log(message: &str) {
     if std::env::var_os("GENEHUB_HOST_DEBUG").is_some_and(|value| !value.is_empty()) {
         eprintln!("genehub-host: {message}");
     }

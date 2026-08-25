@@ -64,11 +64,22 @@ fn pack(
 ) -> Result<(), String> {
     let component = std::fs::read(input.as_ref())
         .map_err(|error| format!("reading {}: {error}", input.as_ref().display()))?;
+    // Debug builds may stamp a foreign ABI digest into the envelope so the
+    // release specialties can manufacture a component from another App
+    // generation; release packs always name the digest this binary was built
+    // against.
+    #[cfg(debug_assertions)]
+    let abi_hash = match std::env::var("GENEHUB_ABI_DIGEST") {
+        Ok(value) if !value.is_empty() => value,
+        _ => abi::hex_digest(&abi::host_digest()),
+    };
+    #[cfg(not(debug_assertions))]
+    let abi_hash = abi::hex_digest(&abi::host_digest());
     let envelope = ArtifactEnvelope::unsigned(
         channel::MODULE_ID,
         artifact_channel,
         version.to_string(),
-        abi::hex_digest(&abi::host_digest()),
+        abi_hash,
         genehub_identity::WEB_PROTOCOL_VERSION,
         key_id,
         &component,
