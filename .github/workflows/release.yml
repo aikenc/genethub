@@ -484,7 +484,11 @@ jobs:
           # job that lost its stamping step would ship a daemon calling itself
           # 0.0.0 — which tells every user they run an unreleased build, silently.
           node scripts/stamp-version.mjs --verify "target/release/$CLI_BINARY$exe" || exit 1
+          # The signed component is downloaded, not cargo-built here, so the
+          # daemon's target-dir search finds nothing; point it at the artifact
+          # the bundle step already verified byte-for-byte.
           env "$ENV_DATA_DIR=$root/data" "$ENV_WORKSPACE_DIR=$root/workspace" \
+            "GENEHUB_LOCAL_COMPONENT=${{ runner.temp }}/guest-wasm/genehub_guest.wasm" \
             "target/release/$CLI_BINARY$exe" daemon run >"$root/out.json" 2>"$root/err.log" &
           pid=$!
           for _ in $(seq 1 30); do
