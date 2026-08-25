@@ -36,10 +36,14 @@ try {
     !boot.url.startsWith("http://127.0.0.1:5173") && !boot.url.startsWith("chrome-error://"),
     `offline launch left the bundled boot page: ${boot.url}`,
   );
-  const bootState = await evaluate(boot, `({
-    status: document.getElementById("status")?.textContent ?? "",
-    hasGlobalTauri: Boolean(globalThis.__TAURI__)
-  })`);
+  const bootState = await evaluateUntil(
+    boot,
+    `({
+      status: document.getElementById("status")?.textContent ?? "",
+      hasGlobalTauri: Boolean(globalThis.__TAURI__)
+    })`,
+    (state) => state.status !== "",
+  );
   assert(/官网暂时无法访问|启动/.test(bootState.status), `boot status is visible: ${bootState.status}`);
   assert(bootState.hasGlobalTauri === false, "the boot surface has no globally exposed Tauri API");
   stopTree(child);
@@ -58,11 +62,15 @@ try {
   cdpPort = await availablePort();
   child = launch(cdpPort);
   const remote = await inspectPage(cdpPort, (target) => target.url === "http://127.0.0.1:5173/app");
-  const remoteState = await evaluate(remote, `({
-    url: location.href,
-    marker: document.getElementById("remote")?.textContent ?? "",
-    hasGlobalTauri: Boolean(globalThis.__TAURI__)
-  })`);
+  const remoteState = await evaluateUntil(
+    remote,
+    `({
+      url: location.href,
+      marker: document.getElementById("remote")?.textContent ?? "",
+      hasGlobalTauri: Boolean(globalThis.__TAURI__)
+    })`,
+    (state) => state.marker !== "",
+  );
   assert(remoteState.url === "http://127.0.0.1:5173/app", `remote URL loaded: ${remoteState.url}`);
   assert(remoteState.marker === "remote", "the real remote document rendered in WebView2");
   assert(remoteState.hasGlobalTauri === false, "the remote origin has no globally exposed Tauri API");
@@ -125,6 +133,20 @@ async function inspectPage(port, predicate) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
   throw new Error(`timed out waiting for WebView2 page (${last})`);
+}
+
+// A CDP target is listed as soon as navigation starts, before the document
+// has parsed far enough to hold the element the assertion reads. Poll the
+// expression until the page has rendered (10s ceiling), then return the last
+// value so the caller's assertion still decides pass/fail.
+async function evaluateUntil(target, expression, accept, { attempts = 40, intervalMs = 250 } = {}) {
+  let value;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    value = await evaluate(target, expression);
+    if (accept(value)) return value;
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+  return value;
 }
 
 async function evaluate(target, expression) {
