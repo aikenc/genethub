@@ -372,7 +372,7 @@ pub fn load_active_bytes() -> Result<Option<Vec<u8>>> {
             crate::load::debug_log(&format!(
                 "the stored active component is unusable ({error}); falling back to the bundled one"
             ));
-            let _ = guard.store.discard_active_quietly();
+            guard.store.discard_active_quietly();
             return Ok(None);
         }
     };

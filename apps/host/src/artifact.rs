@@ -268,12 +268,6 @@ impl VerifiedArtifact {
         &self.artifact_id
     }
 
-    /// Content digest of the Wasm component, shared by manifests that publish
-    /// identical code under a different version or signing key.
-    pub fn digest(&self) -> &str {
-        self.envelope.sha256()
-    }
-
     pub fn envelope(&self) -> &ArtifactEnvelope {
         &self.envelope
     }
