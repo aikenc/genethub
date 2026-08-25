@@ -8,9 +8,7 @@
  */
 
 import type { HubMachine } from "@genehub/proto";
-import type { UpdateStatus } from "@genehub/proto";
 
-import { MANIFEST_URL } from "../channel";
 import { locatorsMatch } from "../location/locator";
 import { formatWorkbenchPath, parseWorkbenchPath } from "../location/workbench";
 import { goApp, readAppHref } from "../location/history";
@@ -185,14 +183,6 @@ export interface Host {
    * two belong to different machines and update independently.
    */
   appVersion?(): Promise<string | null>;
-  /**
-   * Checks the desktop shell itself, on the client where it is installed.
-   *
-   * This must not go through the selected daemon: that daemon may be a Linux
-   * server on the other side of a relay, whose version and platform answer a
-   * different update question.
-   */
-  checkAppUpdate?(): Promise<UpdateStatus>;
   /** The shell asking the workbench to show remote access, e.g. from a tray menu. */
   onPairRequested?(listener: () => void): () => void;
   /**
@@ -545,11 +535,6 @@ export function desktopHost(
     },
     async appVersion() {
       return tauri.core.invoke<string>("app_version");
-    },
-    async checkAppUpdate() {
-      return tauri.core.invoke<UpdateStatus>("app_update_status", {
-        manifestUrl: MANIFEST_URL,
-      });
     },
     onEndpointChange(listener) {
       return subscribe(tauri, "genehub://daemon", listener);

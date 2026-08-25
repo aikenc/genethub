@@ -473,10 +473,6 @@ const PRODUCTS: Record<BuildIdentity, string> = {
   stable: "GeneHub",
 };
 export const PRODUCT = import.meta.env.VITE_GENEHUB_BRAND || PRODUCTS[CHANNEL];
-// The desktop shell checks its own release independently from whichever
-// daemon the workbench currently controls. In a browser this stays unused;
-// in a source build it is empty, because local is not on a release scale.
-export const MANIFEST_URL = "${value("manifest_url", channel)}";
 
 function isBuildIdentity(value: unknown): value is BuildIdentity {
   return value === "local" || value === "dev" || value === "beta" || value === "stable";

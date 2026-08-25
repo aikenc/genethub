@@ -25,7 +25,6 @@ import type {
 } from "@genehub/proto";
 import { create } from "zustand";
 
-import type { Host } from "../host";
 import { takeLandingIntent, type LandingIntent } from "../location/landing";
 import {
   decodeTabToken,
@@ -273,8 +272,9 @@ interface WorkbenchState {
   loadLog(name?: string): Promise<void>;
   /** Asks the machine whether a newer build has been published. */
   checkUpdate(): Promise<void>;
-  /** Checks both the selected daemon and, when present, this desktop App. */
-  checkUpdates(host: Host): Promise<void>;
+  /** Checks both the Live component and this machine's App build, both answered
+   * by the daemon. */
+  checkUpdates(): Promise<void>;
   /**
    * Asks the machine to fetch the installer. Returns once it has started, not
    * once it has finished: what happens after that arrives as pushes.
@@ -1561,16 +1561,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
-  async checkUpdates(host) {
-    set({ appUpdate: null, appUpdating: Boolean(host.checkAppUpdate) });
+  async checkUpdates() {
+    set({ appUpdate: null, appUpdating: true });
     await Promise.all([
       get().checkUpdate(),
-      host.checkAppUpdate
-        ? host
-            .checkAppUpdate()
-            .then((appUpdate) => set({ appUpdate }))
-            .finally(() => set({ appUpdating: false }))
-        : Promise.resolve(),
+      (async () => {
+        try {
+          const reply = await asked(set, () =>
+            require_(get().client).call({ type: "update.appCheck" }),
+          );
+          if (reply?.type === "update") set({ appUpdate: reply.data });
+        } finally {
+          set({ appUpdating: false });
+        }
+      })(),
     ]);
   },
 

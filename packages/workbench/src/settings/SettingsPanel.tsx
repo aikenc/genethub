@@ -574,7 +574,7 @@ function Version({
             // is nothing to ask — and a button that can only answer "还没连上"
             // should not be pressable in the first place.
             disabled={updating || appUpdating || !client}
-            onClick={() => void checkUpdates(host)}
+            onClick={() => void checkUpdates()}
           >
             {updating || appUpdating ? "检查中…" : "检查更新"}
           </button>
@@ -616,7 +616,9 @@ function Version({
             客户端 App 和远程 daemon 分别更新，版本可以不同。
           </p>
         ) : null}
-        {appUpdate && (!localBundle || appUpdate.newer) ? <AppAnswer status={appUpdate} /> : null}
+        {appUpdate && (!localBundle || appUpdate.newer) ? (
+          <AppAnswer status={appUpdate} subject={localBundle ? "应用" : "远程应用"} />
+        ) : null}
         <Answer status={update} subject={localBundle ? "整机" : "daemon"} />
       </div>
     </section>
@@ -682,23 +684,23 @@ function GuestUpdatePrompt({
   );
 }
 
-function AppAnswer({ status }: { status: UpdateStatus }) {
+function AppAnswer({ status, subject }: { status: UpdateStatus; subject: "应用" | "远程应用" }) {
   if (status.problem) {
     return (
       <p role="alert" className="text-danger">
-        没查到客户端 App 有没有新版本：{status.problem}
+        没查到{subject}有没有新版本：{status.problem}
       </p>
     );
   }
   if (status.current === UNRELEASED) {
-    return <p className="text-muted">客户端 App 是源码构建的开发版，不跟发布版本比较。</p>;
+    return <p className="text-muted">{subject}是源码构建的开发版，不跟发布版本比较。</p>;
   }
   if (!status.newer) {
-    return <p className="text-muted">客户端 App 已经是最新的了。</p>;
+    return <p className="text-muted">{subject}已经是最新的了。</p>;
   }
   return (
     <p className="text-muted">
-      客户端 App 有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
+      {subject}有新版本 {status.latest}。自动下载未启用，请使用上方官方发布页手动更新。
     </p>
   );
 }

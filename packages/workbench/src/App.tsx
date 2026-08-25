@@ -407,7 +407,7 @@ export function App({
         // above: arriving on settings with nothing happening reads as a menu item
         // that did nothing. Every outcome, including 已是最新, lands in the
         // version section.
-        void useWorkbench.getState().checkUpdates(host);
+        void useWorkbench.getState().checkUpdates();
         useWorkbench.getState().openTab("settings");
       }),
     [host],

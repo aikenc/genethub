@@ -935,39 +935,40 @@ describe("the version section", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("只装了一半");
   });
 
-  it("checks the client App separately when controlling a remote daemon", async () => {
+  it("asks the daemon about both updates when controlling a remote machine", async () => {
     const opened: string[] = [];
-    connected({
+    const { calls } = connected({
       "update.check": () => ({
         type: "update",
         data: { current: "0.1.18", latest: "0.1.18", newer: false },
       }),
-    });
-    const host = {
-      ...desktopish("0.1.16", opened),
-      checkAppUpdate: async () => ({
-        current: "0.1.16",
-        latest: "0.1.18",
-        newer: true,
-        url: "https://example.test/releases/tag/v0.1.18",
-        downloadUrl: "https://example.test/GeneHub-setup.exe",
+      "update.appCheck": () => ({
+        type: "update",
+        data: {
+          current: "0.1.16",
+          latest: "0.1.18",
+          newer: true,
+          url: "https://example.test/releases/tag/v0.1.18",
+        },
       }),
-    };
+    });
 
     render(
       <SettingsPanel
-        host={host}
+        host={desktopish("0.1.16", opened)}
         endpoint={{ url: "wss://example.test/fabric/v2?ticket=test", via: "relay", label: "服务器" }}
       />,
     );
     await userEvent.click(await screen.findByTestId("check-update"));
 
-    expect(await screen.findByText(/客户端 App 有新版本 0\.1\.18/)).toBeTruthy();
+    // The App answer comes from the daemon too: the shell stays thin and never
+    // checks itself, so what is reported is the remote machine's own build.
+    expect(calls.some((call) => call.type === "update.appCheck")).toBe(true);
+    expect(await screen.findByText(/远程应用有新版本 0\.1\.18/)).toBeTruthy();
     expect(screen.getByText("daemon 已经是最新的了。")).toBeTruthy();
     expect(screen.getByTestId("remote-version-note")).toHaveTextContent("分别更新");
     expect(screen.queryByText(/只装了一半/)).toBeNull();
 
-    expect(screen.queryByTestId("download-app-update")).toBeNull();
     await userEvent.click(screen.getByTestId("manual-update-link"));
     expect(opened).toEqual(["https://github.com/aikenc/genethub/releases"]);
   });

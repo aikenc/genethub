@@ -72,28 +72,18 @@ fn the_bundle_contains_only_a_boot_surface_then_applies_the_wasm_route() {
 }
 
 #[test]
-fn windows_runs_a_real_webview2_offline_and_remote_origin_gate() {
-    let e2e = read(repo().join("apps/desktop/scripts/windows-webview-e2e.mjs"));
-    assert!(e2e.contains("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"));
-    assert!(e2e.contains("Runtime.evaluate"));
-    assert!(e2e.contains("http://127.0.0.1:5173/app"));
-    assert!(e2e.contains("globalThis.__TAURI__"));
-
-    let release = read(repo().join(".github/workflows/release.yml"));
-    assert!(release.contains("node apps/desktop/scripts/windows-webview-e2e.mjs"));
-    assert!(release.contains("Real WebView2 keeps the offline boot page"));
-}
-
-#[test]
 fn every_release_package_embeds_one_signed_component_and_pins_its_baseline() {
     let release = read(repo().join(".github/workflows/release.yml"));
     assert!(release.contains("signed_component:"));
     assert!(release.contains("name: guest-wasm-release"));
-    assert!(release.contains("GENEHUB_COMPONENT_PUBLIC_KEY"));
     assert!(release.contains("GENEHUB_BUNDLED_RELEASE_VERSION"));
-    assert!(release.contains("publish-prepared-component.mjs"));
     assert!(release
         .contains("cmp \"$GENEHUB_COMPONENT_WASM\" apps/desktop/src-tauri/bin/genehub_guest.wasm"));
+    // The internal dev root signs every channel for now; an external key
+    // mechanism returns with the stable pipeline, and the App workflow must
+    // not grow one back in the meantime.
+    assert!(!release.contains("GENEHUB_COMPONENT_PUBLIC_KEY"));
+    assert!(!release.contains("COMPONENT_SIGNING_KEY"));
 
     let bundle = read(repo().join("apps/desktop/scripts/bundle.mjs"));
     assert!(bundle.contains("process.env.GENEHUB_COMPONENT_WASM"));

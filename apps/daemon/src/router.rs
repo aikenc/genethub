@@ -803,6 +803,13 @@ async fn dispatch(
             Err(message) => Handled::err(ErrorCode::Unsupported, message),
         },
 
+        Request::UpdateAppCheck => {
+            let manifest_url = state.config.read().await.update_manifest_url.clone();
+            Handled::ok(Reply::Update(
+                crate::updates::check(&manifest_url, &state.version).await,
+            ))
+        }
+
         Request::UpdateDownload => match crate::host_update::apply("web") {
             Ok(()) => {
                 state.reload.notify_waiters();

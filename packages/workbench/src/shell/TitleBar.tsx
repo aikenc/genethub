@@ -252,7 +252,7 @@ function Items({
           answer lands in the version section of settings either way. */}
       <Item
         onSelect={run(() => {
-          void checkUpdates(host);
+          void checkUpdates();
           openTab("settings");
         })}
       >

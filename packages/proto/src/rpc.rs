@@ -404,6 +404,11 @@ pub enum Request {
     /// never on a timer — see `UpdateStatus`.
     #[serde(rename = "update.check")]
     UpdateCheck,
+    /// Whether a newer App build (this machine's own binaries) has been
+    /// published. Answered by the daemon from the channel's App manifest, so
+    /// the desktop shell stays thin and never checks itself.
+    #[serde(rename = "update.appCheck")]
+    UpdateAppCheck,
     /// Fetches the installer for this platform into the machine's own data
     /// directory. Answers with the state at that moment; the rest arrives as
     /// `ServerFrame::UpdateDownload` pushes.

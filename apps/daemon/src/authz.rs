@@ -331,6 +331,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::HubMachines
         | Request::SpeechCapabilities
         | Request::UpdateCheck
+        | Request::UpdateAppCheck
         | Request::UpdateDownloadState => Capability::Read,
 
         Request::FileWrite { .. }
