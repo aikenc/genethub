@@ -4565,6 +4565,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_agent_without_native_fork_reconstructs_when_target_is_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "cursor",
+                native_fork: false,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "cursor",
+                Some("model".into()),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(None);
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "cursor".into(),
+                    workspace_id: Some("w1".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork.agent_id, "cursor");
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_some());
+
+        let error = sessions
+            .fork(&source.id, "source-turn", None, &ProviderMap::new())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("the cursor agent does not support forking"));
+    }
+
+    #[tokio::test]
     async fn import_discovery_is_opaque_two_stage_and_filters_durable_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = SessionManager::new(

@@ -343,16 +343,10 @@ export function TimelineView({
           onClose={() => setForkRequest(null)}
           onConfirm={(selection) => {
             if (forkController) return forkController.fork(forkRequest.turnId, selection);
-            const unchanged =
-              selection.machine.id === CURRENT_MACHINE.id &&
-              selection.workspaceId === activeSession.workspaceId &&
-              selection.agentId === activeSession.agentId;
-            return forkSession(
-              forkRequest.turnId,
-              unchanged
-                ? undefined
-                : { agentId: selection.agentId, workspaceId: selection.workspaceId },
-            );
+            return forkSession(forkRequest.turnId, {
+              agentId: selection.agentId,
+              workspaceId: selection.workspaceId,
+            });
           }}
         />
       ) : null}
