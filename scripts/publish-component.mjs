@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// Build, sign, inspect and optionally activate one component-only update.
-// Native binaries, tags and GitHub releases are deliberately outside this command.
+// Build, sign, inspect and optionally activate one component-only update —
+// and, with --web, the matching website half of the same Live Release.
+// Native binaries, tags and GitHub releases are deliberately outside this
+// command: a Live Release is local and lands in seconds.
 
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,11 +24,14 @@ main().catch((error) => {
 });
 
 async function main() {
+  const started = Date.now();
   const commit = argumentsMap.has("commit");
   const channel = argumentsMap.get("channel") ?? "beta";
   if (!new Set(["stable", "beta", "dev"]).has(channel)) {
     throw new Error("--channel must be stable, beta or dev");
   }
+  const web = argumentsMap.has("web");
+  if (web && !commit) throw new Error("--web publishes the live site, so it requires --commit");
   const cloud = resolve(
     argumentsMap.get("cloud-root") ?? process.env.GENEHUB_CLOUD_ROOT ?? join(open, "../genethub-cloud"),
   );
@@ -42,16 +47,38 @@ async function main() {
   };
 
   const temporary = mkdtempSync(join(tmpdir(), "genehub-guest-publish-"));
-  const root = commit ? requiredAbsolute("--store", argumentsMap.get("store")) : join(temporary, "artifacts");
+  const stage = argumentsMap.has("stage") ? requiredAbsolute("--stage", argumentsMap.get("stage")) : undefined;
+  const root = commit
+    ? (argumentsMap.has("store")
+      ? requiredAbsolute("--store", argumentsMap.get("store"))
+      : stage
+        ? join(stage, "artifacts")
+        : required("--store or --stage", undefined))
+    : join(temporary, "artifacts");
+  if (web && !stage) throw new Error("--web requires --stage so the site has a stage root");
   const publicOrigin = commit
     ? required("--public-origin", argumentsMap.get("public-origin"))
     : "https://candidate.invalid";
-  const raw = argumentsMap.get("raw")
-    ? resolve(argumentsMap.get("raw"))
-    : buildRaw(argumentsMap.get("cargo") ?? "cargo", channel);
-  const signer = argumentsMap.get("signer")
-    ? resolve(argumentsMap.get("signer"))
-    : buildSigner(argumentsMap.get("cargo") ?? "cargo");
+  const runner = process.env.GENEHUB_RUNNER_ID ?? `${userInfo().username}@${hostname()}`;
+
+  // The Cargo builds share one package-cache lock, so they run as one
+  // sequential chain; the console build (npm/rolldown-vite) is an independent
+  // toolchain and runs concurrently with it. An unchanged tree makes every
+  // one of these a no-op measured in seconds.
+  const cargo = argumentsMap.get("cargo") ?? "cargo";
+  let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
+  let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
+  const builds = [];
+  if (!raw || !signer) {
+    builds.push((async () => {
+      if (!raw) raw = await buildRaw(cargo, channel);
+      if (!signer) signer = await buildSigner(cargo);
+    })());
+  }
+  if (web) builds.push(buildWeb(cloud, channel));
+  await Promise.all(builds);
+  const builtMs = Date.now() - started;
+
   const githubUrl = channel === "stable"
     ? argumentsMap.get("github-url") ??
       (!commit
@@ -64,6 +91,9 @@ async function main() {
         appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
       }
     : undefined;
+  const version = argumentsMap.has("version")
+    ? required("--version", argumentsMap.get("version"))
+    : undefined;
 
   try {
     const result = await publishComponent({
@@ -72,9 +102,10 @@ async function main() {
       publicOrigin,
       githubUrl,
       source,
-      runner: process.env.GENEHUB_RUNNER_ID ?? `${userInfo().username}@${hostname()}`,
+      runner,
       verifyPublic: commit,
       appRelease,
+      version,
       pausedReason: argumentsMap.get("paused-reason"),
       build: async (version) => signAndInspect({
         signer,
@@ -84,7 +115,17 @@ async function main() {
         version,
       }),
     });
-    process.stdout.write(`${JSON.stringify({ mode: commit ? "committed" : "candidate", store: root, ...result }, null, 2)}\n`);
+    let webReceipt;
+    if (web && result.changed !== false) {
+      webReceipt = await publishWebHalf({ cloud, stage, channel, source, runner, version: result.version });
+    }
+    const totalMs = Date.now() - started;
+    process.stdout.write(`${JSON.stringify(
+      { mode: commit ? "committed" : "candidate", store: root, ...result,
+        ...(webReceipt ? { web: webReceipt } : {}),
+        timing: { buildMs: builtMs, totalMs } },
+      null, 2,
+    )}\n`);
   } finally {
     if (commit || argumentsMap.has("discard-candidate")) {
       rmSync(temporary, { recursive: true, force: true });
@@ -98,13 +139,49 @@ function guestProfile(channel) {
 
 function buildRaw(cargo, channel) {
   const profile = guestProfile(channel);
-  exec(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"]);
-  return join(open, "target/wasm32-wasip2", profile, "genehub_guest.wasm");
+  return run(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"])
+    .then(() => join(open, "target/wasm32-wasip2", profile, "genehub_guest.wasm"));
 }
 
 function buildSigner(cargo) {
-  exec(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"]);
-  return join(open, "target/iterate", process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local");
+  return run(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"])
+    .then(() => join(open, "target/iterate", process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local"));
+}
+
+// The website half of a Live Release: exact dependencies only when the
+// lockfile moved, then the rolldown-vite build (seconds, not the historical
+// tsc+vite half minute). Tests stay with CI — this chain is for iteration.
+async function buildWeb(cloud, channel) {
+  const consoleRoot = join(cloud, "console");
+  await npmCiIfChanged(consoleRoot);
+  const brand = { stable: "GeneHub", beta: "GeneHub Beta", dev: "GeneHub Dev" }[channel];
+  await run("npm", ["--prefix", consoleRoot, "run", "build"], {
+    env: { ...process.env, VITE_GENEHUB_CHANNEL: channel, VITE_GENEHUB_BRAND: brand },
+  });
+}
+
+async function npmCiIfChanged(prefix) {
+  const digest = createHash("sha256").update(readFileSync(join(prefix, "package-lock.json"))).digest("hex");
+  const stamp = join(prefix, "node_modules", ".deploy-lockfile-sha256");
+  if (existsSync(stamp) && readFileSync(stamp, "utf8").trim() === digest) return;
+  await run("npm", ["--prefix", prefix, "ci"]);
+  writeFileSync(stamp, `${digest}\n`);
+}
+
+function publishWebHalf({ cloud, stage, channel, source, runner, version }) {
+  const buildId = `${source.cloudSha.slice(0, 12)}-${source.openSha.slice(0, 12)}-${source.lockfileSha256.slice(0, 12)}`;
+  return run("node", [
+    join(cloud, "deploy", "web-release.mjs"),
+    "--stage", stage,
+    "--dist", join(cloud, "console", "dist"),
+    "--channel", channel,
+    "--build-id", buildId,
+    "--open-sha", source.openSha,
+    "--cloud-sha", source.cloudSha,
+    "--lockfile-sha256", source.lockfileSha256,
+    "--runner", runner,
+    "--release-version", version,
+  ]);
 }
 
 function signAndInspect({ signer, raw, output, channel, version }) {
@@ -135,8 +212,15 @@ function git(repository, args) {
   return execFileSync("git", ["-C", repository, ...args], { encoding: "utf8" }).trim();
 }
 
-function exec(command, args) {
-  execFileSync(command, args, { cwd: open, stdio: "inherit" });
+function run(command, args, options = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { cwd: open, stdio: "inherit", ...options });
+    child.on("error", rejectPromise);
+    child.on("exit", (code, signal) => {
+      if (code === 0) resolvePromise();
+      else rejectPromise(new Error(`${command} ${args.join(" ")} exited with ${signal ?? code}`));
+    });
+  });
 }
 
 function required(label, value) {
@@ -158,7 +242,7 @@ function requiredHash(label, value) {
 
 function parseArguments(values) {
   const result = new Map();
-  const flags = new Set(["commit", "discard-candidate", "help"]);
+  const flags = new Set(["commit", "discard-candidate", "help", "web"]);
   for (let index = 0; index < values.length; index += 1) {
     const raw = values[index];
     if (!raw.startsWith("--")) throw new Error(`unexpected argument ${raw}`);
@@ -178,10 +262,14 @@ function usage() {
   process.stdout.write(`Usage:
   node scripts/publish-component.mjs --channel beta [--raw FILE] [--paused-reason TEXT] [--discard-candidate]
   node scripts/publish-component.mjs --commit --channel beta --store DIR --public-origin URL
+  node scripts/publish-component.mjs --commit --channel beta --stage DIR --public-origin URL --web
 
 The default uses an isolated candidate store. --commit additionally requires a
-clean paired checkout. Every channel signs with the one self-contained
-development root; the stable line reintroduces external keys when it graduates.
+clean paired checkout. --stage implies --store DIR/artifacts, and --web (commit
+only) additionally builds the console and activates the same Product Version
+on the website half, so one command lands a whole Live Release in seconds.
+Every channel signs with the one self-contained development root; the stable
+line reintroduces external keys when it graduates.
 ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
 Guest compile uses Cargo profile iterate unless --channel stable (then release).
 `);
