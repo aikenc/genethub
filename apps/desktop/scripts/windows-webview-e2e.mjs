@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Launch the real Windows Tauri/WebView2 executable twice: once with the
-// website offline, then against the dev channel's loopback website. CDP is
-// enabled only for this external test process and is not a product capability.
+// Launch the real Windows Tauri/WebView2 executable with the website offline
+// and assert the bundled boot page stays. On a local build it then launches
+// once more against the loopback website; stamped release builds carry their
+// channel's real WEB_APP_URL, so that leg is local-only. CDP is enabled only
+// for this external test process and is not a product capability.
 
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -49,32 +51,42 @@ try {
   stopTree(child);
   child = undefined;
 
-  website = createServer((request, response) => {
-    if (request.url !== "/app") {
-      response.writeHead(404).end("not found");
-      return;
-    }
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    response.end(`<!doctype html><meta charset="utf-8"><title>Remote GeneHub E2E</title><main id="remote">remote</main>`);
-  });
-  await listen(website, 5173);
+  // The loopback remote leg only exists on a local build: a stamped release
+  // build carries its channel's real WEB_APP_URL as a constant, so the shell
+  // navigates to the live hub and no environment override can point it at
+  // 127.0.0.1. Privilege isolation of remote origins is asserted there.
+  if (identity.channel === "local") {
+    website = createServer((request, response) => {
+      if (request.url !== "/app") {
+        response.writeHead(404).end("not found");
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      response.end(`<!doctype html><meta charset="utf-8"><title>Remote GeneHub E2E</title><main id="remote">remote</main>`);
+    });
+    await listen(website, 5173);
 
-  cdpPort = await availablePort();
-  child = launch(cdpPort);
-  const remote = await inspectPage(cdpPort, (target) => target.url === "http://127.0.0.1:5173/app");
-  const remoteState = await evaluateUntil(
-    remote,
-    `({
-      url: location.href,
-      marker: document.getElementById("remote")?.textContent ?? "",
-      hasGlobalTauri: Boolean(globalThis.__TAURI__)
-    })`,
-    (state) => state.marker !== "",
-  );
-  assert(remoteState.url === "http://127.0.0.1:5173/app", `remote URL loaded: ${remoteState.url}`);
-  assert(remoteState.marker === "remote", "the real remote document rendered in WebView2");
-  assert(remoteState.hasGlobalTauri === false, "the remote origin has no globally exposed Tauri API");
-  process.stdout.write("Windows WebView2 kept the offline boot page and loaded the unprivileged remote site\n");
+    cdpPort = await availablePort();
+    child = launch(cdpPort);
+    const remote = await inspectPage(cdpPort, (target) => target.url === "http://127.0.0.1:5173/app");
+    const remoteState = await evaluateUntil(
+      remote,
+      `({
+        url: location.href,
+        marker: document.getElementById("remote")?.textContent ?? "",
+        hasGlobalTauri: Boolean(globalThis.__TAURI__)
+      })`,
+      (state) => state.marker !== "",
+    );
+    assert(remoteState.url === "http://127.0.0.1:5173/app", `remote URL loaded: ${remoteState.url}`);
+    assert(remoteState.marker === "remote", "the real remote document rendered in WebView2");
+    assert(remoteState.hasGlobalTauri === false, "the remote origin has no globally exposed Tauri API");
+    process.stdout.write("Windows WebView2 kept the offline boot page and loaded the unprivileged remote site\n");
+  } else {
+    process.stdout.write(
+      `Windows WebView2 kept the offline boot page (channel ${identity.channel}: remote leg is local-only)\n`,
+    );
+  }
 } finally {
   if (child) stopTree(child);
   if (website) await new Promise((resolveClose) => website.close(resolveClose));
@@ -91,7 +103,7 @@ function readChannelIdentity() {
   );
   const desktopBinary = entries.get("DESKTOP_BINARY");
   if (!desktopBinary) throw new Error("scripts/channel.env has no DESKTOP_BINARY");
-  return { desktopBinary };
+  return { desktopBinary, channel: entries.get("CHANNEL") ?? "local" };
 }
 
 function launch(cdpPort) {
