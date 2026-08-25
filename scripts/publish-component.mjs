@@ -52,7 +52,6 @@ async function main() {
   const signer = argumentsMap.get("signer")
     ? resolve(argumentsMap.get("signer"))
     : buildSigner(argumentsMap.get("cargo") ?? "cargo");
-  const signing = signingIdentity(channel, commit, signer);
   const githubUrl = channel === "stable"
     ? argumentsMap.get("github-url") ??
       (!commit
@@ -83,7 +82,6 @@ async function main() {
         output: join(temporary, `genehub-component-${version}.wasm`),
         channel,
         version,
-        ...signing,
       }),
     });
     process.stdout.write(`${JSON.stringify({ mode: commit ? "committed" : "candidate", store: root, ...result }, null, 2)}\n`);
@@ -105,33 +103,15 @@ function buildRaw(cargo, channel) {
 }
 
 function buildSigner(cargo) {
-  exec(cargo, ["build", "--release", "-p", "genehub-host"]);
-  return join(open, "target/release", process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local");
+  exec(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"]);
+  return join(open, "target/iterate", process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local");
 }
 
-function signingIdentity(channel, commit, signer) {
-  const prefix = `GENEHUB_${channel.toUpperCase()}_COMPONENT`;
-  const signingKey = commit
-    ? required(`${prefix}_SIGNING_KEY`, process.env[`${prefix}_SIGNING_KEY`])
-    : Buffer.alloc(32, 29).toString("base64").replace(/=+$/u, "");
-  const keyId = commit
-    ? required(`${prefix}_KEY_ID`, process.env[`${prefix}_KEY_ID`])
-    : "candidate-only";
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId)) throw new Error(`${prefix}_KEY_ID is not a safe key id`);
-  const environment = { ...process.env, GENEHUB_COMPONENT_SIGNING_KEY: signingKey };
-  if (commit) {
-    const publicKey = execFileSync(signer, ["public-key"], { cwd: open, env: environment, encoding: "utf8" }).trim();
-    const developmentKey = execFileSync(signer, ["dev-public-key"], { cwd: open, encoding: "utf8" }).trim();
-    if (publicKey === developmentKey) throw new Error("release publication refuses the development signing root");
-  }
-  return { keyId, environment };
-}
-
-function signAndInspect({ signer, raw, output, channel, version, keyId, environment }) {
+function signAndInspect({ signer, raw, output, channel, version }) {
   execFileSync(
     signer,
-    ["pack", raw, output, channel, version, keyId],
-    { cwd: open, env: environment, stdio: ["ignore", "inherit", "inherit"] },
+    ["pack", raw, output, channel, version],
+    { cwd: open, stdio: ["ignore", "inherit", "inherit"] },
   );
   const identity = JSON.parse(execFileSync(signer, ["inspect", output], { cwd: open, encoding: "utf8" }));
   return { identity, bytes: readFileSync(output) };
@@ -200,7 +180,8 @@ function usage() {
   node scripts/publish-component.mjs --commit --channel beta --store DIR --public-origin URL
 
 The default uses an isolated candidate store. --commit additionally requires a
-clean paired checkout and GENEHUB_<CHANNEL>_COMPONENT_SIGNING_KEY / _KEY_ID.
+clean paired checkout. Every channel signs with the one self-contained
+development root; the stable line reintroduces external keys when it graduates.
 ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
 Guest compile uses Cargo profile iterate unless --channel stable (then release).
 `);

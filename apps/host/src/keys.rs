@@ -1,36 +1,16 @@
-use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::STANDARD_NO_PAD;
-use base64::Engine as _;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-
-use crate::channel;
 
 const DEVELOPMENT_KEY_ID: &str = "dev-local";
 const DEVELOPMENT_SEED: [u8; 32] = [7; 32];
 
-/// Independent signing root for component artifacts. Stable/beta/dev pin a
-/// public key into this host binary; local uses a fixed seed.
-pub fn trusted_key() -> Result<(String, VerifyingKey)> {
-    if channel::CHANNEL == "local" {
-        return Ok((
-            DEVELOPMENT_KEY_ID.to_string(),
-            SigningKey::from_bytes(&DEVELOPMENT_SEED).verifying_key(),
-        ));
-    }
-    let key_id = option_env!("GENEHUB_COMPONENT_KEY_ID")
-        .filter(|value| !value.is_empty())
-        .context("release build has no pinned component key id")?;
-    let encoded = option_env!("GENEHUB_COMPONENT_PUBLIC_KEY")
-        .filter(|value| !value.is_empty())
-        .context("release build has no pinned component public key")?;
-    let bytes = STANDARD_NO_PAD
-        .decode(encoded)
-        .context("decoding pinned component public key")?;
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("component public key must be 32 bytes"))?;
-    let key = VerifyingKey::from_bytes(&bytes).context("reading component public key")?;
-    Ok((key_id.to_string(), key))
+/// One self-contained signing root for every channel. External key management
+/// was removed on purpose; the stable line reintroduces it here when it
+/// graduates.
+pub fn trusted_key() -> Result<(String, VerifyingKey), anyhow::Error> {
+    Ok((
+        DEVELOPMENT_KEY_ID.to_string(),
+        SigningKey::from_bytes(&DEVELOPMENT_SEED).verifying_key(),
+    ))
 }
 
 pub fn development_signing_key() -> SigningKey {

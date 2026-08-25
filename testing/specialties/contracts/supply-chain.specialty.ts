@@ -82,9 +82,9 @@ defineSpecialty(
 defineSpecialty(
   {
     id: "specialty.contracts.release-signed-component",
-    title: "App release embeds one signed component with channel-specific keys",
+    title: "App release embeds one signed component with the self-contained root",
     oracle: "release.yml packs genehub_guest.wasm signed per channel",
-    catches: ["unsigned component", "channel signing key missing"],
+    catches: ["unsigned component", "external key machinery creeping back"],
     tags: ["core", "contract", "parity"],
     expectedDurationMs: 400,
     timeoutMs: 10_000,
@@ -92,9 +92,11 @@ defineSpecialty(
   },
   async (t) => {
     const workflow = readOpen(t.openRoot, ".github/workflows/release.yml");
-    t.assertions.assert(workflow.includes("GENEHUB_BETA_COMPONENT_SIGNING_KEY"), "beta key missing");
-    t.assertions.assert(workflow.includes("GENEHUB_STABLE_COMPONENT_SIGNING_KEY"), "stable key missing");
     t.assertions.assert(workflow.includes("dist/genehub_guest.wasm"), "signed component not packed");
+    t.assertions.assert(
+      !workflow.includes("COMPONENT_SIGNING_KEY"),
+      "external signing keys are removed until the stable line graduates",
+    );
   },
 );
 

@@ -48,7 +48,7 @@ fn main() {
             });
             run_and_exit(&component, &guest_args, entry);
         }
-        Some(command @ ("pack" | "pack-dev" | "inspect" | "public-key" | "dev-public-key")) => {
+        Some(command @ ("pack" | "inspect")) => {
             let mut artifact_args = vec![command.to_string()];
             artifact_args.extend(args);
             if let Err(error) = artifact_cli::run(&artifact_args) {

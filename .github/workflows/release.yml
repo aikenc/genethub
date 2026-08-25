@@ -224,12 +224,6 @@ jobs:
         env:
           CHANNEL: ${{ needs.channel.outputs.name }}
           HUB_URL: ${{ needs.channel.outputs.hub_url }}
-          BETA_SIGNING_KEY: ${{ secrets.GENEHUB_BETA_COMPONENT_SIGNING_KEY }}
-          BETA_KEY_ID: ${{ vars.GENEHUB_BETA_COMPONENT_KEY_ID }}
-          DEV_SIGNING_KEY: ${{ secrets.GENEHUB_DEV_COMPONENT_SIGNING_KEY }}
-          DEV_KEY_ID: ${{ vars.GENEHUB_DEV_COMPONENT_KEY_ID }}
-          STABLE_SIGNING_KEY: ${{ secrets.GENEHUB_STABLE_COMPONENT_SIGNING_KEY }}
-          STABLE_KEY_ID: ${{ vars.GENEHUB_STABLE_COMPONENT_KEY_ID }}
         run: |
           set -euo pipefail
           node scripts/stamp-version.mjs --from-tag
@@ -242,23 +236,16 @@ jobs:
             cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
             raw=target/wasm32-wasip2/iterate/genehub_guest.wasm
           fi
-          cargo build --release -p genehub-host
+          cargo build --profile iterate -p genehub-host
+          host_bin="target/iterate/$HOST_BINARY"
           mkdir -p dist
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             case "$CHANNEL" in
-              beta) signing_key="$BETA_SIGNING_KEY"; key_id="$BETA_KEY_ID"; manifest=latest-beta.json ;;
-              dev) signing_key="$DEV_SIGNING_KEY"; key_id="$DEV_KEY_ID"; manifest=latest-dev.json ;;
-              stable) signing_key="$STABLE_SIGNING_KEY"; key_id="$STABLE_KEY_ID"; manifest=latest.json ;;
+              beta) manifest=latest-beta.json ;;
+              dev) manifest=latest-dev.json ;;
+              stable) manifest=latest.json ;;
               *) echo "::error::tag build has non-release channel $CHANNEL"; exit 1 ;;
             esac
-            test -n "$signing_key" || {
-              echo "::error::$CHANNEL component signing key is required for an App release"
-              exit 1
-            }
-            [[ "$key_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || {
-              echo "::error::$CHANNEL component key id must be a safe non-empty identifier"
-              exit 1
-            }
             # An App Release takes the tag's Product Version and it must move
             # the channel forward: anything at or below the public manifest
             # would be an anti-rollback violation on every installed host.
@@ -283,28 +270,20 @@ jobs:
               }
               process.stdout.write(tag);
             ')"
-            export GENEHUB_COMPONENT_SIGNING_KEY="$signing_key"
-            "target/release/$HOST_BINARY" pack \
-              "$raw" dist/genehub_guest.wasm "$CHANNEL" "$version" "$key_id"
-            public_key="$("target/release/$HOST_BINARY" public-key)"
           else
             version="0.0.0-dev.1"
-            key_id=dev-local
-            "target/release/$HOST_BINARY" pack-dev "$raw" dist/genehub_guest.wasm "$version"
-            public_key="$("target/release/$HOST_BINARY" dev-public-key)"
           fi
-          "target/release/$HOST_BINARY" inspect dist/genehub_guest.wasm \
+          # One self-contained development root signs every channel for now;
+          # the stable line reintroduces external keys when it graduates.
+          "$host_bin" pack "$raw" dist/genehub_guest.wasm "$CHANNEL" "$version"
+          "$host_bin" inspect dist/genehub_guest.wasm \
             > dist/component-identity.json
           VERSION="$version" node --input-type=module -e '
             import { readFileSync } from "node:fs";
             const identity = JSON.parse(readFileSync("dist/component-identity.json", "utf8"));
             if (identity.releaseVersion !== process.env.VERSION) throw new Error("signed version drifted");
           '
-          {
-            printf 'GENEHUB_COMPONENT_KEY_ID=%s\n' "$key_id"
-            printf 'GENEHUB_COMPONENT_PUBLIC_KEY=%s\n' "$public_key"
-            printf 'GENEHUB_BUNDLED_RELEASE_VERSION=%s\n' "$version"
-          } > dist/trust.env
+          printf 'GENEHUB_BUNDLED_RELEASE_VERSION=%s\n' "$version" > dist/trust.env
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           test "$(od -An -tx1 -N4 dist/genehub_guest.wasm | tr -d ' \n')" = 0061736d
           sha256sum dist/genehub_guest.wasm
