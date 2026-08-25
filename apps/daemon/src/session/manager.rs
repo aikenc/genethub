@@ -311,12 +311,10 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
         let source = self.live(session_id).await?;
-        if matches!(
+        let busy = matches!(
             *source.status.lock().await,
             SessionStatus::Running | SessionStatus::Waiting
-        ) {
-            anyhow::bail!("wait for the current turn to finish before forking");
-        }
+        );
         let source_meta = source.meta.lock().await.clone();
         let source_adapter = self.registry.require(&source_meta.agent_id)?;
         let source_round_id = source
@@ -329,20 +327,7 @@ impl SessionManager {
 
         let (items, checkpoint) = {
             let items = source.items.lock().await;
-            let at = items
-                .iter()
-                .position(|item| {
-                    matches!(
-                        item,
-                        TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id
-                    )
-                })
-                .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
-            let checkpoint = match &items[at] {
-                TimelineItem::TurnSummary { stats, .. } => stats.fork_checkpoint.clone(),
-                _ => unreachable!("the index was selected by the same variant"),
-            };
-            (items[..=at].to_vec(), checkpoint)
+            fork_history(&items, turn_id, busy)?
         };
 
         let explicit_target = target.is_some();
@@ -354,8 +339,10 @@ impl SessionManager {
             effort_id: source_meta.effort_id.clone(),
         });
         let same_agent = target.agent_id == source_meta.agent_id;
+        // A live turn still has usable history, but the agent is mid-prompt.
+        // Reconstruct from the selected boundary instead of asking it to fork.
         let native_candidate =
-            same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+            !busy && same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
         let native = if native_candidate {
             match self
                 .store
@@ -513,12 +500,10 @@ impl SessionManager {
 
     pub async fn fork_export(&self, session_id: &str, turn_id: &str) -> Result<ForkTransfer> {
         let source = self.live(session_id).await?;
-        if matches!(
+        let busy = matches!(
             *source.status.lock().await,
             SessionStatus::Running | SessionStatus::Waiting
-        ) {
-            anyhow::bail!("wait for the current turn to finish before forking");
-        }
+        );
         let meta = source.meta.lock().await.clone();
         let source_round_id = source
             .rounds
@@ -528,19 +513,9 @@ impl SessionManager {
             .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
             .map(|round| round.round_id.clone());
         let items = source.items.lock().await;
-        let at = items
-            .iter()
-            .position(|item| {
-                matches!(item,
-            TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id)
-            })
-            .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
-        let through_boundary = at.saturating_add(1);
-        let portable = items[..=at]
-            .iter()
-            .cloned()
-            .map(portable_fork_item)
-            .collect();
+        let (history, _) = fork_history(&items, turn_id, busy)?;
+        let through_boundary = history.len();
+        let portable = history.into_iter().map(portable_fork_item).collect();
         let (selected, omitted, altered) = bound_imported_items(portable);
         let mut coverage = coverage_for_meta(&meta, through_boundary);
         let prior_omitted = coverage.omitted_item_count;
@@ -2273,6 +2248,29 @@ fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> 
     digest.update([0]);
     digest.update(source_id.as_bytes());
     format!("{:x}", digest.finalize())
+}
+
+fn fork_history(
+    items: &[TimelineItem],
+    turn_id: &str,
+    allow_in_progress: bool,
+) -> Result<(Vec<TimelineItem>, Option<String>)> {
+    if let Some(at) = items.iter().position(|item| {
+        matches!(
+            item,
+            TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id
+        )
+    }) {
+        let checkpoint = match &items[at] {
+            TimelineItem::TurnSummary { stats, .. } => stats.fork_checkpoint.clone(),
+            _ => None,
+        };
+        return Ok((items[..=at].to_vec(), checkpoint));
+    }
+    if allow_in_progress && !items.is_empty() {
+        return Ok((items.to_vec(), None));
+    }
+    Err(anyhow!("no completed turn called {turn_id}"))
 }
 
 fn portable_fork_item(mut item: TimelineItem) -> TimelineItem {
@@ -4621,6 +4619,139 @@ mod tests {
         assert!(error
             .to_string()
             .contains("the cursor agent does not support forking"));
+    }
+
+    #[tokio::test]
+    async fn a_running_session_reconstructs_instead_of_native_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(Some("native-checkpoint"));
+        *source_live.status.lock().await = SessionStatus::Running;
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "source".into(),
+                    workspace_id: None,
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_some());
+        assert!(sessions
+            .store
+            .load_meta("w1", &fork.id)
+            .unwrap()
+            .persist
+            .is_none());
+        assert!(starts.lock().unwrap().is_empty());
+        assert!(matches!(
+            *source_live.status.lock().await,
+            SessionStatus::Running
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_running_session_can_reconstruct_an_in_progress_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "cursor",
+                native_fork: false,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "cursor",
+                Some("model".into()),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = vec![
+            TimelineItem::UserMessage {
+                id: "user-live".into(),
+                text: "What can you help with?".into(),
+                attachments: Vec::new(),
+            },
+            TimelineItem::AssistantMessage {
+                id: "assistant-live".into(),
+                text: "I can investigate errors".into(),
+            },
+        ];
+        *source_live.status.lock().await = SessionStatus::Waiting;
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "live-turn",
+                Some(ForkTarget {
+                    agent_id: "cursor".into(),
+                    workspace_id: Some("w1".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        let items = sessions.store.load_chat("w1", &fork.id).unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items.last(),
+            Some(TimelineItem::AssistantMessage { text, .. })
+                if text == "I can investigate errors"
+        ));
+
+        let transfer = sessions.fork_export(&source.id, "live-turn").await.unwrap();
+        assert_eq!(transfer.items.len(), 2);
     }
 
     #[tokio::test]

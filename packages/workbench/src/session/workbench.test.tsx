@@ -1906,6 +1906,63 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
     expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();
   });
+
+  it("lets a running turn open a reconstruct-only Fork dialog", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "cursor",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "running",
+        },
+      ],
+      activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
+      agents: [
+        agent({
+          id: "cursor",
+          label: "Cursor",
+          capabilities: { ...agent().capabilities, fork: false },
+        }),
+      ],
+    });
+    let state = apply(emptyTimeline(), {
+      type: "turnStarted",
+      turnId: "t-live",
+      startedAtMs: 1,
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t-live",
+      item: { type: "userMessage", id: "u1", text: "你能帮忙做什么?", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t-live",
+      item: { type: "assistantMessage", id: "a1", text: "排查和稳定性" },
+    });
+
+    render(<TimelineView state={state} />);
+    const fork = screen.getByRole("button", { name: "Fork" });
+    expect(fork).toBeEnabled();
+    expect(fork).toHaveAttribute("title", "从当前进行中的内容重建分支");
+    await userEvent.click(fork);
+
+    expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
+    expect(screen.getByText("重建会话")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
+  });
 });
 
 describe("a turn that failed", () => {
