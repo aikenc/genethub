@@ -30,8 +30,8 @@ use super::context_seed::{
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, now_ms, title_from, ContextSeedState, ImportedSessionMeta, SessionMeta, Store,
-    SESSION_FORMAT,
+    self, normalize_session_title, now_ms, title_from, ContextSeedState, ImportedSessionMeta,
+    SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -283,6 +283,7 @@ impl SessionManager {
             format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
             title,
+            title_locked: false,
             cwd,
             model_id,
             mode_id,
@@ -454,6 +455,7 @@ impl SessionManager {
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
             title,
+            title_locked: source_meta.title_locked,
             cwd: source_meta.cwd,
             model_id,
             mode_id,
@@ -638,6 +640,7 @@ impl SessionManager {
                 .title
                 .as_deref()
                 .and_then(|title| title_from(&format!("{title} · 分支"))),
+            title_locked: false,
             cwd,
             model_id,
             mode_id: target.mode_id,
@@ -835,6 +838,7 @@ impl SessionManager {
             format: SESSION_FORMAT,
             agent_id: candidate.agent_id.clone(),
             title: history.title.or(Some(candidate.title)),
+            title_locked: false,
             cwd,
             model_id: None,
             mode_id: None,
@@ -1588,9 +1592,9 @@ impl SessionManager {
             let mut items = live.items.lock().await;
             items.push(item.clone());
         }
-        // A session that already has a name keeps it: the name either came
-        // from the user or from the first thing they said, and neither gets
-        // overwritten by the second message.
+        // A session that already has a name keeps it against later prompts.
+        // An Agent title can still replace a first-prompt label unless the
+        // user locked the name with `rename`.
         let (workspace_id, needs_title) = {
             let meta = live.meta.lock().await;
             (meta.workspace_id.clone(), meta.title.is_none())
@@ -2139,23 +2143,19 @@ impl SessionManager {
 
     /// Gives a session the name the user typed.
     ///
-    /// Safe from being undone: `send` only names a session whose title is
-    /// `None`, so a name set here survives every later message. That property is
-    /// the whole feature — a title overwritten a second after typing it would be
+    /// Safe from being undone: later prompts do not rename a session that
+    /// already has a title, and Agent-extracted titles skip a name typed here
+    /// (`title_locked`). A title overwritten a second after typing it would be
     /// worse than no rename at all.
     pub async fn rename(&self, session_id: &str, title: &str) -> Result<SessionSummary> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(anyhow!("a session needs a name"));
-        }
-        // Long enough for a sentence, short enough that one session cannot make
-        // the list unreadable for every other one.
-        let title: String = title.chars().take(120).collect();
+        let title =
+            normalize_session_title(title).ok_or_else(|| anyhow!("a session needs a name"))?;
 
         let live = self.live(session_id).await?;
         let summary = {
             let mut meta = live.meta.lock().await;
             meta.title = Some(title.clone());
+            meta.title_locked = true;
             meta.updated_at_ms = now_ms();
             self.store.save_meta(&meta)?;
             meta.summary(*live.status.lock().await)
@@ -3285,6 +3285,11 @@ async fn pump_events(
             live.trim_replay(replay_window).await;
         }
 
+        let publish_title = match &event {
+            SessionEvent::TitleChanged { title } => agent_title_would_apply(&live, title).await,
+            _ => true,
+        };
+
         apply(&live, &event).await;
 
         let settle = matches!(
@@ -3312,7 +3317,9 @@ async fn pump_events(
             _ => {}
         }
 
-        live.publish(event).await;
+        if publish_title {
+            live.publish(event).await;
+        }
         if let Some(progress) = tool_progress {
             apply(&live, &progress).await;
             live.publish(progress).await;
@@ -3437,6 +3444,19 @@ fn turn_summary(
     })
 }
 
+/// Whether an Agent-extracted title should replace the current name.
+///
+/// Locked names (the user typed them) stay put. Empty or identical titles
+/// are no-ops so a `title: null` / whitespace update cannot blank the
+/// sidebar, and a repeated extraction does not spam `titleChanged`.
+async fn agent_title_would_apply(live: &Live, title: &str) -> bool {
+    let Some(title) = normalize_session_title(title) else {
+        return false;
+    };
+    let meta = live.meta.lock().await;
+    !meta.title_locked && meta.title.as_deref() != Some(title.as_str())
+}
+
 /// Applies an event to the in-memory timeline.
 async fn apply(live: &Arc<Live>, event: &SessionEvent) {
     match event {
@@ -3553,11 +3573,20 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
-        // Published straight from `SessionManager::send`, never by an agent,
-        // so it never reaches this function's caller in practice — `meta`
-        // is already updated by the time it is published. Listed anyway so
-        // this match stays exhaustive if that ever changes.
-        SessionEvent::TitleChanged { .. } => {}
+        SessionEvent::TitleChanged { title } => {
+            let Some(title) = normalize_session_title(title) else {
+                return;
+            };
+            let mut meta = live.meta.lock().await;
+            if meta.title_locked || meta.title.as_deref() == Some(title.as_str()) {
+                return;
+            }
+            meta.title = Some(title);
+            meta.updated_at_ms = now_ms();
+            if let Err(error) = live.store.save_meta(&meta) {
+                tracing::warn!(error = %error, "failed to persist an agent title");
+            }
+        }
     }
 }
 
@@ -3737,6 +3766,7 @@ mod tests {
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
             title: None,
+            title_locked: false,
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,
@@ -5024,6 +5054,66 @@ mod tests {
         assert!(
             sessions.rename("s1", "   ").await.is_err(),
             "a blank name is a row with nothing on it, and no way back to a real one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_title_replaces_the_first_prompt_title() {
+        let (live, _dir) = live_session(SessionMeta {
+            title: Some("Fix the login redirect".into()),
+            ..meta()
+        });
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "  修复登录跳转  ".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            live.meta.lock().await.title.as_deref(),
+            Some("修复登录跳转")
+        );
+        assert_eq!(
+            live.store.load_meta("w1", "s1").unwrap().title.as_deref(),
+            Some("修复登录跳转"),
+            "the agent title only reached memory, so it is lost on restart"
+        );
+        assert!(
+            !live.meta.lock().await.title_locked,
+            "an extracted title must stay replaceable by a later extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_title_does_not_replace_a_name_the_user_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions.rename("s1", "我起的名字").await.unwrap();
+        let live = sessions.live("s1").await.unwrap();
+
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "Agent 想改的名字".into(),
+            },
+        )
+        .await;
+
+        assert_eq!(live.meta.lock().await.title.as_deref(), Some("我起的名字"));
+        assert!(
+            live.meta.lock().await.title_locked,
+            "rename must lock the name so the next agent title cannot undo it"
+        );
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("我起的名字")
         );
     }
 

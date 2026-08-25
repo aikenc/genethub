@@ -2073,11 +2073,11 @@ function newest(sessions: SessionSummary[]): SessionSummary | null {
 }
 
 /**
- * The daemon names a session once, from the user's first message
- * (`SessionManager::send`), and pushes `titleChanged` at that moment. Without
- * this the sidebar and the tab both keep showing the "新会话" placeholder
- * they were created with until something unrelated (switching workspaces,
- * reconnecting) happens to refetch `session.list`.
+ * The daemon pushes `titleChanged` when a session gets a name: first from
+ * the user's first message, then again if an Agent extracts a better one.
+ * Without this the sidebar and the tab both keep showing the "新会话"
+ * placeholder they were created with until something unrelated (switching
+ * workspaces, reconnecting) happens to refetch `session.list`.
  */
 function applyTitle(sessionId: string, title: string, set: Setter): void {
   set((state) => ({
