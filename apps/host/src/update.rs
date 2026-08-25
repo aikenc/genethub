@@ -168,7 +168,11 @@ fn bundled_version() -> Result<Option<ProductVersion>> {
     // rebuild. Release builds keep it a build-time fact.
     #[cfg(debug_assertions)]
     if let Ok(value) = std::env::var("GENEHUB_BUNDLED_RELEASE_VERSION") {
-        return parse_bundled_version(if value.is_empty() { None } else { Some(value.as_str()) });
+        return parse_bundled_version(if value.is_empty() {
+            None
+        } else {
+            Some(value.as_str())
+        });
     }
     parse_bundled_version(option_env!("GENEHUB_BUNDLED_RELEASE_VERSION"))
 }
@@ -308,7 +312,9 @@ pub fn apply(_request_id: &str) -> Result<()> {
     // signed file — so transport corruption is caught before the envelope is
     // even parsed. The envelope's own sha256/size cover the component inside
     // it, a different scale, and the signature binds the two together.
-    if sha256_hex(&bytes) != manifest.artifact.sha256 || bytes.len() as u64 != manifest.artifact.size {
+    if sha256_hex(&bytes) != manifest.artifact.sha256
+        || bytes.len() as u64 != manifest.artifact.size
+    {
         bail!("downloaded artifact does not match the signed manifest");
     }
     let signed = SignedArtifact::from_single_file(&bytes).map_err(|error| anyhow!("{error}"))?;
