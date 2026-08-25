@@ -67,6 +67,16 @@ const CASES = [
     want: { ...NONE, desktop: true, guest: true, app: true },
   },
   {
+    name: "desktop test-only change runs nothing heavy",
+    files: ["apps/desktop/src-tauri/tests/wiring.rs"],
+    want: NONE,
+  },
+  {
+    name: "desktop test plus shipped source still runs desktop",
+    files: ["apps/desktop/src-tauri/tests/wiring.rs", "apps/desktop/src-tauri/src/main.rs"],
+    want: { ...NONE, desktop: true, guest: true, app: true },
+  },
+  {
     name: "[regression] channel stamping script runs rust+desktop",
     files: ["scripts/channel.mjs"],
     want: { ...NONE, rust: true, desktop: true, guest: true, app: true, native_host: true, native_cli: true },
@@ -210,6 +220,7 @@ test("every rule family path matches exactly one rule (no fall-through)", () => 
     "apps/host/src/main.rs",
     "apps/cli/src/main.rs",
     "apps/desktop/src-tauri/tauri.conf.json",
+    "apps/desktop/src-tauri/tests/supervision.rs",
     "apps/daemon/src/lib.rs",
     "apps/agent/src/lib.rs",
     "apps/guest/src/lib.rs",

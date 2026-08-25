@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Release calls this with force_full=true. Ordinary push/PR never do — the
-  # full suite is the tag's cost, not every merge to main.
-  workflow_call:
+# Release calls this on the tag and classifies against the previous tag, the
+# same incremental question an MR answers. force_full remains for rehearsals
+# only; ordinary push/PR never set it.
+workflow_call:
     inputs:
       force_full:
         description: Run every job regardless of changed paths
@@ -35,10 +36,11 @@ jobs:
   #               still builds; no second and third operating system
   #   neither     wasm, workbench, relay, tests, docs — GitHub runs nothing heavy
   #
-  # A `false` output means GitHub never allocates that runner, so the Win/mac
-  # matrix below costs nothing on the tips that do not need it. Tag and
-  # rehearsal releases (force_full) still run everything. Live vs App *release*
-  # is NOT decided here — the publisher derives that from the signed ABI hash.
+# A `false` output means GitHub never allocates that runner, so the Win/mac
+# matrix below costs nothing on the tips that do not need it. Tags classify
+# against the previous tag like an MR; only rehearsals (force_full) still run
+# everything. Live vs App *release* is NOT decided here — the publisher
+# derives that from the signed ABI hash.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -78,6 +80,20 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
             head="${{ github.event.pull_request.head.sha }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Tag release: the question is the same one an MR answers — which
+            # tiers does this change set touch — asked over everything shipped
+            # since the previous tag. main's own push CI already covered those
+            # commits one push at a time; the tag does not buy the full matrix
+            # a second time.
+            head="${{ github.sha }}"
+            base="$(git describe --tags --abbrev=0 "$head^" 2>/dev/null || true)"
+            if [ -z "$base" ]; then
+              node scripts/ci-classify.mjs --all >> "$GITHUB_OUTPUT"
+              echo "no previous tag: full suite"
+              exit 0
+            fi
+            echo "tag release: classifying against previous tag $base"
           else
             base="${{ github.event.before }}"
             head="${{ github.sha }}"

@@ -25,10 +25,10 @@ jobs:
   # Full CI matrix (rust, relay, web e2e, desktop Win/mac). Ordinary main/PR
   # runs stay path-filtered; the tag is where every job has to pass together
   # before an installer or tarball is built.
+  # Incremental, same as an MR: ci.yml classifies the tag against the previous
+  # tag instead of paying for the full matrix on every release.
   verify:
     uses: ./.github/workflows/ci.yml
-    with:
-      force_full: true
 
   cloud_source:
     if: startsWith(github.ref, 'refs/tags/v')

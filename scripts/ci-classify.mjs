@@ -71,6 +71,10 @@ const RULES = [
   { match: (f) => f.startsWith("wit/"), jobs: ["rust", "desktop"], native: ["host"], why: "ABI hash boundary" },
   { match: (f) => f.startsWith("apps/host/"), jobs: ["rust", "desktop"], native: ["host"], why: "Host runtime ships in the installer" },
   { match: (f) => f.startsWith("apps/cli/"), jobs: ["rust", "desktop"], native: ["cli"], why: "CLI/launcher ships in the installer" },
+  // Test-only edits assert over shipped sources; they ship nothing themselves.
+  // The Win/mac matrix re-runs the suite the next time a shipped source moves,
+  // so a tests-only tip pays for no heavy leg at all.
+  { match: (f) => f.startsWith("apps/desktop/src-tauri/tests/"), jobs: [], native: [], why: "desktop test-only change: no shipped source moves, no App to rebuild" },
   { match: (f) => f.startsWith("apps/desktop/"), jobs: ["desktop"], native: [], why: "Desktop shell and installer" },
   { match: (f) => f.startsWith("apps/daemon/"), jobs: ["rust"], native: [], why: "Client Component; nothing native links it, so a Linux build guard is the whole gate" },
   { match: (f) => f.startsWith("apps/agent/"), jobs: [], native: [], why: "Client Component; Linux wasm, not a cross-platform App" },
