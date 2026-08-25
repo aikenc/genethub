@@ -364,11 +364,23 @@ mod tests {
 
     #[test]
     fn channel_front_doors_must_be_absolute_and_are_never_renamed() {
-        for path in [
-            "/opt/genehub/dev/genet-dev",
-            "/opt/genehub/beta/genet-beta",
-            "/opt/genehub/stable/genet",
-        ] {
+        // Absolute paths are platform-shaped: Unix takes /opt/..., Windows
+        // needs a drive letter. The contract is "absolute survives verbatim,
+        // bare names are rejected", not one OS's path syntax.
+        let paths: [&str; 3] = if cfg!(windows) {
+            [
+                r"C:\opt\genehub\dev\genet-dev.exe",
+                r"C:\opt\genehub\beta\genet-beta.exe",
+                r"C:\opt\genehub\stable\genet.exe",
+            ]
+        } else {
+            [
+                "/opt/genehub/dev/genet-dev",
+                "/opt/genehub/beta/genet-beta",
+                "/opt/genehub/stable/genet",
+            ]
+        };
+        for path in paths {
             assert_eq!(
                 normalize_front_door_cli(Some(path.into())),
                 Some(PathBuf::from(path))

@@ -180,7 +180,9 @@ fn the_windows_installer_stops_the_daemon_before_replacing_it() {
     // The lock lives in the daemon's own data directory, so the define has to
     // name the same directory the daemon's channel constants do — a drift here
     // is the installer reading the other channel's lock, or nobody's.
-    let daemon_channel = read(repo().join("apps/daemon/src/channel.rs"));
+    // The daemon's channel identity lives in packages/frontdoor since the
+    // control-plane extraction (dbfd4d9).
+    let daemon_channel = read(repo().join("packages/frontdoor/src/channel.rs"));
     let data_dir = daemon_channel
         .lines()
         .find_map(|line| line.strip_prefix("pub const DATA_DIR_NAME: &str = "))
@@ -533,7 +535,7 @@ fn the_tree_claims_to_be_local_and_only_the_stamper_says_otherwise() {
     // release build compiles straight past.
     let modules = [
         (
-            "apps/daemon/src/channel.rs",
+            "packages/frontdoor/src/channel.rs",
             "pub const CHANNEL: &str = \"local\";",
         ),
         (
