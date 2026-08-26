@@ -14,6 +14,7 @@ use crate::abi;
 use crate::artifact::{sha256_hex, ArtifactVerifier, SignedArtifact};
 use crate::bindings::genehub::host::component_update as wit;
 use crate::channel;
+use crate::error::ArtifactError;
 use crate::keys;
 use crate::store::ArtifactStore;
 use crate::version::ProductVersion;
@@ -151,9 +152,16 @@ fn open_runtime() -> Result<Runtime> {
         .map_err(|error| anyhow!("recovering the signed component candidate: {error}"))?;
     let baseline_version = bundled_version()?;
     if let Some(baseline) = &baseline_version {
-        store
-            .advance_high_water(baseline)
-            .map_err(|error| anyhow!("recording bundled component version: {error}"))?;
+        // The bundled version is a floor, not a candidate: after any Live
+        // update the store's high-water mark already sits above it, and that
+        // is the normal state of an updated machine, not a replay. Refusing
+        // it here would kill every cold start after the first Live update.
+        match store.advance_high_water(baseline) {
+            Ok(()) | Err(ArtifactError::VersionReplay { .. }) => {}
+            Err(error) => {
+                return Err(anyhow!("recording bundled component version: {error}"));
+            }
+        }
     }
     Ok(Runtime {
         store,

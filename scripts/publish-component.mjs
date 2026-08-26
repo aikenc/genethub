@@ -36,6 +36,8 @@ async function main() {
     argumentsMap.get("cloud-root") ?? process.env.GENEHUB_CLOUD_ROOT ?? join(open, "../genethub-cloud"),
   );
   const { publishComponent } = await import(pathToFileURL(join(cloud, "publisher/component.mjs")).href);
+  const { readCurrent } = await import(pathToFileURL(join(cloud, "publisher/store.mjs")).href);
+  const { nextLiveVersion } = await import(pathToFileURL(join(cloud, "publisher/version.mjs")).href);
   if (commit) {
     requireClean(open, "genethub");
     requireClean(cloud, "genethub-cloud");
@@ -61,6 +63,30 @@ async function main() {
     : "https://candidate.invalid";
   const runner = process.env.GENEHUB_RUNNER_ID ?? `${userInfo().username}@${hostname()}`;
 
+  // A committed release compiles for its channel, and the tree always says
+  // `local`: stamp the channel and the resolved version in before any Cargo
+  // build, and put the tree back afterwards. Without the stamp the guest
+  // carries the local channel constants — it reads GENEHUB_LOCAL_DATA_DIR
+  // while a beta host hands it GENEHUB_BETA_DATA_DIR, and every updated
+  // machine dies on the next boot with "no platform data directory".
+  // The version has to be resolved here, before the build: the publisher
+  // would pick it inside the channel lease, but the compile needs it stamped.
+  let version = argumentsMap.has("version")
+    ? required("--version", argumentsMap.get("version"))
+    : undefined;
+  if (commit && !version) {
+    const current = await readCurrent(root, "component", channel);
+    if (!current) throw new Error("the channel's first component release requires an explicit version");
+    version = nextLiveVersion(current.value.releaseVersion);
+  }
+  if (commit) {
+    run(process.execPath, [join(open, "scripts/channel.mjs"), channel]);
+    run(process.execPath, [join(open, "scripts/stamp-version.mjs"), version]);
+  }
+  const restoreTree = () => {
+    if (commit) git(open, ["checkout", "--", "."]);
+  };
+
   // The Cargo builds share one package-cache lock, so they run as one
   // sequential chain; the console build (npm/rolldown-vite) is an independent
   // toolchain and runs concurrently with it. An unchanged tree makes every
@@ -72,7 +98,7 @@ async function main() {
   if (!raw || !signer) {
     builds.push((async () => {
       if (!raw) raw = await buildRaw(cargo, channel);
-      if (!signer) signer = await buildSigner(cargo);
+      if (!signer) signer = await buildSigner(cargo, channel);
     })());
   }
   if (web) builds.push(buildWeb(cloud, channel));
@@ -90,9 +116,6 @@ async function main() {
         release: required("--app-release", argumentsMap.get("app-release")),
         appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
       }
-    : undefined;
-  const version = argumentsMap.has("version")
-    ? required("--version", argumentsMap.get("version"))
     : undefined;
 
   try {
@@ -127,6 +150,7 @@ async function main() {
       null, 2,
     )}\n`);
   } finally {
+    restoreTree();
     if (commit || argumentsMap.has("discard-candidate")) {
       rmSync(temporary, { recursive: true, force: true });
     }
@@ -143,9 +167,12 @@ function buildRaw(cargo, channel) {
     .then(() => join(open, "target/wasm32-wasip2", profile, "genehub_guest.wasm"));
 }
 
-function buildSigner(cargo) {
+function buildSigner(cargo, channel) {
+  // The stamp renames the bin in apps/host/Cargo.toml, so the signer lands
+  // under the channel's host name.
+  const name = process.platform === "win32" ? `genehub-host-${channel}.exe` : `genehub-host-${channel}`;
   return run(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"])
-    .then(() => join(open, "target/iterate", process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local"));
+    .then(() => join(open, "target/iterate", name));
 }
 
 // The website half of a Live Release: exact dependencies only when the
