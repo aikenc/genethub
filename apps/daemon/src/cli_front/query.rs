@@ -219,7 +219,7 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
             "workspace show needs a workspace id",
         )),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workspace list | genet workspace show <id> — browse local daemon workspaces",
+            "usage: genet workspace list | genet workspace show <id> — list and inspect workspaces on the local daemon",
         )),
     }
 }
