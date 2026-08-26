@@ -27,7 +27,9 @@ describe("active single-file HTML Preview", () => {
     expect(policy).toContain("script-src 'unsafe-inline' 'wasm-unsafe-eval' https: data: blob:");
     expect(policy).toContain("worker-src blob: data:");
     expect(policy).toContain("style-src 'unsafe-inline' https: data:");
-    expect(policy).toContain("font-src data: https:");
+    expect(policy).toContain("font-src data: blob: https:");
+    expect(policy).toContain("img-src data: blob: https:");
+    expect(policy).toContain("media-src data: blob: https:");
     expect(policy).toContain("object-src 'none'");
     expect(policy).toContain("form-action 'none'");
     expect(policy).not.toContain("default-src *");
