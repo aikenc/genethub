@@ -90,15 +90,20 @@ async function main() {
   // The Cargo builds share one package-cache lock, so they run as one
   // sequential chain; the console build (npm/rolldown-vite) is an independent
   // toolchain and runs concurrently with it. An unchanged tree makes every
-  // one of these a no-op measured in seconds.
+  // one of these a no-op measured in seconds. A committed build is stamped
+  // for its channel, so it gets its own target directory: the tree is
+  // restored afterwards, and artifacts compiled against the stamp must not
+  // stay behind in the default target/ posing as local-channel builds.
   const cargo = argumentsMap.get("cargo") ?? "cargo";
+  const targetDir = commit ? join(open, "target", "publish", channel) : join(open, "target");
+  const cargoEnv = { ...process.env, CARGO_TARGET_DIR: targetDir };
   let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
   let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
   const builds = [];
   if (!raw || !signer) {
     builds.push((async () => {
-      if (!raw) raw = await buildRaw(cargo, channel);
-      if (!signer) signer = await buildSigner(cargo, channel);
+      if (!raw) raw = await buildRaw(cargo, channel, targetDir, cargoEnv);
+      if (!signer) signer = await buildSigner(cargo, channel, targetDir, cargoEnv);
     })());
   }
   if (web) builds.push(buildWeb(cloud, channel));
@@ -161,18 +166,18 @@ function guestProfile(channel) {
   return channel === "stable" ? "release" : "iterate";
 }
 
-function buildRaw(cargo, channel) {
+function buildRaw(cargo, channel, targetDir, cargoEnv) {
   const profile = guestProfile(channel);
-  return run(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"])
-    .then(() => join(open, "target/wasm32-wasip2", profile, "genehub_guest.wasm"));
+  return run(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"], { env: cargoEnv })
+    .then(() => join(targetDir, "wasm32-wasip2", profile, "genehub_guest.wasm"));
 }
 
-function buildSigner(cargo, channel) {
+function buildSigner(cargo, channel, targetDir, cargoEnv) {
   // The stamp renames the bin in apps/host/Cargo.toml, so the signer lands
   // under the channel's host name.
   const name = process.platform === "win32" ? `genehub-host-${channel}.exe` : `genehub-host-${channel}`;
-  return run(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"])
-    .then(() => join(open, "target/iterate", name));
+  return run(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"], { env: cargoEnv })
+    .then(() => join(targetDir, "iterate", name));
 }
 
 // The website half of a Live Release: exact dependencies only when the
