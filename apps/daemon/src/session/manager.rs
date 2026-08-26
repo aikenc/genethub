@@ -1,7 +1,8 @@
 //! Session lifecycle: create, run, persist, replay.
 //!
 //! Everything here is agent-agnostic. The manager holds a `dyn AgentSession`
-//! and never learns which adapter produced it.
+//! and never learns which adapter produced it. Sessions persist across
+//! reloads, so a Live update swaps the binary under a running conversation.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
