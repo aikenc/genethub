@@ -79,10 +79,11 @@ enum DaemonExit {
 
 /// Read bytes, compile in this process, instantiate, run the entry.
 ///
-/// Never write a `.cwasm` beside the data dir: a file the guest (or anything
-/// that can write the data dir) can replace is an exec path. The compiled
-/// image lives in this process only. A built-in agent is another host process
-/// and compiles from the same bytes; it does not deserialize a cache file.
+/// Derived (precompiled) artifacts are persisted per §5.1.6: the update flow
+/// derives after signature verification and before the reload, and loads
+/// deserialize from memory — never `deserialize_file`. A derived artifact
+/// that fails any check is deleted and the bytes are recompiled, so a bad
+/// artifact costs one slow start, never a wrong one.
 ///
 /// Dev does not verify. Never `from_file`: that re-opens a path after the
 /// buffer was inspected and is the TOCTOU the contract forbids.
@@ -94,11 +95,20 @@ pub fn run_component(path: &Path, guest_args: &[String], entry: Entry) -> Result
         .block_on(run_component_async(path, guest_args, entry))
 }
 
-async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -> Result<i32> {
+/// The engine configuration shared by the daemon loop and the update flow's
+/// precompile step. Derived artifacts are only compatible when both sides
+/// agree on every setting, so there is exactly one source of truth.
+///
+/// Cranelift stays at its default opt level: on a release-profile guest,
+/// dropping to `None` saves ~0.04s of compile and costs guest code quality.
+pub(crate) fn engine_config() -> Config {
     let mut config = Config::new();
     config.wasm_component_model(true);
-    // Cranelift stays at its default opt level: on a release-profile guest,
-    // dropping to `None` saves ~0.04s of compile and costs guest code quality.
+    config
+}
+
+async fn run_component_async(path: &Path, guest_args: &[String], entry: Entry) -> Result<i32> {
+    let mut config = engine_config();
     // Wasmtime's own compile cache stays off (§5.1.6): a cache the runtime
     // trusts implicitly is an exec path, so released channels never get one.
     // The single exception is the local tree under a test harness that names
@@ -407,7 +417,8 @@ fn build_instance(
     Ok((store, linker))
 }
 
-/// Compile in memory from the bytes we just read. No file cache.
+/// Compile in memory from the bytes we just read, or deserialize a derived
+/// artifact that was precompiled from those exact bytes (§5.1.6).
 fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
     // Builds without an update source keep their file-watcher loop and never
     // consult a release activation store. Naming an update source — stamped
@@ -424,10 +435,30 @@ fn load_component(engine: &Engine, path: &Path) -> Result<Component> {
     };
     crate::update::note_running_component(&bytes);
     crate::abi::assert_digest_if_present(&bytes)?;
+    // §5.1.6: a derived artifact exists when the update flow precompiled
+    // these exact bytes. Any mismatch or corruption is fail-closed — the
+    // artifact is deleted and we compile from scratch.
+    if let Some(component) = crate::derived::try_load(engine, &bytes) {
+        debug_log("loaded component from derived artifact");
+        require_product_digest(&bytes, engine, &component)?;
+        return Ok(component);
+    }
     debug_log(&format!("compiling {}-byte component", bytes.len()));
-    let component = Component::from_binary(engine, &bytes)
+    // Precompile once, then deserialize from the in-memory result: the same
+    // bytes serve both this instantiation and the derived artifact on disk,
+    // so a compile is never paid twice.
+    let precompiled = engine
+        .precompile_component(&bytes)
+        .map_err(anyhow::Error::from)
+        .context("precompile_component")?;
+    if let Err(error) = crate::derived::store_precompiled(&bytes, &precompiled) {
+        debug_log(&format!("derived artifact store failed: {error:#}"));
+    }
+    // Safety: these bytes are the output of `precompile_component` on this
+    // engine, produced above in this same call.
+    let component = unsafe { Component::deserialize(engine, &precompiled) }
         .anyhow()
-        .context("Component::from_binary")?;
+        .context("Component::deserialize after precompile")?;
     require_product_digest(&bytes, engine, &component)?;
     Ok(component)
 }

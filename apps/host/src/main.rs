@@ -8,6 +8,7 @@ mod artifact;
 mod artifact_cli;
 mod bindings;
 mod channel;
+mod derived;
 mod error;
 mod file_lock;
 mod fs_perms;

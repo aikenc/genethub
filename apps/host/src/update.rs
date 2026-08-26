@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
+use wasmtime::Engine;
 
 use crate::abi;
 use crate::artifact::{sha256_hex, ArtifactVerifier, SignedArtifact};
@@ -361,6 +362,21 @@ pub fn apply(_request_id: &str) -> Result<()> {
         .store
         .commit_candidate(&manifest_version)
         .map_err(|error| anyhow!("{error}"))?;
+    // §5.1.6: derive the precompiled artifact now, while the user is already
+    // waiting, so the reload that follows deserializes instead of compiling.
+    // A failure here never fails the update — the reload compiles from the
+    // verified bytes and stores the artifact then.
+    drop(guard);
+    match Engine::new(&crate::load::engine_config()) {
+        Ok(engine) => {
+            if let Err(error) = crate::derived::derive_and_store(&engine, &bytes) {
+                crate::load::debug_log(&format!("derived artifact precompile failed: {error:#}"));
+            }
+        }
+        Err(error) => {
+            crate::load::debug_log(&format!("derived artifact engine failed: {error:#}"));
+        }
+    }
     Ok(())
 }
 
