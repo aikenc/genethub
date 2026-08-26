@@ -1101,7 +1101,7 @@ fn initialize_params() -> Value {
         "clientInfo": {
             "name": "genehub",
             "title": crate::channel::PRODUCT,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::version::product_version(),
         },
     })
 }

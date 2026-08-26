@@ -11,6 +11,8 @@ import { hostname, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { acquirePublishLock, ensureStampedWorktree } from "./lib/publish-tree.mjs";
+
 const open = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const argumentsMap = parseArguments(process.argv.slice(2));
 if (argumentsMap.has("help")) {
@@ -63,14 +65,19 @@ async function main() {
     : "https://candidate.invalid";
   const runner = process.env.GENEHUB_RUNNER_ID ?? `${userInfo().username}@${hostname()}`;
 
-  // A committed release compiles for its channel, and the tree always says
-  // `local`: stamp the channel and the resolved version in before any Cargo
-  // build, and put the tree back afterwards. Without the stamp the guest
-  // carries the local channel constants — it reads GENEHUB_LOCAL_DATA_DIR
-  // while a beta host hands it GENEHUB_BETA_DATA_DIR, and every updated
-  // machine dies on the next boot with "no platform data directory".
-  // The version has to be resolved here, before the build: the publisher
-  // would pick it inside the channel lease, but the compile needs it stamped.
+  // A committed Live build compiles for its channel while the source tree
+  // always says `local`, so the guest compiles in a persistent per-channel
+  // worktree that stays stamped between publishes (scripts/lib/publish-tree.mjs).
+  // Without the stamp the guest carries the local channel constants — it reads
+  // GENEHUB_LOCAL_DATA_DIR while a beta host hands it GENEHUB_BETA_DATA_DIR,
+  // and every updated machine dies on the next boot with "no platform data
+  // directory". Keeping the stamp out of the main checkout is what makes a
+  // warm publish fast: the tree never flip-flops, and a byte-identical
+  // re-stamp leaves mtimes alone, so cargo keeps target/publish/<channel>
+  // warm. The Live version is never stamped into Cargo.toml either — it
+  // travels in the signed envelope (pack's argv) and reaches the runtime as
+  // GENEHUB_COMPONENT_VERSION, and stamping the workspace version would
+  // invalidate every crate's fingerprint for nothing.
   let version = argumentsMap.has("version")
     ? required("--version", argumentsMap.get("version"))
     : undefined;
@@ -79,31 +86,39 @@ async function main() {
     if (!current) throw new Error("the channel's first component release requires an explicit version");
     version = nextLiveVersion(current.value.releaseVersion);
   }
-  if (commit) {
-    run(process.execPath, [join(open, "scripts/channel.mjs"), channel]);
-    run(process.execPath, [join(open, "scripts/stamp-version.mjs"), version]);
-  }
-  const restoreTree = () => {
-    if (commit) git(open, ["checkout", "--", "."]);
-  };
+  // One Live publish per channel at a time; held for the whole run because
+  // the version computation and the store write race just as badly as the
+  // worktree does.
+  const releaseLock = commit ? acquirePublishLock(open, channel) : null;
 
   // The Cargo builds share one package-cache lock, so they run as one
   // sequential chain; the console build (npm/rolldown-vite) is an independent
-  // toolchain and runs concurrently with it. An unchanged tree makes every
-  // one of these a no-op measured in seconds. A committed build is stamped
-  // for its channel, so it gets its own target directory: the tree is
-  // restored afterwards, and artifacts compiled against the stamp must not
-  // stay behind in the default target/ posing as local-channel builds.
+  // toolchain and runs concurrently with it. A committed guest build compiles
+  // in the stamped worktree against its own channel-keyed target directory;
+  // the signer compiles from the main checkout — pack/inspect take channel
+  // and version from argv (the only compiled-in constants they use, MODULE_ID
+  // and the WIT ABI digest, are identical across channels), so one
+  // local-stamped host binary signs every channel and target/publish/signer
+  // stays warm across publishes. An unchanged tree makes every one of these
+  // a no-op measured in seconds.
   const cargo = argumentsMap.get("cargo") ?? "cargo";
-  const targetDir = commit ? join(open, "target", "publish", channel) : join(open, "target");
-  const cargoEnv = { ...process.env, CARGO_TARGET_DIR: targetDir };
   let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
   let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
   const builds = [];
   if (!raw || !signer) {
     builds.push((async () => {
-      if (!raw) raw = await buildRaw(cargo, channel, targetDir, cargoEnv);
-      if (!signer) signer = await buildSigner(cargo, channel, targetDir, cargoEnv);
+      if (!raw) {
+        const tree = commit ? ensureStampedWorktree(open, channel, source.openSha) : open;
+        // The channel-keyed target dir doubles as the warm dependency cache;
+        // it predates the worktree flow and stays put so the first publish
+        // under it does not recompile the world.
+        const guestTarget = commit ? join(open, "target", "publish", channel) : join(open, "target");
+        raw = await buildRaw(cargo, channel, tree, guestTarget);
+      }
+      if (!signer) {
+        const signerTarget = commit ? join(open, "target", "publish", "signer") : join(open, "target");
+        signer = await buildSigner(cargo, signerTarget);
+      }
     })());
   }
   if (web) builds.push(buildWeb(cloud, channel));
@@ -155,7 +170,7 @@ async function main() {
       null, 2,
     )}\n`);
   } finally {
-    restoreTree();
+    releaseLock?.();
     if (commit || argumentsMap.has("discard-candidate")) {
       rmSync(temporary, { recursive: true, force: true });
     }
@@ -166,17 +181,19 @@ function guestProfile(channel) {
   return channel === "stable" ? "release" : "iterate";
 }
 
-function buildRaw(cargo, channel, targetDir, cargoEnv) {
+function buildRaw(cargo, channel, tree, targetDir) {
   const profile = guestProfile(channel);
-  return run(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"], { env: cargoEnv })
+  const env = { ...process.env, CARGO_TARGET_DIR: targetDir };
+  return run(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"], { cwd: tree, env })
     .then(() => join(targetDir, "wasm32-wasip2", profile, "genehub_guest.wasm"));
 }
 
-function buildSigner(cargo, channel, targetDir, cargoEnv) {
-  // The stamp renames the bin in apps/host/Cargo.toml, so the signer lands
-  // under the channel's host name.
-  const name = process.platform === "win32" ? `genehub-host-${channel}.exe` : `genehub-host-${channel}`;
-  return run(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"], { env: cargoEnv })
+function buildSigner(cargo, targetDir) {
+  // The tree is never stamped, so the bin keeps its local name. The binary
+  // signs for any channel: `pack` takes channel and version from argv.
+  const name = process.platform === "win32" ? "genehub-host-local.exe" : "genehub-host-local";
+  const env = { ...process.env, CARGO_TARGET_DIR: targetDir };
+  return run(cargo, ["build", "--profile", "iterate", "-p", "genehub-host"], { env })
     .then(() => join(targetDir, "iterate", name));
 }
 
@@ -304,5 +321,7 @@ Every channel signs with the one self-contained development root; the stable
 line reintroduces external keys when it graduates.
 ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
 Guest compile uses Cargo profile iterate unless --channel stable (then release).
+Committed builds compile in a persistent stamped worktree under target/publish/
+(scripts/lib/publish-tree.mjs); the checkout itself is never stamped or restored.
 `);
 }

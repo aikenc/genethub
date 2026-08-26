@@ -616,7 +616,7 @@ async fn import_rpc(program: &Path, cwd: &Path, method: &str, params: Value) -> 
                 "params": { "clientInfo": {
                     "name": CLIENT_NAME,
                     "title": crate::channel::PRODUCT,
-                    "version": env!("CARGO_PKG_VERSION"),
+                    "version": crate::version::product_version(),
                 } },
             }),
         )
@@ -690,7 +690,7 @@ async fn discover(program: &Path) -> Option<Hello> {
             "params": { "clientInfo": {
                 "name": CLIENT_NAME,
                 "title": crate::channel::PRODUCT,
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": crate::version::product_version(),
             } },
         });
         write_json_line(&mut stdin, &hello).await.ok()?;
@@ -961,7 +961,7 @@ impl CodexSession {
             json!({ "clientInfo": {
                 "name": CLIENT_NAME,
                 "title": crate::channel::PRODUCT,
-                "version": env!("CARGO_PKG_VERSION"),
+                "version": crate::version::product_version(),
             } }),
         )
         .await?;

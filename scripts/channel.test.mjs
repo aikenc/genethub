@@ -7,7 +7,7 @@
 
 import assert from "node:assert";
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -148,6 +148,29 @@ test("a beta stamp writes beta identity everywhere and local restores it", () =>
     const localHost = readFileSync(join(root, "apps/host/src/channel.rs"), "utf8");
     assert.ok(localHost.includes("pub const COMPONENT_MANIFEST_URLS: &[&str] = &[];"));
     assert.equal(stamped(root, "beta"), beta);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("re-stamping the same channel touches nothing on disk", () => {
+  // Cargo keys freshness on mtime: a byte-identical re-stamp that rewrites
+  // the file anyway rebuilds frontdoor/agent and everything downstream.
+  // The persistent publish worktree is re-stamped on every Live publish, so
+  // a no-op stamp must be a no-op on the filesystem too.
+  const root = stampSandbox();
+  try {
+    stamped(root, "beta");
+    const files = [...STAMPED_FILES, ...GENERATED_FILES];
+    const before = new Map(
+      files.map((relative) => [relative, statSync(join(root, relative)).mtimeMs]),
+    );
+    // mtime granularity differs across filesystems; make a rewrite visible.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100);
+    stamped(root, "beta");
+    for (const [relative, mtime] of before) {
+      assert.equal(statSync(join(root, relative)).mtimeMs, mtime, `${relative} was rewritten by a no-op stamp`);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

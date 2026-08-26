@@ -25,11 +25,21 @@
 //   node scripts/channel.mjs --from-tag              stamp from the tag being built, if there is one
 //   node scripts/channel.mjs --show                  print the channel the tree is stamped for
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Write only on a real change. Cargo keys freshness on mtime, so a
+// byte-identical re-stamp that still touches the file sends frontdoor, agent
+// and everything downstream through codegen again — the persistent publish
+// worktree is re-stamped on every Live publish and depends on this being a
+// no-op when the channel has not moved.
+function writeIfChanged(path, content) {
+  if (existsSync(path) && readFileSync(path, "utf8") === content) return;
+  writeFileSync(path, content);
+}
 
 const usage = () => {
   console.error(`  node scripts/channel.mjs local|stable|beta|dev   stamp the tree for a build identity
@@ -263,7 +273,7 @@ function rewriteLines(path, replacements) {
     const missed = replacements.filter((_, i) => !matched.has(i)).map(([p]) => p);
     throw new Error(`${path}: no line matched ${missed.join(", ")} — the marker drifted from the stamper`);
   }
-  writeFileSync(path, out.join("\n"));
+  writeIfChanged(path, out.join("\n"));
 }
 
 // The scoped form: sed's `/^\[\[bin\]\]/,/^\[/ s/...` — only the first
@@ -283,7 +293,7 @@ function rewriteInSection(path, sectionStart, pattern, substitute) {
     return line;
   });
   if (!done) throw new Error(`${path}: no line matched ${pattern} inside ${sectionStart} — the marker drifted from the stamper`);
-  writeFileSync(path, out.join("\n"));
+  writeIfChanged(path, out.join("\n"));
 }
 
 const rustModule = (channel) => {
@@ -508,12 +518,12 @@ function stamp(channel) {
   const hostBinary = value("host_binary", channel);
   const desktopBinary = value("desktop_binary", channel);
 
-  writeFileSync(join(repo, "packages/frontdoor/src/channel.rs"), rustModule(channel));
-  writeFileSync(join(repo, "apps/agent/src/channel.rs"), agentModule(channel));
-  writeFileSync(join(repo, "apps/host/src/channel.rs"), hostModule(channel));
-  writeFileSync(join(repo, "apps/desktop/src-tauri/src/channel.rs"), desktopModule(channel));
-  writeFileSync(join(repo, "packages/workbench/src/channel.ts"), tsModule(channel));
-  writeFileSync(join(repo, "scripts/channel.env"), shellEnv(channel));
+  writeIfChanged(join(repo, "packages/frontdoor/src/channel.rs"), rustModule(channel));
+  writeIfChanged(join(repo, "apps/agent/src/channel.rs"), agentModule(channel));
+  writeIfChanged(join(repo, "apps/host/src/channel.rs"), hostModule(channel));
+  writeIfChanged(join(repo, "apps/desktop/src-tauri/src/channel.rs"), desktopModule(channel));
+  writeIfChanged(join(repo, "packages/workbench/src/channel.ts"), tsModule(channel));
+  writeIfChanged(join(repo, "scripts/channel.env"), shellEnv(channel));
 
   // The bundle config: productName is the install-directory name (and what
   // the Start menu folder is called); the window title stays the display
@@ -586,10 +596,29 @@ function fromRef() {
   return "";
 }
 
+// Every repo-relative path stamp() owns. The persistent publish worktree
+// (scripts/lib/publish-tree.mjs) snapshots these across `git reset --hard` so
+// a byte-identical re-stamp can keep its mtime — cargo keys freshness on
+// mtime, and a touched frontdoor/agent channel.rs rebuilds the guest on top.
+const STAMPED_PATHS = [
+  "packages/frontdoor/src/channel.rs",
+  "apps/agent/src/channel.rs",
+  "apps/host/src/channel.rs",
+  "apps/desktop/src-tauri/src/channel.rs",
+  "packages/workbench/src/channel.ts",
+  "scripts/channel.env",
+  "apps/desktop/src-tauri/tauri.conf.json",
+  "apps/desktop/src-tauri/installer.nsh",
+  "apps/cli/Cargo.toml",
+  "apps/agent/Cargo.toml",
+  "apps/host/Cargo.toml",
+  "scripts/install.sh",
+];
+
 // Exported for `channel.test.mjs`: the table and the tag mapping are the
 // channel policy, and they deserve direct assertions instead of discovery by
 // a broken release.
-export { fromRef, TABLE };
+export { fromRef, TABLE, STAMPED_PATHS };
 
 const invokedDirectly =
   typeof process.argv[1] === "string" &&
