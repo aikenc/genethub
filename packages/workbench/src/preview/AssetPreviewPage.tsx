@@ -565,7 +565,7 @@ export function HtmlDocument({
           return;
         }
         const infoLines = [
-          "模式：多文件站点（内联 CSS/JS/module，媒体 data:）",
+          "模式：多文件站点（内联 CSS/JS/module，媒体按需加载）",
           "运行时 fetch / import 已转发到工作区",
           "WASM / Worker：已开启",
           "网络：已开启（https / wss）",
@@ -760,9 +760,9 @@ export function isolatedHtml(source: string): string {
     "default-src 'none'",
     "script-src 'unsafe-inline' 'wasm-unsafe-eval' https: data: blob:",
     "style-src 'unsafe-inline' https: data:",
-    "img-src data: https:",
-    "media-src data: https:",
-    "font-src data: https:",
+    "img-src data: blob: https:",
+    "media-src data: blob: https:",
+    "font-src data: blob: https:",
     "connect-src https: wss: blob: data:",
     "object-src 'none'",
     "frame-src 'none'",
@@ -1046,9 +1046,13 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
   window.addEventListener("error", function(e){
     var t = e.target;
     if (t && t !== window && t.tagName) {
+      var failedUrl = String(t.currentSrc || t.src || t.href || "");
+      // Placeholder failures are expected: the lazy media resolver swaps them
+      // for blob URLs and reports its own errors.
+      if (isPlaceholderUrl(failedUrl)) return;
       send("resource", {
         tag: String(t.tagName).toLowerCase(),
-        src: safeUrl(t.currentSrc || t.src || t.href || ""),
+        src: safeUrl(failedUrl),
         message: "resource load failed"
       });
       return;
@@ -1113,6 +1117,132 @@ const PREVIEW_DIAG_BRIDGE = `(function(){
       }, 60000);
     });
   }
+  // --- Lazy media resolver -------------------------------------------------
+  // The remap rewrites media URLs to https://preview.invalid/... placeholders
+  // without fetching bytes. Native loads of placeholders would fail (the host
+  // does not resolve), so this resolver swaps them for iframe-local blob:
+  // URLs fetched through the asset bridge. Three coverage paths:
+  //   1. prototype setter hooks  — el.src = "assets/a.png" before the browser
+  //      starts a doomed native load;
+  //   2. MutationObserver        — static HTML, innerHTML, setAttribute,
+  //      srcset and SVG image/use (catch-all);
+  //   3. runtime fetch/XHR       — handled by the fetch interception below.
+  var mediaBlobCache = new Map();
+  function isPlaceholderUrl(value){
+    if (!value) return false;
+    try {
+      return new URL(String(value), document.baseURI).hostname === "preview.invalid";
+    } catch (e) {
+      return false;
+    }
+  }
+  function resolveMediaBlob(rawUrl){
+    var key = String(rawUrl);
+    var cached = mediaBlobCache.get(key);
+    if (cached) return cached;
+    var pending = requestPreviewAsset(key).then(function(response){
+      return response.blob();
+    }).then(function(blob){
+      return URL.createObjectURL(blob);
+    }).catch(function(error){
+      send("resource", { tag: "media", src: safeUrl(key), message: text(error, 500) });
+      return null;
+    });
+    mediaBlobCache.set(key, pending);
+    return pending;
+  }
+  function resolveMediaAttribute(el, attr){
+    var value = el.getAttribute && el.getAttribute(attr);
+    if (!isPlaceholderUrl(value)) return;
+    var absolute = new URL(String(value), document.baseURI).href;
+    resolveMediaBlob(absolute).then(function(blobUrl){
+      if (blobUrl) el.setAttribute(attr, blobUrl);
+    });
+  }
+  function resolveSrcsetValue(value){
+    var candidates = String(value).split(",");
+    return Promise.all(candidates.map(function(candidate){
+      var parts = candidate.trim().split(/\s+/);
+      var url = parts[0];
+      if (!isPlaceholderUrl(url)) return candidate.trim();
+      return resolveMediaBlob(new URL(url, document.baseURI).href).then(function(blobUrl){
+        parts[0] = blobUrl || url;
+        return parts.join(" ");
+      });
+    })).then(function(list){ return list.join(", "); });
+  }
+  function hookMediaSetter(prototype, attr){
+    if (!prototype) return;
+    var desc = Object.getOwnPropertyDescriptor(prototype, attr);
+    if (!desc || !desc.set || !desc.get) return;
+    Object.defineProperty(prototype, attr, {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get: desc.get,
+      set: function(value){
+        if (isPlaceholderUrl(value)) {
+          var el = this;
+          var apply = attr === "srcset"
+            ? resolveSrcsetValue(value)
+            : resolveMediaBlob(new URL(String(value), document.baseURI).href);
+          apply.then(function(resolved){
+            if (resolved) desc.set.call(el, resolved);
+          });
+          return;
+        }
+        desc.set.call(this, value);
+      }
+    });
+  }
+  try {
+    hookMediaSetter(window.HTMLImageElement && HTMLImageElement.prototype, "src");
+    hookMediaSetter(window.HTMLImageElement && HTMLImageElement.prototype, "srcset");
+    hookMediaSetter(window.HTMLMediaElement && HTMLMediaElement.prototype, "src");
+    hookMediaSetter(window.HTMLSourceElement && HTMLSourceElement.prototype, "src");
+    hookMediaSetter(window.HTMLSourceElement && HTMLSourceElement.prototype, "srcset");
+    hookMediaSetter(window.HTMLVideoElement && HTMLVideoElement.prototype, "poster");
+    hookMediaSetter(window.HTMLTrackElement && HTMLTrackElement.prototype, "src");
+  } catch (e) {}
+  function scanMediaNode(node){
+    if (!node || node.nodeType !== 1) return;
+    var tag = String(node.tagName || "").toLowerCase();
+    var watched = tag === "img" || tag === "source" || tag === "video" || tag === "audio" ||
+      tag === "track" || tag === "image" || tag === "use" || tag === "link";
+    if (watched) {
+      resolveMediaAttribute(node, "src");
+      resolveMediaAttribute(node, "poster");
+      if (tag === "image" || tag === "use" || tag === "link") resolveMediaAttribute(node, "href");
+      var srcset = node.getAttribute && node.getAttribute("srcset");
+      if (isPlaceholderUrl(srcset)) {
+        resolveSrcsetValue(srcset).then(function(resolved){
+          if (resolved) node.setAttribute("srcset", resolved);
+        });
+      }
+    }
+    if (node.querySelectorAll) {
+      var nested = node.querySelectorAll("img,source,video,audio,track,image,use,link");
+      for (var i = 0; i < nested.length; i++) scanMediaNode(nested[i]);
+    }
+  }
+  if (window.MutationObserver) {
+    var mediaObserver = new MutationObserver(function(records){
+      for (var i = 0; i < records.length; i++) {
+        var record = records[i];
+        if (record.type === "attributes") {
+          scanMediaNode(record.target);
+        } else if (record.type === "childList") {
+          for (var j = 0; j < record.addedNodes.length; j++) scanMediaNode(record.addedNodes[j]);
+        }
+      }
+    });
+    mediaObserver.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["src", "srcset", "poster", "href"]
+    });
+  }
+  // --- End lazy media resolver ---------------------------------------------
   if (window.fetch) {
     var originalFetch = window.fetch;
     window.fetch = function(){

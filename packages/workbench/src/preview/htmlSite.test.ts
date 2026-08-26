@@ -13,7 +13,7 @@ describe("remapHtmlSite", () => {
     });
   });
 
-  it("inlines relative css/js and data-URLs images for opaque iframes", async () => {
+  it("inlines relative css/js and rewrites media to lazy placeholders", async () => {
     const fetchAsset = vi.fn(async (path: string) => {
       if (path === "r_demo/app.css") {
         return { bytes: new TextEncoder().encode("body{color:red}"), mediaType: "text/plain" };
@@ -21,12 +21,6 @@ describe("remapHtmlSite", () => {
       if (path === "r_demo/app.js") {
         return {
           bytes: new TextEncoder().encode("globalThis.ok=true"),
-          mediaType: "text/plain",
-        };
-      }
-      if (path === "r_demo/mark.svg") {
-        return {
-          bytes: new TextEncoder().encode("<svg xmlns='http://www.w3.org/2000/svg'/>"),
           mediaType: "text/plain",
         };
       }
@@ -38,18 +32,57 @@ describe("remapHtmlSite", () => {
       html: `<!doctype html><html><head>
         <link rel="stylesheet" href="./app.css">
         <script src="./app.js"></script>
-      </head><body><img src="./mark.svg"></body></html>`,
+      </head><body><img src="./mark.svg"><video poster="./cover.png" src="./clip.mp4"></video></body></html>`,
       fetchAsset,
     });
 
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/app.css");
     expect(fetchAsset).toHaveBeenCalledWith("r_demo/app.js");
-    expect(fetchAsset).toHaveBeenCalledWith("r_demo/mark.svg");
+    // Media bytes are not fetched during remap; the iframe bridge resolves
+    // the placeholders on demand.
+    expect(fetchAsset).not.toHaveBeenCalledWith("r_demo/mark.svg");
+    expect(fetchAsset).not.toHaveBeenCalledWith("r_demo/cover.png");
+    expect(fetchAsset).not.toHaveBeenCalledWith("r_demo/clip.mp4");
     expect(result.html).toContain("<style>body{color:red}</style>");
     expect(result.html).toContain("<script>globalThis.ok=true</script>");
-    expect(result.html).toContain('src="data:image/svg+xml;base64,');
+    expect(result.html).toContain('src="https://preview.invalid/@root/mark.svg"');
+    expect(result.html).toContain('poster="https://preview.invalid/@root/cover.png"');
+    expect(result.html).toContain('src="https://preview.invalid/@root/clip.mp4"');
     expect(result.html).not.toContain("blob:");
     expect(result.blobUrls).toHaveLength(0);
+  });
+
+  it("resolves placeholders back onto the entry root and confines traversal", () => {
+    expect(
+      resolveRuntimeAssetPath("r_demo/index.html", "https://preview.invalid/@root/mark.svg"),
+    ).toBe("r_demo/mark.svg");
+    expect(
+      resolveRuntimeAssetPath("r_demo/a/b/index.html", "https://preview.invalid/@root/mark.svg"),
+    ).toBe("r_demo/mark.svg");
+    // ".." segments are normalized away by the URL parser before resolution;
+    // what survives is still confined to the entry root.
+    expect(
+      resolveRuntimeAssetPath("r_demo/index.html", "https://preview.invalid/@root/../x.svg"),
+    ).toBe("r_demo/x.svg");
+    expect(
+      resolveRuntimeAssetPath("r_demo/index.html", "https://preview.invalid/@root/a/../../x.svg"),
+    ).toBe("r_demo/x.svg");
+    // Encoded traversal is normalized by the URL parser as well.
+    expect(
+      resolveRuntimeAssetPath("r_demo/index.html", "https://preview.invalid/@root/%2e%2e/x.svg"),
+    ).toBe("r_demo/x.svg");
+  });
+
+  it("keeps query and fragment suffixes on media placeholders", async () => {
+    const fetchAsset = vi.fn(async () => null);
+    const result = await remapHtmlSite({
+      entryPath: "r_demo/index.html",
+      html: `<img src="./mark.svg?v=2"><svg><use href="./icons.svg#play"></use></svg>`,
+      fetchAsset,
+    });
+    expect(result.html).toContain('src="https://preview.invalid/@root/mark.svg?v=2"');
+    expect(result.html).toContain('href="https://preview.invalid/@root/icons.svg#play"');
+    expect(fetchAsset).not.toHaveBeenCalled();
   });
 
   it("rewrites site-root paths and leaves remote assets alone", async () => {

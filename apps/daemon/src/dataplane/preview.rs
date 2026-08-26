@@ -11,6 +11,9 @@ use crate::files::{PreviewFailure, PreviewFile};
 
 static PREVIEW_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// On-demand preview loading fetches many small sub-resources in parallel;
+/// two slots serialized whole sites behind each other.
+const PREVIEW_WORKERS: usize = 8;
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
@@ -55,7 +58,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     let slot = match tokio::time::timeout(
         PREVIEW_IO_TIMEOUT,
         PREVIEW_SLOTS
-            .get_or_init(|| Arc::new(Semaphore::new(2)))
+            .get_or_init(|| Arc::new(Semaphore::new(PREVIEW_WORKERS)))
             .clone()
             .acquire_owned(),
     )
