@@ -927,7 +927,7 @@ impl SessionManager {
             .list_meta()?
             .into_iter()
             .find(|meta| meta.id == session_id)
-            .ok_or_else(|| anyhow!("no such session: {session_id}"))?;
+            .ok_or_else(|| anyhow!("没有这个会话：{session_id}"))?;
         // Reading a layout this build predates would not give a partial view,
         // it would give a wrong one, and any reply written back would corrupt
         // the session for the build that can read it.
