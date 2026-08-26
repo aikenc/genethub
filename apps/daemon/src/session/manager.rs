@@ -40,6 +40,20 @@ use crate::diagnostics::Diagnostics;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
+
+/// A session id that matches nothing in memory or on disk. The router maps
+/// this typed error to `notFound`; the Display text is user-facing and free
+/// to change without touching the wire classification.
+#[derive(Debug)]
+pub struct SessionMissing(pub String);
+
+impl std::fmt::Display for SessionMissing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "查无此会话：{}", self.0)
+    }
+}
+
+impl std::error::Error for SessionMissing {}
 /// A snapshot is one RPC body (`MAX_RPC_BODY_BYTES` is 2.9 MiB). Leave room for
 /// summary/round metadata and JSON escaping instead of importing a transcript
 /// that can be written successfully but never opened.
@@ -927,7 +941,7 @@ impl SessionManager {
             .list_meta()?
             .into_iter()
             .find(|meta| meta.id == session_id)
-            .ok_or_else(|| anyhow!("会话不存在：{session_id}"))?;
+            .ok_or_else(|| SessionMissing(session_id.to_string()))?;
         // Reading a layout this build predates would not give a partial view,
         // it would give a wrong one, and any reply written back would corrupt
         // the session for the build that can read it.

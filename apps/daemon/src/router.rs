@@ -57,7 +57,15 @@ impl Handled {
 /// something actionable rather than render blank.
 fn failed(error: anyhow::Error) -> Handled {
     let message = format!("{error:#}");
-    let code = if message.contains("invalid session artifact")
+    // Typed errors classify by type so a user-facing message (any language)
+    // can change without breaking the wire code; string matching below is the
+    // fallback for errors that cross module boundaries as plain anyhow text.
+    let code = if error
+        .downcast_ref::<crate::session::manager::SessionMissing>()
+        .is_some()
+    {
+        ErrorCode::NotFound
+    } else if message.contains("invalid session artifact")
         || message.contains("session artifact chunk")
         || message.contains("session artifact metadata")
         || message.contains("session artifact exceeds")
@@ -1430,6 +1438,18 @@ mod tests {
         let handled = failed(anyhow::anyhow!("no such session: s1"));
         match handled.reply {
             Err(error) => assert_eq!(error.code, ErrorCode::NotFound),
+            Ok(_) => panic!("expected an error"),
+        }
+    }
+
+    #[test]
+    fn a_missing_session_classifies_by_type_not_by_wording() {
+        let handled = failed(crate::session::manager::SessionMissing("s1".to_string()).into());
+        match handled.reply {
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::NotFound);
+                assert_eq!(error.message, "查无此会话：s1");
+            }
             Ok(_) => panic!("expected an error"),
         }
     }
