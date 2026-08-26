@@ -43,8 +43,12 @@ export async function openRtcDataLink(
   if (onDiagnostic) watchPeer(peer, diagnosticId ?? null, onDiagnostic);
   const channel = peer.createDataChannel("genehub-data-v3", { ordered: true });
   channel.binaryType = "arraybuffer";
+  // Created before signaling so ICE can progress while the offer is in
+  // flight. If negotiation fails before either promise is awaited, the
+  // catch below silences the late rejection from the teardown close.
+  const opened = dataChannelOpened(channel, peer);
+  let welcome: Promise<Uint8Array> | undefined;
   try {
-    const opened = dataChannelOpened(channel, peer);
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
     await iceGathered(peer, CONNECT_TIMEOUT_MS);
@@ -98,7 +102,7 @@ export async function openRtcDataLink(
       capabilityId: answer.capabilityId,
       secret: answer.secret,
     });
-    const welcome = nextDataChannelMessage(channel);
+    welcome = nextDataChannelMessage(channel);
     channel.send(new TextEncoder().encode(JSON.stringify(prepared.hello)));
     const welcomeValue = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(
@@ -123,6 +127,10 @@ export async function openRtcDataLink(
       },
     };
   } catch (error) {
+    // Closing an unopened channel rejects `opened`/`welcome`; nobody is
+    // still awaiting them here, so swallow to avoid unhandled rejections.
+    opened.catch(() => {});
+    welcome?.catch(() => {});
     channel.close();
     peer.close();
     throw error;

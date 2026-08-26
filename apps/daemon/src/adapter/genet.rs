@@ -169,6 +169,13 @@ impl AgentAdapter for GenetAdapter {
                     argument_hint: Some("[analysis goal]".into()),
                 },
                 CommandInfo {
+                    name: "skill:genehub-html-preview".into(),
+                    description: Some(
+                        "Load the GeneHub HTML / H5 Asset Preview authoring contract".into(),
+                    ),
+                    argument_hint: Some("[preview goal]".into()),
+                },
+                CommandInfo {
                     name: "compact".into(),
                     description: Some(
                         "Compact this session in a private, non-recorded analysis run".into(),

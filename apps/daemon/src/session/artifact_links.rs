@@ -26,7 +26,14 @@ runtime fetch/import into the workspace.
 - Video: `.mp4`, `.webm`
 - WASM (`.wasm`) and other binary assets, loaded by the entry HTML
 - Text / source / config: any valid UTF-8 text without NUL (highlighted when \
-recognized)"
+recognized)
+
+When authoring HTML, H5 games, or static sites for Preview, read the \
+`genehub-html-preview` skill. Write a regular static site (entry HTML + \
+relative paths) that also opens as a local file. Do not start an HTTP server \
+for static assets, and do not embed Preview-specific scripts — GeneHub \
+injects its own loader. `localStorage` works via a persistent sandbox shim; \
+IndexedDB, cookies, nested iframes, and forms do not."
 }
 
 #[cfg(test)]
@@ -44,5 +51,8 @@ mod tests {
         assert!(text.contains(".md"));
         assert!(text.contains(".wasm"));
         assert!(text.contains("64 MiB"));
+        assert!(text.contains("genehub-html-preview"));
+        assert!(text.contains("relative paths"));
+        assert!(text.contains("localStorage"));
     }
 }
