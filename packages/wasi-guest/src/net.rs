@@ -254,7 +254,21 @@ impl Stream {
         // `check-write` is the whole of the backpressure story: writing more
         // than it permits is a trap, not a short write.
         let permitted = match output.check_write() {
-            Ok(0) => return delay.idle(cx),
+            Ok(0) => {
+                // A zero permit is not always a backpressure signal. The
+                // wasi:tls output stream advances its write/flush state
+                // machine only when its pollable is queried or awaited, so
+                // polling `check-write` alone never observes the completion
+                // of an in-flight write and reports 0 forever. Querying the
+                // pollable once drives that transition; only a genuine
+                // not-ready falls back to the timer.
+                let ready = output.subscribe();
+                if ready.ready() {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                return delay.idle(cx);
+            }
             Ok(available) => usize::try_from(available).unwrap_or(usize::MAX),
             Err(error) => return Poll::Ready(Err(stream_error("writing the connection", error))),
         };
