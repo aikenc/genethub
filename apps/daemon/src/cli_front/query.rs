@@ -219,7 +219,7 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
             "workspace show needs a workspace id",
         )),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workspace list | genet workspace show <id> — list and inspect workspaces on the local daemon",
+            "usage: genet workspace list | genet workspace show <id> — list and inspect workspaces known to the local daemon",
         )),
     }
 }
@@ -227,7 +227,7 @@ fn parse_workspace(args: &[String]) -> Result<Query, CliFailure> {
 fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
     let Some(verb) = args.first().map(String::as_str) else {
         return Err(CliFailure::invalid_args(
-            "usage: genet session <list|get|inspect|narrative|rounds|trunks|trunk|blob|context> ... — browse, inspect, and replay sessions on the local daemon",
+            "usage: genet session <list|get|inspect|narrative|rounds|trunks|trunk|blob|context> ... — list, inspect, and replay sessions on the local daemon",
         ));
     };
     match verb {
