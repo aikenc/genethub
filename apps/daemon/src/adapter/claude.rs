@@ -20,9 +20,10 @@
 //!   `--permission-mode` to `bypassPermissions`. An explicitly selected lower
 //!   mode is still passed through. The ask-mode alias is not stable across
 //!   builds (`manual` versus `default`), so that one is read from `--help`.
-//!   As uid 0 the CLI refuses that bypass flag unless it believes it is already
-//!   in a container; the child then also gets `IS_SANDBOX=1`, which is the
-//!   CLI's own documented switch.
+//!   The CLI refuses that bypass flag as uid 0 unless it believes it is
+//!   already in a container. The live daemon is a WASI guest and cannot see
+//!   the host uid, so every Claude child gets `IS_SANDBOX=1` — the CLI's own
+//!   documented switch — rather than guessing from `geteuid`.
 //! - Each user turn is one `{"type":"user","message":{...}}` line on stdin;
 //!   the process stays alive across turns.
 //! - Output is a mix of `{"type":"stream_event","event":{...}}` (the raw
@@ -101,8 +102,10 @@ const UNRESTRICTED_SETTINGS: &str = r#"{"sandbox":{"enabled":false}}"#;
 /// Claude Code's documented container/CI switch. The CLI exits 1 as uid 0
 /// when given `--allow-dangerously-skip-permissions` unless it believes it is
 /// already sandboxed. GeneHub still launches at highest privilege, so the
-/// flag stays and this env is set on the child only.
-const ROOT_SANDBOX_COMPAT_ENV: (&str, &str) = ("IS_SANDBOX", "1");
+/// flag stays. This env is set on every child: the product daemon is a WASI
+/// guest (`#[cfg(not(unix))]`) and cannot read the host euid, which is how a
+/// uid-0-only gate shipped as a no-op on the Linux root host.
+const CLAUDE_SANDBOX_COMPAT_ENV: (&str, &str) = ("IS_SANDBOX", "1");
 
 /// The modes we offer, of the ones this CLI accepts.
 ///
@@ -133,25 +136,8 @@ const MODES: [(&str, &str, &str); 3] = [
 /// rather wait than be told a lie about what the CLI supports.
 const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn current_euid() -> u32 {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() }
-    }
-    #[cfg(not(unix))]
-    {
-        1
-    }
-}
-
-fn root_sandbox_compat_env_for(euid: u32) -> Option<(&'static str, &'static str)> {
-    (euid == 0).then_some(ROOT_SANDBOX_COMPAT_ENV)
-}
-
-fn apply_root_sandbox_compat(command: &mut Command) {
-    if let Some((key, value)) = root_sandbox_compat_env_for(current_euid()) {
-        command.env(key, value);
-    }
+fn apply_claude_sandbox_compat(command: &mut Command) {
+    command.env(CLAUDE_SANDBOX_COMPAT_ENV.0, CLAUDE_SANDBOX_COMPAT_ENV.1);
 }
 
 #[derive(Default)]
@@ -222,9 +208,9 @@ impl ClaudeAdapter {
     /// per daemon lifetime, and `initialize` reaches no model — it only reports
     /// what this install is configured with.
     ///
-    /// A failed handshake is not remembered: as uid 0 the CLI used to refuse
-    /// the bypass flag and leave the model picker empty until the daemon
-    /// restarted.
+    /// A failed handshake is not remembered: without `IS_SANDBOX` the CLI
+    /// refuses the bypass flag as root and would otherwise leave the model
+    /// picker empty until the daemon restarted.
     async fn hello(&self, program: &std::path::Path) -> Option<Value> {
         if let Some(cached) = self.hello.get() {
             return cached.clone();
@@ -240,7 +226,7 @@ impl ClaudeAdapter {
 /// Runs one `initialize` control request and takes the answer away with it.
 async fn initialize(program: &std::path::Path) -> Option<Value> {
     let mut command = Command::new(program);
-    apply_root_sandbox_compat(&mut command);
+    apply_claude_sandbox_compat(&mut command);
     command
         .args([
             "--print",
@@ -579,7 +565,7 @@ impl AgentAdapter for ClaudeAdapter {
             .ok_or_else(|| anyhow!("claude is not installed"))?;
 
         let mut command = Command::new(&program);
-        apply_root_sandbox_compat(&mut command);
+        apply_claude_sandbox_compat(&mut command);
         command
             .args([
                 "--print",
@@ -2211,10 +2197,9 @@ mod tests {
     }
 
     #[test]
-    fn uid_zero_gets_claude_sandbox_compat_env() {
-        assert_eq!(root_sandbox_compat_env_for(0), Some(("IS_SANDBOX", "1")));
-        assert_eq!(root_sandbox_compat_env_for(501), None);
-        assert_eq!(root_sandbox_compat_env_for(1000), None);
+    fn claude_child_always_gets_sandbox_compat_env() {
+        // WASI cannot see the host uid, so this must not be gated on euid==0.
+        assert_eq!(CLAUDE_SANDBOX_COMPAT_ENV, ("IS_SANDBOX", "1"));
     }
 
     /// How hard to think is a second axis, and the CLI reports it per model —
