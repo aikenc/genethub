@@ -1,4 +1,12 @@
 <!doctype html>
+<!--
+  DEPRECATED — leftover of the pre-subpath Hub "打开工作台" hop.
+
+  Current deployments open the workbench through /relay-$DEV_NAME (or the
+  product origin) and do not mint this page. The rewrite below is kept only
+  so an old bookmarked #endpoint= URL still lands in the app instead of 404.
+  Do not add callers. Remove once those bookmarks are gone.
+-->
 <script>
   var params = new URLSearchParams(location.hash.slice(1));
   var inner = params.get("endpoint");

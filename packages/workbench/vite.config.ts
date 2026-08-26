@@ -51,9 +51,9 @@ function readPublishedTarget(): string | null {
  * Only relevant when trying the full Hub journey (register → pair → connect
  * through the forwarding layer) from a machine where only this dev server's
  * port is forwarded: the ticket URL the control plane hands out points at the
- * relay's own (unforwarded) port, which `hub-connect.html` rewrites to go
- * through `/relay` on this origin instead — see that file and
- * `.cursor/skills/try-genehub`.
+ * relay's own (unforwarded) port. `hub-connect.html` used to rewrite that onto
+ * `/relay` on this origin; that hop is deprecated leftover of the pre-subpath
+ * architecture and must not grow new callers. See that file.
  */
 function relayProxy(): Record<string, string | ProxyOptions> {
   const target = process.env.GENEHUB_RELAY_PROXY_TARGET;
