@@ -1443,6 +1443,91 @@ defineSpecialty(
 );
 
 
+defineSpecialty(
+  meta(
+    "specialty.release.cold-start-without-compile-cache",
+    "A first-run daemon start has no compile cache and still fits the CLI budget",
+    "with GENEHUB_TEST_COMPONENT_CACHE_DIR dropped the daemon compiles the guest from scratch and answers before the CLI's 45s start timeout",
+    [
+      "every test environment pre-warms the compile cache, so a cold start slower than the CLI budget only hits real first runs",
+      "released channels never get a compile cache at all — this case is the only measure of what a new install pays",
+    ],
+    120_000,
+  ),
+  async (t) => {
+    const { guest } = requireArtifacts(t.openRoot);
+    const startedAt = Date.now();
+    const daemon = startDaemon({
+      genet: locateGenet(t.openRoot),
+      wasm: guest,
+      lease: t.env,
+      dropEnv: ["GENEHUB_TEST_COMPONENT_CACHE_DIR"],
+    });
+    try {
+      const client = await connectProductClient({
+        ...daemonEndpoint(daemon),
+        redial: async () => daemonEndpoint(daemon),
+      });
+      try {
+        t.assertions.assert(
+          typeof client.identity?.daemonVersion === "string",
+          `daemon never identified itself: ${JSON.stringify(client.identity)}`,
+        );
+        t.assertions.assert(
+          Date.now() - startedAt < 45_000,
+          `cold start took ${Date.now() - startedAt}ms, past the CLI's 45s budget`,
+        );
+      } finally {
+        client.close();
+      }
+    } finally {
+      daemon.stop();
+    }
+  },
+);
+
+defineSpecialty(
+  meta(
+    "specialty.release.installed-layout-starts",
+    "The installed three-file layout starts without a cargo target tree",
+    "genet, the host and the guest copied into one bare bin directory start the daemon through the beside-the-CLI lookup",
+    [
+      "every test runs from a cargo target layout, so the installed layout's lookup branch only runs on user machines",
+      "a rename or a missing file in the install layout ships broken to every beta install",
+    ],
+  ),
+  async (t) => {
+    const { genet, host, guest } = requireArtifacts(t.openRoot);
+    const bin = mkdtempSync(path.join(tmpdir(), "genehub-install-"));
+    try {
+      const installedGenet = path.join(bin, path.basename(genet));
+      cpSync(genet, installedGenet);
+      cpSync(host, path.join(bin, path.basename(host)));
+      cpSync(guest, path.join(bin, "genehub_guest.wasm"));
+      const daemon = startDaemon({ genet: installedGenet, lease: t.env });
+      try {
+        const client = await connectProductClient({
+          ...daemonEndpoint(daemon),
+          redial: async () => daemonEndpoint(daemon),
+        });
+        try {
+          t.assertions.assert(
+            typeof client.identity?.daemonVersion === "string",
+            `daemon never identified itself from the installed layout: ${JSON.stringify(client.identity)}`,
+          );
+        } finally {
+          client.close();
+        }
+      } finally {
+        daemon.stop();
+      }
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  },
+);
+
+
 async function waitForDaemonVersion(client: Client, version: string): Promise<void> {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
