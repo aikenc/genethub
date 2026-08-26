@@ -178,10 +178,10 @@ GeneHub 产品内置 Skill 的目录、构建期扫描、打包和新增流程�
 - 注入：daemon 对所有 Agent 统一写入一次 GeneHub 内置 Skill 的「名称 + 描述 + 路径」清单；内置 Agent 仍加载这些 entrypoint 以提供 `/skill:`，但不会重复注入第二份产品清单；技能正文在被调用时才读入
 - 相对路径：技能文件里的相对路径按 `SKILL.md` 所在目录解析
 - 同时通过 `get_commands` 暴露为 `/skill:<name>`，`source: "skill"`
-- `genehub-session-history` 与 `genehub-speech-runtime` 都由 daemon 物化并注入所有内置/第三方 Agent，不再存在 Agent 私有的产品内置 Skill
+- `genehub-session-history`、`genehub-html-preview` 与 `genehub-speech-runtime` 都由 daemon 物化并注入所有内置/第三方 Agent，不再存在 Agent 私有的产品内置 Skill
 - daemon 只加载编译时登记的 GeneHub 内置 entrypoint；工作区 `.genethub/skills`、`.genehub/skills` 和数据目录中的未知文件都不能进入产品目录
 - daemon 同时在摘要中给出当前 channel 启动器绑定的 CLI 绝对路径，并向 Agent 进程设置 `GENEHUB_CLI`；绑定缺失时明确 unavailable，禁止猜命令名
-- `/skill:genehub-session-history [goal]` 在 daemon 会话里强制加载同一份 SOP；普通会话只注入名称、描述和路径
+- `/skill:genehub-session-history [goal]` 与 `/skill:genehub-html-preview [goal]` 可强制加载完整 SOP；普通会话只注入名称、描述和路径
 
 ---
 

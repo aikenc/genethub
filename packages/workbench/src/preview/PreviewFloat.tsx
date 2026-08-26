@@ -652,6 +652,21 @@ function PreviewInfoDialog({
               </li>
             ))}
           </ul>
+          {meta?.storage ? (
+            <div className="mt-4 flex items-center gap-3 border-t border-line pt-3 text-xs">
+              <span className="min-w-0 flex-1 text-muted">
+                本地存储：{meta.storage.count} 项（沙箱 shim，已持久化到本浏览器）
+              </span>
+              <button
+                type="button"
+                disabled={meta.storage.count === 0}
+                className="shrink-0 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={meta.storage.onClear}
+              >
+                清除
+              </button>
+            </div>
+          ) : null}
         </div>
       </section>
     </div>

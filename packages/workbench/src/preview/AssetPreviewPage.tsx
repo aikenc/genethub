@@ -10,6 +10,16 @@ import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown"
 import { readRtcEnabled } from "../settings/rtc";
 import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
 import {
+  applyPreviewStoreMutation,
+  clearPreviewStore,
+  loadPreviewStore,
+  parsePreviewStoreMutation,
+  PREVIEW_STORAGE_SOURCE,
+  previewStorageNamespace,
+  previewStorageShimSource,
+  type PreviewStorageScope,
+} from "./storage";
+import {
   PreviewRuntimeControls,
   type PreviewDomSnapshot,
   type PreviewRuntimeEvent,
@@ -27,6 +37,11 @@ type ViewState =
 export type PreviewMeta = {
   documentTitle: string | null;
   infoLines: string[];
+  /**
+   * Sandbox storage shim state, when the preview persists localStorage through
+   * the parent. `onClear` wipes both the parent-side store and the live frame.
+   */
+  storage?: { count: number; onClear: () => void };
 };
 
 export function AssetPreviewPage({
@@ -220,6 +235,7 @@ export function AssetPreviewPage({
           path={source.path}
           title={meta?.documentTitle?.trim() || basenamePath(source.path)}
           lines={meta?.infoLines ?? ["预览信息尚未就绪，请稍候再打开。"]}
+          storage={meta?.storage}
           onClose={() => setPageInfoOpen(false)}
         />
       ) : null}
@@ -310,6 +326,7 @@ function PreviewDocument({
         bytes={bytes}
         metadata={metadata}
         entryPath={path}
+        storageScope={{ deviceHandle, workspaceHandle }}
         fetchAsset={loadPreview}
         onMetaChange={onMetaChange}
         onRuntimeArtifact={onRuntimeArtifact}
@@ -358,6 +375,7 @@ export function HtmlDocument({
   bytes,
   metadata,
   entryPath,
+  storageScope,
   fetchAsset,
   onMetaChange,
   onRuntimeArtifact,
@@ -366,6 +384,8 @@ export function HtmlDocument({
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   entryPath: string;
+  /** Identifies the device/workspace the store namespace is confined to. */
+  storageScope?: PreviewStorageScope;
   fetchAsset: (path: string) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
   onMetaChange?: (meta: PreviewMeta | null) => void;
   onRuntimeArtifact?: RuntimeArtifactSubmit;
@@ -398,6 +418,44 @@ export function HtmlDocument({
       }
     >(),
   );
+
+  const storageNamespace = storageScope
+    ? previewStorageNamespace(storageScope, entryPath)
+    : null;
+  const [storageCount, setStorageCount] = useState(0);
+  const [baseMeta, setBaseMeta] = useState<{
+    documentTitle: string | null;
+    infoLines: string[];
+  } | null>(null);
+
+  const clearPreviewStorage = useCallback(() => {
+    if (!storageNamespace) return;
+    clearPreviewStore(storageNamespace);
+    try {
+      frameRef.current?.contentWindow?.postMessage(
+        { source: PREVIEW_STORAGE_SOURCE, command: "clear" },
+        "*",
+      );
+    } catch {
+      // Frame already gone; the parent-side store is cleared regardless.
+    }
+    setStorageCount(0);
+    emitPreviewDiagnostic("log", {
+      topic: "preview-storage",
+      path: entryPath,
+      phase: "cleared",
+    });
+  }, [storageNamespace, entryPath]);
+
+  useEffect(() => {
+    if (!baseMeta) return;
+    onMetaChange?.({
+      ...baseMeta,
+      ...(storageNamespace
+        ? { storage: { count: storageCount, onClear: clearPreviewStorage } }
+        : {}),
+    });
+  }, [baseMeta, storageCount, storageNamespace, clearPreviewStorage, onMetaChange]);
 
   const requestDomSnapshot = useCallback(() => {
     const frame = frameRef.current;
@@ -492,6 +550,37 @@ export function HtmlDocument({
         })();
         return;
       }
+      if (data.source === PREVIEW_STORAGE_SOURCE) {
+        if (!storageNamespace) return;
+        const op = (data as { op?: unknown }).op;
+        if (op === "ready") {
+          const count = Number((data as { value?: unknown }).value);
+          const keys = Number.isFinite(count) ? count : 0;
+          setStorageCount(keys);
+          emitPreviewDiagnostic("log", {
+            topic: "preview-storage",
+            path: entryPath,
+            keys,
+            phase: "shim-ready",
+          });
+          return;
+        }
+        const mutation = parsePreviewStoreMutation(
+          data as { op?: unknown; key?: unknown; value?: unknown },
+        );
+        if (!mutation) return;
+        if (applyPreviewStoreMutation(storageNamespace, mutation)) {
+          setStorageCount(Object.keys(loadPreviewStore(storageNamespace)).length);
+        } else {
+          emitPreviewDiagnostic("error", {
+            topic: "preview-storage",
+            path: entryPath,
+            op: mutation.op,
+            phase: "mutation-rejected",
+          });
+        }
+        return;
+      }
       if (data.source === PREVIEW_DIAG_SOURCE && isPreviewDiagnosticKind(data.kind)) {
         const detail = isPreviewDiagnosticDetail(data.detail) ? data.detail : {};
         if (
@@ -527,7 +616,7 @@ export function HtmlDocument({
       }
       renderRequestsRef.current.clear();
     };
-  }, [entryPath, fetchAsset]);
+  }, [entryPath, fetchAsset, storageNamespace]);
 
   useEffect(() => {
     eventsRef.current = [];
@@ -546,13 +635,17 @@ export function HtmlDocument({
     const blobUrls: string[] = [];
     setSrcDoc(null);
     setFrameReady(false);
-    onMetaChange?.({
+    setBaseMeta({
       documentTitle: extractHtmlTitle(decodeText(bytes)),
       infoLines: ["正在解析静态资源…"],
     });
     void (async () => {
       const sourceHtml = decodeText(bytes);
       const documentTitle = extractHtmlTitle(sourceHtml);
+      // Sandboxed frames have no origin storage: seed the shim with what the
+      // parent persisted for this site so scripts see it synchronously.
+      const storageSnapshot = storageNamespace ? loadPreviewStore(storageNamespace) : null;
+      if (storageSnapshot) setStorageCount(Object.keys(storageSnapshot).length);
       try {
         const remapped = await remapHtmlSite({
           entryPath,
@@ -569,14 +662,15 @@ export function HtmlDocument({
           "运行时 fetch / import 已转发到工作区",
           "WASM / Worker：已开启",
           "网络：已开启（https / wss）",
+          ...(storageSnapshot ? ["本地存储：沙箱 shim（持久化到本浏览器，同目录页面共享）"] : []),
           `源文件大小：${metadata.sourceBytes} bytes`,
           remapped.warnings.length > 0
             ? `未加载资源：${remapped.warnings.length} 个`
             : "未加载资源：0",
           ...remapped.warnings.slice(0, 40).map((warning) => `· ${warning}`),
         ];
-        setSrcDoc(isolatedHtml(remapped.html));
-        onMetaChange?.({ documentTitle, infoLines });
+        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot));
+        setBaseMeta({ documentTitle, infoLines });
         emitPreviewDiagnostic("log", {
           topic: "html-site",
           path: entryPath,
@@ -594,12 +688,13 @@ export function HtmlDocument({
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "资源解析失败";
-          setSrcDoc(isolatedHtml(sourceHtml));
-          onMetaChange?.({
+          setSrcDoc(isolatedHtml(sourceHtml, storageSnapshot));
+          setBaseMeta({
             documentTitle,
             infoLines: [
               "模式：单文件回退",
               "网络：已开启（https / wss）",
+              ...(storageSnapshot ? ["本地存储：沙箱 shim（持久化到本浏览器，同目录页面共享）"] : []),
               `源文件大小：${metadata.sourceBytes} bytes`,
               `说明：${message}`,
             ],
@@ -616,7 +711,7 @@ export function HtmlDocument({
       cancelled = true;
       for (const url of blobUrls) URL.revokeObjectURL(url);
     };
-  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, onMetaChange]);
+  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, storageNamespace]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -675,11 +770,13 @@ function EmbeddedInfoDialog({
   path,
   title,
   lines,
+  storage,
   onClose,
 }: {
   path: string;
   title: string;
   lines: string[];
+  storage?: PreviewMeta["storage"];
   onClose(): void;
 }) {
   return (
@@ -724,6 +821,21 @@ function EmbeddedInfoDialog({
               </li>
             ))}
           </ul>
+          {storage ? (
+            <div className="mt-4 flex items-center gap-3 border-t border-line pt-3 text-xs">
+              <span className="min-w-0 flex-1 text-muted">
+                本地存储：{storage.count} 项（沙箱 shim，已持久化到本浏览器）
+              </span>
+              <button
+                type="button"
+                disabled={storage.count === 0}
+                className="shrink-0 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={storage.onClear}
+              >
+                清除
+              </button>
+            </div>
+          ) : null}
         </div>
       </section>
     </div>
@@ -744,7 +856,10 @@ function PageInfoIcon() {
   );
 }
 
-export function isolatedHtml(source: string): string {
+export function isolatedHtml(
+  source: string,
+  storageSnapshot?: Record<string, string> | null,
+): string {
   const document_ = new DOMParser().parseFromString(source, "text/html");
   document_.querySelectorAll("base, meta[http-equiv]").forEach((node) => {
     if (
@@ -780,7 +895,15 @@ export function isolatedHtml(source: string): string {
   bridge.textContent = PREVIEW_DIAG_BRIDGE;
   const renderer = document_.createElement("script");
   renderer.textContent = modernScreenshotSource;
-  document_.head.prepend(policy, base, renderer, bridge);
+  const injected = [policy, base, renderer, bridge];
+  if (storageSnapshot) {
+    // Sandboxed frames have no storage of their own: the shim backed by a
+    // parent-persisted snapshot must precede application scripts as well.
+    const shim = document_.createElement("script");
+    shim.textContent = previewStorageShimSource(storageSnapshot);
+    injected.push(shim);
+  }
+  document_.head.prepend(...injected);
   return `<!doctype html>\n${document_.documentElement.outerHTML}`;
 }
 

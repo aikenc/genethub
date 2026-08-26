@@ -51,6 +51,36 @@ describe("active single-file HTML Preview", () => {
     expect(bridge?.compareDocumentPosition(application!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
+  it("injects the persistent storage shim ahead of application scripts when seeded", () => {
+    const output = isolatedHtml(
+      `<!doctype html><html><head></head><body><script id="application-script">void 0</script></body></html>`,
+      { score: "7" },
+    );
+    const parsed = new DOMParser().parseFromString(output, "text/html");
+    const scripts = Array.from(parsed.querySelectorAll("script"));
+    const bridge = scripts.find((node) =>
+      (node.textContent ?? "").includes("genehub-preview-diag"),
+    );
+    const shim = scripts.find((node) =>
+      (node.textContent ?? "").includes("genehub-preview-storage"),
+    );
+    const application = parsed.querySelector<HTMLScriptElement>("#application-script");
+    expect(shim?.textContent).toContain('"score":"7"');
+    expect(bridge && shim ? bridge.compareDocumentPosition(shim) : 0).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(shim && application ? shim.compareDocumentPosition(application) : 0).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  });
+
+  it("omits the storage shim when no snapshot is provided", () => {
+    const output = isolatedHtml(
+      `<!doctype html><html><head></head><body></body></html>`,
+    );
+    expect(output).not.toContain("genehub-preview-storage");
+  });
+
   it("pins the iframe to a fixed box so iOS WebKit cannot stretch it to content height", async () => {
     const bytes = new TextEncoder().encode(
       "<!doctype html><html><head><title>t</title></head><body>hello</body></html>",
@@ -77,6 +107,72 @@ describe("active single-file HTML Preview", () => {
     expect(frame.className).toContain("inset-0");
     expect(frame.parentElement?.className).toContain("relative");
     expect(frame.parentElement?.className).toContain("overflow-hidden");
+  });
+
+  it("persists frame storage mutations under its namespace and clears them", async () => {
+    localStorage.clear();
+    const bytes = new TextEncoder().encode("<!doctype html><html><body>game</body></html>");
+    const metadata = {
+      kind: "html",
+      mediaType: "text/html",
+      sourceBytes: bytes.byteLength,
+    } as AssetPreviewMetadata;
+    const onMetaChange = vi.fn();
+    render(
+      <HtmlDocument
+        bytes={bytes}
+        metadata={metadata}
+        entryPath="r_root/games/index.html"
+        storageScope={{ deviceHandle: "machine-a", workspaceHandle: "ws-b" }}
+        fetchAsset={async () => null}
+        onMetaChange={onMetaChange}
+      />,
+    );
+    const frame = await screen.findByTitle<HTMLIFrameElement>("HTML 文件预览");
+    const namespaceKey = "genehub:preview-store:v1:machine-a/ws-b/r_root/games";
+
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { source: "genehub-preview-storage", op: "set", key: "score", value: "42" },
+          source: frame.contentWindow,
+        }),
+      ),
+    );
+    expect(localStorage.getItem(namespaceKey)).toBe('{"score":"42"}');
+
+    const meta = onMetaChange.mock.calls.map((call) => call[0]).filter(Boolean).at(-1);
+    expect(meta?.storage?.count).toBe(1);
+    act(() => meta?.storage?.onClear());
+    expect(localStorage.getItem(namespaceKey)).toBeNull();
+  });
+
+  it("ignores storage messages when no scope identifies the preview", async () => {
+    localStorage.clear();
+    const bytes = new TextEncoder().encode("<!doctype html><html><body>game</body></html>");
+    const metadata = {
+      kind: "html",
+      mediaType: "text/html",
+      sourceBytes: bytes.byteLength,
+    } as AssetPreviewMetadata;
+    render(
+      <HtmlDocument
+        bytes={bytes}
+        metadata={metadata}
+        entryPath="r_root/index.html"
+        fetchAsset={async () => null}
+      />,
+    );
+    const frame = await screen.findByTitle<HTMLIFrameElement>("HTML 文件预览");
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { source: "genehub-preview-storage", op: "set", key: "score", value: "42" },
+          source: frame.contentWindow,
+        }),
+      ),
+    );
+    expect(localStorage.length).toBe(0);
   });
 
   it("accepts diagnostics only from the iframe it rendered", async () => {

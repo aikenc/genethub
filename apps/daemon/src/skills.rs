@@ -297,6 +297,9 @@ mod tests {
         assert!(skills
             .iter()
             .any(|skill| skill.name == "genehub-session-history"));
+        assert!(skills
+            .iter()
+            .any(|skill| skill.name == "genehub-html-preview"));
         let speech = skills
             .iter()
             .find(|skill| skill.name == "genehub-speech-runtime")
@@ -342,6 +345,7 @@ mod tests {
         let prompt = session_guidance(Some(&root), Some(Path::new("/opt/genehub/genet-beta")));
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-session-history"));
+        assert!(prompt.contains("genehub-html-preview"));
         assert!(prompt.contains("genehub-speech-runtime"));
         assert!(prompt.contains("/opt/genehub/genet-beta"));
         assert!(prompt.contains("<available_skills>"));
