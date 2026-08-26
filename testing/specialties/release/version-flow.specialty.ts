@@ -659,6 +659,7 @@ defineSpecialty(
       "the activation store is only consulted on the first boot",
       "a restart silently reverts to the bundled component",
       "the persisted high-water mark is lost with the process",
+      "the bundled floor re-recorded on boot is treated as a rollback and kills the process",
     ],
     180_000,
     420_000,
@@ -672,7 +673,13 @@ defineSpecialty(
       const signed5 = packComponent(host, guest, NEXT_COMPONENT_VERSION, dir);
       const identity = readComponentIdentity(host, signed4);
       service.setComponent({ version: NEXT_COMPONENT_VERSION, bytes: readFileSync(signed5), identity });
-      const env = { GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json` };
+      // The bundled floor names the component the host ships with. Without it
+      // the restart never re-records the floor, and a store already past it —
+      // the normal state after any Live update — goes untested.
+      const env = {
+        GENEHUB_COMPONENT_MANIFEST_URL: `${service.origin}/component/latest.json`,
+        GENEHUB_BUNDLED_RELEASE_VERSION: COMPONENT_VERSION,
+      };
       const first = await startReleaseDaemon(t, { wasm: signed4, env });
       try {
         await first.client.call({ type: "update.download" });
