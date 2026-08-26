@@ -104,41 +104,40 @@ async function main() {
   const cargo = argumentsMap.get("cargo") ?? "cargo";
   let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
   let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
-  const builds = [];
-  if (!raw || !signer) {
-    builds.push((async () => {
-      if (!raw) {
-        const tree = commit ? ensureStampedWorktree(open, channel, source.openSha) : open;
-        // The channel-keyed target dir doubles as the warm dependency cache;
-        // it predates the worktree flow and stays put so the first publish
-        // under it does not recompile the world.
-        const guestTarget = commit ? join(open, "target", "publish", channel) : join(open, "target");
-        raw = await buildRaw(cargo, channel, tree, guestTarget);
-      }
-      if (!signer) {
-        const signerTarget = commit ? join(open, "target", "publish", "signer") : join(open, "target");
-        signer = await buildSigner(cargo, signerTarget);
-      }
-    })());
-  }
-  if (web) builds.push(buildWeb(cloud, channel));
-  await Promise.all(builds);
-  const builtMs = Date.now() - started;
-
-  const githubUrl = channel === "stable"
-    ? argumentsMap.get("github-url") ??
-      (!commit
-        ? "https://github.com/aikenc/genethub/releases/download/component-candidate/genehub_guest.wasm"
-        : undefined)
-    : undefined;
-  const appRelease = argumentsMap.has("app-release")
-    ? {
-        release: required("--app-release", argumentsMap.get("app-release")),
-        appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
-      }
-    : undefined;
-
   try {
+    const builds = [];
+    if (!raw || !signer) {
+      builds.push((async () => {
+        if (!raw) {
+          const tree = commit ? ensureStampedWorktree(open, channel, source.openSha) : open;
+          // The channel-keyed target dir doubles as the warm dependency cache;
+          // it predates the worktree flow and stays put so the first publish
+          // under it does not recompile the world.
+          const guestTarget = commit ? join(open, "target", "publish", channel) : join(open, "target");
+          raw = await buildRaw(cargo, channel, tree, guestTarget);
+        }
+        if (!signer) {
+          const signerTarget = commit ? join(open, "target", "publish", "signer") : join(open, "target");
+          signer = await buildSigner(cargo, signerTarget);
+        }
+      })());
+    }
+    if (web) builds.push(buildWeb(cloud, channel));
+    await Promise.all(builds);
+    const builtMs = Date.now() - started;
+
+    const githubUrl = channel === "stable"
+      ? argumentsMap.get("github-url") ??
+        (!commit
+          ? "https://github.com/aikenc/genethub/releases/download/component-candidate/genehub_guest.wasm"
+          : undefined)
+      : undefined;
+    const appRelease = argumentsMap.has("app-release")
+      ? {
+          release: required("--app-release", argumentsMap.get("app-release")),
+          appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
+        }
+      : undefined;
     const result = await publishComponent({
       root,
       channel,
