@@ -40,7 +40,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 |-------|-------------------------|
 | Genet | 不做工作区目录限制；文件工具接受绝对路径，命令继承 daemon 用户权限 |
 | OpenCode | `OPENCODE_PERMISSION` 注入全工具、外部目录与网络全允许策略 |
-| Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox |
+| Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox。uid 0 时子进程另带 `IS_SANDBOX=1`，否则 Claude CLI 会因该 flag 直接 exit 1 |
 | Codex | `approval_policy="never"` + `sandbox_mode="danger-full-access"`，新会话默认 `full-access` |
 | Cursor | `--force --sandbox disabled --trust --approve-mcps acp` |
 | 自定义 ACP | command 原样启动；GeneHub 不能猜某个未知 CLI 的私有放权参数，接入声明应自行带上 |
