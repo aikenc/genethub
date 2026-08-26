@@ -49,7 +49,7 @@ pub struct SessionMissing(pub String);
 
 impl std::fmt::Display for SessionMissing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "查无此会话：{}", self.0)
+        write!(f, "找不到该会话：{}", self.0)
     }
 }
 

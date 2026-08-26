@@ -1448,7 +1448,7 @@ mod tests {
         match handled.reply {
             Err(error) => {
                 assert_eq!(error.code, ErrorCode::NotFound);
-                assert_eq!(error.message, "查无此会话：s1");
+                assert_eq!(error.message, "找不到该会话：s1");
             }
             Ok(_) => panic!("expected an error"),
         }
