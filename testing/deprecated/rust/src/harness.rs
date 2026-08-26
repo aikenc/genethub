@@ -469,8 +469,12 @@ pub fn agent_command_override() -> Result<(String, PathBuf)> {
 /// `KEY=value` from `scripts/channel.env`, the file the stamper writes for
 /// exactly this kind of consumer.
 fn channel_env() -> Result<std::collections::HashMap<String, String>> {
+    // CARGO_MANIFEST_DIR is testing/deprecated/rust; the repository root is
+    // three levels up.
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
         .context("no repository root")?
         .join("scripts/channel.env");
     let contents = std::fs::read_to_string(&path)

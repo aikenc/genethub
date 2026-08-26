@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1394,6 +1394,50 @@ defineSpecialty(
       }
     } finally {
       await service.close();
+    }
+  },
+);
+
+
+defineSpecialty(
+  meta(
+    "specialty.release.cli-start-without-data-dir-env",
+    "A bare CLI start hands the guest the data directory it cannot discover",
+    "with no GENEHUB_*_DATA_DIR in the environment the daemon still boots and lands its state under the platform data home",
+    [
+      "the CLI never sets the data-dir override and a WASI guest has no platform dirs to discover",
+      "every test lease pre-sets the override, so the real CLI path can ship broken",
+    ],
+  ),
+  async (t) => {
+    requireArtifacts(t.openRoot);
+    const daemon = startDaemon({
+      genet: locateGenet(t.openRoot),
+      lease: t.env,
+      dropEnv: ["GENEHUB_LOCAL_DATA_DIR", "GENEHUB_DATA_DIR"],
+    });
+    try {
+      const client = await connectProductClient({
+        ...daemonEndpoint(daemon),
+        redial: async () => daemonEndpoint(daemon),
+      });
+      try {
+        t.assertions.assert(
+          typeof client.identity?.daemonVersion === "string",
+          `daemon never identified itself: ${JSON.stringify(client.identity)}`,
+        );
+      } finally {
+        client.close();
+      }
+      const discovered = path.join(t.env.home, ".local", "share", "GeneHub-local");
+      const found = spawnSync("find", [t.env.home, "-name", "endpoint.json"], { encoding: "utf8" })
+        .stdout.trim();
+      t.assertions.assert(
+        existsSync(path.join(discovered, "endpoint.json")),
+        `state did not land under the platform data home ${discovered}; endpoint.json found at: ${found || "nowhere"}`,
+      );
+    } finally {
+      daemon.stop();
     }
   },
 );

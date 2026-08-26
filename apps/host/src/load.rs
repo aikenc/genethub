@@ -265,6 +265,7 @@ fn build_instance(
                 | crate::channel::ENV_CWD
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
+                | crate::channel::ENV_DATA_DIR
                 | "GENEHUB_COMPONENT_VERSION"
                 | "GENEHUB_APP_VERSION"
                 | "GENEHUB_BUNDLED_RELEASE_VERSION"
@@ -326,6 +327,18 @@ fn build_instance(
         crate::update::running_version_string(),
     );
     wasi.env("GENEHUB_APP_VERSION", crate::version::app_version());
+    // The data directory is another fact the guest cannot learn on its own:
+    // WASI has no platform dirs, so `Paths::discover` in there only works
+    // when this process hands the answer over. Resolve it natively — the
+    // desktop shell sets the channel override when it spawns us, the CLI
+    // does not, and a native fallback always exists here.
+    let data_dir = genet_frontdoor::paths::Paths::discover()
+        .context("locate the data directory for the guest")?
+        .root;
+    wasi.env(
+        crate::channel::ENV_DATA_DIR,
+        crate::guest_paths::env_value_for_guest(data_dir.to_string_lossy()),
+    );
 
     let store = Store::new(
         engine,

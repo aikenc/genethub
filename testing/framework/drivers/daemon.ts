@@ -26,12 +26,17 @@ export function startDaemon(input: {
   genet: string;
   wasm?: string;
   lease: EnvironmentLease;
+  /** Names to remove from the inherited environment outright: a case that
+   * exercises a fallback path cannot just delete the key from the lease,
+   * because the merge with `process.env` would resurrect it. */
+  dropEnv?: string[];
 }): DaemonHandle {
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...input.lease.env,
     ...(input.wasm ? { GENEHUB_LOCAL_COMPONENT: input.wasm } : {}),
   };
+  for (const key of input.dropEnv ?? []) delete env[key];
   const started = runGenet(input.genet, ["daemon", "start"], env);
   if (started.code !== 0) {
     throw new BlockedError(`genet daemon start failed: ${started.stderr || started.stdout}`);

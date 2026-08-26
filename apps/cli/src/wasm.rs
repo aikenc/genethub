@@ -31,10 +31,10 @@ fn exe_dir() -> Option<PathBuf> {
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
 }
 
-/// `target/{debug,release}` when this CLI was built by Cargo.
+/// `target/{debug,release,iterate}` when this CLI was built by Cargo.
 fn cargo_target(dir: &Path) -> Option<&Path> {
     let profile = dir.file_name()?.to_str()?;
-    if profile != "debug" && profile != "release" {
+    if profile != "debug" && profile != "release" && profile != "iterate" {
         return None;
     }
     dir.parent()
@@ -52,12 +52,15 @@ pub fn locate() -> Result<Guest, String> {
     let dir = exe_dir().ok_or_else(|| "could not locate our own binary".to_string())?;
     let target = cargo_target(&dir);
 
-    let mut hosts = Vec::new();
+    // The host beside this CLI first: it is the same profile and the same
+    // build. Stale artifacts from other profiles (a leftover fat-LTO release
+    // host predates every debug hook) must never win over it.
+    let mut hosts = vec![dir.join(host_name())];
     if let Some(target) = target {
-        hosts.push(target.join("release").join(host_name()));
+        hosts.push(target.join("iterate").join(host_name()));
         hosts.push(target.join("debug").join(host_name()));
+        hosts.push(target.join("release").join(host_name()));
     }
-    hosts.push(dir.join(host_name()));
     let host = std::env::var("GENEHUB_HOST")
         .ok()
         .filter(|value| !value.is_empty())
