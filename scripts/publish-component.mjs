@@ -180,11 +180,20 @@ function guestProfile(channel) {
   return channel === "stable" ? "release" : "iterate";
 }
 
-function buildRaw(cargo, channel, tree, targetDir) {
+async function buildRaw(cargo, channel, tree, targetDir) {
   const profile = guestProfile(channel);
   const env = { ...process.env, CARGO_TARGET_DIR: targetDir };
-  return run(cargo, ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"], { cwd: tree, env })
-    .then(() => join(targetDir, "wasm32-wasip2", profile, "genehub_guest.wasm"));
+  const args = ["build", "--profile", profile, "-p", "genehub-guest", "--target", "wasm32-wasip2"];
+  // Transient exit-101 under concurrent vite load: retry once before failing.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await run(cargo, args, { cwd: tree, env });
+      return join(targetDir, "wasm32-wasip2", profile, "genehub_guest.wasm");
+    } catch (error) {
+      if (attempt === 1) throw error;
+      console.warn(`cargo build failed (attempt 1), retrying: ${error.message}`);
+    }
+  }
 }
 
 function buildSigner(cargo, targetDir) {
@@ -262,11 +271,17 @@ function git(repository, args) {
 
 function run(command, args, options = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, { cwd: open, stdio: "inherit", ...options });
+    const child = spawn(command, args, { cwd: open, stdio: ["inherit", "inherit", "pipe"], ...options });
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    child.stderr?.pipe(process.stderr);
     child.on("error", rejectPromise);
     child.on("exit", (code, signal) => {
       if (code === 0) resolvePromise();
-      else rejectPromise(new Error(`${command} ${args.join(" ")} exited with ${signal ?? code}`));
+      else {
+        const detail = stderr.trim() ? `\n--- stderr ---\n${stderr.trim()}` : "";
+        rejectPromise(new Error(`${command} ${args.join(" ")} exited with ${signal ?? code}${detail}`));
+      }
     });
   });
 }
