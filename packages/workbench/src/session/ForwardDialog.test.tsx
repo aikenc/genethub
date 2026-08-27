@@ -1,5 +1,5 @@
-import type { AgentInfo, SessionSummary, WorkspaceInfo } from "@genehub/proto";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import type { AgentInfo, RoundSummary, SessionSummary, WorkspaceInfo } from "@genehub/proto";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -222,6 +222,76 @@ describe("ForwardDialog", () => {
     notice?.onAction?.();
     expect(jumpTo).toHaveBeenCalledWith(remoteMachine, "remote-s");
     expect(onConfirmed).toHaveBeenCalled();
+  });
+
+  it("does not restart the build when re-rendered with equal input under fresh identities", async () => {
+    // fb_PjEbBuX4fPjf: store polls re-render the parent every second; if the
+    // dialog took prop identity as a build signal, each poll restarted the
+    // assembly from scratch and a large session never finished filling.
+    const round: RoundSummary = {
+      roundId: "r1",
+      startedAtMs: 0,
+      endedAtMs: 1,
+      outcome: "completed",
+      trunkCount: 1,
+    };
+    const messages: CapsuleMessage[] = [
+      { id: "u1", role: "user", text: "你好", attachments: [], roundId: "r1", atMs: 0 },
+    ];
+    let trunkLists = 0;
+    const countingClient = {
+      call: async (request: { type: string }) => {
+        if (request.type === "round.trunk.list") {
+          trunkLists += 1;
+          return { type: "roundLayer", data: { trunks: [], nextCursor: null } };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], pendingPermission: undefined, summary: session("s2", "既有会话") },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client: countingClient });
+
+    const props = {
+      source: SOURCE,
+      messages,
+      rounds: [round],
+      onClose: vi.fn(),
+      onConfirmed: vi.fn(),
+    };
+    const { rerender } = render(<ForwardDialog {...props} />);
+    await waitForBuilt();
+    const afterFirstBuild = trunkLists;
+    expect(afterFirstBuild).toBeGreaterThan(0);
+
+    // Same content, brand-new object identities — plus a store poll tick.
+    rerender(
+      <ForwardDialog
+        {...props}
+        source={{ ...SOURCE }}
+        messages={messages.map((message) => ({ ...message }))}
+        rounds={[{ ...round }]}
+      />,
+    );
+    act(() => {
+      useWorkbench.setState({ sessions: [session("s1", "源会话"), session("s2", "既有会话")] });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(trunkLists).toBe(afterFirstBuild);
+    // A real content change still rebuilds.
+    rerender(
+      <ForwardDialog
+        {...props}
+        messages={[...messages, { id: "u2", role: "user", text: "补充", attachments: [], roundId: "r1", atMs: 1 }]}
+        rounds={[{ ...round }]}
+      />,
+    );
+    await waitFor(() => expect(trunkLists).toBeGreaterThan(afterFirstBuild));
   });
 
   it("creates a session on the target machine for a cross-machine new forward", async () => {

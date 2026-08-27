@@ -204,6 +204,14 @@ export function TimelineView({
   const [selection, setSelection] = useState<SelectionState | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const [forwardOpen, setForwardOpen] = useState(false);
+  // The dialog builds from the selection as it was when opened. Freezing that
+  // input here keeps every later render (store polls, streaming ticks) from
+  // handing the dialog fresh identities that would restart the build.
+  const [forwardInput, setForwardInput] = useState<{
+    source: ForwardSource;
+    messages: CapsuleMessage[];
+    rounds: RoundSummary[];
+  } | null>(null);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const roundLayers = useWorkbench((workbench) => workbench.timeline.roundLayers);
@@ -616,7 +624,15 @@ export function TimelineView({
                 type="button"
                 disabled={selection.selected.size === 0}
                 className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-on-accent disabled:opacity-50"
-                onClick={() => setForwardOpen(true)}
+                onClick={() => {
+                  const input = selectedCapsuleInput();
+                  setForwardInput({
+                    source: forwardSource(),
+                    messages: input.messages,
+                    rounds: input.involvedRounds,
+                  });
+                  setForwardOpen(true);
+                }}
               >
                 转发…
               </button>
@@ -640,15 +656,19 @@ export function TimelineView({
         </div>
       ) : null}
 
-      {forwardOpen && selection && activeSession ? (
+      {forwardOpen && forwardInput && activeSession ? (
         <ForwardDialog
-          source={forwardSource()}
-          messages={selectedCapsuleInput().messages}
-          rounds={selectedCapsuleInput().involvedRounds}
+          source={forwardInput.source}
+          messages={forwardInput.messages}
+          rounds={forwardInput.rounds}
           controller={forwardController}
-          onClose={() => setForwardOpen(false)}
+          onClose={() => {
+            setForwardOpen(false);
+            setForwardInput(null);
+          }}
           onConfirmed={() => {
             setForwardOpen(false);
+            setForwardInput(null);
             setSelection(null);
             setSelectionNotice(null);
           }}

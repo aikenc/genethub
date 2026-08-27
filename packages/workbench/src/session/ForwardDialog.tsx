@@ -33,6 +33,19 @@ const BUDGET_LABELS: Record<number, string> = {
 /** Fill iterations are bounded; each fetches up to FILL_BATCH_SIZE refs. */
 const MAX_FILL_ITERATIONS = 10;
 
+/**
+ * Keep the first value whose content key is still current. Parents re-render
+ * with fresh identities holding the same selection (store polls, streaming
+ * ticks); only a real content change may restart the capsule build below.
+ */
+function useContentStable<T>(value: T, key: string): T {
+  const held = useRef<{ key: string; value: T } | null>(null);
+  if (held.current === null || held.current.key !== key) {
+    held.current = { key, value };
+  }
+  return held.current.value;
+}
+
 export function ForwardDialog({
   source,
   messages,
@@ -86,6 +99,21 @@ export function ForwardDialog({
     listMachines: controller?.listMachines,
     loadCatalog: controller?.loadCatalog,
   });
+
+  // The capsule input is a snapshot of the selection at open time; identity
+  // noise from the parent must not restart the build, only content may.
+  const stableSource = useContentStable(
+    source,
+    `${source.sessionId} ${source.sessionTitle} ${source.agentLabel}`,
+  );
+  const stableMessages = useContentStable(
+    messages,
+    messages.map((message) => message.id).join(" "),
+  );
+  const stableRounds = useContentStable(
+    rounds,
+    rounds.map((round) => round.roundId).join(" "),
+  );
 
   const [destination, setDestination] = useState<"new" | "existing">("new");
   const [targetSessionId, setTargetSessionId] = useState<string | null>(null);
@@ -144,13 +172,13 @@ export function ForwardDialog({
     void (async () => {
       try {
         const layers: CapsuleData["layers"] = {};
-        for (const round of rounds) {
+        for (const round of stableRounds) {
           const trunks: RoundTrunkSummary[] = [];
           let cursor: string | null = null;
           do {
             const reply = await client.call({
               type: "round.trunk.list",
-              payload: { sessionId: source.sessionId, roundId: round.roundId, cursor, limit: 100 },
+              payload: { sessionId: stableSource.sessionId, roundId: round.roundId, cursor, limit: 100 },
             });
             if (reply?.type !== "roundLayer") break;
             trunks.push(...reply.data.trunks);
@@ -166,13 +194,13 @@ export function ForwardDialog({
           sourceAccessible: true,
         };
         for (let iteration = 0; iteration < MAX_FILL_ITERATIONS; iteration += 1) {
-          const current = buildForwardCapsule(source, messages, rounds, data, options);
+          const current = buildForwardCapsule(stableSource, stableMessages, stableRounds, data, options);
           if (cancelled) return;
           setBuilt(current);
           const { trunks: wantedTrunks, blobs: wantedBlobs } = current.wanted;
           if (wantedTrunks.length === 0 && wantedBlobs.length === 0) break;
           if (wantedTrunks.length > 0) {
-            const fetched = await fetchTrunkDetails(source.sessionId, wantedTrunks);
+            const fetched = await fetchTrunkDetails(stableSource.sessionId, wantedTrunks);
             if (!fetched) break;
             for (const [index, trunk] of fetched.entries()) {
               const ref = wantedTrunks[index];
@@ -180,7 +208,7 @@ export function ForwardDialog({
             }
           }
           if (wantedBlobs.length > 0) {
-            const fetched = await fetchBlobPayloads(source.sessionId, wantedBlobs);
+            const fetched = await fetchBlobPayloads(stableSource.sessionId, wantedBlobs);
             if (!fetched) break;
             for (const payload of fetched) data.blobs[payload.id] = payload;
           }
@@ -194,7 +222,7 @@ export function ForwardDialog({
     return () => {
       cancelled = true;
     };
-  }, [client, source, messages, rounds, budget, fillDetail, includeBlobBodies, fetchTrunkDetails, fetchBlobPayloads]);
+  }, [client, stableSource, stableMessages, stableRounds, budget, fillDetail, includeBlobBodies, fetchTrunkDetails, fetchBlobPayloads]);
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -229,8 +257,8 @@ export function ForwardDialog({
           capsule: built.text,
           itemCount: built.stats.selectedCount,
           estimatedTokens: built.estimatedTokens,
-          sourceSessionId: source.sessionId,
-          sourceTitle: source.sessionTitle,
+          sourceSessionId: stableSource.sessionId,
+          sourceTitle: stableSource.sessionTitle,
         });
       } else if (targetSessionId) {
         setForwardDraft({
@@ -238,8 +266,8 @@ export function ForwardDialog({
           capsule: built.text,
           itemCount: built.stats.selectedCount,
           estimatedTokens: built.estimatedTokens,
-          sourceSessionId: source.sessionId,
-          sourceTitle: source.sessionTitle,
+          sourceSessionId: stableSource.sessionId,
+          sourceTitle: stableSource.sessionTitle,
         });
         void selectSession(targetSessionId);
       }
@@ -294,7 +322,7 @@ export function ForwardDialog({
         <header className="flex items-center gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0 flex-1">
             <h2 id="forward-title" className="font-medium text-fg">
-              转发 {messages.length} 条消息
+              转发 {stableMessages.length} 条消息
             </h2>
             <p className="text-xs text-faint">
               组装成一段受预算约束的上下文。本机目标放入输入框由你审阅后发出；其他机器会直接送达。
@@ -381,7 +409,7 @@ export function ForwardDialog({
                       ? "本机没有其他可接收的会话。"
                       : "目标机器没有可接收的会话。"
                   }
-                  excludeId={onSourceMachine ? source.sessionId : undefined}
+                  excludeId={onSourceMachine ? stableSource.sessionId : undefined}
                 />
               </div>
             </fieldset>
