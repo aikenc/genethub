@@ -93,7 +93,10 @@ impl Diagnostics {
             version: 1,
             captured_at: now(),
             daemon_version: daemon_version.to_string(),
-            os: std::env::consts::OS.to_string(),
+            // The component build reports "wasi"/"wasm32" for its own OS and
+            // arch, which says nothing about the machine a report is about.
+            // The preopen probe is the guest's only window onto the host.
+            os: host_os_label().to_string(),
             arch: std::env::consts::ARCH.to_string(),
             uptime_seconds: self.started.elapsed().as_secs(),
             hub_state: hub_state(hub).to_string(),
@@ -106,6 +109,17 @@ impl Diagnostics {
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// The OS the filesystem answers like, not the ISA the code runs on: a
+/// Windows host behind the component is indistinguishable from native
+/// Windows for every path question a diagnostician will ask.
+fn host_os_label() -> &'static str {
+    if cfg!(target_family = "wasm") && crate::guest_paths::windows_host() {
+        "windows"
+    } else {
+        std::env::consts::OS
+    }
 }
 
 fn hub_state(status: &HubStatus) -> &'static str {
