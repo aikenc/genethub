@@ -2010,6 +2010,107 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
   });
+
+  it("enters multi-select from a turn's 选择 button and range-selects across bubbles", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
+      agents: [agent({ id: "codex", label: "Codex" })],
+    });
+    const completedTurn = (turnId: string, userText: string, assistantText: string) => [
+      {
+        type: "item" as const,
+        turnId,
+        item: { type: "userMessage" as const, id: `u-${turnId}`, text: userText, attachments: [] },
+      },
+      { type: "turnStarted" as const, turnId, startedAtMs: 1 },
+      {
+        type: "item" as const,
+        turnId,
+        item: { type: "assistantMessage" as const, id: `a-${turnId}`, text: assistantText },
+      },
+      {
+        type: "item" as const,
+        turnId,
+        item: {
+          type: "turnSummary" as const,
+          id: `summary-${turnId}`,
+          stats: {
+            turnId,
+            outcome: "completed" as const,
+            startedAtMs: 1,
+            finishedAtMs: 2,
+            durationMs: 1,
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              llmRounds: 1,
+              toolOutputTokens: 0,
+              compactionCount: 0,
+              outputRateEstimated: false,
+              costUsd: undefined,
+            },
+            toolCalls: 0,
+            forkCheckpoint: undefined,
+          },
+        },
+      },
+    ];
+    let state = emptyTimeline();
+    for (const event of [
+      ...completedTurn("t1", "第一个问题", "第一个回答"),
+      ...completedTurn("t2", "第二个问题", "第二个回答"),
+    ]) {
+      state = apply(state, event);
+    }
+
+    render(<TimelineView state={state} />);
+
+    // The floating entry and the footer's old single-shot copy are gone;
+    // each completed turn's footer offers 选择 next to Fork instead.
+    expect(screen.queryByRole("button", { name: "多选" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
+    const entries = screen.getAllByRole("button", { name: "选择" });
+    expect(entries).toHaveLength(2);
+
+    // 选择 checks its own turn and anchors the bubble above the footer.
+    await userEvent.click(entries[1]!);
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 2/30 条");
+    expect(screen.getByRole("checkbox", { name: /第二个问题/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: /第二个回答/ })).toHaveAttribute("aria-checked", "true");
+    // The footer entry steps aside while selecting; the turn-level add remains.
+    expect(screen.queryByRole("button", { name: "选择" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /选择整个 Turn/ })).toHaveLength(2);
+
+    // Clicking a bubble above the anchor range-selects everything between.
+    await userEvent.click(screen.getByRole("checkbox", { name: /第一个问题/ }));
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 4/30 条");
+    expect(screen.getByRole("checkbox", { name: /第一个回答/ })).toHaveAttribute("aria-checked", "true");
+
+    // Clicking a checked bubble unchecks it (反选).
+    await userEvent.click(screen.getByRole("checkbox", { name: /第一个回答/ }));
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 3/30 条");
+  });
 });
 
 describe("a turn that failed", () => {

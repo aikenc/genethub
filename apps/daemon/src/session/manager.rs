@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::{
     Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
     HistoryCoverage, ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome,
@@ -19,8 +19,8 @@ use genehub_proto::{
     SessionArtifactFile, SessionArtifactUpload, SessionContext, SessionEvent,
     SessionImportCandidate, SessionImportListing, SessionImportSource, SessionInspection,
     SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot,
-    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats,
-    Usage,
+    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator, TurnErrorCode,
+    TurnOutcome, TurnStats, Usage,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
@@ -41,6 +41,9 @@ use crate::diagnostics::Diagnostics;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
+/// Upper bound for one `*.batchGet` call. Abuse control, not a security
+/// boundary: keeps a single request from turning into an unbounded scan.
+const MAX_BATCH_GET: usize = 64;
 
 /// A session id that matches nothing in memory or on disk. The router maps
 /// this typed error to `notFound`; the Display text is user-facing and free
@@ -1412,6 +1415,44 @@ impl SessionManager {
         self.store
             .get_blob(&meta.workspace_id, &meta.id, blob)?
             .ok_or_else(|| anyhow!("no such blob: {}", blob.id))
+    }
+
+    /// Batch variant of `round_trunk`: one live lookup, then the same
+    /// per-trunk reads in request order. Any unknown locator fails the whole
+    /// batch — a partial answer would silently mislead the caller's budget
+    /// accounting.
+    pub async fn round_trunks(
+        &self,
+        session_id: &str,
+        refs: &[TrunkLocator],
+    ) -> Result<Vec<RoundTrunk>> {
+        if refs.len() > MAX_BATCH_GET {
+            bail!("batch too large: {} refs (max {MAX_BATCH_GET})", refs.len());
+        }
+        let mut trunks = Vec::with_capacity(refs.len());
+        for locator in refs {
+            trunks.push(
+                self.round_trunk(session_id, &locator.round_id, locator.trunk_index)
+                    .await?,
+            );
+        }
+        Ok(trunks)
+    }
+
+    /// Batch variant of `blob`: same per-blob semantics in request order,
+    /// all-or-nothing like `round_trunks`.
+    pub async fn blobs(&self, session_id: &str, blobs: &[BlobRef]) -> Result<Vec<BlobPayload>> {
+        if blobs.len() > MAX_BATCH_GET {
+            bail!(
+                "batch too large: {} blobs (max {MAX_BATCH_GET})",
+                blobs.len()
+            );
+        }
+        let mut payloads = Vec::with_capacity(blobs.len());
+        for blob in blobs {
+            payloads.push(self.blob(session_id, blob).await?);
+        }
+        Ok(payloads)
     }
 
     /// Snapshot plus whatever the client missed, in one answer.
@@ -6895,6 +6936,131 @@ mod tests {
         assert_eq!(older.trunks.len(), 5);
         assert_eq!(older.trunks.first().unwrap().index, 0);
         assert!(older.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn round_trunks_batch_get_returns_trunks_in_request_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+        sessions
+            .store
+            .append_round(
+                "w1",
+                "s1",
+                &RoundRecord {
+                    schema_version: rounds::SCHEMA_VERSION,
+                    round_id: "r-batch".into(),
+                    ord: 0,
+                    user_item_id: None,
+                    started_at_ms: 1,
+                    ended_at_ms: 2,
+                    outcome: Some(RoundOutcome::Completed),
+                    adapter_turn_ids: vec!["t1".into()],
+                    blocked_ms: 0,
+                    synthesized: false,
+                    trunk_count: 3,
+                },
+            )
+            .unwrap();
+        for index in 0..3 {
+            sessions
+                .store
+                .write_trunk(
+                    "w1",
+                    "s1",
+                    0,
+                    &RoundTrunk {
+                        summary: TrunkSummary {
+                            index,
+                            first_item_id: format!("i{index}"),
+                            blob_count: 0,
+                            title: format!("阶段 {index}"),
+                            batches: vec![],
+                        },
+                        batches: vec![],
+                    },
+                )
+                .unwrap();
+        }
+        sessions.sessions.write().await.clear();
+
+        let trunks = sessions
+            .round_trunks(
+                "s1",
+                &[
+                    TrunkLocator {
+                        round_id: "r-batch".into(),
+                        trunk_index: 2,
+                    },
+                    TrunkLocator {
+                        round_id: "r-batch".into(),
+                        trunk_index: 0,
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(trunks.len(), 2);
+        assert_eq!(
+            trunks[0].summary.index, 2,
+            "responses align with request order"
+        );
+        assert_eq!(trunks[1].summary.index, 0);
+    }
+
+    #[tokio::test]
+    async fn round_trunks_batch_get_is_all_or_nothing_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+
+        let missing = sessions
+            .round_trunks(
+                "s1",
+                &[TrunkLocator {
+                    round_id: "r-absent".into(),
+                    trunk_index: 0,
+                }],
+            )
+            .await;
+        assert!(
+            missing.is_err(),
+            "any unknown locator fails the whole batch"
+        );
+
+        let oversized: Vec<TrunkLocator> = (0..65)
+            .map(|trunk_index| TrunkLocator {
+                round_id: "r-batch".into(),
+                trunk_index,
+            })
+            .collect();
+        let refused = sessions.round_trunks("s1", &oversized).await;
+        assert!(refused.is_err(), "batches beyond the bound are rejected");
+    }
+
+    #[tokio::test]
+    async fn blobs_batch_get_returns_payloads_in_request_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, _events, _) = wired(dir.path()).await;
+        let first = sessions
+            .store
+            .put_blob("w1", "s1", serde_json::json!({"n": 1}))
+            .unwrap();
+        let second = sessions
+            .store
+            .put_blob("w1", "s1", serde_json::json!({"n": 2}))
+            .unwrap();
+
+        let payloads = sessions
+            .blobs("s1", &[second.clone(), first.clone()])
+            .await
+            .unwrap();
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0].value, serde_json::json!({"n": 2}));
+        assert_eq!(payloads[1].value, serde_json::json!({"n": 1}));
+
+        let mut tampered = first.clone();
+        tampered.id = "0".repeat(tampered.id.len());
+        assert!(sessions.blobs("s1", &[first, tampered]).await.is_err());
     }
 
     /// The proposal's central claim: an approval mid-turn is not a new round,

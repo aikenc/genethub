@@ -372,6 +372,20 @@ async fn dispatch(
             }
         }
 
+        Request::RoundTrunkBatchGet { session_id, refs } => {
+            match state.sessions.round_trunks(&session_id, &refs).await {
+                Ok(trunks) => Handled::ok(Reply::RoundTrunks(trunks)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::BlobBatchGet { session_id, blobs } => {
+            match state.sessions.blobs(&session_id, &blobs).await {
+                Ok(blobs) => Handled::ok(Reply::Blobs(blobs)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionSend {
             session_id,
             text,
