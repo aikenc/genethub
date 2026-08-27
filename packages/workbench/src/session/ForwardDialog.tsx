@@ -372,6 +372,7 @@ export function ForwardDialog({
                 <SessionPicker
                   sessions={onSourceMachine ? sessions : remoteSessions}
                   agents={onSourceMachine ? agents : catalog.agents}
+                  workspaces={onSourceMachine ? workspaces : catalog.workspaces}
                   selectedId={targetSessionId}
                   onSelect={setTargetSessionId}
                   loading={loadingSessions}

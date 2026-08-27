@@ -1,5 +1,5 @@
 import type { AgentInfo, SessionSummary, WorkspaceInfo } from "@genehub/proto";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -35,10 +35,15 @@ function workspace(id: string, name: string): WorkspaceInfo {
   return { id, name, root: `/work/${id}`, isGitRepo: true, folders: [] };
 }
 
-function session(id: string, title: string, agentId = "codex"): SessionSummary {
+function session(
+  id: string,
+  title: string,
+  agentId = "codex",
+  workspaceId = "w1",
+): SessionSummary {
   return {
     id,
-    workspaceId: "w1",
+    workspaceId,
     agentId,
     title,
     status: "idle",
@@ -155,7 +160,10 @@ describe("ForwardDialog", () => {
 
     await waitForBuilt();
     await userEvent.click(screen.getByRole("radio", { name: "既有会话" }));
-    await userEvent.click(await screen.findByRole("option", { name: /既有会话/ }));
+    const row = await screen.findByRole("option", { name: /既有会话/ });
+    // The row carries its workspace so same-named sessions stay tellable apart.
+    expect(within(row).getByText("GeneHub")).toBeInTheDocument();
+    await userEvent.click(row);
     await userEvent.click(screen.getByRole("button", { name: "放入输入框" }));
 
     await waitFor(() =>
@@ -174,7 +182,7 @@ describe("ForwardDialog", () => {
         agents: [agent("claude", "Claude Code")],
         workspaces: [workspace("rw", "远程项目")],
       }),
-      loadSessions: async () => [session("remote-s", "远端会话", "claude")],
+      loadSessions: async () => [session("remote-s", "远端会话", "claude", "rw")],
       deliver,
       jumpTo,
     };
@@ -193,7 +201,10 @@ describe("ForwardDialog", () => {
     await waitForBuilt();
     await userEvent.click(screen.getByRole("radio", { name: "既有会话" }));
     await userEvent.click(await screen.findByRole("radio", { name: "工作机" }));
-    await userEvent.click(await screen.findByRole("option", { name: /远端会话/ }));
+    const remoteRow = await screen.findByRole("option", { name: /远端会话/ });
+    // Remote rows resolve the workspace from the remote machine's own catalog.
+    expect(within(remoteRow).getByText("远程项目")).toBeInTheDocument();
+    await userEvent.click(remoteRow);
     await userEvent.click(screen.getByRole("button", { name: "直接发送" }));
 
     await waitFor(() =>
