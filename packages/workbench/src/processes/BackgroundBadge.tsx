@@ -4,7 +4,7 @@ import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "./SessionProcessesDialog";
 
 /**
- * How many processes the agents left running, where the conversation is.
+ * How many processes this conversation left running.
  *
  * Absent at zero rather than showing "0", because the only reason to look at
  * this is that it is not zero. A permanent indicator saying nothing is wrong
