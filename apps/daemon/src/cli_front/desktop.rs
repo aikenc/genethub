@@ -28,7 +28,9 @@ async fn route(args: &[String]) -> i32 {
     // the cookie jar was empty (fresh install, expired session), and nothing
     // in the window could fix that itself (fb__Y-nM9ptEeYt).
     if !args.is_empty() {
-        return output::fail(CliFailure::invalid_args("desktop route accepts no arguments"));
+        return output::fail(CliFailure::invalid_args(
+            "desktop route accepts no arguments",
+        ));
     }
     let Some(web_url) = channel_web_url() else {
         return output::fail(CliFailure::business(
