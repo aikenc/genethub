@@ -5,6 +5,7 @@
 //! reloads, so a Live update swaps the binary under a running conversation.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -18,10 +19,11 @@ use genehub_proto::{
     RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
     SessionArtifactFile, SessionArtifactUpload, SessionContext, SessionEvent,
     SessionImportCandidate, SessionImportListing, SessionImportSource, SessionInspection,
-    SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot,
-    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TurnErrorCode, TurnOutcome, TurnStats,
-    Usage,
+    SessionKind, SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage,
+    SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus, TurnErrorCode,
+    TurnOutcome, TurnStats, Usage, WorkSessionInfo,
 };
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
@@ -233,6 +235,12 @@ pub struct SessionManager {
     /// Exact channel front door supplied by the launcher. This is a runtime
     /// binding, never inferred from a product or channel name.
     front_door_cli: Option<PathBuf>,
+    /// Device-local key used only to bind a CLI invocation to the PM session
+    /// whose Agent process received it. Never written into a project.
+    project_manager_secret: Option<Arc<Vec<u8>>>,
+    /// Role-bearing sessions have uniqueness constraints that span the disk
+    /// scan and in-memory insert. Keep that check-and-create sequence atomic.
+    role_creation: Mutex<()>,
 }
 
 impl SessionManager {
@@ -256,6 +264,8 @@ impl SessionManager {
             import_candidates: Mutex::new(HashMap::new()),
             skills_dir: None,
             front_door_cli: None,
+            project_manager_secret: None,
+            role_creation: Mutex::new(()),
         }
     }
 
@@ -266,6 +276,11 @@ impl SessionManager {
     ) -> Self {
         self.skills_dir = Some(dir.into());
         self.front_door_cli = front_door_cli;
+        self
+    }
+
+    pub fn with_project_manager_secret(mut self, secret: impl AsRef<[u8]>) -> Self {
+        self.project_manager_secret = Some(Arc::new(secret.as_ref().to_vec()));
         self
     }
 
@@ -286,6 +301,132 @@ impl SessionManager {
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
     ) -> Result<SessionSummary> {
+        self.create_kind(
+            workspace_id,
+            cwd,
+            agent_id,
+            model_id,
+            mode_id,
+            runtime_values,
+            title,
+            SessionKind::Normal,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_project_manager(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        model_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+    ) -> Result<SessionSummary> {
+        let _creation = self.role_creation.lock().await;
+        if self.project_manager_secret.is_none() {
+            anyhow::bail!("project-manager identity is unavailable on this daemon");
+        }
+        if self.store.list_meta()?.into_iter().any(|meta| {
+            meta.kind == SessionKind::Pm
+                && !meta.archived
+                && meta.workspace_id != workspace_id
+                && meta.cwd == cwd
+        }) {
+            anyhow::bail!(
+                "this project root already has an active PM Agent through another workspace view"
+            );
+        }
+        if let Some(existing) = self
+            .list(Some(workspace_id), false)
+            .await?
+            .into_iter()
+            .find(|summary| summary.kind == Some(SessionKind::Pm))
+        {
+            return Ok(existing);
+        }
+        self.create_kind(
+            workspace_id,
+            cwd,
+            "genet",
+            model_id,
+            mode_id,
+            runtime_values,
+            title,
+            SessionKind::Pm,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_work_session(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        work_package_id: &str,
+        controller_session_id: &str,
+        agent_id: &str,
+        model_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+    ) -> Result<SessionSummary> {
+        let _creation = self.role_creation.lock().await;
+        let work_package_id = work_package_id.trim();
+        if work_package_id.is_empty()
+            || work_package_id.len() > 160
+            || work_package_id.chars().any(char::is_control)
+        {
+            anyhow::bail!("work package id must be 1-160 printable characters");
+        }
+        if self
+            .list(Some(workspace_id), true)
+            .await?
+            .into_iter()
+            .any(|summary| {
+                summary.work.as_ref().is_some_and(|work| {
+                    work.work_package_id == work_package_id
+                        && work.controller_session_id == controller_session_id
+                })
+            })
+        {
+            anyhow::bail!(
+                "work package {work_package_id} already has a session in this Agent Space"
+            );
+        }
+        self.create_kind(
+            workspace_id,
+            cwd,
+            agent_id,
+            model_id,
+            mode_id,
+            runtime_values,
+            title,
+            SessionKind::Work,
+            Some(WorkSessionInfo {
+                work_package_id: work_package_id.to_string(),
+                controller_session_id: controller_session_id.to_string(),
+            }),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_kind(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        kind: SessionKind,
+        work: Option<WorkSessionInfo>,
+    ) -> Result<SessionSummary> {
         // Fail before creating anything if the agent is not real.
         self.registry.require(agent_id)?;
 
@@ -297,6 +438,8 @@ impl SessionManager {
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
+            kind,
+            work,
             title,
             title_locked: false,
             cwd,
@@ -317,6 +460,31 @@ impl SessionManager {
             Arc::new(Live::new(meta, self.store.clone())),
         );
         Ok(summary)
+    }
+
+    /// Validates the session-bound credential carried by a local CLI call.
+    /// Both the cryptographic token and the durable PM role must match.
+    pub async fn authenticate_project_manager(&self, session_id: &str, token: &str) -> bool {
+        let Ok(summary) = self.summary(session_id).await else {
+            return false;
+        };
+        if summary.kind != Some(SessionKind::Pm) {
+            return false;
+        }
+        self.project_manager_token(session_id)
+            .is_some_and(|expected| genet_frontdoor::proof::token_matches(&expected, token))
+    }
+
+    fn project_manager_token(&self, session_id: &str) -> Option<String> {
+        let secret = self.project_manager_secret.as_deref()?;
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).ok()?;
+        mac.update(b"genehub-project-manager-cli-v1\0");
+        mac.update(session_id.as_bytes());
+        let mut token = String::with_capacity(64);
+        for byte in mac.finalize().into_bytes() {
+            let _ = write!(&mut token, "{byte:02x}");
+        }
+        Some(token)
     }
 
     pub async fn fork(
@@ -469,6 +637,8 @@ impl SessionManager {
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
+            kind: SessionKind::Normal,
+            work: None,
             title,
             title_locked: source_meta.title_locked,
             cwd: source_meta.cwd,
@@ -651,6 +821,8 @@ impl SessionManager {
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
+            kind: SessionKind::Normal,
+            work: None,
             title: transfer
                 .title
                 .as_deref()
@@ -852,6 +1024,8 @@ impl SessionManager {
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: candidate.agent_id.clone(),
+            kind: SessionKind::Normal,
+            work: None,
             title: history.title.or(Some(candidate.title)),
             title_locked: false,
             cwd,
@@ -1761,6 +1935,9 @@ impl SessionManager {
         let additional_system_prompt = live.additional_system_prompt.lock().await.clone();
         let config = |resume: Option<PersistHandle>| SessionConfig {
             session_id: meta.id.clone(),
+            project_manager_token: (meta.kind == SessionKind::Pm)
+                .then(|| self.project_manager_token(&meta.id))
+                .flatten(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
             mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
@@ -3780,6 +3957,8 @@ mod tests {
             workspace_id: "w1".into(),
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
+            kind: SessionKind::Normal,
+            work: None,
             title: None,
             title_locked: false,
             cwd: PathBuf::from("/tmp"),
@@ -3819,6 +3998,146 @@ mod tests {
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
+    }
+
+    #[tokio::test]
+    async fn pm_identity_and_work_role_are_durable_and_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path()).with_project_manager_secret(b"machine-secret");
+        let pm = sessions
+            .create_project_manager(
+                "w1",
+                dir.path().to_path_buf(),
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(pm.kind, Some(SessionKind::Pm));
+        let token = sessions.project_manager_token(&pm.id).unwrap();
+        assert!(sessions.authenticate_project_manager(&pm.id, &token).await);
+        assert!(
+            !sessions
+                .authenticate_project_manager(&pm.id, "not-the-token")
+                .await
+        );
+
+        let work = sessions
+            .create_work_session(
+                "w1",
+                dir.path().to_path_buf(),
+                "wp-gameplay",
+                &pm.id,
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(work.kind, Some(SessionKind::Work));
+        assert_eq!(
+            work.work.as_ref().map(|work| work.work_package_id.as_str()),
+            Some("wp-gameplay")
+        );
+        let capabilities = work.capabilities.as_ref().unwrap();
+        assert!(!capabilities.send);
+        assert!(!capabilities.delete);
+        assert!(capabilities.fork);
+
+        let stored = sessions.store.load_meta("w1", &work.id).unwrap();
+        assert_eq!(stored.format, SESSION_FORMAT);
+        assert_eq!(stored.kind, SessionKind::Work);
+        assert_eq!(
+            stored
+                .work
+                .as_ref()
+                .map(|work| work.controller_session_id.as_str()),
+            Some(pm.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_role_session_creation_preserves_uniqueness() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path()).with_project_manager_secret(b"machine-secret");
+        let (first_pm, second_pm) = tokio::join!(
+            sessions.create_project_manager(
+                "w1",
+                dir.path().to_path_buf(),
+                None,
+                None,
+                Default::default(),
+                None,
+            ),
+            sessions.create_project_manager(
+                "w1",
+                dir.path().to_path_buf(),
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+        );
+        let first_pm = first_pm.unwrap();
+        let second_pm = second_pm.unwrap();
+        assert_eq!(first_pm.id, second_pm.id);
+        assert_eq!(
+            sessions
+                .list(Some("w1"), true)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|session| session.kind == Some(SessionKind::Pm))
+                .count(),
+            1
+        );
+
+        let (first_work, second_work) = tokio::join!(
+            sessions.create_work_session(
+                "w1",
+                dir.path().to_path_buf(),
+                "wp-concurrent",
+                &first_pm.id,
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            ),
+            sessions.create_work_session(
+                "w1",
+                dir.path().to_path_buf(),
+                "wp-concurrent",
+                &first_pm.id,
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+        );
+        assert_eq!(
+            first_work.is_ok() as usize + second_work.is_ok() as usize,
+            1
+        );
+        assert_eq!(
+            first_work.is_err() as usize + second_work.is_err() as usize,
+            1
+        );
+        assert_eq!(
+            sessions
+                .list(Some("w1"), true)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|session| session.kind == Some(SessionKind::Work))
+                .count(),
+            1
+        );
     }
 
     /// An agent whose past threads are gone: it starts fresh, and refuses to

@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use genehub_proto::WorkspaceKind;
 use serde::{Deserialize, Serialize};
 
 // The on-disk layout and its owner-only hardening live in the native front door:
@@ -190,6 +191,13 @@ pub struct WorkspaceFolderEntry {
 pub struct WorkspaceEntry {
     pub id: String,
     pub name: String,
+    /// Folder/PipeSpace may be discovered. AgentSpace is only ever written by
+    /// the PM-controlled registration path.
+    #[serde(default)]
+    pub kind: WorkspaceKind,
+    /// Durable project/controller binding for an explicit Agent Space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_space: Option<AgentSpaceBinding>,
     /// The first folder is deliberately duplicated here as a first-class fact:
     /// it remains the Agent/session/terminal/git working directory.
     pub root: PathBuf,
@@ -208,6 +216,13 @@ pub struct WorkspaceEntry {
     /// change from producing a different Hub snapshot at the same revision.
     #[serde(default)]
     pub is_git_repo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpaceBinding {
+    pub project_workspace_id: String,
+    pub controller_session_id: String,
 }
 
 impl Config {
@@ -378,6 +393,47 @@ impl Config {
 
         if changed {
             self.workspace_catalog_revision = self.workspace_catalog_revision.saturating_add(1);
+            self.save(path)?;
+        }
+        Ok(())
+    }
+
+    /// Persists the legacy Folder/PipeSpace distinction once at startup.
+    ///
+    /// AgentSpace is intentionally absent from discovery: its on-disk shape is
+    /// the same as PipeSpace and only an authenticated PM registration may
+    /// assign the stronger product meaning.
+    pub fn migrate_workspace_kinds(&mut self, path: &Path) -> Result<()> {
+        let mut changed = false;
+        for workspace in &mut self.workspaces {
+            match workspace.kind {
+                WorkspaceKind::AgentSpace if workspace.agent_space.is_none() => {
+                    anyhow::bail!(
+                        "Agent Space {} has no project-manager binding",
+                        workspace.id
+                    );
+                }
+                WorkspaceKind::Folder => {
+                    let source_root = workspace
+                        .workspace_file
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .unwrap_or(&workspace.root);
+                    if source_root.join("pipespace.json").is_file() {
+                        workspace.kind = WorkspaceKind::PipeSpace;
+                        changed = true;
+                    }
+                }
+                WorkspaceKind::PipeSpace | WorkspaceKind::AgentSpace => {}
+            }
+            if workspace.kind != WorkspaceKind::AgentSpace && workspace.agent_space.is_some() {
+                anyhow::bail!(
+                    "workspace {} has an Agent Space binding but is not an Agent Space",
+                    workspace.id
+                );
+            }
+        }
+        if changed {
             self.save(path)?;
         }
         Ok(())
@@ -659,6 +715,8 @@ mod tests {
         config.workspaces.push(WorkspaceEntry {
             id: "w1".into(),
             name: "demo".into(),
+            kind: WorkspaceKind::Folder,
+            agent_space: None,
             root: PathBuf::from("/tmp/demo"),
             folders: vec![WorkspaceFolderEntry {
                 name: "demo".into(),
@@ -721,6 +779,8 @@ mod tests {
         config.workspaces.push(WorkspaceEntry {
             id: "w1".into(),
             name: "Project".into(),
+            kind: WorkspaceKind::Folder,
+            agent_space: None,
             root: root.clone(),
             folders: Vec::new(),
             workspace_file: None,
@@ -764,6 +824,8 @@ mod tests {
                 WorkspaceEntry {
                     id: "w_folder".into(),
                     name: "product".into(),
+                    kind: WorkspaceKind::Folder,
+                    agent_space: None,
                     root: root.clone(),
                     folders: vec![folder.clone()],
                     workspace_file: None,
@@ -773,6 +835,8 @@ mod tests {
                 WorkspaceEntry {
                     id: "w_suite".into(),
                     name: "suite".into(),
+                    kind: WorkspaceKind::Folder,
+                    agent_space: None,
                     root: root.clone(),
                     folders: vec![
                         WorkspaceFolderEntry {
@@ -826,6 +890,8 @@ mod tests {
             workspaces: vec![WorkspaceEntry {
                 id: "w_project".into(),
                 name: "project".into(),
+                kind: WorkspaceKind::Folder,
+                agent_space: None,
                 root: root.clone(),
                 folders: vec![WorkspaceFolderEntry {
                     name: "project".into(),
@@ -1000,6 +1066,8 @@ mod tests {
         config.workspaces.push(WorkspaceEntry {
             id: "w1".into(),
             name: "project".into(),
+            kind: WorkspaceKind::Folder,
+            agent_space: None,
             root: project.clone(),
             folders: vec![WorkspaceFolderEntry {
                 name: "project".into(),

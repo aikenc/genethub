@@ -97,6 +97,7 @@ enum Inner {
 
 struct Local {
     state: Shared,
+    principal: Principal,
     hello: HelloResult,
     events: Mutex<mpsc::UnboundedReceiver<Payload>>,
     event_tx: mpsc::UnboundedSender<Payload>,
@@ -116,13 +117,15 @@ impl Rpc {
 
     pub async fn connect() -> Result<Self, ConnectError> {
         let state = super::local_state().map_err(ConnectError::Unavailable)?;
+        let principal = super::caller_principal().map_err(ConnectError::Unavailable)?;
         let handled = tokio::spawn({
             let state = state.clone();
+            let principal = principal.clone();
             async move {
                 router::handle(
                     &state,
                     TransportKind::Loopback,
-                    &Principal::LocalUser,
+                    &principal,
                     Request::ConnectionIdentity,
                 )
                 .await
@@ -143,6 +146,7 @@ impl Rpc {
         Ok(Self {
             inner: Inner::Local(Local {
                 state,
+                principal,
                 hello,
                 events: Mutex::new(events),
                 event_tx,
@@ -187,14 +191,9 @@ impl Rpc {
         match &self.inner {
             Inner::Local(local) => {
                 let state = local.state.clone();
+                let principal = local.principal.clone();
                 let handled = tokio::spawn(async move {
-                    router::handle(
-                        &state,
-                        TransportKind::Loopback,
-                        &Principal::LocalUser,
-                        request,
-                    )
-                    .await
+                    router::handle(&state, TransportKind::Loopback, &principal, request).await
                 })
                 .await
                 .map_err(|error| RpcError::Transport(format!("rpc task failed: {error}")))?;
@@ -234,7 +233,7 @@ impl Rpc {
             Inner::Local(local) => {
                 let started = crate::dataplane::exec::start(
                     &local.state,
-                    &Principal::LocalUser,
+                    &local.principal,
                     request.clone(),
                     stdin,
                 )

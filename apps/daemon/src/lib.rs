@@ -49,6 +49,7 @@ pub mod state;
 pub mod transport;
 pub mod updates;
 pub mod version;
+pub mod work_session;
 pub mod workspace;
 
 use anyhow::Result;

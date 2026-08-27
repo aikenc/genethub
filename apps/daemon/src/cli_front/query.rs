@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 35] = [
+const COMMAND_NAMES: [&str; 37] = [
     "schema",
     "context",
     "capabilities",
@@ -26,6 +26,7 @@ const COMMAND_NAMES: [&str; 35] = [
     "process.killAll",
     "workspace.list",
     "workspace.show",
+    "workspace.registerAgentSpace",
     "session.list",
     "session.get",
     "session.inspect",
@@ -37,6 +38,7 @@ const COMMAND_NAMES: [&str; 35] = [
     "session.context",
     "agent.list",
     "agent.run",
+    "pm.run",
     "session.send",
     "session.respond",
     "session.interrupt",
@@ -83,6 +85,8 @@ fn mutates(name: &str) -> bool {
             | "process.kill"
             | "process.killAll"
             | "agent.run"
+            | "pm.run"
+            | "workspace.registerAgentSpace"
             | "session.send"
             | "session.respond"
             | "session.interrupt"
@@ -999,6 +1003,14 @@ fn command_schema(name: &str) -> Value {
                 &["workspaceId"],
             ),
         ),
+        "workspace.registerAgentSpace" => (
+            "genet workspace register-agent-space <space.code-workspace>",
+            true,
+            object_input(
+                json!({"source": {"type": "string", "minLength": 1}}),
+                &["source"],
+            ),
+        ),
         "session.list" => (
             "genet session list [--workspace <id>]",
             true,
@@ -1110,8 +1122,33 @@ fn command_schema(name: &str) -> Value {
                     "autoApprove": {"type": "boolean", "default": false},
                     "timeout": {"type": ["integer", "null"], "minimum": 1},
                     "openWorkspace": {"type": "boolean", "default": false},
+                    "workPackageId": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "$comment": "PM-only: creates a read-only-to-users WorkAgent session in an Agent Space",
+                    },
                 }),
                 &["agentId", "prompt"],
+            ),
+        ),
+        "pm.run" => (
+            "genet pm run \"<prompt>\" [--workspace <id> | --session <id>]",
+            true,
+            object_input(
+                json!({
+                    "prompt": {"type": "string", "minLength": 1},
+                    "sessionId": {"type": ["string", "null"], "minLength": 1},
+                    "workspaceId": {"type": ["string", "null"], "minLength": 1},
+                    "modelId": {"type": ["string", "null"], "minLength": 1},
+                    "modeId": {"type": ["string", "null"], "minLength": 1},
+                    "effortId": {"type": ["string", "null"], "minLength": 1},
+                    "title": {"type": ["string", "null"], "minLength": 1},
+                    "wait": {"type": "boolean", "default": true},
+                    "sinceSeq": {"type": ["integer", "null"], "minimum": 0},
+                    "autoApprove": {"type": "boolean", "default": false},
+                    "timeout": {"type": ["integer", "null"], "minimum": 1},
+                }),
+                &["prompt"],
             ),
         ),
         "session.send" => (
@@ -1317,7 +1354,7 @@ fn command_output() -> Value {
 }
 
 fn streams(name: &str) -> bool {
-    matches!(name, "shell" | "agent.run" | "session.send")
+    matches!(name, "shell" | "agent.run" | "pm.run" | "session.send")
 }
 
 fn single_output(name: &str) -> Value {
@@ -1856,6 +1893,9 @@ mod tests {
             id: "s_1".into(),
             workspace_id: "w_1".into(),
             agent_id: "genet".into(),
+            kind: None,
+            work: None,
+            capabilities: None,
             title: None,
             status: SessionStatus::Idle,
             model_id: None,

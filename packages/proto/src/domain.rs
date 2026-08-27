@@ -168,12 +168,49 @@ pub struct WorkspaceFolderInfo {
     pub root_handle: String,
 }
 
+/// Product meaning of a registered workspace.
+///
+/// `PipeSpace` is discovered from the existing PipeBuilder source shape during
+/// migration/open. `AgentSpace` is never inferred: only a project manager may
+/// explicitly promote a verified Space source to that kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum WorkspaceKind {
+    #[default]
+    Folder,
+    PipeSpace,
+    AgentSpace,
+}
+
+/// End-user affordances computed by the daemon for one workspace.
+///
+/// These fields make the UI honest, but they are not the security boundary;
+/// the daemon applies the same policy to every mutation request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkspaceCapabilities {
+    pub create_session: bool,
+    pub rename: bool,
+    pub remove: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkspaceInfo {
     pub id: String,
     pub name: String,
+    /// Optional on the TypeScript surface so an older daemon remains readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<WorkspaceKind>,
+    /// Server-derived end-user affordances. Authorization is still enforced by
+    /// the daemon when a request arrives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub capabilities: Option<WorkspaceCapabilities>,
     /// The first folder and Agent working directory.
     pub root: String,
     pub is_git_repo: bool,
@@ -480,6 +517,19 @@ pub struct SessionSummary {
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
+    /// Optional on the TypeScript surface so an older daemon remains readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<SessionKind>,
+    /// Present only for a PM-controlled WorkAgent session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub work: Option<WorkSessionInfo>,
+    /// Server-derived end-user affordances. The daemon independently enforces
+    /// them, including for callers that never render a UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub capabilities: Option<SessionCapabilities>,
     /// Absent until the session has been named — by the user, or by the daemon
     /// from the first thing they said. Clients supply their own placeholder;
     /// the daemon has no business picking a word in the user's language.
@@ -516,6 +566,47 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<SessionImportOrigin>,
+}
+
+/// Product role of a durable conversation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum SessionKind {
+    #[default]
+    Normal,
+    Pm,
+    Work,
+}
+
+/// Durable controller relationship for a WorkAgent execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkSessionInfo {
+    pub work_package_id: String,
+    pub controller_session_id: String,
+}
+
+/// End-user affordances computed from the durable session kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionCapabilities {
+    pub send: bool,
+    pub respond_permission: bool,
+    pub interrupt: bool,
+    pub close: bool,
+    pub archive: bool,
+    pub rename: bool,
+    pub delete: bool,
+    pub set_model: bool,
+    pub set_mode: bool,
+    pub set_effort: bool,
+    pub set_runtime_axis: bool,
+    pub upload_artifact: bool,
+    pub manage_processes: bool,
+    pub fork: bool,
 }
 
 /// A session written by a newer build than this one.

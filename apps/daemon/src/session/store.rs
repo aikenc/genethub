@@ -30,8 +30,8 @@ use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImportContinuation,
     PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
-    SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
-    UnsupportedFormat,
+    SessionCapabilities, SessionImportOrigin, SessionKind, SessionLineage, SessionStatus,
+    SessionSummary, TimelineItem, UnsupportedFormat, WorkSessionInfo,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,7 +94,9 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     is correctness-breaking rather than merely metadata it can ignore.
 /// 6 — imported origin and continuation mode. An older build would allow a
 ///     read-only imported transcript to send into a blank Agent context.
-pub const SESSION_FORMAT: u32 = 6;
+/// 7 — PM/work session roles and controller relationships. An older build
+///     would treat a WorkAgent transcript as an ordinary user-writable session.
+pub const SESSION_FORMAT: u32 = 7;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -142,6 +144,10 @@ pub struct SessionMeta {
     #[serde(default = "format_before_versions", skip_deserializing)]
     pub format: u32,
     pub agent_id: String,
+    #[serde(default)]
+    pub kind: SessionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkSessionInfo>,
     /// `None` until it has been named. Metas written before this was optional
     /// read back as `Some`, which is the right answer for them.
     #[serde(default)]
@@ -226,6 +232,8 @@ impl SessionMeta {
             workspace_id,
             format: header.format,
             agent_id: String::new(),
+            kind: SessionKind::Normal,
+            work: None,
             title: header.title,
             title_locked: false,
             cwd,
@@ -250,10 +258,43 @@ impl SessionMeta {
     }
 
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
+        let capabilities = if !self.openable() {
+            SessionCapabilities::default()
+        } else if self.kind == SessionKind::Work {
+            SessionCapabilities {
+                fork: true,
+                ..SessionCapabilities::default()
+            }
+        } else {
+            let mut capabilities = SessionCapabilities {
+                send: true,
+                respond_permission: true,
+                interrupt: true,
+                close: true,
+                archive: true,
+                rename: true,
+                delete: true,
+                set_model: true,
+                set_mode: true,
+                set_effort: true,
+                set_runtime_axis: true,
+                upload_artifact: true,
+                manage_processes: true,
+                fork: true,
+            };
+            if self.kind == SessionKind::Pm {
+                capabilities.archive = false;
+                capabilities.delete = false;
+            }
+            capabilities
+        };
         SessionSummary {
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
             agent_id: self.agent_id.clone(),
+            kind: Some(self.kind),
+            work: self.work.clone(),
+            capabilities: Some(capabilities),
             title: self.title.clone(),
             status,
             model_id: self.model_id.clone(),
@@ -817,6 +858,7 @@ impl Store {
     /// says what wrote it" cannot be forgotten at one of the dozen places a
     /// session is touched.
     pub fn save_meta(&self, meta: &SessionMeta) -> Result<()> {
+        validate_session_role(meta)?;
         let path = self.meta_path(&meta.workspace_id, &meta.id)?;
         self.prepare_write(
             &meta.workspace_id,
@@ -858,6 +900,7 @@ impl Store {
         }
         meta.workspace_id = workspace_id.to_string();
         meta.format = header.format;
+        validate_session_role(&meta)?;
         Ok(meta)
     }
 
@@ -1458,6 +1501,24 @@ impl Store {
     }
 }
 
+fn validate_session_role(meta: &SessionMeta) -> Result<()> {
+    match (&meta.kind, &meta.work) {
+        (SessionKind::Work, Some(work))
+            if !work.work_package_id.trim().is_empty()
+                && !work.controller_session_id.trim().is_empty() =>
+        {
+            Ok(())
+        }
+        (SessionKind::Work, _) => {
+            anyhow::bail!("a work session requires its package and controller")
+        }
+        (SessionKind::Normal | SessionKind::Pm, None) => Ok(()),
+        (SessionKind::Normal | SessionKind::Pm, Some(_)) => {
+            anyhow::bail!("only a work session may carry work metadata")
+        }
+    }
+}
+
 /// Tool calls and reasoning belong to the round layer, never to the narrative.
 pub fn is_work_item(item: &TimelineItem) -> bool {
     matches!(
@@ -1552,6 +1613,8 @@ mod project_home_tests {
             workspace_id: workspace_id.into(),
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
+            kind: SessionKind::Normal,
+            work: None,
             title: Some(id.into()),
             title_locked: false,
             cwd: cwd.to_path_buf(),

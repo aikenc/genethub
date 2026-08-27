@@ -115,6 +115,7 @@ impl AppState {
         config.migrate_workspace_folders(&paths.config_file())?;
         config.migrate_workspace_roots(&paths.config_file())?;
         config.migrate_workspace_identities(&paths.config_file())?;
+        config.migrate_workspace_kinds(&paths.config_file())?;
         config.refresh_workspace_catalog_facts(&paths.config_file())?;
         let machine = MachineState::load_or_create(&paths.state_file())?;
         let devices = Devices::load(paths.devices_file());
@@ -141,7 +142,8 @@ impl AppState {
             config.replay_window,
             diagnostics.clone(),
         )
-        .with_builtin_skills(skills_dir, front_door_cli);
+        .with_builtin_skills(skills_dir, front_door_cli)
+        .with_project_manager_secret(machine.secret.as_bytes());
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);

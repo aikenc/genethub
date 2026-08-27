@@ -81,6 +81,42 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
+    /// Creates (or returns) the one active project-manager conversation for a
+    /// local Folder workspace. The Agent/profile choice is product-owned, so a
+    /// caller cannot turn an arbitrary third-party Agent into a manager.
+    #[serde(rename = "pm.session.create", rename_all = "camelCase")]
+    ProjectManagerSessionCreate {
+        workspace_id: String,
+        #[serde(default)]
+        model_id: Option<String>,
+        #[serde(default)]
+        mode_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        runtime_values: Option<std::collections::BTreeMap<String, String>>,
+        #[serde(default)]
+        title: Option<String>,
+    },
+    /// Creates one PM-controlled WorkAgent conversation in an Agent Space.
+    /// The controller id is derived from the authenticated caller rather than
+    /// accepted from this untrusted payload.
+    #[serde(rename = "workSession.create", rename_all = "camelCase")]
+    WorkSessionCreate {
+        workspace_id: String,
+        work_package_id: String,
+        agent_id: String,
+        #[serde(default)]
+        model_id: Option<String>,
+        #[serde(default)]
+        mode_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        runtime_values: Option<std::collections::BTreeMap<String, String>>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
         #[serde(default)]
@@ -507,6 +543,11 @@ pub enum Request {
     WorkspaceList,
     #[serde(rename = "workspace.open", rename_all = "camelCase")]
     WorkspaceOpen { root: String },
+    /// Promotes an already built PipeSpace-shaped source into the explicit
+    /// AgentSpace workspace kind. Local PM identity is carried by the CLI
+    /// transport; it is deliberately absent from this payload.
+    #[serde(rename = "workspace.registerAgentSpace", rename_all = "camelCase")]
+    WorkspaceRegisterAgentSpace { source: String },
     #[serde(rename = "workspace.create", rename_all = "camelCase")]
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]

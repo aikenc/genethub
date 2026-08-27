@@ -241,6 +241,10 @@ struct CliBody {
     argv: Vec<String>,
     cwd: String,
     stdin: Option<String>,
+    #[serde(default, rename = "callerSessionId")]
+    caller_session_id: Option<String>,
+    #[serde(default, rename = "projectManagerToken")]
+    project_manager_token: Option<String>,
 }
 
 const MAX_CLI_STDIN_BYTES: usize = 1024 * 1024;
@@ -280,6 +284,31 @@ async fn cli(
         return (StatusCode::UNAUTHORIZED, "invalid cli proof").into_response();
     }
 
+    let principal = match (
+        body.caller_session_id.as_deref(),
+        body.project_manager_token.as_deref(),
+    ) {
+        (None, None) => crate::authz::Principal::LocalUser,
+        (Some(session_id), Some(token))
+            if context
+                .state
+                .sessions
+                .authenticate_project_manager(session_id, token)
+                .await =>
+        {
+            crate::authz::Principal::ProjectManager {
+                session_id: session_id.to_string(),
+            }
+        }
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "invalid project-manager CLI identity",
+            )
+                .into_response()
+        }
+    };
+
     let stdin = match decode_cli_stdin(body.stdin.as_deref()) {
         Ok(stdin) => stdin,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
@@ -293,6 +322,7 @@ async fn cli(
             argv: body.argv,
             cwd,
             stdin,
+            principal,
         },
         tx,
     ));

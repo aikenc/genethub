@@ -70,6 +70,11 @@ mod tests {
             json!({"type": "git.commit", "payload": {"workspaceId": "w", "message": "m"}}),
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
+            json!({"type": "workspace.registerAgentSpace", "payload": {"source": "/project/spaces/code/code.code-workspace"}}),
+            json!({"type": "pm.session.create", "payload": {"workspaceId": "w"}}),
+            json!({"type": "workSession.create", "payload": {
+                "workspaceId": "w_space", "workPackageId": "wp-1", "agentId": "codex"
+            }}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
             json!({"type": "session.artifact.begin", "payload": {
                 "sessionId": "s",
@@ -107,6 +112,20 @@ mod tests {
         )
         .expect("parse legacy fork");
         assert!(matches!(fork, Request::SessionFork { target: None, .. }));
+    }
+
+    #[test]
+    fn older_workspace_rows_remain_readable_without_classification_fields() {
+        let workspace: WorkspaceInfo = serde_json::from_value(json!({
+            "id": "w",
+            "name": "legacy",
+            "root": "/project",
+            "isGitRepo": false,
+            "folders": []
+        }))
+        .expect("parse an older daemon reply");
+        assert_eq!(workspace.kind, None);
+        assert_eq!(workspace.capabilities, None);
     }
 
     #[test]

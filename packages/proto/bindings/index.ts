@@ -607,7 +607,7 @@ expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId:
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+cwd: string | null, } } | { "type": "pm.session.create", "payload": { workspaceId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, } } | { "type": "workSession.create", "payload": { workspaceId: string, workPackageId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -665,7 +665,7 @@ workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "spee
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.registerAgentSpace", "payload": { source: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -773,6 +773,11 @@ relativePath: string,
 workspacePath: string, maxChunkBytes: number, };
 
 /**
+ * End-user affordances computed from the durable session kind.
+ */
+export type SessionCapabilities = { send: boolean, respondPermission: boolean, interrupt: boolean, close: boolean, archive: boolean, rename: boolean, delete: boolean, setModel: boolean, setMode: boolean, setEffort: boolean, setRuntimeAxis: boolean, uploadArtifact: boolean, manageProcesses: boolean, fork: boolean, };
+
+/**
  * Deterministic, model-free context projection used directly by Agents and
  * as the fallback for reconstructed forks and built-in compaction.
  */
@@ -825,6 +830,11 @@ export type SessionImportSource = { agentId: string, label: string, supported: b
 export type SessionInspection = { summary: SessionSummary, source: SessionReadSource, narrativeItemCount: number, roundCount: number, latestRoundId?: string, coverage: HistoryCoverage, layers: Array<string>, };
 
 /**
+ * Product role of a durable conversation.
+ */
+export type SessionKind = "normal" | "pm" | "work";
+
+/**
  * Durable ancestry for a forked conversation.
  */
 export type SessionLineage = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, method: ForkMethod, context?: ForkContextStats, };
@@ -873,6 +883,19 @@ export type SessionSourceRef = { id: string, sessionId: string, itemId?: string,
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
 export type SessionSummary = { id: string, workspaceId: string, agentId: string, 
+/**
+ * Optional on the TypeScript surface so an older daemon remains readable.
+ */
+kind?: SessionKind, 
+/**
+ * Present only for a PM-controlled WorkAgent session.
+ */
+work?: WorkSessionInfo, 
+/**
+ * Server-derived end-user affordances. The daemon independently enforces
+ * them, including for callers that never render a UI.
+ */
+capabilities?: SessionCapabilities, 
 /**
  * Absent until the session has been named — by the user, or by the daemon
  * from the first thing they said. Clients supply their own placeholder;
@@ -1323,6 +1346,19 @@ avgOutputRateTps?: number,
  */
 outputRateEstimated: boolean, costUsd?: number, };
 
+/**
+ * Durable controller relationship for a WorkAgent execution.
+ */
+export type WorkSessionInfo = { workPackageId: string, controllerSessionId: string, };
+
+/**
+ * End-user affordances computed by the daemon for one workspace.
+ *
+ * These fields make the UI honest, but they are not the security boundary;
+ * the daemon applies the same policy to every mutation request.
+ */
+export type WorkspaceCapabilities = { createSession: boolean, rename: boolean, remove: boolean, };
+
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 
 export type WorkspaceFileSourceKind = "workspaceFile";
@@ -1344,6 +1380,24 @@ rootHandle: string, };
 
 export type WorkspaceInfo = { id: string, name: string, 
 /**
+ * Optional on the TypeScript surface so an older daemon remains readable.
+ */
+kind?: WorkspaceKind, 
+/**
+ * Server-derived end-user affordances. Authorization is still enforced by
+ * the daemon when a request arrives.
+ */
+capabilities?: WorkspaceCapabilities, 
+/**
  * The first folder and Agent working directory.
  */
 root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspaceFile?: string, };
+
+/**
+ * Product meaning of a registered workspace.
+ *
+ * `PipeSpace` is discovered from the existing PipeBuilder source shape during
+ * migration/open. `AgentSpace` is never inferred: only a project manager may
+ * explicitly promote a verified Space source to that kind.
+ */
+export type WorkspaceKind = "folder" | "pipeSpace" | "agentSpace";

@@ -146,6 +146,8 @@ mod tests {
         WorkspaceInfo {
             id: id.into(),
             name: id.into(),
+            kind: None,
+            capabilities: None,
             root: roots[0].to_string_lossy().into_owned(),
             is_git_repo: false,
             folders: roots

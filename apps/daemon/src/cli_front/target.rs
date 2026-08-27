@@ -34,13 +34,14 @@ pub enum Routing {
 /// `machine`, `device` and `shell` are reserved before they are implemented,
 /// which is the point: reserving them later would be a breaking change for
 /// anyone who had shipped an agent under one of those names.
-pub const RESERVED: [&str; 15] = [
+pub const RESERVED: [&str; 16] = [
     "schema",
     "context",
     "capabilities",
     "workspace",
     "session",
     "agent",
+    "pm",
     "machine",
     "device",
     "daemon",

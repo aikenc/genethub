@@ -183,6 +183,11 @@ pub enum Principal {
     /// caller can already read files as this account and start processes as it,
     /// so withholding a capability here would protect nothing.
     LocalUser,
+    /// A loopback CLI invocation carrying a daemon-verified credential minted
+    /// for one durable PM session. It has ordinary local authority plus the
+    /// narrowly scoped right to control that project's Agent Spaces and Work
+    /// sessions; the project-management policy checks the session id again.
+    ProjectManager { session_id: String },
     /// A paired device, holding exactly what it was granted.
     Device { id: String, grants: GrantSet },
     /// An end-to-end authenticated hosted channel that never identified as a
@@ -227,7 +232,7 @@ impl Principal {
 
     pub fn allows(&self, capability: Capability) -> bool {
         match self {
-            Principal::LocalUser | Principal::Channel => true,
+            Principal::LocalUser | Principal::ProjectManager { .. } | Principal::Channel => true,
             Principal::Device { grants, .. } => grants.allows(capability),
             Principal::Pairing => capability == Capability::Handshake,
         }
@@ -236,6 +241,13 @@ impl Principal {
     pub fn device_id(&self) -> Option<&str> {
         match self {
             Principal::Device { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn project_manager_session_id(&self) -> Option<&str> {
+        match self {
+            Principal::ProjectManager { session_id } => Some(session_id),
             _ => None,
         }
     }
@@ -346,6 +358,8 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::ProjectManagerSessionCreate { .. }
+        | Request::WorkSessionCreate { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }
@@ -387,6 +401,7 @@ pub fn required(request: &Request) -> Capability {
         // all, so it sits with the other configuration changes rather than with
         // reading one.
         Request::WorkspaceOpen { .. }
+        | Request::WorkspaceRegisterAgentSpace { .. }
         | Request::WorkspaceCreate { .. }
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }

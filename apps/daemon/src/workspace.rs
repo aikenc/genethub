@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    DirectoryEntry, DirectoryListing, FileNode, WorkspaceFolderInfo, WorkspaceInfo,
+    DirectoryEntry, DirectoryListing, FileNode, WorkspaceCapabilities, WorkspaceFolderInfo,
+    WorkspaceInfo, WorkspaceKind,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-use crate::config::{Config, WorkspaceEntry, WorkspaceFolderEntry};
+use crate::config::{AgentSpaceBinding, Config, WorkspaceEntry, WorkspaceFolderEntry};
 use crate::session::WorkspaceHomes;
 
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
@@ -422,6 +423,88 @@ impl Workspaces {
             ));
         };
 
+        self.register_candidate(candidate, None).await
+    }
+
+    /// Registers a Builder-produced Space source as an explicit Agent Space.
+    ///
+    /// The source remains ordinary Git-managed project data. This registry only
+    /// persists its product kind and the PM controller relationship.
+    pub async fn register_agent_space(
+        &self,
+        source: &Path,
+        project: &WorkspaceEntry,
+        controller_session_id: &str,
+    ) -> Result<WorkspaceInfo> {
+        if project.kind != WorkspaceKind::Folder || project.agent_space.is_some() {
+            anyhow::bail!("a PM project must start from a Folder workspace");
+        }
+        let source = source
+            .canonicalize()
+            .with_context(|| format!("no such Agent Space workspace file: {}", source.display()))?;
+        if !source.is_file() || !is_workspace_file(&source) {
+            anyhow::bail!("an Agent Space source must be a .code-workspace file");
+        }
+        let space_root = source
+            .parent()
+            .ok_or_else(|| anyhow!("Agent Space workspace file has no parent"))?;
+        let spaces_root = project
+            .root
+            .join("spaces")
+            .canonicalize()
+            .context("the PM project has no spaces directory")?;
+        if space_root.parent() != Some(spaces_root.as_path()) {
+            anyhow::bail!(
+                "Agent Space source must be directly under {}/<space>/",
+                spaces_root.display()
+            );
+        }
+        if !space_root.join("pipespace.json").is_file() {
+            anyhow::bail!("Agent Space source has no pipespace.json");
+        }
+        let lock_path = space_root.join(".pipebuilder/lock.json");
+        let lock = std::fs::read_to_string(&lock_path).with_context(|| {
+            format!("Agent Space source has no readable {}", lock_path.display())
+        })?;
+        let lock: serde_json::Value = serde_json::from_str(&lock).with_context(|| {
+            format!(
+                "Agent Space Builder lock is invalid: {}",
+                lock_path.display()
+            )
+        })?;
+        if !lock.is_object() {
+            anyhow::bail!("Agent Space Builder lock must be a JSON object");
+        }
+
+        let candidate = code_workspace(&source)?;
+        if candidate
+            .folders
+            .first()
+            .map(|folder| folder.root.as_path())
+            != Some(space_root)
+        {
+            anyhow::bail!("an Agent Space workspace must list its own root as the first folder");
+        }
+        self.register_candidate(
+            candidate,
+            Some(AgentSpaceBinding {
+                project_workspace_id: project.id.clone(),
+                controller_session_id: controller_session_id.to_string(),
+            }),
+        )
+        .await
+    }
+
+    async fn register_candidate(
+        &self,
+        mut candidate: WorkspaceEntry,
+        agent_space: Option<AgentSpaceBinding>,
+    ) -> Result<WorkspaceInfo> {
+        if let Some(binding) = agent_space.clone() {
+            candidate.kind = WorkspaceKind::AgentSpace;
+            candidate.agent_space = Some(binding);
+        }
+
         // Keep the write lock from the source identity check through commit.
         // A folder source and a `.code-workspace` source remain distinct even
         // when their Agent roots happen to be the same directory.
@@ -437,6 +520,19 @@ impl Workspaces {
             .find(|entry| same_project_source(entry, &candidate))
             .cloned()
         {
+            if agent_space.is_none() && existing.kind == WorkspaceKind::AgentSpace {
+                if existing.removed {
+                    anyhow::bail!("an Agent Space can only be reactivated by its project manager");
+                }
+                return Ok(describe(&existing));
+            }
+            if let Some(binding) = agent_space.as_ref() {
+                if existing.kind == WorkspaceKind::AgentSpace
+                    && existing.agent_space.as_ref() != Some(binding)
+                {
+                    anyhow::bail!("this Agent Space belongs to another project manager");
+                }
+            }
             let mut updated = candidate;
             updated.id = existing.id.clone();
             // The label belongs to the durable project identity, not whichever
@@ -486,6 +582,26 @@ impl Workspaces {
     /// conversations. The durable entry is a tombstone with enough identity to
     /// reactivate the same id when the source is opened again.
     pub async fn remove(&self, id: &str) -> Result<Vec<WorkspaceInfo>> {
+        self.remove_with_controller(id, None).await
+    }
+
+    /// The PM-only counterpart to [`Self::remove`]. The router authenticates
+    /// the caller; this layer rechecks the durable Agent Space binding so a
+    /// routing mistake still cannot remove another manager's topology.
+    pub async fn remove_agent_space(
+        &self,
+        id: &str,
+        controller_session_id: &str,
+    ) -> Result<Vec<WorkspaceInfo>> {
+        self.remove_with_controller(id, Some(controller_session_id))
+            .await
+    }
+
+    async fn remove_with_controller(
+        &self,
+        id: &str,
+        controller_session_id: Option<&str>,
+    ) -> Result<Vec<WorkspaceInfo>> {
         let mut entries = self.entries.write().await;
         let entry = entries
             .get(id)
@@ -493,6 +609,17 @@ impl Workspaces {
             .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
         if entry.removed {
             return Ok(active_descriptions(entries.values()));
+        }
+        if entry.kind == WorkspaceKind::AgentSpace {
+            let expected = entry
+                .agent_space
+                .as_ref()
+                .map(|binding| binding.controller_session_id.as_str());
+            if expected != controller_session_id {
+                anyhow::bail!("removing an Agent Space requires its project manager");
+            }
+        } else if controller_session_id.is_some() {
+            anyhow::bail!("the PM removal path only accepts Agent Spaces");
         }
 
         let mut updated = entry;
@@ -563,9 +690,23 @@ fn active_descriptions<'a>(
 }
 
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
+    let capabilities = match entry.kind {
+        WorkspaceKind::AgentSpace => WorkspaceCapabilities {
+            create_session: true,
+            rename: false,
+            remove: false,
+        },
+        WorkspaceKind::Folder | WorkspaceKind::PipeSpace => WorkspaceCapabilities {
+            create_session: true,
+            rename: true,
+            remove: true,
+        },
+    };
     WorkspaceInfo {
         id: entry.id.clone(),
         name: entry.name.clone(),
+        kind: Some(entry.kind),
+        capabilities: Some(capabilities),
         root: entry.root.display().to_string(),
         is_git_repo: entry.is_git_repo,
         folders: entry
@@ -592,6 +733,12 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
     WorkspaceEntry {
         id: format!("w_{}", uuid::Uuid::new_v4().simple()),
         name: name.unwrap_or_else(|| folder_name.clone()),
+        kind: if root.join("pipespace.json").is_file() {
+            WorkspaceKind::PipeSpace
+        } else {
+            WorkspaceKind::Folder
+        },
+        agent_space: None,
         root: root.clone(),
         folders: vec![WorkspaceFolderEntry {
             name: folder_name,
@@ -688,6 +835,12 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
     Ok(WorkspaceEntry {
         id: format!("w_{}", uuid::Uuid::new_v4().simple()),
         name,
+        kind: if base.join("pipespace.json").is_file() {
+            WorkspaceKind::PipeSpace
+        } else {
+            WorkspaceKind::Folder
+        },
+        agent_space: None,
         root: root.clone(),
         folders,
         workspace_file: Some(path.to_path_buf()),
@@ -863,6 +1016,80 @@ mod tests {
         assert_eq!(first.id, second.id, "the same folder is one workspace");
         assert_eq!(first.name, "project");
         assert_eq!(spaces.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_explicit_pm_registration_promotes_a_built_space_to_agent_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        let space_root = project_root.join("spaces/code");
+        std::fs::create_dir_all(space_root.join(".pipebuilder")).unwrap();
+        std::fs::write(
+            space_root.join("pipespace.json"),
+            r#"{"schema":"pipespace.v1"}"#,
+        )
+        .unwrap();
+        std::fs::write(space_root.join(".pipebuilder/lock.json"), "{}").unwrap();
+        let source = space_root.join("code.code-workspace");
+        std::fs::write(&source, r#"{"folders":[{"path":"."}]}"#).unwrap();
+
+        let spaces = workspaces(dir.path()).await;
+        let project = spaces.open(&project_root, None).await.unwrap();
+        assert_eq!(project.kind, Some(WorkspaceKind::Folder));
+
+        let discovered = spaces.open(&source, None).await.unwrap();
+        assert_eq!(discovered.kind, Some(WorkspaceKind::PipeSpace));
+
+        let project_entry = spaces.get(&project.id).await.unwrap();
+        let promoted = spaces
+            .register_agent_space(&source, &project_entry, "s_pm")
+            .await
+            .unwrap();
+        assert_eq!(promoted.id, discovered.id);
+        assert_eq!(promoted.kind, Some(WorkspaceKind::AgentSpace));
+        assert_eq!(
+            promoted.capabilities.as_ref().map(|caps| caps.remove),
+            Some(false)
+        );
+        let binding = spaces.get(&promoted.id).await.unwrap().agent_space.unwrap();
+        assert_eq!(binding.project_workspace_id, project.id);
+        assert_eq!(binding.controller_session_id, "s_pm");
+
+        let reopened = spaces.open(&source, None).await.unwrap();
+        assert_eq!(reopened.kind, Some(WorkspaceKind::AgentSpace));
+        assert!(spaces.remove(&promoted.id).await.is_err());
+        assert!(spaces
+            .remove_agent_space(&promoted.id, "s_other")
+            .await
+            .is_err());
+        let remaining = spaces
+            .remove_agent_space(&promoted.id, "s_pm")
+            .await
+            .unwrap();
+        assert!(!remaining
+            .iter()
+            .any(|workspace| workspace.id == promoted.id));
+        let restored = spaces
+            .register_agent_space(&source, &project_entry, "s_pm")
+            .await
+            .unwrap();
+        assert_eq!(restored.id, promoted.id);
+        assert_eq!(restored.kind, Some(WorkspaceKind::AgentSpace));
+
+        let saved = Config::load(&dir.path().join("config.json")).unwrap();
+        let saved = saved
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == promoted.id)
+            .unwrap();
+        assert_eq!(saved.kind, WorkspaceKind::AgentSpace);
+        assert_eq!(
+            saved
+                .agent_space
+                .as_ref()
+                .map(|binding| binding.controller_session_id.as_str()),
+            Some("s_pm")
+        );
     }
 
     #[tokio::test]
@@ -1485,6 +1712,8 @@ mod tests {
             workspaces: vec![WorkspaceEntry {
                 id: "w_unsafe12345678".into(),
                 name: "  looks-safe\u{202e}but-is-not  ".into(),
+                kind: WorkspaceKind::Folder,
+                agent_space: None,
                 root: project.clone(),
                 folders: vec![WorkspaceFolderEntry {
                     name: "project".into(),

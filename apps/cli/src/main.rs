@@ -20,6 +20,7 @@ const FORWARDED: &[&str] = &[
     "context",
     "capabilities",
     "workspace",
+    "pm",
     "session",
     "agent",
     "shell",
@@ -152,6 +153,8 @@ pub fn usage() -> i32 {
   genet capabilities                static read-only capability surface
   genet workspace list              list local daemon workspaces
   genet workspace show <id>         show one workspace by exact id
+  genet workspace register-agent-space <space.code-workspace>
+                                    PM-only explicit Agent Space registration
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
@@ -167,7 +170,10 @@ pub fn usage() -> i32 {
   genet session context <id>        build bounded, cited context without an LLM
   genet agent list                  agents installed on this machine
   genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>]
+                  [--work-package <id>]
                                     start a session and stream it as JSON Lines
+  genet pm run \"<prompt>\" --workspace <id>
+                                    start or continue the project's PM Agent
   genet <agentId> \"<prompt>\" [...]   the same thing, spelled shorter
   genet shell [--workspace <id>] --cwd <dir> [--env NAME=VALUE]... [--timeout <s>]
               [--max-output <bytes>] -- <command> [args...]

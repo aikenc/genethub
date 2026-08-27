@@ -11,6 +11,7 @@ mod machines;
 pub mod output;
 mod place;
 mod process;
+mod project;
 mod query;
 mod rpc;
 // The local CLI now calls the router in-process. Keep the loopback dialer in
@@ -38,6 +39,7 @@ pub use genet_frontdoor::envelope::{EXIT_FAILED, EXIT_INVALID_ARGS, EXIT_OK, EXI
 
 tokio::task_local! {
     static LOCAL_STATE: Shared;
+    static CALLER_PRINCIPAL: crate::authz::Principal;
     static CALLER_CWD: PathBuf;
     static CALLER_STDIN: Vec<u8>;
     static CLI_IO: CliIo;
@@ -53,6 +55,7 @@ pub struct Invocation {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
+    pub principal: crate::authz::Principal,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -88,11 +91,14 @@ pub async fn invoke(state: Shared, invocation: Invocation, sink: mpsc::Unbounded
     });
     let code = tokio::spawn(LOCAL_STATE.scope(
         state,
-        CALLER_CWD.scope(
-            invocation.cwd,
-            CALLER_STDIN.scope(
-                invocation.stdin,
-                CLI_IO.scope(io, dispatch(invocation.argv)),
+        CALLER_PRINCIPAL.scope(
+            invocation.principal,
+            CALLER_CWD.scope(
+                invocation.cwd,
+                CALLER_STDIN.scope(
+                    invocation.stdin,
+                    CLI_IO.scope(io, dispatch(invocation.argv)),
+                ),
             ),
         ),
     ))
@@ -107,6 +113,12 @@ pub(crate) fn local_state() -> Result<Shared, String> {
     LOCAL_STATE
         .try_with(Arc::clone)
         .map_err(|_| "cli front has no daemon state".to_string())
+}
+
+pub(crate) fn caller_principal() -> Result<crate::authz::Principal, String> {
+    CALLER_PRINCIPAL
+        .try_with(Clone::clone)
+        .map_err(|_| "cli front has no caller identity".to_string())
 }
 
 pub(crate) fn caller_cwd() -> PathBuf {
@@ -177,6 +189,9 @@ async fn dispatch(args: Vec<String>) -> i32 {
         return output::fail(error);
     }
     match args.first().map(String::as_str) {
+        Some("workspace") if args.get(1).map(String::as_str) == Some("register-agent-space") => {
+            Box::pin(project::register_agent_space(&args[1..], &selection)).await
+        }
         Some("schema" | "context" | "capabilities" | "workspace") => {
             Box::pin(query::run(&args, &selection)).await
         }
@@ -189,6 +204,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
             Some(_) => Box::pin(converse::session(&args[1..], &selection)).await,
         },
         Some("agent") => Box::pin(converse::agent(&args[1..], &selection)).await,
+        Some("pm") => Box::pin(converse::pm(&args[1..], &selection)).await,
         Some("shell") => Box::pin(shell::shell(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,

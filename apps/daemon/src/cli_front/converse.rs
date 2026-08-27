@@ -49,6 +49,8 @@ enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
     pub agent_id: Option<String>,
+    pub project_manager: bool,
+    pub work_package_id: Option<String>,
     pub prompt: String,
     pub session_id: Option<String>,
     pub workspace_id: Option<String>,
@@ -86,6 +88,34 @@ pub async fn agent(args: &[String], selection: &Selection) -> i32 {
     match parse_agent(args, selection) {
         Ok(command) => execute(command, selection).await,
         Err(error) => output::fail(error),
+    }
+}
+
+/// `genet pm run …` starts or continues the one PM Agent for a Folder project.
+pub async fn pm(args: &[String], selection: &Selection) -> i32 {
+    match parse_pm(args, selection) {
+        Ok(command) => execute(command, selection).await,
+        Err(error) => output::fail(error),
+    }
+}
+
+fn parse_pm(args: &[String], selection: &Selection) -> Result<Command, CliFailure> {
+    match args.first().map(String::as_str) {
+        Some("run") => match Options::parse(&args[1..], selection) {
+            Ok(options) if options.agent.is_some() || options.work_package.is_some() => {
+                Err(CliFailure::invalid_args(
+                    "genet pm run chooses the built-in PM profile; do not pass --agent or --work-package",
+                ))
+            }
+            Ok(options) => options.into_run(None).map(|mut run| {
+                run.project_manager = true;
+                Command::Run(Box::new(run))
+            }),
+            Err(error) => Err(error),
+        },
+        _ => Err(CliFailure::invalid_args(
+            "usage: genet pm run \"<prompt>\" [--workspace <id> | --session <id>]",
+        )),
     }
 }
 
@@ -181,6 +211,7 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
 struct Options {
     positional: Vec<String>,
     agent: Option<String>,
+    work_package: Option<String>,
     session: Option<String>,
     workspace: Option<String>,
     cwd: Option<String>,
@@ -217,6 +248,7 @@ impl Options {
             };
             match argument {
                 "--agent" => options.agent = Some(value()?),
+                "--work-package" => options.work_package = Some(value()?),
                 "--session" => options.session = Some(value()?),
                 "--workspace" => options.workspace = Some(value()?),
                 "--model" => options.model = Some(value()?),
@@ -248,6 +280,11 @@ impl Options {
                 "--workspace and --cwd are two answers to the same question; give one",
             ));
         }
+        if self.session.is_some() && self.work_package.is_some() {
+            return Err(CliFailure::invalid_args(
+                "--work-package creates a new WorkAgent session; continue it with --session only",
+            ));
+        }
         let prompt = self.positional.join(" ").trim().to_string();
         if prompt.is_empty() {
             return Err(CliFailure::invalid_args(
@@ -256,6 +293,8 @@ impl Options {
         }
         Ok(Run {
             agent_id,
+            project_manager: false,
+            work_package_id: self.work_package,
             prompt,
             session_id: self.session,
             workspace_id: self.workspace,
@@ -373,6 +412,12 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         Some(session_id) => attach(rpc, session_id, run.agent_id.as_deref()).await?,
         None => create(rpc, &run, here).await?,
     };
+    if run.project_manager && session.kind != Some(genehub_proto::SessionKind::Pm) {
+        return Err(CliFailure::invalid_args(format!(
+            "session {} is not a PM Agent session",
+            session.id
+        )));
+    }
 
     // Subscribing before sending is what makes the stream gap-free: a turn that
     // starts and finishes between the two calls would otherwise be invisible.
@@ -507,13 +552,35 @@ async fn attach(
 }
 
 async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliFailure> {
-    let agent_id = run
-        .agent_id
-        .clone()
-        .ok_or_else(|| CliFailure::invalid_args("no agent named"))?;
+    let agent_id = if run.project_manager {
+        "genet".to_string()
+    } else {
+        run.agent_id
+            .clone()
+            .ok_or_else(|| CliFailure::invalid_args("no agent named"))?
+    };
     let (workspace_id, cwd) = resolve_workspace(rpc, run, here).await?;
-    let Reply::Session(summary) = rpc
-        .call(Request::SessionCreate {
+    let request = if run.project_manager {
+        Request::ProjectManagerSessionCreate {
+            workspace_id,
+            model_id: run.model_id.clone(),
+            mode_id: run.mode_id.clone(),
+            runtime_values: None,
+            title: run.title.clone(),
+        }
+    } else if let Some(work_package_id) = run.work_package_id.clone() {
+        Request::WorkSessionCreate {
+            workspace_id,
+            work_package_id,
+            agent_id,
+            model_id: run.model_id.clone(),
+            mode_id: run.mode_id.clone(),
+            runtime_values: None,
+            title: run.title.clone(),
+            cwd,
+        }
+    } else {
+        Request::SessionCreate {
             workspace_id,
             agent_id,
             model_id: run.model_id.clone(),
@@ -521,10 +588,9 @@ async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliF
             runtime_values: None,
             title: run.title.clone(),
             cwd,
-        })
-        .await
-        .map_err(query::rpc_error)?
-    else {
+        }
+    };
+    let Reply::Session(summary) = rpc.call(request).await.map_err(query::rpc_error)? else {
         return Err(CliFailure::protocol(
             "the daemon answered session.create with something other than a session",
         ));
@@ -877,6 +943,59 @@ mod tests {
         assert_eq!(run.session_id.as_deref(), Some("s_1"));
         assert_eq!(run.prompt, "carry on");
         assert_eq!(run.agent_id, None);
+    }
+
+    #[test]
+    fn pm_and_workagent_creation_are_distinct_cli_intents() {
+        let pm = run_of(
+            parse_pm(
+                &words(&["run", "--workspace", "w_project", "build the game"]),
+                &selection(None),
+            )
+            .unwrap(),
+        );
+        assert!(pm.project_manager);
+        assert_eq!(pm.agent_id, None);
+        assert_eq!(pm.workspace_id.as_deref(), Some("w_project"));
+
+        let work = run_of(
+            parse_agent(
+                &words(&[
+                    "run",
+                    "--agent",
+                    "codex",
+                    "--workspace",
+                    "w_space",
+                    "--work-package",
+                    "wp-1",
+                    "implement",
+                ]),
+                &selection(None),
+            )
+            .unwrap(),
+        );
+        assert!(!work.project_manager);
+        assert_eq!(work.work_package_id.as_deref(), Some("wp-1"));
+
+        assert!(parse_pm(
+            &words(&["run", "--agent", "codex", "manage"]),
+            &selection(None),
+        )
+        .is_err());
+        assert!(parse_agent(
+            &words(&[
+                "run",
+                "--agent",
+                "codex",
+                "--session",
+                "s_1",
+                "--work-package",
+                "wp-1",
+                "continue",
+            ]),
+            &selection(None),
+        )
+        .is_err());
     }
 
     fn request(

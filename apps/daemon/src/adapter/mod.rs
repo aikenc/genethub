@@ -32,6 +32,10 @@ use crate::config::ProviderConfig;
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub session_id: String,
+    /// Present only for the built-in PM session. The native CLI forwards it to
+    /// the daemon as a session-bound caller credential; WorkAgent and ordinary
+    /// sessions never receive it.
+    pub project_manager_token: Option<String>,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
@@ -348,6 +352,14 @@ pub(super) fn apply_session_environment(
     config: &SessionConfig,
 ) {
     command.env("GENEHUB_SESSION_ID", &config.session_id);
+    match &config.project_manager_token {
+        Some(token) => {
+            command.env("GENEHUB_PM_TOKEN", token);
+        }
+        None => {
+            command.env_remove("GENEHUB_PM_TOKEN");
+        }
+    }
     match &config.front_door_cli {
         Some(path) => {
             command.env("GENEHUB_CLI", path);
@@ -593,6 +605,7 @@ mod tests {
         let mut command = crate::os_process::Command::new("agent");
         let config = SessionConfig {
             session_id: "s-bound".into(),
+            project_manager_token: None,
             cwd: PathBuf::from("/workspace"),
             model_id: None,
             mode_id: None,
@@ -621,5 +634,25 @@ mod tests {
             Some(&Some("/opt/genehub/genet-beta".into()))
         );
         assert_eq!(env.get("GENEHUB_SESSION_ID"), Some(&Some("s-bound".into())));
+        assert_eq!(env.get("GENEHUB_PM_TOKEN"), Some(&None));
+
+        let mut pm_command = crate::os_process::Command::new("agent");
+        let mut pm_config = config;
+        pm_config.project_manager_token = Some("session-bound-token".into());
+        apply_session_environment(&mut pm_command, &pm_config);
+        let pm_env: std::collections::BTreeMap<_, _> = pm_command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pm_env.get("GENEHUB_PM_TOKEN"),
+            Some(&Some("session-bound-token".into()))
+        );
     }
 }

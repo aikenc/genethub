@@ -56,13 +56,15 @@ pub async fn hub_status() -> Option<Value> {
 async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
     let (url, _) = admission()?;
     let cwd = caller_cwd();
+    let mut body = serde_json::json!({
+        "argv": argv,
+        "cwd": cwd,
+    });
+    add_project_manager_identity(&mut body);
     let response = Client::new()
         .post(&url)
         .timeout(Duration::from_secs(15))
-        .json(&serde_json::json!({
-            "argv": argv,
-            "cwd": cwd,
-        }))
+        .json(&body)
         .send()
         .await
         .map_err(|error| format!("the local daemon did not accept /cli: {error}"))?;
@@ -98,6 +100,7 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         use base64::Engine;
         body["stdin"] = serde_json::json!(base64::engine::general_purpose::STANDARD.encode(stdin));
     }
+    add_project_manager_identity(&mut body);
     let response = Client::builder()
         .build()
         .map_err(|error| format!("build http client: {error}"))?
@@ -143,6 +146,22 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         apply(&record, &mut exit);
     }
     exit.ok_or_else(|| "the daemon closed /cli without an exit record".to_string())
+}
+
+fn add_project_manager_identity(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if let Ok(session_id) = std::env::var("GENEHUB_SESSION_ID") {
+        if !session_id.trim().is_empty() {
+            object.insert("callerSessionId".into(), Value::String(session_id));
+        }
+    }
+    if let Ok(token) = std::env::var("GENEHUB_PM_TOKEN") {
+        if !token.trim().is_empty() {
+            object.insert("projectManagerToken".into(), Value::String(token));
+        }
+    }
 }
 
 fn apply(record: &CliRecord, exit: &mut Option<i32>) {

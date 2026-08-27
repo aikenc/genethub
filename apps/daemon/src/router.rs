@@ -80,13 +80,22 @@ fn failed(error: anyhow::Error) -> Handled {
         ErrorCode::Forbidden
     } else if message.contains("Asset Preview base URL") {
         ErrorCode::BadRequest
-    } else if message.contains("escapes the workspace")
+    } else if message.contains("WorkAgent session is read-only")
+        || message.contains("PM Agent session is retained")
+        || message.contains("requires a project manager")
+        || message.contains("belongs to another project manager")
+        || message.contains("can only be reactivated by its project manager")
+        || message.contains("Agent Spaces are retained")
         || message.contains("not a member of this workspace")
         || message.contains("workspace path is not canonical")
         || message.contains("must name its root handle")
+        || message.contains("escapes the workspace")
     {
         ErrorCode::Forbidden
-    } else if message.contains("already running") {
+    } else if message.contains("already running")
+        || message.contains("already has an active PM Agent")
+        || message.contains("already has a session in this Agent Space")
+    {
         ErrorCode::Conflict
     } else if message.contains("no such") || message.contains("does not exist") {
         ErrorCode::NotFound
@@ -129,7 +138,16 @@ pub async fn handle(
     request: Request,
 ) -> Handled {
     let operation = diagnostic_operation(&request);
-    let handled = dispatch(state, transport, caller, request).await;
+    let handled = match crate::work_session::authorization::authorize(
+        &state.sessions,
+        caller,
+        &request,
+    )
+    .await
+    {
+        Ok(()) => dispatch(state, transport, caller, request).await,
+        Err(error) => failed(error),
+    };
     if let Some(operation) = operation {
         let (outcome, code) = match &handled.reply {
             Ok(_) => ("ok", None),
@@ -243,6 +261,110 @@ async fn dispatch(
                 .create(
                     &workspace_id,
                     start_in,
+                    &agent_id,
+                    model_id,
+                    mode_id,
+                    runtime_values.unwrap_or_default(),
+                    title,
+                )
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::ProjectManagerSessionCreate {
+            workspace_id,
+            model_id,
+            mode_id,
+            runtime_values,
+            title,
+        } => {
+            if transport != TransportKind::Loopback
+                || !matches!(caller, crate::authz::Principal::LocalUser)
+            {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "the PM Agent MVP can only be started by the local user",
+                );
+            }
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            if workspace.kind != genehub_proto::WorkspaceKind::Folder {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "a PM project must start from a Folder workspace",
+                );
+            }
+            match state
+                .sessions
+                .create_project_manager(
+                    &workspace_id,
+                    workspace.root,
+                    model_id,
+                    mode_id,
+                    runtime_values.unwrap_or_default(),
+                    title,
+                )
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkSessionCreate {
+            workspace_id,
+            work_package_id,
+            agent_id,
+            model_id,
+            mode_id,
+            runtime_values,
+            title,
+            cwd,
+        } => {
+            let Some(controller_session_id) = caller.project_manager_session_id() else {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "creating a WorkAgent session requires a project manager",
+                );
+            };
+            let controller = match state.sessions.summary(controller_session_id).await {
+                Ok(summary) => summary,
+                Err(error) => return failed(error),
+            };
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let Some(binding) = workspace.agent_space.as_ref() else {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "work sessions can only be created in an Agent Space",
+                );
+            };
+            if binding.controller_session_id != controller_session_id
+                || binding.project_workspace_id != controller.workspace_id
+            {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "this Agent Space belongs to another project manager",
+                );
+            }
+            let start_in = match resolve_session_cwd(&workspace, cwd.as_deref()) {
+                Ok(start_in) => start_in,
+                Err(error) => return failed(error),
+            };
+            match state
+                .sessions
+                .create_work_session(
+                    &workspace_id,
+                    start_in,
+                    &work_package_id,
+                    controller_session_id,
                     &agent_id,
                     model_id,
                     mode_id,
@@ -1018,6 +1140,31 @@ async fn dispatch(
             }
         }
 
+        Request::WorkspaceRegisterAgentSpace { source } => {
+            let Some(controller_session_id) = caller.project_manager_session_id() else {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "registering an Agent Space requires a project manager",
+                );
+            };
+            let controller = match state.sessions.summary(controller_session_id).await {
+                Ok(summary) => summary,
+                Err(error) => return failed(error),
+            };
+            let project = match state.workspaces.get(&controller.workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match state
+                .workspaces
+                .register_agent_space(Path::new(&source), &project, controller_session_id)
+                .await
+            {
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::WorkspaceCreate { root, name } => {
             let path = Path::new(&root);
             if let Err(error) = std::fs::create_dir_all(path) {
@@ -1033,6 +1180,18 @@ async fn dispatch(
         }
 
         Request::WorkspaceRename { workspace_id, name } => {
+            if let Ok(workspace) = state.workspaces.get(&workspace_id).await {
+                if let Some(binding) = workspace.agent_space.as_ref() {
+                    if caller.project_manager_session_id()
+                        != Some(binding.controller_session_id.as_str())
+                    {
+                        return Handled::err(
+                            ErrorCode::Forbidden,
+                            "renaming an Agent Space requires its project manager",
+                        );
+                    }
+                }
+            }
             match state.workspaces.rename(&workspace_id, &name).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
@@ -1040,6 +1199,10 @@ async fn dispatch(
         }
 
         Request::WorkspaceRemove { workspace_id } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
             let sessions = match state.sessions.list(Some(&workspace_id), true).await {
                 Ok(sessions) => sessions,
                 Err(error) => return failed(error),
@@ -1055,7 +1218,37 @@ async fn dispatch(
                     "stop the workspace's running or waiting sessions before removing it",
                 );
             }
-            match state.workspaces.remove(&workspace_id).await {
+            if workspace.kind == genehub_proto::WorkspaceKind::Folder
+                && sessions
+                    .iter()
+                    .any(|session| session.kind == Some(genehub_proto::SessionKind::Pm))
+            {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "the PM project is retained while its project manager exists",
+                );
+            }
+            let removed = if let Some(binding) = workspace.agent_space.as_ref() {
+                let Some(controller) = caller.project_manager_session_id() else {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "removing an Agent Space requires its project manager",
+                    );
+                };
+                if controller != binding.controller_session_id.as_str() {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "this Agent Space belongs to another project manager",
+                    );
+                }
+                state
+                    .workspaces
+                    .remove_agent_space(&workspace_id, controller)
+                    .await
+            } else {
+                state.workspaces.remove(&workspace_id).await
+            };
+            match removed {
                 Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
                 Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
             }
@@ -1311,6 +1504,22 @@ async fn dispatch(
             Handled::ok(Reply::Ack)
         }
     }
+}
+
+fn resolve_session_cwd(
+    workspace: &crate::config::WorkspaceEntry,
+    cwd: Option<&str>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let Some(cwd) = cwd else {
+        return Ok(workspace.root.clone());
+    };
+    let candidate = std::path::Path::new(cwd);
+    workspace
+        .folders
+        .iter()
+        .find_map(|folder| crate::session::store::ensure_within(&folder.root, candidate).ok())
+        .or_else(|| crate::session::store::ensure_within(&workspace.root, candidate).ok())
+        .ok_or_else(|| anyhow::anyhow!("cwd {cwd} escapes the workspace"))
 }
 
 /// Only operations useful during support triage enter the automatic record.
