@@ -1443,7 +1443,10 @@ impl SessionManager {
     /// all-or-nothing like `round_trunks`.
     pub async fn blobs(&self, session_id: &str, blobs: &[BlobRef]) -> Result<Vec<BlobPayload>> {
         if blobs.len() > MAX_BATCH_GET {
-            bail!("batch too large: {} blobs (max {MAX_BATCH_GET})", blobs.len());
+            bail!(
+                "batch too large: {} blobs (max {MAX_BATCH_GET})",
+                blobs.len()
+            );
         }
         let mut payloads = Vec::with_capacity(blobs.len());
         for blob in blobs {
@@ -6998,7 +7001,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(trunks.len(), 2);
-        assert_eq!(trunks[0].summary.index, 2, "responses align with request order");
+        assert_eq!(
+            trunks[0].summary.index, 2,
+            "responses align with request order"
+        );
         assert_eq!(trunks[1].summary.index, 0);
     }
 
@@ -7016,7 +7022,10 @@ mod tests {
                 }],
             )
             .await;
-        assert!(missing.is_err(), "any unknown locator fails the whole batch");
+        assert!(
+            missing.is_err(),
+            "any unknown locator fails the whole batch"
+        );
 
         let oversized: Vec<TrunkLocator> = (0..65)
             .map(|trunk_index| TrunkLocator {
