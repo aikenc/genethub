@@ -8,6 +8,7 @@ import {
   resolveAgentAvailability,
   resolveAgentPresentation,
 } from "../presentation/catalog/resolve";
+import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 
 export interface ForkMachineOption {
   /** Daemon identity. Unlike routeId, this is stable across connection paths. */
@@ -158,7 +159,6 @@ export function ForkDialog({
   const native = Boolean(
     unchanged && hasNativeCheckpoint && selectedAgent?.capabilities.fork,
   );
-  const currentUnavailable = unchanged && !native;
   const valid = Boolean(
     selectedMachine.online !== false &&
       selectedWorkspace &&
@@ -185,7 +185,7 @@ export function ForkDialog({
           <div className="min-w-0 flex-1">
             <h2 id="fork-title" className="font-medium text-fg">Fork 会话</h2>
             <p className="text-xs text-faint">
-              保持全部目标不变时走原生 Fork；切换 Agent、机器或工作区会重建会话。
+              当前 Agent 有原生 checkpoint 时走原生 Fork；否则重建会话，包括 Fork 回原 Agent。
             </p>
           </div>
           <button
@@ -240,16 +240,36 @@ export function ForkDialog({
             {loadingCatalog ? (
               <p className="mt-2 text-xs text-faint">正在读取目标机器…</p>
             ) : catalog.workspaces.length > 0 ? (
-              <select
+              <div
+                role="listbox"
                 aria-label="目标工作区"
-                value={selectedWorkspaceId}
-                onChange={(event) => setSelectedWorkspaceId(event.target.value)}
-                className="mt-2 w-full rounded-xl border border-line bg-raised px-3 py-2 text-sm text-fg outline-none focus:border-accent"
+                className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
               >
-                {catalog.workspaces.map((workspace) => (
-                  <option key={workspace.id} value={workspace.id}>{workspace.name} — {workspace.root}</option>
-                ))}
-              </select>
+                {catalog.workspaces.map((workspace) => {
+                  const selected = workspace.id === selectedWorkspaceId;
+                  return (
+                    <button
+                      key={workspace.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      title={workspace.root}
+                      onClick={() => setSelectedWorkspaceId(workspace.id)}
+                      className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left text-sm ${
+                        selected
+                          ? "bg-accent/10 text-fg"
+                          : "text-muted hover:bg-raised hover:text-fg"
+                      }`}
+                    >
+                      <WorkspaceIcon workspace={workspace} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-fg">{workspace.name}</span>
+                        <span className="block truncate text-[10px] text-faint">{workspace.root}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             ) : (
               <p className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
                 目标机器没有可用工作区。
@@ -298,21 +318,15 @@ export function ForkDialog({
           {problem ? <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{problem}</p> : null}
 
           <div className={`rounded-xl border px-3 py-3 text-sm ${
-            native
-              ? "border-accent/40 bg-accent/10"
-              : currentUnavailable
-                ? "border-danger/30 bg-danger/10"
-                : "border-line bg-raised/50"
+            native ? "border-accent/40 bg-accent/10" : "border-line bg-raised/50"
           }`}>
             <p className="font-medium text-fg">
-              {native ? "原生分支" : currentUnavailable ? "当前回合不可原生 Fork" : "重建会话"}
+              {native ? "原生分支" : "重建会话"}
             </p>
             <p className="mt-1 text-xs text-muted">
               {native
                 ? "保留当前 Agent 的 checkpoint 和原生线程状态。"
-                : currentUnavailable
-                  ? "当前 Agent 没有这个回合的原生 checkpoint。请选择其他 Agent、机器或工作区。"
-                  : "完整历史仍留在 GeneHub；目标 Agent 接收受预算约束的可见历史胶囊，默认不超过上下文窗口的 35%。"}
+                : "完整历史仍留在 GeneHub；目标 Agent 接收受预算约束的可见历史胶囊，默认不超过上下文窗口的 35%。没有原生 Fork 的 Agent 也会走这条路径。"}
             </p>
           </div>
         </div>
@@ -328,7 +342,7 @@ export function ForkDialog({
           </button>
           <button
             type="button"
-            disabled={busy || loadingCatalog || !valid || currentUnavailable}
+            disabled={busy || loadingCatalog || !valid}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => {
               setBusy(true);

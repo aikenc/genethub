@@ -590,6 +590,8 @@ describe("switching from the sidebar", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Fork" }));
     await userEvent.click(await screen.findByRole("radio", { name: "工作机" }));
     expect(await screen.findByRole("option", { name: /Remote/ })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
+    expect(useWorkbench.getState().activeSessionId).toBe("source-session");
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
 
     await waitFor(() => expect(sourceCalls).toContainEqual({
@@ -606,6 +608,150 @@ describe("switching from the sidebar", () => {
     await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("forked-session"));
     expect(openTarget).toHaveBeenCalledWith("m_far", { remember: false });
     expect(openTarget).toHaveBeenCalledWith("m_far");
+  });
+
+  it("sends an explicit target so a non-native Agent can Fork back to itself", async () => {
+    const sourceSession: SessionSummary = {
+      id: "cursor-session",
+      workspaceId: "source-workspace",
+      agentId: "cursor",
+      title: "Investigate",
+      status: "idle",
+      createdAtMs: 1,
+      updatedAtMs: 2,
+      archived: false,
+    };
+    const forkedSession: SessionSummary = {
+      ...sourceSession,
+      id: "cursor-fork",
+      title: "Investigate · 分支",
+      updatedAtMs: 3,
+    };
+    const workspace: WorkspaceInfo = {
+      id: "source-workspace",
+      name: "Source",
+      root: "/work/source",
+      isGitRepo: true,
+      folders: [],
+    };
+    const cursor: AgentInfo = {
+      id: "cursor",
+      label: "Cursor",
+      builtin: false,
+      probe: { state: "ready" },
+      capabilities: {
+        interrupt: false,
+        setModel: false,
+        setMode: false,
+        setEffort: false,
+        permissions: false,
+        resume: false,
+        fork: false,
+        attachments: false,
+      },
+      catalog: { models: [], modes: [], commands: [] },
+    };
+    const items: TimelineItem[] = [
+      { type: "userMessage", id: "u1", text: "继续实现", attachments: [] },
+      {
+        type: "turnSummary",
+        id: "summary-1",
+        stats: {
+          turnId: "turn-1",
+          outcome: "completed",
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          durationMs: 1,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            llmRounds: 1,
+            toolOutputTokens: 0,
+            compactionCount: 0,
+            outputRateEstimated: false,
+          },
+          toolCalls: 0,
+        },
+      },
+    ];
+    const calls: Request[] = [];
+    const client = {
+      connectionState: "ready",
+      identity: { machineId: "m_here" },
+      connect() {},
+      close() {},
+      onStateChange: () => () => {},
+      onNotice: () => () => {},
+      onUpdateDownload: () => () => {},
+      onBackgroundProcesses: () => () => {},
+      onEvent: () => () => {},
+      onPty: () => () => {},
+      call: async (request: Request): Promise<Reply | null> => {
+        calls.push(request);
+        switch (request.type) {
+          case "agent.list":
+            return { type: "agents", data: [cursor] };
+          case "workspace.list":
+            return { type: "workspaces", data: [workspace] };
+          case "session.list":
+            return { type: "sessions", data: [sourceSession] };
+          case "session.fork":
+            return { type: "session", data: forkedSession };
+          default:
+            return null;
+        }
+      },
+      subscribe: async (sessionId: string) => ({
+        snapshot: {
+          seq: 0,
+          items,
+          pendingPermissions: [],
+          summary: sessionId === forkedSession.id ? forkedSession : sourceSession,
+        },
+        replayed: [],
+        reset: true,
+      }),
+      unsubscribe: async () => {},
+    } as never;
+    const connect = vi.fn(() => client);
+    useWorkbench.setState({
+      activeSessionId: null,
+      sessions: [],
+      draft: null,
+      client: null,
+    });
+    render(
+      <App
+        host={host({
+          targets: async () => [
+            {
+              id: "local",
+              deviceHandle: "m_here",
+              label: "这台电脑",
+              kind: "local",
+              online: true,
+            },
+          ],
+        })}
+        connect={connect}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Fork" }));
+    expect(screen.getByText("重建会话")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
+
+    await waitFor(() => expect(calls).toContainEqual({
+      type: "session.fork",
+      payload: {
+        sessionId: "cursor-session",
+        turnId: "turn-1",
+        target: { agentId: "cursor", workspaceId: "source-workspace" },
+      },
+    }));
+    await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("cursor-fork"));
   });
 
   it("does not drag someone home because the local daemon restarted", async () => {

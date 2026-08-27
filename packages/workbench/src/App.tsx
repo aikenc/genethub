@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HistoryCoverage } from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
@@ -445,7 +445,7 @@ export function App({
     });
   }, [pendingForkSession, workbench.connection, workbench.sessions]);
 
-  const pickTarget = (picked: Target, next: Endpoint) => {
+  const pickTarget = useCallback((picked: Target, next: Endpoint) => {
     // The local machine goes back to following the shell, which is the only
     // thing that knows where its daemon moved to.
     setTarget(picked.kind === "local" ? null : picked.id);
@@ -455,123 +455,120 @@ export function App({
     setEndpoint((current) =>
       current !== "loading" && current?.url === next.url ? current : next,
     );
-  };
+  }, []);
 
   const sourceMachineId = workbench.client?.identity?.machineId ?? "current";
-  const sourceMachine: ForkMachineOption = {
-    id: sourceMachineId,
-    routeId: target ?? sourceMachineId,
-    label:
-      endpoint !== "loading" && endpoint !== null ? endpoint.label : "当前机器",
-    kind: target === null && host.kind === "desktop" ? "local" : "remote",
-    online: workbench.connection === "ready",
-  };
-  const forkController: ForkController | undefined =
-    host.targets && host.openTarget
-      ? {
-          sourceMachine,
-          async listMachines() {
-            const listed = await host.targets!();
-            const machines = listed.map((machine): ForkMachineOption => ({
-              id: machine.deviceHandle ?? machine.id,
-              routeId: machine.id,
-              label: machine.label,
-              kind: machine.kind,
-              ...(machine.online === undefined ? {} : { online: machine.online }),
-            }));
-            const current = machines.find((machine) => machine.id === sourceMachine.id);
-            if (current) {
-              current.label = sourceMachine.label;
-              current.online = true;
-            } else {
-              machines.unshift(sourceMachine);
-            }
-            return machines;
-          },
-          async loadCatalog(machine) {
-            if (machine.id === sourceMachine.id) {
-              const state = useWorkbench.getState();
-              return { agents: state.agents, workspaces: state.workspaces };
-            }
-            return withForkClient(
-              connect,
-              await host.openTarget!(machine.routeId, { remember: false }),
-              async () => dialOf(await host.openTarget!(machine.routeId, { remember: false })),
-              async (client) => {
-                const [agents, workspaces] = await Promise.all([
-                  client.call({ type: "agent.list" }),
-                  client.call({ type: "workspace.list" }),
-                ]);
-                if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-                  throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
-                }
-                return { agents: agents.data, workspaces: workspaces.data };
-              },
-            );
-          },
-          async fork(turnId, selection) {
-            const state = useWorkbench.getState();
-            const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
-            if (!source || !state.client) return false;
-            const unchanged =
-              selection.machine.id === sourceMachine.id &&
-              selection.workspaceId === source.workspaceId &&
-              selection.agentId === source.agentId;
-            if (selection.machine.id === sourceMachine.id) {
-              return state.forkSession(
-                turnId,
-                unchanged
-                  ? undefined
-                  : {
-                      agentId: selection.agentId,
-                      workspaceId: selection.workspaceId,
-                    },
-              );
-            }
-
-            const exported = await state.client.call({
-              type: "session.forkExport",
-              payload: { sessionId: source.id, turnId },
-            });
-            if (exported?.type !== "forkTransfer") {
-              throw new Error("源机器没有返回可迁移的 Fork 历史。");
-            }
-            const created = await withForkClient(
-              connect,
-              await host.openTarget!(selection.machine.routeId, { remember: false }),
-              async () => dialOf(
-                await host.openTarget!(selection.machine.routeId, { remember: false }),
-              ),
-              (client) => client.call({
-                type: "session.forkImport",
-                payload: {
-                  transfer: exported.data,
-                  target: {
-                    agentId: selection.agentId,
-                    workspaceId: selection.workspaceId,
-                  },
-                },
-              }),
-            );
-            if (created?.type !== "session") {
-              throw new Error("目标机器没有创建 Fork 会话。");
-            }
-            const next = await host.openTarget!(selection.machine.routeId);
-            setPendingForkSession(created.data.id);
-            pickTarget(
-              {
-                id: selection.machine.routeId,
-                deviceHandle: selection.machine.id,
-                label: selection.machine.label,
-                kind: selection.machine.kind,
-                online: true,
-              },
-              next,
-            );
-            return true;
-          },
+  const sourceMachine = useMemo<ForkMachineOption>(
+    () => ({
+      id: sourceMachineId,
+      routeId: target ?? sourceMachineId,
+      label:
+        endpoint !== "loading" && endpoint !== null ? endpoint.label : "当前机器",
+      kind: target === null && host.kind === "desktop" ? "local" : "remote",
+      online: workbench.connection === "ready",
+    }),
+    [endpoint, host.kind, sourceMachineId, target, workbench.connection],
+  );
+  const forkController = useMemo<ForkController | undefined>(() => {
+    if (!host.targets || !host.openTarget) return undefined;
+    const listTargets = host.targets;
+    const openTarget = host.openTarget;
+    return {
+      sourceMachine,
+      async listMachines() {
+        const listed = await listTargets();
+        const machines = listed.map((machine): ForkMachineOption => ({
+          id: machine.deviceHandle ?? machine.id,
+          routeId: machine.id,
+          label: machine.label,
+          kind: machine.kind,
+          ...(machine.online === undefined ? {} : { online: machine.online }),
+        }));
+        const current = machines.find((machine) => machine.id === sourceMachine.id);
+        if (current) {
+          current.label = sourceMachine.label;
+          current.online = true;
+        } else {
+          machines.unshift(sourceMachine);
         }
-      : undefined;
+        return machines;
+      },
+      async loadCatalog(machine) {
+        if (machine.id === sourceMachine.id) {
+          const state = useWorkbench.getState();
+          return { agents: state.agents, workspaces: state.workspaces };
+        }
+        return withForkClient(
+          connect,
+          await openTarget(machine.routeId, { remember: false }),
+          async () => dialOf(await openTarget(machine.routeId, { remember: false })),
+          async (client) => {
+            const [agents, workspaces] = await Promise.all([
+              client.call({ type: "agent.list" }),
+              client.call({ type: "workspace.list" }),
+            ]);
+            if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
+              throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
+            }
+            return { agents: agents.data, workspaces: workspaces.data };
+          },
+        );
+      },
+      async fork(turnId, selection) {
+        const state = useWorkbench.getState();
+        const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
+        if (!source || !state.client) return false;
+        if (selection.machine.id === sourceMachine.id) {
+          // Always send an explicit target. The daemon still takes the native
+          // path when the same Agent has a checkpoint; omitting target is the
+          // legacy "native only" request and would refuse Cursor-class Agents.
+          return state.forkSession(turnId, {
+            agentId: selection.agentId,
+            workspaceId: selection.workspaceId,
+          });
+        }
+
+        const exported = await state.client.call({
+          type: "session.forkExport",
+          payload: { sessionId: source.id, turnId },
+        });
+        if (exported?.type !== "forkTransfer") {
+          throw new Error("源机器没有返回可迁移的 Fork 历史。");
+        }
+        const created = await withForkClient(
+          connect,
+          await openTarget(selection.machine.routeId, { remember: false }),
+          async () => dialOf(await openTarget(selection.machine.routeId, { remember: false })),
+          (client) => client.call({
+            type: "session.forkImport",
+            payload: {
+              transfer: exported.data,
+              target: {
+                agentId: selection.agentId,
+                workspaceId: selection.workspaceId,
+              },
+            },
+          }),
+        );
+        if (created?.type !== "session") {
+          throw new Error("目标机器没有创建 Fork 会话。");
+        }
+        const next = await openTarget(selection.machine.routeId);
+        setPendingForkSession(created.data.id);
+        pickTarget(
+          {
+            id: selection.machine.routeId,
+            deviceHandle: selection.machine.id,
+            label: selection.machine.label,
+            kind: selection.machine.kind,
+            online: true,
+          },
+          next,
+        );
+        return true;
+      },
+    };
+  }, [connect, host.openTarget, host.targets, pickTarget, sourceMachine]);
 
   if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
   if (claiming !== "idle") {

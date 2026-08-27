@@ -31,6 +31,9 @@ export function ProcessesPanel({ sessionId }: { sessionId?: string }) {
     if (client) void refreshBackgroundProcesses();
   }, [client, refreshBackgroundProcesses]);
 
+  // The daemon deliberately answers the machine-wide question. Narrowing it
+  // here keeps the wire useful for the global view while making a conversation
+  // entry mean exactly that conversation, not its current workspace.
   const processes = sessionId
     ? backgroundProcesses.filter((process) => process.sessionId === sessionId)
     : backgroundProcesses;

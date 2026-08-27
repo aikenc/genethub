@@ -271,7 +271,13 @@ export function TimelineView({
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
                     text={hasRound ? "" : assistantText(turn.items)}
-                    canFork={false}
+                    canFork={canFork}
+                    onFork={() =>
+                      setForkRequest({
+                        turnId: state.activeTurn!,
+                        hasNativeCheckpoint: false,
+                      })
+                    }
                   />
                 ) : null}
               </section>
@@ -343,16 +349,10 @@ export function TimelineView({
           onClose={() => setForkRequest(null)}
           onConfirm={(selection) => {
             if (forkController) return forkController.fork(forkRequest.turnId, selection);
-            const unchanged =
-              selection.machine.id === CURRENT_MACHINE.id &&
-              selection.workspaceId === activeSession.workspaceId &&
-              selection.agentId === activeSession.agentId;
-            return forkSession(
-              forkRequest.turnId,
-              unchanged
-                ? undefined
-                : { agentId: selection.agentId, workspaceId: selection.workspaceId },
-            );
+            return forkSession(forkRequest.turnId, {
+              agentId: selection.agentId,
+              workspaceId: selection.workspaceId,
+            });
           }}
         />
       ) : null}
@@ -1161,10 +1161,10 @@ function TurnFooter({
     (liveItems ? estimateToolOutputTokens(liveItems) : 0);
   const rounds = usage?.llmRounds ?? 0;
   const forkTitle = canFork
-    ? "从这个 turn 创建分支并选择 Agent"
-    : live
-      ? "turn 完成后才能 Fork"
-      : "当前没有可用的目标 Agent";
+    ? live
+      ? "从当前进行中的内容重建分支"
+      : "从这个 turn 创建分支并选择 Agent"
+    : "当前没有可用的目标 Agent";
 
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">

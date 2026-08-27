@@ -8,11 +8,11 @@ import { defaultAgent, useWorkbench } from "./store";
 import { emptyTimeline } from "./timeline";
 
 /**
- * The daemon pushes `titleChanged` once, the moment a session picks up a
- * name (`SessionManager::send`, first message only). A client that ignores
- * the push and only ever reads titles off `session.list`/`session.create`
- * shows "新会话" until something unrelated causes a refetch — this is the bug
- * the user reported as "标题没刷新".
+ * The daemon pushes `titleChanged` when a session is named: first from the
+ * user's first message, then again if an Agent extracts a better title. A
+ * client that ignores the push and only ever reads titles off
+ * `session.list`/`session.create` shows "新会话" until something unrelated
+ * causes a refetch — this is the bug the user reported as "标题没刷新".
  */
 
 const SESSION: SessionSummary = {
@@ -164,6 +164,18 @@ describe("a session's title arriving after the first message", () => {
 
     expect(useWorkbench.getState().sessions.find((s) => s.id === "s2")?.title).toBeUndefined();
     expect(useWorkbench.getState().tabs.find((t) => t.sessionId === "s2")?.title).toBe("新会话");
+  });
+
+  it("replaces a first-prompt title when the agent extracts a better one", async () => {
+    const { client, fire } = stubClient();
+    useWorkbench.setState({ client });
+    await useWorkbench.getState().selectSession("s1");
+
+    fire({ seq: 1, sessionId: "s1", event: { type: "titleChanged", title: "Fix the login redirect" } });
+    fire({ seq: 2, sessionId: "s1", event: { type: "titleChanged", title: "修复登录跳转" } });
+
+    expect(useWorkbench.getState().sessions.find((s) => s.id === "s1")?.title).toBe("修复登录跳转");
+    expect(useWorkbench.getState().tabs.find((t) => t.sessionId === "s1")?.title).toBe("修复登录跳转");
   });
 });
 

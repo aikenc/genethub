@@ -31,8 +31,8 @@ use super::context_seed::{
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, now_ms, title_from, ContextSeedState, ImportedSessionMeta, SessionMeta, Store,
-    SESSION_FORMAT,
+    self, normalize_session_title, now_ms, title_from, ContextSeedState, ImportedSessionMeta,
+    SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -298,6 +298,7 @@ impl SessionManager {
             format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
             title,
+            title_locked: false,
             cwd,
             model_id,
             mode_id,
@@ -326,12 +327,10 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
         let source = self.live(session_id).await?;
-        if matches!(
+        let busy = matches!(
             *source.status.lock().await,
             SessionStatus::Running | SessionStatus::Waiting
-        ) {
-            anyhow::bail!("wait for the current turn to finish before forking");
-        }
+        );
         let source_meta = source.meta.lock().await.clone();
         let source_adapter = self.registry.require(&source_meta.agent_id)?;
         let source_round_id = source
@@ -344,20 +343,7 @@ impl SessionManager {
 
         let (items, checkpoint) = {
             let items = source.items.lock().await;
-            let at = items
-                .iter()
-                .position(|item| {
-                    matches!(
-                        item,
-                        TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id
-                    )
-                })
-                .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
-            let checkpoint = match &items[at] {
-                TimelineItem::TurnSummary { stats, .. } => stats.fork_checkpoint.clone(),
-                _ => unreachable!("the index was selected by the same variant"),
-            };
-            (items[..=at].to_vec(), checkpoint)
+            fork_history(&items, turn_id, busy)?
         };
 
         let explicit_target = target.is_some();
@@ -369,8 +355,10 @@ impl SessionManager {
             effort_id: source_meta.effort_id.clone(),
         });
         let same_agent = target.agent_id == source_meta.agent_id;
+        // A live turn still has usable history, but the agent is mid-prompt.
+        // Reconstruct from the selected boundary instead of asking it to fork.
         let native_candidate =
-            same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
+            !busy && same_agent && source_adapter.capabilities().fork && checkpoint.is_some();
         let native = if native_candidate {
             match self
                 .store
@@ -482,6 +470,7 @@ impl SessionManager {
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
             title,
+            title_locked: source_meta.title_locked,
             cwd: source_meta.cwd,
             model_id,
             mode_id,
@@ -528,12 +517,10 @@ impl SessionManager {
 
     pub async fn fork_export(&self, session_id: &str, turn_id: &str) -> Result<ForkTransfer> {
         let source = self.live(session_id).await?;
-        if matches!(
+        let busy = matches!(
             *source.status.lock().await,
             SessionStatus::Running | SessionStatus::Waiting
-        ) {
-            anyhow::bail!("wait for the current turn to finish before forking");
-        }
+        );
         let meta = source.meta.lock().await.clone();
         let source_round_id = source
             .rounds
@@ -543,19 +530,9 @@ impl SessionManager {
             .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
             .map(|round| round.round_id.clone());
         let items = source.items.lock().await;
-        let at = items
-            .iter()
-            .position(|item| {
-                matches!(item,
-            TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id)
-            })
-            .ok_or_else(|| anyhow!("no completed turn called {turn_id}"))?;
-        let through_boundary = at.saturating_add(1);
-        let portable = items[..=at]
-            .iter()
-            .cloned()
-            .map(portable_fork_item)
-            .collect();
+        let (history, _) = fork_history(&items, turn_id, busy)?;
+        let through_boundary = history.len();
+        let portable = history.into_iter().map(portable_fork_item).collect();
         let (selected, omitted, altered) = bound_imported_items(portable);
         let mut coverage = coverage_for_meta(&meta, through_boundary);
         let prior_omitted = coverage.omitted_item_count;
@@ -678,6 +655,7 @@ impl SessionManager {
                 .title
                 .as_deref()
                 .and_then(|title| title_from(&format!("{title} · 分支"))),
+            title_locked: false,
             cwd,
             model_id,
             mode_id: target.mode_id,
@@ -875,6 +853,7 @@ impl SessionManager {
             format: SESSION_FORMAT,
             agent_id: candidate.agent_id.clone(),
             title: history.title.or(Some(candidate.title)),
+            title_locked: false,
             cwd,
             model_id: None,
             mode_id: None,
@@ -1628,9 +1607,9 @@ impl SessionManager {
             let mut items = live.items.lock().await;
             items.push(item.clone());
         }
-        // A session that already has a name keeps it: the name either came
-        // from the user or from the first thing they said, and neither gets
-        // overwritten by the second message.
+        // A session that already has a name keeps it against later prompts.
+        // An Agent title can still replace a first-prompt label unless the
+        // user locked the name with `rename`.
         let (workspace_id, needs_title) = {
             let meta = live.meta.lock().await;
             (meta.workspace_id.clone(), meta.title.is_none())
@@ -2179,23 +2158,19 @@ impl SessionManager {
 
     /// Gives a session the name the user typed.
     ///
-    /// Safe from being undone: `send` only names a session whose title is
-    /// `None`, so a name set here survives every later message. That property is
-    /// the whole feature — a title overwritten a second after typing it would be
+    /// Safe from being undone: later prompts do not rename a session that
+    /// already has a title, and Agent-extracted titles skip a name typed here
+    /// (`title_locked`). A title overwritten a second after typing it would be
     /// worse than no rename at all.
     pub async fn rename(&self, session_id: &str, title: &str) -> Result<SessionSummary> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err(anyhow!("a session needs a name"));
-        }
-        // Long enough for a sentence, short enough that one session cannot make
-        // the list unreadable for every other one.
-        let title: String = title.chars().take(120).collect();
+        let title =
+            normalize_session_title(title).ok_or_else(|| anyhow!("a session needs a name"))?;
 
         let live = self.live(session_id).await?;
         let summary = {
             let mut meta = live.meta.lock().await;
             meta.title = Some(title.clone());
+            meta.title_locked = true;
             meta.updated_at_ms = now_ms();
             self.store.save_meta(&meta)?;
             meta.summary(*live.status.lock().await)
@@ -2288,6 +2263,29 @@ fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> 
     digest.update([0]);
     digest.update(source_id.as_bytes());
     format!("{:x}", digest.finalize())
+}
+
+fn fork_history(
+    items: &[TimelineItem],
+    turn_id: &str,
+    allow_in_progress: bool,
+) -> Result<(Vec<TimelineItem>, Option<String>)> {
+    if let Some(at) = items.iter().position(|item| {
+        matches!(
+            item,
+            TimelineItem::TurnSummary { stats, .. } if stats.turn_id == turn_id
+        )
+    }) {
+        let checkpoint = match &items[at] {
+            TimelineItem::TurnSummary { stats, .. } => stats.fork_checkpoint.clone(),
+            _ => None,
+        };
+        return Ok((items[..=at].to_vec(), checkpoint));
+    }
+    if allow_in_progress && !items.is_empty() {
+        return Ok((items.to_vec(), None));
+    }
+    Err(anyhow!("no completed turn called {turn_id}"))
 }
 
 fn portable_fork_item(mut item: TimelineItem) -> TimelineItem {
@@ -3302,6 +3300,11 @@ async fn pump_events(
             live.trim_replay(replay_window).await;
         }
 
+        let publish_title = match &event {
+            SessionEvent::TitleChanged { title } => agent_title_would_apply(&live, title).await,
+            _ => true,
+        };
+
         apply(&live, &event).await;
 
         let settle = matches!(
@@ -3329,7 +3332,9 @@ async fn pump_events(
             _ => {}
         }
 
-        live.publish(event).await;
+        if publish_title {
+            live.publish(event).await;
+        }
         if let Some(progress) = tool_progress {
             apply(&live, &progress).await;
             live.publish(progress).await;
@@ -3454,6 +3459,19 @@ fn turn_summary(
     })
 }
 
+/// Whether an Agent-extracted title should replace the current name.
+///
+/// Locked names (the user typed them) stay put. Empty or identical titles
+/// are no-ops so a `title: null` / whitespace update cannot blank the
+/// sidebar, and a repeated extraction does not spam `titleChanged`.
+async fn agent_title_would_apply(live: &Live, title: &str) -> bool {
+    let Some(title) = normalize_session_title(title) else {
+        return false;
+    };
+    let meta = live.meta.lock().await;
+    !meta.title_locked && meta.title.as_deref() != Some(title.as_str())
+}
+
 /// Applies an event to the in-memory timeline.
 async fn apply(live: &Arc<Live>, event: &SessionEvent) {
     match event {
@@ -3570,11 +3588,20 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
-        // Published straight from `SessionManager::send`, never by an agent,
-        // so it never reaches this function's caller in practice — `meta`
-        // is already updated by the time it is published. Listed anyway so
-        // this match stays exhaustive if that ever changes.
-        SessionEvent::TitleChanged { .. } => {}
+        SessionEvent::TitleChanged { title } => {
+            let Some(title) = normalize_session_title(title) else {
+                return;
+            };
+            let mut meta = live.meta.lock().await;
+            if meta.title_locked || meta.title.as_deref() == Some(title.as_str()) {
+                return;
+            }
+            meta.title = Some(title);
+            meta.updated_at_ms = now_ms();
+            if let Err(error) = live.store.save_meta(&meta) {
+                tracing::warn!(error = %error, "failed to persist an agent title");
+            }
+        }
     }
 }
 
@@ -3754,6 +3781,7 @@ mod tests {
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
             title: None,
+            title_locked: false,
             cwd: PathBuf::from("/tmp"),
             model_id: None,
             mode_id: None,
@@ -4580,6 +4608,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_agent_without_native_fork_reconstructs_when_target_is_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "cursor",
+                native_fork: false,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "cursor",
+                Some("model".into()),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(None);
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "cursor".into(),
+                    workspace_id: Some("w1".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fork.agent_id, "cursor");
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_some());
+
+        let error = sessions
+            .fork(&source.id, "source-turn", None, &ProviderMap::new())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("the cursor agent does not support forking"));
+    }
+
+    #[tokio::test]
+    async fn a_running_session_reconstructs_instead_of_native_fork() {
+        let dir = tempfile::tempdir().unwrap();
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = completed_turn(Some("native-checkpoint"));
+        *source_live.status.lock().await = SessionStatus::Running;
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "source-turn",
+                Some(ForkTarget {
+                    agent_id: "source".into(),
+                    workspace_id: None,
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        assert!(sessions.store.load_seed("w1", &fork.id).unwrap().is_some());
+        assert!(sessions
+            .store
+            .load_meta("w1", &fork.id)
+            .unwrap()
+            .persist
+            .is_none());
+        assert!(starts.lock().unwrap().is_empty());
+        assert!(matches!(
+            *source_live.status.lock().await,
+            SessionStatus::Running
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_running_session_can_reconstruct_an_in_progress_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "cursor",
+                native_fork: false,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let source = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "cursor",
+                Some("model".into()),
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let source_live = sessions.live(&source.id).await.unwrap();
+        *source_live.items.lock().await = vec![
+            TimelineItem::UserMessage {
+                id: "user-live".into(),
+                text: "What can you help with?".into(),
+                attachments: Vec::new(),
+            },
+            TimelineItem::AssistantMessage {
+                id: "assistant-live".into(),
+                text: "I can investigate errors".into(),
+            },
+        ];
+        *source_live.status.lock().await = SessionStatus::Waiting;
+
+        let fork = sessions
+            .fork(
+                &source.id,
+                "live-turn",
+                Some(ForkTarget {
+                    agent_id: "cursor".into(),
+                    workspace_id: Some("w1".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                }),
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fork.lineage.unwrap().method,
+            ForkMethod::ReconstructedContext
+        );
+        let items = sessions.store.load_chat("w1", &fork.id).unwrap().items;
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items.last(),
+            Some(TimelineItem::AssistantMessage { text, .. })
+                if text == "I can investigate errors"
+        ));
+
+        let transfer = sessions.fork_export(&source.id, "live-turn").await.unwrap();
+        assert_eq!(transfer.items.len(), 2);
+    }
+
+    #[tokio::test]
     async fn import_discovery_is_opaque_two_stage_and_filters_durable_duplicates() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = SessionManager::new(
@@ -4850,6 +5070,66 @@ mod tests {
         assert!(
             sessions.rename("s1", "   ").await.is_err(),
             "a blank name is a row with nothing on it, and no way back to a real one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_title_replaces_the_first_prompt_title() {
+        let (live, _dir) = live_session(SessionMeta {
+            title: Some("Fix the login redirect".into()),
+            ..meta()
+        });
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "  修复登录跳转  ".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            live.meta.lock().await.title.as_deref(),
+            Some("修复登录跳转")
+        );
+        assert_eq!(
+            live.store.load_meta("w1", "s1").unwrap().title.as_deref(),
+            Some("修复登录跳转"),
+            "the agent title only reached memory, so it is lost on restart"
+        );
+        assert!(
+            !live.meta.lock().await.title_locked,
+            "an extracted title must stay replaceable by a later extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_title_does_not_replace_a_name_the_user_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions.rename("s1", "我起的名字").await.unwrap();
+        let live = sessions.live("s1").await.unwrap();
+
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "Agent 想改的名字".into(),
+            },
+        )
+        .await;
+
+        assert_eq!(live.meta.lock().await.title.as_deref(), Some("我起的名字"));
+        assert!(
+            live.meta.lock().await.title_locked,
+            "rename must lock the name so the next agent title cannot undo it"
+        );
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("我起的名字")
         );
     }
 
