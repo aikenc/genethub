@@ -146,6 +146,11 @@ pub struct SessionMeta {
     /// read back as `Some`, which is the right answer for them.
     #[serde(default)]
     pub title: Option<String>,
+    /// A name the user typed. First-prompt and Agent titles stay unlocked so
+    /// a later Agent extraction can replace the provisional sidebar label.
+    /// Metas written before this existed read back as unlocked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_locked: bool,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
@@ -222,6 +227,7 @@ impl SessionMeta {
             format: header.format,
             agent_id: String::new(),
             title: header.title,
+            title_locked: false,
             cwd,
             model_id: None,
             mode_id: None,
@@ -1492,6 +1498,18 @@ pub fn title_from(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// Trim a session name to the same length `rename` accepts.
+///
+/// Empty after trim stays `None` so an Agent cannot blank a title with
+/// whitespace. ACP `title: null` never arrives here as a string.
+pub fn normalize_session_title(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(120).collect())
+}
+
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -1535,6 +1553,7 @@ mod project_home_tests {
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
             title: Some(id.into()),
+            title_locked: false,
             cwd: cwd.to_path_buf(),
             model_id: None,
             mode_id: None,
@@ -1582,6 +1601,23 @@ mod project_home_tests {
 
         homes.attach_project("w_folder", "folder", root.path());
         assert_eq!(store.list_meta().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_meta_written_before_title_lock_reads_back_unlocked() {
+        let raw = r#"{
+            "id": "s1",
+            "agentId": "genet",
+            "title": "旧会话",
+            "cwd": "/tmp",
+            "modelId": null,
+            "modeId": null,
+            "createdAtMs": 1,
+            "updatedAtMs": 1
+        }"#;
+        let meta: SessionMeta = serde_json::from_str(raw).unwrap();
+        assert!(!meta.title_locked);
+        assert_eq!(meta.title.as_deref(), Some("旧会话"));
     }
 
     #[test]

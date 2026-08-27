@@ -1914,11 +1914,17 @@ fn translate_update(
     state: &mut TurnState,
     events: &broadcast::Sender<SessionEvent>,
 ) {
-    let Some(turn_id) = state.id.clone() else {
-        return;
-    };
     let update = params.get("update").unwrap_or(&Value::Null);
     let Some(kind) = update.get("sessionUpdate").and_then(Value::as_str) else {
+        return;
+    };
+    // Session metadata is not bound to a turn. An Agent may name the
+    // conversation before `session/prompt` starts or after it ends.
+    if kind == "session_info_update" {
+        emit_session_title(update, events);
+        return;
+    }
+    let Some(turn_id) = state.id.clone() else {
         return;
     };
     let emit = |event: SessionEvent| {
@@ -2069,6 +2075,20 @@ fn translate_update(
             }
         }
     }
+}
+
+/// ACP `session_info_update.title`. `null` or whitespace does not clear
+/// an existing name — the manager only applies a non-empty title.
+fn emit_session_title(update: &Value, events: &broadcast::Sender<SessionEvent>) {
+    let Some(title) = update.get("title").and_then(Value::as_str) else {
+        return;
+    };
+    let title = title.trim();
+    if title.is_empty() {
+        return;
+    }
+    let title: String = title.chars().take(120).collect();
+    let _ = events.send(SessionEvent::TitleChanged { title });
 }
 
 /// ACP describes tools by `kind` plus a list of locations and content blocks.
@@ -2671,6 +2691,59 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_session_info_update_becomes_a_title_change() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut turn = state();
+        translate_update(
+            &json!({"update": {
+                "sessionUpdate": "session_info_update",
+                "title": "  修复登录跳转  "
+            }}),
+            &mut turn,
+            &tx,
+        );
+        match &drain(&mut rx)[..] {
+            [SessionEvent::TitleChanged { title }] => assert_eq!(title, "修复登录跳转"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_session_info_update_reaches_us_before_a_turn() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut turn = TurnState::default();
+        translate_update(
+            &json!({"update": {
+                "sessionUpdate": "session_info_update",
+                "title": "夜间构建"
+            }}),
+            &mut turn,
+            &tx,
+        );
+        match &drain(&mut rx)[..] {
+            [SessionEvent::TitleChanged { title }] => assert_eq!(title, "夜间构建"),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_session_info_title_is_ignored() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut turn = state();
+        translate_update(
+            &json!({"update": {"sessionUpdate": "session_info_update", "title": "   "}}),
+            &mut turn,
+            &tx,
+        );
+        translate_update(
+            &json!({"update": {"sessionUpdate": "session_info_update", "title": null}}),
+            &mut turn,
+            &tx,
+        );
+        assert!(drain(&mut rx).is_empty());
     }
 
     #[test]

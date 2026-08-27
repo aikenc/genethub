@@ -29,8 +29,15 @@ function agent(id: string, label: string, fork: boolean, ready = true): AgentInf
   };
 }
 
-function workspace(id: string, name: string): WorkspaceInfo {
-  return { id, name, root: `/work/${id}`, isGitRepo: true, folders: [] };
+function workspace(id: string, name: string, workspaceFile?: string): WorkspaceInfo {
+  return {
+    id,
+    name,
+    root: `/work/${id}`,
+    isGitRepo: true,
+    folders: [],
+    ...(workspaceFile ? { workspaceFile } : {}),
+  };
 }
 
 const sourceMachine: ForkMachineOption = {
@@ -81,28 +88,64 @@ describe("ForkDialog", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("allows a same-Agent reconstruction only after the workspace changes", async () => {
+  it("reconstructs onto the original Agent when native Fork is unavailable", async () => {
+    const onConfirm = vi.fn(async () => true);
     render(
       <ForkDialog
         sourceMachine={sourceMachine}
         sourceWorkspaceId="w1"
-        sourceAgentId="codex"
+        sourceAgentId="cursor"
         sourceCatalog={{
-          agents: [agent("codex", "Codex", true)],
-          workspaces: [workspace("w1", "Source"), workspace("w2", "Destination")],
+          agents: [agent("cursor", "Cursor", false), agent("codex", "Codex", true)],
+          workspaces: [workspace("w1", "GeneHub"), workspace("w2", "Suite", "/work/suite.code-workspace")],
         }}
         hasNativeCheckpoint={false}
+        onClose={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    expect(screen.getByRole("radio", { name: "Cursor" })).toBeChecked();
+    expect(screen.getByText("重建会话")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: /GeneHub/ })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Suite/ }).querySelector("[data-workspace-icon=workspace]")).toBeTruthy();
+
+    await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
+      machine: sourceMachine,
+      workspaceId: "w1",
+      agentId: "cursor",
+    }));
+  });
+
+  it("keeps the workspace list open while the machine roster finishes loading", async () => {
+    let release: (machines: ForkMachineOption[]) => void = () => {};
+    const pending = new Promise<ForkMachineOption[]>((resolve) => {
+      release = resolve;
+    });
+    render(
+      <ForkDialog
+        sourceMachine={sourceMachine}
+        sourceWorkspaceId="w1"
+        sourceAgentId="cursor"
+        sourceCatalog={{
+          agents: [agent("cursor", "Cursor", false)],
+          workspaces: [workspace("w1", "GeneHub"), workspace("w2", "Destination")],
+        }}
+        hasNativeCheckpoint={false}
+        listMachines={() => pending}
         onClose={vi.fn()}
         onConfirm={vi.fn(async () => true)}
       />,
     );
 
-    expect(screen.getByText("当前回合不可原生 Fork")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeDisabled();
-
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: "目标工作区" }), "w2");
-    expect(screen.getByText("重建会话")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: /Destination/ })).toBeInTheDocument();
+    release([sourceMachine]);
+    await waitFor(() => expect(screen.queryByText("正在读取机器列表…")).not.toBeInTheDocument());
+    expect(screen.getByRole("option", { name: /Destination/ })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "目标工作区" })).toBeInTheDocument();
   });
 
   it("loads only the selected machine's existing workspaces and Agents", async () => {
