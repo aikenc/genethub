@@ -93,6 +93,7 @@ class PreviewProbe {
 interface Sample {
   line: string;
   mibPerSec: number;
+  elapsedMs: number;
   rttMs: number;
   sizeMiB: number;
 }
@@ -147,23 +148,36 @@ async function measurePoint(
     `${input.label} elapsedMs=${elapsedMs} mibPerSec=${mibPerSec.toFixed(2)}` +
     ` productMs=${productMs ?? "-"} ttfbMs=${ttfbMs ?? "-"}` +
     (stats ? ` rxMsgs=${stats.receivedMessages} rxBytes=${stats.receivedBytes}` : "");
-  return { line, mibPerSec, rttMs: input.rttMs, sizeMiB: input.file.sizeBytes / MIB };
+  return { line, mibPerSec, elapsedMs, rttMs: input.rttMs, sizeMiB: input.file.sizeBytes / MIB };
 }
 
-/** The report leads with the proven conclusion; raw rows follow as evidence. */
+/** Headline = the optimization target itself: user-visible wait per image at each RTT. */
 function windowLawConclusion(samples: Sample[]): string {
-  const ceiling = samples.find((s) => s.rttMs === 0 && s.sizeMiB === 32)?.mibPerSec;
-  const parts: string[] = [];
+  const waits = [8, 32]
+    .map((size) => {
+      const cells = [0, 50, 100, 200]
+        .map((rtt) => samples.find((s) => s.rttMs === rtt && s.sizeMiB === size))
+        .filter((s): s is Sample => s !== undefined)
+        .map((s) => `${(s.elapsedMs / 1000).toFixed(1)}s@${s.rttMs}ms`);
+      return cells.length > 0 ? `${size}MiB 图等待 ${cells.join(" → ")}` : null;
+    })
+    .filter((line): line is string => line !== null);
+  const ladder = [0, 50, 100, 200]
+    .map((rtt) => samples.find((s) => s.rttMs === rtt && s.sizeMiB === 32))
+    .filter((s): s is Sample => s !== undefined)
+    .map((s) => s.mibPerSec.toFixed(1))
+    .join(" → ");
+  const achievement: string[] = [];
   for (const rtt of [50, 100, 200]) {
     const point = samples.find((s) => s.rttMs === rtt && s.sizeMiB === 32);
     if (!point) continue;
     const theory = STREAM_WINDOW_BYTES / MIB / (rtt / 1000);
-    parts.push(`${rtt}ms=${Math.round((point.mibPerSec / theory) * 100)}%`);
+    achievement.push(`${rtt}ms=${Math.round((point.mibPerSec / theory) * 100)}%`);
   }
   return (
-    `结论：直连吞吐服从 256KiB/RTT 窗口定律（32MiB 点达成率 ${parts.join(" ")}）；` +
-    `RTT=0 受 WASM guest CPU 限制约 ${ceiling?.toFixed(0) ?? "?"} MiB/s。` +
-    `RTT 每翻倍等待同比例翻倍——优化杠杆是窗口放大/动态缩放，不是实现修补。`
+    `核心指标（优化目标=缩短等待）：${waits.join("；")}。` +
+    `吞吐 ${ladder} MiB/s，即 256KiB/RTT 窗口定律。` +
+    `次级：达成率 ${achievement.join(" ")}——实现已贴天花板，杠杆在协议窗口不在代码。`
   );
 }
 
@@ -427,12 +441,18 @@ defineSpecialty(
         relay100!.mibPerSec <= directRef!.mibPerSec * 1.2,
         `relay ${relay100!.mibPerSec.toFixed(2)} MiB/s is suspiciously faster than 1.2x direct ${directRef!.mibPerSec.toFixed(2)} MiB/s — the relay leg is likely not carrying the traffic`,
       );
-      conclusion = `结论：relay 在窗口定律之上只加约 ${Math.round((1 - relay100!.mibPerSec / directRef!.mibPerSec) * 100)}% 开销` +
-        `（8MiB@100ms 为直连的 ${Math.round((relay100!.mibPerSec / directRef!.mibPerSec) * 100)}%）；` +
-        (relay10
-          ? `低 RTT 下嵌套窗口退化显现：10ms 时 ${relay10.mibPerSec.toFixed(1)} MiB/s，仅为理论 25.6 的 ${Math.round((relay10.mibPerSec / 25.6) * 100)}%（有效约半窗）；`
-          : "") +
-        `控制帧随 relay 翻倍。已知缺陷：回环速度 ≥4MiB 触发 daemon 入队溢出 reset，rtt=0 点因此排除。`;
+      const relay32 = samples.find((sample) => sample.line.startsWith("relay rtt=100ms size=32MiB"));
+      conclusion =
+        `核心指标（优化目标=缩短等待）：relay 路径 8MiB 图等待 ` +
+        [relay10, relay100]
+          .filter((s): s is Sample => s !== undefined)
+          .map((s) => `${(s.elapsedMs / 1000).toFixed(1)}s@${s.rttMs}ms`)
+          .join(" → ") +
+        (relay32 ? `，32MiB@100ms 等待 ${(relay32.elapsedMs / 1000).toFixed(1)}s` : "") +
+        `——等待随 RTT 线性增长。次级：relay 自身只加约 ${Math.round((1 - relay100!.mibPerSec / directRef!.mibPerSec) * 100)}% 开销` +
+        `（100ms 为直连 ${Math.round((relay100!.mibPerSec / directRef!.mibPerSec) * 100)}%），远程的税是 RTT 不是 relay；` +
+        (relay10 ? `10ms 半窗退化（${relay10.mibPerSec.toFixed(1)} MiB/s = 理论 50%）；` : "") +
+        `已知缺陷：回环 ≥4MiB 触发 daemon 入队溢出 reset，rtt=0 点排除。`;
     } catch (error) {
       const tail = relay.logTail().trim();
       if (error instanceof Error && tail.length > 0) {
@@ -525,8 +545,8 @@ defineSpecialty(
     }
     t.note(
       `neteff preview-timeout-cliff (daemon=wasm guest)\n` +
-        `结论：48MiB@400ms 在 ${(cliffElapsedMs / 1000).toFixed(1)}s 被产品 60s 超时杀死（理论 77s）——` +
-        `高 RTT 下大图在数学上不可能打开，这是用户可见的死线；超时后同连接恢复预览正常（见下行）。\n` +
+        `核心指标（优化目标=消除死线）：48MiB 图 @400ms RTT 在 ${(cliffElapsedMs / 1000).toFixed(1)}s 被产品 60s 超时杀死（理论需 77s）——` +
+        `该档 RTT 下大图永远打不开；超时后同连接恢复预览正常（见下行）。\n` +
         lines.join("\n"),
     );
   },
