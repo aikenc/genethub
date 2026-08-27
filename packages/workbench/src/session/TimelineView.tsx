@@ -17,9 +17,29 @@ import {
   type ForkMachineOption,
   type ForkSelection,
 } from "./ForkDialog";
+import { ForwardDialog } from "./ForwardDialog";
 import { Markdown } from "./Markdown";
 
 import { attachmentPreviewUrl } from "./attachments";
+import {
+  attributeRounds,
+  splitForwardEnvelope,
+  type CapsuleMessage,
+  type ForwardEnvelopeInfo,
+  type ForwardSource,
+} from "./forwardCapsule";
+import {
+  applySelectionAddMany,
+  applySelectionClick,
+  emptySelection,
+  estimateSelectionTokens,
+  isSelectableItem,
+  toSelectable,
+  MAX_FORWARD_SELECTION,
+  type SelectableMessage,
+  type SelectionState,
+} from "./selection";
+import { buildSelectionCopy } from "./selectionCopy";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { ToolCallView } from "./ToolCall";
@@ -155,6 +175,11 @@ export function TimelineView({
     turnId: string;
     hasNativeCheckpoint: boolean;
   } | null>(null);
+  // Selection mode (multi-select + forward/copy). `null` is mode off; the
+  // state machine itself is pure and lives in `selection.ts`.
+  const [selection, setSelection] = useState<SelectionState | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  const [forwardOpen, setForwardOpen] = useState(false);
   const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const roundLayers = useWorkbench((workbench) => workbench.timeline.roundLayers);
@@ -170,6 +195,107 @@ export function TimelineView({
   });
   const turns = turnBlocks(state.items);
   const contextualTurns = contextualizeTurns(turns, rounds, state.items);
+
+  // The selectable bubbles in render order, mirroring exactly what the turns
+  // below paint: narrative items, plus the round's final assistant message.
+  // Selection operates on what is visible, never on collapsed-away items.
+  const selectableByTurn: SelectableMessage[][] = contextualTurns.map(
+    ({ turn, round, finalAssistant }) => {
+      const layerReady = Boolean(round && roundLayers[round.roundId]);
+      const narrative = turnNarrativeItems(turn, Boolean(round), layerReady);
+      const seen = new Set<string>();
+      const selectable: SelectableMessage[] = [];
+      for (const item of [...narrative, ...(finalAssistant ? [finalAssistant] : [])]) {
+        if (!isSelectableItem(item) || seen.has(item.id)) continue;
+        seen.add(item.id);
+        selectable.push(toSelectable(item));
+      }
+      return selectable;
+    },
+  );
+  const selectableOrder = selectableByTurn.flat().map((message) => message.id);
+  const selectableSet = new Set(selectableOrder);
+
+  const toggleSelectable = (id: string) => {
+    setSelection((current) => {
+      if (!current) return current;
+      const step = applySelectionClick(current, id, selectableOrder);
+      setSelectionNotice(step.notice);
+      return step.next;
+    });
+  };
+
+  const selectedCapsuleInput = (): {
+    messages: CapsuleMessage[];
+    involvedRounds: typeof rounds;
+  } => {
+    const selectedIds = selection?.selected ?? new Set<string>();
+    const { roundIdByItem, involved } = attributeRounds(state.items, rounds, selectedIds);
+    const roundById = new Map(rounds.map((round) => [round.roundId, round]));
+    const messages: CapsuleMessage[] = state.items
+      .filter(
+        (item): item is Extract<TimelineItem, { type: "userMessage" | "assistantMessage" }> =>
+          selectedIds.has(item.id) && isSelectableItem(item),
+      )
+      .map((item) => {
+        const roundId = roundIdByItem.get(item.id) ?? null;
+        const owning = roundId ? roundById.get(roundId) : undefined;
+        return {
+          ...toSelectable(item),
+          roundId,
+          atMs: owning
+            ? item.type === "userMessage"
+              ? owning.startedAtMs
+              : owning.endedAtMs || owning.startedAtMs
+            : null,
+        };
+      });
+    return { messages, involvedRounds: involved };
+  };
+
+  const forwardSource = (): ForwardSource => {
+    const session = sessions.find((entry) => entry.id === activeSessionId);
+    const agent = agents.find((entry) => entry.id === session?.agentId);
+    const span =
+      rounds.length > 0
+        ? {
+            start: rounds[0]!.startedAtMs,
+            end: rounds[rounds.length - 1]!.endedAtMs || rounds[rounds.length - 1]!.startedAtMs,
+          }
+        : null;
+    return {
+      sessionId: activeSessionId ?? "",
+      agentLabel: agent?.label ?? session?.agentId ?? null,
+      sessionTitle: session?.title ?? null,
+      spanMs: span,
+    };
+  };
+
+  const copySelection = async () => {
+    if (!selection || selection.selected.size === 0) return;
+    const { messages } = selectedCapsuleInput();
+    const source = forwardSource();
+    const built = buildSelectionCopy(
+      {
+        sessionId: source.sessionId,
+        agentLabel: source.agentLabel,
+        spanMs: source.spanMs,
+      },
+      messages,
+    );
+    if (
+      built.exceedsSoftLimit &&
+      !window.confirm("复制内容超过 200k 字符，可能不适合粘贴到输入框。仍要复制吗？")
+    ) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(built.text);
+      setSelectionNotice(`已复制 ${messages.length} 条`);
+    } catch {
+      setSelectionNotice("复制失败：浏览器拒绝了剪贴板访问");
+    }
+  };
 
   pinnedRef.current = pinned;
 
@@ -192,6 +318,18 @@ export function TimelineView({
     const element = scroller.current;
     if (pinned && element) element.scrollTo?.({ top: element.scrollHeight });
   }, [pinned, bottomInset]);
+
+  useEffect(() => {
+    if (!selection) return;
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || forwardOpen) return;
+      event.preventDefault();
+      setSelection(null);
+      setSelectionNotice(null);
+    };
+    document.addEventListener("keydown", dismiss);
+    return () => document.removeEventListener("keydown", dismiss);
+  }, [selection, forwardOpen]);
 
   const returnToBottom = () => {
     const element = scroller.current;
@@ -232,18 +370,83 @@ export function TimelineView({
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
             const layerReady = Boolean(round && roundLayers[round.roundId]);
-            const narrative =
-              !layerReady
-                ? turn.items
-                : turn.items.filter(
-                    (item) =>
-                      item.type !== "reasoning" &&
-                      item.type !== "toolCall" &&
-                      (!hasRound || item.type !== "assistantMessage"),
-                  );
+            const narrative = turnNarrativeItems(turn, hasRound, layerReady);
+            // A turn still in flight is not selectable: its items are still
+            // being written, and a capsule built from them would go stale
+            // before it was ever reviewed.
+            const liveTurn =
+              index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
+            const turnSelectable = selectableByTurn[index] ?? [];
+            const renderItem = (item: TimelineItem) => {
+              if (!selection || !selectableSet.has(item.id)) {
+                return <Item key={item.id} item={item} />;
+              }
+              const checked = selection.selected.has(item.id);
+              return (
+                <div
+                  key={item.id}
+                  role="checkbox"
+                  aria-checked={checked}
+                  aria-disabled={liveTurn}
+                  tabIndex={liveTurn ? -1 : 0}
+                  className={`flex items-start gap-2 rounded-lg transition-colors ${
+                    liveTurn
+                      ? "cursor-not-allowed opacity-50"
+                      : "cursor-pointer hover:bg-surface/60"
+                  } ${checked ? "bg-accent/5" : ""} ${
+                    selection.anchor === item.id
+                      ? "ring-1 ring-accent/40 ring-dashed"
+                      : ""
+                  }`}
+                  onClick={() => {
+                    if (!liveTurn) toggleSelectable(item.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (liveTurn) return;
+                    if (event.key === " " || event.key === "Enter") {
+                      event.preventDefault();
+                      toggleSelectable(item.id);
+                    }
+                  }}
+                >
+                  <span
+                    aria-hidden
+                    className={`mt-2 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-[11px] ${
+                      checked
+                        ? "border-accent bg-accent text-on-accent"
+                        : "border-line-strong bg-surface text-transparent"
+                    }`}
+                  >
+                    ✓
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <Item item={item} />
+                  </div>
+                </div>
+              );
+            };
             return (
               <section key={turnSectionKey(turn, index)} className="space-y-4">
-                {narrative.map((item) => <Item key={item.id} item={item} />)}
+                {selection && turnSelectable.length > 0 ? (
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      disabled={liveTurn}
+                      className="text-xs text-accent underline decoration-dotted disabled:opacity-50"
+                      onClick={() => {
+                        const step = applySelectionAddMany(
+                          selection,
+                          turnSelectable.map((message) => message.id),
+                        );
+                        setSelection(step.next);
+                        setSelectionNotice(step.notice);
+                      }}
+                    >
+                      选择整个 Turn（{turnSelectable.length} 条）
+                    </button>
+                  </div>
+                ) : null}
+                {narrative.map((item) => renderItem(item))}
                 {startedRounds.map((startedRound) => (
                   <RoundProgress
                     key={startedRound.roundId}
@@ -251,7 +454,7 @@ export function TimelineView({
                     finalSummaryText={roundFinalText}
                   />
                 ))}
-                {finalAssistant ? <Item item={finalAssistant} /> : null}
+                {finalAssistant ? renderItem(finalAssistant) : null}
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
@@ -337,6 +540,95 @@ export function TimelineView({
           </button>
         </div>
       </div>
+
+      {!selection && selectableOrder.length > 0 ? (
+        <div className="pointer-events-none absolute inset-x-0 top-2 px-4">
+          <div className="mx-auto flex max-w-chat justify-end">
+            <button
+              type="button"
+              className="pointer-events-auto rounded-full border border-line-strong bg-surface/95 px-3 py-1.5 text-xs text-muted shadow-[0_4px_16px_rgb(0_0_0_/0.35)] backdrop-blur hover:text-fg"
+              onClick={() => {
+                setSelection(emptySelection());
+                setSelectionNotice(null);
+              }}
+            >
+              多选
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {selection ? (
+        <div
+          className="absolute inset-x-0 px-4"
+          style={{ bottom: `calc(0.75rem + ${bottomInset}px)` }}
+          data-testid="selection-bar"
+        >
+          <div className="mx-auto max-w-chat rounded-2xl border border-line-strong bg-surface/95 px-4 py-2.5 shadow-[0_8px_30px_rgb(0_0_0_/0.35)] backdrop-blur">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <span className="text-sm text-fg">
+                已选 {selection.selected.size}/{MAX_FORWARD_SELECTION} 条
+              </span>
+              <span className="text-xs text-muted">
+                约 {formatTokenEstimate(
+                  estimateSelectionTokens(
+                    selectableByTurn.flat().filter((message) =>
+                      selection.selected.has(message.id),
+                    ),
+                  ),
+                )}{" "}
+                tokens
+              </span>
+              <span className="min-w-0 flex-1" />
+              <button
+                type="button"
+                disabled={selection.selected.size === 0}
+                className="rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-raised hover:text-fg disabled:opacity-50"
+                onClick={() => void copySelection()}
+              >
+                复制
+              </button>
+              <button
+                type="button"
+                disabled={selection.selected.size === 0}
+                className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-on-accent disabled:opacity-50"
+                onClick={() => setForwardOpen(true)}
+              >
+                转发…
+              </button>
+              <button
+                type="button"
+                className="rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-raised hover:text-fg"
+                onClick={() => {
+                  setSelection(null);
+                  setSelectionNotice(null);
+                }}
+              >
+                取消
+              </button>
+            </div>
+            {selectionNotice ? (
+              <p className="mt-1 text-xs text-muted" role="status">
+                {selectionNotice}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {forwardOpen && selection && activeSession ? (
+        <ForwardDialog
+          source={forwardSource()}
+          messages={selectedCapsuleInput().messages}
+          rounds={selectedCapsuleInput().involvedRounds}
+          onClose={() => setForwardOpen(false)}
+          onConfirmed={() => {
+            setForwardOpen(false);
+            setSelection(null);
+            setSelectionNotice(null);
+          }}
+        />
+      ) : null}
       {forkRequest && activeSession ? (
         <ForkDialog
           sourceMachine={forkController?.sourceMachine ?? CURRENT_MACHINE}
@@ -457,9 +749,41 @@ function CompactionMarker({ reason }: { reason: string }) {
   );
 }
 
+/**
+ * A forwarded capsule parked in a user message renders as a collapsed card,
+ * not a text wall (proposal §3.6). The full text is one tap away.
+ */
+function ForwardedHistoryCard({ text, info }: { text: string; info: ForwardEnvelopeInfo }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="max-w-[80%] rounded-xl border border-line bg-surface px-3 py-2">
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 text-left text-xs text-muted hover:text-fg"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+      >
+        <span aria-hidden>↪</span>
+        <span className="min-w-0 flex-1 truncate">
+          转发的会话历史
+          {info.messageCount !== null ? ` · ${info.messageCount} 条` : ""}
+          {info.sourceSessionId ? ` · 来自 ${info.sourceSessionId}` : ""}
+        </span>
+        <span className="shrink-0 text-faint">{open ? "收起" : "展开"}</span>
+      </button>
+      {open ? (
+        <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-line bg-raised/50 p-2 font-mono text-[11px] whitespace-pre-wrap text-muted">
+          {text}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
 function Item({ item }: { item: TimelineItem }) {
   switch (item.type) {
-    case "userMessage":
+    case "userMessage": {
+      const forwarded = splitForwardEnvelope(item.text);
       return (
         <div className="flex flex-col items-end gap-1.5">
           {item.attachments.length > 0 ? (
@@ -477,13 +801,21 @@ function Item({ item }: { item: TimelineItem }) {
               })}
             </div>
           ) : null}
-          {item.text ? (
+          {forwarded ? <ForwardedHistoryCard text={forwarded.capsule} info={forwarded.info} /> : null}
+          {forwarded ? (
+            forwarded.rest ? (
+              <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
+                {forwarded.rest}
+              </p>
+            ) : null
+          ) : item.text ? (
             <p className="max-w-[80%] whitespace-pre-wrap rounded-2xl bg-accent px-3 py-2 text-white">
               {item.text}
             </p>
           ) : null}
         </div>
       );
+    }
 
     case "assistantMessage":
       return (
@@ -556,6 +888,29 @@ function useCardOpen(defaultOpen: boolean): {
   const [manualOpen, setManualOpen] = useState<boolean | null>(null);
   const open = manualOpen ?? defaultOpen;
   return { open, toggle: () => setManualOpen(!open) };
+}
+
+function formatTokenEstimate(tokens: number): string {
+  return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
+}
+
+/**
+ * What a turn paints as its narrative flow. When the round layer is ready,
+ * process items (reasoning/tool calls) live in the round's cards and all but
+ * the final assistant message collapse into it.
+ */
+function turnNarrativeItems(
+  turn: TurnBlock,
+  hasRound: boolean,
+  layerReady: boolean,
+): TimelineItem[] {
+  if (!layerReady) return turn.items;
+  return turn.items.filter(
+    (item) =>
+      item.type !== "reasoning" &&
+      item.type !== "toolCall" &&
+      (!hasRound || item.type !== "assistantMessage"),
+  );
 }
 
 function turnBlocks(items: TimelineItem[]): TurnBlock[] {

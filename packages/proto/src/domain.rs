@@ -645,6 +645,15 @@ pub enum BlobKind {
     ToolCall,
 }
 
+/// One trunk's address inside a session's round layer, for batch fetches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct TrunkLocator {
+    pub round_id: String,
+    pub trunk_index: u32,
+}
+
 /// One compact row in a batch. Full source content is fetched by `blob.get`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

@@ -12,7 +12,10 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  BlobPayload,
   BlobRef,
+  RoundTrunk,
+  TrunkLocator,
   SequencedEvent,
   SessionSnapshot,
   SessionImportListing,
@@ -151,6 +154,22 @@ export type ComposerDraftInsert = {
   text: string;
 };
 
+/**
+ * A forward capsule parked on a composer, shown as a removable quote card
+ * rather than poured into the text field. On send the composer prepends
+ * `capsule` to the user's own text, so the user reviews before anything is
+ * sent (proposal §3.5).
+ */
+export type ForwardDraft = {
+  /** `null` is the unstarted conversation's composer. */
+  sessionId: string | null;
+  capsule: string;
+  itemCount: number;
+  estimatedTokens: number;
+  sourceSessionId: string;
+  sourceTitle: string | null;
+};
+
 let composerDraftInsertSequence = 0;
 
 interface WorkbenchState {
@@ -197,6 +216,8 @@ interface WorkbenchState {
   restoreDraft: { text: string; attachments: Attachment[] } | null;
   /** Lines waiting to be appended to a session's composer without sending it. */
   composerDraftInserts: ComposerDraftInsert[];
+  /** The forward capsule parked on a composer, if any. One at a time. */
+  forwardDraft: ForwardDraft | null;
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -347,6 +368,15 @@ interface WorkbenchState {
   appendComposerDraftLine(sessionId: string | null, text: string): void;
   /** Acknowledges that one queued composer insertion has been applied. */
   consumedComposerDraftInsert(id: string): void;
+  /** Parks (or clears, with `null`) the forward capsule on a composer. */
+  setForwardDraft(draft: ForwardDraft | null): void;
+  /**
+   * Batch fetches for the forward dialog's detail fill (proposal §7.0).
+   * Results are also cached into the session's timeline, which the round
+   * layer's own expansion then reuses.
+   */
+  fetchTrunkDetails(sessionId: string, refs: TrunkLocator[]): Promise<RoundTrunk[] | null>;
+  fetchBlobPayloads(sessionId: string, refs: BlobRef[]): Promise<BlobPayload[] | null>;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
   /** Lightweight provider discovery; full history is read only after selection. */
@@ -575,6 +605,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   notice: null,
   restoreDraft: null,
   composerDraftInserts: [],
+  forwardDraft: null,
   hub: null,
   claim: null,
   devices: [],
@@ -1333,6 +1364,52 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }));
   },
 
+  setForwardDraft(draft) {
+    set({ forwardDraft: draft });
+  },
+
+  async fetchTrunkDetails(sessionId, refs) {
+    if (refs.length === 0) return [];
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "round.trunk.batchGet",
+        payload: { sessionId, refs },
+      }),
+    );
+    if (reply?.type !== "roundTrunks") return null;
+    const trunks = reply.data;
+    patchTimeline(sessionId, set, (timeline) => {
+      const roundTrunks = { ...timeline.roundTrunks };
+      // Responses align with request order; the locator's round id is what
+      // the timeline cache key needs, and the payload does not repeat it.
+      for (const [index, trunk] of trunks.entries()) {
+        const roundId = refs[index]?.roundId;
+        if (roundId) roundTrunks[`${roundId}:${trunk.summary.index}`] = trunk;
+      }
+      return { roundTrunks };
+    });
+    return trunks;
+  },
+
+  async fetchBlobPayloads(sessionId, refs) {
+    if (refs.length === 0) return [];
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "blob.batchGet",
+        payload: { sessionId, blobs: refs },
+      }),
+    );
+    if (reply?.type !== "blobs") return null;
+    const payloads = reply.data;
+    patchTimeline(sessionId, set, (timeline) => ({
+      blobs: {
+        ...timeline.blobs,
+        ...Object.fromEntries(payloads.map((payload) => [payload.id, payload])),
+      },
+    }));
+    return payloads;
+  },
+
   async forkSession(turnId, target) {
     const sessionId = get().activeSessionId;
     if (!sessionId) return false;
@@ -1962,6 +2039,11 @@ async function start(
   });
   set((current) => ({
     sessions: [reply.data, ...current.sessions],
+    // A forward capsule parked on the unstarted conversation belongs to the
+    // session that conversation just became; re-key it or the card vanishes.
+    ...(current.forwardDraft?.sessionId === null
+      ? { forwardDraft: { ...current.forwardDraft, sessionId: reply.data.id } }
+      : {}),
     // Seed before `selectSession` so the first paint of the new session still
     // holds the message that is in flight; otherwise subscribe's empty
     // timeline puts Send back until this function patches pending afterwards.

@@ -816,6 +816,12 @@ export function App({
                           (insert) => insert.sessionId === workbench.activeSessionId,
                         ) ?? null
                       }
+                      forwardDraft={
+                        workbench.forwardDraft?.sessionId === workbench.activeSessionId
+                          ? workbench.forwardDraft
+                          : null
+                      }
+                      onClearForwardDraft={() => workbench.setForwardDraft(null)}
                       speech={
                         workbench.client &&
                         workbench.activeWorkspaceId &&

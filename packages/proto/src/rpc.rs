@@ -148,6 +148,22 @@ pub enum Request {
     /// what makes this a seek instead of a scan (`docs/session-storage.md`).
     #[serde(rename = "blob.get", rename_all = "camelCase")]
     BlobGet { session_id: String, blob: BlobRef },
+    /// Batch variant of `round.trunk.get`: same per-trunk semantics, one
+    /// round trip. Responses align with request order; any unknown locator
+    /// fails the whole batch rather than returning a partial result.
+    #[serde(rename = "round.trunk.batchGet", rename_all = "camelCase")]
+    RoundTrunkBatchGet {
+        session_id: String,
+        refs: Vec<TrunkLocator>,
+    },
+    /// Batch variant of `blob.get`: same per-blob semantics, one round trip.
+    /// Responses align with request order; any unknown ref fails the whole
+    /// batch rather than returning a partial result.
+    #[serde(rename = "blob.batchGet", rename_all = "camelCase")]
+    BlobBatchGet {
+        session_id: String,
+        blobs: Vec<BlobRef>,
+    },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
         session_id: String,
@@ -678,7 +694,9 @@ pub enum Reply {
     SessionContext(SessionContext),
     RoundLayer(RoundLayer),
     RoundTrunk(RoundTrunk),
+    RoundTrunks(Vec<RoundTrunk>),
     Blob(BlobPayload),
+    Blobs(Vec<BlobPayload>),
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
     Workspace(WorkspaceInfo),
