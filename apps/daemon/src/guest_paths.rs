@@ -95,9 +95,7 @@ fn wasm_guest_form(raw: &str) -> Cow<'_, str> {
     // `F:dir` is drive-relative on Windows (resolved against the drive's
     // current directory). The guest has no such notion; nobody typing a path
     // into a picker means it, so the volume root is the only sane anchor.
-    let rest = rest
-        .strip_prefix(['\\', '/'])
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix(['\\', '/']).unwrap_or(rest);
     if rest.is_empty() {
         return Cow::Owned(format!("/{drive}"));
     }
