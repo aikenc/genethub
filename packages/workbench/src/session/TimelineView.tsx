@@ -490,13 +490,27 @@ export function TimelineView({
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
-                    text={hasRound ? (finalAssistant?.text ?? "") : assistantText(turn.items)}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
                         turnId: turn.stats!.turnId,
                         hasNativeCheckpoint: Boolean(turn.stats!.forkCheckpoint),
                       })
+                    }
+                    onSelect={
+                      !selection && turnSelectable.length > 0
+                        ? () => {
+                            const ids = turnSelectable.map((message) => message.id);
+                            const step = applySelectionAddMany(emptySelection(), ids);
+                            // Anchor on the bubble the footer belongs to, so the
+                            // next click above or below range-selects from here.
+                            setSelection({
+                              ...step.next,
+                              anchor: ids[ids.length - 1] ?? null,
+                            });
+                            setSelectionNotice(step.notice);
+                          }
+                        : undefined
                     }
                   />
                 ) : index === turns.length - 1 && state.activeTurn ? (
@@ -505,7 +519,6 @@ export function TimelineView({
                     liveUsage={state.usage}
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
-                    text={hasRound ? "" : assistantText(turn.items)}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -572,23 +585,6 @@ export function TimelineView({
           </button>
         </div>
       </div>
-
-      {!selection && selectableOrder.length > 0 ? (
-        <div className="pointer-events-none absolute inset-x-0 top-2 px-4">
-          <div className="mx-auto flex max-w-chat justify-end">
-            <button
-              type="button"
-              className="pointer-events-auto rounded-full border border-line-strong bg-surface/95 px-3 py-1.5 text-xs text-muted shadow-[0_4px_16px_rgb(0_0_0_/0.35)] backdrop-blur hover:text-fg"
-              onClick={() => {
-                setSelection(emptySelection());
-                setSelectionNotice(null);
-              }}
-            >
-              多选
-            </button>
-          </div>
-        </div>
-      ) : null}
 
       {selection ? (
         <div
@@ -1425,15 +1421,6 @@ function Diff({ text }: { text: string }) {
   );
 }
 
-function assistantText(items: TimelineItem[]): string {
-  return items
-    .filter((item): item is Extract<TimelineItem, { type: "assistantMessage" }> =>
-      item.type === "assistantMessage",
-    )
-    .map((item) => item.text)
-    .join("\n\n");
-}
-
 function finalAssistantMessage(
   items: TimelineItem[],
 ): Extract<TimelineItem, { type: "assistantMessage" }> | undefined {
@@ -1530,23 +1517,23 @@ function TurnFooter({
   liveStartedAtMs,
   liveTools = 0,
   liveItems,
-  text,
   canFork,
   onFork,
+  onSelect,
 }: {
   stats?: TurnStats;
   liveUsage?: Usage | null;
   liveStartedAtMs?: number;
   liveTools?: number;
   liveItems?: TimelineItem[];
-  text: string;
   canFork: boolean;
   onFork?: () => void;
+  /** Enters selection mode with this turn checked; absent while selecting. */
+  onSelect?: () => void;
 }) {
   const live = !stats;
   const [now, setNow] = useState(Date.now());
   const [details, setDetails] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), live ? 1_000 : 60_000);
@@ -1591,20 +1578,16 @@ function TurnFooter({
         >
           Fork
         </button>
-        <button
-          type="button"
-          className="text-accent disabled:text-faint"
-          disabled={!text}
-          onClick={() => {
-            if (!text || !navigator.clipboard) return;
-            void navigator.clipboard.writeText(text).then(() => {
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1200);
-            });
-          }}
-        >
-          {copied ? "已复制" : "复制"}
-        </button>
+        {onSelect ? (
+          <button
+            type="button"
+            className="text-accent"
+            title="进入多选并选中本 Turn，继续点选上方或下方消息可连选"
+            onClick={onSelect}
+          >
+            选择
+          </button>
+        ) : null}
       </div>
       {details ? (
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
