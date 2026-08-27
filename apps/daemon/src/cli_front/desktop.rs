@@ -21,15 +21,17 @@ pub async fn desktop(args: &[String]) -> i32 {
 }
 
 async fn route(args: &[String]) -> i32 {
-    let claim = match args {
-        [] => false,
-        [flag] if flag == "--claim" => true,
-        _ => {
-            return output::fail(CliFailure::invalid_args(
-                "desktop route accepts only the optional --claim flag",
-            ))
-        }
-    };
+    // No flags: startup and the tray's "重新登录官网" run this same route. The
+    // one-use claim link below is not an occasional recovery side effect — it
+    // is how the WebView gets a session at all. A bare workbench URL for an
+    // already-paired daemon landed the window on the signed-out page whenever
+    // the cookie jar was empty (fresh install, expired session), and nothing
+    // in the window could fix that itself (fb__Y-nM9ptEeYt).
+    if !args.is_empty() {
+        return output::fail(CliFailure::invalid_args(
+            "desktop route accepts no arguments",
+        ));
+    }
     let Some(web_url) = channel_web_url() else {
         return output::fail(CliFailure::business(
             "unsupportedChannel",
@@ -68,14 +70,10 @@ async fn route(args: &[String]) -> i32 {
     };
 
     match status {
-        HubStatus::Paired { machine_id, .. } if !claim => {
-            match workbench_url(web_url, &machine_id) {
-                Ok(navigate) => {
-                    output::succeed("desktop.route", desktop_directive(navigate, true, None))
-                }
-                Err(error) => output::fail(error),
-            }
-        }
+        // A paired daemon is proof of ownership, and the claim link it mints
+        // is one-use and redeemed immediately in this machine's own window —
+        // so every launch signs the WebView back in, whatever happened to the
+        // cookie jar since the last one.
         HubStatus::Paired { machine_id, .. } => {
             let workbench = match workbench_url(web_url, &machine_id) {
                 Ok(value) => value,
@@ -189,7 +187,7 @@ fn claim_url_with_next(value: &str, workbench: &str) -> Result<String, CliFailur
 
 #[cfg(test)]
 mod tests {
-    use super::{desktop_directive, workbench_url};
+    use super::{claim_url_with_next, desktop_directive, workbench_url};
 
     #[test]
     fn desktop_and_hub_navigation_shapes_are_built_in_the_cli() {
@@ -206,6 +204,20 @@ mod tests {
         assert_eq!(
             workbench_url("https://relay.genethub.com/app", "m1").unwrap(),
             "https://relay.genethub.com/app?desktopMachine=m1"
+        );
+    }
+
+    #[test]
+    fn the_startup_navigation_is_a_claim_link_carrying_the_workbench_as_next() {
+        // The whole point of the Paired branch: the window lands signed in,
+        // then continues to the machine it is running on.
+        assert_eq!(
+            claim_url_with_next(
+                "https://relay.genethub.com/link/tok_1",
+                "https://relay.genethub.com/app?desktopMachine=m1",
+            )
+            .unwrap(),
+            "https://relay.genethub.com/link/tok_1?next=https%3A%2F%2Frelay.genethub.com%2Fapp%3FdesktopMachine%3Dm1"
         );
     }
 }
