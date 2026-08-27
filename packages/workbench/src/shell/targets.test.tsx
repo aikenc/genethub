@@ -605,8 +605,19 @@ describe("switching from the sidebar", () => {
         target: { agentId: "claude", workspaceId: "remote-workspace" },
       },
     }));
-    await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("forked-session"));
+    // The fork lands without yanking the user onto the other machine: the
+    // dialog closes, the source session stays on screen, and the jump is a
+    // button on the completion banner, not a side effect of confirming.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Fork 会话" })).not.toBeInTheDocument(),
+    );
+    expect(useWorkbench.getState().activeSessionId).toBe("source-session");
     expect(openTarget).toHaveBeenCalledWith("m_far", { remember: false });
+    expect(openTarget).not.toHaveBeenCalledWith("m_far");
+
+    const jump = await screen.findByRole("button", { name: "前往查看" });
+    await userEvent.click(jump);
+    await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("forked-session"));
     expect(openTarget).toHaveBeenCalledWith("m_far");
   });
 

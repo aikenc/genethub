@@ -14,6 +14,7 @@ import type {
   PermissionOutcome,
   BlobPayload,
   BlobRef,
+  Reply,
   RoundTrunk,
   TrunkLocator,
   SequencedEvent,
@@ -170,6 +171,17 @@ export type ForwardDraft = {
   sourceTitle: string | null;
 };
 
+/**
+ * A finished piece of work the user may want to act on — a Fork or forward
+ * that landed on another machine. The action is theirs to take; nothing here
+ * navigates on its own.
+ */
+export type CompletionNotice = {
+  text: string;
+  actionLabel?: string;
+  onAction?: () => void;
+};
+
 let composerDraftInsertSequence = 0;
 
 interface WorkbenchState {
@@ -218,6 +230,8 @@ interface WorkbenchState {
   composerDraftInserts: ComposerDraftInsert[];
   /** The forward capsule parked on a composer, if any. One at a time. */
   forwardDraft: ForwardDraft | null;
+  /** A completed cross-machine outcome offering a follow-up action. */
+  completionNotice: CompletionNotice | null;
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -370,6 +384,8 @@ interface WorkbenchState {
   consumedComposerDraftInsert(id: string): void;
   /** Parks (or clears, with `null`) the forward capsule on a composer. */
   setForwardDraft(draft: ForwardDraft | null): void;
+  /** Shows (or clears, with `null`) the completed-work banner. */
+  setCompletionNotice(notice: CompletionNotice | null): void;
   /**
    * Batch fetches for the forward dialog's detail fill (proposal §7.0).
    * Results are also cached into the session's timeline, which the round
@@ -606,6 +622,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   restoreDraft: null,
   composerDraftInserts: [],
   forwardDraft: null,
+  completionNotice: null,
   hub: null,
   claim: null,
   devices: [],
@@ -1368,16 +1385,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ forwardDraft: draft });
   },
 
+  setCompletionNotice(notice) {
+    set({ completionNotice: notice });
+  },
+
   async fetchTrunkDetails(sessionId, refs) {
     if (refs.length === 0) return [];
-    const reply = await asked(set, () =>
-      require_(get().client).call({
-        type: "round.trunk.batchGet",
-        payload: { sessionId, refs },
-      }),
+    const client = require_(get().client);
+    const trunks = await batchOrSequentially(
+      client,
+      "roundTrunks",
+      () => client.call({ type: "round.trunk.batchGet", payload: { sessionId, refs } }),
+      async () => {
+        const oneByOne: RoundTrunk[] = [];
+        for (const ref of refs) {
+          const reply = await client.call({
+            type: "round.trunk.get",
+            payload: { sessionId, roundId: ref.roundId, trunkIndex: ref.trunkIndex },
+          });
+          if (reply?.type !== "roundTrunk") return null;
+          oneByOne.push(reply.data);
+        }
+        return oneByOne;
+      },
+      set,
     );
-    if (reply?.type !== "roundTrunks") return null;
-    const trunks = reply.data;
+    if (!trunks) return null;
     patchTimeline(sessionId, set, (timeline) => {
       const roundTrunks = { ...timeline.roundTrunks };
       // Responses align with request order; the locator's round id is what
@@ -1393,14 +1426,26 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async fetchBlobPayloads(sessionId, refs) {
     if (refs.length === 0) return [];
-    const reply = await asked(set, () =>
-      require_(get().client).call({
-        type: "blob.batchGet",
-        payload: { sessionId, blobs: refs },
-      }),
+    const client = require_(get().client);
+    const payloads = await batchOrSequentially(
+      client,
+      "blobs",
+      () => client.call({ type: "blob.batchGet", payload: { sessionId, blobs: refs } }),
+      async () => {
+        const oneByOne: BlobPayload[] = [];
+        for (const ref of refs) {
+          const reply = await client.call({
+            type: "blob.get",
+            payload: { sessionId, blob: ref },
+          });
+          if (reply?.type !== "blob") return null;
+          oneByOne.push(reply.data);
+        }
+        return oneByOne;
+      },
+      set,
     );
-    if (reply?.type !== "blobs") return null;
-    const payloads = reply.data;
+    if (!payloads) return null;
     patchTimeline(sessionId, set, (timeline) => ({
       blobs: {
         ...timeline.blobs,
@@ -2311,4 +2356,45 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
 function require_(client: Client | null): Client {
   if (!client) throw new Error("the workbench is not connected yet");
   return client;
+}
+
+/**
+ * `*.batchGet` is younger than some daemons this build can be pointed at —
+ * browsing an older machine through a newer web is a normal thing to do. One
+ * "unknown variant" refusal tells us the daemon predates batch fetches; the
+ * flag makes that client go one-by-one from then on instead of paying for a
+ * refused round trip on every fill iteration.
+ */
+const batchGetSupport = new WeakMap<Client, boolean>();
+
+function isUnknownVariant(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("unknown variant");
+}
+
+async function batchOrSequentially<T>(
+  client: Client,
+  batchType: "roundTrunks" | "blobs",
+  batch: () => Promise<Reply | undefined>,
+  sequentially: () => Promise<T[] | null>,
+  set: Setter,
+): Promise<T[] | null> {
+  if (batchGetSupport.get(client) !== false) {
+    try {
+      const reply = await batch();
+      if (reply?.type !== batchType) return null;
+      return reply.data as T[];
+    } catch (error) {
+      if (!isUnknownVariant(error)) {
+        reportError(set, error);
+        return null;
+      }
+      batchGetSupport.set(client, false);
+    }
+  }
+  try {
+    return await sequentially();
+  } catch (error) {
+    reportError(set, error);
+    return null;
+  }
 }

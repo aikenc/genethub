@@ -3,6 +3,7 @@ import type {
   RoundBatch,
   RoundSummary,
   RoundTrunkSummary,
+  SessionSummary,
   TimelineItem,
   TurnStats,
   Usage,
@@ -18,6 +19,7 @@ import {
   type ForkSelection,
 } from "./ForkDialog";
 import { ForwardDialog } from "./ForwardDialog";
+import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
 
 import { attachmentPreviewUrl } from "./attachments";
@@ -139,23 +141,45 @@ export interface ForkController {
   fork(turnId: string, selection: ForkSelection): Promise<boolean>;
 }
 
-const CURRENT_MACHINE: ForkMachineOption = {
-  id: "current",
-  routeId: "current",
-  label: "当前机器",
-  kind: "local",
-  online: true,
-};
+/**
+ * What forwarding can do beyond the machine on screen. Without it (a host
+ * that cannot reach other machines) the dialog offers the current machine
+ * only, which is exactly the v1 behavior.
+ */
+export interface ForwardController {
+  sourceMachine: ForkMachineOption;
+  listMachines(): Promise<ForkMachineOption[]>;
+  loadCatalog(machine: ForkMachineOption): Promise<ForkCatalog>;
+  loadSessions(machine: ForkMachineOption): Promise<SessionSummary[]>;
+  /**
+   * Cross-machine delivery: sends the capsule to an existing session, or
+   * creates one and sends. There is no composer to park a draft on over
+   * there, so delivery is immediate — the dialog's preview is the review.
+   */
+  deliver(
+    machine: ForkMachineOption,
+    target: ForwardTarget,
+    capsule: string,
+  ): Promise<{ sessionId: string }>;
+  jumpTo(machine: ForkMachineOption, sessionId: string): void;
+}
+
+export type ForwardTarget =
+  | { kind: "session"; sessionId: string }
+  | { kind: "new"; workspaceId: string; agentId: string };
+
 
 export function TimelineView({
   state,
   forkController,
+  forwardController,
   bottomInset = 0,
   onScrollBack,
   onReturnToBottom,
 }: {
   state: TimelineState;
   forkController?: ForkController;
+  forwardController?: ForwardController;
   /** Overlay clearance added to scroll content without shrinking its viewport. */
   bottomInset?: number;
   /** Fired once a sustained drag back through history says the reader has left
@@ -621,6 +645,7 @@ export function TimelineView({
           source={forwardSource()}
           messages={selectedCapsuleInput().messages}
           rounds={selectedCapsuleInput().involvedRounds}
+          controller={forwardController}
           onClose={() => setForwardOpen(false)}
           onConfirmed={() => {
             setForwardOpen(false);

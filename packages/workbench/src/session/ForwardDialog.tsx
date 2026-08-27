@@ -1,10 +1,16 @@
-import type { RoundSummary, RoundTrunkSummary } from "@genehub/proto";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { RoundSummary, RoundTrunkSummary, SessionSummary } from "@genehub/proto";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { AgentMark } from "../presentation/AgentMark";
-import { canStartAgent, resolveAgentPresentation } from "../presentation/catalog/resolve";
-import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { canStartAgent } from "../presentation/catalog/resolve";
+import {
+  AgentGrid,
+  CURRENT_MACHINE,
+  MachineGrid,
+  useMachineCatalog,
+  WorkspaceList,
+} from "./MachineCatalogPicker";
+import { SessionPicker } from "./SessionPicker";
 import {
   buildForwardCapsule,
   DEFAULT_FORWARD_BUDGET,
@@ -14,8 +20,8 @@ import {
   type CapsuleMessage,
   type ForwardSource,
 } from "./forwardCapsule";
-import { formatClock } from "./selectionCopy";
 import { useWorkbench } from "./store";
+import type { ForwardController } from "./TimelineView";
 
 const BUDGET_LABELS: Record<number, string> = {
   8_000: "精要 8k",
@@ -31,6 +37,7 @@ export function ForwardDialog({
   source,
   messages,
   rounds,
+  controller,
   onClose,
   onConfirmed,
 }: {
@@ -39,8 +46,10 @@ export function ForwardDialog({
   messages: CapsuleMessage[];
   /** Rounds the selection touches, in timeline order. */
   rounds: RoundSummary[];
+  /** Machine reach. Absent on hosts that cannot dial others: current only. */
+  controller?: ForwardController;
   onClose(): void;
-  /** After the capsule is parked on a composer; defaults to `onClose`. */
+  /** After the capsule is parked or delivered; defaults to `onClose`. */
   onConfirmed?(): void;
 }) {
   const client = useWorkbench((state) => state.client);
@@ -53,13 +62,35 @@ export function ForwardDialog({
   const newSession = useWorkbench((state) => state.newSession);
   const selectSession = useWorkbench((state) => state.selectSession);
   const setForwardDraft = useWorkbench((state) => state.setForwardDraft);
+  const setCompletionNotice = useWorkbench((state) => state.setCompletionNotice);
+
+  const sourceMachine = controller?.sourceMachine ?? CURRENT_MACHINE;
+  const {
+    machines,
+    selectedMachine,
+    catalog,
+    workspaceId,
+    setWorkspaceId,
+    agentId,
+    setAgentId,
+    loadingMachines,
+    loadingCatalog,
+    problem: machineProblem,
+    setProblem: setMachineProblem,
+    pickMachine,
+  } = useMachineCatalog({
+    sourceMachine,
+    sourceCatalog: { agents, workspaces },
+    sourceWorkspaceId: activeWorkspaceId ?? workspaces[0]?.id ?? "",
+    sourceAgentId: agents.find(canStartAgent)?.id,
+    listMachines: controller?.listMachines,
+    loadCatalog: controller?.loadCatalog,
+  });
 
   const [destination, setDestination] = useState<"new" | "existing">("new");
-  const [workspaceId, setWorkspaceId] = useState(activeWorkspaceId ?? workspaces[0]?.id ?? "");
-  const [agentId, setAgentId] = useState(
-    () => agents.find(canStartAgent)?.id ?? "",
-  );
   const [targetSessionId, setTargetSessionId] = useState<string | null>(null);
+  const [remoteSessions, setRemoteSessions] = useState<SessionSummary[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
   const [budget, setBudget] = useState<number>(DEFAULT_FORWARD_BUDGET);
   const [fillDetail, setFillDetail] = useState(true);
   const [includeBlobBodies, setIncludeBlobBodies] = useState(false);
@@ -67,16 +98,40 @@ export function ForwardDialog({
   const [building, setBuilding] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLElement>(null);
 
-  const targets = useMemo(
-    () =>
-      sessions
-        .filter((session) => session.id !== source.sessionId && !session.archived)
-        .sort((a, b) => b.updatedAtMs - a.updatedAtMs)
-        .slice(0, 50),
-    [sessions, source.sessionId],
-  );
+  const onSourceMachine = selectedMachine.id === sourceMachine.id;
+
+  // The existing-session list belongs to the machine under the radio: the
+  // store's list for the one on screen, a fetch for any other.
+  useEffect(() => {
+    setTargetSessionId(null);
+    if (onSourceMachine || !controller) {
+      setRemoteSessions([]);
+      setLoadingSessions(false);
+      return;
+    }
+    let cancelled = false;
+    setLoadingSessions(true);
+    void controller
+      .loadSessions(selectedMachine)
+      .then((loaded) => {
+        if (!cancelled) setRemoteSessions(loaded);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setRemoteSessions([]);
+          setMachineProblem(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSessions(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [controller, onSourceMachine, selectedMachine, setMachineProblem]);
 
   // Assemble the capsule, fetching detail layers in batches while the budget
   // says more would fit. Re-runs from scratch on any option change: the build
@@ -143,21 +198,21 @@ export function ForwardDialog({
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || busy) return;
       event.preventDefault();
       onClose();
     };
     document.addEventListener("keydown", dismiss);
     return () => document.removeEventListener("keydown", dismiss);
-  }, [onClose]);
+  }, [busy, onClose]);
 
-  const selectedAgent = agents.find((agent) => agent.id === agentId);
+  const selectedAgent = catalog.agents.find((agent) => agent.id === agentId);
   const valid =
     built !== null &&
     !built.overBudget &&
     (destination === "new"
       ? Boolean(
-          workspaces.some((workspace) => workspace.id === workspaceId) &&
+          catalog.workspaces.some((workspace) => workspace.id === workspaceId) &&
             selectedAgent &&
             canStartAgent(selectedAgent),
         )
@@ -165,28 +220,60 @@ export function ForwardDialog({
 
   const confirm = () => {
     if (!built || !valid) return;
-    if (destination === "new") {
-      newSession(workspaceId, agentId);
-      setForwardDraft({
-        sessionId: null,
-        capsule: built.text,
-        itemCount: built.stats.selectedCount,
-        estimatedTokens: built.estimatedTokens,
-        sourceSessionId: source.sessionId,
-        sourceTitle: source.sessionTitle,
-      });
-    } else if (targetSessionId) {
-      setForwardDraft({
-        sessionId: targetSessionId,
-        capsule: built.text,
-        itemCount: built.stats.selectedCount,
-        estimatedTokens: built.estimatedTokens,
-        sourceSessionId: source.sessionId,
-        sourceTitle: source.sessionTitle,
-      });
-      void selectSession(targetSessionId);
+    if (onSourceMachine) {
+      // Same machine: park the capsule on a composer, reviewed before sending.
+      if (destination === "new") {
+        newSession(workspaceId, agentId);
+        setForwardDraft({
+          sessionId: null,
+          capsule: built.text,
+          itemCount: built.stats.selectedCount,
+          estimatedTokens: built.estimatedTokens,
+          sourceSessionId: source.sessionId,
+          sourceTitle: source.sessionTitle,
+        });
+      } else if (targetSessionId) {
+        setForwardDraft({
+          sessionId: targetSessionId,
+          capsule: built.text,
+          itemCount: built.stats.selectedCount,
+          estimatedTokens: built.estimatedTokens,
+          sourceSessionId: source.sessionId,
+          sourceTitle: source.sessionTitle,
+        });
+        void selectSession(targetSessionId);
+      }
+      (onConfirmed ?? onClose)();
+      return;
     }
-    (onConfirmed ?? onClose)();
+    if (!controller) return;
+    const machine = selectedMachine;
+    const target =
+      destination === "new"
+        ? ({ kind: "new", workspaceId, agentId } as const)
+        : targetSessionId
+          ? ({ kind: "session", sessionId: targetSessionId } as const)
+          : null;
+    if (!target) return;
+    setBusy(true);
+    setProblem(null);
+    void controller
+      .deliver(machine, target, built.text)
+      .then(({ sessionId }) => {
+        setCompletionNotice({
+          text:
+            destination === "new"
+              ? `已在「${machine.label}」创建会话并送入转发内容`
+              : `已转发到「${machine.label}」的会话`,
+          actionLabel: "前往查看",
+          onAction: () => controller.jumpTo(machine, sessionId),
+        });
+        (onConfirmed ?? onClose)();
+      })
+      .catch((error: unknown) => {
+        setProblem(error instanceof Error ? error.message : String(error));
+        setBusy(false);
+      });
   };
 
   if (typeof document === "undefined") return null;
@@ -194,7 +281,7 @@ export function ForwardDialog({
     <div
       className="fixed inset-0 z-[80] flex items-end justify-center bg-black/60 md:items-center md:p-4"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget && !busy) onClose();
       }}
     >
       <section
@@ -210,13 +297,14 @@ export function ForwardDialog({
               转发 {messages.length} 条消息
             </h2>
             <p className="text-xs text-faint">
-              组装成一段受预算约束的上下文，放入目标会话的输入框，由你审阅后发出。
+              组装成一段受预算约束的上下文。本机目标放入输入框由你审阅后发出；其他机器会直接送达。
             </p>
           </div>
           <button
             type="button"
             aria-label="关闭转发"
-            className="flex h-10 w-10 items-center justify-center rounded-full text-xl text-muted hover:bg-raised hover:text-fg"
+            disabled={busy}
+            className="flex h-10 w-10 items-center justify-center rounded-full text-xl text-muted hover:bg-raised hover:text-fg disabled:opacity-50"
             onClick={onClose}
           >
             ×
@@ -224,7 +312,7 @@ export function ForwardDialog({
         </header>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
-          <fieldset>
+          <fieldset disabled={busy}>
             <legend className="text-xs font-medium uppercase tracking-wide text-faint">去向</legend>
             <div className="mt-2 grid grid-cols-2 gap-2">
               {(
@@ -251,115 +339,54 @@ export function ForwardDialog({
             </div>
           </fieldset>
 
+          <MachineGrid
+            machines={machines}
+            selectedMachineId={selectedMachine.id}
+            sourceMachineId={sourceMachine.id}
+            disabled={busy || loadingMachines}
+            loading={loadingMachines}
+            onPick={pickMachine}
+          />
+
           {destination === "new" ? (
             <>
-              <fieldset>
-                <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标工作区</legend>
-                <div
-                  role="listbox"
-                  aria-label="目标工作区"
-                  className="mt-2 max-h-36 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
-                >
-                  {workspaces.map((workspace) => {
-                    const selected = workspace.id === workspaceId;
-                    return (
-                      <button
-                        key={workspace.id}
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        title={workspace.root}
-                        onClick={() => setWorkspaceId(workspace.id)}
-                        className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left text-sm ${
-                          selected ? "bg-accent/10 text-fg" : "text-muted hover:bg-raised hover:text-fg"
-                        }`}
-                      >
-                        <WorkspaceIcon workspace={workspace} />
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-fg">{workspace.name}</span>
-                          <span className="block truncate text-[10px] text-faint">{workspace.root}</span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </fieldset>
+              <WorkspaceList
+                workspaces={catalog.workspaces}
+                selectedWorkspaceId={workspaceId}
+                disabled={busy || loadingCatalog}
+                loading={loadingCatalog}
+                onSelect={setWorkspaceId}
+              />
 
-              <fieldset>
-                <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标 Agent</legend>
-                <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {agents.map((agent) => {
-                    const presentation = resolveAgentPresentation(agent);
-                    return (
-                      <label
-                        key={agent.id}
-                        className="flex min-h-14 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-                      >
-                        <input
-                          type="radio"
-                          name="forward-agent"
-                          value={agent.id}
-                          aria-label={presentation.label}
-                          checked={agent.id === agentId}
-                          disabled={!canStartAgent(agent)}
-                          onChange={() => setAgentId(agent.id)}
-                          className="sr-only"
-                        />
-                        {presentation.kind === "text" ? null : (
-                          <AgentMark agent={agent} className="h-6 w-6" fallbackToText={false} />
-                        )}
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-fg">{presentation.label}</span>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </fieldset>
+              <AgentGrid
+                agents={catalog.agents}
+                selectedAgentId={agentId}
+                disabled={busy || loadingCatalog}
+                onSelect={setAgentId}
+              />
             </>
           ) : (
-            <fieldset>
+            <fieldset disabled={busy || loadingSessions}>
               <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标会话</legend>
-              {targets.length > 0 ? (
-                <div
-                  role="listbox"
-                  aria-label="目标会话"
-                  className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
-                >
-                  {targets.map((session) => {
-                    const selected = session.id === targetSessionId;
-                    const agent = agents.find((entry) => entry.id === session.agentId);
-                    return (
-                      <button
-                        key={session.id}
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        onClick={() => setTargetSessionId(session.id)}
-                        className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left text-sm ${
-                          selected ? "bg-accent/10 text-fg" : "text-muted hover:bg-raised hover:text-fg"
-                        }`}
-                      >
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-fg">{session.title ?? "未命名会话"}</span>
-                          <span className="block truncate text-[10px] text-faint">
-                            {agent ? resolveAgentPresentation(agent).label : session.agentId} ·{" "}
-                            {formatClock(session.updatedAtMs)}
-                          </span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="mt-2 rounded-xl border border-line bg-raised/50 px-3 py-2 text-xs text-muted">
-                  本机没有其他可接收的会话。
-                </p>
-              )}
+              <div className="mt-2">
+                <SessionPicker
+                  sessions={onSourceMachine ? sessions : remoteSessions}
+                  agents={onSourceMachine ? agents : catalog.agents}
+                  selectedId={targetSessionId}
+                  onSelect={setTargetSessionId}
+                  loading={loadingSessions}
+                  emptyHint={
+                    onSourceMachine
+                      ? "本机没有其他可接收的会话。"
+                      : "目标机器没有可接收的会话。"
+                  }
+                  excludeId={onSourceMachine ? source.sessionId : undefined}
+                />
+              </div>
             </fieldset>
           )}
 
-          <fieldset>
+          <fieldset disabled={busy}>
             <legend className="text-xs font-medium uppercase tracking-wide text-faint">预算</legend>
             <div className="mt-2 grid grid-cols-4 gap-2">
               {FORWARD_BUDGET_TIERS.map((tier) => (
@@ -381,7 +408,7 @@ export function ForwardDialog({
             </div>
           </fieldset>
 
-          <fieldset>
+          <fieldset disabled={busy}>
             <legend className="text-xs font-medium uppercase tracking-wide text-faint">细节</legend>
             <div className="mt-2 space-y-2">
               <label className="flex cursor-pointer items-center gap-2 text-sm text-fg">
@@ -460,9 +487,9 @@ export function ForwardDialog({
             )}
           </div>
 
-          {problem ? (
+          {problem || machineProblem ? (
             <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-              {problem}
+              {problem ?? machineProblem}
             </p>
           ) : null}
         </div>
@@ -470,18 +497,25 @@ export function ForwardDialog({
         <footer className="flex justify-end gap-2 border-t border-line px-4 py-3">
           <button
             type="button"
-            className="rounded-lg px-4 py-2 text-sm text-muted hover:bg-raised hover:text-fg"
+            disabled={busy}
+            className="rounded-lg px-4 py-2 text-sm text-muted hover:bg-raised hover:text-fg disabled:opacity-50"
             onClick={onClose}
           >
             取消
           </button>
           <button
             type="button"
-            disabled={!valid || building}
+            disabled={!valid || building || busy || loadingCatalog}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:cursor-not-allowed disabled:opacity-50"
             onClick={confirm}
           >
-            放入输入框
+            {busy
+              ? "正在送达…"
+              : onSourceMachine
+                ? "放入输入框"
+                : destination === "new"
+                  ? "创建并发送"
+                  : "直接发送"}
           </button>
         </footer>
       </section>
