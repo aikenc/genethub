@@ -15,6 +15,7 @@ pub mod diagnostics;
 pub mod files;
 pub(crate) mod fs_cap;
 pub mod git;
+pub(crate) mod guest_paths;
 pub mod host_pid;
 pub(crate) mod host_update;
 pub(crate) mod http;

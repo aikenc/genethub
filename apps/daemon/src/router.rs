@@ -1019,14 +1019,14 @@ async fn dispatch(
         }
 
         Request::WorkspaceCreate { root, name } => {
-            let path = Path::new(&root);
-            if let Err(error) = std::fs::create_dir_all(path) {
+            let path = crate::guest_paths::guest_path(Path::new(&root));
+            if let Err(error) = std::fs::create_dir_all(&path) {
                 return Handled::err(
                     ErrorCode::BadRequest,
                     format!("could not create {root}: {error}"),
                 );
             }
-            match state.workspaces.open(path, Some(name)).await {
+            match state.workspaces.open(&path, Some(name)).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }

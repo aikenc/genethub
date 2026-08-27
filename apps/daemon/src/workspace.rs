@@ -54,7 +54,7 @@ pub fn list_directory(requested: Option<&Path>) -> Result<DirectoryListing> {
     }
 
     let path = requested
-        .map(Path::to_path_buf)
+        .map(crate::guest_paths::guest_path)
         .or_else(crate::config::home_dir)
         .ok_or_else(|| anyhow!("no home directory"))?
         .canonicalize()
@@ -101,7 +101,7 @@ pub fn mkdir_directory(parent: &Path, name: &str) -> Result<DirectoryListing> {
     if parent.as_os_str().is_empty() {
         return Err(anyhow!("cannot create a folder at the machine roots"));
     }
-    let parent = parent
+    let parent = crate::guest_paths::guest_path(parent)
         .canonicalize()
         .with_context(|| format!("no such directory: {}", parent.display()))?;
     if !parent.is_dir() {
@@ -117,11 +117,18 @@ pub fn mkdir_directory(parent: &Path, name: &str) -> Result<DirectoryListing> {
 
 fn listing_parent(path: &Path) -> Option<String> {
     match path.parent() {
+        // Volume roots have no real parent. The component sees a Windows
+        // host's volumes as `/c`, `/d`, … — their parent is `/`, which is
+        // not preopened there — so on a Windows host the picker climbs from
+        // a volume root straight to the drive list (the empty path).
+        Some(parent) if parent == Path::new("/") && crate::guest_paths::windows_host() => {
+            Some(String::new())
+        }
         Some(parent) if !parent.as_os_str().is_empty() => Some(parent.display().to_string()),
-        // Volume roots (`C:\`, `/`) have no real parent. On Windows the picker
-        // climbs to the drive list; elsewhere `/` is the top.
+        // Natively a volume root (`C:\`) has no parent at all; `/` is the top
+        // everywhere else.
         _ => {
-            if cfg!(windows) {
+            if crate::guest_paths::windows_host() {
                 Some(String::new())
             } else {
                 None
@@ -162,6 +169,19 @@ fn machine_root_entries() -> Vec<DirectoryEntry> {
     }
     #[cfg(not(windows))]
     {
+        // The component build reaches a Windows host's volumes through their
+        // `/c`, `/d`, … preopens; there is no `/` to list there. Everywhere
+        // else the filesystem root is the one root.
+        let volumes = crate::guest_paths::windows_volumes();
+        if !volumes.is_empty() {
+            return volumes
+                .iter()
+                .map(|volume| DirectoryEntry {
+                    name: format!("{}:", volume.letter),
+                    path: volume.guest.clone(),
+                })
+                .collect();
+        }
         vec![DirectoryEntry {
             name: "/".into(),
             path: "/".into(),
@@ -183,8 +203,9 @@ fn validate_new_entry_name(name: &str) -> Result<&str> {
     if name.contains('/') || name.contains('\\') || name.contains('\0') {
         return Err(anyhow!("folder name cannot contain path separators"));
     }
-    #[cfg(windows)]
-    {
+    // The component build is never cfg(windows), but the machine behind it
+    // can still be one — this is a host fact, so ask at runtime.
+    if crate::guest_paths::windows_host() {
         const RESERVED: &[&str] = &[
             "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
             "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
@@ -408,6 +429,11 @@ impl Workspaces {
     /// Opening the same folder twice is a normal thing for a user to do and
     /// should not produce two entries pointing at one directory.
     pub async fn open(&self, root: &Path, name: Option<String>) -> Result<WorkspaceInfo> {
+        // A Windows host's spelling (`F:\dir`, or the `\\?\` verbatim form a
+        // native caller canonicalized) names the same directory the guest can
+        // only reach through its volume preopens — translate before anything
+        // touches the filesystem.
+        let root = crate::guest_paths::guest_path(root);
         let source = root
             .canonicalize()
             .with_context(|| format!("no such folder or workspace file: {}", root.display()))?;
@@ -648,7 +674,10 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
         if raw.contains('\0') {
             anyhow::bail!("workspace folder {} contains NUL", index + 1);
         }
-        let requested = PathBuf::from(raw);
+        // A .code-workspace written on Windows names its folders in the
+        // host's spelling, which is not absolute from the guest's POSIX point
+        // of view — translate first, then classify.
+        let requested = crate::guest_paths::guest_path(Path::new(&raw));
         let requested = if requested.is_absolute() {
             requested
         } else {
