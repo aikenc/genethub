@@ -10,6 +10,7 @@ export interface RunStore {
   dir: string;
   writeResult(result: UnitResult): void;
   writeFailure(result: UnitResult, diagnostic: string): void;
+  writeReport(result: UnitResult): void;
   finalize(manifest: RunManifest, summary: string): void;
 }
 
@@ -29,6 +30,12 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
       const folder = path.join(dir, "failures", result.caseId.replace(/[^\w.-]+/g, "_"));
       mkdirSync(path.join(folder, "logs"), { recursive: true });
       writeFileSync(path.join(folder, "diagnostic.md"), redactText(diagnostic));
+    },
+    writeReport(result) {
+      const folder = path.join(dir, "reports");
+      mkdirSync(folder, { recursive: true });
+      const name = `${result.caseId.replace(/[^\w.-]+/g, "_")}.md`;
+      writeFileSync(path.join(folder, name), redactText(result.message ?? ""));
     },
     finalize(manifest, summary) {
       writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
