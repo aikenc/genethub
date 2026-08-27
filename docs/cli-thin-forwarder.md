@@ -75,7 +75,8 @@ stdout 的每一行仍是原来的 JSON 对象（`genet.cli/v1` 信封或对话�
 
 `cwd` 必须由调用方传入。guest 自己的工作目录不是人敲命令时的目录；相对路径和「当前工作区」都针对调用方。
 
-stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB。更大的输入写文件再在 argv 里点名。
+stdin 只用于 `genet shell` 的管道输入，上限仍是 1 MiB；其他命令不读取调用者的 stdin，因而也不会被
+Agent adapter 为会话保留的长生命周期管道阻塞。更大的输入写文件再在 argv 里点名。
 
 ## 4. 信任模型变更
 

@@ -38,7 +38,16 @@ struct CliRecord {
 }
 
 pub async fn forward(argv: Vec<String>) -> i32 {
-    match stream(argv, piped_stdin(), caller_cwd()).await {
+    // Agent adapters normally keep a command's stdin pipe open until the
+    // command exits. Reading that pipe for verbs which never consume stdin
+    // makes the CLI and the adapter wait on each other forever. Only `shell`
+    // owns piped stdin in the public contract.
+    let stdin = if accepts_piped_stdin(&argv) {
+        piped_stdin()
+    } else {
+        Vec::new()
+    };
+    match stream(argv, stdin, caller_cwd()).await {
         Ok(code) => code,
         Err(message) => crate::fail_envelope(CliFailure::daemon_unavailable(message)),
     }
@@ -223,6 +232,13 @@ fn caller_cwd() -> String {
         .unwrap_or_else(|_| ".".into())
 }
 
+fn accepts_piped_stdin(argv: &[String]) -> bool {
+    genet_frontdoor::selectors::split(argv)
+        .ok()
+        .and_then(|(_, args)| args.first().cloned())
+        .is_some_and(|verb| verb == "shell")
+}
+
 fn piped_stdin() -> Vec<u8> {
     if std::io::stdin().is_terminal() {
         return Vec::new();
@@ -242,4 +258,35 @@ fn piped_stdin() -> Vec<u8> {
         );
     }
     buffer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accepts_piped_stdin;
+
+    fn words(input: &[&str]) -> Vec<String> {
+        input.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    #[test]
+    fn only_shell_consumes_the_callers_stdin_pipe() {
+        assert!(accepts_piped_stdin(&words(&[
+            "--machine",
+            "m_1",
+            "shell",
+            "--",
+            "cat",
+        ])));
+        assert!(accepts_piped_stdin(&words(&[
+            "shell", "--cwd", "/project", "--", "cat",
+        ])));
+        assert!(!accepts_piped_stdin(&words(&[
+            "workspace",
+            "register-agent-space",
+            "spaces/code/code.code-workspace",
+        ])));
+        assert!(!accepts_piped_stdin(&words(&[
+            "agent", "run", "--agent", "codex", "prompt",
+        ])));
+    }
 }
