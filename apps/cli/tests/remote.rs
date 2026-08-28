@@ -111,15 +111,25 @@ fn start_relay(bundle: &Path) -> Relay {
 enum Cli {
     /// Its own directory, holding nothing but what pairing put there. This is
     /// the jump box or CI runner the feature exists for.
-    Elsewhere(tempfile::TempDir),
+    Elsewhere {
+        _daemon: Daemon,
+        dir: tempfile::TempDir,
+    },
     /// The machine's own directory, so the same binary reaches the daemon over
     /// loopback. Only used to compare the two answers.
     OnTheMachine(PathBuf),
 }
 
 impl Cli {
-    fn new() -> Self {
-        Cli::Elsewhere(tempfile::tempdir().expect("a data directory for the CLI"))
+    async fn new() -> Self {
+        let dir = tempfile::tempdir().expect("a data directory for the CLI");
+        let daemon = Daemon::start(Paths::new(dir.path()))
+            .await
+            .expect("the CLI's local daemon could not be started");
+        Cli::Elsewhere {
+            _daemon: daemon,
+            dir,
+        }
     }
 
     fn on(data: &Path) -> Self {
@@ -128,7 +138,7 @@ impl Cli {
 
     fn home(&self) -> &Path {
         match self {
-            Cli::Elsewhere(dir) => dir.path(),
+            Cli::Elsewhere { dir, .. } => dir.path(),
             Cli::OnTheMachine(path) => path,
         }
     }
@@ -245,7 +255,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
 
     // Pairing, from a CLI installation that has never heard of this machine.
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -283,7 +293,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
         .state
         .devices
         .invite_with(GrantSet::of([Capability::Read]));
-    let onlooker = Cli::new();
+    let onlooker = Cli::new().await;
     let (paired, code) = onlooker.run(&[
         "machine",
         "pair",
@@ -356,7 +366,7 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -426,7 +436,7 @@ async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -567,7 +577,7 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -635,7 +645,7 @@ async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let elsewhere = Cli::new();
+    let elsewhere = Cli::new().await;
     let (paired, code) = elsewhere.run(&[
         "machine",
         "pair",
@@ -711,7 +721,7 @@ async fn a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -874,7 +884,7 @@ async fn a_machine_that_answers_with_a_different_identity_is_refused() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
