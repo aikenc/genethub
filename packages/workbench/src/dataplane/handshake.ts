@@ -46,6 +46,10 @@ export async function preparePeerHandshake(
     clientName: boundedClientName(options.clientName),
     auth,
     rtcSupported: options.rtcSupported ?? supportsRtc(),
+    // New peers state the largest finite Preview lease they understand. Old
+    // daemons ignore the optional field and keep advertising their 8 MiB cap;
+    // old clients omit it, so new daemons reply with that same legacy cap.
+    maxBulkStreamWindowBytes: MAX_BULK_STREAM_WINDOW_BYTES,
   };
   return {
     hello,

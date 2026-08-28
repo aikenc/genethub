@@ -10,7 +10,7 @@ Relay 是有界的 opaque byte router：
 |---|---|
 | 验证 endpoint admission | 不持有配对 PSK 或 hosted channel secret |
 | 用 opaque route ticket 找 target endpoint | 不知道 account、machine、workspace、method 或 path 的业务含义 |
-| 转发 Fabric frame、维护 outer stream credit | 不解密 protocol-v3 record |
+| 转发 Fabric frame；新路径逐腿执行 socket 背压，旧路径维护 outer stream credit | 不解密 protocol-v3 record |
 | endpoint presence、generation fence、revocation | 不执行业务授权、文件读取或 RTC signaling 解析 |
 | 心跳、背压、容量和超时 | 不存业务数据，不依赖数据库 |
 
@@ -35,7 +35,10 @@ daemon endpoint      ── WebSocket /fabric/v2 ─┘
                                    └─ peer hello + E2EE v3 records
 ```
 
-一条物理 endpoint WebSocket 可以同时拥有多条 outer stream。browser 以 `OPEN(routeTicket, opaqueHello)` 发起；Relay 向 target 改写 stream id 并发送 `INCOMING(opaqueHello)`。target `ACCEPT(opaqueWelcome)` 后，两端使用 `DATA / WINDOW_UPDATE / FIN / RESET`。
+一条物理 endpoint WebSocket 可以同时拥有多条 outer stream。browser 以 `OPEN(routeTicket, opaqueHello)`
+发起；Relay 向 target 改写 stream id 并发送 `INCOMING(opaqueHello)`。target
+`ACCEPT(opaqueWelcome)` 后，两端使用 `DATA / FIN / RESET`；只有兼容旧 endpoint 的 credit 模式才继续
+使用 `WINDOW_UPDATE`。
 
 Fabric outer frame：
 
@@ -45,7 +48,13 @@ version:u8 | kind:u8 | flags:u16 | streamId:16 bytes | value:u64 | payload
 
 frame kinds 为 `OPEN / INCOMING / ACCEPT / DATA / WINDOW_UPDATE / FIN / RESET / PING / PONG`。outer stream id 是 Relay 路由状态，不是 E2EE 内部 logical stream id。Relay 对两侧重写 id，避免全局 id namespace 和跨 socket 混淆。
 
-Fabric v2 的默认 receive credit 是 256 KiB。daemon/browser 的 peer adapter 把单个 protocol-v3 record 限制为 16 KiB；Relay 自身 `RELAY_MAX_FRAME_BYTES` 的默认 4 MiB 是通用 Fabric 防护上限，不代表当前业务会发送 4 MiB frame。
+Fabric v2 保留 256 KiB receive credit 作为 wire-compatible fallback。daemon/browser 在 endpoint URL
+声明 `flow=transport-v1`；只有同一 binding 两端都声明时，Relay 才以零值 `INCOMING/ACCEPT` 激活
+transport-flow。该模式不维护逐字节 outer credit，也不发送 `WINDOW_UPDATE`：目标 `ws.send` callback
+未完成时暂停来源 socket，完成后恢复，让两条 TCP 腿分别承担接收窗口和拥塞控制。任一旧 client、
+daemon 或 Relay 都安全回退 256 KiB credit。peer adapter 仍把单个 protocol-v3 record 限制为 16 KiB；
+Relay 自身 `RELAY_MAX_FRAME_BYTES` 的默认 4 MiB 是通用 Fabric 防护上限，不代表当前业务会发送 4 MiB
+frame。
 
 ## 3. 准入模式
 
@@ -113,7 +122,10 @@ Relay 的边界按 endpoint、pending upgrade、pending OPEN、stream、socket b
 | `RELAY_HEARTBEAT` | 30 s | WebSocket heartbeat |
 | `RELAY_FABRIC_PRESENCE_REFRESH_MAX` | 30 s | presence lease 最大刷新间隔 |
 
-每个 outer stream 独立 credit；只有对端返回 `WINDOW_UPDATE` 才继续发送。慢读者超过单 socket 或全局预算时只关闭触发 socket，不将无界 bytes 留在 Node heap。
+transport-flow 下，outer stream 没有逐窗网络确认；Relay 等待目标 socket 的本地 send/drain，并在等待时
+暂停对应来源 socket。`RELAY_MAX_BUFFERED_BYTES` 与 `RELAY_MAX_OUTBOUND_QUEUED_BYTES` 约束的是
+Node 进程内真实已排队 bytes，不是每 RTT 可发送的额度。慢读者超过单 socket 或全局预算时只关闭触发
+socket，不将无界 bytes 留在 Node heap。旧 credit 模式仍按每 stream `WINDOW_UPDATE` 工作，仅用于兼容。
 
 pending OPEN 在 authority 返回前用 per-endpoint/global limit 限制；同一 stream id 的并发 frame 会取消 reservation，迟到 grant 不能复活已 reset stream。endpoint generation、route expiry、revocation tombstone 和 connection object identity 防止旧连接或跨 socket frame 接管新状态。
 

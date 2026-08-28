@@ -1,6 +1,6 @@
 # 轻量 Asset Preview v4
 
-> 状态：v4.2。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 重映射 CSS/JS/module 与站点根路径资源，并把 iframe 内相对 fetch/import 转回 `asset.preview`。单文件上限 64 MiB，含 WASM/二进制。真 WebRoot HTTP origin 与公开 Assets Gateway 仍不在本版本内。
+> 状态：v4.3。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 重映射 CSS/JS/module 与站点根路径资源，并把 iframe 内相对 fetch/import 转回 `asset.preview`。新 client/daemon 在认证握手中为有限 Preview 协商完整 64 MiB 授信，持续传输由 TCP/socket 背压而不是应用层 RTT 回包推进。单文件上限仍为 64 MiB，含 WASM/二进制。真 WebRoot HTTP origin 与公开 Assets Gateway 仍不在本版本内。
 
 ## 1. 产品结论
 
@@ -67,7 +67,7 @@ FilesPanel、Agent 输出和聊天链接应共享这个 builder，不能手拼 U
   ├─ Client 完成 v3 peer authentication
   ├─ 校验 daemon 返回的 machineId == URL deviceHandle
   └─ 发起 asset.preview Exchange
-         └─ daemon 校验 workspace/path、完整读取、返回 bytes
+         └─ daemon 校验 workspace/path、首遍有界扫描、复位同一文件句柄并流式返回 bytes
 ```
 
 Cloud console 在入口就识别 Preview deep link，并使用账号机器列表或浏览器本地 pairing roster 解析设备；不要求先进入 workbench 选择机器。连接重建会重新签发 one-use Fabric endpoint/route ticket，不复用已消费票据。
@@ -89,8 +89,7 @@ RequestHead {
       path
     }
   },
-  bodyLength: 0,
-  timeoutMs: 15000
+  bodyLength: 0
 }
 FIN
 
@@ -109,6 +108,12 @@ FIN
 
 method、metadata、status 和 body 都在 E2EE record 内。body 是 streaming bytes，不经过 JSON/base64；DataEndpoint 自动切成最多 16 KiB record 并与其他 logical streams 公平轮转。
 
+新 client 在 `PeerHello` 声明自己支持的有限 Preview 授信上限，新 daemon 取双方上限并在
+`PeerWelcome` 返回。双方都为当前版本时，`asset.preview` 的 OPEN 一次授予完整 64 MiB 方法上限；
+分片仍参与公平轮转，但合法单文件即使完全收不到 `WINDOW_UPDATE` 也能发送完，因此应用层确认不再
+位于吞吐关键路径。首批支持有限 bulk 的旧 client 没有 Hello 声明，只获得 8 MiB；更老 daemon
+缺少 Welcome 字段时回退 256 KiB。三种组合都保持 wire-compatible。
+
 请求没有 body。成功 response 的 `bodyLength`、`sourceBytes` 和实际收到的 bytes 必须完全相等且不超过 64 MiB，否则 Viewer fail-close 当前 stream。失败 response body 必须为空。
 
 `source.kind` 在 MVP 只有 `workspaceFile`。未来若支持 artifact、Git revision 或生成文档，应新增明确 contract，而不是让 `path` 指向 workspace 外资源。
@@ -117,8 +122,10 @@ method、metadata、status 和 body 都在 E2EE record 内。body 是 streaming 
 
 ```text
 MAX_PREVIEW_SOURCE_BYTES = 64 * 1024 * 1024
-PREVIEW_WORKERS = 2
-PREVIEW_TIMEOUT = 60 seconds
+MAX_PREVIEW_STREAM_LEASE_BYTES = 64 * 1024 * 1024  # 新 client + 新 daemon
+LEGACY_PREVIEW_STREAM_LEASE_BYTES = 8 * 1024 * 1024
+PREVIEW_WORKERS = 8
+PREVIEW_HEAD_OR_STALL_TIMEOUT = 60 seconds
 ```
 
 daemon 的顺序是：
@@ -128,11 +135,18 @@ daemon 的顺序是：
 3. 用首段查 daemon 级 root mapping，并确认该 rootHandle 是当前项目成员；再以对应 capability directory API 打开余下递归相对路径。
 4. 要求目标是普通文件；不把目录、FIFO、设备或 socket 当文件流。
 5. 先读 metadata。大于 64 MiB 直接返回 `tooLarge`，不开始传输。
-6. 最多读取 `64 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
-7. 图片/视频/WASM 按扩展名 + magic 判定；Markdown/HTML 按扩展名 + UTF-8 判定；其他有效 UTF-8 无 NUL 内容作为安全文本；其余二进制作为 `binary`。
-8. 对完整 bytes 计算截短 SHA-256 version，发送精确 response head 和 body。
+6. 用固定 256 KiB 缓冲首遍扫描同一 capability-opened 文件句柄，最多读取 `64 MiB + 1`；增长越界返回 `tooLarge`，长度变化返回 `sourceChanged`。
+7. 首遍同时完成类型探测与 SHA-256；图片/视频/WASM 按扩展名 + magic 判定，Markdown/HTML 按扩展名 + UTF-8 判定，其他有效 UTF-8 无 NUL 内容作为安全文本，其余二进制作为 `binary`。
+8. 将同一文件句柄复位到开头，发送精确 response head，再以固定 256 KiB 读缓冲流式写入 DataEndpoint；第二遍重新核对长度和 SHA-256，源文件变化则 fail-close。
 
-文件读取在 `spawn_blocking` 中执行，最多两个并发 Preview worker；它不占 carrier reader 或 DataEndpoint writer task。handler 等待 worker 时只占自己的 logical stream。
+最多 8 个 Preview worker permit 覆盖首遍扫描和第二遍实际发送的完整生命周期；这限制的是同时打开的
+文件句柄、磁盘读取和加密工作，而不是每 RTT 可发送的字节数。WASM guest 没有 blocking thread pool，
+两遍读取都按 256 KiB step cooperative yield；原生形态沿用同一算法。client 根据精确 `bodyLength`
+只分配一次最终 `Uint8Array` 并逐块写入，不再同时保留 chunk 列表和第二份最终副本。
+
+60 秒不再是整个 Preview 的总寿命：client 对 response head 设 60 秒期限，收到 body 后则只在连续
+60 秒没有新 chunk/FIN 时取消。稳定持续传输可以超过 60 秒。daemon 的 worker 排队与首遍本地扫描仍
+分别有 60 秒故障期限；它们保护本地资源故障，不参与网络稳态速率。
 
 路径边界使用 `cap-std::fs::Dir` 相对于已验证 workspace root 打开，并有 symlink escape 测试。绝对路径、`..`、编码分隔符和平台歧义 spelling 在 URL 层与 daemon 层分别拒绝，不能依赖前端校验作为安全边界。
 
@@ -160,7 +174,7 @@ daemon 的顺序是：
 
 ### 图片与视频
 
-Viewer 用完整 bytes 创建带 daemon MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 64 MiB 上限同时控制内存和首屏等待。
+Viewer 用完整 bytes 创建带 daemon MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 64 MiB 上限仍同时控制最终浏览器对象内存和首屏等待；传输层已经可以为整个合法文件一次授信，不等于可以取消这个产品内存边界。
 
 ### Markdown 与文本
 

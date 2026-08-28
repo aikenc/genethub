@@ -501,7 +501,13 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  * Capability advertisement only.  Signaling remains encrypted data-plane
  * traffic and no RTC address is ever placed in this hello.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * Optional for wire compatibility. A missing field identifies a peer
+ * from the first finite-bulk rollout, whose largest understood lease is
+ * [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+ */
+maxBulkStreamWindowBytes?: number, };
 
 export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
 /**

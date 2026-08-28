@@ -1,9 +1,10 @@
 # GeneHub 大对象传输网络效率优化提案（neteff）
 
-> 状态：测量基线与产品阶段 1–3 均已落地。提交依次为：专项重构 `d573c897`、阶段 1
-> `08551a5e`、阶段 2 `9329660d`、阶段 3 `8b48138b`。最新真实基线：
-> `260828-1151-neteff-phase3-2250`，真实 WASM daemon、真实 rendezvous relay，2/2 passed。
-> 直连和 Relay 已达到同链路原始 TCP 利用率目标；后续重点转向体验层和更宽网络矩阵。
+> 状态：测量基线、产品阶段 1–3 与阶段 3 后的限制收敛均已落地。前三阶段提交依次为：专项重构 `d573c897`、阶段 1
+> `08551a5e`、阶段 2 `9329660d`、阶段 3 `8b48138b`。限制收敛后的真实产物回归
+> `260828-1312-neteff-limit-policy-serial-c333` 使用真实 WASM daemon、真实 rendezvous relay，2/2 passed；
+> 两条 case 分别为 7.9 秒和 8.3 秒。直连和 Relay 已达到同链路原始 TCP 利用率目标；后续重点转向
+> 体验层和更宽网络矩阵。
 
 ## 1. 决策摘要
 
@@ -197,7 +198,9 @@ client 获得新信用 ← relay 转发 WindowUpdate ← daemon 返回信用
 现有 TCP-backed WebSocket、record framing、E2EE 和每流公平轮转全部保留。有限 Preview 的新模式
 分两层落地：
 
-1. data plane 在认证后的 peer 能力握手中为 `asset.preview` 协商最多 8 MiB 的 initial bulk lease；
+1. data plane 在认证后的 peer 能力握手中为 `asset.preview` 协商 initial bulk lease；新 client 在
+   `PeerHello` 声明 64 MiB 能力，新 daemon 返回双方共同上限，因此新/新组合一次授予完整合法文件；
+   首批 bulk 旧 client 没有 Hello 声明，仍获得 8 MiB，更老 daemon 缺少 Welcome 字段时回退 256 KiB；
 2. Fabric endpoint URL 声明 `flow=transport-v1`，只有 Relay 看到两端都声明能力时，才用
    `Incoming.value=0` / `Accept.value=0` 激活 transport-flow。
 
@@ -231,7 +234,9 @@ socket 一可写就继续，不新增网络 RTT。
 - client 只分配一次精确长度的最终 buffer，并逐块写入；
 - consumer 取消时发送 terminal reset，不再继续缓存。
 
-当前 Preview consumer 是内部立即读取、长度有限的 collector，因此健康路径不发送额外流控消息。
+当前 Preview consumer 是内部立即读取、长度有限的 collector。兼容 frame 仍可能返回
+`WINDOW_UPDATE`，但新/新组合的初始许可已经覆盖完整 64 MiB 方法上限，发送方即使收不到这些回包也
+能发送完整个合法文件，因此回包不在健康路径的进度条件中。
 通用的外部慢 sink、PTY 和 events 仍保留旧信用语义；粗粒度 `PAUSE/RESUME` 尚未实施，列入未知长度
 流的后续方案，不能反过来阻塞已经有精确长度的 finite bulk。
 
@@ -326,12 +331,30 @@ daemon TCP/WebSocket
 预算应约束“实际已排队/已保留的内存”，不能再用一个固定小在途窗口代替所有资源管理。对于 Preview，
 应优先减少完整文件的重复拷贝和并发对象总量。
 
+### 8.3 当前限制的最终归类
+
+| 限制 | 当前值/语义 | 处理结论 | 原因 |
+| --- | --- | --- | --- |
+| Preview 应用层授信 | 新/新 64 MiB；旧 bulk client 8 MiB；更老 peer 256 KiB | 已大幅放宽并完成双向协商 | 授信不分配内存；完整合法文件不再依赖信用 RTT |
+| Fabric outer credit | transport-flow 下关闭；旧端 256 KiB fallback | 新路径移出关键路径 | 两条 TCP 腿分别提供拥塞控制与接收窗口 |
+| Preview 文件大小 | 64 MiB | 保留 | Viewer 仍持有一个完整最终 buffer/Blob，尚无 Range 或渐进解码 |
+| Preview worker | daemon 全局 8 个 | 保留 | 限制文件句柄、两遍磁盘读取与 WASM 加密并发 |
+| active logical streams | 每 peer 256 | 保留 | 限制 task、队列和 stream 状态；远高于正常 UI 需求 |
+| record 大小 | 完整 record 16 KiB | 保留 | E2EE record、防大帧独占与公平调度；不再造成逐片 RTT |
+| client 超时 | response head 60 秒；连续无 chunk/FIN 60 秒 | 保留为停滞检测 | 稳定传输可无限续期，不再是 60 秒总寿命 |
+| Relay socket 排队 | 单 socket 8 MiB、进程 64 MiB | 保留 | 约束真实 Node heap；不限制健康链路每 RTT 可发送量 |
+
+因此“降低限制”不是把所有数字调大：RTT 相关的传输许可已经放宽到完整方法范围；留下的数字都必须能
+对应一项实际持有的内存、文件句柄、task 或故障检测。继续提高 64 MiB 文件上限之前，必须先让 Viewer
+支持 Range/渐进渲染或流式 sink，否则只是把浏览器单对象内存风险同比放大。
+
 ## 9. 协议协商与兼容（已落地部分）
 
 不能单方面删除信用：旧 client、daemon 和 relay 都会校验信用上限，单侧变化会触发 protocol reset。
 已落地的兼容策略为：
 
-- client 和 daemon 的认证握手协商有限 Preview bulk lease；任一旧 peer 回退 256 KiB；
+- 新 client 在 `PeerHello` 声明最大有限 Preview 授信，新 daemon 返回双方共同上限；新/新为完整
+  64 MiB，首批 bulk 旧 client 无声明时为 8 MiB，更老 daemon 缺少 Welcome 字段时回退 256 KiB；
 - daemon uplink 与 browser dial 在 Fabric URL 附加 `flow=transport-v1`；
 - Relay 只有在同一 binding 两端都声明该 capability 时才发送零值 `Incoming/Accept` 信号；
 - 新 endpoint 只在自己主动声明能力时接受零值信号，否则按协议违规失败；
@@ -342,8 +365,9 @@ daemon TCP/WebSocket
 - `streamPauseResume`：支持异常慢消费者的暂停/恢复；
 - `absoluteStreamLimit`：未知长度流支持绝对接收上限。
 
-阶段 1 的 8 MiB lease 是兼容且有界的最小直连实验；阶段 2 的 Fabric transport-flow 才让 Relay
-外层彻底退出逐窗 RTT 回路。两者共同覆盖当前有限 Preview，不能把静态大 lease 泛化为所有未知长度流。
+阶段 1 的 8 MiB lease 是兼容且有界的最小直连实验；阶段 2 的 Fabric transport-flow 让 Relay 外层
+彻底退出逐窗 RTT 回路；阶段 3 流式 source/sink 后，新 peer 才具备把 Preview 授信提升到完整 64 MiB
+方法范围的资源前提。该许可只适用于长度已知且有硬上限的 Preview，不能泛化为未知长度流。
 
 ## 10. 正确性前置修复（已完成）
 
@@ -417,6 +441,19 @@ RTT 回包”本身就是主要杠杆。
 - daemon 全包 567 项执行到 566 passed；唯一失败是未改动 `router.rs` 的既有中文文案断言，未混入本阶段；
 - 阶段 1/2 性能未回退：直连 94.4%–96.0%，Relay 92.2%–95.5%。
 
+### 阶段 3 后续：限制收敛（已完成）
+
+- 新 client 在 `PeerHello` 主动声明自己可接受的有限 Preview 授信，新 daemon 只返回双方共同上限；
+- 新/新组合把 initial lease 从 8 MiB 提升到完整 64 MiB 方法上限，任何合法单文件都不以信用回包为
+  继续发送的必要条件；
+- 旧 client 没有 Hello 能力字段时仍得到 8 MiB，新 client 连接旧 daemon 仍接受 8 MiB 或 256 KiB，
+  不提升 data-plane version，不让混合版本互相 reset；
+- 64 MiB 文件上限、8 个 Preview worker、256 active streams、16 KiB record、Relay 真实排队预算和
+  60 秒停滞检测全部保留，并在产品文档中逐项写明保护对象。
+- 真实产物回归 `260828-1312-neteff-limit-policy-serial-c333` 在串行性能槽中 2/2 passed。一次将两条
+  RTT=0 基准并发执行的探针因共享宿主 CPU 竞争降至 69.6%–73.6%，因此失败结果没有被调低阈值掩盖；
+  性能门禁必须隔离 CPU 基准，不能把同机并发噪声误判为传输协议回退。
+
 ### 阶段 4：体验与大对象能力
 
 - Range、断点续传和缓存；
@@ -458,7 +495,7 @@ RTT 回包”本身就是主要杠杆。
 | --- | --- | --- | --- | --- |
 | finite bulk 使用 TCP/socket 背压 | 直接消除正常路径信用 RTT | 阶段 1/2 已完成 | 外部慢 sink 尚需 coarse pause | 保持为主路径 |
 | Relay 逐腿背压 | 消除两腿端到端信用 | 阶段 2 已完成 | socket 级 pause 粒度可继续细化 | 保持硬门禁 |
-| 8 MiB 协商初始 lease | 快速解除 direct 小窗 | 阶段 1 已完成 | 仅限有限 Preview，不能泛化 | 兼容过渡层 |
+| 完整方法范围的协商 lease | 有限 Preview 完全退出信用 RTT | 已完成 | 仅限长度已知且 ≤64 MiB；旧 client 回退 8 MiB | 保持为当前路径 |
 | 流式 source + 定长 sink | 降低两端内存/复制 | 阶段 3 已完成 | daemon 为版本 hash 做两遍顺序读 | 继续观测 I/O |
 | 绝对 offset + 提前续授 | 通用 streaming 流控 | 未实施 | 状态机和兼容复杂 | 用于未知长度流 |
 | 独立 bulk 数据通道 | 最接近原生 TCP，支持 Range | 未实施 | ticket、连接、路由、重连 | Range 需求出现后评估 |
@@ -486,7 +523,7 @@ TCP 对照中。专项目标不是让远程绝对耗时等于 loopback，而是�
 ## 15. 最终建议
 
 1. 核心门禁固定为同链路 TCP 带宽利用率：直连 ≥85%、Relay ≥80%，不得退回“旧窗口达成率”；
-2. 保持阶段 1–3 当前架构：分片负责公平，TCP 负责健康有限流的持续传输，应用层只管理准入和实际资源；
+2. 保持阶段 1–3 及限制收敛后的架构：分片负责公平，TCP 负责健康有限流的持续传输，应用层只管理准入和实际资源；
 3. 将 `neteff` 快速矩阵纳入涉及 data plane/Fabric/Relay/Preview 改动的 merge gate；
 4. 下一轮网络专项扩展 10/500 Mbps、400 ms、jitter/loss，确认瓶颈是否迁移到 WASM AES 或 TCP HOL；
 5. 下一产品优先级建议是缩略图 + 缓存：链路效率已经接近 TCP，体验优化应减少首屏必须传输的字节；
