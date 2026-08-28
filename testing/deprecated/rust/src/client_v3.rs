@@ -42,6 +42,7 @@ impl Client {
                 ),
             },
             rtc_supported: false,
+            max_bulk_stream_window_bytes: None,
         };
         socket
             .send(Message::Binary(serde_json::to_vec(&hello)?))
@@ -204,6 +205,7 @@ impl Client {
                 ),
             },
             rtc_supported: false,
+            max_bulk_stream_window_bytes: None,
         };
         Self::over_carrier(daemon, hello, &credential.secret, &context, &nonce).await
     }
@@ -228,6 +230,7 @@ impl Client {
                 proof: genet_daemon::channel_auth::client_proof(secret, &context, &nonce),
             },
             rtc_supported: false,
+            max_bulk_stream_window_bytes: None,
         };
         let client = Self::over_carrier(daemon, hello, secret, &context, &nonce).await?;
         Ok((client, invite_id.to_string()))
