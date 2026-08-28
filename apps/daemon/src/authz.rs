@@ -238,6 +238,17 @@ impl Principal {
         }
     }
 
+    /// Starting or reopening the durable PM is a user action. Hosted Fabric
+    /// peers are authenticated users just like the loopback workbench, while a
+    /// PM's session-bound CLI credential must not be able to mint another PM.
+    pub fn may_start_project_manager(&self) -> bool {
+        match self {
+            Principal::LocalUser | Principal::Channel => true,
+            Principal::Device { grants, .. } => grants.allows(Capability::Session),
+            Principal::ProjectManager { .. } | Principal::Pairing => false,
+        }
+    }
+
     pub fn device_id(&self) -> Option<&str> {
         match self {
             Principal::Device { id, .. } => Some(id),

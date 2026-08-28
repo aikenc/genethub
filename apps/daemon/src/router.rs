@@ -281,12 +281,10 @@ async fn dispatch(
             runtime_values,
             title,
         } => {
-            if transport != TransportKind::Loopback
-                || !matches!(caller, crate::authz::Principal::LocalUser)
-            {
+            if !caller.may_start_project_manager() {
                 return Handled::err(
                     ErrorCode::Forbidden,
-                    "the PM Agent MVP can only be started by the local user",
+                    "starting a PM Agent requires an authenticated user with session access",
                 );
             }
             let workspace = match state.workspaces.get(&workspace_id).await {
