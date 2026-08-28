@@ -539,6 +539,7 @@ describe("switching from the sidebar", () => {
                     omittedItemCount: 0,
                     retrieval: "genehub",
                   },
+                  blobAppendix: [],
                 },
               };
             case "session.forkImport":

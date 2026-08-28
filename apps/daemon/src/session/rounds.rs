@@ -386,7 +386,7 @@ pub fn trunks_from_items(items: &[TimelineItem]) -> Vec<RoundTrunk> {
                 }
                 _ => None,
             });
-            let blobs = slice.iter().filter_map(blob_overview).collect();
+            let blobs = slice.iter().flat_map(blob_overviews).collect();
             batches.push(RoundBatch {
                 summary: batch.clone(),
                 monologue,
@@ -401,8 +401,11 @@ pub fn trunks_from_items(items: &[TimelineItem]) -> Vec<RoundTrunk> {
     trunks
 }
 
-/// The compact row for one work item, or `None` for anything that is not work.
-pub fn blob_overview(item: &TimelineItem) -> Option<BlobOverview> {
+/// The compact rows for one work item: one for the work itself, plus one per
+/// image its result carried. Image rows take a synthetic id
+/// (`<tool item>:img:<n>`) — the same id the pump's blob writer used — so the
+/// regular ref merge addresses their produced-image payloads.
+pub fn blob_overviews(item: &TimelineItem) -> Vec<BlobOverview> {
     let (kind, overview) = match item {
         TimelineItem::Reasoning { text, .. } => (BlobKind::Reasoning, text.clone()),
         TimelineItem::ToolCall { name, detail, .. } => (
@@ -412,14 +415,29 @@ pub fn blob_overview(item: &TimelineItem) -> Option<BlobOverview> {
                 _ => name.clone(),
             },
         ),
-        _ => return None,
+        _ => return Vec::new(),
     };
-    Some(BlobOverview {
+    let mut rows = vec![BlobOverview {
         item_id: item.id().to_string(),
         kind,
         overview,
         blob: None,
-    })
+        thumb: None,
+        path: None,
+    }];
+    if let TimelineItem::ToolCall { id, images, .. } = item {
+        for (index, image) in images.iter().enumerate() {
+            rows.push(BlobOverview {
+                item_id: format!("{id}:img:{index}"),
+                kind: BlobKind::Image,
+                overview: image.alt.clone(),
+                blob: None,
+                thumb: image.thumb.clone(),
+                path: image.path.clone(),
+            });
+        }
+    }
+    rows
 }
 
 #[cfg(test)]

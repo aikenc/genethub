@@ -19,6 +19,7 @@ import {
   type ForkSelection,
 } from "./ForkDialog";
 import { ForwardDialog } from "./ForwardDialog";
+import { ImageThumbStrip } from "./ImageStrip";
 import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
 
@@ -869,7 +870,14 @@ function Item({ item }: { item: TimelineItem }) {
       return <Reasoning text={item.text} />;
 
     case "toolCall":
-      return <ToolCallView name={item.name} status={item.status} detail={item.detail} />;
+      return (
+        <ToolCallView
+          name={item.name}
+          status={item.status}
+          detail={item.detail}
+          images={item.images}
+        />
+      );
 
     case "todo":
       return (
@@ -1207,6 +1215,8 @@ function BatchContent({
   batch: RoundBatch;
   monologue?: string;
 }) {
+  const images = batch.blobs.filter((blob) => blob.kind === "image");
+  const rows = batch.blobs.filter((blob) => blob.kind !== "image");
   return (
     <div className="space-y-1 px-2 pb-2">
       {monologue ? (
@@ -1214,7 +1224,18 @@ function BatchContent({
           <SessionMarkdown text={monologue} />
         </div>
       ) : null}
-      {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
+      {images.length > 0 ? (
+        <ImageThumbStrip
+          images={images.map((blob) => ({
+            id: blob.itemId,
+            alt: blob.overview,
+            thumb: blob.thumb,
+            path: blob.path,
+            blob: blob.blob,
+          }))}
+        />
+      ) : null}
+      {rows.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
     </div>
   );
 }
@@ -1232,7 +1253,9 @@ function LiveTail({ blobs }: { blobs: BlobOverview[] }) {
             className="flex items-center gap-2 px-2 py-1.5 text-xs"
             data-testid="live-blob-row"
           >
-            <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
+            <span className="text-muted">
+              {blob.kind === "reasoning" ? "思考" : blob.kind === "image" ? "图片" : "工具"}
+            </span>
             <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
           </div>
         ))
@@ -1325,7 +1348,9 @@ function BlobRow({ blob }: { blob: BlobOverview }) {
           if (next && blob.blob && !payload) void loadBlob(blob.blob);
         }}
       >
-        <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
+        <span className="text-muted">
+          {blob.kind === "reasoning" ? "思考" : blob.kind === "image" ? "图片" : "工具"}
+        </span>
         <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
         {blob.blob ? <span className="text-accent">{open ? "收起" : "详情"}</span> : null}
       </button>

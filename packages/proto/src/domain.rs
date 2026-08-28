@@ -270,6 +270,12 @@ pub struct ForkTransfer {
     pub title: Option<String>,
     pub items: Vec<TimelineItem>,
     pub coverage: HistoryCoverage,
+    /// Batch overview rows (tool calls, reasoning, images) covering the
+    /// exported history. Thumbnails ride inline; original payloads never do —
+    /// `blob` refs resolve against `source_session_id` while that session is
+    /// reachable, and image `path`s only while the source workspace is.
+    #[serde(default)]
+    pub blob_appendix: Vec<BlobOverview>,
 }
 
 /// Whether an imported conversation can keep talking through its original
@@ -643,6 +649,25 @@ pub struct BlobRef {
 pub enum BlobKind {
     Reasoning,
     ToolCall,
+    Image,
+}
+
+/// A downscaled stand-in for an image row, inlined into the batch overview so
+/// the strip renders with zero extra round trips. Daemon-generated at
+/// extraction time: 64px wide for images the agent read (workspace files),
+/// 128px for images it produced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ImageThumb {
+    /// Encoded thumbnail mime: `image/jpeg` or `image/webp`.
+    pub mime: String,
+    pub data_base64: String,
+    /// Original dimensions, so layout can reserve the aspect ratio box.
+    #[ts(type = "number")]
+    pub width: u32,
+    #[ts(type = "number")]
+    pub height: u32,
 }
 
 /// One trunk's address inside a session's round layer, for batch fetches.
@@ -665,6 +690,17 @@ pub struct BlobOverview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub blob: Option<BlobRef>,
+    /// Present only on `Image` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thumb: Option<ImageThumb>,
+    /// `Image` rows only: workspace-relative path when the image is a file the
+    /// agent read. Clicking opens it through `asset.preview`; the bytes are
+    /// never duplicated into the blob layer. Absent for agent-produced images
+    /// (those carry `blob` instead) and for paths outside the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

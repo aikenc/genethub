@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
+    Usage,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex};
@@ -916,6 +917,7 @@ fn emit_part(
             };
             TimelineItem::ToolCall {
                 id: item_id,
+                images: images_from_part(&name, part),
                 name: name.clone(),
                 status,
                 detail: detail_from_part(&name, part),
@@ -924,6 +926,53 @@ fn emit_part(
         _ => return,
     };
     let _ = events.send(SessionEvent::Item { turn_id, item });
+}
+
+/// Image output rides a tool state's `attachments` as file parts with data
+/// URLs (screenshot tools and the like). A `read` tool's `filePath` input is
+/// the source path; everything else is treated as produced bytes.
+fn images_from_part(name: &str, part: &Value) -> Vec<ToolImage> {
+    let state = part.get("state").unwrap_or(&Value::Null);
+    let read_path = (name == "read")
+        .then(|| {
+            state
+                .get("input")
+                .and_then(|input| input.get("filePath"))
+                .and_then(Value::as_str)
+        })
+        .flatten();
+    state
+        .get("attachments")
+        .and_then(Value::as_array)
+        .map(|attachments| {
+            attachments
+                .iter()
+                .filter(|part| {
+                    part.get("mime")
+                        .and_then(Value::as_str)
+                        .is_some_and(|mime| mime.starts_with("image/"))
+                })
+                .filter_map(|part| {
+                    let url = part.get("url").and_then(Value::as_str)?;
+                    let data = url.strip_prefix("data:")?.split_once(";base64,")?.1;
+                    Some(ToolImage {
+                        alt: match read_path {
+                            Some(path) => format!("{name}: {path}"),
+                            None => name.to_string(),
+                        },
+                        mime: part
+                            .get("mime")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_string(),
+                        data_base64: Some(data.to_string()),
+                        thumb: None,
+                        path: read_path.map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Builds the `parts` array for `POST /session/{id}/message`. Only inline
@@ -1417,5 +1466,25 @@ mod tests {
             })),
             Some("ses_abc".into())
         );
+    }
+
+    #[test]
+    fn opencode_image_attachments_become_tool_images() {
+        let part = json!({
+            "tool": "read",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "docs/diagram.png"},
+                "attachments": [
+                    {"type": "file", "mime": "image/png", "url": "data:image/png;base64,aGk="},
+                    {"type": "file", "mime": "text/plain", "url": "data:text/plain;base64,bm8="},
+                ],
+            },
+        });
+        let images = images_from_part("read", &part);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].path.as_deref(), Some("docs/diagram.png"));
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
+        assert!(images_from_part("shell", &json!({"state": {"status": "completed"}})).is_empty());
     }
 }

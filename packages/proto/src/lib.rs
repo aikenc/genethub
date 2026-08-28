@@ -51,6 +51,7 @@ mod tests {
                 output: "a\nb".into(),
                 exit_code: Some(0),
             },
+            images: vec![],
         });
         round_trip(TimelineItem::ToolCall {
             id: "i3".into(),
@@ -59,6 +60,7 @@ mod tests {
             detail: ToolCallDetail::Unknown {
                 raw: json!({"anything": [1, 2, 3]}),
             },
+            images: vec![],
         });
     }
 
@@ -150,6 +152,7 @@ mod tests {
                 id: "a1".into(),
                 text: "done".into(),
             }],
+            blob_appendix: vec![],
             coverage: HistoryCoverage {
                 source_item_count: Some(1),
                 retained_item_count: 1,
