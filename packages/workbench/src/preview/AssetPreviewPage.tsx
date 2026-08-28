@@ -293,6 +293,18 @@ function PreviewDocument({
     },
     [client, workspaceHandle],
   );
+  const text = useMemo(() => decodeText(bytes), [bytes]);
+  const artifact = useMemo(
+    () => ({
+      deviceHandle,
+      workspaceHandle,
+      folders: [{ root: "", rootHandle }],
+      documentPath: path,
+      ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
+      loadPreview,
+    }),
+    [deviceHandle, workspaceHandle, rootHandle, path, runtimeSessionId, loadPreview],
+  );
 
   useEffect(() => {
     if (metadata.kind === "html") return;
@@ -312,29 +324,14 @@ function PreviewDocument({
     return (
       <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
         <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
-          <Markdown
-            text={decodeText(bytes)}
-            variant="document"
-            artifact={{
-              deviceHandle,
-              workspaceHandle,
-              folders: [{ root: "", rootHandle }],
-              documentPath: path,
-              ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
-              loadPreview,
-            }}
-          />
+          <Markdown text={text} variant="document" artifact={artifact} />
         </div>
       </article>
     );
   }
   if (metadata.kind === "text") {
     return (
-      <HighlightedCode
-        text={decodeText(bytes)}
-        language={languageForPath(path)}
-        document
-      />
+      <HighlightedCode text={text} language={languageForPath(path)} document />
     );
   }
   if (metadata.kind === "html") {
