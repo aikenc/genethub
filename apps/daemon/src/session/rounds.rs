@@ -244,7 +244,8 @@ impl TrunkBuilder {
             if self.first_item_id.is_none() {
                 self.first_item_id = Some(item_id.to_string());
             }
-            self.closed_batches.push(ClosedBatch::marker(item_id, reason));
+            self.closed_batches
+                .push(ClosedBatch::marker(item_id, reason));
             return None;
         }
         let mut closed_trunk = None;
@@ -654,10 +655,10 @@ mod tests {
         builder.push("c1", TrunkItem::Compaction("auto"));
         builder.push("a2", TrunkItem::Monologue);
         builder.push("t2", TrunkItem::ToolCall("write"));
-        let summary = builder.close().unwrap().into_summary(
-            0,
-            &texts(&[("a1", "先读取配置"), ("a2", "再写入修改")]),
-        );
+        let summary = builder
+            .close()
+            .unwrap()
+            .into_summary(0, &texts(&[("a1", "先读取配置"), ("a2", "再写入修改")]));
 
         assert_eq!(summary.batches.len(), 3);
         assert_eq!(summary.batches[0].first_item_id, "a1");
