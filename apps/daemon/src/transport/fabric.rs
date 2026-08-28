@@ -959,8 +959,8 @@ pub async fn dial(
                     // Returned only once the bounded carrier queue has taken
                     // ownership, so credit tracks what was consumed rather
                     // than what was merely read off the socket.
-                    if !reader_flow.is_transport() {
-                        if reader_writer
+                    if !reader_flow.is_transport()
+                        && reader_writer
                             .frame(Frame {
                                 kind: Kind::WindowUpdate,
                                 stream_id,
@@ -969,9 +969,8 @@ pub async fn dial(
                             })
                             .await
                             .is_err()
-                        {
-                            return;
-                        }
+                    {
+                        return;
                     }
                 }
                 Kind::WindowUpdate => {
