@@ -1018,15 +1018,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("project");
         let space_root = project_root.join("spaces/code");
-        std::fs::create_dir_all(space_root.join(".pipebuilder")).unwrap();
-        std::fs::write(
-            space_root.join("pipespace.json"),
-            r#"{"schema":"pipespace.v1"}"#,
+        std::fs::create_dir_all(project_root.join("spaces")).unwrap();
+        crate::agent_space_builder::run(
+            &project_root,
+            &space_root,
+            crate::agent_space_builder::Command::Init,
+            true,
         )
         .unwrap();
-        std::fs::write(space_root.join(".pipebuilder/lock.json"), "{}").unwrap();
+        crate::agent_space_builder::run(
+            &project_root,
+            &space_root,
+            crate::agent_space_builder::Command::Build { dry_run: false },
+            true,
+        )
+        .unwrap();
         let source = space_root.join("code.code-workspace");
-        std::fs::write(&source, r#"{"folders":[{"path":"."}]}"#).unwrap();
 
         let spaces = workspaces(dir.path()).await;
         let project = spaces.open(&project_root, None).await.unwrap();
