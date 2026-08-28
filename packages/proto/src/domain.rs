@@ -596,6 +596,14 @@ pub struct RoundBatchSummary {
     pub first_item_id: String,
     pub blob_count: u32,
     pub text: String,
+    /// The compaction reason when this batch is a context-compaction marker:
+    /// a zero-blob batch whose only item (`firstItemId`) is the compaction
+    /// event, so clients render the marker at the exact batch boundary where
+    /// the context was squeezed. Rows written before this field existed read
+    /// as `None` and their markers stay in the flat narrative stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub marker: Option<String>,
 }
 
 /// A visible, bounded section of a round. Trunks are carried by the round

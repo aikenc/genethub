@@ -113,10 +113,11 @@ pub enum TrunkItem<'a> {
     Monologue,
     Reasoning,
     ToolCall(&'a str),
-    /// A context-compaction marker. It never joins a batch: it closes the batch
-    /// in flight so the compression line renders between batches, not inside
-    /// one where it would read as part of the work it interrupted.
-    Compaction,
+    /// A context-compaction marker, carrying the adapter's reason. It closes
+    /// the batch in flight and then stands in the stream as its own zero-blob
+    /// marker batch, so the compression line renders at the exact spot the
+    /// work was interrupted instead of floating outside the batch flow.
+    Compaction(&'a str),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,6 +136,22 @@ pub struct ClosedBatch {
     pub monologue_item_id: Option<String>,
     pub first_reasoning_item_id: Option<String>,
     pub tool_count: u32,
+    /// The compaction reason when this batch is a context-compaction marker:
+    /// a zero-blob batch whose only item is the compaction event itself.
+    pub marker: Option<String>,
+}
+
+impl ClosedBatch {
+    fn marker(item_id: &str, reason: &str) -> Self {
+        Self {
+            first_item_id: item_id.to_string(),
+            blob_count: 0,
+            monologue_item_id: None,
+            first_reasoning_item_id: None,
+            tool_count: 0,
+            marker: Some(reason.to_string()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -152,26 +169,34 @@ impl ClosedTrunk {
             .into_iter()
             .enumerate()
             .map(|(batch_index, batch)| {
-                let text = batch
-                    .monologue_item_id
-                    .as_ref()
-                    .and_then(|id| texts.get(id))
-                    .map(|text| overview::shorten(text, 100))
-                    .filter(|text| !text.is_empty())
-                    .or_else(|| {
-                        batch
-                            .first_reasoning_item_id
-                            .as_ref()
-                            .and_then(|id| texts.get(id))
-                            .map(|text| overview::shorten(text, 100))
-                            .filter(|text| !text.is_empty())
-                    })
-                    .unwrap_or_else(|| format!("调用了 {} 次工具", batch.tool_count));
+                let text = if batch.marker.is_some() {
+                    // A marker batch's text is only a fallback for readers
+                    // that predate the marker field; the current frontend
+                    // renders its own label from `marker`.
+                    "上下文压缩".to_string()
+                } else {
+                    batch
+                        .monologue_item_id
+                        .as_ref()
+                        .and_then(|id| texts.get(id))
+                        .map(|text| overview::shorten(text, 100))
+                        .filter(|text| !text.is_empty())
+                        .or_else(|| {
+                            batch
+                                .first_reasoning_item_id
+                                .as_ref()
+                                .and_then(|id| texts.get(id))
+                                .map(|text| overview::shorten(text, 100))
+                                .filter(|text| !text.is_empty())
+                        })
+                        .unwrap_or_else(|| format!("调用了 {} 次工具", batch.tool_count))
+                };
                 BatchSummary {
                     index: batch_index as u32,
                     first_item_id: batch.first_item_id,
                     blob_count: batch.blob_count,
                     text,
+                    marker: batch.marker,
                 }
             })
             .collect();
@@ -181,7 +206,12 @@ impl ClosedTrunk {
             .and_then(|id| texts.get(id))
             .map(|text| first_sentence(text))
             .filter(|text| !text.is_empty())
-            .or_else(|| batches.first().map(|batch| overview::clip(&batch.text, 32)))
+            .or_else(|| {
+                batches
+                    .iter()
+                    .find(|batch| batch.marker.is_none())
+                    .map(|batch| overview::clip(&batch.text, 32))
+            })
             .unwrap_or_else(|| "工作过程".to_string());
         TrunkSummary {
             index,
@@ -205,10 +235,16 @@ pub struct TrunkBuilder {
 
 impl TrunkBuilder {
     pub fn push(&mut self, item_id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
-        // A compaction cuts the batch short and stands alone between batches;
-        // it carries no blob of its own.
-        if matches!(item, TrunkItem::Compaction) {
+        // A compaction cuts the batch short and then takes its own place in
+        // the stream: a zero-blob marker batch whose first_item_id is the
+        // compaction item itself, so every reader renders the marker at the
+        // exact batch boundary where the context was squeezed.
+        if let TrunkItem::Compaction(reason) = item {
             self.close_batch();
+            if self.first_item_id.is_none() {
+                self.first_item_id = Some(item_id.to_string());
+            }
+            self.closed_batches.push(ClosedBatch::marker(item_id, reason));
             return None;
         }
         let mut closed_trunk = None;
@@ -216,7 +252,7 @@ impl TrunkBuilder {
             TrunkItem::Monologue => !self.current_batch.item_ids.is_empty(),
             TrunkItem::Reasoning => self.current_batch.tool_count >= BATCH_REASONING_TOOL_THRESHOLD,
             TrunkItem::ToolCall(_) => false,
-            TrunkItem::Compaction => unreachable!("handled above"),
+            TrunkItem::Compaction(_) => unreachable!("handled above"),
         };
         if starts_semantic_batch {
             self.close_batch();
@@ -256,7 +292,7 @@ impl TrunkBuilder {
                     self.current_batch.first_reasoning_item_id = Some(item_id.to_string());
                 }
             }
-            TrunkItem::Compaction => unreachable!("handled above"),
+            TrunkItem::Compaction(_) => unreachable!("handled above"),
         }
 
         if self.current_batch.tool_count >= BATCH_MAX_TOOL_CALLS
@@ -283,6 +319,7 @@ impl TrunkBuilder {
             monologue_item_id: batch.monologue_item_id,
             first_reasoning_item_id: batch.first_reasoning_item_id,
             tool_count: batch.tool_count,
+            marker: None,
         });
     }
 
@@ -337,7 +374,7 @@ pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
             TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
             TimelineItem::ToolCall { name, .. } => TrunkItem::ToolCall(name),
-            TimelineItem::Compaction { .. } => TrunkItem::Compaction,
+            TimelineItem::Compaction { reason, .. } => TrunkItem::Compaction(reason),
             _ => continue,
         };
         if let Some(trunk) = builder.push(item.id(), kind) {
@@ -607,6 +644,97 @@ mod tests {
         assert_eq!(summary.batches.len(), 2);
         assert_eq!(summary.batches[0].text, "第一句");
         assert_eq!(summary.batches[1].text, "第二句");
+    }
+
+    #[test]
+    fn a_compaction_stands_as_a_marker_batch_between_work_batches() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("a1", TrunkItem::Monologue);
+        builder.push("t1", TrunkItem::ToolCall("read"));
+        builder.push("c1", TrunkItem::Compaction("auto"));
+        builder.push("a2", TrunkItem::Monologue);
+        builder.push("t2", TrunkItem::ToolCall("write"));
+        let summary = builder.close().unwrap().into_summary(
+            0,
+            &texts(&[("a1", "先读取配置"), ("a2", "再写入修改")]),
+        );
+
+        assert_eq!(summary.batches.len(), 3);
+        assert_eq!(summary.batches[0].first_item_id, "a1");
+        assert_eq!(summary.batches[0].marker, None);
+        let marker = &summary.batches[1];
+        assert_eq!(marker.first_item_id, "c1");
+        assert_eq!(marker.blob_count, 0);
+        assert_eq!(marker.marker.as_deref(), Some("auto"));
+        assert_eq!(summary.batches[2].first_item_id, "a2");
+        assert_eq!(summary.batches[2].marker, None);
+        assert_eq!(summary.blob_count, 2, "a marker carries no blob");
+        assert_eq!(summary.title, "先读取配置");
+    }
+
+    #[test]
+    fn consecutive_compactions_each_stand_as_a_marker_batch() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("t1", TrunkItem::ToolCall("read"));
+        builder.push("c1", TrunkItem::Compaction("auto"));
+        builder.push("c2", TrunkItem::Compaction("manual"));
+        builder.push("t2", TrunkItem::ToolCall("write"));
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+
+        assert_eq!(summary.batches.len(), 4);
+        assert_eq!(summary.batches[1].first_item_id, "c1");
+        assert_eq!(summary.batches[1].marker.as_deref(), Some("auto"));
+        assert_eq!(summary.batches[2].first_item_id, "c2");
+        assert_eq!(summary.batches[2].marker.as_deref(), Some("manual"));
+        assert_eq!(summary.batches[3].first_item_id, "t2");
+    }
+
+    #[test]
+    fn a_compaction_before_any_work_opens_the_trunk() {
+        let mut builder = TrunkBuilder::default();
+        builder.push("c1", TrunkItem::Compaction("auto"));
+        builder.push("t1", TrunkItem::ToolCall("read"));
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+
+        assert_eq!(summary.first_item_id, "c1");
+        assert_eq!(summary.batches.len(), 2);
+        assert_eq!(summary.batches[0].marker.as_deref(), Some("auto"));
+        assert_eq!(summary.batches[1].first_item_id, "t1");
+        assert_eq!(
+            summary.title, "调用了 1 次工具",
+            "a leading marker batch must not become the trunk title"
+        );
+    }
+
+    #[test]
+    fn a_marker_batch_slices_out_exactly_the_compaction_item() {
+        let items = vec![
+            TimelineItem::AssistantMessage {
+                id: "a1".into(),
+                text: "先读取配置".into(),
+            },
+            TimelineItem::Compaction {
+                id: "c1".into(),
+                reason: "auto".into(),
+            },
+            TimelineItem::AssistantMessage {
+                id: "a2".into(),
+                text: "再写入修改".into(),
+            },
+        ];
+        let trunks = trunks_from_items(&items);
+        assert_eq!(trunks.len(), 1);
+        let batches = &trunks[0].batches;
+        assert_eq!(batches.len(), 3);
+        let marker = &batches[1];
+        assert_eq!(marker.summary.marker.as_deref(), Some("auto"));
+        assert_eq!(marker.summary.first_item_id, "c1");
+        assert!(
+            marker.monologue.is_none() && marker.blobs.is_empty(),
+            "the marker batch must not absorb neighbouring work"
+        );
+        assert_eq!(batches[0].monologue.as_deref(), Some("先读取配置"));
+        assert_eq!(batches[2].monologue.as_deref(), Some("再写入修改"));
     }
 
     #[test]
