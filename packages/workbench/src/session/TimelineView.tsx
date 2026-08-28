@@ -227,6 +227,17 @@ export function TimelineView({
   });
   const turns = turnBlocks(state.items);
   const contextualTurns = contextualizeTurns(turns, rounds, state.items);
+  // Compactions any loaded round layer carries as marker batches render
+  // inside the batch flow; the flat narrative must not hoist a second copy
+  // above the trunk cards. Markers no loaded layer owns (legacy sessions,
+  // imports) keep their flat rendering.
+  const absorbedCompactions = new Set(
+    Object.values(roundLayers).flatMap((layer) =>
+      layer.trunks.flatMap((trunk) =>
+        trunk.batches.filter((batch) => batch.marker).map((batch) => batch.firstItemId),
+      ),
+    ),
+  );
 
   // The selectable bubbles in render order, mirroring exactly what the turns
   // below paint: narrative items, plus the round's final assistant message.
@@ -234,7 +245,12 @@ export function TimelineView({
   const selectableByTurn: SelectableMessage[][] = contextualTurns.map(
     ({ turn, round, finalAssistant }) => {
       const layerReady = Boolean(round && roundLayers[round.roundId]);
-      const narrative = turnNarrativeItems(turn, Boolean(round), layerReady);
+      const narrative = turnNarrativeItems(
+        turn,
+        Boolean(round),
+        layerReady,
+        absorbedCompactions,
+      );
       const seen = new Set<string>();
       const selectable: SelectableMessage[] = [];
       for (const item of [...narrative, ...(finalAssistant ? [finalAssistant] : [])]) {
@@ -402,7 +418,12 @@ export function TimelineView({
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
             const layerReady = Boolean(round && roundLayers[round.roundId]);
-            const narrative = turnNarrativeItems(turn, hasRound, layerReady);
+            const narrative = turnNarrativeItems(
+              turn,
+              hasRound,
+              layerReady,
+              absorbedCompactions,
+            );
             // A turn still in flight is not selectable: its items are still
             // being written, and a capsule built from them would go stale
             // before it was ever reviewed.
@@ -772,20 +793,33 @@ function PendingBubble({
   );
 }
 
-/** A horizontal rule with a label, rendered between batches at a compaction. */
+/** A short trigger label for the reasons adapters report; import-time
+ * markers already carry an explanatory Chinese sentence worth showing. */
+function compactionTrigger(reason: string): string {
+  if (reason === "auto") return "自动";
+  if (reason === "manual") return "手动";
+  if (/[\u4e00-\u9fff]/.test(reason)) return reason;
+  return "";
+}
+
+/** A dashed rule with a label, rendered at the exact spot a compaction
+ * interrupted the work — inside the batch flow when the round layer carries
+ * it, or between turns for markers no round owns (e.g. session imports). */
 function CompactionMarker({ reason }: { reason: string }) {
+  const trigger = compactionTrigger(reason);
   return (
     <div
       className="flex items-center gap-2 py-1"
       role="separator"
       data-testid="compaction-marker"
+      title={`为腾出上下文空间，Agent 已把此线之前的对话压缩为摘要继续工作；聊天记录仍完整保留，但此前给出的细节要求可能需要重申。${reason ? `（${reason}）` : ""}`}
     >
-      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+      <span className="flex-1 border-t border-dashed border-line" aria-hidden="true" />
       <span className="flex items-center gap-1.5 text-xs text-muted">
-        <span aria-hidden="true">✂️</span>
-        历史已压缩（{reason}）
+        <span aria-hidden="true">🗜️</span>
+        上下文压缩{trigger ? ` · ${trigger}` : ""}
       </span>
-      <span className="h-px flex-1 bg-line" aria-hidden="true" />
+      <span className="flex-1 border-t border-dashed border-line" aria-hidden="true" />
     </div>
   );
 }
@@ -944,13 +978,15 @@ function turnNarrativeItems(
   turn: TurnBlock,
   hasRound: boolean,
   layerReady: boolean,
+  absorbedCompactions: ReadonlySet<string> = new Set(),
 ): TimelineItem[] {
   if (!layerReady) return turn.items;
   return turn.items.filter(
     (item) =>
       item.type !== "reasoning" &&
       item.type !== "toolCall" &&
-      (!hasRound || item.type !== "assistantMessage"),
+      (!hasRound || item.type !== "assistantMessage") &&
+      (item.type !== "compaction" || !absorbedCompactions.has(item.id)),
   );
 }
 
@@ -1113,7 +1149,8 @@ function TrunkCard({
     (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
   );
   const firstBatch = batches?.[0];
-  const flattenCompleted = !live && batches?.length === 1 ? firstBatch : undefined;
+  const flattenCompleted =
+    !live && batches?.length === 1 && !firstBatch?.summary.marker ? firstBatch : undefined;
   const singleBatchTitle = splitMonologue((firstBatch ?? flattenCompleted)?.monologue ?? "").first;
   const trunkTitle = singleBatchTitle || progressTitle(summary.title);
   const liveBlobs = live ? (batches?.flatMap((batch) => batch.blobs) ?? []) : [];
@@ -1146,7 +1183,16 @@ function TrunkCard({
               monologue={monologueAfterTitle(flattenCompleted.monologue ?? "", trunkTitle)}
             />
           ) : (
-            batches?.map((batch) => <BatchCard key={batch.summary.index} batch={batch} />)
+            batches?.map((batch) =>
+              batch.summary.marker ? (
+                <CompactionMarker
+                  key={batch.summary.firstItemId}
+                  reason={batch.summary.marker}
+                />
+              ) : (
+                <BatchCard key={batch.summary.index} batch={batch} />
+              ),
+            )
           )}
           {live && active ? <LiveTail blobs={liveBlobs} /> : null}
         </div>

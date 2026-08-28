@@ -699,7 +699,15 @@ monologue?: string, blobs: Array<BlobOverview>, };
  * A semantic group inside a trunk: one monologue and the work following it,
  * bounded to sixteen blobs even when an agent never narrates.
  */
-export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, };
+export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, 
+/**
+ * The compaction reason when this batch is a context-compaction marker:
+ * a zero-blob batch whose only item (`firstItemId`) is the compaction
+ * event, so clients render the marker at the exact batch boundary where
+ * the context was squeezed. Rows written before this field existed read
+ * as `None` and their markers stay in the flat narrative stream.
+ */
+marker?: string, };
 
 /**
  * A page of visible trunks in one round. `nextCursor` asks for the preceding
