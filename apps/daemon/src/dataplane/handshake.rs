@@ -148,6 +148,7 @@ pub fn accept(
             version: genehub_proto::DATA_PLANE_VERSION,
             server_nonce,
             proof,
+            max_bulk_stream_window_bytes: Some(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES),
         },
         key,
         access: PeerAccess {
@@ -198,6 +199,10 @@ mod tests {
             &accepted.welcome.proof,
         )
         .unwrap();
+        assert_eq!(
+            accepted.welcome.max_bulk_stream_window_bytes,
+            Some(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES)
+        );
     }
 
     #[tokio::test]

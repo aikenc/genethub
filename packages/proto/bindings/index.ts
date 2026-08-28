@@ -503,7 +503,13 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  */
 rtcSupported: boolean, };
 
-export type PeerWelcome = { version: number, serverNonce: string, proof: string, };
+export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
+/**
+ * Optional for wire compatibility. A missing field is the v3 256 KiB
+ * receive lease; new clients use the larger value only for allowlisted
+ * finite bulk methods.
+ */
+maxBulkStreamWindowBytes?: number, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 

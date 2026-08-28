@@ -9,7 +9,11 @@ import {
   randomNonce,
   type ChannelSessionKey,
 } from "../devices/proof";
-import { DATA_PLANE_VERSION } from "./frame";
+import {
+  DATA_PLANE_VERSION,
+  INITIAL_STREAM_WINDOW_BYTES,
+  MAX_BULK_STREAM_WINDOW_BYTES,
+} from "./frame";
 
 export type PeerCredential =
   | { kind: "loopback"; secret: string }
@@ -19,7 +23,13 @@ export type PeerCredential =
 
 export interface PreparedPeerHandshake {
   hello: PeerHello;
-  complete(welcome: PeerWelcome): Promise<ChannelSessionKey>;
+  complete(welcome: PeerWelcome): Promise<PeerHandshakeResult>;
+}
+
+export interface PeerHandshakeResult {
+  key: ChannelSessionKey;
+  /** Receive lease advertised by this authenticated daemon for finite bulk flows. */
+  maxBulkStreamWindowBytes: number;
 }
 
 /** Builds the only plaintext application message on a peer carrier. */
@@ -57,14 +67,33 @@ export async function preparePeerHandshake(
       if (!sameHex(welcome.proof, expected)) {
         throw new Error("the peer did not prove the expected E2EE secret");
       }
-      return deriveChannelSessionKey(
-        credential.secret,
-        context,
-        nonce,
-        welcome.serverNonce,
-      );
+      const advertised = welcome.maxBulkStreamWindowBytes;
+      const maxBulkStreamWindowBytes =
+        advertised === undefined
+          ? INITIAL_STREAM_WINDOW_BYTES
+          : validBulkWindow(advertised);
+      return {
+        key: await deriveChannelSessionKey(
+          credential.secret,
+          context,
+          nonce,
+          welcome.serverNonce,
+        ),
+        maxBulkStreamWindowBytes,
+      };
     },
   };
+}
+
+function validBulkWindow(value: number): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < INITIAL_STREAM_WINDOW_BYTES ||
+    value > MAX_BULK_STREAM_WINDOW_BYTES
+  ) {
+    throw new Error("the daemon advertised an invalid finite-bulk receive lease");
+  }
+  return value;
 }
 
 function contextOf(credential: PeerCredential): string {

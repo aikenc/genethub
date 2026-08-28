@@ -745,9 +745,9 @@ export class Client {
     } catch (cause) {
       throw new PeerAuthenticationError("the daemon returned an invalid peer welcome", { cause });
     }
-    let key;
+    let handshake;
     try {
-      key = await prepared.complete(welcome);
+      handshake = await prepared.complete(welcome);
     } catch (cause) {
       throw new PeerAuthenticationError("对面没有通过端到端身份验证，连接已中止", { cause });
     }
@@ -757,7 +757,8 @@ export class Client {
     const endpoint = new DataEndpoint({
       role: "client",
       carrier,
-      key,
+      key: handshake.key,
+      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       onError: (error) => this.report(error),
     });

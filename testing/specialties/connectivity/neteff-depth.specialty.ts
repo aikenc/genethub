@@ -29,8 +29,8 @@ const MIB = 1024 * 1024;
 const LINK_BANDWIDTH_MBPS = 100;
 const DIRECT_TARGET_UTILIZATION = 0.85;
 const RELAY_TARGET_UTILIZATION = 0.8;
-// The product does not meet the target yet. This independent floor makes the
-// baseline a regression guard without pretending the optimization is done.
+// Relay remains on the recorded baseline until phase 2. Direct is promoted to
+// its product target as part of phase 1.
 const BASELINE_UTILIZATION_FLOOR = 0.1;
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -360,6 +360,7 @@ defineSpecialty(
     const rawServer = await startTcpPayloadServer(file.sizeBytes);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
+    let busyRpcMs: number | null = null;
     try {
       const endpoint = daemonEndpoint(opened.daemon);
       for (const rttMs of [0, 100, 200]) {
@@ -371,7 +372,22 @@ defineSpecialty(
         try {
           client = await connectLinkedDaemon(opened, productLink, `neteff-direct-${rttMs}ms`, probe);
           productLink.resetStats();
-          const product = await measurePreview(t, { client, opened, file, probe });
+          const preview = measurePreview(t, { client, opened, file, probe });
+          if (rttMs === 200) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const rpcBegan = performance.now();
+            const workspaces = await client.call({ type: "workspace.list" });
+            busyRpcMs = performance.now() - rpcBegan;
+            t.assertions.assert(
+              workspaces?.type === "workspaces",
+              `workspace.list during Preview returned ${workspaces?.type}`,
+            );
+            t.assertions.assert(
+              busyRpcMs <= 1_500,
+              `small RPC waited ${busyRpcMs.toFixed(0)}ms behind a bulk Preview`,
+            );
+          }
+          const product = await preview;
           samples.push(
             recordUtilization(t, {
               label: `direct rtt=${rttMs}ms`,
@@ -395,9 +411,16 @@ defineSpecialty(
       await opened.mock.stop();
       await rawServer.stop();
     }
+    for (const sample of samples) {
+      t.assertions.assert(
+        sample.utilization >= DIRECT_TARGET_UTILIZATION,
+        `${sample.label}: ${(sample.utilization * 100).toFixed(1)}% of same-link TCP is below the phase-1 ${(DIRECT_TARGET_UTILIZATION * 100).toFixed(0)}% target`,
+      );
+    }
     t.note(
       `neteff preview-direct-bandwidth-utilization (daemon=wasm guest, link=${LINK_BANDWIDTH_MBPS}Mbps)\n` +
         `${headline("直连", samples, DIRECT_TARGET_UTILIZATION)}\n` +
+        `fairness rpcDuring8MiBAt200ms=${busyRpcMs?.toFixed(0) ?? "-"}ms target<=1500ms\n` +
         samples.map((sample) => sample.line).join("\n"),
     );
   },
@@ -437,7 +460,13 @@ defineSpecialty(
         attached?.type === "remoteAccess" && typeof attached.data.rendezvousUrl === "string",
         `device.remoteAttach returned ${attached?.type}`,
       );
+      if (attached?.type !== "remoteAccess") {
+        throw new Error(`device.remoteAttach returned ${attached?.type}`);
+      }
       const rendezvous = attached.data.rendezvousUrl;
+      if (typeof rendezvous !== "string") {
+        throw new Error("device.remoteAttach omitted its rendezvous URL");
+      }
       await t.tools.waitUntil(async () => {
         const devices = await opened.client.call({ type: "device.list" });
         return devices?.type === "devices" && devices.data.remote.online === true;
@@ -445,6 +474,9 @@ defineSpecialty(
 
       const invite = await opened.client.call({ type: "device.invite", payload: null });
       t.assertions.assert(invite?.type === "invite", `device.invite returned ${invite?.type}`);
+      if (invite?.type !== "invite") {
+        throw new Error(`device.invite returned ${invite?.type}`);
+      }
       const code = invite.data.code;
       const split = code.indexOf(".");
       t.assertions.assert(split > 0, "device invite is not inviteId.secret");
@@ -461,6 +493,9 @@ defineSpecialty(
           payload: { code: code.slice(0, split), deviceName: "neteff-remote" },
         });
         t.assertions.assert(claimed?.type === "claimed", `device.claim returned ${claimed?.type}`);
+        if (claimed?.type !== "claimed") {
+          throw new Error(`device.claim returned ${claimed?.type}`);
+        }
         credential = claimed.data;
       } finally {
         pairing.close();

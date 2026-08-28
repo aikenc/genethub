@@ -22,6 +22,13 @@ pub use genehub_identity::DATA_PLANE_VERSION;
 pub const MAX_DATA_FRAME_BYTES: usize = 16 * 1024;
 pub const MAX_EXCHANGE_HEAD_BYTES: usize = 8 * 1024;
 pub const INITIAL_STREAM_WINDOW_BYTES: u32 = 256 * 1024;
+/// Largest receive lease a new peer may advertise for a finite bulk flow.
+///
+/// This is deliberately larger than the 100 Mbps / 400 ms BDP used by the
+/// network-efficiency specialty. It is a permission bound, not a buffer
+/// allocation: endpoints still enforce the method body limit and consume the
+/// response as a stream.
+pub const MAX_BULK_STREAM_WINDOW_BYTES: u32 = 8 * 1024 * 1024;
 pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
 /// Finite exchange bodies share the Preview source cap so a WASM/H5 game
 /// asset can arrive in one exact response. Indefinite event streams omit a
@@ -85,6 +92,12 @@ pub struct PeerWelcome {
     pub version: u32,
     pub server_nonce: String,
     pub proof: String,
+    /// Optional for wire compatibility. A missing field is the v3 256 KiB
+    /// receive lease; new clients use the larger value only for allowlisted
+    /// finite bulk methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_bulk_stream_window_bytes: Option<u32>,
 }
 
 /// Non-trickle RTC signaling carried inside an already E2EE Exchange.

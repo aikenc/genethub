@@ -49,12 +49,13 @@ export async function openFabricDataLink(options: {
       throw new Error("the daemon returned an invalid Fabric peer welcome");
     }
     const welcome = JSON.parse(decoder.decode(welcomeBytes)) as PeerWelcome;
-    const key = await prepared.complete(welcome);
+    const handshake = await prepared.complete(welcome);
     const carrier = new FabricRecordCarrier(fabric, stream);
     const endpoint = new DataEndpoint({
       role: "client",
       carrier,
-      key,
+      key: handshake.key,
+      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       ...(options.onError ? { onError: options.onError } : {}),
     });

@@ -392,23 +392,38 @@ async fn receive(
             tasks.push(task);
         }
         Kind::Data => {
-            let mut peers = peers.lock().await;
-            let Some(slot) = peers.get_mut(&frame.stream_id) else {
-                drop(peers);
-                writer.reset(frame.stream_id, 1).await;
-                return Ok(());
-            };
             let bytes = u64::try_from(frame.payload.len())?;
-            if bytes == 0
-                || frame.value != slot.remote_sequence + 1
-                || slot.inbound.try_send(frame.payload).is_err()
-            {
-                peers.remove(&frame.stream_id);
+            let (inbound, peer_generation) = {
+                let mut peers = peers.lock().await;
+                let Some(slot) = peers.get_mut(&frame.stream_id) else {
+                    drop(peers);
+                    writer.reset(frame.stream_id, 1).await;
+                    return Ok(());
+                };
+                if bytes == 0 || frame.value != slot.remote_sequence + 1 {
+                    peers.remove(&frame.stream_id);
+                    drop(peers);
+                    writer.reset(frame.stream_id, 6).await;
+                    return Ok(());
+                }
+                slot.remote_sequence = frame.value;
+                (slot.inbound.clone(), slot.generation)
+            };
+            // A full bounded carrier queue is backpressure, not a protocol
+            // violation. Waiting here also stops this socket reader from
+            // acknowledging bytes it has nowhere bounded to place.
+            if inbound.send(frame.payload).await.is_err() {
+                let mut peers = peers.lock().await;
+                if peers
+                    .get(&frame.stream_id)
+                    .is_some_and(|slot| slot.generation == peer_generation)
+                {
+                    peers.remove(&frame.stream_id);
+                }
                 drop(peers);
                 writer.reset(frame.stream_id, 6).await;
                 return Ok(());
             }
-            slot.remote_sequence = frame.value;
             // The bounded carrier queue accepted ownership, so this outer
             // stream can return exactly the credit it consumed.
             let update = Frame {
@@ -417,7 +432,6 @@ async fn receive(
                 value: bytes,
                 payload: Vec::new(),
             };
-            drop(peers);
             writer.frame(update).await?;
         }
         Kind::WindowUpdate => {

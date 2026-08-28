@@ -109,12 +109,13 @@ export async function openRtcDataLink(
         await withDeadline(welcome, 10_000, "RTC E2EE handshake timed out"),
       ),
     ) as PeerWelcome;
-    const key = await prepared.complete(welcomeValue);
+    const handshake = await prepared.complete(welcomeValue);
     const carrier = new RtcRecordCarrier(peer, channel);
     const endpoint = new DataEndpoint({
       role: "client",
       carrier,
-      key,
+      key: handshake.key,
+      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
     return {
