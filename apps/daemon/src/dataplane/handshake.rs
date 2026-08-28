@@ -38,8 +38,9 @@ pub fn accept(
     let bulk_stream_window = match hello.max_bulk_stream_window_bytes {
         None => genehub_proto::LEGACY_BULK_STREAM_WINDOW_BYTES,
         Some(value)
-            if value >= genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-                && value <= genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES =>
+            if (genehub_proto::INITIAL_STREAM_WINDOW_BYTES
+                ..=genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES)
+                .contains(&value) =>
         {
             value
         }

@@ -356,6 +356,6 @@ mod tests {
             MAX_BULK_STREAM_WINDOW_BYTES as usize,
             MAX_PREVIEW_SOURCE_BYTES
         );
-        assert!(LEGACY_BULK_STREAM_WINDOW_BYTES < MAX_BULK_STREAM_WINDOW_BYTES);
+        const { assert!(LEGACY_BULK_STREAM_WINDOW_BYTES < MAX_BULK_STREAM_WINDOW_BYTES) };
     }
 }
