@@ -715,10 +715,11 @@ describe("what the user sees in a session", () => {
       turnId: "t1",
       item: { type: "userMessage", id: "u1", text: "改一下配置", attachments: [] },
     });
+    // The built-in agent reports manual compactions as "manual:cited".
     state = apply(state, {
       type: "item",
       turnId: "t1",
-      item: { type: "compaction", id: "c1", reason: "manual" },
+      item: { type: "compaction", id: "c1", reason: "manual:cited" },
     });
     state = apply(state, {
       type: "item",

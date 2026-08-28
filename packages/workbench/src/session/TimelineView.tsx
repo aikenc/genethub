@@ -796,8 +796,9 @@ function PendingBubble({
 /** A short trigger label for the reasons adapters report; import-time
  * markers already carry an explanatory Chinese sentence worth showing. */
 function compactionTrigger(reason: string): string {
-  if (reason === "auto") return "自动";
-  if (reason === "manual") return "手动";
+  // The built-in agent reports manual compactions as "manual:cited".
+  if (reason === "auto" || reason.startsWith("auto:")) return "自动";
+  if (reason === "manual" || reason.startsWith("manual:")) return "手动";
   if (/[\u4e00-\u9fff]/.test(reason)) return reason;
   return "";
 }
