@@ -40,8 +40,9 @@ struct CliRecord {
 pub async fn forward(argv: Vec<String>) -> i32 {
     // Agent adapters normally keep a command's stdin pipe open until the
     // command exits. Reading that pipe for verbs which never consume stdin
-    // makes the CLI and the adapter wait on each other forever. Only `shell`
-    // owns piped stdin in the public contract.
+    // makes the CLI and the adapter wait on each other forever. `shell` owns
+    // stdin implicitly; conversations own it only when the caller explicitly
+    // asks for `--message -`.
     let stdin = if accepts_piped_stdin(&argv) {
         piped_stdin()
     } else {
@@ -235,8 +236,12 @@ fn caller_cwd() -> String {
 fn accepts_piped_stdin(argv: &[String]) -> bool {
     genet_frontdoor::selectors::split(argv)
         .ok()
-        .and_then(|(_, args)| args.first().cloned())
-        .is_some_and(|verb| verb == "shell")
+        .is_some_and(|(_, args)| {
+            args.first().is_some_and(|verb| verb == "shell")
+                || args
+                    .windows(2)
+                    .any(|pair| pair[0] == "--message" && pair[1] == "-")
+        })
 }
 
 fn piped_stdin() -> Vec<u8> {
@@ -269,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn only_shell_consumes_the_callers_stdin_pipe() {
+    fn only_explicit_stdin_consumers_read_the_callers_pipe() {
         assert!(accepts_piped_stdin(&words(&[
             "--machine",
             "m_1",
@@ -287,6 +292,29 @@ mod tests {
         ])));
         assert!(!accepts_piped_stdin(&words(&[
             "agent", "run", "--agent", "codex", "prompt",
+        ])));
+        assert!(accepts_piped_stdin(&words(&[
+            "session",
+            "send",
+            "s_1",
+            "--no-wait",
+            "--message",
+            "-",
+        ])));
+        assert!(accepts_piped_stdin(&words(&[
+            "--machine",
+            "m_1",
+            "pm",
+            "run",
+            "--message",
+            "-",
+        ])));
+        assert!(!accepts_piped_stdin(&words(&[
+            "session",
+            "send",
+            "s_1",
+            "--message",
+            "text",
         ])));
     }
 }

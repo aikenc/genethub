@@ -1371,6 +1371,25 @@ describe("the controls offered to the user", () => {
     expect(onInterrupt).toHaveBeenCalled();
   });
 
+  it("does not let a read-only observer interrupt a running WorkSession", async () => {
+    const onInterrupt = vi.fn();
+    render(
+      <Composer
+        {...composerProps({
+          phase: "running",
+          disabled: true,
+          disabledReason: "PM 管理 · 用户只读",
+          onInterrupt,
+        })}
+      />,
+    );
+
+    expect(screen.getByText("PM 管理 · 用户只读")).toBeInTheDocument();
+    expect(screen.getByLabelText("停止")).toBeDisabled();
+    await userEvent.click(screen.getByLabelText("停止"));
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
   it("keeps the send control busy after the echo and when switching onto a running tab", () => {
     const pending = { text: "改这里", attachments: [], sentAtMs: 1, error: null };
     expect(
@@ -2009,6 +2028,77 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
+  });
+
+  it("uses the source session capability to hide Fork when policy forbids it", () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+          capabilities: {
+            send: false,
+            respondPermission: false,
+            interrupt: false,
+            close: false,
+            archive: false,
+            rename: false,
+            delete: false,
+            setModel: false,
+            setMode: false,
+            setEffort: false,
+            setRuntimeAxis: false,
+            uploadArtifact: false,
+            manageProcesses: false,
+            fork: false,
+          },
+        },
+      ],
+      activeSessionId: "s1",
+      agents: [agent({ id: "codex", label: "Codex" })],
+    });
+    let state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "只读", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "turnSummary",
+        id: "summary-t1",
+        stats: {
+          turnId: "t1",
+          outcome: "completed",
+          startedAtMs: 1,
+          finishedAtMs: 2,
+          durationMs: 1,
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            llmRounds: 1,
+            toolOutputTokens: 0,
+            compactionCount: 0,
+            outputRateEstimated: false,
+            costUsd: undefined,
+          },
+          toolCalls: 0,
+          forkCheckpoint: undefined,
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+
+    expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
   });
 });
 

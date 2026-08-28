@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -21,7 +21,6 @@ export function createLease(prefix = "genehub-env-"): EnvironmentLease {
   const config = path.join(root, "config");
   const logs = path.join(root, "logs");
   for (const dir of [home, data, workspace, config, logs]) mkdirSync(dir, { recursive: true });
-  writeFileSync(path.join(workspace, ".keep"), "");
   const env = {
     HOME: home,
     USERPROFILE: home,

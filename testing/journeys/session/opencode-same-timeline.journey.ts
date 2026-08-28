@@ -6,14 +6,16 @@ defineJourney(
     title: "OpenCode reaches the same timeline as the built-in agent",
     oracle: "an opencode session turn completes with a reply after the CLI is on PATH and pointed at the built-in DeepSeek key",
     catches: ["OpenCode handshake never becomes a turn", "prompt echoed as the reply"],
-    tags: ["third-party", "session", "opencode"],
+    tags: ["third-party", "session", "opencode", "opencode-global-real"],
+    llm: { default: "real", realEligible: true },
+    resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "real-llm" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
     productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
-    const modelId = t.flows.main.writeOpencodeBuiltinConfig(t.env);
+    const modelId = t.flows.main.configureOpencodeBuiltinAgent(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       await t.flows.main.requireAgentReady(opened.client, "opencode");

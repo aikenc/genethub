@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 37] = [
+const COMMAND_NAMES: [&str; 39] = [
     "schema",
     "context",
     "capabilities",
@@ -27,6 +27,7 @@ const COMMAND_NAMES: [&str; 37] = [
     "workspace.list",
     "workspace.show",
     "workspace.registerAgentSpace",
+    "agent-space.builder",
     "session.list",
     "session.get",
     "session.inspect",
@@ -39,6 +40,7 @@ const COMMAND_NAMES: [&str; 37] = [
     "agent.list",
     "agent.run",
     "pm.run",
+    "pm.project",
     "session.send",
     "session.respond",
     "session.interrupt",
@@ -86,6 +88,8 @@ fn mutates(name: &str) -> bool {
             | "process.killAll"
             | "agent.run"
             | "pm.run"
+            | "pm.project"
+            | "agent-space.builder"
             | "workspace.registerAgentSpace"
             | "session.send"
             | "session.respond"
@@ -1132,7 +1136,7 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "pm.run" => (
-            "genet pm run \"<prompt>\" [--workspace <id> | --session <id>]",
+            "genet pm run (\"<prompt>\" | --message -) [--workspace <id> | --session <id>]",
             true,
             object_input(
                 json!({
@@ -1151,8 +1155,48 @@ fn command_schema(name: &str) -> Value {
                 &["prompt"],
             ),
         ),
+        "pm.project" => (
+            "genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition | space record",
+            true,
+            object_input(
+                json!({
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "init", "show", "intent.set", "advance", "lifecycle",
+                            "package.put", "package.transition", "space.record", "observe",
+                        ],
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "$comment": "The PM project Skill defines the operation-specific flags. Project and controller identity are derived from the authenticated PM session and cannot be supplied.",
+                    },
+                }),
+                &["operation"],
+            ),
+        ),
+        "agent-space.builder" => (
+            "genet agent-space init|check|explain|verify|clean <space> | build <space> [--dry-run] [--require-no-post-commands]",
+            true,
+            object_input(
+                json!({
+                    "operation": {
+                        "type": "string",
+                        "enum": ["init", "check", "explain", "build", "verify", "clean"],
+                    },
+                    "space": {
+                        "type": "string",
+                        "minLength": 1,
+                        "$comment": "Exact directory name beneath the authenticated PM project's spaces/ directory.",
+                    },
+                    "dryRun": {"type": "boolean", "default": false},
+                    "requireNoPostCommands": {"type": "boolean", "default": false},
+                }),
+                &["operation", "space"],
+            ),
+        ),
         "session.send" => (
-            "genet session send <id> \"<text>\" [--wait|--no-wait] [--timeout <s>]",
+            "genet session send <id> (\"<text>\" | --message -) [--wait|--no-wait] [--timeout <s>]",
             true,
             object_input(
                 json!({
@@ -1590,6 +1634,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionArtifact(_) => "session artifact",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
+        Reply::ProjectStatus(_) => "PM project status",
         Reply::Directory(_) => "directory",
         Reply::FileTree(_) => "file tree",
         Reply::GitStatus(_) => "git status",
@@ -1846,6 +1891,12 @@ mod tests {
         assert_eq!(
             schema["commands"][0]["outputSchema"]["properties"]["schema"]["const"],
             CLI_SCHEMA
+        );
+        assert!(
+            command_schema("agent-space.builder")["inputSchema"]["properties"]["operation"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("init"))
         );
 
         let capabilities = capabilities_data();

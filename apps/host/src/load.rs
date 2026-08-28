@@ -272,6 +272,7 @@ fn build_instance(
             key.as_str(),
             "GENEHUB_CLI"
                 | crate::channel::ENV_HOST_PID
+                | crate::channel::ENV_HOST_NAME
                 | crate::channel::ENV_CWD
                 | crate::channel::ENV_CLI
                 | crate::channel::ENV_COMPONENT_FILE
@@ -310,6 +311,7 @@ fn build_instance(
     // The guest has no pid of its own, and the process a local client can see
     // holding the listening socket is this one. See the v2 proposal §6.9.
     wasi.env(crate::channel::ENV_HOST_PID, std::process::id().to_string());
+    wasi.env(crate::channel::ENV_HOST_NAME, host_name());
     // WASI reaches the filesystem through preopens, so a component has no
     // working directory and inherits none. Whoever launched the shell did pick
     // one, though, and relative paths in a request are meant against it.
@@ -415,6 +417,16 @@ fn build_instance(
     .anyhow()
     .context("component-update linker")?;
     Ok((store, linker))
+}
+
+fn host_name() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Compile in memory from the bytes we just read, or deserialize a derived

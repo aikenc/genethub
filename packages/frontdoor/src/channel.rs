@@ -30,6 +30,8 @@ pub const ENV_WORKSPACE_DIR: &str = "GENEHUB_LOCAL_WORKSPACE_DIR";
 pub const ENV_LOG: &str = "GENEHUB_LOCAL_LOG";
 /// The shell's pid, handed to the WASI guest which has none of its own.
 pub const ENV_HOST_PID: &str = "GENEHUB_LOCAL_HOST_PID";
+/// The shell's host name, handed to the WASI guest for same-machine locks.
+pub const ENV_HOST_NAME: &str = "GENEHUB_LOCAL_HOST_NAME";
 pub const ENV_MACHINE_NAME: &str = "GENEHUB_LOCAL_MACHINE_NAME";
 pub const ENV_AGENT_COMMAND: &str = "GENET_AGENT_LOCAL_COMMAND";
 /// Runs the daemon instead of `genet daemon run`, for pointing the product at

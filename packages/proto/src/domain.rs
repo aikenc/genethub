@@ -220,6 +220,89 @@ pub struct WorkspaceInfo {
     pub workspace_file: Option<String>,
 }
 
+/// Read-only user projection of one durable PM project. Control-only paths and
+/// mutable daemon internals stay out of the public protocol; the user still
+/// gets enough exact state to monitor progress without spending an LLM turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmProjectStatus {
+    pub workspace_id: String,
+    pub controller_session_id: String,
+    pub phase: String,
+    pub lifecycle: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    #[ts(optional)]
+    pub intent: Option<PmIntentStatus>,
+    pub work_packages: Vec<PmWorkPackageStatus>,
+    pub agent_spaces: Vec<PmAgentSpaceStatus>,
+    pub supervisor: PmSupervisorStatus,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmIntentStatus {
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub outcome: String,
+    pub acceptance: Vec<String>,
+    pub constraints: Vec<String>,
+    pub out_of_scope: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkPackageStatus {
+    pub id: String,
+    pub title: String,
+    pub outcome: String,
+    pub status: String,
+    pub dependencies: Vec<String>,
+    pub agent_space: String,
+    pub branch: String,
+    #[ts(optional)]
+    pub work_session_id: Option<String>,
+    #[ts(optional)]
+    pub candidate_commit: Option<String>,
+    #[ts(optional)]
+    pub candidate_tree: Option<String>,
+    #[ts(optional)]
+    pub review_session_id: Option<String>,
+    #[ts(optional)]
+    pub review_verdict: Option<String>,
+    #[ts(optional)]
+    pub block_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmAgentSpaceStatus {
+    pub name: String,
+    pub purpose: String,
+    pub workspace_id: String,
+    pub source_commit: String,
+    pub builder_lock_digest: String,
+    pub role: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmSupervisorStatus {
+    pub mode: String,
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub next_check_at_ms: Option<i64>,
+    pub wake_pending: bool,
+}
+
 /// How a child session obtained the context that precedes its first new turn.
 ///
 /// Native checkpoints preserve the Agent's own thread. Reconstructed context

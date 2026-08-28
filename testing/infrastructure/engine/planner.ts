@@ -23,7 +23,20 @@ export function planCases(cases: CaseMeta[], gate: GateName, tags: string[] = []
       variant: "default",
       meta,
     }))
-    .sort((a, b) => b.meta.expectedDurationMs - a.meta.expectedDurationMs);
+    .sort((a, b) => {
+      const left = a.meta.sequence;
+      const right = b.meta.sequence;
+      if (left && right) {
+        const bySequence = left.id.localeCompare(right.id);
+        return bySequence || left.order - right.order;
+      }
+      // Sequence groups run before ordinary scheduler work. Preserve that
+      // execution order in `plan` output so a shared-project journey never
+      // appears to promise a different evolution than `run` performs.
+      if (left) return -1;
+      if (right) return 1;
+      return b.meta.expectedDurationMs - a.meta.expectedDurationMs;
+    });
   return {
     gate,
     units,

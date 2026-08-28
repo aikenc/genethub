@@ -754,9 +754,10 @@ export function Composer({
               <button
                 type="button"
                 aria-label="停止"
+                disabled={disabled}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={onInterrupt}
-                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"
+                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:border-line disabled:hover:text-muted md:h-6 md:w-6"
               >
                 <span className="h-[18px] w-[18px] rounded-[3px] bg-current md:h-3 md:w-3 md:rounded-[2px]" />
               </button>

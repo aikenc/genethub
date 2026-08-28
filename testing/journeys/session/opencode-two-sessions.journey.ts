@@ -7,6 +7,8 @@ defineJourney(
     oracle: "two in-flight turns complete, each with exactly one turnStarted on its own subscribe",
     catches: ["shared adapter state mixing two agents"],
     tags: ["third-party", "session", "opencode"],
+    llm: { default: "real", realEligible: true },
+    resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "real-llm" },
     expectedDurationMs: 120_000,
     timeoutMs: 210_000,
     surfaces: ["daemon", "agent", "workbench-client"],

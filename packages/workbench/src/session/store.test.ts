@@ -773,6 +773,47 @@ describe("opening a new conversation", () => {
     expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
   });
 
+  it("creates or reopens the dedicated PM Agent immediately", async () => {
+    const pm: SessionSummary = {
+      ...SESSION,
+      id: "pm-1",
+      kind: "pm",
+      title: "项目管理",
+    };
+    const calls: Array<{ type: string; payload?: unknown }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request);
+        return request.type === "pm.session.create"
+          ? ({ type: "session", data: pm } as const)
+          : undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], summary: pm },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [], activeWorkspaceId: "w1" });
+
+    await useWorkbench.getState().openProjectManager("w1");
+
+    expect(calls[0]).toEqual({
+      type: "pm.session.create",
+      payload: {
+        workspaceId: "w1",
+        modelId: null,
+        modeId: null,
+        runtimeValues: {},
+        title: "项目管理",
+      },
+    });
+    expect(useWorkbench.getState().activeSessionId).toBe("pm-1");
+    expect(useWorkbench.getState().sessions).toContainEqual(pm);
+    expect(useWorkbench.getState().draft).toBeNull();
+  });
+
   it("creates the session with the first message, and only once", async () => {
     const { client, calls } = creatingClient();
     useWorkbench.setState({ client, sessions: [], activeWorkspaceId: "w1" });

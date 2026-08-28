@@ -462,18 +462,13 @@ impl Workspaces {
         if !space_root.join("pipespace.json").is_file() {
             anyhow::bail!("Agent Space source has no pipespace.json");
         }
-        let lock_path = space_root.join(".pipebuilder/lock.json");
-        let lock = std::fs::read_to_string(&lock_path).with_context(|| {
-            format!("Agent Space source has no readable {}", lock_path.display())
-        })?;
-        let lock: serde_json::Value = serde_json::from_str(&lock).with_context(|| {
-            format!(
-                "Agent Space Builder lock is invalid: {}",
-                lock_path.display()
-            )
-        })?;
-        if !lock.is_object() {
-            anyhow::bail!("Agent Space Builder lock must be a JSON object");
+        let verified = crate::agent_space_builder::verify_space(&project.root, space_root)
+            .context("Agent Space Builder verification failed")?;
+        if verified.workspace_path != source {
+            anyhow::bail!(
+                "Agent Space registration must use the Builder-bound workspace file {}",
+                verified.workspace_path.display()
+            );
         }
 
         let candidate = code_workspace(&source)?;

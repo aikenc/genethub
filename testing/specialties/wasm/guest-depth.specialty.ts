@@ -122,6 +122,43 @@ defineSpecialty(
 );
 
 defineSpecialty(
+  {
+    ...wasmMeta(
+      "specialty.wasm.guest-identity.test-run-uses-immutable-component",
+      "A test environment runs an immutable lease-owned component snapshot",
+      "the host component path is under the lease .test-runtime tree rather than the mutable repository target",
+      [
+        "a repository rebuild hot-reloads and interrupts an active journey",
+        "parallel test environments share one mutable component path",
+        "the snapshot escapes checkpoint filtering",
+      ],
+    ),
+    tags: ["core", "wasm-guest", "v2-shell", "pm-agent-mvp"],
+  },
+  async (t) => {
+    const artifacts = requireWasmArtifacts(t.openRoot);
+    await withOpened(t, async () => {
+      const status = cliJson(t, ["daemon", "status"]);
+      const pid = Number(status.pid);
+      const cmd = procCmdline(pid);
+      const runtimeRoot = path.join(t.env.root, ".test-runtime");
+      t.assertions.assert(
+        cmd.includes(runtimeRoot),
+        `host did not use the lease-owned component snapshot: ${cmd}`,
+      );
+      t.assertions.assert(
+        !cmd.includes(artifacts.component),
+        `host still watches the mutable repository component: ${cmd}`,
+      );
+      t.assertions.assert(
+        cmd.includes("genehub_guest.wasm"),
+        `snapshot lost the product component identity: ${cmd}`,
+      );
+    });
+  },
+);
+
+defineSpecialty(
   wasmMeta(
     "specialty.wasm.guest-identity.host-pid-not-inherited",
     "A pre-set GENEHUB_LOCAL_HOST_PID does not become the advertised daemon pid",

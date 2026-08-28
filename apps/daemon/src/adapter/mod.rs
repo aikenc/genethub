@@ -36,6 +36,8 @@ pub struct SessionConfig {
     /// the daemon as a session-bound caller credential; WorkAgent and ordinary
     /// sessions never receive it.
     pub project_manager_token: Option<String>,
+    /// Product Skill catalog mounted for this durable session role.
+    pub skill_profile: crate::skills::SkillProfile,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
     pub mode_id: Option<String>,
@@ -606,6 +608,7 @@ mod tests {
         let config = SessionConfig {
             session_id: "s-bound".into(),
             project_manager_token: None,
+            skill_profile: crate::skills::SkillProfile::Common,
             cwd: PathBuf::from("/workspace"),
             model_id: None,
             mode_id: None,

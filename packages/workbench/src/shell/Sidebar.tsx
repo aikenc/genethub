@@ -57,6 +57,7 @@ export function Sidebar({
     renameWorkspace,
     removeWorkspace,
     newSession,
+    openProjectManager,
     renameSession,
     deleteSession,
     connection,
@@ -215,6 +216,20 @@ export function Sidebar({
               <span aria-hidden>+</span>
               新建会话
             </button>
+            {workspace?.kind === "folder" ? (
+              <button
+                type="button"
+                className="flex min-h-11 shrink-0 items-center justify-center rounded-xl border border-accent/40 px-2.5 text-sm font-medium text-accent hover:bg-accent/10 disabled:opacity-40 md:min-h-0 md:rounded-md md:py-1.5 md:text-xs"
+                disabled={connection !== "ready"}
+                title="打开负责拆解、调度和验收项目的 PM Agent"
+                onClick={() => {
+                  void openProjectManager(workspace.id);
+                  onNavigate();
+                }}
+              >
+                项目管理
+              </button>
+            ) : null}
             <button
               type="button"
               aria-label="会话与工作区"
@@ -532,6 +547,8 @@ function WorkspaceRow({
   const [details, setDetails] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
+  const canRename = workspace.capabilities?.rename ?? true;
+  const canRemove = workspace.capabilities?.remove ?? true;
   return (
     <li className="group relative mb-1">
       {editing ? (
@@ -565,6 +582,11 @@ function WorkspaceRow({
           >
             <WorkspaceIcon workspace={workspace} />
             <span className="min-w-0 truncate">{workspace.name}</span>
+            {workspace.kind === "agentSpace" ? (
+              <span className="shrink-0 rounded bg-accent/10 px-1 text-[9px] font-medium text-accent">
+                Agent Space
+              </span>
+            ) : null}
           </button>
           {running > 0 ? (
             <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
@@ -606,30 +628,34 @@ function WorkspaceRow({
             >
               详情
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={() => {
-                setMenu(false);
-                setEditing(true);
-              }}
-            >
-              重命名
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              disabled={running > 0}
-              title={running > 0 ? "先停止这个工作区中正在运行或等待的会话" : undefined}
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={() => {
-                setMenu(false);
-                setRemoving(true);
-              }}
-            >
-              从列表移除
-            </button>
+            {canRename ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={() => {
+                  setMenu(false);
+                  setEditing(true);
+                }}
+              >
+                重命名
+              </button>
+            ) : null}
+            {canRemove ? (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={running > 0}
+                title={running > 0 ? "先停止这个工作区中正在运行或等待的会话" : undefined}
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={() => {
+                  setMenu(false);
+                  setRemoving(true);
+                }}
+              >
+                从列表移除
+              </button>
+            ) : null}
           </div>
         </>
       ) : null}
@@ -647,6 +673,7 @@ function WorkspaceRow({
             </button>
           </div>
           <Detail label="名称" value={workspace.name} />
+          <Detail label="类型" value={workspaceKindLabel(workspace)} />
           {workspace.workspaceFile ? (
             <Detail label="工作区文件" value={workspace.workspaceFile} />
           ) : null}
@@ -664,7 +691,7 @@ function WorkspaceRow({
           <Detail label="所属设备" value={deviceName} />
         </div>
       ) : null}
-      {removing ? (
+      {canRemove && removing ? (
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
           <p className="font-medium text-fg">从列表移除「{workspace.name}」？</p>
           <p className="mt-1 leading-relaxed text-muted">
@@ -818,6 +845,10 @@ function SessionRow({
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
   const unsupported = session.unsupported;
+  const canRename = session.capabilities?.rename ?? true;
+  const canManageProcesses = session.capabilities?.manageProcesses ?? true;
+  const canDelete = session.capabilities?.delete ?? true;
+  const hasMenuActions = canRename || canManageProcesses || canDelete;
 
   if (editing) {
     return (
@@ -851,6 +882,18 @@ function SessionRow({
       >
         <SessionStateIcon session={session} />
         <span className="min-w-0 flex-1 truncate">{title(session)}</span>
+        {session.kind === "work" ? (
+          <span
+            className="shrink-0 rounded bg-accent/10 px-1 text-[9px] font-medium text-accent"
+            title={session.work ? `工作包 ${session.work.workPackageId} · 用户只读` : "PM 管理 · 用户只读"}
+          >
+            Work
+          </span>
+        ) : session.kind === "pm" ? (
+          <span className="shrink-0 rounded bg-ok/10 px-1 text-[9px] font-medium text-ok">
+            PM
+          </span>
+        ) : null}
         {unsupported ? (
           <span className="shrink-0 text-[10px] text-faint">需升级</span>
         ) : project ? (
@@ -858,22 +901,27 @@ function SessionRow({
         ) : null}
       </button>
 
-      <button
-        type="button"
-        aria-label={`${title(session)} 的更多操作`}
-        aria-expanded={menu !== "shut"}
-        // Always there on a touch screen: hover is the one interaction a phone
-        // cannot perform, and hiding the only way to delete a conversation
-        // behind it is how this ended up missing entirely.
-        className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
-        onClick={() => setMenu((state) => (state === "shut" ? "open" : "shut"))}
-      >
-        <span aria-hidden>⋯</span>
-      </button>
+      {hasMenuActions ? (
+        <button
+          type="button"
+          aria-label={`${title(session)} 的更多操作`}
+          aria-expanded={menu !== "shut"}
+          // Always there on a touch screen: hover is the one interaction a phone
+          // cannot perform, and hiding the only way to delete a conversation
+          // behind it is how this ended up missing entirely.
+          className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+          onClick={() => setMenu((state) => (state === "shut" ? "open" : "shut"))}
+        >
+          <span aria-hidden>⋯</span>
+        </button>
+      ) : null}
 
       {menu === "shut" ? null : (
         <Menu
           confirming={menu === "confirming"}
+          canRename={canRename}
+          canManageProcesses={canManageProcesses}
+          canDelete={canDelete}
           onRename={() => {
             setMenu("shut");
             setEditing(true);
@@ -907,6 +955,9 @@ function SessionRow({
  */
 function Menu({
   confirming,
+  canRename,
+  canManageProcesses,
+  canDelete,
   onRename,
   onOpenProcesses,
   onAskDelete,
@@ -914,6 +965,9 @@ function Menu({
   onDismiss,
 }: {
   confirming: boolean;
+  canRename: boolean;
+  canManageProcesses: boolean;
+  canDelete: boolean;
   onRename(): void;
   onOpenProcesses(): void;
   onAskDelete(): void;
@@ -932,7 +986,7 @@ function Menu({
         role="menu"
         className="absolute right-0 top-full z-50 mt-1 w-40 overflow-hidden rounded-xl border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
       >
-        {confirming ? (
+        {confirming && canDelete ? (
           <>
             <p className="px-3 py-1.5 text-[11px] leading-snug text-muted">
               删掉之后没有回收站，对话和 agent 那边的记录都会消失。
@@ -956,30 +1010,36 @@ function Menu({
           </>
         ) : (
           <>
-            <button
-              type="button"
-              role="menuitem"
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={onRename}
-            >
-              重命名
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={onOpenProcesses}
-            >
-              后台进程
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={onAskDelete}
-            >
-              删除
-            </button>
+            {canRename ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={onRename}
+              >
+                重命名
+              </button>
+            ) : null}
+            {canManageProcesses ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={onOpenProcesses}
+              >
+                后台进程
+              </button>
+            ) : null}
+            {canDelete ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={onAskDelete}
+              >
+                删除
+              </button>
+            ) : null}
           </>
         )}
       </div>
@@ -1123,6 +1183,13 @@ function SessionStateIcon({ session }: { session: ListedSession }) {
 
 /** The daemon names a session from its first message; until then this stands in. */
 const title = (session: SessionSummary) => session.title || "新会话";
+
+const workspaceKindLabel = (workspace: WorkspaceInfo) => {
+  if (workspace.kind === "agentSpace") return "Agent Space（PM 管理）";
+  if (workspace.kind === "pipeSpace") return "PipeSpace";
+  if (workspace.kind === "folder") return "文件夹";
+  return workspace.workspaceFile ? "Workspace" : "文件夹";
+};
 
 /**
  * Why a conversation sitting in this workspace cannot be opened by this build.

@@ -3,7 +3,7 @@
 //! No libgit2: linking it would add megabytes to a binary with a hard size
 //! budget, and every machine that has a checkout already has the CLI.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -179,6 +179,167 @@ pub async fn commit(root: &Path, message: &str, paths: &[String]) -> Result<Stri
     Ok(git(root, &["rev-parse", "HEAD"]).await?.trim().to_string())
 }
 
+/// Prove that the current outer project HEAD exactly represents every
+/// human-owned Agent Space and Provider source. Ignored Builder projections,
+/// business repositories, and worktrees may exist beside those sources;
+/// tracked or untracked project-source drift is rejected.
+pub async fn verify_clean_project_sources_at_commit(
+    repository_root: &Path,
+    commit: &str,
+    subtree: &Path,
+) -> Result<()> {
+    validate_object_id("commit", commit)?;
+    let root = repository_root
+        .canonicalize()
+        .context("canonicalizing Git repository root")?;
+    let subtree = subtree
+        .canonicalize()
+        .context("canonicalizing Git subtree")?;
+    let relative = git_relative_path(&root, &subtree)?;
+    let commit_object = format!("{commit}^{{commit}}");
+    git(&root, &["rev-parse", "--verify", &commit_object])
+        .await
+        .context("source commit is not a local commit object")?;
+    let head = git(&root, &["rev-parse", "HEAD"]).await?;
+    if !head.trim().eq_ignore_ascii_case(commit) {
+        anyhow::bail!("Agent Space source commit must be the outer project HEAD");
+    }
+    let committed_path = format!("{commit}:{relative}");
+    git(&root, &["cat-file", "-e", &committed_path])
+        .await
+        .context("source commit does not contain the Agent Space")?;
+    git(&root, &["diff", "--quiet", commit, "--", "."])
+        .await
+        .context(
+            "project Agent Space or Provider sources differ from the supplied source commit",
+        )?;
+    let untracked = git(
+        &root,
+        &["ls-files", "--others", "--exclude-standard", "--", "."],
+    )
+    .await?;
+    if !untracked.trim().is_empty() {
+        anyhow::bail!(
+            "the outer project has untracked human-owned Agent Space or Provider sources"
+        );
+    }
+    Ok(())
+}
+
+/// Prove that a writable path is a worktree of the expected local repository
+/// and is on the branch assigned by the PM graph.
+pub async fn verify_worktree_binding(
+    worktree: &Path,
+    repository_root: &Path,
+    expected_branch: &str,
+) -> Result<()> {
+    if expected_branch.trim().is_empty() || expected_branch.chars().any(char::is_control) {
+        anyhow::bail!("expected Git branch is invalid");
+    }
+    let worktree = worktree
+        .canonicalize()
+        .context("canonicalizing package worktree")?;
+    let repository_root = repository_root
+        .canonicalize()
+        .context("canonicalizing package repository")?;
+    let common = git(&worktree, &["rev-parse", "--git-common-dir"])
+        .await
+        .context("package worktree is not a Git worktree")?;
+    let common = resolve_git_path(&worktree, common.trim())?;
+    let expected_common = if repository_root.join(".git").exists() {
+        repository_root.join(".git").canonicalize()?
+    } else {
+        repository_root.clone()
+    };
+    if common != expected_common {
+        anyhow::bail!("package worktree belongs to another local repository");
+    }
+    let branch = git(&worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .context("package worktree has a detached HEAD")?;
+    if branch.trim() != expected_branch {
+        anyhow::bail!(
+            "package worktree is on branch {}, expected {expected_branch}",
+            branch.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Bind candidate evidence to the exact clean HEAD of its assigned worktree.
+pub async fn verify_worktree_candidate(
+    worktree: &Path,
+    repository_root: &Path,
+    expected_branch: &str,
+    commit: &str,
+    tree: &str,
+) -> Result<()> {
+    validate_object_id("candidate commit", commit)?;
+    validate_object_id("candidate tree", tree)?;
+    verify_worktree_binding(worktree, repository_root, expected_branch).await?;
+    let head = git(worktree, &["rev-parse", "HEAD"]).await?;
+    if !head.trim().eq_ignore_ascii_case(commit) {
+        anyhow::bail!("candidate commit is not the assigned worktree HEAD");
+    }
+    let actual_tree = git(worktree, &["show", "-s", "--format=%T", commit]).await?;
+    if !actual_tree.trim().eq_ignore_ascii_case(tree) {
+        anyhow::bail!("candidate tree does not match the candidate commit");
+    }
+    let status = git(
+        worktree,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )
+    .await?;
+    if !status.is_empty() {
+        anyhow::bail!("candidate worktree is not clean");
+    }
+    Ok(())
+}
+
+fn validate_object_id(label: &str, value: &str) -> Result<()> {
+    if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("{label} must be a full Git object id");
+    }
+    Ok(())
+}
+
+fn git_relative_path(root: &Path, path: &Path) -> Result<String> {
+    let relative = path
+        .strip_prefix(root)
+        .context("Git path escaped its repository")?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        anyhow::bail!("Git path must be a strict repository descendant");
+    }
+    relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .context("Git path is not UTF-8")
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|parts| parts.join("/"))
+}
+
+fn resolve_git_path(worktree: &Path, value: &str) -> Result<PathBuf> {
+    if value.is_empty() {
+        anyhow::bail!("Git returned an empty common directory");
+    }
+    let path = Path::new(value);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        worktree.join(path)
+    };
+    path.canonicalize()
+        .context("canonicalizing Git common directory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +452,60 @@ mod tests {
         let diff = diff(dir.path(), None).await.unwrap();
         assert!(diff.contains("-one"));
         assert!(diff.contains("+two"));
+    }
+
+    #[tokio::test]
+    async fn source_commit_must_match_every_human_owned_space_input() {
+        let dir = repo().await;
+        std::fs::create_dir_all(dir.path().join("spaces/code/.pipebuilder")).unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "**/.pipebuilder/\n").unwrap();
+        std::fs::write(dir.path().join("spaces/code/pipespace.json"), "{}\n").unwrap();
+        std::fs::write(
+            dir.path().join("spaces/code/.pipebuilder/lock.json"),
+            "ignored\n",
+        )
+        .unwrap();
+        let sha = commit(dir.path(), "space", &[]).await.unwrap();
+        verify_clean_project_sources_at_commit(dir.path(), &sha, &dir.path().join("spaces/code"))
+            .await
+            .unwrap();
+
+        std::fs::create_dir_all(dir.path().join("skills/new-skill")).unwrap();
+        std::fs::write(dir.path().join("skills/new-skill/SKILL.md"), "untracked\n").unwrap();
+        assert!(verify_clean_project_sources_at_commit(
+            dir.path(),
+            &sha,
+            &dir.path().join("spaces/code")
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn candidate_must_be_the_clean_head_of_its_bound_repository_and_branch() {
+        let dir = repo().await;
+        std::fs::write(dir.path().join("game.txt"), "ready\n").unwrap();
+        let sha = commit(dir.path(), "candidate", &[]).await.unwrap();
+        let branch = git(dir.path(), &["symbolic-ref", "--short", "HEAD"])
+            .await
+            .unwrap();
+        let tree = git(dir.path(), &["show", "-s", "--format=%T", &sha])
+            .await
+            .unwrap();
+        verify_worktree_candidate(dir.path(), dir.path(), branch.trim(), &sha, tree.trim())
+            .await
+            .unwrap();
+
+        std::fs::write(dir.path().join("leftover.txt"), "dirty\n").unwrap();
+        assert!(verify_worktree_candidate(
+            dir.path(),
+            dir.path(),
+            branch.trim(),
+            &sha,
+            tree.trim()
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

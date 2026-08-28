@@ -3,6 +3,7 @@
 //! The native CLI now forwards argv here through loopback `POST /cli`.
 //! See `docs/cli-thin-forwarder.md`.
 
+mod agent_space;
 mod converse;
 mod desktop;
 mod hub;
@@ -10,6 +11,7 @@ mod machine;
 mod machines;
 pub mod output;
 mod place;
+mod pm_project;
 mod process;
 mod project;
 mod query;
@@ -189,6 +191,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         return output::fail(error);
     }
     match args.first().map(String::as_str) {
+        Some("agent-space") => Box::pin(agent_space::run(&args[1..])).await,
         Some("workspace") if args.get(1).map(String::as_str) == Some("register-agent-space") => {
             Box::pin(project::register_agent_space(&args[1..], &selection)).await
         }
@@ -204,6 +207,9 @@ async fn dispatch(args: Vec<String>) -> i32 {
             Some(_) => Box::pin(converse::session(&args[1..], &selection)).await,
         },
         Some("agent") => Box::pin(converse::agent(&args[1..], &selection)).await,
+        Some("pm") if args.get(1).map(String::as_str) == Some("project") => {
+            Box::pin(pm_project::run(&args[2..])).await
+        }
         Some("pm") => Box::pin(converse::pm(&args[1..], &selection)).await,
         Some("shell") => Box::pin(shell::shell(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,

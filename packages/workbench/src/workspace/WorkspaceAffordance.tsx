@@ -14,7 +14,7 @@ export function WorkspaceAffordance({
   workspace,
   className = "max-w-[5.5rem]",
 }: {
-  workspace: Pick<WorkspaceInfo, "name" | "workspaceFile">;
+  workspace: Pick<WorkspaceInfo, "name" | "kind" | "workspaceFile">;
   className?: string;
 }) {
   return (

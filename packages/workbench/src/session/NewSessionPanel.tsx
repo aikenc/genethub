@@ -47,6 +47,7 @@ export function NewSessionPanel({
   const sessions = useWorkbench((state) => state.sessions);
   const draft = useWorkbench((state) => state.draft);
   const newSession = useWorkbench((state) => state.newSession);
+  const openProjectManager = useWorkbench((state) => state.openProjectManager);
   const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
   const [showAllWorkspaces, setShowAllWorkspaces] = useState(false);
   const [suggestions, setSuggestions] = useState(() => pickPromptSuggestions());
@@ -65,6 +66,22 @@ export function NewSessionPanel({
     <div className="mx-auto h-full min-w-0 max-w-chat overflow-y-auto px-3 py-4">
       <h2 className="text-sm font-medium text-fg">新会话</h2>
       <p className="mt-0.5 text-xs text-muted">选好工作区，然后在下面直接说要做什么。</p>
+
+      {workspaces.find((workspace) => workspace.id === draft.workspaceId)?.kind === "folder" ? (
+        <div className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-accent/20 bg-accent/5 px-3 py-2">
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-fg">需要拆任务、并行 WorkAgent 和独立评审？</p>
+            <p className="mt-0.5 text-[11px] text-muted">项目管理是独立的 PM Agent，不会占用普通会话。</p>
+          </div>
+          <button
+            type="button"
+            className="shrink-0 rounded-md border border-accent/40 px-2 py-1 text-xs text-accent hover:bg-accent/10"
+            onClick={() => void openProjectManager(draft.workspaceId)}
+          >
+            打开项目管理
+          </button>
+        </div>
+      ) : null}
 
       <section className="mt-3 min-w-0" aria-labelledby="new-session-workspace">
         <div className="flex items-center justify-between gap-2">

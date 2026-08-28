@@ -15,6 +15,7 @@ import {
   hasClaimable,
 } from "../infrastructure/engine/scheduler.ts";
 import { runNodeUnit } from "../infrastructure/adapters/node.ts";
+import { runNodeSequence } from "../infrastructure/adapters/node.ts";
 import { runRustLegacyUnit } from "../infrastructure/adapters/rust-legacy.ts";
 import { createRunStore } from "../infrastructure/evidence/run-store.ts";
 import { parseSummaryLanguage, renderRunSummary } from "../infrastructure/evidence/summary.ts";
@@ -43,6 +44,13 @@ function has(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+function optionMissingValue(args: string[], name: string): boolean {
+  return args.some(
+    (argument, index) =>
+      argument === name && (!args[index + 1] || args[index + 1]!.startsWith("--")),
+  );
+}
+
 function tagsOf(args: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -56,7 +64,7 @@ function usage(): string {
   lint [--open <path>] [--cloud <path>]
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>]
-  run --space <abs> --gate <gate> --topic <slug> [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms]
+  run --space <abs> --gate <gate> --topic <slug> [--tags <tag>] [--environments <n>] [--summary-language <en|zh-CN>] [--open <path>] [--cloud <path>] [--max-run-ms <ms>]
   inspect --run <abs> [--failed|--case <id>]
   compare --base <run> --candidate <run>
   list --space <abs>
@@ -86,8 +94,30 @@ async function main(): Promise<number> {
     process.stdout.write(usage());
     return 0;
   }
-  const openRoot = flag(args, "--open", OPEN_DEFAULT);
-  const cloudRoot = flag(args, "--cloud") || undefined;
+  for (const option of [
+    "--open",
+    "--cloud",
+    "--gate",
+    "--tags",
+    "--space",
+    "--topic",
+    "--environments",
+    "--summary-language",
+    "--max-run-ms",
+    "--run",
+    "--case",
+    "--base",
+    "--candidate",
+    "--before",
+  ]) {
+    if (optionMissingValue(args, option)) {
+      process.stderr.write(`${option} needs a value\n`);
+      return 2;
+    }
+  }
+  const openRoot = path.resolve(flag(args, "--open", OPEN_DEFAULT));
+  const cloud = flag(args, "--cloud");
+  const cloudRoot = cloud ? path.resolve(cloud) : undefined;
 
   if (command === "lint") {
     const findings = lintLayers(openRoot, cloudRoot);
@@ -132,10 +162,37 @@ async function main(): Promise<number> {
     }
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const plan = planCases(cases, gate, tagsOf(args));
+    if (plan.units.length === 0) {
+      process.stderr.write("selected test plan is empty; refusing a false-green run\n");
+      return 2;
+    }
     const store = createRunStore(space, topic);
     const startedAt = new Date();
     const results: UnitResult[] = [];
-    const scheduler = createScheduler(plan.units, defaultBudget(environments));
+    const sequenceGroups = new Map<string, WorkUnit[]>();
+    const ordinaryUnits: WorkUnit[] = [];
+    for (const unit of plan.units) {
+      const sequence = unit.meta.sequence;
+      if (!sequence) {
+        ordinaryUnits.push(unit);
+        continue;
+      }
+      const group = sequenceGroups.get(sequence.id) ?? [];
+      group.push(unit);
+      sequenceGroups.set(sequence.id, group);
+    }
+    for (const [id, units] of sequenceGroups) {
+      const orders = new Set(units.map((unit) => unit.meta.sequence?.order));
+      if (
+        units.some((unit) => unit.meta.runner !== "node") ||
+        orders.size !== units.length ||
+        units.some((unit) => !Number.isInteger(unit.meta.sequence?.order) || (unit.meta.sequence?.order ?? 0) < 1)
+      ) {
+        throw new Error(`invalid node sequence ${id}`);
+      }
+      units.sort((left, right) => left.meta.sequence!.order - right.meta.sequence!.order);
+    }
+    const scheduler = createScheduler(ordinaryUnits, defaultBudget(environments));
     // Every environment compiles the same component on each daemon start;
     // a shared, machine-local cache (target/ is gitignored) turns that into
     // one compile per artifact hash. The host only honours this on the local
@@ -150,6 +207,25 @@ async function main(): Promise<number> {
     const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
     const inflight = new Set<Promise<void>>();
 
+    const recordResult = (result: UnitResult, browserArtifacts?: string) => {
+      results.push(result);
+      store.writeResult(result);
+      if (result.status === "passed" && browserArtifacts) {
+        rmSync(browserArtifacts, { recursive: true, force: true });
+      }
+      if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
+        store.writeFailure(
+          result,
+          [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
+        );
+      }
+    };
+
+    for (const units of [...sequenceGroups.values()].sort((left, right) => left[0]!.id.localeCompare(right[0]!.id))) {
+      const sequenceResults = await runNodeSequence(units, extraEnv, runDeadline);
+      for (const result of sequenceResults) recordResult(result);
+    }
+
     const startOne = (unit: WorkUnit) => {
       const env = { ...extraEnv };
       if (unit.meta.runner === "playwright") {
@@ -161,17 +237,7 @@ async function main(): Promise<number> {
       }
       const task = runUnit(unit, env, openRoot).then((result) => {
         completeUnit(scheduler, unit, result.durationMs);
-        results.push(result);
-        store.writeResult(result);
-        if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS) {
-          rmSync(env.TESTCTL_BROWSER_ARTIFACTS, { recursive: true, force: true });
-        }
-        if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
-          store.writeFailure(
-            result,
-            [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
-          );
-        }
+        recordResult(result, env.TESTCTL_BROWSER_ARTIFACTS);
       }).finally(() => {
         inflight.delete(task);
       });
@@ -313,7 +379,23 @@ async function main(): Promise<number> {
       : has(args, "--failed")
         ? results.filter((item) => item.status !== "passed")
         : results;
-    process.stdout.write(`${JSON.stringify({ manifest, results: filtered }, null, 2)}\n`);
+    const diagnostics = Object.fromEntries(
+      filtered
+        .filter((item) => item.status !== "passed" && item.status !== "not-applicable")
+        .map((item) => {
+          const file = path.join(
+            runDir,
+            "failures",
+            item.caseId.replace(/[^\w.-]+/g, "_"),
+            "diagnostic.md",
+          );
+          return [item.caseId, existsSync(file) ? readFileSync(file, "utf8") : null];
+        }),
+    );
+    // Keep the requested evidence first. Large catalogs can make
+    // manifest.notExecuted exceed bounded terminal capture; putting results
+    // after it made `inspect --case/--failed` hide the very failure requested.
+    process.stdout.write(`${JSON.stringify({ results: filtered, diagnostics, manifest }, null, 2)}\n`);
     return 0;
   }
 

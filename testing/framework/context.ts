@@ -2,7 +2,7 @@ import { createLease, releaseLease, type CaseMeta, type EnvironmentLease } from 
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
-import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
+import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, installFixtureAcpAgent, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, configureOpencodeBuiltinAgent, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
 import { leftoverProcesses, reconnectAfterStop } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
@@ -31,8 +31,10 @@ export interface CaseContext {
       seedHostCursorLogin: typeof seedHostCursorLogin;
       seedHostBetaProviders: typeof seedHostBetaProviders;
       seedHostCodexLogin: typeof seedHostCodexLogin;
+      installFixtureAcpAgent: typeof installFixtureAcpAgent;
       pointClaudeAtBuiltinLlm: typeof pointClaudeAtBuiltinLlm;
       writeOpencodeBuiltinConfig: typeof writeOpencodeBuiltinConfig;
+      configureOpencodeBuiltinAgent: typeof configureOpencodeBuiltinAgent;
       sessionEventOf: typeof sessionEventOf;
       startShell: typeof startShell;
       runShell: typeof runShell;
@@ -91,8 +93,10 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         seedHostCursorLogin,
         seedHostBetaProviders,
         seedHostCodexLogin,
+        installFixtureAcpAgent,
         pointClaudeAtBuiltinLlm,
         writeOpencodeBuiltinConfig,
+        configureOpencodeBuiltinAgent,
         sessionEventOf,
         startShell,
         runShell,

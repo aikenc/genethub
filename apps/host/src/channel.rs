@@ -16,6 +16,8 @@ pub const CHANNEL: &str = "local";
 pub const ENV_CLI: &str = "GENEHUB_LOCAL_CLI";
 /// The shell's pid, handed to the WASI guest which has none of its own.
 pub const ENV_HOST_PID: &str = "GENEHUB_LOCAL_HOST_PID";
+/// The shell's host name, handed to the WASI guest for same-machine locks.
+pub const ENV_HOST_NAME: &str = "GENEHUB_LOCAL_HOST_NAME";
 /// The directory the daemon was started in; a WASI guest cannot ask the OS.
 pub const ENV_CWD: &str = "GENEHUB_LOCAL_CWD";
 /// The component file the shell loaded; the daemon watches it to ask for an

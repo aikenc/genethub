@@ -335,6 +335,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::RoundTrunkGet { .. }
         | Request::BlobGet { .. }
         | Request::WorkspaceList
+        | Request::ProjectManagerStatus { .. }
         | Request::DirectoryList { .. }
         | Request::FileTree { .. }
         | Request::LogTail { .. }

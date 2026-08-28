@@ -1,6 +1,10 @@
 import type { WorkspaceInfo } from "@genehub/proto";
 
-export type WorkspaceKind = "folder" | "workspace";
+/**
+ * `workspace` is the legacy picker-only name for an arbitrary
+ * `.code-workspace`. Durable workspaces use the three protocol kinds.
+ */
+export type WorkspaceKind = "folder" | "workspace" | "pipeSpace" | "agentSpace";
 /** @deprecated Use {@link WorkspaceKind}. */
 export type ProjectKind = WorkspaceKind;
 
@@ -12,7 +16,28 @@ export function WorkspaceKindIcon({
   kind: WorkspaceKind;
   className?: string;
 }) {
-  if (kind === "workspace") {
+  if (kind === "agentSpace") {
+    return (
+      <svg
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={`shrink-0 text-accent ${className}`}
+        data-workspace-icon="agent-space"
+        aria-hidden="true"
+      >
+        <rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.25" />
+        <circle cx="5.25" cy="8" r="1" />
+        <circle cx="10.75" cy="5.25" r="1" />
+        <circle cx="10.75" cy="10.75" r="1" />
+        <path d="m6.15 7.55 3.7-1.85M6.15 8.45l3.7 1.85" />
+      </svg>
+    );
+  }
+  if (kind === "workspace" || kind === "pipeSpace") {
     return (
       <svg
         viewBox="0 0 16 16"
@@ -20,7 +45,7 @@ export function WorkspaceKindIcon({
         stroke="currentColor"
         strokeWidth="1.4"
         className={`shrink-0 text-accent ${className}`}
-        data-workspace-icon="workspace"
+        data-workspace-icon={kind === "pipeSpace" ? "pipe-space" : "workspace"}
         aria-hidden="true"
       >
         <rect x="2.25" y="2.25" width="7.5" height="7.5" rx="1.25" />
@@ -50,13 +75,16 @@ export function WorkspaceIcon({
   workspace,
   className,
 }: {
-  workspace: Pick<WorkspaceInfo, "workspaceFile">;
+  workspace: Pick<WorkspaceInfo, "kind" | "workspaceFile">;
   className?: string;
 }) {
+  const kind =
+    workspace.kind === "agentSpace" || workspace.kind === "pipeSpace"
+      ? workspace.kind
+      : workspace.workspaceFile
+        ? "workspace"
+        : "folder";
   return (
-    <WorkspaceKindIcon
-      kind={workspace.workspaceFile ? "workspace" : "folder"}
-      className={className}
-    />
+    <WorkspaceKindIcon kind={kind} className={className} />
   );
 }

@@ -4,6 +4,7 @@
 //! real daemon in-process instead of asserting against a mock of one.
 
 pub mod adapter;
+pub mod agent_space_builder;
 pub mod authz;
 pub(crate) mod blocking;
 pub mod channel_auth;
@@ -35,6 +36,7 @@ pub use genet_frontdoor::channel;
 pub use genet_frontdoor::fs_lock;
 pub use genet_frontdoor::lifecycle;
 pub mod logs;
+pub mod pm_domain;
 pub mod process;
 pub mod processes;
 pub mod provider;
@@ -61,6 +63,7 @@ pub struct Daemon {
     pub state: Shared,
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
+    _pm_supervisor: tokio::task::JoinHandle<()>,
 }
 
 impl Daemon {
@@ -85,11 +88,13 @@ impl Daemon {
         let mut remote = remote::Remote::new(state.paths.clone(), pty);
         remote.attach(&state).await;
         let _ = state.remote.set(remote);
+        let pm_supervisor = pm_domain::runtime::spawn(state.clone());
 
         Ok(Daemon {
             state,
             port: listener.port,
             listener: listener.handle,
+            _pm_supervisor: pm_supervisor,
         })
     }
 

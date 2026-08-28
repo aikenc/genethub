@@ -119,6 +119,12 @@ const TABLE = {
     beta: "GENEHUB_BETA_HOST_PID",
     stable: "GENEHUB_HOST_PID",
   },
+  env_host_name: {
+    local: "GENEHUB_LOCAL_HOST_NAME",
+    dev: "GENEHUB_DEV_HOST_NAME",
+    beta: "GENEHUB_BETA_HOST_NAME",
+    stable: "GENEHUB_HOST_NAME",
+  },
   env_daemon_command: {
     local: "GENEHUB_LOCAL_DAEMON_COMMAND",
     dev: "GENEHUB_DEV_DAEMON_COMMAND",
@@ -340,6 +346,8 @@ pub const ENV_WORKSPACE_DIR: &str = "${value("env_workspace_dir", channel)}";
 pub const ENV_LOG: &str = "${value("env_log", channel)}";
 /// The shell's pid, handed to the WASI guest which has none of its own.
 pub const ENV_HOST_PID: &str = "${value("env_host_pid", channel)}";
+/// The shell's host name, handed to the WASI guest for same-machine locks.
+pub const ENV_HOST_NAME: &str = "${value("env_host_name", channel)}";
 pub const ENV_MACHINE_NAME: &str = "${value("env_machine_name", channel)}";
 pub const ENV_AGENT_COMMAND: &str = "${value("env_agent_command", channel)}";
 /// Runs the daemon instead of \`genet daemon run\`, for pointing the product at
@@ -410,6 +418,8 @@ pub const CHANNEL: &str = "${value("channel", channel)}";
 pub const ENV_CLI: &str = "${value("env_cli", channel)}";
 /// The shell's pid, handed to the WASI guest which has none of its own.
 pub const ENV_HOST_PID: &str = "${value("env_host_pid", channel)}";
+/// The shell's host name, handed to the WASI guest for same-machine locks.
+pub const ENV_HOST_NAME: &str = "${value("env_host_name", channel)}";
 /// The directory the daemon was started in; a WASI guest cannot ask the OS.
 pub const ENV_CWD: &str = "${value("env_cwd", channel)}";
 /// The component file the shell loaded; the daemon watches it to ask for an

@@ -1,0 +1,17 @@
+{
+  "schema": "pipespace.v1",
+  "name": "gameplay",
+  "description": "Frozen local compatibility fixture",
+  "agents": ["codex", "claude-code"],
+  "skills": ["game-skill"],
+  "tags": [],
+  "skillProviders": [
+    {
+      "type": "folder",
+      "path": "../../skills"
+    }
+  ],
+  "children": {
+    "scanDepth": 3
+  }
+}

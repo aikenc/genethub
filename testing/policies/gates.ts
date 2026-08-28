@@ -8,6 +8,9 @@ export function selectForGate(
   if (tags.length > 0 && !tags.some((tag) => item.tags.includes(tag))) {
     return { include: false, reason: "tag filter" };
   }
+  if (item.resources.pool === "real-llm" && tags.length === 0) {
+    return { include: false, reason: "real LLM qualification requires an explicit tag" };
+  }
   if (gate === "infra-compact") {
     return item.tags.includes("infra-compact")
       ? { include: true, reason: "infra compact" }

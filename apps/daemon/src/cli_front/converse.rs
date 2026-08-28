@@ -14,6 +14,7 @@ use std::time::Duration;
 use genehub_proto::{
     PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, Reply,
     Request, SequencedEvent, SessionEvent, SessionSnapshot, SessionSummary, TurnError,
+    WorkSessionInfo,
 };
 use serde_json::{json, Value};
 
@@ -22,6 +23,8 @@ use super::query;
 use super::rpc::{Payload, Rpc};
 use super::target::Selection;
 use super::{EXIT_FAILED, EXIT_OK, EXIT_UNREACHABLE};
+
+const MAX_STDIN_PROMPT_BYTES: usize = 1024 * 1024;
 
 /// How a wait ended. Only `Completed` is a success; everything else leaves
 /// something for the caller to do, and the exit code has to say so.
@@ -114,7 +117,7 @@ fn parse_pm(args: &[String], selection: &Selection) -> Result<Command, CliFailur
             Err(error) => Err(error),
         },
         _ => Err(CliFailure::invalid_args(
-            "usage: genet pm run \"<prompt>\" [--workspace <id> | --session <id>]",
+            "usage: genet pm run (\"<prompt>\" | --message -) [--workspace <id> | --session <id>]",
         )),
     }
 }
@@ -226,6 +229,7 @@ struct Options {
     wait: Option<bool>,
     auto_approve: bool,
     open_workspace: bool,
+    prompt_from_stdin: bool,
 }
 
 impl Options {
@@ -255,7 +259,19 @@ impl Options {
                 "--mode" => options.mode = Some(value()?),
                 "--effort" => options.effort = Some(value()?),
                 "--title" => options.title = Some(value()?),
-                "--message" => options.positional.push(value()?),
+                "--message" => {
+                    let message = value()?;
+                    if message == "-" {
+                        if options.prompt_from_stdin {
+                            return Err(CliFailure::invalid_args(
+                                "--message - may be given only once",
+                            ));
+                        }
+                        options.prompt_from_stdin = true;
+                    } else {
+                        options.positional.push(message);
+                    }
+                }
                 "--request" => options.request = Some(value()?),
                 "--choose" => options.choose = Some(value()?),
                 "--since-seq" => options.since_seq = Some(number(&value()?, "--since-seq")?),
@@ -275,6 +291,15 @@ impl Options {
     }
 
     fn into_run(self, agent_id: Option<String>) -> Result<Run, CliFailure> {
+        let stdin = self.prompt_from_stdin.then(super::caller_stdin);
+        self.into_run_with_stdin(agent_id, stdin)
+    }
+
+    fn into_run_with_stdin(
+        self,
+        agent_id: Option<String>,
+        stdin: Option<Vec<u8>>,
+    ) -> Result<Run, CliFailure> {
         if self.workspace.is_some() && self.cwd.is_some() {
             return Err(CliFailure::invalid_args(
                 "--workspace and --cwd are two answers to the same question; give one",
@@ -285,7 +310,15 @@ impl Options {
                 "--work-package creates a new WorkAgent session; continue it with --session only",
             ));
         }
-        let prompt = self.positional.join(" ").trim().to_string();
+        if self.prompt_from_stdin && !self.positional.is_empty() {
+            return Err(CliFailure::invalid_args(
+                "--message - cannot be combined with another prompt argument",
+            ));
+        }
+        let prompt = match stdin {
+            Some(stdin) => decode_stdin_prompt(stdin)?,
+            None => self.positional.join(" ").trim().to_string(),
+        };
         if prompt.is_empty() {
             return Err(CliFailure::invalid_args(
                 "nothing to say; pass the prompt as an argument or with --message",
@@ -310,6 +343,30 @@ impl Options {
             timeout: self.timeout,
         })
     }
+}
+
+fn decode_stdin_prompt(stdin: Vec<u8>) -> Result<String, CliFailure> {
+    if stdin.len() > MAX_STDIN_PROMPT_BYTES {
+        return Err(CliFailure::invalid_args(format!(
+            "too much standard input: --message - accepts at most {MAX_STDIN_PROMPT_BYTES} bytes"
+        )));
+    }
+    let prompt = String::from_utf8(stdin)
+        .map_err(|_| CliFailure::invalid_args("--message - requires UTF-8 standard input"))?;
+    // A shell heredoc contributes one line ending before its delimiter. Drop
+    // exactly that transport newline while preserving indentation, trailing
+    // spaces, and any additional blank line that belongs to the contract.
+    let prompt = prompt
+        .strip_suffix("\r\n")
+        .or_else(|| prompt.strip_suffix('\n'))
+        .unwrap_or(&prompt)
+        .to_string();
+    if prompt.trim().is_empty() {
+        return Err(CliFailure::invalid_args(
+            "--message - needs non-empty standard input",
+        ));
+    }
+    Ok(prompt)
 }
 
 fn number(raw: &str, flag: &str) -> Result<u64, CliFailure> {
@@ -418,11 +475,23 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
             session.id
         )));
     }
+    // A PM model that accidentally omits `--no-wait` must not make itself
+    // unavailable for user guidance while its WorkAgent runs. Keep the public
+    // session protocol unchanged, but make non-blocking dispatch an invariant
+    // of the authenticated PM -> owned WorkSession control relationship.
+    let principal = super::caller_principal().ok();
+    let wait = effective_wait(
+        run.wait,
+        principal
+            .as_ref()
+            .and_then(crate::authz::Principal::project_manager_session_id),
+        session.work.as_ref(),
+    );
 
     // Subscribing before sending is what makes the stream gap-free: a turn that
     // starts and finishes between the two calls would otherwise be invisible.
     let mut seq = 0;
-    if run.wait {
+    if wait {
         rpc.watch_events().await.map_err(query::rpc_error)?;
         let Reply::Subscribed {
             snapshot,
@@ -493,7 +562,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
     .await
     .map_err(query::rpc_error)?;
 
-    if !run.wait {
+    if !wait {
         emit(
             "session.result",
             json!({"sessionId": session.id, "status": "running", "waited": false}),
@@ -503,6 +572,18 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
 
     let outcome = pump(rpc, &session.id, run.auto_approve, run.timeout, seq).await;
     Ok(report(&session.id, outcome))
+}
+
+fn effective_wait(
+    requested: bool,
+    manager_session_id: Option<&str>,
+    work: Option<&WorkSessionInfo>,
+) -> bool {
+    requested
+        && !matches!(
+            (manager_session_id, work),
+            (Some(manager), Some(work)) if work.controller_session_id == manager
+        )
 }
 
 fn opened(session: &SessionSummary, snapshot: &SessionSnapshot, attached: bool) {
@@ -881,6 +962,50 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_stdin_prompt_preserves_multiline_shell_metacharacters() {
+        let options = Options::parse(
+            &words(&["--message", "-", "--no-wait"]),
+            &selection(Some("/srv/app")),
+        )
+        .unwrap();
+        let run = options
+            .into_run_with_stdin(
+                Some("codex".into()),
+                Some(b"  first line\nUse `git status` and $PROJECT literally.  \n".to_vec()),
+            )
+            .unwrap();
+        assert_eq!(
+            run.prompt,
+            "  first line\nUse `git status` and $PROJECT literally.  "
+        );
+        assert!(!run.wait);
+    }
+
+    #[test]
+    fn stdin_prompt_is_explicit_exclusive_and_utf8() {
+        let mixed = Options::parse(
+            &words(&["ordinary prompt", "--message", "-"]),
+            &selection(None),
+        )
+        .unwrap()
+        .into_run_with_stdin(None, Some(b"stdin".to_vec()))
+        .unwrap_err();
+        assert!(mixed.message.contains("cannot be combined"));
+
+        let duplicate = Options::parse(
+            &words(&["--message", "-", "--message", "-"]),
+            &selection(None),
+        )
+        .unwrap_err();
+        assert!(duplicate.message.contains("only once"));
+
+        let invalid = decode_stdin_prompt(vec![0xff]).unwrap_err();
+        assert!(invalid.message.contains("UTF-8"));
+        let empty = decode_stdin_prompt(b" \n".to_vec()).unwrap_err();
+        assert!(empty.message.contains("non-empty"));
+    }
+
+    #[test]
     fn a_conversation_without_a_prompt_is_a_mistake_not_an_empty_turn() {
         let error =
             parse_agent(&words(&["run", "--agent", "codex"]), &selection(Some("/s"))).unwrap_err();
@@ -996,6 +1121,18 @@ mod tests {
             &selection(None),
         )
         .is_err());
+    }
+
+    #[test]
+    fn an_owning_pm_can_never_block_on_its_workagent_turn() {
+        let work = WorkSessionInfo {
+            work_package_id: "wp-1".into(),
+            controller_session_id: "s_pm".into(),
+        };
+        assert!(!effective_wait(true, Some("s_pm"), Some(&work)));
+        assert!(!effective_wait(false, Some("s_pm"), Some(&work)));
+        assert!(effective_wait(true, Some("s_other"), Some(&work)));
+        assert!(effective_wait(true, Some("s_pm"), None));
     }
 
     fn request(

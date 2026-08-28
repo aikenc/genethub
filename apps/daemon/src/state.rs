@@ -28,6 +28,10 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub speech: Arc<crate::speech::SpeechBroker>,
     pub sessions: SessionManager,
+    /// Durable, daemon-owned PM project facts. Agent Space source and topology
+    /// stay in the project's Git repository; this store holds only control and
+    /// recovery state that must not be editable by an Agent process.
+    pub projects: crate::pm_domain::ProjectStore,
     pub workspaces: Workspaces,
     pub terminals: Arc<Terminals>,
     /// What each session's agent has left running.
@@ -160,6 +164,7 @@ impl AppState {
         let processes = sessions.processes();
         let (terminals, pty_rx) = Terminals::new();
         let updates_dir = paths.updates_dir();
+        let projects = crate::pm_domain::ProjectStore::new(&paths.root);
 
         let state = Arc::new(AppState {
             paths,
@@ -169,6 +174,7 @@ impl AppState {
             registry,
             speech: Arc::new(crate::speech::SpeechBroker::new()),
             sessions,
+            projects,
             workspaces,
             terminals,
             processes,

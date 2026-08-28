@@ -97,6 +97,10 @@ pub enum Request {
         #[serde(default)]
         title: Option<String>,
     },
+    /// Reads the durable PM state projected for a human. This is intentionally
+    /// separate from the authenticated PM control CLI and cannot mutate it.
+    #[serde(rename = "pm.project.status", rename_all = "camelCase")]
+    ProjectManagerStatus { workspace_id: String },
     /// Creates one PM-controlled WorkAgent conversation in an Agent Space.
     /// The controller id is derived from the authenticated caller rather than
     /// accepted from this untrusted payload.
@@ -724,6 +728,7 @@ pub enum Reply {
     SessionArtifact(SessionArtifactBundle),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
+    ProjectStatus(PmProjectStatus),
     Directory(DirectoryListing),
     FileTree(FileNode),
     GitStatus(GitStatus),

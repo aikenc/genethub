@@ -47,7 +47,9 @@ pub fn load(cwd: &Path, agent_dir: &Path) -> Vec<Skill> {
 }
 
 fn load_daemon_builtins(dir: &Path) -> Vec<Skill> {
-    let Ok(manifest) = std::fs::read_to_string(dir.join(".entrypoints")) else {
+    let manifest_name =
+        daemon_entrypoint_manifest(std::env::var_os("GENEHUB_SKILL_PROFILE").as_deref());
+    let Ok(manifest) = std::fs::read_to_string(dir.join(manifest_name)) else {
         return Vec::new();
     };
     let mut skills = Vec::new();
@@ -77,6 +79,14 @@ fn load_daemon_builtins(dir: &Path) -> Vec<Skill> {
         skills.push(skill);
     }
     skills
+}
+
+fn daemon_entrypoint_manifest(profile: Option<&std::ffi::OsStr>) -> &'static str {
+    if profile == Some(std::ffi::OsStr::new("project-manager")) {
+        ".entrypoints-project-manager"
+    } else {
+        ".entrypoints"
+    }
 }
 
 /// Only our own skill directories treat loose `.md` files as skills; shared
@@ -406,5 +416,18 @@ mod tests {
         assert_eq!(skills[0].name, "genehub-session-history");
         assert!(skills[0].disable_model_invocation);
         assert!(format_for_prompt(&skills).is_empty());
+    }
+
+    #[test]
+    fn manager_sessions_select_the_manager_entrypoint_manifest() {
+        assert_eq!(
+            daemon_entrypoint_manifest(Some(std::ffi::OsStr::new("project-manager"))),
+            ".entrypoints-project-manager"
+        );
+        assert_eq!(daemon_entrypoint_manifest(None), ".entrypoints");
+        assert_eq!(
+            daemon_entrypoint_manifest(Some(std::ffi::OsStr::new("unknown"))),
+            ".entrypoints"
+        );
     }
 }

@@ -41,6 +41,17 @@ export interface LlmOptions {
   realEligible?: boolean;
 }
 
+/**
+ * Explicit local-project evolution. Members run in order in one isolated
+ * lease, and later members may consume only an immutable checkpoint emitted
+ * by their predecessor. This is reserved for journeys whose product identity
+ * (workspace/session/Git lineage) is itself under test.
+ */
+export interface CaseSequence {
+  id: string;
+  order: number;
+}
+
 export interface CaseMeta {
   id: string;
   title: string;
@@ -58,6 +69,7 @@ export interface CaseMeta {
   requiredArtifacts?: string[];
   doubleExceptions?: DoubleException[];
   retention?: boolean;
+  sequence?: CaseSequence;
   file: string;
 }
 

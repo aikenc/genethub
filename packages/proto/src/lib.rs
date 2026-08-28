@@ -72,6 +72,7 @@ mod tests {
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "workspace.registerAgentSpace", "payload": {"source": "/project/spaces/code/code.code-workspace"}}),
             json!({"type": "pm.session.create", "payload": {"workspaceId": "w"}}),
+            json!({"type": "pm.project.status", "payload": {"workspaceId": "w"}}),
             json!({"type": "workSession.create", "payload": {
                 "workspaceId": "w_space", "workPackageId": "wp-1", "agentId": "codex"
             }}),

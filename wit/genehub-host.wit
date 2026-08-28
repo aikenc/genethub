@@ -64,6 +64,10 @@ interface process {
   /// A name that is already a path is answered as itself if it exists.
   locate: func(name: string, extra: list<string>) -> option<string>;
 
+  /// Whether a native pid is still alive on this host. The guest needs this
+  /// for same-machine ownership locks; WASI has no process table of its own.
+  pid-alive: func(pid: u32) -> bool;
+
   /// A directory that exists and says nothing about any of the user's
   /// projects: the working directory for a child that must not look like it
   /// was started inside somebody's work.

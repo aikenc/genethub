@@ -233,6 +233,10 @@ impl wit::Host for crate::load::Host {
             .map(|path| path.to_string_lossy().into_owned())
     }
 
+    async fn pid_alive(&mut self, pid: u32) -> bool {
+        native_pid_alive(pid)
+    }
+
     async fn scratch_dir(&mut self) -> String {
         crate::guest_paths::env_value_for_guest(std::env::temp_dir().to_string_lossy())
     }
@@ -308,4 +312,51 @@ fn signal_group(_pid: Option<u32>, _signal: i32) {}
 #[cfg(not(unix))]
 fn group_alive(_pid: Option<u32>) -> bool {
     false
+}
+
+#[cfg(unix)]
+fn native_pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    unsafe {
+        libc::kill(pid, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(windows)]
+fn native_pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    if pid == 0 {
+        return false;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    unsafe {
+        CloseHandle(handle);
+    }
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
+fn native_pid_alive(_pid: u32) -> bool {
+    true
+}
+
+#[cfg(test)]
+mod pid_tests {
+    #[test]
+    fn native_pid_probe_distinguishes_current_process_from_impossible_pid() {
+        assert!(super::native_pid_alive(std::process::id()));
+        #[cfg(unix)]
+        assert!(!super::native_pid_alive(i32::MAX as u32));
+    }
 }

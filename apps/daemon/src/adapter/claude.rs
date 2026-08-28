@@ -2663,6 +2663,7 @@ mod tests {
                 front_door_cli: None,
                 session_id: "s1".into(),
                 project_manager_token: None,
+                skill_profile: crate::skills::SkillProfile::Common,
                 cwd: dir.path().to_path_buf(),
                 model_id: None,
                 mode_id: None,

@@ -173,6 +173,15 @@ export function App({
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
+  const managedReadOnly = session?.kind === "work";
+  const sessionReadOnly = importedReadOnly || session?.capabilities?.send === false;
+  const readOnlyReason = managedReadOnly
+    ? `这是 PM 管理的 WorkSession${session?.work ? `（工作包 ${session.work.workPackageId}）` : ""}：用户可查看与 Fork，不能直接干预执行。`
+    : importedReadOnly
+      ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
+      : sessionReadOnly
+        ? "当前会话只读。"
+        : undefined;
   const composing = Boolean(workbench.activeSessionId || draft);
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
@@ -734,6 +743,17 @@ export function App({
               ) : null}
             </div>
           ) : null}
+          {managedReadOnly ? (
+            <div
+              className="shrink-0 border-b border-accent/20 bg-accent/5 px-3 py-1.5 text-xs text-muted"
+              role="status"
+            >
+              <span className="font-medium text-accent">WorkSession</span>
+              <span>
+                {session.work ? ` · 工作包 ${session.work.workPackageId}` : ""} · PM 管理 · 用户只读 · 可 Fork
+              </span>
+            </div>
+          ) : null}
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
@@ -769,7 +789,8 @@ export function App({
                         </div>
                       )}
                     </div>
-                    {workbench.timeline.pendingPermission ? (
+                    {workbench.timeline.pendingPermission &&
+                    (session?.capabilities?.respondPermission ?? true) ? (
                       <div className="z-20 shrink-0 px-4">
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
@@ -783,12 +804,8 @@ export function App({
                     ) : null}
                     <Composer
                       phase={phase}
-                      disabled={importedReadOnly}
-                      disabledReason={
-                        importedReadOnly
-                          ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
-                          : undefined
-                      }
+                      disabled={sessionReadOnly}
+                      disabledReason={readOnlyReason}
                       agents={workbench.agents}
                       agentId={agentId}
                       modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}

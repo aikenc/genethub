@@ -17,6 +17,21 @@ struct BuiltinFile {
 include!(concat!(env!("OUT_DIR"), "/builtin_skills.rs"));
 
 pub const ENTRYPOINT_MANIFEST: &str = ".entrypoints";
+pub const PROJECT_MANAGER_ENTRYPOINT_MANIFEST: &str = ".entrypoints-project-manager";
+const PROJECT_MANAGER_SKILL_PREFIX: &str = "genehub-pm-";
+const PROJECT_MANAGER_AVAILABILITY_GUIDANCE: &str = r#"<project_manager_availability>
+A PM session must remain available for user guidance while WorkSessions run. Create and continue owned WorkSessions with a top-level GeneHub CLI command using `--no-wait`; the PM control surface also forces those turns to return non-blocking if the flag is accidentally omitted. Never wrap them in timeout, a pipe, a background job, or another waiting construct. Never execute sleep, timer, foreground or background wait, polling loop, or repeated `session get` commands merely to monitor work. After dispatching and binding every currently-ready package and recording immediate state transitions, briefly report progress and finish the PM turn. The daemon supervisor owns quiet-session backoff checks and wakes the PM only for material WorkSession changes. A newly arrived user message takes priority over a supervisor wake.
+</project_manager_availability>"#;
+
+/// Product-owned Skill catalog selected for one durable session role.
+/// Project and Agent Space Skills remain workspace inputs rather than being
+/// copied into this product profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SkillProfile {
+    #[default]
+    Common,
+    ProjectManager,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
@@ -70,16 +85,46 @@ pub fn materialize(root: &Path) -> Option<PathBuf> {
             return None;
         }
     }
-    let mut entrypoints = BUILTIN_ENTRYPOINTS.join("\n");
-    entrypoints.push('\n');
-    let manifest = root.join(ENTRYPOINT_MANIFEST);
-    if std::fs::read(&manifest).ok().as_deref() != Some(entrypoints.as_bytes()) {
-        if let Err(error) = install_file(&manifest, entrypoints.as_bytes()) {
-            tracing::warn!(%error, "could not install built-in Skill entrypoint manifest");
-            return None;
-        }
+    let common = BUILTIN_ENTRYPOINTS
+        .iter()
+        .copied()
+        .filter(|entrypoint| !is_project_manager_skill(entrypoint));
+    if !install_entrypoint_manifest(root, ENTRYPOINT_MANIFEST, common) {
+        return None;
+    }
+    if !install_entrypoint_manifest(
+        root,
+        PROJECT_MANAGER_ENTRYPOINT_MANIFEST,
+        BUILTIN_ENTRYPOINTS.iter().copied(),
+    ) {
+        return None;
     }
     Some(root.to_path_buf())
+}
+
+fn install_entrypoint_manifest(
+    root: &Path,
+    name: &str,
+    entrypoints: impl IntoIterator<Item = &'static str>,
+) -> bool {
+    let mut body = entrypoints.into_iter().collect::<Vec<_>>().join("\n");
+    body.push('\n');
+    let manifest = root.join(name);
+    if std::fs::read(&manifest).ok().as_deref() == Some(body.as_bytes()) {
+        return true;
+    }
+    if let Err(error) = install_file(&manifest, body.as_bytes()) {
+        tracing::warn!(manifest = name, %error, "could not install built-in Skill entrypoint manifest");
+        return false;
+    }
+    true
+}
+
+fn is_project_manager_skill(entrypoint: &str) -> bool {
+    entrypoint
+        .split('/')
+        .next()
+        .is_some_and(|name| name.starts_with(PROJECT_MANAGER_SKILL_PREFIX))
 }
 
 fn install_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -113,9 +158,16 @@ fn install_file(target: &Path, contents: &[u8]) -> std::io::Result<()> {
 /// Load exactly the product-owned Skill entrypoints compiled into this daemon.
 /// Unknown files in the data directory are never promoted into Agent context.
 pub fn load(skills_root: &Path) -> Vec<Skill> {
+    load_for_profile(skills_root, SkillProfile::Common)
+}
+
+pub fn load_for_profile(skills_root: &Path, profile: SkillProfile) -> Vec<Skill> {
     let mut skills = Vec::new();
     if materialize(skills_root).is_some() {
         for entrypoint in BUILTIN_ENTRYPOINTS {
+            if profile == SkillProfile::Common && is_project_manager_skill(entrypoint) {
+                continue;
+            }
             if let Some(skill) = parse_skill_file(&skills_root.join(entrypoint)) {
                 skills.push(skill);
             }
@@ -127,17 +179,22 @@ pub fn load(skills_root: &Path) -> Vec<Skill> {
 
 /// Artifact-link rules plus the Skill catalog, or just the rules when
 /// this daemon has no skills directory.
-pub fn session_guidance(skills_root: Option<&Path>, front_door_cli: Option<&Path>) -> String {
-    let artifact = crate::session::artifact_links::guidance().to_string();
-    let Some(root) = skills_root else {
-        return artifact;
-    };
-    let catalog = format_catalog(&load(root), front_door_cli);
-    if catalog.is_empty() {
-        artifact
-    } else {
-        format!("{artifact}\n\n{catalog}")
+pub fn session_guidance(
+    skills_root: Option<&Path>,
+    front_door_cli: Option<&Path>,
+    profile: SkillProfile,
+) -> String {
+    let mut sections = vec![crate::session::artifact_links::guidance().to_string()];
+    if profile == SkillProfile::ProjectManager {
+        sections.push(PROJECT_MANAGER_AVAILABILITY_GUIDANCE.to_string());
     }
+    if let Some(root) = skills_root {
+        let catalog = format_catalog(&load_for_profile(root, profile), front_door_cli);
+        if !catalog.is_empty() {
+            sections.push(catalog);
+        }
+    }
+    sections.join("\n\n")
 }
 
 pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String {
@@ -293,7 +350,15 @@ mod tests {
             );
         }
         let entrypoints = std::fs::read_to_string(root.join(ENTRYPOINT_MANIFEST)).unwrap();
-        assert_eq!(entrypoints.lines().collect::<Vec<_>>(), BUILTIN_ENTRYPOINTS);
+        assert!(entrypoints
+            .lines()
+            .all(|entrypoint| !is_project_manager_skill(entrypoint)));
+        let manager_entrypoints =
+            std::fs::read_to_string(root.join(PROJECT_MANAGER_ENTRYPOINT_MANIFEST)).unwrap();
+        assert_eq!(
+            manager_entrypoints.lines().collect::<Vec<_>>(),
+            BUILTIN_ENTRYPOINTS
+        );
         assert!(skills
             .iter()
             .any(|skill| skill.name == "genehub-session-history"));
@@ -308,6 +373,25 @@ mod tests {
         assert!(base.join("agents/openai.yaml").is_file());
         assert!(base.join("references/models.md").is_file());
         assert!(base.join("references/runtime-contract.md").is_file());
+        assert!(!skills
+            .iter()
+            .any(|skill| skill.name.starts_with("genehub-pm-")));
+        let manager = load_for_profile(&root, SkillProfile::ProjectManager);
+        assert!(manager
+            .iter()
+            .any(|skill| skill.name == "genehub-pm-project-control"));
+        assert!(manager
+            .iter()
+            .any(|skill| skill.name == "genehub-pm-agent-space-orchestration"));
+        assert!(manager
+            .iter()
+            .any(|skill| skill.name == "genehub-pm-quality-governance"));
+        let agent_space_contract = std::fs::read_to_string(
+            root.join("genehub-pm-agent-space-orchestration/references/agent-space-contract.md"),
+        )
+        .unwrap();
+        assert!(agent_space_contract.contains("never put `opencode`"));
+        assert!(agent_space_contract.contains("dispatch `--agent opencode`"));
     }
 
     #[test]
@@ -342,26 +426,56 @@ mod tests {
     #[test]
     fn session_guidance_keeps_artifact_rules_and_appends_the_catalog() {
         let root = temp_dir("guidance");
-        let prompt = session_guidance(Some(&root), Some(Path::new("/opt/genehub/genet-beta")));
+        let prompt = session_guidance(
+            Some(&root),
+            Some(Path::new("/opt/genehub/genet-beta")),
+            SkillProfile::Common,
+        );
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-session-history"));
         assert!(prompt.contains("genehub-html-preview"));
         assert!(prompt.contains("genehub-speech-runtime"));
         assert!(prompt.contains("/opt/genehub/genet-beta"));
         assert!(prompt.contains("<available_skills>"));
+        assert!(!prompt.contains("genehub-pm-project-control"));
+        let manager = session_guidance(
+            Some(&root),
+            Some(Path::new("/opt/genehub/genet-beta")),
+            SkillProfile::ProjectManager,
+        );
+        assert!(manager.contains("genehub-pm-project-control"));
+        assert!(manager.contains("genehub-pm-agent-space-orchestration"));
+        assert!(manager.contains("genehub-pm-quality-governance"));
+        assert!(manager.contains("must remain available for user guidance"));
+        assert!(manager.contains("Never execute sleep"));
+        assert!(manager.contains("daemon supervisor"));
     }
 
     #[test]
     fn session_guidance_without_a_root_is_artifact_rules_only() {
-        let prompt = session_guidance(None, Some(Path::new("/opt/genehub/genet")));
+        let prompt = session_guidance(
+            None,
+            Some(Path::new("/opt/genehub/genet")),
+            SkillProfile::Common,
+        );
         assert!(prompt.contains("index.html"));
         assert!(!prompt.contains("available_skills"));
+        assert!(!prompt.contains("project_manager_availability"));
+
+        let manager = session_guidance(
+            None,
+            Some(Path::new("/opt/genehub/genet")),
+            SkillProfile::ProjectManager,
+        );
+        assert!(manager.contains("project_manager_availability"));
+        assert!(manager.contains("finish the PM turn"));
+        assert!(!manager.contains("available_skills"));
     }
 
     #[test]
     fn missing_cli_binding_is_explicit_and_never_guessed() {
         let root = temp_dir("no-cli");
-        let prompt = session_guidance(Some(&root), None);
+        let prompt = session_guidance(Some(&root), None, SkillProfile::Common);
         assert!(prompt.contains("<genehub_cli unavailable=\"true\" />"));
         assert!(prompt.contains("stop instead of guessing"));
     }

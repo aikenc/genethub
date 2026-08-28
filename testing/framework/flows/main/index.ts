@@ -15,6 +15,8 @@ import type { EnvironmentLease } from "../../../infrastructure/public.ts";
 import { startMockLlm } from "../../../infrastructure/public.ts";
 import { waitUntil } from "../../tools/wait.ts";
 
+let componentSnapshotSequence = 0;
+
 function hostHome(): string {
   return userInfo().homedir;
 }
@@ -73,6 +75,67 @@ export function seedHostCodexLogin(lease: EnvironmentLease): void {
   copyFileSync(auth, path.join(dest, "auth.json"));
   const config = path.join(home, ".codex", "config.toml");
   if (existsSync(config)) copyFileSync(config, path.join(dest, "config.toml"));
+}
+
+/**
+ * Installs a deterministic ACP-speaking third-party Agent in the isolated
+ * machine config. This exercises the real ACP adapter and child-process path
+ * without spending a network model turn; business journeys must not use it.
+ */
+export function installFixtureAcpAgent(lease: EnvironmentLease): string {
+  const script = path.join(lease.root, "fixture-acp-agent.mjs");
+  writeFileSync(
+    script,
+    `import readline from "node:readline";
+const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let nextSession = 1;
+const sessions = new Map();
+const write = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+for await (const line of input) {
+  if (!line.trim()) continue;
+  const frame = JSON.parse(line);
+  if (frame.method === "initialize") {
+    write({ jsonrpc: "2.0", id: frame.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  } else if (frame.method === "session/new") {
+    const sessionId = "fixture-" + nextSession++;
+    sessions.set(sessionId, frame.params.cwd);
+    write({ jsonrpc: "2.0", id: frame.id, result: { sessionId } });
+  } else if (frame.method === "session/prompt") {
+    const cwd = sessions.get(frame.params.sessionId) ?? "unknown";
+    write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: frame.params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Fixture WorkAgent cwd=" + cwd } } } });
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    write({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "end_turn" } });
+  } else if (frame.id !== undefined) {
+    write({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "unsupported" } });
+  }
+}
+`,
+  );
+  const configPath = path.join(lease.data, "config.json");
+  const current = existsSync(configPath)
+    ? (JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>)
+    : {};
+  const agents =
+    current.agents && typeof current.agents === "object"
+      ? (current.agents as Record<string, unknown>)
+      : {};
+  const custom =
+    agents.custom && typeof agents.custom === "object"
+      ? (agents.custom as Record<string, unknown>)
+      : {};
+  current.agents = {
+    ...agents,
+    custom: {
+      ...custom,
+      fixture: {
+        extends: "acp",
+        command: [process.execPath, script],
+        label: "Fixture ACP Agent",
+      },
+    },
+  };
+  writeFileSync(configPath, `${JSON.stringify(current, null, 2)}\n`);
+  return "acp:fixture";
 }
 
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
@@ -170,6 +233,34 @@ export function writeOpencodeBuiltinConfig(lease: EnvironmentLease): string {
     },
   };
   writeFileSync(path.join(lease.workspace, "opencode.json"), `${JSON.stringify(config, null, 2)}\n`);
+  return `journey/${llm.bareId}`;
+}
+
+/**
+ * Configures OpenCode at its user-global path, preserving an empty project
+ * root for PM initialization journeys. The installed third-party runtime
+ * still discovers this through its public configuration contract.
+ */
+export function configureOpencodeBuiltinAgent(lease: EnvironmentLease): string {
+  prependHostCliPath(lease, "opencode");
+  const llm = hostBuiltinLlm();
+  const config = {
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      journey: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Journey",
+        options: {
+          baseURL: llm.openaiBaseUrl,
+          apiKey: llm.apiKey,
+        },
+        models: { [llm.bareId]: { name: "Journey" } },
+      },
+    },
+  };
+  const configDir = path.join(lease.home, ".config", "opencode");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(path.join(configDir, "opencode.json"), `${JSON.stringify(config, null, 2)}\n`);
   return `journey/${llm.bareId}`;
 }
 
@@ -290,9 +381,13 @@ export async function startLocalEnvironment(input: {
   lease: EnvironmentLease;
 }): Promise<{ daemon: DaemonHandle; mock: MockLlmHandle; client: ProductSession["client"] }> {
   const mock = await startMockLlm();
+  const sourceComponent = tryLocateDaemonComponent(input.openRoot);
+  const component = sourceComponent
+    ? snapshotDaemonComponent(sourceComponent, input.lease)
+    : undefined;
   const daemon = startDaemon({
     genet: locateGenet(input.openRoot),
-    wasm: tryLocateDaemonComponent(input.openRoot),
+    wasm: component,
     lease: input.lease,
   });
   const endpoint = daemonEndpoint(daemon);
@@ -301,6 +396,26 @@ export async function startLocalEnvironment(input: {
     redial: async () => daemonEndpoint(daemon),
   });
   return { daemon, mock, client };
+}
+
+/**
+ * A test run owns an immutable component snapshot. Rebuilding the repository
+ * while a multi-hour real-model journey is active must not hot-reload that
+ * journey's resident daemon and interrupt every PM/WorkAgent turn.
+ */
+export function snapshotDaemonComponent(
+  source: string,
+  lease: EnvironmentLease,
+): string {
+  const dir = path.join(
+    lease.root,
+    ".test-runtime",
+    `component-${process.pid}-${++componentSnapshotSequence}`,
+  );
+  mkdirSync(dir, { recursive: true });
+  const destination = path.join(dir, "genehub_guest.wasm");
+  copyFileSync(source, destination);
+  return destination;
 }
 
 export async function openWorkspace(input: {

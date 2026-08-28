@@ -53,14 +53,28 @@ defineJourney(
       const expectedEntrypoints = sourceFiles
         .filter((relative) => relative.split("/").length === 2 && relative.endsWith("/SKILL.md"))
         .sort();
+      const expectedCommonEntrypoints = expectedEntrypoints.filter(
+        (relative) => !relative.startsWith("genehub-pm-"),
+      );
       const entrypoints = (await readFile(path.join(installedSkills, ".entrypoints"), "utf8"))
         .trim()
         .split("\n")
         .filter(Boolean)
         .sort();
       t.assertions.assert(
-        JSON.stringify(entrypoints) === JSON.stringify(expectedEntrypoints),
-        "the materialized built-in Skill entrypoint manifest drifted from the source tree",
+        JSON.stringify(entrypoints) === JSON.stringify(expectedCommonEntrypoints),
+        "the common built-in Skill entrypoint manifest drifted from its source profile",
+      );
+      const projectManagerEntrypoints = (
+        await readFile(path.join(installedSkills, ".entrypoints-project-manager"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .sort();
+      t.assertions.assert(
+        JSON.stringify(projectManagerEntrypoints) === JSON.stringify(expectedEntrypoints),
+        "the project-manager Skill entrypoint manifest drifted from the source tree",
       );
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
       opened.mock.script({ text: "ok" });

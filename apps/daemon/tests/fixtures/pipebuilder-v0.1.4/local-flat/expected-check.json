@@ -1,0 +1,119 @@
+{
+  "schema": "pipebuilder-report.v1",
+  "builderVersion": "0.1.4",
+  "command": "check",
+  "status": "ok",
+  "pipespace": "gameplay",
+  "diagnostics": [],
+  "summary": {
+    "planned": 6,
+    "postCommands": 0,
+    "skills": 1
+  },
+  "details": {
+    "agents": [
+      {
+        "id": "codex",
+        "adapterVersion": "2",
+        "capabilityStatus": "client-verified"
+      },
+      {
+        "id": "claude-code",
+        "adapterVersion": "2",
+        "capabilityStatus": "client-verified"
+      }
+    ],
+    "workspace": {
+      "file": "gameplay.code-workspace",
+      "folders": [
+        {
+          "name": "gameplay",
+          "path": "."
+        },
+        {
+          "name": "project",
+          "path": "../.."
+        }
+      ]
+    },
+    "providers": [
+      {
+        "id": "folder:../../skills",
+        "type": "folder",
+        "digest": "sha256:bf4dd41d576d8a95ff34129995b2c4e6efa84204d07850dbb99ff119d74921d7",
+        "snapshot": "sha256:bf4dd41d576d8a95ff34129995b2c4e6efa84204d07850dbb99ff119d74921d7",
+        "priority": 0,
+        "path": "../../skills",
+        "subdir": ".",
+        "resolvedPath": "../../skills"
+      }
+    ],
+    "skillBuilders": [],
+    "postCommands": [],
+    "skills": [
+      {
+        "name": "game-skill",
+        "provider": "folder:../../skills",
+        "selectedBy": "skills",
+        "matchedTags": [],
+        "shadowedCandidates": []
+      }
+    ],
+    "operations": [
+      {
+        "target": ".agents/skills/game-skill/SKILL.md",
+        "sources": ["skill:game-skill:SKILL.md"],
+        "logicalType": "common-skill",
+        "semanticKey": "target:.agents/skills/game-skill/skill.md",
+        "operation": "copy",
+        "digest": "sha256:ea2f8d408be6123df1510894b70fc1097e458eb78656f7a78f662a9149a5e859",
+        "risks": []
+      },
+      {
+        "target": ".claude/rules/pipebuilder-workspace.md",
+        "sources": ["core:workspace"],
+        "logicalType": "workspace-rule",
+        "semanticKey": "target:.claude/rules/pipebuilder-workspace.md",
+        "operation": "render",
+        "digest": "sha256:e7bc518457a8e3057e77ae718724388dd20bc885716df150bf09d3a4fd295b64",
+        "risks": []
+      },
+      {
+        "target": ".claude/skills/game-skill/SKILL.md",
+        "sources": ["skill:game-skill:SKILL.md"],
+        "logicalType": "common-skill",
+        "semanticKey": "target:.claude/skills/game-skill/skill.md",
+        "operation": "copy",
+        "digest": "sha256:ea2f8d408be6123df1510894b70fc1097e458eb78656f7a78f662a9149a5e859",
+        "risks": []
+      },
+      {
+        "target": ".pipebuilder/generated/workspace-rule.md",
+        "sources": ["core:workspace"],
+        "logicalType": "workspace-rule",
+        "semanticKey": "target:.pipebuilder/generated/workspace-rule.md",
+        "operation": "render",
+        "digest": "sha256:e7bc518457a8e3057e77ae718724388dd20bc885716df150bf09d3a4fd295b64",
+        "risks": []
+      },
+      {
+        "target": "AGENTS.md",
+        "sources": ["core:workspace", "skill:game-skill:AGENTS.md"],
+        "logicalType": "project-instructions",
+        "semanticKey": "target:agents.md",
+        "operation": "merge-document",
+        "digest": "sha256:097707810013ce04460a654c660eba1c8ea80f6c40a5b9c5aa4a4a1468a4eeeb",
+        "risks": []
+      },
+      {
+        "target": "CLAUDE.md",
+        "sources": ["skill:game-skill:CLAUDE.md"],
+        "logicalType": "project-instructions",
+        "semanticKey": "target:claude.md",
+        "operation": "merge-document",
+        "digest": "sha256:0e32a4a0db7e24b2a54fc57f2ddd00921c3cfda3021e0f05f0f01851a68fcce5",
+        "risks": []
+      }
+    ]
+  }
+}

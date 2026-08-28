@@ -19,9 +19,9 @@ defineSpecialty(
   {
     id: "specialty.host.component-health",
     title: "v2 host loads a wasip2 Component and the guest serves loopback /health",
-    oracle: "HTTP GET /health on the guest TcpListener returns 200 ok after Component::from_binary",
+    oracle: "HTTP GET /health returns 200 after the host compiles verified in-memory bytes",
     catches: [
-      "host uses Component::from_file",
+      "host re-opens verified bytes through Component::from_file",
       "guest bind stays in native",
       "wasip2 listener never accepts",
       "js-sys/wasm-bindgen sneak into the probe",
@@ -37,7 +37,10 @@ defineSpecialty(
   async (t) => {
     const hostSrc = path.join(t.openRoot, "apps/host/src/load.rs");
     const load = readFileSync(hostSrc, "utf8");
-    t.assertions.assert(load.includes("Component::from_binary"), "host lost from_binary");
+    t.assertions.assert(
+      load.includes("precompile_component(&bytes)") && load.includes("Component::deserialize"),
+      "host lost the in-memory precompile and deserialize path",
+    );
     t.assertions.assert(!/Component::from_file\b/.test(load), "host must not call from_file");
     t.assertions.assert(load.includes("CHANNEL") && load.includes("\"local\""), "local channel is not compile-time");
 

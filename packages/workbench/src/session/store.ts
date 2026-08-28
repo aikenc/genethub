@@ -313,6 +313,8 @@ interface WorkbenchState {
     agentId?: string | null,
     options?: { addressScope?: AddressScope },
   ): void;
+  /** Opens the one daemon-owned PM Agent for a Folder project. */
+  openProjectManager(workspaceId: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   loadRound(roundId: string): Promise<void>;
   loadOlderTrunks(roundId: string): Promise<void>;
@@ -814,6 +816,26 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       activeTabId: DRAFT_TAB,
     });
     discardSubscriptions(state.client, limited.evicted);
+  },
+
+  async openProjectManager(workspaceId) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "pm.session.create",
+        payload: {
+          workspaceId,
+          modelId: null,
+          modeId: null,
+          runtimeValues: {},
+          title: "项目管理",
+        },
+      }),
+    );
+    if (reply?.type !== "session") return;
+    set((state) => ({
+      sessions: upsertBy(state.sessions, reply.data, (session) => session.id),
+    }));
+    await get().selectSession(reply.data.id);
   },
 
   async selectSession(sessionId) {

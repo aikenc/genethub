@@ -26,6 +26,7 @@ export interface DefineInput {
   requiredArtifacts?: string[];
   doubleExceptions?: CaseMeta["doubleExceptions"];
   retention?: boolean;
+  sequence?: CaseMeta["sequence"];
 }
 
 function register(kind: CaseKind, input: DefineInput, run: CaseDefinition["run"], file: string): void {
@@ -49,6 +50,7 @@ function register(kind: CaseKind, input: DefineInput, run: CaseDefinition["run"]
     requiredArtifacts: input.requiredArtifacts,
     doubleExceptions: input.doubleExceptions,
     retention: input.retention,
+    sequence: input.sequence,
     file,
   };
   cases.set(input.id, { ...meta, run });

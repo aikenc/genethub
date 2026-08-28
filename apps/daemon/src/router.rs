@@ -332,6 +332,12 @@ async fn dispatch(
                     "creating a WorkAgent session requires a project manager",
                 );
             };
+            if agent_id == "genet" {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "a project WorkAgent must use an installed third-party Coding Agent",
+                );
+            }
             let controller = match state.sessions.summary(controller_session_id).await {
                 Ok(summary) => summary,
                 Err(error) => return failed(error),
@@ -354,10 +360,41 @@ async fn dispatch(
                     "this Agent Space belongs to another project manager",
                 );
             }
-            let start_in = match resolve_session_cwd(&workspace, cwd.as_deref()) {
+            let target = match state
+                .projects
+                .authorize_work_session(
+                    &controller.workspace_id,
+                    controller_session_id,
+                    &workspace_id,
+                    &work_package_id,
+                )
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => return failed(error),
+            };
+            let Some(target_cwd) = target.cwd.to_str() else {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "the assigned WorkAgent worktree is not a UTF-8 path",
+                );
+            };
+            let start_in = match resolve_session_cwd(&workspace, Some(target_cwd)) {
                 Ok(start_in) => start_in,
                 Err(error) => return failed(error),
             };
+            if let Some(requested) = cwd.as_deref() {
+                let requested = match resolve_session_cwd(&workspace, Some(requested)) {
+                    Ok(requested) => requested,
+                    Err(error) => return failed(error),
+                };
+                if requested != start_in {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "a WorkAgent cwd is fixed by its durable work package",
+                    );
+                }
+            }
             match state
                 .sessions
                 .create_work_session(
@@ -1132,6 +1169,24 @@ async fn dispatch(
         },
 
         Request::WorkspaceList => Handled::ok(Reply::Workspaces(state.workspaces.list().await)),
+
+        Request::ProjectManagerStatus { workspace_id } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            if workspace.kind != genehub_proto::WorkspaceKind::Folder {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "PM project status belongs to a Folder workspace",
+                );
+            }
+            match state.projects.public_status(&workspace_id).await {
+                Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
+                Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::WorkspaceOpen { root } => {
             match state.workspaces.open(Path::new(&root), None).await {

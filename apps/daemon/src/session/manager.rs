@@ -1124,6 +1124,28 @@ impl SessionManager {
         Ok(summary)
     }
 
+    /// Durable outcome for the round containing an exact adapter turn.
+    ///
+    /// `None` means the prompt was accepted but its round never settled.  That
+    /// distinction is used by the PM supervisor after a daemon reload: an open
+    /// wake round must be retried rather than mistaken for acknowledged work.
+    pub(crate) async fn turn_outcome(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+    ) -> Result<Option<RoundOutcome>> {
+        let live = self.live(session_id).await?;
+        let outcome = live
+            .rounds
+            .lock()
+            .await
+            .iter()
+            .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
+            .map(|round| round.outcome)
+            .ok_or_else(|| anyhow!("session {session_id} has no turn {turn_id}"))?;
+        Ok(outcome)
+    }
+
     pub async fn begin_artifact(
         &self,
         session_id: &str,
@@ -1679,9 +1701,15 @@ impl SessionManager {
         // must not be injected into Agent system prompts — only path-linking
         // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
+        let skill_profile = if live.meta.lock().await.kind == SessionKind::Pm {
+            crate::skills::SkillProfile::ProjectManager
+        } else {
+            crate::skills::SkillProfile::Common
+        };
         let additional_system_prompt = Some(crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
+            skill_profile,
         ));
         {
             let mut status = live.status.lock().await;
@@ -1938,6 +1966,11 @@ impl SessionManager {
             project_manager_token: (meta.kind == SessionKind::Pm)
                 .then(|| self.project_manager_token(&meta.id))
                 .flatten(),
+            skill_profile: if meta.kind == SessionKind::Pm {
+                crate::skills::SkillProfile::ProjectManager
+            } else {
+                crate::skills::SkillProfile::Common
+            },
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
             mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),

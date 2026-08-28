@@ -23,6 +23,7 @@ import { TitleBar } from "./TitleBar";
 const workspace = (id: string, name: string): WorkspaceInfo => ({
   id,
   name,
+  kind: "folder",
   root: `/home/me/${name}`,
   isGitRepo: true,
   folders: [{ name, root: "/home/me/" + name, rootHandle: `r_${id}` }],
@@ -82,6 +83,7 @@ beforeEach(() => {
     selectSession: vi.fn(async () => {}),
     selectWorkspace: vi.fn(async () => {}),
     newSession: vi.fn(),
+    openProjectManager: vi.fn(async () => {}),
     openTab: vi.fn(),
     renameSession: vi.fn(async () => {}),
     renameWorkspace: vi.fn(async () => {}),
@@ -235,6 +237,31 @@ describe("the left edge", () => {
     expect(useWorkbench.getState().removeWorkspace).toHaveBeenCalledWith("w3");
   });
 
+  it("exposes an Agent Space without offering user-owned rename or removal", async () => {
+    const agentSpace: WorkspaceInfo = {
+      ...workspace("w1", "gameplay"),
+      kind: "agentSpace",
+      workspaceFile: "/home/me/gameplay/gameplay.code-workspace",
+      capabilities: { createSession: true, rename: false, remove: false },
+    };
+    useWorkbench.setState((state) => ({
+      workspaces: [agentSpace, ...state.workspaces.slice(1)],
+    }));
+
+    const tree = sidebar();
+    expect(tree.querySelector('[data-workspace-icon="agent-space"]')).toBeInTheDocument();
+    expect(within(projectRows(tree)[0]!).getByText("Agent Space")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "gameplay 的工作区操作" }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: "详情" })).toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "重命名" })).not.toBeInTheDocument();
+    expect(within(menu).queryByRole("menuitem", { name: "从列表移除" })).not.toBeInTheDocument();
+
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "详情" }));
+    expect(screen.getByText("Agent Space（PM 管理）")).toBeInTheDocument();
+  });
+
   it("reaches into folded projects when searching, or the search finds nothing", async () => {
     sidebar();
     await userEvent.click(screen.getByLabelText("折叠 genethub"));
@@ -284,6 +311,15 @@ describe("the left edge", () => {
     await userEvent.click(screen.getByRole("button", { name: "新建会话" }));
 
     expect(useWorkbench.getState().newSession).toHaveBeenCalledWith("w1", null);
+  });
+
+  it("opens project management through a separate PM Agent entry", async () => {
+    sidebar();
+
+    await userEvent.click(screen.getByRole("button", { name: "项目管理" }));
+
+    expect(useWorkbench.getState().openProjectManager).toHaveBeenCalledWith("w1");
+    expect(useWorkbench.getState().newSession).not.toHaveBeenCalled();
   });
 
   it("opens search and import from the overflow next to 新建会话", async () => {
@@ -601,6 +637,41 @@ describe("what can be done to one conversation", () => {
 
     expect(useWorkbench.getState().deleteSession).not.toHaveBeenCalled();
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("marks PM-owned WorkSessions as read-only and offers no mutation menu", () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          ...session("work-1", "w1", "实现碰撞系统"),
+          kind: "work",
+          work: { workPackageId: "physics", controllerSessionId: "pm-1" },
+          capabilities: {
+            send: false,
+            respondPermission: false,
+            interrupt: false,
+            close: false,
+            archive: false,
+            rename: false,
+            delete: false,
+            setModel: false,
+            setMode: false,
+            setEffort: false,
+            setRuntimeAxis: false,
+            uploadArtifact: false,
+            manageProcesses: false,
+            fork: true,
+          },
+        },
+      ],
+    });
+
+    sidebar();
+
+    expect(screen.getByText("Work")).toHaveAccessibleDescription(/工作包 physics/);
+    expect(
+      screen.queryByRole("button", { name: "实现碰撞系统 的更多操作" }),
+    ).not.toBeInTheDocument();
   });
 });
 

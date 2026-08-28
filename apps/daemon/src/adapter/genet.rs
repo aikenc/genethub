@@ -229,6 +229,11 @@ impl AgentAdapter for GenetAdapter {
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
         }
+        if config.skill_profile == crate::skills::SkillProfile::ProjectManager {
+            command.env("GENEHUB_SKILL_PROFILE", "project-manager");
+        } else {
+            command.env_remove("GENEHUB_SKILL_PROFILE");
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

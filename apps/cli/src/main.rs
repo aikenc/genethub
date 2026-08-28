@@ -20,6 +20,7 @@ const FORWARDED: &[&str] = &[
     "context",
     "capabilities",
     "workspace",
+    "agent-space",
     "pm",
     "session",
     "agent",
@@ -155,6 +156,9 @@ pub fn usage() -> i32 {
   genet workspace show <id>         show one workspace by exact id
   genet workspace register-agent-space <space.code-workspace>
                                     PM-only explicit Agent Space registration
+  genet agent-space init|check|explain|verify <space>
+  genet agent-space build <space> [--dry-run] [--require-no-post-commands]
+  genet agent-space clean <space>   PM-only deterministic Agent Space Builder
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
@@ -173,7 +177,11 @@ pub fn usage() -> i32 {
                   [--work-package <id>]
                                     start a session and stream it as JSON Lines
   genet pm run \"<prompt>\" --workspace <id>
+  genet pm run --message - --workspace <id>
                                     start or continue the project's PM Agent
+  genet pm project init|show|advance|lifecycle|observe
+  genet pm project intent set ... | package put|transition ... | space record ...
+                                    PM-session-only durable project control
   genet <agentId> \"<prompt>\" [...]   the same thing, spelled shorter
   genet shell [--workspace <id>] --cwd <dir> [--env NAME=VALUE]... [--timeout <s>]
               [--max-output <bytes>] -- <command> [args...]
@@ -191,6 +199,8 @@ pub fn usage() -> i32 {
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
   genet session send <id> \"<text>\"  continue a session
+  genet session send <id> --message -
+                                    read a multiline UTF-8 prompt from stdin
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked
   genet session interrupt <id>      stop the running turn
