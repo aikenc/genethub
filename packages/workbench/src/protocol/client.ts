@@ -149,6 +149,25 @@ export interface CloseReason {
 export interface AssetPreviewResult {
   metadata: AssetPreviewMetadata;
   bytes: Uint8Array;
+  transfer: AssetPreviewTransferStats;
+}
+
+export type AssetPreviewTransport = "websocket" | "fabric" | "rtc";
+
+/** User-facing measurements for the entry file of one Preview request. */
+export interface AssetPreviewTransferStats {
+  transport: AssetPreviewTransport;
+  responseBytes: number;
+  /** Request start through exact body completion: the user's total wait. */
+  elapsedMs: number;
+  /** Request start through the first non-empty DATA chunk; null for an empty body. */
+  firstByteMs: number | null;
+  /** Response-head acceptance through exact body completion. */
+  transferMs: number;
+  /** Body bytes divided by transferMs; null when the clock cannot resolve it. */
+  averageBytesPerSecond: number | null;
+  chunkCount: number;
+  largestChunkBytes: number;
 }
 
 export class ProtocolError_ extends Error {
@@ -475,6 +494,11 @@ export class Client {
       bodyLength: 0,
     });
     const operation = (async () => {
+      const observed = {
+        firstByteAt: null as number | null,
+        chunkCount: 0,
+        largestChunkBytes: 0,
+      };
       const head = await withTimeout(
         (async () => {
           await stream.finish();
@@ -502,7 +526,23 @@ export class Client {
         throw new AssetPreviewError_("tooLarge", 413, head.bodyLength);
       }
       const metadata = previewMetadata(head.metadata);
-      const bytes = await collectBodyExact(stream.body(), head.bodyLength, MAX_PREVIEW_BYTES, {
+      const bodyStarted = this.now();
+      const now = () => this.now();
+      const measuredBody = (async function* () {
+        for await (const chunk of stream.body()) {
+          const at = now();
+          if (chunk.byteLength > 0 && observed.firstByteAt === null) {
+            observed.firstByteAt = at;
+          }
+          observed.chunkCount += 1;
+          observed.largestChunkBytes = Math.max(
+            observed.largestChunkBytes,
+            chunk.byteLength,
+          );
+          yield chunk;
+        }
+      })();
+      const bytes = await collectBodyExact(measuredBody, head.bodyLength, MAX_PREVIEW_BYTES, {
         stallTimeoutMs: PREVIEW_STALL_TIMEOUT_MS,
         onStall: () => stream.reset(DataReset.Timeout),
         stallError: () => new ClientRequestTimeoutError("asset preview stalled"),
@@ -513,7 +553,29 @@ export class Client {
       ) {
         throw new DataPlaneError("the preview body does not match its exact metadata");
       }
-      return { metadata, bytes };
+      const finished = this.now();
+      const elapsedMs = Math.max(0, finished - started);
+      const transferMs = Math.max(0, finished - bodyStarted);
+      return {
+        metadata,
+        bytes,
+        transfer: {
+          transport,
+          responseBytes: bytes.byteLength,
+          elapsedMs,
+          firstByteMs:
+            observed.firstByteAt === null
+              ? null
+              : Math.max(0, observed.firstByteAt - started),
+          transferMs,
+          averageBytesPerSecond:
+            bytes.byteLength > 0 && transferMs > 0
+              ? (bytes.byteLength * 1_000) / transferMs
+              : null,
+          chunkCount: observed.chunkCount,
+          largestChunkBytes: observed.largestChunkBytes,
+        },
+      };
     })();
     try {
       const result = await operation;
@@ -526,6 +588,14 @@ export class Client {
         path,
         durationMs: Math.round(this.now() - started),
         responseBytes: result.bytes.byteLength,
+        firstByteMs: result.transfer.firstByteMs,
+        transferMs: Math.round(result.transfer.transferMs),
+        averageBytesPerSecond:
+          result.transfer.averageBytesPerSecond === null
+            ? null
+            : Math.round(result.transfer.averageBytesPerSecond),
+        chunks: result.transfer.chunkCount,
+        largestChunkBytes: result.transfer.largestChunkBytes,
       });
       return result;
     } catch (error) {

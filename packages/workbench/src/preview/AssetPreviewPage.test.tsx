@@ -4,8 +4,43 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
 
-import { HtmlDocument, isolatedHtml } from "./AssetPreviewPage";
+import {
+  HtmlDocument,
+  PreviewTransferSummary,
+  isolatedHtml,
+} from "./AssetPreviewPage";
 import type { RuntimeArtifactSubmission } from "./PreviewRuntimeControls";
+
+describe("Preview transfer facts", () => {
+  it("shows five measured entry-file statistics without inventing RTT", () => {
+    render(
+      <PreviewTransferSummary
+        stats={{
+          transport: "fabric",
+          responseBytes: 32 * 1024 * 1024,
+          elapsedMs: 2_730,
+          firstByteMs: 210,
+          transferMs: 2_560,
+          averageBytesPerSecond: 12.5 * 1024 * 1024,
+          chunkCount: 2_054,
+          largestChunkBytes: 16_340,
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("region", { name: "入口文件传输" })).toBeInTheDocument();
+    expect(screen.getByText("Fabric Relay")).toBeInTheDocument();
+    expect(screen.getByText("32.0 MiB")).toBeInTheDocument();
+    expect(screen.getByText("2.73 s")).toBeInTheDocument();
+    expect(screen.getByText("首字节")).toBeInTheDocument();
+    expect(screen.getByText("210 ms")).toBeInTheDocument();
+    expect(screen.getByText("12.5 MiB/s")).toBeInTheDocument();
+    expect(screen.getByText("2,054 个")).toBeInTheDocument();
+    expect(screen.getByText("最大 16.0 KiB/片")).toBeInTheDocument();
+    expect(screen.getByText(/不展示估算值/)).toBeInTheDocument();
+    expect(screen.getByText(/不是 TCP 包/)).toBeInTheDocument();
+  });
+});
 
 describe("active single-file HTML Preview", () => {
   it("keeps scripts but replaces document-controlled origin and network policy", () => {

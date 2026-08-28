@@ -1,6 +1,6 @@
 # 轻量 Asset Preview v4
 
-> 状态：v4.3。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 重映射 CSS/JS/module 与站点根路径资源，并把 iframe 内相对 fetch/import 转回 `asset.preview`。新 client/daemon 在认证握手中为有限 Preview 协商完整 64 MiB 授信，持续传输由 TCP/socket 背压而不是应用层 RTT 回包推进。单文件上限仍为 64 MiB，含 WASM/二进制。真 WebRoot HTTP origin 与公开 Assets Gateway 仍不在本版本内。
+> 状态：v4.4。在 v4 单文件 Preview 与 E2EE 边界上，聊天/文档 Markdown 于渲染期绑定 Preview URL（不再向 Agent 注入部署前缀），HTML Viewer 重映射 CSS/JS/module 与站点根路径资源，并把 iframe 内相对 fetch/import 转回 `asset.preview`。新 client/daemon 在认证握手中为有限 Preview 协商完整 64 MiB 授信，持续传输由 TCP/socket 背压而不是应用层 RTT 回包推进；预览信息面板展示本次入口文件的五项实测传输数据。单文件上限仍为 64 MiB，含 WASM/二进制。真 WebRoot HTTP origin 与公开 Assets Gateway 仍不在本版本内。
 
 ## 1. 产品结论
 
@@ -175,6 +175,23 @@ daemon 的顺序是：
 ### 图片与视频
 
 Viewer 用完整 bytes 创建带 daemon MIME 的 Blob URL。图片使用 `<img>`，MP4/WebM 使用带 controls 的 `<video>`。没有 Range 和转码，因此 64 MiB 上限仍同时控制最终浏览器对象内存和首屏等待；传输层已经可以为整个合法文件一次授信，不等于可以取消这个产品内存边界。
+
+### 预览信息与传输统计
+
+独立 Viewer 和 Preview 浮窗共用同一份“预览信息”面板。入口文件完成后，面板展示五项由本次
+`asset.preview` 实际字节流和单调时钟直接计算的数据：
+
+1. 文件大小：收到并通过精确长度校验的正文 bytes；
+2. 总等待：发起 request 到精确正文完成；
+3. 首字节：发起 request 到第一个非空 DATA 分片；
+4. 正文平均速度：response head 被接受到精确正文完成之间的正文 bytes/s；
+5. DATA 分片：GeneHub 逻辑 DATA 记录数及本次最大的记录大小。
+
+面板同时标明本次入口文件使用 WebSocket、Fabric Relay 或 WebRTC。DATA 分片不是 TCP packet；保留
+16 KiB 量级的逻辑记录是为了多流公平调度，并不表示每片等待网络确认。首字节包含请求 RTT、daemon
+首遍扫描、worker 排队和调度，不能解释成独立 RTT。浏览器 WebSocket 没有跨直连、Fabric 与 WebRTC
+通用且可信的 RTT API，因此产品 UI 不从首字节时间反推 RTT，也不展示伪精度估算值；独立 RTT 与同链路
+TCP 利用率继续由 neteff 专项的受控整形器测量。
 
 ### Markdown 与文本
 

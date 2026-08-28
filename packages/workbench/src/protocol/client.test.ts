@@ -499,7 +499,21 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
       mediaType: "text/markdown",
       sourceBytes: bytes.byteLength,
     }, bytes);
-    expect(Array.from((await preview).bytes)).toEqual(Array.from(bytes));
+    const result = await preview;
+    expect(Array.from(result.bytes)).toEqual(Array.from(bytes));
+    expect(result.transfer).toMatchObject({
+      transport: "websocket",
+      responseBytes: bytes.byteLength,
+      chunkCount: 1,
+      largestChunkBytes: bytes.byteLength,
+    });
+    expect(result.transfer.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(result.transfer.firstByteMs).not.toBeNull();
+    expect(result.transfer.transferMs).toBeGreaterThanOrEqual(0);
+    if (result.transfer.averageBytesPerSecond !== null) {
+      expect(Number.isFinite(result.transfer.averageBytesPerSecond)).toBe(true);
+      expect(result.transfer.averageBytesPerSecond).toBeGreaterThan(0);
+    }
 
     const missing = client.preview("workspace-1", "r_project/gone.png");
     await waitFor(() => socket.lastOf("asset.preview").id !== exchange.id);
