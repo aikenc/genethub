@@ -451,6 +451,7 @@ defineSpecialty(
     t.env.env.GENEHUB_LOCAL_LOG = "info";
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     const samples: UtilizationSample[] = [];
+    let busyRpcMs: number | null = null;
     try {
       const attached = await opened.client.call({
         type: "device.remoteAttach",
@@ -502,6 +503,7 @@ defineSpecialty(
       }
 
       const points = [
+        { clientRttMs: 0, daemonRttMs: 0 },
         { clientRttMs: 100, daemonRttMs: 0 },
         { clientRttMs: 50, daemonRttMs: 50 },
         { clientRttMs: 0, daemonRttMs: 100 },
@@ -535,7 +537,22 @@ defineSpecialty(
           redial: async () => ({ url: routedRendezvous, credential }),
         });
         try {
-          const product = await measurePreview(t, { client, opened, file, probe });
+          const preview = measurePreview(t, { client, opened, file, probe });
+          if (point.clientRttMs === 100 && point.daemonRttMs === 100) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            const rpcBegan = performance.now();
+            const workspaces = await client.call({ type: "workspace.list" });
+            busyRpcMs = performance.now() - rpcBegan;
+            t.assertions.assert(
+              workspaces?.type === "workspaces",
+              `workspace.list during relayed Preview returned ${workspaces?.type}`,
+            );
+            t.assertions.assert(
+              busyRpcMs <= 1_500,
+              `relayed small RPC waited ${busyRpcMs.toFixed(0)}ms behind bulk Preview`,
+            );
+          }
+          const product = await preview;
           samples.push(
             recordUtilization(t, {
               label,
@@ -580,9 +597,16 @@ defineSpecialty(
       relay.stop();
       await rawServer.stop();
     }
+    for (const sample of samples) {
+      t.assertions.assert(
+        sample.utilization >= RELAY_TARGET_UTILIZATION,
+        `${sample.label}: ${(sample.utilization * 100).toFixed(1)}% of same-link TCP is below the phase-2 ${(RELAY_TARGET_UTILIZATION * 100).toFixed(0)}% target`,
+      );
+    }
     t.note(
       `neteff preview-relay-leg-utilization (daemon=wasm guest, real relay, each leg=${LINK_BANDWIDTH_MBPS}Mbps)\n` +
         `${headline("Relay", samples, RELAY_TARGET_UTILIZATION)}\n` +
+        `fairness rpcDuring4MiBAt100+100ms=${busyRpcMs?.toFixed(0) ?? "-"}ms target<=1500ms\n` +
         samples.map((sample) => sample.line).join("\n"),
     );
   },

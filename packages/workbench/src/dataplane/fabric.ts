@@ -6,6 +6,7 @@ import {
   type FabricSocketLike,
   type FabricStream,
 } from "../fabric";
+import { FABRIC_TRANSPORT_FLOW } from "../fabric/frame";
 import { DataEndpoint, type RecordCarrier } from "./endpoint";
 import { MAX_DATA_FRAME_BYTES } from "./frame";
 import { preparePeerHandshake, type PeerCredential } from "./handshake";
@@ -29,10 +30,11 @@ export async function openFabricDataLink(options: {
   onError?: (error: unknown) => void;
 }): Promise<FabricDataLink> {
   const fabric = new FabricEndpoint({
-    url: options.url,
+    url: transportFlowUrl(options.url),
     reconnect: false,
     maxFrameBytes: MAX_DATA_FRAME_BYTES + 28,
     maxBufferedBytes: 256 * 1024,
+    transportFlow: true,
     ...(options.socketFactory ? { socketFactory: options.socketFactory } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
   });
@@ -71,6 +73,14 @@ export async function openFabricDataLink(options: {
     fabric.close();
     throw error;
   }
+}
+
+function transportFlowUrl(value: string): string {
+  const url = new URL(value);
+  if (!url.searchParams.has("flow")) {
+    url.searchParams.set("flow", FABRIC_TRANSPORT_FLOW);
+  }
+  return url.toString();
 }
 
 class FabricRecordCarrier implements RecordCarrier {

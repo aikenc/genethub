@@ -7,6 +7,7 @@ import {
   type FabricRandomFill,
   FabricReset,
   newFabricStreamId,
+  FABRIC_HEADER_BYTES,
   FABRIC_INITIAL_STREAM_CREDIT,
   FABRIC_MAX_OPERATION_METADATA_BYTES,
   FABRIC_MAX_STREAM_CREDIT,
@@ -94,6 +95,8 @@ export interface FabricEndpointOptions {
   maxBufferedBytes?: number;
   /** Bytes this endpoint is prepared to buffer independently for each stream. */
   initialStreamCredit?: number;
+  /** Allows Relay-negotiated transport flow: TCP backpressure without WINDOW_UPDATE. */
+  transportFlow?: boolean;
   onError?: (error: unknown) => void;
 }
 
@@ -174,6 +177,7 @@ export class FabricStream {
   private remoteFin = false;
   private outboundCredit = 0n;
   private outboundWindow = 0n;
+  private transportFlow_ = false;
   private inboundCredit: bigint;
   private readonly inboundWindow: bigint;
   private inboundTail: Promise<void> = Promise.resolve();
@@ -195,12 +199,14 @@ export class FabricStream {
     readonly connectionEpoch: symbol,
     inboundWindow: bigint,
     initialOutboundCredit = 0n,
+    transportFlow = false,
   ) {
     this.phase_ = direction === "outgoing" ? "opening" : "incoming";
     this.inboundWindow = inboundWindow;
     this.inboundCredit = inboundWindow;
     this.outboundCredit = initialOutboundCredit;
     this.outboundWindow = initialOutboundCredit;
+    this.transportFlow_ = transportFlow;
     // A caller is free to observe only `done`. Marking the internal promise as
     // handled prevents a reset-before-accept from becoming a global unhandled
     // rejection; awaiting `accepted` still receives the same rejection.
@@ -214,6 +220,11 @@ export class FabricStream {
   /** Bytes that may be sent immediately without exceeding peer credit. */
   get availableSendCredit(): bigint {
     return this.outboundCredit;
+  }
+
+  /** @internal */
+  get transportFlow(): boolean {
+    return this.transportFlow_;
   }
 
   /** Accepts an INCOMING stream. Outgoing streams are accepted by their peer. */
@@ -230,6 +241,10 @@ export class FabricStream {
   async sendAsync(payload: Uint8Array): Promise<void> {
     if (payload.byteLength === 0 || BigInt(payload.byteLength) > this.inboundWindow) {
       throw new FabricStateError("Fabric DATA must fit the negotiated stream window");
+    }
+    if (this.transportFlow_) {
+      await this.endpoint.sendDataAsync(this, payload);
+      return;
     }
     while (BigInt(payload.byteLength) > this.outboundCredit) {
       if (!this.canSend() || this.completed) {
@@ -270,8 +285,12 @@ export class FabricStream {
   activate(payload: Uint8Array, outboundCredit?: bigint): void {
     if (this.phase_ !== "opening" && this.phase_ !== "incoming") return;
     if (outboundCredit !== undefined) {
-      this.outboundCredit = outboundCredit;
-      this.outboundWindow = outboundCredit;
+      if (outboundCredit === 0n) {
+        this.transportFlow_ = true;
+      } else {
+        this.outboundCredit = outboundCredit;
+        this.outboundWindow = outboundCredit;
+      }
     }
     this.phase_ = "active";
     if (!this.acceptedSettled) {
@@ -289,6 +308,7 @@ export class FabricStream {
   /** @internal */
   takeOutboundCredit(byteLength: number): boolean {
     const cost = BigInt(byteLength);
+    if (this.transportFlow_) return cost > 0n;
     if (cost <= 0n || cost > this.outboundCredit) return false;
     this.outboundCredit -= cost;
     return true;
@@ -312,17 +332,19 @@ export class FabricStream {
       this.remoteFin ||
       sequence !== this.remoteSequence + 1n ||
       cost <= 0n ||
-      cost > this.inboundCredit
+      (!this.transportFlow_ && cost > this.inboundCredit)
     ) {
       return false;
     }
     this.remoteSequence = sequence;
-    this.inboundCredit -= cost;
+    if (!this.transportFlow_) this.inboundCredit -= cost;
     const handlers = [...this.dataHandlers];
     const delivered = this.inboundTail.then(async () => {
       if (this.completed) return;
       for (const handler of handlers) await handler(payload.slice());
-      if (!this.completed) this.endpoint.returnCredit(this, cost);
+      if (!this.completed && !this.transportFlow_) {
+        this.endpoint.returnCredit(this, cost);
+      }
     });
     this.inboundTail = delivered.catch((error: unknown) => {
       this.endpoint.failConsumer(this, error);
@@ -569,10 +591,18 @@ export class FabricEndpoint {
     this.sendFrame({
       kind: FabricKind.Accept,
       streamId: stream.id,
-      value: this.initialCredit,
+      value: stream.transportFlow ? 0n : this.initialCredit,
       payload: opaqueReply,
     });
     stream.activate(opaqueReply);
+  }
+
+  /** @internal */
+  async sendDataAsync(stream: FabricStream, payload: Uint8Array): Promise<void> {
+    if (stream.transportFlow) {
+      await this.waitForSocketCapacity(payload.byteLength + FABRIC_HEADER_BYTES);
+    }
+    this.sendData(stream, payload);
   }
 
   /** @internal */
@@ -638,6 +668,7 @@ export class FabricEndpoint {
   /** @internal */
   returnCredit(stream: FabricStream, credit: bigint): void {
     if (this.streams.get(stream.id) !== stream || stream.isCompleted()) return;
+    if (stream.transportFlow) return;
     if (!stream.restoreInboundCredit(credit)) {
       this.failProtocol(stream);
       return;
@@ -776,6 +807,29 @@ export class FabricEndpoint {
       this.protocolClose(socket, epoch, 1009, "Fabric frame is too large");
       return;
     }
+    // Production sockets use `binaryType = "arraybuffer"`. Those bytes are
+    // already resident, so preserve wire order on the promise tail without
+    // charging them to the async-Blob decode budget. Otherwise a healthy TCP
+    // burst can manufacture an artificial 64-frame queue and close the
+    // carrier. Blob embedders keep the bounded asynchronous path below.
+    const immediate = immediateMessageBytes(data);
+    if (immediate) {
+      queue.tail = queue.tail
+        .then(() => {
+          if (!this.isCurrent(socket, epoch)) return;
+          const frame = decodeFabricFrame(immediate);
+          if (!frame) {
+            this.protocolClose(socket, epoch, 1002, "malformed Fabric frame");
+            return;
+          }
+          this.receive(frame);
+        })
+        .catch((cause: unknown) => {
+          if (!this.isCurrent(socket, epoch)) return;
+          this.protocolClose(socket, epoch, 1002, "malformed Fabric frame", cause);
+        });
+      return;
+    }
     if (
       queue.queuedFrames >=
         (this.options.maxQueuedInboundFrames ?? DEFAULT_MAX_QUEUED_INBOUND_FRAMES) ||
@@ -855,9 +909,10 @@ export class FabricEndpoint {
   }
 
   private receiveIncoming(frame: FabricFrame): void {
+    const transportFlow = frame.value === 0n && this.options.transportFlow === true;
     if (
-      frame.value <= 0n ||
-      frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT) ||
+      (!transportFlow &&
+        (frame.value <= 0n || frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT))) ||
       frame.payload.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES
     ) {
       this.sendUnknownReset(frame.streamId, FabricReset.ProtocolViolation);
@@ -889,7 +944,8 @@ export class FabricEndpoint {
       "incoming",
       this.epoch!,
       this.initialCredit,
-      frame.value,
+      transportFlow ? 0n : frame.value,
+      transportFlow,
     );
     this.streams.set(frame.streamId, stream);
     const handler = this.incomingHandler;
@@ -916,8 +972,9 @@ export class FabricEndpoint {
     if (
       stream.direction !== "outgoing" ||
       stream.phase !== "opening" ||
-      frame.value <= 0n ||
-      frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT) ||
+      (frame.value === 0n
+        ? this.options.transportFlow !== true
+        : frame.value > BigInt(FABRIC_MAX_STREAM_CREDIT)) ||
       frame.payload.byteLength > FABRIC_MAX_OPERATION_METADATA_BYTES
     ) {
       this.failProtocol(stream);
@@ -941,6 +998,7 @@ export class FabricEndpoint {
         stream.phase !== "halfClosedRemote") ||
       frame.value === 0n ||
       frame.payload.byteLength !== 0 ||
+      stream.transportFlow ||
       !stream.addOutboundCredit(frame.value)
     ) {
       this.failProtocol(stream);
@@ -1027,6 +1085,24 @@ export class FabricEndpoint {
       return streamId;
     }
     throw new FabricStateError("the Fabric stream id source repeatedly returned used ids");
+  }
+
+  /**
+   * Transport-flow DATA waits only for this process' WebSocket/TCP queue.
+   * No network acknowledgement or application WINDOW_UPDATE participates.
+   */
+  private async waitForSocketCapacity(wireBytes: number): Promise<void> {
+    const high = this.options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+    const low = Math.floor(high / 2);
+    for (;;) {
+      const socket = this.socket;
+      if (!socket || this.state_ !== "open" || socket.readyState !== SOCKET_OPEN) {
+        throw new FabricStateError("Fabric endpoint is not open");
+      }
+      if (socket.bufferedAmount + wireBytes <= high) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 4));
+      if (socket.bufferedAmount <= low) continue;
+    }
   }
 
   private sendFrame(frame: FabricFrame): void {
@@ -1373,6 +1449,14 @@ async function messageBytes(data: unknown): Promise<Uint8Array> {
     return new Uint8Array(await data.arrayBuffer());
   }
   throw new TypeError("Fabric WebSocket messages must be binary");
+}
+
+function immediateMessageBytes(data: unknown): Uint8Array | null {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data).slice();
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice();
+  }
+  return null;
 }
 
 function messageByteLength(data: unknown): number | null {
