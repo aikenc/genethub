@@ -492,6 +492,28 @@ mod tests {
     }
 
     #[test]
+    fn only_authenticated_users_with_session_authority_may_start_a_pm() {
+        assert!(Principal::LocalUser.may_start_project_manager());
+        assert!(Principal::Channel.may_start_project_manager());
+        assert!(Principal::Device {
+            id: "d_session".into(),
+            grants: GrantSet::of([Capability::Session]),
+        }
+        .may_start_project_manager());
+
+        assert!(!Principal::Device {
+            id: "d_read".into(),
+            grants: GrantSet::of([Capability::Read]),
+        }
+        .may_start_project_manager());
+        assert!(!Principal::ProjectManager {
+            session_id: "s_pm".into(),
+        }
+        .may_start_project_manager());
+        assert!(!Principal::Pairing.may_start_project_manager());
+    }
+
+    #[test]
     fn capability_names_round_trip_because_they_are_stored_and_typed_by_people() {
         for capability in Capability::ALL {
             assert_eq!(Capability::parse(capability.as_str()), Some(capability));
