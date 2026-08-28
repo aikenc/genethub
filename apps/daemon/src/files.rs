@@ -1,6 +1,6 @@
 //! Directory listing, exact Preview reads, and writes scoped to a workspace.
 
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -151,7 +151,14 @@ fn is_noise(path: &Path) -> bool {
 #[derive(Debug)]
 pub struct PreviewFile {
     pub metadata: AssetPreviewMetadata,
-    pub bytes: Vec<u8>,
+    source: std::fs::File,
+    expected_digest: [u8; 32],
+}
+
+impl PreviewFile {
+    pub(crate) fn into_parts(self) -> (AssetPreviewMetadata, std::fs::File, [u8; 32]) {
+        (self.metadata, self.source, self.expected_digest)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,15 +191,17 @@ impl std::error::Error for PreviewFailure {}
 /// How much of the file one step of the read below takes. Small enough that no
 /// single step is long, large enough that a preview of a few megabytes is a
 /// handful of steps rather than a thousand.
-const PREVIEW_STEP_BYTES: usize = 256 * 1024;
+pub(crate) const PREVIEW_STEP_BYTES: usize = 256 * 1024;
 
-/// Reads one complete regular workspace file or returns a low-cardinality
-/// preview failure. It never truncates, summarizes, probes, transforms, or
-/// follows a stream-like special file.
+/// Prepares one complete regular workspace file or returns a low-cardinality
+/// preview failure. It never truncates, summarizes, transforms, or follows a
+/// stream-like special file.
 ///
-/// The read is in steps: previews are as big as the user's file, up to
-/// [`genehub_proto::MAX_PREVIEW_SOURCE_BYTES`], and a guest that swallowed one
-/// whole would hold every other session for as long as the disk took.
+/// The first pass establishes exact length, type and version without retaining
+/// the payload. The same capability-opened file handle is then rewound for the
+/// response path to stream in bounded steps. Keeping that handle, rather than
+/// reopening an ambient path, also prevents a rename between both passes from
+/// changing which file is authorized.
 pub async fn preview(
     root: &Path,
     relative_path: &str,
@@ -210,48 +219,146 @@ pub async fn preview(
             source_bytes: before.len(),
         });
     }
-    let mut source = file
-        .into_std()
-        .take((genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1) as u64);
-    let mut bytes = Vec::with_capacity(before.len() as usize);
+    let mut source = file.into_std();
     let mut hasher = Sha256::new();
+    let mut probe = PreviewProbe::default();
     let mut step = vec![0u8; PREVIEW_STEP_BYTES];
-    loop {
-        let read = source.read(&mut step).map_err(map_preview_io)?;
+    let scan_limit = genehub_proto::MAX_PREVIEW_SOURCE_BYTES + 1;
+    let mut source_bytes = 0usize;
+    while source_bytes < scan_limit {
+        let remaining = scan_limit - source_bytes;
+        let read = source
+            .read(&mut step[..remaining.min(PREVIEW_STEP_BYTES)])
+            .map_err(map_preview_io)?;
         if read == 0 {
             break;
         }
         hasher.update(&step[..read]);
-        bytes.extend_from_slice(&step[..read]);
+        probe.update(&step[..read]);
+        source_bytes += read;
         crate::blocking::breathe().await;
     }
-    if bytes.len() > genehub_proto::MAX_PREVIEW_SOURCE_BYTES {
+    if source_bytes > genehub_proto::MAX_PREVIEW_SOURCE_BYTES {
         return Err(PreviewFailure::TooLarge {
-            source_bytes: bytes.len() as u64,
+            source_bytes: source_bytes as u64,
         });
     }
     // A replacement or growth between stat and EOF must not turn the promised
     // complete file into a prefix. Length catches the portable, meaningful
     // race; the hash taken as it was read makes the successful response version
     // exact.
-    if bytes.len() as u64 != before.len() {
+    if source_bytes as u64 != before.len() {
         return Err(PreviewFailure::SourceChanged);
     }
-    let (kind, media_type) = preview_type(relative, &bytes)?;
-    let digest = hasher.finalize();
+    let (kind, media_type) = preview_type(relative, probe.prefix(), probe.is_text())?;
+    let digest: [u8; 32] = hasher.finalize().into();
     let version = digest[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
+    source.seek(SeekFrom::Start(0)).map_err(map_preview_io)?;
     Ok(PreviewFile {
         metadata: AssetPreviewMetadata {
             kind,
             media_type: media_type.to_string(),
-            source_bytes: bytes.len() as u64,
+            source_bytes: source_bytes as u64,
             version,
         },
-        bytes,
+        source,
+        expected_digest: digest,
     })
+}
+
+#[derive(Default)]
+struct PreviewProbe {
+    prefix: [u8; 12],
+    prefix_len: usize,
+    utf8: Utf8Probe,
+}
+
+impl PreviewProbe {
+    fn update(&mut self, bytes: &[u8]) {
+        if self.prefix_len < self.prefix.len() {
+            let take = (self.prefix.len() - self.prefix_len).min(bytes.len());
+            self.prefix[self.prefix_len..self.prefix_len + take].copy_from_slice(&bytes[..take]);
+            self.prefix_len += take;
+        }
+        self.utf8.update(bytes);
+    }
+
+    fn prefix(&self) -> &[u8] {
+        &self.prefix[..self.prefix_len]
+    }
+
+    fn is_text(&self) -> bool {
+        self.utf8.is_valid_text()
+    }
+}
+
+#[derive(Default)]
+struct Utf8Probe {
+    invalid: bool,
+    has_nul: bool,
+    carry: [u8; 3],
+    carry_len: usize,
+}
+
+impl Utf8Probe {
+    fn update(&mut self, bytes: &[u8]) {
+        self.has_nul |= bytes.contains(&0);
+        if self.invalid {
+            return;
+        }
+
+        let mut rest = bytes;
+        if self.carry_len > 0 {
+            let width = utf8_width(self.carry[0]);
+            if width == 0 {
+                self.invalid = true;
+                return;
+            }
+            let needed = width - self.carry_len;
+            if rest.len() < needed {
+                self.carry[self.carry_len..self.carry_len + rest.len()].copy_from_slice(rest);
+                self.carry_len += rest.len();
+                return;
+            }
+            let mut sequence = [0u8; 4];
+            sequence[..self.carry_len].copy_from_slice(&self.carry[..self.carry_len]);
+            sequence[self.carry_len..width].copy_from_slice(&rest[..needed]);
+            if std::str::from_utf8(&sequence[..width]).is_err() {
+                self.invalid = true;
+                return;
+            }
+            self.carry_len = 0;
+            rest = &rest[needed..];
+        }
+
+        if let Err(error) = std::str::from_utf8(rest) {
+            if error.error_len().is_some() {
+                self.invalid = true;
+                return;
+            }
+            let suffix = &rest[error.valid_up_to()..];
+            debug_assert!(suffix.len() <= self.carry.len());
+            self.carry[..suffix.len()].copy_from_slice(suffix);
+            self.carry_len = suffix.len();
+        }
+    }
+
+    fn is_valid_text(&self) -> bool {
+        !self.invalid && !self.has_nul && self.carry_len == 0
+    }
+}
+
+fn utf8_width(first: u8) -> usize {
+    match first {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => 0,
+    }
 }
 
 pub(crate) fn validate_preview_path(path: &str) -> std::result::Result<(), PreviewFailure> {
@@ -283,7 +390,8 @@ fn map_preview_io(error: std::io::Error) -> PreviewFailure {
 
 fn preview_type(
     path: &Path,
-    bytes: &[u8],
+    prefix: &[u8],
+    is_text: bool,
 ) -> std::result::Result<(AssetPreviewKind, &'static str), PreviewFailure> {
     let extension = path
         .extension()
@@ -291,39 +399,39 @@ fn preview_type(
         .unwrap_or_default()
         .to_ascii_lowercase();
     let exact = match extension.as_str() {
-        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => {
+        "png" if prefix.starts_with(b"\x89PNG\r\n\x1a\n") => {
             Some((AssetPreviewKind::Image, "image/png"))
         }
-        "jpg" | "jpeg" if bytes.starts_with(b"\xff\xd8\xff") => {
+        "jpg" | "jpeg" if prefix.starts_with(b"\xff\xd8\xff") => {
             Some((AssetPreviewKind::Image, "image/jpeg"))
         }
-        "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => {
+        "gif" if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") => {
             Some((AssetPreviewKind::Image, "image/gif"))
         }
-        "webp" if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" => {
+        "webp" if prefix.len() >= 12 && &prefix[..4] == b"RIFF" && &prefix[8..12] == b"WEBP" => {
             Some((AssetPreviewKind::Image, "image/webp"))
         }
-        "mp4" if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" => {
+        "mp4" if prefix.len() >= 12 && &prefix[4..8] == b"ftyp" => {
             Some((AssetPreviewKind::Video, "video/mp4"))
         }
-        "webm" if bytes.starts_with(b"\x1a\x45\xdf\xa3") => {
+        "webm" if prefix.starts_with(b"\x1a\x45\xdf\xa3") => {
             Some((AssetPreviewKind::Video, "video/webm"))
         }
-        "wasm" if bytes.starts_with(b"\0asm") => Some((AssetPreviewKind::Wasm, "application/wasm")),
+        "wasm" if prefix.starts_with(b"\0asm") => {
+            Some((AssetPreviewKind::Wasm, "application/wasm"))
+        }
         _ => None,
     };
     if let Some(found) = exact {
         return Ok(found);
     }
 
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        if !text.contains('\0') {
-            return match extension.as_str() {
-                "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
-                "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
-                _ => Ok((AssetPreviewKind::Text, "text/plain")),
-            };
-        }
+    if is_text {
+        return match extension.as_str() {
+            "md" | "markdown" | "mdown" => Ok((AssetPreviewKind::Markdown, "text/markdown")),
+            "html" | "htm" => Ok((AssetPreviewKind::Html, "text/html")),
+            _ => Ok((AssetPreviewKind::Text, "text/plain")),
+        };
     }
     Ok((AssetPreviewKind::Binary, "application/octet-stream"))
 }
@@ -588,12 +696,15 @@ mod tests {
         let bytes = vec![b'x'; genehub_proto::MAX_PREVIEW_SOURCE_BYTES];
         std::fs::write(dir.path().join("exact.txt"), &bytes).unwrap();
         let shown = preview(dir.path(), "exact.txt").await.unwrap();
-        assert_eq!(shown.bytes, bytes);
         assert_eq!(shown.metadata.kind, AssetPreviewKind::Text);
         assert_eq!(
             shown.metadata.source_bytes,
             genehub_proto::MAX_PREVIEW_SOURCE_BYTES as u64
         );
+        let (_, mut source, _) = shown.into_parts();
+        let mut streamed = Vec::new();
+        source.read_to_end(&mut streamed).unwrap();
+        assert_eq!(streamed, bytes);
 
         std::fs::write(
             dir.path().join("large.txt"),
@@ -680,6 +791,18 @@ mod tests {
                 .metadata
                 .kind,
             AssetPreviewKind::Binary
+        );
+
+        let mut split_utf8 = vec![b'a'; PREVIEW_STEP_BYTES - 1];
+        split_utf8.extend_from_slice("界".as_bytes());
+        std::fs::write(dir.path().join("split-utf8.custom"), split_utf8).unwrap();
+        assert_eq!(
+            preview(dir.path(), "split-utf8.custom")
+                .await
+                .unwrap()
+                .metadata
+                .kind,
+            AssetPreviewKind::Text
         );
     }
 

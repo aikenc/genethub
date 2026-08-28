@@ -501,9 +501,21 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  * Capability advertisement only.  Signaling remains encrypted data-plane
  * traffic and no RTC address is ever placed in this hello.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * Optional for wire compatibility. A missing field identifies a peer
+ * from the first finite-bulk rollout, whose largest understood lease is
+ * [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+ */
+maxBulkStreamWindowBytes?: number, };
 
-export type PeerWelcome = { version: number, serverNonce: string, proof: string, };
+export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
+/**
+ * Optional for wire compatibility. A missing field is the v3 256 KiB
+ * receive lease; new clients use the larger value only for allowlisted
+ * finite bulk methods.
+ */
+maxBulkStreamWindowBytes?: number, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 

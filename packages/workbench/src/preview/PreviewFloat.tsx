@@ -12,7 +12,11 @@ import type { Host } from "../host";
 import type { Client } from "../protocol/client";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { isIosStandalonePwa } from "../shell/platform";
-import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
+import {
+  AssetPreviewPage,
+  PreviewTransferSummary,
+  type PreviewMeta,
+} from "./AssetPreviewPage";
 import {
   createPortablePreviewUrl,
   createPreviewPopoutChannel,
@@ -389,7 +393,7 @@ export function PreviewFloat({
             <button
               type="button"
               aria-label="查看预览信息"
-              title="查看预览信息"
+              title="查看文件与传输信息"
               className={expandedIconBtn}
               onClick={() => setInfoOpen(true)}
             >
@@ -645,6 +649,7 @@ function PreviewInfoDialog({
               <dd className="break-all font-mono text-fg">{path}</dd>
             </div>
           </dl>
+          {meta?.transfer ? <PreviewTransferSummary stats={meta.transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
             {lines.map((line) => (
               <li key={line} className="break-words">

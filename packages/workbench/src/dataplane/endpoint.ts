@@ -11,6 +11,7 @@ import {
   decodeDataFrame,
   encodeDataFrame,
   INITIAL_STREAM_WINDOW_BYTES,
+  MAX_BULK_STREAM_WINDOW_BYTES,
   MAX_DATA_PAYLOAD_BYTES,
   MAX_FINITE_EXCHANGE_BODY_BYTES,
   type DataFrame,
@@ -34,6 +35,8 @@ export interface DataEndpointOptions {
   maxActiveStreams?: number;
   maxQueuedBytes?: number;
   maxReceiveBytesPerStream?: number;
+  /** Negotiated receive lease for allowlisted finite bulk responses. */
+  maxBulkStreamWindowBytes?: number;
   onError?: (error: unknown) => void;
 }
 
@@ -78,6 +81,7 @@ export class DataStream {
   private localSequence = 0;
   private remoteSequence = 0;
   private outboundCredit = INITIAL_STREAM_WINDOW_BYTES;
+  private outboundWindow = INITIAL_STREAM_WINDOW_BYTES;
   private localFin = false;
   private remoteFin = false;
   private closed = false;
@@ -103,6 +107,7 @@ export class DataStream {
     initialOutboundCredit = INITIAL_STREAM_WINDOW_BYTES,
   ) {
     this.outboundCredit = initialOutboundCredit;
+    this.outboundWindow = initialOutboundCredit;
     // A consumer may only await `done`; resets before a response head must not
     // become a process-wide unhandled rejection.
     void this.responseHead.catch(() => {});
@@ -205,13 +210,14 @@ export class DataStream {
       this.direction !== "outgoing" ||
       this.responseHeadSettled ||
       credit < 1 ||
-      credit > INITIAL_STREAM_WINDOW_BYTES
+      credit > this.endpoint.maxBulkStreamWindowBytes
     ) {
       return false;
     }
     this.responseHeadSettled = true;
     this.responseHeadValue = head;
     this.outboundCredit = credit;
+    this.outboundWindow = credit;
     this.wakeCredit();
     this.responseHead_.resolve(head);
     return true;
@@ -248,7 +254,7 @@ export class DataStream {
     if (
       this.closed ||
       value < 1 ||
-      this.outboundCredit + value > INITIAL_STREAM_WINDOW_BYTES
+      this.outboundCredit + value > this.outboundWindow
     ) {
       return false;
     }
@@ -367,16 +373,26 @@ export class DataEndpoint {
   private readonly stopClose: () => void;
 
   readonly maxReceiveBytesPerStream: number;
+  readonly maxBulkStreamWindowBytes: number;
 
   constructor(private readonly options: DataEndpointOptions) {
     this.nextStreamId = options.role === "client" ? 1 : 2;
     this.maxReceiveBytesPerStream =
       options.maxReceiveBytesPerStream ?? INITIAL_STREAM_WINDOW_BYTES;
+    this.maxBulkStreamWindowBytes =
+      options.maxBulkStreamWindowBytes ?? INITIAL_STREAM_WINDOW_BYTES;
     if (
       this.maxReceiveBytesPerStream < MAX_DATA_PAYLOAD_BYTES ||
       this.maxReceiveBytesPerStream > 64 * 1024 * 1024
     ) {
       throw new RangeError("invalid per-stream receive budget");
+    }
+    if (
+      !Number.isSafeInteger(this.maxBulkStreamWindowBytes) ||
+      this.maxBulkStreamWindowBytes < INITIAL_STREAM_WINDOW_BYTES ||
+      this.maxBulkStreamWindowBytes > MAX_BULK_STREAM_WINDOW_BYTES
+    ) {
+      throw new RangeError("invalid finite-bulk receive lease");
     }
     this.stopRecord = options.carrier.onRecord((record) => this.receive(record));
     this.stopClose = options.carrier.onClose((reason) => this.closeFromCarrier(reason));
@@ -399,11 +415,15 @@ export class DataEndpoint {
     const payload = encodeHead(canonicalHead);
     const id = this.allocateStreamId();
     const stream = new DataStream(this, id, "outgoing", canonicalHead);
+    const receiveWindow = receiveWindowFor(
+      canonicalHead,
+      this.maxBulkStreamWindowBytes,
+    );
     this.streams.set(id, stream);
     void this.sendFrame(stream, {
       kind: DataKind.Open,
       streamId: id,
-      value: INITIAL_STREAM_WINDOW_BYTES,
+      value: receiveWindow,
       payload,
     }).catch((error: unknown) => stream.fail(error));
     return stream;
@@ -521,7 +541,10 @@ export class DataEndpoint {
         return;
       }
       const head = requestHeadOf(decodeHead(frame.payload));
-      if (frame.value < 1 || frame.value > INITIAL_STREAM_WINDOW_BYTES) {
+      if (
+        frame.value < 1 ||
+        frame.value > receiveWindowFor(head, this.maxBulkStreamWindowBytes)
+      ) {
         throw new DataPlaneError("peer advertised an invalid stream window");
       }
       const stream = new DataStream(
@@ -762,6 +785,21 @@ function requestHeadOf(value: unknown): ExchangeRequestHead {
     throw new DataPlaneError("invalid exchange request head");
   }
   return value as unknown as ExchangeRequestHead;
+}
+
+/**
+ * A finite Preview may be fully prefunded at stream creation. Framing and the
+ * fair writer remain unchanged; only the feedback clock leaves its healthy
+ * transfer path. Unknown-length and duplex methods keep the conservative
+ * 256 KiB lease.
+ */
+function receiveWindowFor(
+  head: ExchangeRequestHead,
+  maxBulkStreamWindowBytes: number,
+): number {
+  return head.method === "asset.preview"
+    ? maxBulkStreamWindowBytes
+    : INITIAL_STREAM_WINDOW_BYTES;
 }
 
 function responseHeadOf(value: unknown): ExchangeResponseHead {

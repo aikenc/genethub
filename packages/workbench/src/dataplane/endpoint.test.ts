@@ -4,7 +4,12 @@ import { describe, expect, it } from "vitest";
 import { deriveChannelSessionKey } from "../devices/proof";
 import { collectBody, exchange } from "./exchange";
 import { DataEndpoint, type RecordCarrier } from "./endpoint";
-import { DataKind, decodeDataFrame } from "./frame";
+import {
+  DataKind,
+  decodeDataFrame,
+  INITIAL_STREAM_WINDOW_BYTES,
+  MAX_BULK_STREAM_WINDOW_BYTES,
+} from "./frame";
 import { openDataRecord } from "./secure";
 
 class MemoryCarrier implements RecordCarrier {
@@ -71,7 +76,59 @@ async function endpoints() {
   return { client, server, clientCarrier, key };
 }
 
+async function bulkEndpoints() {
+  const [clientCarrier, serverCarrier] = carriers();
+  const key = await deriveChannelSessionKey(
+    "0123456789abcdef".repeat(4),
+    "hosted:test",
+    "00112233445566778899aabbccddeeff",
+    "ffeeddccbbaa99887766554433221100",
+  );
+  const options = { key, maxBulkStreamWindowBytes: MAX_BULK_STREAM_WINDOW_BYTES };
+  const client = new DataEndpoint({ role: "client", carrier: clientCarrier, ...options });
+  const server = new DataEndpoint({ role: "server", carrier: serverCarrier, ...options });
+  return { client, server, clientCarrier, key };
+}
+
 describe("the E2EE data endpoint", () => {
+  it("prefunds only allowlisted finite Preview flows at stream creation", async () => {
+    const stack = await bulkEndpoints();
+    stack.server.onIncoming((stream) => {
+      void (async () => {
+        await collectBody(stream.body(), 0);
+        await stream.respond({ status: 204, metadata: null, bodyLength: 0 });
+        await stream.finish();
+      })();
+    });
+
+    const preview = stack.client.open(head("asset.preview", 0));
+    await preview.finish();
+    await preview.done;
+    const regular = stack.client.open(head("workspace.list", 0));
+    await regular.finish();
+    await regular.done;
+
+    const opens: Array<{ method: string; window: number }> = [];
+    for (const [index, record] of stack.clientCarrier.sent.entries()) {
+      const plaintext = await openDataRecord(
+        stack.key,
+        "client-to-daemon",
+        index + 1,
+        record,
+      );
+      const frame = decodeDataFrame(plaintext)!;
+      if (frame.kind !== DataKind.Open) continue;
+      const request = JSON.parse(new TextDecoder().decode(frame.payload)) as {
+        method: string;
+      };
+      opens.push({ method: request.method, window: frame.value });
+    }
+    expect(opens).toEqual([
+      { method: "asset.preview", window: MAX_BULK_STREAM_WINDOW_BYTES },
+      { method: "workspace.list", window: INITIAL_STREAM_WINDOW_BYTES },
+    ]);
+  });
+
   it("runs independent streaming exchanges over one carrier", async () => {
     const stack = await endpoints();
     stack.server.onIncoming((stream) => {

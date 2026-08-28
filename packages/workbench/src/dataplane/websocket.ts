@@ -1,6 +1,10 @@
 import { MAX_DATA_FRAME_BYTES } from "./frame";
 import type { RecordCarrier } from "./endpoint";
 
+const SOCKET_BUFFER_HIGH_BYTES = 256 * 1024;
+const SOCKET_BUFFER_LOW_BYTES = 128 * 1024;
+const SOCKET_DRAIN_POLL_MS = 4;
+
 export interface BinaryWebSocketLike {
   binaryType?: string;
   bufferedAmount?: number;
@@ -36,11 +40,25 @@ export class WebSocketRecordCarrier implements RecordCarrier {
     socket.onclose = (event) => this.fail(event);
   }
 
-  send(record: Uint8Array): void {
+  async send(record: Uint8Array): Promise<void> {
     if (this.closed) throw new Error("WebSocket carrier is closed");
     if (record.byteLength > MAX_DATA_FRAME_BYTES) {
       throw new RangeError("WebSocket data record exceeds 16 KiB");
     }
+    while (
+      !this.closed &&
+      (this.socket.bufferedAmount ?? 0) + record.byteLength >
+        SOCKET_BUFFER_HIGH_BYTES
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, SOCKET_DRAIN_POLL_MS));
+      while (
+        !this.closed &&
+        (this.socket.bufferedAmount ?? 0) > SOCKET_BUFFER_LOW_BYTES
+      ) {
+        await new Promise<void>((resolve) => setTimeout(resolve, SOCKET_DRAIN_POLL_MS));
+      }
+    }
+    if (this.closed) throw new Error("WebSocket carrier is closed");
     this.socket.send(record);
   }
 

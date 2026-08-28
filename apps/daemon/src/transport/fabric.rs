@@ -28,6 +28,7 @@ const HEADER_BYTES: usize = 28;
 const STREAM_ID_BYTES: usize = 16;
 const MAX_WIRE_FRAME_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES + HEADER_BYTES;
 const INITIAL_CREDIT: u64 = genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64;
+const TRANSPORT_FLOW: &str = "transport-v1";
 const MAX_PEERS: usize = 32;
 const MAX_PENDING: usize = 8;
 const WRITER_QUEUE: usize = 256;
@@ -157,11 +158,47 @@ impl Credit {
     }
 }
 
+#[derive(Clone)]
+enum StreamFlow {
+    Legacy(Credit),
+    /// DATA follows only local bounded queues and the TCP/WebSocket drain.
+    Transport,
+}
+
+impl StreamFlow {
+    fn from_wire(value: u64) -> Result<Self> {
+        if value == 0 {
+            Ok(Self::Transport)
+        } else {
+            Credit::new(value).map(Self::Legacy)
+        }
+    }
+
+    async fn take(&self, bytes: usize) -> Result<()> {
+        match self {
+            Self::Legacy(credit) => credit.take(bytes).await,
+            Self::Transport if bytes > 0 => Ok(()),
+            Self::Transport => anyhow::bail!("Fabric record cannot be empty"),
+        }
+    }
+
+    fn add(&self, value: u64) -> bool {
+        match self {
+            Self::Legacy(credit) => credit.add(value),
+            Self::Transport => false,
+        }
+    }
+
+    fn is_transport(&self) -> bool {
+        matches!(self, Self::Transport)
+    }
+}
+
 struct PeerSlot {
     generation: u64,
     inbound: mpsc::Sender<Vec<u8>>,
     remote_sequence: u64,
-    outbound_credit: Credit,
+    outbound_flow: StreamFlow,
 }
 
 type Peers = Arc<tokio::sync::Mutex<HashMap<[u8; STREAM_ID_BYTES], PeerSlot>>>;
@@ -271,9 +308,10 @@ async fn run_once(
     online: &AtomicBool,
     diagnostic_operation: &'static str,
 ) -> Result<()> {
-    validate_fabric_url(url)?;
-    tracing::debug!(%url, "dialing the Fabric relay");
-    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(url, socket_config()))
+    let endpoint_url = transport_flow_url(url)?;
+    validate_fabric_url(&endpoint_url)?;
+    tracing::debug!(url = %endpoint_url, "dialing the Fabric relay");
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .context("Fabric WebSocket handshake timed out")??;
     online.store(true, Ordering::Relaxed);
@@ -354,7 +392,6 @@ async fn receive(
     match frame.kind {
         Kind::Incoming => {
             if frame.stream_id == [0; STREAM_ID_BYTES]
-                || frame.value == 0
                 || frame.value > INITIAL_CREDIT
                 || frame.payload.is_empty()
                 || frame.payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES
@@ -392,33 +429,53 @@ async fn receive(
             tasks.push(task);
         }
         Kind::Data => {
-            let mut peers = peers.lock().await;
-            let Some(slot) = peers.get_mut(&frame.stream_id) else {
-                drop(peers);
-                writer.reset(frame.stream_id, 1).await;
-                return Ok(());
-            };
             let bytes = u64::try_from(frame.payload.len())?;
-            if bytes == 0
-                || frame.value != slot.remote_sequence + 1
-                || slot.inbound.try_send(frame.payload).is_err()
-            {
-                peers.remove(&frame.stream_id);
+            let (inbound, peer_generation, transport_flow) = {
+                let mut peers = peers.lock().await;
+                let Some(slot) = peers.get_mut(&frame.stream_id) else {
+                    drop(peers);
+                    writer.reset(frame.stream_id, 1).await;
+                    return Ok(());
+                };
+                if bytes == 0 || frame.value != slot.remote_sequence + 1 {
+                    peers.remove(&frame.stream_id);
+                    drop(peers);
+                    writer.reset(frame.stream_id, 6).await;
+                    return Ok(());
+                }
+                slot.remote_sequence = frame.value;
+                (
+                    slot.inbound.clone(),
+                    slot.generation,
+                    slot.outbound_flow.is_transport(),
+                )
+            };
+            // A full bounded carrier queue is backpressure, not a protocol
+            // violation. Waiting here also stops this socket reader from
+            // acknowledging bytes it has nowhere bounded to place.
+            if inbound.send(frame.payload).await.is_err() {
+                let mut peers = peers.lock().await;
+                if peers
+                    .get(&frame.stream_id)
+                    .is_some_and(|slot| slot.generation == peer_generation)
+                {
+                    peers.remove(&frame.stream_id);
+                }
                 drop(peers);
                 writer.reset(frame.stream_id, 6).await;
                 return Ok(());
             }
-            slot.remote_sequence = frame.value;
             // The bounded carrier queue accepted ownership, so this outer
             // stream can return exactly the credit it consumed.
-            let update = Frame {
-                kind: Kind::WindowUpdate,
-                stream_id: frame.stream_id,
-                value: bytes,
-                payload: Vec::new(),
-            };
-            drop(peers);
-            writer.frame(update).await?;
+            if !transport_flow {
+                let update = Frame {
+                    kind: Kind::WindowUpdate,
+                    stream_id: frame.stream_id,
+                    value: bytes,
+                    payload: Vec::new(),
+                };
+                writer.frame(update).await?;
+            }
         }
         Kind::WindowUpdate => {
             if !frame.payload.is_empty() || frame.value == 0 {
@@ -430,7 +487,7 @@ async fn receive(
                 writer.reset(frame.stream_id, 1).await;
                 return Ok(());
             };
-            if !slot.outbound_credit.add(frame.value) {
+            if !slot.outbound_flow.add(frame.value) {
                 anyhow::bail!("Fabric peer exceeded its credit window");
             }
         }
@@ -508,14 +565,14 @@ async fn serve_peer_inner(
         admitted.workspace_handle,
     )?;
     let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
-    let credit = Credit::new(frame.value)?;
+    let flow = StreamFlow::from_wire(frame.value)?;
     peers.lock().await.insert(
         frame.stream_id,
         PeerSlot {
             generation,
             inbound,
             remote_sequence: 0,
-            outbound_credit: credit.clone(),
+            outbound_flow: flow.clone(),
         },
     );
     pending.lock().await.remove(&frame.stream_id);
@@ -523,7 +580,11 @@ async fn serve_peer_inner(
         .frame(Frame {
             kind: Kind::Accept,
             stream_id: frame.stream_id,
-            value: INITIAL_CREDIT,
+            value: if flow.is_transport() {
+                0
+            } else {
+                INITIAL_CREDIT
+            },
             payload: serde_json::to_vec(&accepted.welcome)?,
         })
         .await?;
@@ -536,7 +597,7 @@ async fn serve_peer_inner(
             if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
                 anyhow::bail!("data-plane record exceeds the Fabric bound");
             }
-            credit.take(record.len()).await?;
+            flow.take(record.len()).await?;
             sequence = sequence
                 .checked_add(1)
                 .context("Fabric sequence exhausted")?;
@@ -686,17 +747,24 @@ fn decode(bytes: &[u8]) -> Option<Frame> {
 
 /// Fabric endpoint admissions are deliberately carried in the WebSocket URL:
 /// browsers cannot set an Authorization header. Accept exactly one `ticket`
-/// query value and keep every other URL authority rule fail-closed.
+/// and the one known transport capability; every other query stays fail-closed.
 pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
     let url = crate::http::Url::parse(value).context("parsing the Fabric endpoint URL")?;
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         anyhow::bail!("Fabric endpoint URLs cannot contain credentials or fragments");
     }
-    let mut query = url.query_pairs();
-    let Some((name, ticket)) = query.next() else {
-        anyhow::bail!("Fabric endpoint URL has no admission ticket");
-    };
-    if name != "ticket" || ticket.is_empty() || ticket.len() > 4096 || query.next().is_some() {
+    let mut ticket = None;
+    let mut flow = false;
+    for (name, value) in url.query_pairs() {
+        match name.as_ref() {
+            "ticket" if ticket.is_none() && !value.is_empty() && value.len() <= 4096 => {
+                ticket = Some(value.into_owned());
+            }
+            "flow" if !flow && value == TRANSPORT_FLOW => flow = true,
+            _ => anyhow::bail!("Fabric endpoint URL has an unsupported query field"),
+        }
+    }
+    if ticket.is_none() {
         anyhow::bail!("Fabric endpoint URL must contain exactly one bounded ticket");
     }
     let host = url
@@ -716,6 +784,23 @@ pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
         ),
         other => anyhow::bail!("unsupported Fabric endpoint URL scheme '{other}'"),
     }
+}
+
+fn transport_flow_url(value: &str) -> Result<String> {
+    let mut url = crate::http::Url::parse(value).context("parsing the Fabric endpoint URL")?;
+    let existing = url
+        .query_pairs()
+        .find(|(name, _)| name == "flow")
+        .map(|(_, value)| value.into_owned());
+    match existing.as_deref() {
+        None => {
+            url.query_pairs_mut().append_pair("flow", TRANSPORT_FLOW);
+        }
+        Some(TRANSPORT_FLOW) => {}
+        Some(_) => anyhow::bail!("Fabric endpoint URL has an unsupported flow capability"),
+    }
+    validate_fabric_url(url.as_str())?;
+    Ok(url.into())
 }
 
 /// One authenticated peer link to a machine that is somewhere else.
@@ -793,7 +878,9 @@ pub async fn dial(
     route_ticket: &str,
     hello: &genehub_proto::PeerHello,
 ) -> std::result::Result<FabricLink, DialError> {
-    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(url, socket_config()))
+    let endpoint_url =
+        transport_flow_url(url).map_err(|error| DialError::Protocol(format!("{error:#}")))?;
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .map_err(|_| DialError::Unavailable("the relay did not answer in time".into()))?
         .map_err(dial_error)?;
@@ -835,8 +922,8 @@ pub async fn dial(
     }
     let welcome: genehub_proto::PeerWelcome = serde_json::from_slice(&accept.payload)
         .map_err(|_| DialError::Protocol("that machine returned an invalid peer welcome".into()))?;
-    let credit =
-        Credit::new(accept.value).map_err(|error| DialError::Protocol(format!("{error:#}")))?;
+    let flow = StreamFlow::from_wire(accept.value)
+        .map_err(|error| DialError::Protocol(format!("{error:#}")))?;
 
     let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
     let socket_writer = tokio::spawn(async move {
@@ -852,7 +939,7 @@ pub async fn dial(
     let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
 
     let reader_writer = writer.clone();
-    let reader_credit = credit.clone();
+    let reader_flow = flow.clone();
     let reader = tokio::spawn(async move {
         let mut sequence = 0u64;
         while let Ok(frame) = next_frame(&mut source, stream_id).await {
@@ -872,21 +959,23 @@ pub async fn dial(
                     // Returned only once the bounded carrier queue has taken
                     // ownership, so credit tracks what was consumed rather
                     // than what was merely read off the socket.
-                    if reader_writer
-                        .frame(Frame {
-                            kind: Kind::WindowUpdate,
-                            stream_id,
-                            value: bytes,
-                            payload: Vec::new(),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
+                    if !reader_flow.is_transport() {
+                        if reader_writer
+                            .frame(Frame {
+                                kind: Kind::WindowUpdate,
+                                stream_id,
+                                value: bytes,
+                                payload: Vec::new(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
                 Kind::WindowUpdate => {
-                    if !reader_credit.add(frame.value) {
+                    if !reader_flow.add(frame.value) {
                         return;
                     }
                 }
@@ -910,7 +999,7 @@ pub async fn dial(
             if record.is_empty() || record.len() > genehub_proto::MAX_DATA_FRAME_BYTES {
                 return;
             }
-            if credit.take(record.len()).await.is_err() {
+            if flow.take(record.len()).await.is_err() {
                 return;
             }
             sequence += 1;
@@ -1089,6 +1178,7 @@ mod tests {
     fn fabric_url_accepts_only_one_ticket_on_a_safe_websocket_origin() {
         for good in [
             "wss://relay.example/fabric/v2?ticket=one-use",
+            "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1",
             "ws://127.0.0.1:8787/fabric/v2?ticket=local",
             "ws://[::1]:8787/fabric/v2?ticket=local",
         ] {
@@ -1098,12 +1188,18 @@ mod tests {
             "wss://relay.example/fabric/v2",
             "wss://relay.example/fabric/v2?ticket=",
             "wss://relay.example/fabric/v2?ticket=a&route=b",
+            "wss://relay.example/fabric/v2?ticket=a&flow=unknown",
+            "wss://relay.example/fabric/v2?ticket=a&flow=transport-v1&flow=transport-v1",
             "wss://user:pass@relay.example/fabric/v2?ticket=a",
             "ws://relay.example/fabric/v2?ticket=a",
             "https://relay.example/fabric/v2?ticket=a",
         ] {
             assert!(validate_fabric_url(bad).is_err(), "accepted {bad}");
         }
+        assert_eq!(
+            transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
+            "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
+        );
     }
 
     fn hex(bytes: &[u8]) -> String {
