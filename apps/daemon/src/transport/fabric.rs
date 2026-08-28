@@ -311,10 +311,7 @@ async fn run_once(
     let endpoint_url = transport_flow_url(url)?;
     validate_fabric_url(&endpoint_url)?;
     tracing::debug!(url = %endpoint_url, "dialing the Fabric relay");
-    let socket = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        ws::connect(&endpoint_url, socket_config()),
-    )
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .context("Fabric WebSocket handshake timed out")??;
     online.store(true, Ordering::Relaxed);
@@ -583,7 +580,11 @@ async fn serve_peer_inner(
         .frame(Frame {
             kind: Kind::Accept,
             stream_id: frame.stream_id,
-            value: if flow.is_transport() { 0 } else { INITIAL_CREDIT },
+            value: if flow.is_transport() {
+                0
+            } else {
+                INITIAL_CREDIT
+            },
             payload: serde_json::to_vec(&accepted.welcome)?,
         })
         .await?;
@@ -877,12 +878,9 @@ pub async fn dial(
     route_ticket: &str,
     hello: &genehub_proto::PeerHello,
 ) -> std::result::Result<FabricLink, DialError> {
-    let endpoint_url = transport_flow_url(url)
-        .map_err(|error| DialError::Protocol(format!("{error:#}")))?;
-    let socket = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        ws::connect(&endpoint_url, socket_config()),
-    )
+    let endpoint_url =
+        transport_flow_url(url).map_err(|error| DialError::Protocol(format!("{error:#}")))?;
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
         .await
         .map_err(|_| DialError::Unavailable("the relay did not answer in time".into()))?
         .map_err(dial_error)?;

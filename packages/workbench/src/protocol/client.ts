@@ -22,6 +22,7 @@ import {
   WebSocketRecordCarrier,
   binaryMessage,
   collectBody,
+  collectBodyExact,
   openRtcDataLink,
   preparePeerHandshake,
   type DataStream,
@@ -40,6 +41,8 @@ import {
 export { WEB_PROTOCOL_VERSION } from "./codec";
 export const MAX_RPC_BODY_BYTES = 2_900_000;
 const MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
+const PREVIEW_HEAD_TIMEOUT_MS = 60_000;
+const PREVIEW_STALL_TIMEOUT_MS = 60_000;
 const MAX_EVENT_BYTES = 3 * 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -470,11 +473,17 @@ export class Client {
         diagnosticId: requestId,
       },
       bodyLength: 0,
-      timeoutMs: 60_000,
     });
     const operation = (async () => {
-      await stream.finish();
-      const head = await stream.responseHead;
+      const head = await withTimeout(
+        (async () => {
+          await stream.finish();
+          return stream.responseHead;
+        })(),
+        PREVIEW_HEAD_TIMEOUT_MS,
+        "asset preview response head timed out",
+        () => stream.reset(DataReset.Timeout),
+      );
       if (head.status !== 200) {
         const metadata = asRecord(head.metadata);
         throw new AssetPreviewError_(
@@ -493,7 +502,11 @@ export class Client {
         throw new AssetPreviewError_("tooLarge", 413, head.bodyLength);
       }
       const metadata = previewMetadata(head.metadata);
-      const bytes = await collectBody(stream.body(), MAX_PREVIEW_BYTES);
+      const bytes = await collectBodyExact(stream.body(), head.bodyLength, MAX_PREVIEW_BYTES, {
+        stallTimeoutMs: PREVIEW_STALL_TIMEOUT_MS,
+        onStall: () => stream.reset(DataReset.Timeout),
+        stallError: () => new ClientRequestTimeoutError("asset preview stalled"),
+      });
       if (
         bytes.byteLength !== head.bodyLength ||
         metadata.sourceBytes !== bytes.byteLength
@@ -503,9 +516,7 @@ export class Client {
       return { metadata, bytes };
     })();
     try {
-      const result = await withTimeout(operation, 60_000, "asset preview timed out", () =>
-        stream.reset(DataReset.Timeout),
-      );
+      const result = await operation;
       this.diagnostic("operation", {
         operation: "asset.preview",
         requestId,
