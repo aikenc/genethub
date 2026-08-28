@@ -594,6 +594,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     name: name.to_string(),
                     status: ToolStatus::Pending,
                     detail: detail_from_call(name, &arguments),
+                    images: vec![],
                 },
             });
         }
@@ -606,6 +607,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     delta: ItemDelta::ToolStatus {
                         status: ToolStatus::Running,
                         detail: None,
+                        images: vec![],
                     },
                 });
             }
@@ -637,6 +639,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     name: name.clone(),
                     status,
                     detail: detail_from_result(&name, &arguments, result, is_error),
+                    images: vec![],
                 },
             });
         }

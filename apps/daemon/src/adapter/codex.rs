@@ -83,7 +83,7 @@ use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, TodoEntry,
-    TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    TodoStatus, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -2163,25 +2163,54 @@ fn item_frame(
                     .and_then(Value::as_i64)
                     .map(|code| code as i32),
             },
+            images: vec![],
         }),
         "fileChange" => emit(TimelineItem::ToolCall {
             id,
             name: "Edit".into(),
             status: tool_status(item, settled),
             detail: edit_detail(item),
+            images: vec![],
         }),
         "mcpToolCall" => {
             let tool = text_of("tool");
             let server = text_of("server");
+            let name = if server.is_empty() {
+                tool
+            } else {
+                format!("{server}.{tool}")
+            };
+            let images = mcp_result_images(item, &name);
             emit(TimelineItem::ToolCall {
                 id,
-                name: if server.is_empty() {
-                    tool
-                } else {
-                    format!("{server}.{tool}")
-                },
+                name,
                 status: tool_status(item, settled),
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
+                images,
+            });
+        }
+        // The agent opened a local image. Only the path crosses the wire — the
+        // daemon reads the workspace file for the thumbnail, so the row stays
+        // a path reference rather than a blob.
+        "imageView" => {
+            let path = text_of("path");
+            emit(TimelineItem::ToolCall {
+                id,
+                name: "View image".into(),
+                status: tool_status(item, settled),
+                detail: ToolCallDetail::Overview {
+                    tool_kind: ToolKind::Read,
+                    overview: path.clone(),
+                    input: path.clone(),
+                    output: String::new(),
+                },
+                images: vec![ToolImage {
+                    alt: format!("View image: {path}"),
+                    mime: crate::session::images::mime_from_path(&path),
+                    data_base64: None,
+                    thumb: None,
+                    path: Some(path),
+                }],
             });
         }
         "webSearch" => emit(TimelineItem::ToolCall {
@@ -2193,6 +2222,7 @@ fn item_frame(
                 // It reports what it searched for, not what it found.
                 matches: Vec::new(),
             },
+            images: vec![],
         }),
         // A sub-agent this turn dispatched. The card says who was asked and
         // what for; its own steps arrive on a thread of their own, which is not
@@ -2207,6 +2237,7 @@ fn item_frame(
                 prompt: text_of("prompt"),
                 items: Vec::new(),
             },
+            images: vec![],
         }),
         "subAgentActivity" => {
             let path = text_of("agentPath");
@@ -2226,6 +2257,7 @@ fn item_frame(
                     _ => ToolStatus::Running,
                 },
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
+                images: vec![],
             });
         }
         "contextCompaction" => {
@@ -2256,6 +2288,7 @@ fn item_frame(
             name: other.to_string(),
             status: tool_status(item, settled),
             detail: ToolCallDetail::Unknown { raw: item.clone() },
+            images: vec![],
         }),
     }
 }
@@ -2379,6 +2412,35 @@ fn plan(params: &Value, state: &mut TurnState, events: &broadcast::Sender<Sessio
         turn_id,
         item: TimelineItem::Todo { id, items },
     });
+}
+
+/// MCP tool results carry content blocks; the image ones would otherwise be
+/// dropped by the text-only detail path. They are produced bytes, never
+/// workspace reads, so no source path is attached.
+fn mcp_result_images(item: &Value, name: &str) -> Vec<ToolImage> {
+    item.get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+                .filter_map(|block| {
+                    Some(ToolImage {
+                        alt: name.to_string(),
+                        mime: block
+                            .get("mimeType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_string(),
+                        data_base64: Some(block.get("data").and_then(Value::as_str)?.to_string()),
+                        thumb: None,
+                        path: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -3492,5 +3554,22 @@ mod tests {
         assert_eq!(decode_base64("aGk=").expect("decodes"), b"hi");
         assert_eq!(decode_base64("YQ==").expect("decodes"), b"a");
         assert!(decode_base64("!!!").is_err());
+    }
+
+    #[test]
+    fn mcp_image_content_becomes_produced_tool_images() {
+        let item = json!({
+            "result": {"content": [
+                {"type": "text", "text": "ok"},
+                {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+            ]},
+        });
+        let images = mcp_result_images(&item, "shot.screenshot");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].alt, "shot.screenshot");
+        assert_eq!(images[0].mime, "image/png");
+        assert!(images[0].path.is_none());
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
+        assert!(mcp_result_images(&json!({"result": {"content": []}}), "t").is_empty());
     }
 }

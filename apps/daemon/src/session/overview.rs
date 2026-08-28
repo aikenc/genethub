@@ -126,13 +126,19 @@ pub fn condense_event(event: &SessionEvent) -> SessionEvent {
         SessionEvent::ItemDelta {
             turn_id,
             item_id,
-            delta: ItemDelta::ToolStatus { status, detail },
+            delta:
+                ItemDelta::ToolStatus {
+                    status,
+                    detail,
+                    images,
+                },
         } => SessionEvent::ItemDelta {
             turn_id: turn_id.clone(),
             item_id: item_id.clone(),
             delta: ItemDelta::ToolStatus {
                 status: *status,
                 detail: detail.as_ref().map(|detail| condense_detail(detail, None)),
+                images: images.clone(),
             },
         },
         other => other.clone(),
@@ -151,11 +157,13 @@ pub fn condense_item(item: &TimelineItem) -> TimelineItem {
             name,
             status,
             detail,
+            images,
         } => TimelineItem::ToolCall {
             id: id.clone(),
             name: shorten(name, OVERVIEW_CHARS),
             status: *status,
             detail: condense_detail(detail, Some(name)),
+            images: images.clone(),
         },
         other => other.clone(),
     }
@@ -369,6 +377,7 @@ mod tests {
                 output: "thousands of lines\n".repeat(100),
                 exit_code: Some(3),
             },
+            images: vec![],
         };
         match condense_item(&item) {
             TimelineItem::ToolCall { detail, .. } => {
@@ -496,6 +505,7 @@ mod tests {
                     output: "a wall of compiler output".into(),
                     exit_code: Some(0),
                 }),
+                images: vec![],
             },
         };
         match condense_event(&delta) {

@@ -1,6 +1,7 @@
 pub mod artifact_links;
 mod artifacts;
 mod context_seed;
+pub mod images;
 pub mod manager;
 pub mod overview;
 pub mod rounds;

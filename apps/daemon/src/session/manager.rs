@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
+    Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
     HistoryCoverage, ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer,
     RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
@@ -28,6 +28,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use super::context_seed::{
     build_context_seed, build_portable_context_seed, prompt_with_seed, seed_token_budget,
 };
+use super::images;
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
@@ -552,6 +553,18 @@ impl SessionManager {
             coverage.reason =
                 Some("the portable fork retained a bounded recent visible-history window".into());
         }
+        // Thumbnails and blob references cross; payloads never do. A produced
+        // image's original stays in the source session's blob layer and is
+        // drilled into through its ref while the source remains reachable.
+        let refs = source.blob_refs.lock().await;
+        let mut blob_appendix: Vec<BlobOverview> = selected
+            .iter()
+            .flat_map(rounds::blob_overviews)
+            .collect();
+        for row in &mut blob_appendix {
+            row.blob = refs.get(&row.item_id).cloned();
+        }
+        drop(refs);
         Ok(ForkTransfer {
             source_session_id: session_id.to_string(),
             source_turn_id: turn_id.to_string(),
@@ -560,6 +573,7 @@ impl SessionManager {
             title: meta.title.clone(),
             coverage,
             items: selected,
+            blob_appendix,
         })
     }
 
@@ -567,11 +581,12 @@ impl SessionManager {
         &self,
         workspace_id: &str,
         cwd: PathBuf,
-        transfer: ForkTransfer,
+        mut transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
         source_accessible: bool,
     ) -> Result<SessionSummary> {
+        let blob_appendix = std::mem::take(&mut transfer.blob_appendix);
         if target.workspace_id.as_deref() != Some(workspace_id) {
             anyhow::bail!("the fork target workspace does not match the validated workspace");
         }
@@ -682,6 +697,10 @@ impl SessionManager {
             self.store
                 .append_chat_items(workspace_id, &meta.id, &items)?;
             self.store.save_seed(workspace_id, &meta.id, &built.seed)?;
+            if !blob_appendix.is_empty() {
+                self.store
+                    .save_fork_appendix(workspace_id, &meta.id, &blob_appendix)?;
+            }
             Ok(())
         };
         if let Err(error) = write() {
@@ -3144,6 +3163,57 @@ async fn pump_events(
         let tool_progress =
             token_usage::record_tool_output(&event, &mut live_usage, &mut counted_tools);
 
+        // Shed tool-result images before anything persists, condenses or
+        // publishes the event: thumbnails are generated here, produced-image
+        // bytes go to the blob writer, and `data_base64` travels no further.
+        {
+            let images = match &mut event {
+                SessionEvent::Item {
+                    item: TimelineItem::ToolCall { id, images, .. },
+                    ..
+                } if images.iter().any(|image| image.data_base64.is_some()) => {
+                    Some((id.clone(), images))
+                }
+                SessionEvent::ItemDelta {
+                    item_id,
+                    delta: ItemDelta::ToolStatus { images, .. },
+                    ..
+                } if images.iter().any(|image| image.data_base64.is_some()) => {
+                    Some((item_id.clone(), images))
+                }
+                _ => None,
+            };
+            if let Some((item_id, images)) = images {
+                let cwd = live.meta.lock().await.cwd.clone();
+                let workspace_root = store
+                    .workspace_root(&workspace_id)
+                    .unwrap_or_else(|_| cwd.clone());
+                let mut taken = std::mem::take(images);
+                let shed_id = item_id.clone();
+                let shed_cwd = cwd.clone();
+                let shed_root = workspace_root.clone();
+                let shed = crate::blocking::run(move || {
+                    let puts = images::shed_tool_images(&shed_id, &mut taken, &shed_cwd, &shed_root);
+                    (taken, puts)
+                })
+                .await;
+                match shed {
+                    Ok((shed_images, puts)) => {
+                        *images = shed_images;
+                        for put in puts {
+                            let _ = blob_sender.send(BlobWrite::Put {
+                                item_id: put.item_id,
+                                value: put.value,
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("could not shed tool images for {item_id}: {error}")
+                    }
+                }
+            }
+        }
+
         match &event {
             SessionEvent::TurnStarted { .. } => {
                 diagnostics.record("agent", "turn", "started", None)
@@ -3209,19 +3279,28 @@ async fn pump_events(
             }
             SessionEvent::ItemDelta {
                 item_id,
-                delta: ItemDelta::ToolStatus { status, detail },
+                delta:
+                    ItemDelta::ToolStatus {
+                        status,
+                        detail,
+                        images,
+                    },
                 ..
             } => {
                 if let Some(item) = raw_tools.get_mut(item_id) {
                     if let TimelineItem::ToolCall {
                         status: raw_status,
                         detail: raw_detail,
+                        images: raw_images,
                         ..
                     } = item
                     {
                         *raw_status = *status;
                         if let Some(detail) = detail {
                             *raw_detail = detail.clone();
+                        }
+                        if !images.is_empty() {
+                            *raw_images = images.clone();
                         }
                     }
                     preserve_tool_blob(&blob_sender, item);
@@ -3544,16 +3623,24 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 ItemDelta::Text { delta } => {
                     item.append_text(delta);
                 }
-                ItemDelta::ToolStatus { status, detail } => {
+                ItemDelta::ToolStatus {
+                    status,
+                    detail,
+                    images,
+                } => {
                     if let TimelineItem::ToolCall {
                         status: current,
                         detail: current_detail,
+                        images: current_images,
                         ..
                     } = item
                     {
                         *current = *status;
                         if let Some(detail) = detail {
                             *current_detail = detail.clone();
+                        }
+                        if !images.is_empty() {
+                            *current_images = images.clone();
                         }
                     }
                 }
@@ -4189,6 +4276,134 @@ mod tests {
                 },
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn a_fork_carries_thumbnails_and_blob_refs_but_never_payloads() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = SessionManager::new(
+            test_store(source_dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let summary = source
+            .create(
+                "w1",
+                source_dir.path().to_path_buf(),
+                "source",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let live = source.live(&summary.id).await.unwrap();
+        let mut items = completed_turn(None);
+        items.insert(
+            1,
+            TimelineItem::ToolCall {
+                id: "tool-1".into(),
+                name: "Read".into(),
+                status: ToolStatus::Ok,
+                detail: ToolCallDetail::Overview {
+                    tool_kind: genehub_proto::ToolKind::Read,
+                    overview: "assets/logo.png".into(),
+                    input: "assets/logo.png".into(),
+                    output: String::new(),
+                },
+                images: vec![genehub_proto::ToolImage {
+                    alt: "Read: assets/logo.png".into(),
+                    mime: "image/png".into(),
+                    data_base64: None,
+                    thumb: Some(genehub_proto::ImageThumb {
+                        mime: "image/jpeg".into(),
+                        data_base64: "dGh1bWI=".into(),
+                        width: 64,
+                        height: 32,
+                    }),
+                    path: Some("assets/logo.png".into()),
+                }],
+            },
+        );
+        *live.items.lock().await = items;
+        let blob_ref = BlobRef {
+            id: "ab".repeat(32),
+            bytes: 48,
+            at: "ab:0:48".into(),
+        };
+        live.blob_refs
+            .lock()
+            .await
+            .insert("tool-1".to_string(), blob_ref.clone());
+
+        let transfer = source
+            .fork_export(&summary.id, "source-turn")
+            .await
+            .unwrap();
+        let tool_row = transfer
+            .blob_appendix
+            .iter()
+            .find(|row| row.item_id == "tool-1")
+            .expect("the tool call has an appendix row");
+        assert_eq!(tool_row.blob.as_ref(), Some(&blob_ref));
+        let image_row = transfer
+            .blob_appendix
+            .iter()
+            .find(|row| row.item_id == "tool-1:img:0")
+            .expect("the image has an appendix row");
+        assert_eq!(image_row.kind, genehub_proto::BlobKind::Image);
+        assert_eq!(image_row.path.as_deref(), Some("assets/logo.png"));
+        assert_eq!(
+            image_row.thumb.as_ref().map(|thumb| thumb.data_base64.as_str()),
+            Some("dGh1bWI=")
+        );
+        // No payload crosses: nothing in the appendix or the items carries bytes.
+        let encoded = serde_json::to_vec(&transfer).unwrap();
+        assert!(!encoded.windows(9).any(|window| window == b"aW1hZ2U".as_slice()));
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target_homes = crate::session::WorkspaceHomes::default();
+        target_homes.attach("target-workspace", target_dir.path());
+        let target = SessionManager::new(
+            Store::new(target_homes),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "target",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let forked = target
+            .fork_import(
+                "target-workspace",
+                target_dir.path().to_path_buf(),
+                transfer,
+                ForkTarget {
+                    agent_id: "target".into(),
+                    workspace_id: Some("target-workspace".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                },
+                &ProviderMap::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        let persisted = target
+            .store
+            .load_fork_appendix("target-workspace", &forked.id)
+            .unwrap();
+        // One row for the tool call, one for its image.
+        assert_eq!(persisted.len(), 2);
+        assert!(persisted.iter().any(|row| row.item_id == "tool-1:img:0"));
     }
 
     #[tokio::test]
@@ -4925,6 +5140,7 @@ mod tests {
             detail: ToolCallDetail::Unknown {
                 raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
             },
+            images: vec![],
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge_tool);
         assert_eq!((omitted, altered), (0, 1));
@@ -5404,6 +5620,7 @@ mod tests {
                         output: String::new(),
                         exit_code: None,
                     },
+                    images: vec![],
                 },
             },
         )
@@ -5416,6 +5633,7 @@ mod tests {
                 delta: ItemDelta::ToolStatus {
                     status: ToolStatus::Running,
                     detail: None,
+                    images: vec![],
                 },
             },
         )
@@ -6059,6 +6277,7 @@ mod tests {
                         output,
                         exit_code: Some(0),
                     },
+                    images: vec![],
                 },
             },
             SessionEvent::TurnCompleted {
@@ -6617,6 +6836,7 @@ mod tests {
                 output: String::new(),
                 exit_code: Some(0),
             },
+            images: vec![],
         }
     }
 
@@ -6812,6 +7032,7 @@ mod tests {
                         content: "raw source content".repeat(100),
                         truncated: false,
                     },
+                    images: vec![],
                 },
             })
             .unwrap();

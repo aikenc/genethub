@@ -1,13 +1,17 @@
-import type { ToolCallDetail, ToolKind, ToolStatus } from "@genehub/proto";
+import type { ToolCallDetail, ToolImage, ToolKind, ToolStatus } from "@genehub/proto";
 import { useState } from "react";
+
+import { ImageThumbStrip } from "./ImageStrip";
 
 export function ToolCallView({
   name,
   detail,
+  images = [],
 }: {
   name: string;
   status: ToolStatus;
   detail: ToolCallDetail;
+  images?: ToolImage[];
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -36,6 +40,18 @@ export function ToolCallView({
           {open ? "收起输出" : "查看输出"}
         </button>
       </header>
+      {images.length > 0 ? (
+        <div className="border-t border-line px-3 pb-2">
+          <ImageThumbStrip
+            images={images.map((image, index) => ({
+              id: `${name}-img-${index}`,
+              alt: image.alt,
+              thumb: image.thumb,
+              path: image.path,
+            }))}
+          />
+        </div>
+      ) : null}
       {open ? (
         <div className="min-w-0 border-t border-line px-3 py-2 text-[13px]">
           <div className="mb-1 flex items-center justify-between">

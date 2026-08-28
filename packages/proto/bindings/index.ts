@@ -49,12 +49,23 @@ sessionId: string, pid: number, parentPid: number,
  */
 command: string, runningForSeconds: number, };
 
-export type BlobKind = "reasoning" | "toolCall";
+export type BlobKind = "reasoning" | "toolCall" | "image";
 
 /**
  * One compact row in a batch. Full source content is fetched by `blob.get`.
  */
-export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, };
+export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, 
+/**
+ * Present only on `Image` rows.
+ */
+thumb?: ImageThumb, 
+/**
+ * `Image` rows only: workspace-relative path when the image is a file the
+ * agent read. Clicking opens it through `asset.preview`; the bytes are
+ * never duplicated into the blob layer. Absent for agent-produced images
+ * (those carry `blob` instead) and for paths outside the workspace.
+ */
+path?: string, };
 
 export type BlobPayload = { id: string, value: JsonValue, };
 
@@ -277,7 +288,14 @@ workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, };
  * different machine. The destination daemon applies its own Agent catalog,
  * context budget and workspace validation; clients cannot supply a seed.
  */
-export type ForkTransfer = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, sourceRoundId?: string, title?: string, items: Array<TimelineItem>, coverage: HistoryCoverage, };
+export type ForkTransfer = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, sourceRoundId?: string, title?: string, items: Array<TimelineItem>, coverage: HistoryCoverage, 
+/**
+ * Batch overview rows (tool calls, reasoning, images) covering the
+ * exported history. Thumbnails ride inline; original payloads never do —
+ * `blob` refs resolve against `source_session_id` while that session is
+ * reachable, and image `path`s only while the source workspace is.
+ */
+blobAppendix: Array<BlobOverview>, };
 
 export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 
@@ -398,6 +416,22 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
 fingerprint: string, };
 
 /**
+ * A downscaled stand-in for an image row, inlined into the batch overview so
+ * the strip renders with zero extra round trips. Daemon-generated at
+ * extraction time: 64px wide for images the agent read (workspace files),
+ * 128px for images it produced.
+ */
+export type ImageThumb = { 
+/**
+ * Encoded thumbnail mime: `image/jpeg` or `image/webp`.
+ */
+mime: string, dataBase64: string, 
+/**
+ * Original dimensions, so layout can reserve the aspect ratio box.
+ */
+width: number, height: number, };
+
+/**
  * Whether an imported conversation can keep talking through its original
  * Agent thread, or is a durable GeneHub transcript only.
  */
@@ -451,7 +485,13 @@ detail: string, };
  * Deltas are transport-only: they are never written to the session log, which
  * keeps file size proportional to final content rather than to token count.
  */
-export type ItemDelta = { "kind": "text", delta: string, } | { "kind": "toolStatus", status: ToolStatus, detail?: ToolCallDetail, };
+export type ItemDelta = { "kind": "text", delta: string, } | { "kind": "toolStatus", status: ToolStatus, detail?: ToolCallDetail, 
+/**
+ * Images the tool result carried. Adapters fill this when the result
+ * arrives (which is delta time, not item time); the daemon sheds it
+ * like `TimelineItem::ToolCall.images`.
+ */
+images: Array<ToolImage>, };
 
 export type LogEntry = { name: string, 
 /**
@@ -1165,7 +1205,11 @@ export type SupportDiagnostics = { version: number, capturedAt: string, daemonVe
  * `id` is assigned by the daemon, not the agent, so that deltas can address an
  * item regardless of whether the underlying agent has a concept of message ids.
  */
-export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, } | { "type": "reasoning", id: string, text: string, } | { "type": "toolCall", id: string, name: string, status: ToolStatus, detail: ToolCallDetail, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
+export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, } | { "type": "reasoning", id: string, text: string, } | { "type": "toolCall", id: string, name: string, status: ToolStatus, detail: ToolCallDetail, 
+/**
+ * Images this call's result carried, in shed form (see `ToolImage`).
+ */
+images: Array<ToolImage>, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
 
 export type TodoEntry = { text: string, status: TodoStatus, };
 
@@ -1179,6 +1223,24 @@ export type TodoStatus = "pending" | "inProgress" | "completed" | "cancelled";
  * coupling point between every adapter we ever add.
  */
 export type ToolCallDetail = { "kind": "overview", toolKind: ToolKind, overview: string, input: string, output: string, } | { "kind": "shell", command: string, output: string, exitCode?: number, } | { "kind": "read", path: string, content: string, truncated: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "write", path: string, content: string, } | { "kind": "search", query: string, matches: Array<SearchMatch>, } | { "kind": "fetch", url: string, summary: string, } | { "kind": "plan", markdown: string, } | { "kind": "subAgent", agent: string, prompt: string, items: Array<TimelineItem>, } | { "kind": "unknown", raw: JsonValue, };
+
+/**
+ * An image the agent read or produced, extracted from a tool result.
+ *
+ * `data_base64` is adapter→daemon transport only: the daemon strips it at
+ * intake — thumbnails are generated, produced images move to the blob layer,
+ * read images keep only their workspace path — before the item is persisted,
+ * condensed or published. It must never reach disk or clients.
+ */
+export type ToolImage = { 
+/**
+ * Source description, e.g. `Read: assets/logo.png` or a tool name.
+ */
+alt: string, mime: string, dataBase64?: string, thumb?: ImageThumb, 
+/**
+ * Workspace-relative path when the image is a file the agent read.
+ */
+path?: string, };
 
 /**
  * A stable semantic category shared by every Agent adapter.

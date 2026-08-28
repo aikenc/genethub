@@ -45,13 +45,14 @@ describe("the session timeline", () => {
       name: "bash",
       status: "pending",
       detail: { kind: "shell", command: "ls", output: "", exitCode: undefined },
+      images: [],
     };
 
     const running = apply(apply(emptyTimeline(), { type: "item", turnId: "t1", item: call }), {
       type: "itemDelta",
       turnId: "t1",
       itemId: "c1",
-      delta: { kind: "toolStatus", status: "running" },
+      delta: { kind: "toolStatus", status: "running", images: [] },
     });
 
     expect(running.items).toHaveLength(1);
@@ -84,6 +85,7 @@ describe("the session timeline", () => {
       name: "bash",
       status: "running",
       detail: { kind: "shell", command: "ls", output: "", exitCode: undefined },
+      images: [],
     };
     const done = apply(apply(emptyTimeline(), { type: "item", turnId: "t1", item: call }), {
       type: "itemDelta",
@@ -93,6 +95,7 @@ describe("the session timeline", () => {
         kind: "toolStatus",
         status: "ok",
         detail: { kind: "shell", command: "ls", output: "a\nb", exitCode: 0 },
+        images: [],
       },
     });
 

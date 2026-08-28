@@ -1366,6 +1366,7 @@ mod tests {
                         retrieval: genehub_proto::RetrievalCapability::Genehub,
                         reason: None,
                     },
+                    blob_appendix: vec![],
                 },
                 target,
             }),

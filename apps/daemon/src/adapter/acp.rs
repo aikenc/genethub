@@ -18,7 +18,8 @@ use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
+    Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -2010,15 +2011,17 @@ fn translate_update(
                 Some("failed") => ToolStatus::Error,
                 _ => ToolStatus::Pending,
             };
+            let name = update
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string();
             emit(SessionEvent::Item {
                 turn_id,
                 item: TimelineItem::ToolCall {
                     id: id.to_string(),
-                    name: update
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("tool")
-                        .to_string(),
+                    images: images_from_update(update, &name),
+                    name,
                     status,
                     detail: detail_from_update(update),
                 },
@@ -2089,6 +2092,55 @@ fn emit_session_title(update: &Value, events: &broadcast::Sender<SessionEvent>) 
     }
     let title: String = title.chars().take(120).collect();
     let _ = events.send(SessionEvent::TitleChanged { title });
+}
+
+/// ACP tool-call content blocks can be images (`{type:"image", data,
+/// mimeType}`, possibly wrapped in a `{type:"content", content:…}` block). A
+/// `read`-kind call's first location is the source path; everything else is
+/// treated as produced bytes.
+fn images_from_update(update: &Value, name: &str) -> Vec<ToolImage> {
+    let read_path = (update.get("kind").and_then(Value::as_str) == Some("read"))
+        .then(|| {
+            update
+                .get("locations")
+                .and_then(Value::as_array)
+                .and_then(|locations| locations.first())
+                .and_then(|location| location.get("path"))
+                .and_then(Value::as_str)
+        })
+        .flatten();
+    update
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    let image = match block.get("type").and_then(Value::as_str) {
+                        Some("image") => Some(block),
+                        Some("content") => block
+                            .get("content")
+                            .filter(|c| c.get("type").and_then(Value::as_str) == Some("image")),
+                        _ => None,
+                    }?;
+                    Some(ToolImage {
+                        alt: match read_path {
+                            Some(path) => format!("{name}: {path}"),
+                            None => name.to_string(),
+                        },
+                        mime: image
+                            .get("mimeType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_string(),
+                        data_base64: Some(image.get("data").and_then(Value::as_str)?.to_string()),
+                        thumb: None,
+                        path: read_path.map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// ACP describes tools by `kind` plus a list of locations and content blocks.
@@ -2923,5 +2975,29 @@ mod tests {
             Some(true)
         );
         assert_eq!(login_from_status_output(b"usage: cursor-agent", b""), None);
+    }
+
+    #[test]
+    fn acp_image_blocks_become_tool_images() {
+        let update = json!({
+            "kind": "read",
+            "locations": [{"path": "src/cat.png"}],
+            "content": [
+                {"type": "content", "content": {"type": "image", "data": "aGk=", "mimeType": "image/png"}},
+            ],
+        });
+        let images = images_from_update(&update, "Read");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].path.as_deref(), Some("src/cat.png"));
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
+
+        let produced = json!({
+            "kind": "other",
+            "content": [{"type": "image", "data": "eWVz", "mimeType": "image/webp"}],
+        });
+        let images = images_from_update(&produced, "screenshot");
+        assert_eq!(images.len(), 1);
+        assert!(images[0].path.is_none());
+        assert_eq!(images[0].mime, "image/webp");
     }
 }

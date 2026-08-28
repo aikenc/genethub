@@ -667,6 +667,12 @@ impl Store {
         self.raw_session_dir(workspace_id, session_id)
     }
 
+    /// Where the workspace itself lives, for mapping absolute tool paths back
+    /// onto workspace-relative ones.
+    pub fn workspace_root(&self, workspace_id: &str) -> Result<PathBuf> {
+        self.homes.root(workspace_id)
+    }
+
     fn raw_session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
     }
@@ -707,6 +713,51 @@ impl Store {
         Ok(self
             .session_dir(workspace_id, session_id)?
             .join("seed.json"))
+    }
+
+    /// The blob overview rows a fork brought with it: thumbnails and blob
+    /// references, never payloads. Persisted as one JSON value per line so the
+    /// forked session keeps its picture strip and — while the source session
+    /// stays reachable — the refs needed to drill into originals.
+    pub fn save_fork_appendix(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        rows: &[genehub_proto::BlobOverview],
+    ) -> Result<()> {
+        let path = self
+            .session_dir(workspace_id, session_id)?
+            .join("fork-appendix.jsonl");
+        self.prepare_write(
+            workspace_id,
+            session_id,
+            path.parent().expect("fork-appendix.jsonl always has a parent"),
+        )?;
+        let mut encoded = Vec::new();
+        for row in rows {
+            encoded.extend_from_slice(&serde_json::to_vec(row)?);
+            encoded.push(b'\n');
+        }
+        crate::config::save_private(&path, &encoded)
+    }
+
+    pub fn load_fork_appendix(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<genehub_proto::BlobOverview>> {
+        let path = self
+            .session_dir(workspace_id, session_id)?
+            .join("fork-appendix.jsonl");
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::Deserializer::from_slice(&raw)
+            .into_iter::<genehub_proto::BlobOverview>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     fn chat_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
@@ -1297,6 +1348,8 @@ impl Store {
                             kind,
                             overview,
                             blob,
+                            thumb: None,
+                            path: None,
                         });
                 }
                 Err(error) => {

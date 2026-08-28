@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+use crate::domain::ImageThumb;
 use crate::event::TurnStats;
 
 /// A stable semantic category shared by every Agent adapter.
@@ -110,6 +111,31 @@ pub enum ToolStatus {
     Canceled,
 }
 
+/// An image the agent read or produced, extracted from a tool result.
+///
+/// `data_base64` is adapter→daemon transport only: the daemon strips it at
+/// intake — thumbnails are generated, produced images move to the blob layer,
+/// read images keep only their workspace path — before the item is persisted,
+/// condensed or published. It must never reach disk or clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ToolImage {
+    /// Source description, e.g. `Read: assets/logo.png` or a tool name.
+    pub alt: String,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub data_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thumb: Option<ImageThumb>,
+    /// Workspace-relative path when the image is a file the agent read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -167,6 +193,9 @@ pub enum TimelineItem {
         name: String,
         status: ToolStatus,
         detail: ToolCallDetail,
+        /// Images this call's result carried, in shed form (see `ToolImage`).
+        #[serde(default)]
+        images: Vec<ToolImage>,
     },
     #[serde(rename_all = "camelCase")]
     Todo { id: String, items: Vec<TodoEntry> },

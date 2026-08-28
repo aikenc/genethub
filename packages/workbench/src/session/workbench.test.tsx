@@ -337,6 +337,112 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("正在加载…")).toBeInTheDocument();
   });
 
+  it("shows a batch's images as a strip: reads open the preview, produced ones expand", async () => {
+    const thumb = {
+      mime: "image/jpeg",
+      dataBase64: "dGh1bWI=",
+      width: 128,
+      height: 64,
+    };
+    const batch = { index: 0, firstItemId: "a1", blobCount: 2, text: "看图" };
+    const trunkSummary = { index: 0, firstItemId: "a1", blobCount: 2, title: "看图。", batches: [batch] };
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const layer: RoundLayer = {
+      round,
+      trunks: [trunkSummary],
+      expandedTrunk: {
+        summary: trunkSummary,
+        batches: [
+          {
+            summary: batch,
+            monologue: "",
+            blobs: [
+              {
+                itemId: "tool1:img:0",
+                kind: "image",
+                overview: "Read: assets/logo.png",
+                thumb,
+                path: "assets/logo.png",
+              },
+              {
+                itemId: "tool2:img:0",
+                kind: "image",
+                overview: "generate_image",
+                thumb,
+                blob: { id: "ef".repeat(12), bytes: 96, at: "ef:0:96" },
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const expanded = layer.expandedTrunk as RoundTrunk;
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "看看", attachments: [] },
+      }),
+      { rounds: [round], roundLayers: { r1: layer }, roundTrunks: { "r1:0": expanded } },
+    );
+    useWorkbench.setState({
+      activeWorkspaceId: "ws1",
+      workspaces: [
+        {
+          id: "ws1",
+          machineId: "dev1",
+          name: "repo",
+          root: "/repo",
+          folders: [{ path: "/repo", name: "repo" }],
+        } as never,
+      ],
+      client: { identity: { machineId: "dev1" } } as never,
+    });
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-batch")).getByRole("button"));
+
+    const strip = screen.getByTestId("image-thumb-strip");
+    const tiles = within(strip).getAllByTestId("image-thumb");
+    expect(tiles).toHaveLength(2);
+    // Every thumbnail renders through <img> — never inline markup — so an SVG
+    // payload stays inert.
+    expect(within(strip).getAllByRole("img")[0]).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,dGh1bWI=",
+    );
+
+    // A workspace read opens the preview float on the original file.
+    await userEvent.click(tiles[0]!);
+    expect(useWorkbench.getState().previewFloat).toMatchObject({
+      deviceHandle: "dev1",
+      workspaceHandle: "ws1",
+      path: "assets/logo.png",
+    });
+    expect(screen.queryByTestId("image-expanded")).not.toBeInTheDocument();
+
+    // A produced image expands in place and asks for its blob; until the
+    // payload lands, the thumbnail stands in.
+    const loadBlob = vi.fn();
+    useWorkbench.setState({ loadBlob });
+    await userEvent.click(tiles[1]!);
+    expect(loadBlob).toHaveBeenCalledWith({ id: "ef".repeat(12), bytes: 96, at: "ef:0:96" });
+    const expandedImage = screen.getByTestId("image-expanded");
+    expect(within(expandedImage).getByRole("img")).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,dGh1bWI=",
+    );
+    await userEvent.click(tiles[1]!);
+    expect(screen.queryByTestId("image-expanded")).not.toBeInTheDocument();
+  });
+
   it("renders reasoning as text, tools as YAML, and edits as a diff", async () => {
     const round = {
       roundId: "r1",
@@ -1926,6 +2032,7 @@ describe("a whole turn as the timeline sees it", () => {
       name: "write",
       status: "pending",
       detail: { kind: "write", path: "hello.txt", content: "hi" },
+      images: [],
     };
 
     let state = emptyTimeline();
@@ -1941,7 +2048,7 @@ describe("a whole turn as the timeline sees it", () => {
         type: "itemDelta" as const,
         turnId: "t1",
         itemId: "c1",
-        delta: { kind: "toolStatus" as const, status: "ok" as const },
+        delta: { kind: "toolStatus" as const, status: "ok" as const, images: [] },
       },
       {
         type: "item" as const,

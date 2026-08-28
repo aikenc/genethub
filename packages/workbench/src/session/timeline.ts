@@ -305,6 +305,9 @@ function withDelta(item: TimelineItem, delta: ItemDeltaOf): TimelineItem {
     // A status delta may carry a fuller detail (output so far, an exit code).
     // When it does not, the detail we already have is still the best we know.
     detail: delta.detail ?? item.detail,
+    // Tool-result images arrive with the settling delta; an empty list means
+    // "nothing new", never "clear".
+    images: delta.images.length > 0 ? delta.images : item.images,
   };
 }
 
