@@ -210,7 +210,7 @@ describe("re-probing agents after they may have been installed", () => {
     probe: { state: "ready" as const },
     catalog: {
       ...cursorMissing.catalog,
-      models: [{ id: "auto", label: "Auto", contextWindow: null, reasoning: false, efforts: [] }],
+      models: [{ id: "auto", label: "Auto", contextWindow: undefined, reasoning: false, efforts: [] }],
       defaultModel: "auto",
     },
   } as AgentInfo;
@@ -243,7 +243,25 @@ describe("re-probing agents after they may have been installed", () => {
     const { client, fire, calls } = probingClient();
     useWorkbench.setState({ client, agents: [cursorMissing] });
     await useWorkbench.getState().selectSession("s1");
-    fire({ seq: 1, sessionId: "s1", event: { type: "turnCompleted" } });
+    fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "turnCompleted",
+        turnId: "t1",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 0,
+          compactionCount: 0,
+          outputRateEstimated: false,
+          costUsd: undefined,
+        },
+      },
+    });
     await vi.waitFor(() => {
       expect(useWorkbench.getState().agents[0]?.probe.state).toBe("ready");
     });
@@ -254,7 +272,25 @@ describe("re-probing agents after they may have been installed", () => {
     const { client, fire, calls } = probingClient();
     useWorkbench.setState({ client, agents: [cursorReady] });
     await useWorkbench.getState().selectSession("s1");
-    fire({ seq: 1, sessionId: "s1", event: { type: "turnCompleted" } });
+    fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "turnCompleted",
+        turnId: "t1",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 0,
+          compactionCount: 0,
+          outputRateEstimated: false,
+          costUsd: undefined,
+        },
+      },
+    });
     await Promise.resolve();
     expect(calls).not.toContain("agent.refresh");
   });
