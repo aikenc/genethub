@@ -64,18 +64,20 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
-    async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
-        // OpenCode owns its own credentials, so the model list comes from a
-        // running instance. Starting one just to fill a dropdown is too slow
-        // for the agent picker; the session reports its models once open.
+    async fn catalog(&self, providers: &ProviderMap) -> Catalog {
+        // OpenCode owns its credentials, while GeneHub owns the picker. Reuse
+        // the explicit provider/model ids already configured in GeneHub: this
+        // avoids probing a third-party process on the latency-sensitive
+        // `agent.list` path and keeps the adapter vendor-neutral.
+        let models = configured_models(providers);
+        let default_model = models.first().map(|model| model.id.clone());
         Catalog {
             runtime_axes: None,
             default_effort: None,
-            // OpenCode has its own commands over HTTP, which we do not read yet.
             commands: Vec::new(),
-            models: Vec::<ModelInfo>::new(),
+            models,
             modes: Vec::<ModeInfo>::new(),
-            default_model: None,
+            default_model,
             default_mode: None,
         }
     }
@@ -293,6 +295,43 @@ impl AgentAdapter for OpenCodeAdapter {
         server.stop().await;
         outcome
     }
+}
+
+fn configured_models(providers: &ProviderMap) -> Vec<ModelInfo> {
+    let mut models = Vec::new();
+    for (provider_id, provider) in providers {
+        let provider_short = provider
+            .short_label
+            .as_deref()
+            .unwrap_or(provider_id)
+            .chars()
+            .take(5)
+            .collect::<String>();
+        for model_id in &provider.models {
+            let id = format!("{provider_id}/{model_id}");
+            if models.iter().any(|model: &ModelInfo| model.id == id) {
+                continue;
+            }
+            models.push(ModelInfo {
+                label: format!(
+                    "{}@{provider_short}",
+                    provider
+                        .model_labels
+                        .get(model_id)
+                        .map(String::as_str)
+                        .unwrap_or(model_id)
+                        .chars()
+                        .take(12)
+                        .collect::<String>()
+                ),
+                id,
+                context_window: None,
+                reasoning: false,
+                efforts: Vec::new(),
+            });
+        }
+    }
+    models
 }
 
 struct OpenCodeImportServer {
@@ -1118,6 +1157,28 @@ mod tests {
     use genehub_proto::Attachment;
 
     use super::*;
+
+    #[test]
+    fn configured_provider_models_become_a_switchable_opencode_catalog() {
+        let providers = ProviderMap::from([(
+            "vendor".into(),
+            crate::config::ProviderConfig {
+                short_label: Some("vndr".into()),
+                models: vec!["max".into(), "flash".into()],
+                model_labels: [("max".into(), "model-max".into())].into(),
+                ..Default::default()
+            },
+        )]);
+        let models = configured_models(&providers);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["vendor/max", "vendor/flash"]
+        );
+        assert_eq!(models[0].label, "model-max@vndr");
+    }
 
     #[test]
     fn spawned_opencode_allows_tools_and_external_directories() {

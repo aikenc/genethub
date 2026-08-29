@@ -290,6 +290,12 @@ interface WorkbenchState {
   selectWorkspace(workspaceId: string): Promise<void>;
   /** Changes a workspace's display name without moving its folders. */
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
+  /** Moves an ordinary workspace in the explicit user-owned hierarchy. */
+  moveWorkspace(
+    workspaceId: string,
+    parentWorkspaceId: string | null,
+    beforeWorkspaceId?: string | null,
+  ): Promise<boolean>;
   /** Hides a workspace registration without deleting files or conversations. */
   removeWorkspace(workspaceId: string): Promise<void>;
   loadTree(path?: string): Promise<void>;
@@ -725,6 +731,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       activeSessionId: null,
       timeline: emptyTimeline(),
     }));
+    await refreshWorkspaces(client, set);
     await loadSessions(client, set);
     get().newSession(reply.data.id, null, { addressScope: "workspace" });
   },
@@ -746,9 +753,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }),
     );
     if (reply?.type !== "workspace") return;
-    set((state) => ({
-      workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
-    }));
+    await refreshWorkspaces(require_(get().client), set);
+  },
+
+  async moveWorkspace(workspaceId, parentWorkspaceId, beforeWorkspaceId = null) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "workspace.layoutMove",
+        payload: { workspaceId, parentWorkspaceId, beforeWorkspaceId },
+      }),
+    );
+    if (reply?.type !== "workspaces") return false;
+    set({ workspaces: reply.data });
+    return true;
   },
 
   async removeWorkspace(workspaceId) {
@@ -1340,13 +1357,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           continuesRound: null,
         },
       });
-      // The daemon publishes the user message before it answers this call, and
-      // replies and events share one socket in arrival order, so the real item
-      // is already here. This is the second of the two ways the placeholder
-      // goes away, and it costs nothing to keep both (`timeline.apply` has the
-      // other): a reply that never comes must not leave a bubble behind.
+      // A successful RPC only proves the daemon accepted the message. Fabric
+      // replies and timeline events can travel on different streams, so the
+      // durable user item may still be in flight when this resolves. Keep the
+      // placeholder until that item arrives; `timeline.apply` removes it at
+      // the exact point where there is something durable to render instead.
       patchTimeline(sessionId, set, (timeline) => ({
-        pending: null,
         status: timeline.status === "idle" ? "running" : timeline.status,
       }));
     } catch (error) {
@@ -1938,6 +1954,11 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
     const known = workspaces.data.some((entry) => entry.id === last?.workspaceId);
     set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
   }
+}
+
+async function refreshWorkspaces(client: Client, set: Setter): Promise<void> {
+  const reply = await client.call({ type: "workspace.list" });
+  if (reply?.type === "workspaces") set({ workspaces: reply.data });
 }
 
 /**

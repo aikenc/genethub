@@ -262,7 +262,7 @@ describe("a message that has been sent and not yet confirmed", () => {
     expect(useWorkbench.getState().timeline.pending).toBeNull();
   });
 
-  it("clears on the reply too, so a lost event cannot leave a bubble behind", async () => {
+  it("keeps the bubble after an RPC reply until Fabric delivers the durable echo", async () => {
     const { client, sends } = sendingClient();
     useWorkbench.setState({ client, activeSessionId: "s1" });
 
@@ -272,7 +272,7 @@ describe("a message that has been sent and not yet confirmed", () => {
     sends()[0]!.settle.resolve({ type: "ok" });
     await inFlight;
 
-    expect(useWorkbench.getState().timeline.pending).toBeNull();
+    expect(useWorkbench.getState().timeline.pending?.text).toBe("跑一下测试");
     expect(useWorkbench.getState().timeline.status).toBe("running");
   });
 
@@ -1459,7 +1459,7 @@ describe("returning after a disconnection", () => {
 });
 
 describe("renaming a workspace", () => {
-  it("uses the name returned by the machine", async () => {
+  it("refreshes the daemon projection so hierarchy fields are preserved", async () => {
     const workspace = {
       id: "w1",
       name: "project",
@@ -1468,16 +1468,79 @@ describe("renaming a workspace", () => {
       folders: [{ name: "project", root: "/tmp/project", rootHandle: "r_project" }],
     };
     const client = {
-      call: async (request: { type: string }) =>
-        request.type === "workspace.rename"
-          ? { type: "workspace", data: { ...workspace, name: "核心项目" } }
-          : undefined,
+      call: async (request: { type: string }) => {
+        if (request.type === "workspace.rename") {
+          return { type: "workspace", data: { ...workspace, name: "核心项目" } };
+        }
+        if (request.type === "workspace.list") {
+          return {
+            type: "workspaces",
+            data: [{ ...workspace, name: "核心项目", parentWorkspaceId: "w_parent" }],
+          };
+        }
+        return undefined;
+      },
     } as unknown as Client;
     useWorkbench.setState({ client, workspaces: [workspace] });
 
     await useWorkbench.getState().renameWorkspace("w1", "  核心项目  ");
 
     expect(useWorkbench.getState().workspaces[0]?.name).toBe("核心项目");
+    expect(useWorkbench.getState().workspaces[0]?.parentWorkspaceId).toBe("w_parent");
+  });
+});
+
+describe("moving a workspace", () => {
+  it("sends an explicit relationship and replaces the tree with the durable projection", async () => {
+    const calls: unknown[] = [];
+    const moved = {
+      id: "w_child",
+      name: "child",
+      root: "/tmp/child",
+      isGitRepo: false,
+      folders: [],
+      parentWorkspaceId: "w_parent",
+      layoutOrder: 0,
+      layoutManaged: false,
+    };
+    const client = {
+      call: async (request: unknown) => {
+        calls.push(request);
+        return { type: "workspaces", data: [moved] };
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+
+    const accepted = await useWorkbench
+      .getState()
+      .moveWorkspace("w_child", "w_parent", "w_before");
+
+    expect(calls).toEqual([
+      {
+        type: "workspace.layoutMove",
+        payload: {
+          workspaceId: "w_child",
+          parentWorkspaceId: "w_parent",
+          beforeWorkspaceId: "w_before",
+        },
+      },
+    ]);
+    expect(accepted).toBe(true);
+    expect(useWorkbench.getState().workspaces).toEqual([moved]);
+  });
+
+  it("reports a rejected move to its caller so the UI can preserve the transaction", async () => {
+    const client = {
+      call: async () => {
+        throw new Error("workspace layout cannot contain a cycle");
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+
+    const accepted = await useWorkbench.getState().moveWorkspace("parent", "child");
+
+    expect(accepted).toBe(false);
+    expect(useWorkbench.getState().notice).toContain("cannot contain a cycle");
   });
 });
 

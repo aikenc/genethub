@@ -159,6 +159,9 @@ mod tests {
                     root_handle: format!("h{index}"),
                 })
                 .collect(),
+            parent_workspace_id: None,
+            layout_order: Some(0),
+            layout_managed: Some(false),
             workspace_file: None,
         }
     }

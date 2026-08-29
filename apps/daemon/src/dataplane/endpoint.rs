@@ -1203,6 +1203,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::SpeechContextPreview { workspace_id, .. }
         | Request::SpeechFeedbackRecord { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
+        | Request::WorkspaceLayoutMove { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         _ => None,
     }

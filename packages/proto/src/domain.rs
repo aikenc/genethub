@@ -215,6 +215,22 @@ pub struct WorkspaceInfo {
     pub root: String,
     pub is_git_repo: bool,
     pub folders: Vec<WorkspaceFolderInfo>,
+    /// Explicit presentation parent. Ordinary relationships come from the
+    /// parent's `.genethub/workspace.json`; Agent Spaces derive it from their
+    /// durable PM binding. Paths never imply a parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_workspace_id: Option<String>,
+    /// Position among siblings. The daemon supplies a stable value even when
+    /// the workspace has no parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout_order: Option<u32>,
+    /// True for a PM-owned relationship that the user may inspect but not
+    /// reparent independently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub layout_managed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workspace_file: Option<String>,

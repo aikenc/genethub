@@ -692,7 +692,7 @@ workspaceId?: string, } } | { "type": "speech.runtime.probe" } | { "type": "spee
  * Omitted means the daemon's own log, which is what an error is about
  * almost every time.
  */
-name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.registerAgentSpace", "payload": { source: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
+name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "update.check" } | { "type": "update.appCheck" } | { "type": "update.download" } | { "type": "update.downloadState" } | { "type": "update.dismiss" } | { "type": "hub.status" } | { "type": "hub.pair", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.trial", "payload": { hubUrl: string, displayName: string | null, } } | { "type": "hub.claimLink" } | { "type": "hub.machines" } | { "type": "hub.connect", "payload": { machineId: string, } } | { "type": "hub.unpair" } | { "type": "device.list" } | { "type": "device.invite", "payload": InviteScope | null } | { "type": "device.claim", "payload": { code: string, deviceName: string, } } | { "type": "device.revoke", "payload": { deviceId: string, } } | { "type": "device.remoteAttach", "payload": { relayUrl: string, joinToken: string | null, } } | { "type": "device.remoteDetach" } | { "type": "workspace.list" } | { "type": "workspace.open", "payload": { root: string, } } | { "type": "workspace.registerAgentSpace", "payload": { source: string, } } | { "type": "workspace.create", "payload": { root: string, name: string, } } | { "type": "workspace.rename", "payload": { workspaceId: string, name: string, } } | { "type": "workspace.layoutMove", "payload": { workspaceId: string, parentWorkspaceId: string | null, beforeWorkspaceId: string | null, } } | { "type": "workspace.remove", "payload": { workspaceId: string, } } | { "type": "directory.list", "payload": { path: string | null, } } | { "type": "directory.mkdir", "payload": { parent: string, name: string, } } | { "type": "file.tree", "payload": { workspaceId: string, path: string | null, depth: number | null, } } | { "type": "file.write", "payload": { workspaceId: string, path: string, content: string, } } | { "type": "file.mkdir", "payload": { workspaceId: string, path: string, } } | { "type": "file.copy", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.move", "payload": { workspaceId: string, from: string, to: string, } } | { "type": "file.delete", "payload": { workspaceId: string, paths: Array<string>, } } | { "type": "git.status", "payload": { workspaceId: string, } } | { "type": "git.diff", "payload": { workspaceId: string, path: string | null, } } | { "type": "git.commit", "payload": { workspaceId: string, message: string, 
 /**
  * Empty means "everything currently changed".
  */
@@ -1431,7 +1431,23 @@ capabilities?: WorkspaceCapabilities,
 /**
  * The first folder and Agent working directory.
  */
-root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspaceFile?: string, };
+root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, 
+/**
+ * Explicit presentation parent. Ordinary relationships come from the
+ * parent's `.genethub/workspace.json`; Agent Spaces derive it from their
+ * durable PM binding. Paths never imply a parent.
+ */
+parentWorkspaceId?: string, 
+/**
+ * Position among siblings. The daemon supplies a stable value even when
+ * the workspace has no parent.
+ */
+layoutOrder?: number, 
+/**
+ * True for a PM-owned relationship that the user may inspect but not
+ * reparent independently.
+ */
+layoutManaged?: boolean, workspaceFile?: string, };
 
 /**
  * Product meaning of a registered workspace.

@@ -396,7 +396,7 @@ describe("the rich runtime settings panel", () => {
     expect(shown()).toHaveLength(4);
   });
 
-  it("marks a model's reasoning and vision on the row rather than under it", async () => {
+  it("keeps traits compact and opens full model details on demand", async () => {
     const agents = [
       {
         ...AGENTS[0]!,
@@ -416,7 +416,12 @@ describe("the rich runtime settings panel", () => {
       within(dialog).getByRole("radio", { name: "Sonnet 4 推理 多模态" }),
     ).toBeInTheDocument();
     expect(within(dialog).getByRole("radio", { name: "DeepSeek V4 Chat" })).toBeInTheDocument();
-    expect(within(dialog).queryByText(/上下文/)).not.toBeInTheDocument();
+    const details = within(dialog).getByLabelText("查看 Sonnet 4 详细信息");
+    expect(details.parentElement).toHaveClass("hidden", "sm:block");
+    await userEvent.click(details);
+    const modelDetails = within(details.parentElement!);
+    expect(modelDetails.getByText("anthropic/sonnet-4")).toBeInTheDocument();
+    expect(modelDetails.getByText(/上下文窗口未声明/)).toBeInTheDocument();
   });
 
   it("explains an empty ready catalog instead of looking unfinished", async () => {

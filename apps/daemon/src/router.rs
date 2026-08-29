@@ -1265,6 +1265,23 @@ async fn dispatch(
             }
         }
 
+        Request::WorkspaceLayoutMove {
+            workspace_id,
+            parent_workspace_id,
+            before_workspace_id,
+        } => match state
+            .workspaces
+            .move_layout(
+                &workspace_id,
+                parent_workspace_id.as_deref(),
+                before_workspace_id.as_deref(),
+            )
+            .await
+        {
+            Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
+            Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+        },
+
         Request::WorkspaceRemove { workspace_id } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
@@ -1622,6 +1639,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkspaceOpen { .. } => Some("workspace.open"),
         Request::WorkspaceCreate { .. } => Some("workspace.create"),
         Request::WorkspaceRename { .. } => Some("workspace.rename"),
+        Request::WorkspaceLayoutMove { .. } => Some("workspace.layoutMove"),
         Request::WorkspaceRemove { .. } => Some("workspace.remove"),
         Request::DirectoryList { .. } => Some("directory.list"),
         Request::DirectoryMkdir { .. } => Some("directory.mkdir"),

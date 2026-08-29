@@ -418,6 +418,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkspaceRegisterAgentSpace { .. }
         | Request::WorkspaceCreate { .. }
         | Request::WorkspaceRename { .. }
+        | Request::WorkspaceLayoutMove { .. }
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet
         | Request::SettingsSetProvider { .. }

@@ -572,6 +572,17 @@ pub enum Request {
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
     WorkspaceRename { workspace_id: String, name: String },
+    /// Moves one ordinary workspace in the user-owned presentation tree.
+    /// `parentWorkspaceId: null` means the machine root; `beforeWorkspaceId`
+    /// is optional and must name a sibling in the destination.
+    #[serde(rename = "workspace.layoutMove", rename_all = "camelCase")]
+    WorkspaceLayoutMove {
+        workspace_id: String,
+        #[serde(default)]
+        parent_workspace_id: Option<String>,
+        #[serde(default)]
+        before_workspace_id: Option<String>,
+    },
     /// Hides a workspace registration while retaining its identity and history.
     #[serde(rename = "workspace.remove", rename_all = "camelCase")]
     WorkspaceRemove { workspace_id: String },

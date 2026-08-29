@@ -26,6 +26,7 @@ futures-util.workspace = true
 hmac.workspace = true
 ignore.workspace = true
 json5.workspace = true
+pathdiff = "0.2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

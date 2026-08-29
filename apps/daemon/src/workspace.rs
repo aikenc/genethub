@@ -9,7 +9,7 @@ use genehub_proto::{
     DirectoryEntry, DirectoryListing, FileNode, WorkspaceCapabilities, WorkspaceFolderInfo,
     WorkspaceInfo, WorkspaceKind,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
@@ -19,6 +19,31 @@ use crate::session::WorkspaceHomes;
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
 const MAX_WORKSPACE_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_WORKSPACE_FOLDERS: usize = 32;
+const WORKSPACE_LAYOUT_FORMAT: u32 = 1;
+const WORKSPACE_LAYOUT_FILE: &str = "workspace.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceLayout {
+    format: u32,
+    #[serde(default)]
+    children: Vec<WorkspaceLayoutChild>,
+}
+
+impl Default for WorkspaceLayout {
+    fn default() -> Self {
+        Self {
+            format: WORKSPACE_LAYOUT_FORMAT,
+            children: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceLayoutChild {
+    source: String,
+}
 
 /// The only workspace metadata that may leave this machine for the Hub.
 /// Absolute roots and repository details intentionally have no field here.
@@ -297,16 +322,164 @@ impl Workspaces {
     }
 
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
-        let mut out: Vec<WorkspaceInfo> = self
-            .entries
-            .read()
-            .await
-            .values()
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        let ordered = config
+            .workspaces
+            .iter()
+            .filter_map(|saved| entries.get(&saved.id))
             .filter(|entry| !entry.removed)
-            .map(describe)
-            .collect();
-        out.sort_by(|a, b| a.name.cmp(&b.name));
-        out
+            .collect::<Vec<_>>();
+        let layout = workspace_layout_projection(&ordered);
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let (parent, order, managed) =
+                    layout
+                        .get(&entry.id)
+                        .cloned()
+                        .unwrap_or((None, index as u32, false));
+                describe_with_layout(entry, parent, order, managed)
+            })
+            .collect()
+    }
+
+    /// Moves an ordinary workspace in the explicit presentation hierarchy.
+    /// PM-owned Agent Spaces are projected from their durable binding and are
+    /// intentionally not writable through this surface.
+    pub async fn move_layout(
+        &self,
+        workspace_id: &str,
+        parent_workspace_id: Option<&str>,
+        before_workspace_id: Option<&str>,
+    ) -> Result<Vec<WorkspaceInfo>> {
+        let entries = self.entries.read().await;
+        let mut config = self.config.write().await;
+        let ordered = config
+            .workspaces
+            .iter()
+            .filter_map(|saved| entries.get(&saved.id))
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .collect::<Vec<_>>();
+        let by_id = ordered
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<HashMap<_, _>>();
+        let child = by_id
+            .get(workspace_id)
+            .copied()
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        if child.kind == WorkspaceKind::AgentSpace {
+            anyhow::bail!("an Agent Space stays under its project manager");
+        }
+        let parent = parent_workspace_id
+            .map(|id| {
+                by_id
+                    .get(id)
+                    .copied()
+                    .ok_or_else(|| anyhow!("no such parent workspace: {id}"))
+            })
+            .transpose()?;
+        if parent.is_some_and(|parent| parent.id == child.id) {
+            anyhow::bail!("a workspace cannot contain itself");
+        }
+        if parent.is_some_and(|parent| parent.kind == WorkspaceKind::AgentSpace) {
+            anyhow::bail!("an Agent Space cannot own user-arranged workspaces");
+        }
+
+        let projection = workspace_layout_projection(&ordered.iter().collect::<Vec<_>>());
+        let destination_parent = parent.map(|entry| entry.id.as_str());
+        if let Some(before_id) = before_workspace_id {
+            if before_id == workspace_id {
+                anyhow::bail!("a workspace cannot be ordered before itself");
+            }
+            let before = by_id
+                .get(before_id)
+                .copied()
+                .ok_or_else(|| anyhow!("no such destination sibling: {before_id}"))?;
+            if before.kind == WorkspaceKind::AgentSpace {
+                anyhow::bail!("a PM-managed Agent Space cannot be used as an ordering anchor");
+            }
+            let before_parent = projection
+                .get(&before.id)
+                .and_then(|(parent, _, _)| parent.as_deref());
+            if before_parent != destination_parent {
+                anyhow::bail!("the ordering target is not in the destination");
+            }
+        }
+        let mut ancestor = destination_parent;
+        while let Some(id) = ancestor {
+            if id == workspace_id {
+                anyhow::bail!("workspace layout cannot contain a cycle");
+            }
+            ancestor = projection
+                .get(id)
+                .and_then(|(parent, _, _)| parent.as_deref());
+        }
+
+        let mut layouts = HashMap::<String, (WorkspaceEntry, WorkspaceLayout)>::new();
+        if let Some(current_parent_id) = projection
+            .get(workspace_id)
+            .and_then(|(current, _, _)| current.as_deref())
+        {
+            let current_parent = by_id
+                .get(current_parent_id)
+                .copied()
+                .ok_or_else(|| anyhow!("current parent workspace is unavailable"))?;
+            let mut layout = read_workspace_layout(current_parent)?;
+            layout
+                .children
+                .retain(|item| !layout_child_matches(current_parent, item, child));
+            layouts.insert(current_parent.id.clone(), (current_parent.clone(), layout));
+        }
+
+        if let Some(parent) = parent {
+            if !layouts.contains_key(&parent.id) {
+                layouts.insert(
+                    parent.id.clone(),
+                    (parent.clone(), read_workspace_layout(parent)?),
+                );
+            }
+            let (_, layout) = layouts.get_mut(&parent.id).expect("layout inserted above");
+            let source = relative_workspace_source(parent, child)?;
+            let position = before_workspace_id
+                .and_then(|before_id| {
+                    let before = by_id.get(before_id).copied()?;
+                    layout
+                        .children
+                        .iter()
+                        .position(|item| layout_child_matches(parent, item, before))
+                })
+                .unwrap_or(layout.children.len());
+            layout
+                .children
+                .insert(position, WorkspaceLayoutChild { source });
+        }
+
+        for (_, (parent, layout)) in layouts {
+            write_workspace_layout(&parent, &layout)?;
+        }
+
+        if parent_workspace_id.is_none() {
+            let mut next = config.clone();
+            let position = next
+                .workspaces
+                .iter()
+                .position(|entry| entry.id == workspace_id)
+                .ok_or_else(|| anyhow!("workspace {workspace_id} is missing from config"))?;
+            let moved = next.workspaces.remove(position);
+            let destination = before_workspace_id
+                .and_then(|id| next.workspaces.iter().position(|entry| entry.id == id))
+                .unwrap_or(next.workspaces.len());
+            next.workspaces.insert(destination, moved);
+            next.save(&self.config_path)?;
+            *config = next;
+        }
+        drop(config);
+        drop(entries);
+        Ok(self.list().await)
     }
 
     /// A stable, path-free snapshot suitable for account-wide discovery.
@@ -629,7 +802,8 @@ impl Workspaces {
             .cloned()
             .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
         if entry.removed {
-            return Ok(active_descriptions(entries.values()));
+            drop(entries);
+            return Ok(self.list().await);
         }
         if entry.kind == WorkspaceKind::AgentSpace {
             let expected = entry
@@ -659,7 +833,9 @@ impl Workspaces {
         entries.insert(id.to_string(), updated);
         self.homes.detach(id);
 
-        Ok(active_descriptions(entries.values()))
+        drop(config);
+        drop(entries);
+        Ok(self.list().await)
     }
 
     /// Changes only the label shown to the user; the directory itself stays put.
@@ -699,17 +875,6 @@ impl Workspaces {
     }
 }
 
-fn active_descriptions<'a>(
-    entries: impl Iterator<Item = &'a WorkspaceEntry>,
-) -> Vec<WorkspaceInfo> {
-    let mut out: Vec<_> = entries
-        .filter(|entry| !entry.removed)
-        .map(describe)
-        .collect();
-    out.sort_by(|left, right| left.name.cmp(&right.name));
-    out
-}
-
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
     let capabilities = match entry.kind {
         WorkspaceKind::AgentSpace => WorkspaceCapabilities {
@@ -739,11 +904,203 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
                 root_handle: folder.root_handle.clone(),
             })
             .collect(),
+        parent_workspace_id: entry
+            .agent_space
+            .as_ref()
+            .map(|binding| binding.project_workspace_id.clone()),
+        layout_order: Some(0),
+        layout_managed: Some(entry.kind == WorkspaceKind::AgentSpace),
         workspace_file: entry
             .workspace_file
             .as_ref()
             .map(|path| path.display().to_string()),
     }
+}
+
+fn describe_with_layout(
+    entry: &WorkspaceEntry,
+    parent_workspace_id: Option<String>,
+    layout_order: u32,
+    layout_managed: bool,
+) -> WorkspaceInfo {
+    let mut workspace = describe(entry);
+    workspace.parent_workspace_id = parent_workspace_id;
+    workspace.layout_order = Some(layout_order);
+    workspace.layout_managed = Some(layout_managed);
+    workspace
+}
+
+fn workspace_definition_dir(entry: &WorkspaceEntry) -> &Path {
+    entry
+        .workspace_file
+        .as_ref()
+        .and_then(|path| path.parent())
+        .unwrap_or(&entry.root)
+}
+
+fn workspace_source(entry: &WorkspaceEntry) -> &Path {
+    entry.workspace_file.as_deref().unwrap_or(&entry.root)
+}
+
+fn workspace_layout_path(entry: &WorkspaceEntry) -> PathBuf {
+    workspace_definition_dir(entry)
+        .join(".genethub")
+        .join(WORKSPACE_LAYOUT_FILE)
+}
+
+fn read_workspace_layout(entry: &WorkspaceEntry) -> Result<WorkspaceLayout> {
+    let path = workspace_layout_path(entry);
+    if !path.exists() {
+        return Ok(WorkspaceLayout::default());
+    }
+    let metadata = std::fs::metadata(&path)
+        .with_context(|| format!("reading workspace layout metadata at {}", path.display()))?;
+    if metadata.len() > MAX_WORKSPACE_FILE_BYTES {
+        anyhow::bail!("workspace layout is too large: {}", path.display());
+    }
+    let source = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading workspace layout at {}", path.display()))?;
+    let layout: WorkspaceLayout = serde_json::from_str(&source)
+        .with_context(|| format!("parsing workspace layout at {}", path.display()))?;
+    if layout.format != WORKSPACE_LAYOUT_FORMAT {
+        anyhow::bail!(
+            "unsupported workspace layout format {} at {}",
+            layout.format,
+            path.display()
+        );
+    }
+    if layout.children.len() > MAX_DIRECTORY_ENTRIES
+        || layout
+            .children
+            .iter()
+            .any(|child| child.source.trim().is_empty())
+    {
+        anyhow::bail!("invalid workspace layout at {}", path.display());
+    }
+    Ok(layout)
+}
+
+fn read_workspace_layout_projection(entry: &WorkspaceEntry) -> WorkspaceLayout {
+    read_workspace_layout(entry).unwrap_or_else(|error| {
+        tracing::warn!(
+            workspace_id = %entry.id,
+            error = %format!("{error:#}"),
+            "ignoring invalid workspace presentation layout"
+        );
+        WorkspaceLayout::default()
+    })
+}
+
+fn resolved_layout_source(parent: &WorkspaceEntry, item: &WorkspaceLayoutChild) -> PathBuf {
+    let source = Path::new(&item.source);
+    let joined = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        workspace_definition_dir(parent).join(source)
+    };
+    joined.canonicalize().unwrap_or(joined)
+}
+
+fn normalized_workspace_source(entry: &WorkspaceEntry) -> PathBuf {
+    workspace_source(entry)
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_source(entry).to_path_buf())
+}
+
+fn layout_child_matches(
+    parent: &WorkspaceEntry,
+    item: &WorkspaceLayoutChild,
+    child: &WorkspaceEntry,
+) -> bool {
+    resolved_layout_source(parent, item) == normalized_workspace_source(child)
+}
+
+fn relative_workspace_source(parent: &WorkspaceEntry, child: &WorkspaceEntry) -> Result<String> {
+    let source = workspace_source(child);
+    let relative = pathdiff::diff_paths(source, workspace_definition_dir(parent))
+        .unwrap_or_else(|| source.to_path_buf());
+    let value = relative.to_string_lossy().to_string();
+    if value.trim().is_empty() {
+        anyhow::bail!("workspace source cannot be empty");
+    }
+    Ok(value)
+}
+
+fn write_workspace_layout(entry: &WorkspaceEntry, layout: &WorkspaceLayout) -> Result<()> {
+    let path = workspace_layout_path(entry);
+    let mut source = serde_json::to_string_pretty(layout)?;
+    source.push('\n');
+    crate::config::save_private(&path, source.as_bytes())
+        .with_context(|| format!("saving workspace layout at {}", path.display()))
+}
+
+fn workspace_layout_projection(
+    entries: &[&WorkspaceEntry],
+) -> HashMap<String, (Option<String>, u32, bool)> {
+    let mut projection = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.id.clone(), (None, index as u32, false)))
+        .collect::<HashMap<_, _>>();
+
+    for parent in entries {
+        if parent.kind == WorkspaceKind::AgentSpace {
+            continue;
+        }
+        let layout = read_workspace_layout_projection(parent);
+        for (order, item) in layout.children.iter().enumerate() {
+            let Some(child) = entries.iter().copied().find(|candidate| {
+                candidate.kind != WorkspaceKind::AgentSpace
+                    && layout_child_matches(parent, item, candidate)
+            }) else {
+                continue;
+            };
+            if projection
+                .get(&child.id)
+                .and_then(|(existing, _, _)| existing.as_ref())
+                .is_some()
+            {
+                continue;
+            }
+            let mut ancestor = Some(parent.id.as_str());
+            let mut cycle = false;
+            while let Some(id) = ancestor {
+                if id == child.id {
+                    cycle = true;
+                    break;
+                }
+                ancestor = projection
+                    .get(id)
+                    .and_then(|(owner, _, _)| owner.as_deref());
+            }
+            if cycle {
+                tracing::warn!(
+                    parent_workspace_id = %parent.id,
+                    child_workspace_id = %child.id,
+                    "ignoring cyclic workspace presentation relationship"
+                );
+                continue;
+            }
+            projection.insert(
+                child.id.clone(),
+                (Some(parent.id.clone()), order as u32, false),
+            );
+        }
+    }
+
+    for (order, entry) in entries.iter().enumerate() {
+        if entry.kind != WorkspaceKind::AgentSpace {
+            continue;
+        }
+        let parent = entry
+            .agent_space
+            .as_ref()
+            .map(|binding| binding.project_workspace_id.clone())
+            .filter(|id| projection.contains_key(id));
+        projection.insert(entry.id.clone(), (parent, order as u32, true));
+    }
+
+    projection
 }
 
 fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
@@ -1043,6 +1400,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_layout_survives_copy_without_inferring_any_path_hierarchy() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let feature = project.join("feature");
+        std::fs::create_dir_all(&feature).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let project_workspace = spaces.open(&project, None).await.unwrap();
+        let feature_workspace = spaces.open(&feature, None).await.unwrap();
+
+        let flat = spaces.list().await;
+        assert_eq!(
+            flat.iter()
+                .find(|entry| entry.id == feature_workspace.id)
+                .and_then(|entry| entry.parent_workspace_id.as_deref()),
+            None,
+            "a nested directory is not an implicit child"
+        );
+
+        let moved = spaces
+            .move_layout(&feature_workspace.id, Some(&project_workspace.id), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            moved
+                .iter()
+                .find(|entry| entry.id == feature_workspace.id)
+                .and_then(|entry| entry.parent_workspace_id.as_deref()),
+            Some(project_workspace.id.as_str())
+        );
+        let saved: WorkspaceLayout = serde_json::from_str(
+            &std::fs::read_to_string(project.join(".genethub/workspace.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.children[0].source, "feature");
+        assert!(spaces
+            .move_layout(&project_workspace.id, Some(&feature_workspace.id), None)
+            .await
+            .is_err());
+
+        let copied = dir.path().join("copied");
+        let copied_feature = copied.join("feature");
+        std::fs::create_dir_all(copied.join(".genethub")).unwrap();
+        std::fs::create_dir_all(&copied_feature).unwrap();
+        std::fs::copy(
+            project.join(".genethub/workspace.json"),
+            copied.join(".genethub/workspace.json"),
+        )
+        .unwrap();
+        let copied_project = spaces.open(&copied, None).await.unwrap();
+        let copied_child = spaces.open(&copied_feature, None).await.unwrap();
+        let copied_projection = spaces.list().await;
+        assert_eq!(
+            copied_projection
+                .iter()
+                .find(|entry| entry.id == copied_child.id)
+                .and_then(|entry| entry.parent_workspace_id.as_deref()),
+            Some(copied_project.id.as_str()),
+            "relative sources preserve semantics when the workspace tree is copied"
+        );
+
+        let roots = spaces
+            .move_layout(&feature_workspace.id, None, Some(&copied_project.id))
+            .await
+            .unwrap();
+        assert!(roots
+            .iter()
+            .find(|entry| entry.id == feature_workspace.id)
+            .unwrap()
+            .parent_workspace_id
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn only_explicit_pm_registration_promotes_a_built_space_to_agent_space() {
         let dir = tempfile::tempdir().unwrap();
         let project_root = dir.path().join("project");
@@ -1079,6 +1509,11 @@ mod tests {
         assert_eq!(promoted.id, discovered.id);
         assert_eq!(promoted.kind, Some(WorkspaceKind::AgentSpace));
         assert_eq!(
+            promoted.parent_workspace_id.as_deref(),
+            Some(project.id.as_str())
+        );
+        assert_eq!(promoted.layout_managed, Some(true));
+        assert_eq!(
             promoted.capabilities.as_ref().map(|caps| caps.remove),
             Some(false)
         );
@@ -1088,7 +1523,19 @@ mod tests {
 
         let reopened = spaces.open(&source, None).await.unwrap();
         assert_eq!(reopened.kind, Some(WorkspaceKind::AgentSpace));
+        let ordinary_root = dir.path().join("ordinary");
+        std::fs::create_dir(&ordinary_root).unwrap();
+        let ordinary = spaces.open(&ordinary_root, None).await.unwrap();
+        let ordering_error = spaces
+            .move_layout(&ordinary.id, Some(&project.id), Some(&promoted.id))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{ordering_error:#}").contains("cannot be used as an ordering anchor"),
+            "a target which cannot be persisted must fail explicitly"
+        );
         assert!(spaces.remove(&promoted.id).await.is_err());
+        assert!(spaces.move_layout(&promoted.id, None, None).await.is_err());
         assert!(spaces
             .remove_agent_space(&promoted.id, "s_other")
             .await

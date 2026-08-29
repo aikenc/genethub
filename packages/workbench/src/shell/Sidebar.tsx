@@ -1,5 +1,12 @@
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 
 import type { Endpoint, Host, Target } from "../host";
 import { useWorkbench } from "../session/store";
@@ -8,6 +15,7 @@ import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { buildWorkspaceTree, type WorkspaceTreeNode } from "../workspace/tree";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
 
@@ -55,6 +63,7 @@ export function Sidebar({
     activeWorkspaceId,
     selectWorkspace,
     renameWorkspace,
+    moveWorkspace,
     removeWorkspace,
     newSession,
     openProjectManager,
@@ -183,7 +192,7 @@ export function Sidebar({
         // `invisible` and not just a transform: an off-screen drawer is still
         // in the document, and a keyboard or a screen reader would otherwise
         // walk straight into a list nobody can see.
-        className={`fixed inset-y-0 left-0 z-40 flex w-[84%] max-w-xs flex-col border-r border-line bg-sidebar transition-transform duration-200 md:visible md:static md:z-auto md:w-64 md:max-w-none md:translate-x-0 md:transition-none ${
+        className={`fixed inset-y-0 left-0 z-40 flex w-[80vw] flex-col border-r border-line bg-sidebar transition-transform duration-200 md:visible md:static md:z-auto md:w-64 md:translate-x-0 md:transition-none ${
           open ? "visible translate-x-0" : "invisible -translate-x-full"
         } ${hidden ? "md:hidden" : "md:flex"}`}
       >
@@ -358,6 +367,9 @@ export function Sidebar({
                 onNavigate();
               }}
               onRenameWorkspace={(id, name) => void renameWorkspace(id, name)}
+              onMoveWorkspace={(id, parentId, beforeId) =>
+                moveWorkspace(id, parentId, beforeId)
+              }
               onRemoveWorkspace={(id) => removeWorkspace(id)}
               onPickSession={go}
               {...actions}
@@ -427,6 +439,95 @@ interface RowActions {
 
 type ListedSession = SessionSummary & { unread: boolean };
 
+type WorkspaceMovePhase = "ready" | "dragging" | "submitting" | "error";
+
+interface WorkspaceMoveState {
+  workspaceId: string;
+  phase: WorkspaceMovePhase;
+  activeTarget: string | null;
+}
+
+interface WorkspaceMoveTarget {
+  key: string;
+  label: string;
+  parentWorkspaceId: string | null;
+  beforeWorkspaceId: string | null;
+}
+
+function collectWorkspaceDescendants(
+  workspaces: WorkspaceInfo[],
+  workspaceId: string,
+): Set<string> {
+  const children = new Map<string, string[]>();
+  for (const workspace of workspaces) {
+    if (!workspace.parentWorkspaceId) continue;
+    const siblings = children.get(workspace.parentWorkspaceId) ?? [];
+    siblings.push(workspace.id);
+    children.set(workspace.parentWorkspaceId, siblings);
+  }
+  const descendants = new Set<string>();
+  const pending = [...(children.get(workspaceId) ?? [])];
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (descendants.has(id)) continue;
+    descendants.add(id);
+    pending.push(...(children.get(id) ?? []));
+  }
+  return descendants;
+}
+
+function WorkspaceMoveDestination({
+  target,
+  blockedReason,
+  move,
+  onActivate,
+  onSubmit,
+}: {
+  target: WorkspaceMoveTarget;
+  blockedReason?: string;
+  move: WorkspaceMoveState;
+  onActivate(target: string): void;
+  onSubmit(target: WorkspaceMoveTarget): void;
+}) {
+  const active = move.activeTarget === target.key;
+  const disabled = Boolean(blockedReason) || move.phase === "submitting";
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      aria-label={blockedReason ? `${target.label}：${blockedReason}` : target.label}
+      className={`flex min-h-9 w-full items-center justify-center rounded-lg border border-dashed px-2 py-1.5 text-center text-[11px] transition-colors ${
+        blockedReason
+          ? "cursor-not-allowed border-line text-faint"
+          : active
+            ? "border-accent bg-accent/25 font-medium text-accent"
+            : "border-accent/60 bg-accent/10 text-accent hover:bg-accent/20"
+      }`}
+      onClick={() => onSubmit(target)}
+      onDragEnter={(event) => {
+        if (blockedReason) return;
+        event.preventDefault();
+        onActivate(target.key);
+      }}
+      onDragOver={(event) => {
+        if (!blockedReason) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (blockedReason) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onSubmit(target);
+      }}
+    >
+      {blockedReason
+        ? `${target.label} · ${blockedReason}`
+        : active && move.phase === "dragging"
+          ? `松开放到这里 · ${target.label}`
+          : target.label}
+    </button>
+  );
+}
+
 /** Every workspace, with its conversations under it. */
 function Projects({
   workspaces,
@@ -440,6 +541,7 @@ function Projects({
   onToggleSessions,
   onPickWorkspace,
   onRenameWorkspace,
+  onMoveWorkspace,
   onRemoveWorkspace,
   ...actions
 }: {
@@ -454,68 +556,344 @@ function Projects({
   onToggleSessions(workspaceId: string): void;
   onPickWorkspace(workspaceId: string): void;
   onRenameWorkspace(workspaceId: string, name: string): void;
+  onMoveWorkspace(
+    workspaceId: string,
+    parentWorkspaceId: string | null,
+    beforeWorkspaceId?: string | null,
+  ): Promise<boolean>;
   onRemoveWorkspace(workspaceId: string): Promise<void>;
 } & RowActions) {
+  const tree = useMemo(() => buildWorkspaceTree(workspaces), [workspaces]);
+  const [move, setMove] = useState<WorkspaceMoveState | null>(null);
+  const movingWorkspace = move
+    ? workspaces.find((workspace) => workspace.id === move.workspaceId)
+    : undefined;
+  const movingDescendants = useMemo(
+    () => (move ? collectWorkspaceDescendants(workspaces, move.workspaceId) : new Set<string>()),
+    [move?.workspaceId, workspaces],
+  );
+
+  useEffect(() => {
+    if (!move) return;
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && move.phase !== "submitting") setMove(null);
+    };
+    window.addEventListener("keydown", cancel);
+    return () => window.removeEventListener("keydown", cancel);
+  }, [move]);
+
+  useEffect(() => {
+    if (move && !movingWorkspace) setMove(null);
+  }, [move, movingWorkspace]);
+
+  const startMove = (workspaceId: string, phase: "ready" | "dragging") => {
+    setMove((current) =>
+      current?.workspaceId === workspaceId && current.phase !== "submitting" && phase === "ready"
+        ? null
+        : { workspaceId, phase, activeTarget: null },
+    );
+  };
+  const finishDrag = (workspaceId: string) => {
+    setMove((current) =>
+      current?.workspaceId === workspaceId && current.phase === "dragging"
+        ? { ...current, phase: "ready", activeTarget: null }
+        : current,
+    );
+  };
+  const activateTarget = (target: string) => {
+    setMove((current) => (current ? { ...current, activeTarget: target } : current));
+  };
+  const submitMove = async (target: WorkspaceMoveTarget) => {
+    if (!move || move.phase === "submitting") return;
+    const workspaceId = move.workspaceId;
+    setMove({ workspaceId, phase: "submitting", activeTarget: target.key });
+    const moved = await onMoveWorkspace(
+      workspaceId,
+      target.parentWorkspaceId,
+      target.beforeWorkspaceId,
+    );
+    setMove((current) => {
+      if (current?.workspaceId !== workspaceId) return current;
+      return moved ? null : { workspaceId, phase: "error", activeTarget: null };
+    });
+  };
+
+  const rootTarget: WorkspaceMoveTarget = {
+    key: "root:end",
+    label: "移到顶层末尾",
+    parentWorkspaceId: null,
+    beforeWorkspaceId: null,
+  };
   return (
-    <ul aria-label="工作区">
-      {workspaces.map((workspace) => {
-        const mine = sessions
-          .filter((session) => session.workspaceId === workspace.id)
-          .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-        const running = mine.filter((session) =>
-          ["running", "waiting"].includes(session.status),
-        ).length;
-        const shut = collapsed.includes(workspace.id);
-        const showAll = expanded.includes(workspace.id);
-        const visible = showAll ? mine : mine.slice(0, PROJECT_SESSION_PREVIEW_LIMIT);
-        const rename = (name: string) => {
-          if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
-        };
-        return (
-          <WorkspaceRow
-            key={workspace.id}
-            workspace={workspace}
-            running={running}
-            shut={shut}
-            active={workspace.id === activeWorkspaceId}
+    <>
+      {move && movingWorkspace ? (
+        <div
+          role="status"
+          className={`mx-1 mb-2 rounded-lg border px-2.5 py-2 text-[11px] ${
+            move.phase === "error"
+              ? "border-danger/60 bg-danger/10 text-danger"
+              : "border-accent/50 bg-accent/10 text-accent"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <div className="font-medium">
+                正在移动「{movingWorkspace.name}」
+                {move.phase === "submitting" ? " · 正在保存" : null}
+              </div>
+              <div className="mt-0.5 opacity-80">
+                {move.phase === "error"
+                  ? "移动失败，目标和上下文已保留；可重试或取消。"
+                  : "拖到明确落点，或直接点击一个落点。按 Esc 取消。"}
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={move.phase === "submitting"}
+              className="shrink-0 rounded px-2 py-1 hover:bg-accent/15 disabled:opacity-40"
+              onClick={() => setMove(null)}
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : null}
+      <ul aria-label="工作区">
+        {tree.map((node) => (
+          <WorkspaceTreeItem
+            key={node.workspace.id}
+            node={node}
+            sessions={sessions}
+            collapsed={collapsed}
+            expanded={expanded}
+            activeSessionId={activeSessionId}
+            activeWorkspaceId={activeWorkspaceId}
             deviceName={deviceName}
-            onToggle={() => onToggle(workspace.id)}
-            onPick={() => onPickWorkspace(workspace.id)}
-            onRename={rename}
-            onRemove={() => onRemoveWorkspace(workspace.id)}
-          >
-            {shut ? null : mine.length > 0 ? (
-              <ul className="ml-3 border-l border-line pl-1">
-                {visible.map((session) => (
-                  <SessionRow
-                    key={session.id}
-                    session={session}
-                    active={session.id === activeSessionId}
-                    {...actions}
-                  />
-                ))}
-                {mine.length > PROJECT_SESSION_PREVIEW_LIMIT ? (
-                  <li>
-                    <button
-                      type="button"
-                      className="w-full rounded-md px-2 py-1 text-left text-[11px] text-accent hover:bg-sidebar-hover"
-                      aria-expanded={showAll}
-                      onClick={() => onToggleSessions(workspace.id)}
-                    >
-                      {showAll
-                        ? "收起到最近 5 个"
-                        : `展开其余 ${mine.length - PROJECT_SESSION_PREVIEW_LIMIT} 个`}
-                    </button>
-                  </li>
-                ) : null}
-              </ul>
-            ) : (
-              <p className="ml-4 py-1 pl-2 text-[11px] text-faint">还没有会话</p>
-            )}
-          </WorkspaceRow>
-        );
-      })}
-    </ul>
+            onToggle={onToggle}
+            onToggleSessions={onToggleSessions}
+            onPickWorkspace={onPickWorkspace}
+            onRenameWorkspace={onRenameWorkspace}
+            onMoveWorkspace={onMoveWorkspace}
+            onRemoveWorkspace={onRemoveWorkspace}
+            move={move}
+            movingDescendants={movingDescendants}
+            onStartMove={startMove}
+            onFinishDrag={finishDrag}
+            onActivateTarget={activateTarget}
+            onSubmitMove={(target) => void submitMove(target)}
+            {...actions}
+          />
+        ))}
+        {move ? (
+          <li className="mx-2 my-1">
+            <WorkspaceMoveDestination
+              target={rootTarget}
+              move={move}
+              onActivate={activateTarget}
+              onSubmit={(target) => void submitMove(target)}
+            />
+          </li>
+        ) : null}
+      </ul>
+    </>
+  );
+}
+
+function WorkspaceTreeItem({
+  node,
+  sessions,
+  collapsed,
+  expanded,
+  activeSessionId,
+  activeWorkspaceId,
+  deviceName,
+  onToggle,
+  onToggleSessions,
+  onPickWorkspace,
+  onRenameWorkspace,
+  onMoveWorkspace,
+  onRemoveWorkspace,
+  move,
+  movingDescendants,
+  onStartMove,
+  onFinishDrag,
+  onActivateTarget,
+  onSubmitMove,
+  ...actions
+}: {
+  node: WorkspaceTreeNode;
+  sessions: ListedSession[];
+  collapsed: string[];
+  expanded: string[];
+  activeSessionId: string | null;
+  activeWorkspaceId: string | null;
+  deviceName: string;
+  onToggle(workspaceId: string): void;
+  onToggleSessions(workspaceId: string): void;
+  onPickWorkspace(workspaceId: string): void;
+  onRenameWorkspace(workspaceId: string, name: string): void;
+  onMoveWorkspace(
+    workspaceId: string,
+    parentWorkspaceId: string | null,
+    beforeWorkspaceId?: string | null,
+  ): Promise<boolean>;
+  onRemoveWorkspace(workspaceId: string): Promise<void>;
+  move: WorkspaceMoveState | null;
+  movingDescendants: Set<string>;
+  onStartMove(workspaceId: string, phase: "ready" | "dragging"): void;
+  onFinishDrag(workspaceId: string): void;
+  onActivateTarget(target: string): void;
+  onSubmitMove(target: WorkspaceMoveTarget): void;
+} & RowActions) {
+  const { workspace } = node;
+  const mine = sessions
+    .filter((session) => session.workspaceId === workspace.id)
+    .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+  const running = mine.filter((session) => ["running", "waiting"].includes(session.status)).length;
+  const shut = collapsed.includes(workspace.id);
+  const showAll = expanded.includes(workspace.id);
+  const visible = showAll ? mine : mine.slice(0, PROJECT_SESSION_PREVIEW_LIMIT);
+  const rename = (name: string) => {
+    if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
+  };
+  const movingWorkspaceId = move?.workspaceId;
+  const beforeTarget: WorkspaceMoveTarget = {
+    key: `before:${workspace.id}`,
+    label: `放到「${workspace.name}」前`,
+    parentWorkspaceId: node.parentWorkspaceId,
+    beforeWorkspaceId: workspace.id,
+  };
+  const beforeBlockedReason = workspace.layoutManaged
+    ? "PM 管理的位置不能作为排序落点"
+    : node.parentWorkspaceId === movingWorkspaceId ||
+        (node.parentWorkspaceId ? movingDescendants.has(node.parentWorkspaceId) : false)
+      ? "不能移入自己的子树"
+      : undefined;
+  const insideTarget: WorkspaceMoveTarget = {
+    key: `inside:${workspace.id}`,
+    label: `放入「${workspace.name}」`,
+    parentWorkspaceId: workspace.id,
+    beforeWorkspaceId: null,
+  };
+  const insideBlockedReason = workspace.id === movingWorkspaceId
+    ? "不能放入自身"
+    : movingDescendants.has(workspace.id)
+      ? "不能放入自己的子工作区"
+      : workspace.kind === "agentSpace"
+        ? "Agent Space 由 PM 管理"
+        : undefined;
+  return (
+    <>
+      {move && movingWorkspaceId !== workspace.id ? (
+        <li className="mx-2 my-1">
+          <WorkspaceMoveDestination
+            target={beforeTarget}
+            blockedReason={beforeBlockedReason}
+            move={move}
+            onActivate={onActivateTarget}
+            onSubmit={onSubmitMove}
+          />
+        </li>
+      ) : null}
+      <WorkspaceRow
+        workspace={workspace}
+        running={running}
+        shut={move ? false : shut}
+        active={workspace.id === activeWorkspaceId}
+        deviceName={deviceName}
+        moving={movingWorkspaceId === workspace.id}
+        moveDisabled={move?.phase === "submitting"}
+        onToggle={() => onToggle(workspace.id)}
+        onPick={() => onPickWorkspace(workspace.id)}
+        onRename={rename}
+        onRemove={() => onRemoveWorkspace(workspace.id)}
+        onMoveToRoot={
+          node.parentWorkspaceId && !workspace.layoutManaged
+            ? () => void onMoveWorkspace(workspace.id, null, null)
+            : undefined
+        }
+        onMoveIntent={() => onStartMove(workspace.id, "ready")}
+        onDragStart={(event) => {
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", workspace.id);
+          onStartMove(workspace.id, "dragging");
+        }}
+        onDragEnd={() => onFinishDrag(workspace.id)}
+        moveControl={
+          move ? (
+            <div className="mx-2 mb-1">
+              <WorkspaceMoveDestination
+                target={insideTarget}
+                blockedReason={insideBlockedReason}
+                move={move}
+                onActivate={onActivateTarget}
+                onSubmit={onSubmitMove}
+              />
+            </div>
+          ) : null
+        }
+      >
+        {!move && !shut ? (
+        <>
+          {mine.length > 0 ? (
+            <ul className="ml-3 border-l border-line pl-1">
+              {visible.map((session) => (
+                <SessionRow
+                  key={session.id}
+                  session={session}
+                  active={session.id === activeSessionId}
+                  {...actions}
+                />
+              ))}
+              {mine.length > PROJECT_SESSION_PREVIEW_LIMIT ? (
+                <li>
+                  <button
+                    type="button"
+                    className="w-full rounded-md px-2 py-1 text-left text-[11px] text-accent hover:bg-sidebar-hover"
+                    aria-expanded={showAll}
+                    onClick={() => onToggleSessions(workspace.id)}
+                  >
+                    {showAll ? "收起到最近 5 个" : `展开其余 ${mine.length - PROJECT_SESSION_PREVIEW_LIMIT} 个`}
+                  </button>
+                </li>
+              ) : null}
+            </ul>
+          ) : node.children.length === 0 ? (
+            <p className="ml-4 py-1 pl-2 text-[11px] text-faint">还没有会话</p>
+          ) : null}
+        </>
+        ) : null}
+        {(move || !shut) && node.children.length > 0 ? (
+            <ul className="ml-3 border-l border-line pl-1" aria-label={`${workspace.name} 的子工作区`}>
+              {node.children.map((child) => (
+                <WorkspaceTreeItem
+                  key={child.workspace.id}
+                  node={child}
+                  sessions={sessions}
+                  collapsed={collapsed}
+                  expanded={expanded}
+                  activeSessionId={activeSessionId}
+                  activeWorkspaceId={activeWorkspaceId}
+                  deviceName={deviceName}
+                  onToggle={onToggle}
+                  onToggleSessions={onToggleSessions}
+                  onPickWorkspace={onPickWorkspace}
+                  onRenameWorkspace={onRenameWorkspace}
+                  onMoveWorkspace={onMoveWorkspace}
+                  onRemoveWorkspace={onRemoveWorkspace}
+                  move={move}
+                  movingDescendants={movingDescendants}
+                  onStartMove={onStartMove}
+                  onFinishDrag={onFinishDrag}
+                  onActivateTarget={onActivateTarget}
+                  onSubmitMove={onSubmitMove}
+                  {...actions}
+                />
+              ))}
+            </ul>
+        ) : null}
+      </WorkspaceRow>
+    </>
   );
 }
 
@@ -529,6 +907,13 @@ function WorkspaceRow({
   onPick,
   onRename,
   onRemove,
+  onMoveToRoot,
+  onMoveIntent,
+  onDragStart,
+  onDragEnd,
+  moving,
+  moveDisabled,
+  moveControl,
   children,
 }: {
   workspace: WorkspaceInfo;
@@ -540,6 +925,13 @@ function WorkspaceRow({
   onPick(): void;
   onRename(name: string): void;
   onRemove(): Promise<void>;
+  onMoveToRoot?(): void;
+  onMoveIntent(): void;
+  onDragStart(event: DragEvent<HTMLElement>): void;
+  onDragEnd(): void;
+  moving: boolean;
+  moveDisabled: boolean;
+  moveControl: ReactNode;
   children: ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
@@ -574,6 +966,31 @@ function WorkspaceRow({
           >
             <span aria-hidden>{shut ? "▸" : "▾"}</span>
           </button>
+          {!workspace.layoutManaged ? (
+            <button
+              type="button"
+              draggable
+              disabled={moveDisabled}
+              aria-label={`移动 ${workspace.name}`}
+              aria-pressed={moving}
+              title="拖动，或点击后选择明确落点"
+              className={`flex h-10 w-7 shrink-0 cursor-grab select-none items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg active:cursor-grabbing disabled:cursor-wait disabled:opacity-40 md:h-7 md:w-5 ${moving ? "bg-accent/15 text-accent" : ""}`}
+              onClick={onMoveIntent}
+              onDragStart={onDragStart}
+              onDragEnd={onDragEnd}
+            >
+              <span aria-hidden>⠿</span>
+            </button>
+          ) : (
+            <span
+              role="img"
+              aria-label={`${workspace.name} 由 PM 管理，不能单独移动`}
+              title="Agent Space 的归属和顺序由 PM 管理"
+              className="flex h-10 w-7 shrink-0 items-center justify-center text-[10px] text-faint md:h-7 md:w-5"
+            >
+              🔒
+            </span>
+          )}
           <button
             type="button"
             className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left font-medium hover:text-fg md:py-1"
@@ -605,6 +1022,7 @@ function WorkspaceRow({
           </button>
         </div>
       )}
+      {moveControl}
       {menu ? (
         <>
           <button
@@ -639,6 +1057,19 @@ function WorkspaceRow({
                 }}
               >
                 重命名
+              </button>
+            ) : null}
+            {onMoveToRoot ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={() => {
+                  setMenu(false);
+                  onMoveToRoot();
+                }}
+              >
+                移到顶层
               </button>
             ) : null}
             {canRemove ? (

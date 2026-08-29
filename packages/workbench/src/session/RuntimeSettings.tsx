@@ -343,22 +343,23 @@ function ModelOption({
   });
   const traits = resolveModelTraits(model);
   return (
-    <label
-      title={unavailable ? `${model.id}（当前目录已不再提供）` : model.id}
-      className="flex h-8 min-w-0 cursor-pointer items-center gap-1 rounded-lg px-2 text-sm hover:bg-raised has-[:checked]:bg-accent/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-    >
-      <input
-        type="radio"
-        name="runtime-model"
-        value={model.id}
-        checked={checked}
-        disabled={unavailable}
-        onChange={() => onPick(model.id)}
-        className="sr-only"
-      />
-      <span className={`min-w-0 flex-1 truncate ${unavailable ? "text-danger" : "text-fg"}`}>
-        {display.fullLabel}
-      </span>
+    <div className="relative flex min-w-0 items-center">
+      <label
+        title={unavailable ? `${model.id}（当前目录已不再提供）` : model.id}
+        className="flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-lg px-2 text-sm hover:bg-raised has-[:checked]:bg-accent/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
+      >
+        <input
+          type="radio"
+          name="runtime-model"
+          value={model.id}
+          checked={checked}
+          disabled={unavailable}
+          onChange={() => onPick(model.id)}
+          className="sr-only"
+        />
+        <span className={`min-w-0 flex-1 truncate ${unavailable ? "text-danger" : "text-fg"}`}>
+          {display.fullLabel}
+        </span>
       {traits.reasoning ? (
         <>
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
@@ -371,9 +372,26 @@ function ModelOption({
           <span className="sr-only">多模态</span>
         </>
       ) : null}
-      {unavailable ? <span className="sr-only">当前目录已不再提供</span> : null}
-      <Tick checked={checked} />
-    </label>
+        {unavailable ? <span className="sr-only">当前目录已不再提供</span> : null}
+        <Tick checked={checked} />
+      </label>
+      <details className="relative hidden shrink-0 sm:block">
+        <summary
+          aria-label={`查看 ${display.fullLabel} 详细信息`}
+          className="flex h-7 w-7 cursor-pointer list-none items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg [&::-webkit-details-marker]:hidden"
+        >
+          <Info className="h-3.5 w-3.5" aria-hidden />
+        </summary>
+        <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border border-line-strong bg-surface p-2.5 text-xs shadow-xl">
+          <div className="font-medium text-fg">{display.fullLabel}</div>
+          <div className="mt-1 break-all font-mono text-[11px] text-muted">{model.id}</div>
+          <div className="mt-2 text-faint">
+            {model.contextWindow ? `上下文 ${model.contextWindow.toLocaleString()} tokens` : "上下文窗口未声明"}
+            {model.reasoning ? " · 支持推理" : ""}
+          </div>
+        </div>
+      </details>
+    </div>
   );
 }
 

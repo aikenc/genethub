@@ -927,16 +927,20 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
         let Some(base_url) = config.base_url.clone().filter(|url| !url.is_empty()) else {
             continue;
         };
-        let label = config.label.clone().unwrap_or_else(|| provider.clone());
+        let provider_short = short_name(config.short_label.as_deref().unwrap_or(provider), 5);
         for id in &config.models {
+            let model_short = short_name(
+                config
+                    .model_labels
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or(id),
+                12,
+            );
             models.push(ConfiguredModel {
                 provider: provider.clone(),
                 id: id.clone(),
-                // `DeepSeek:deepseek-v4-flash`. The provider is in the name
-                // because with several keys configured the model id alone does
-                // not say whose bill this is going on, and prettified names
-                // ("DeepSeek V4 Flash") do not say what to type anywhere else.
-                label: format!("{label}:{id}"),
+                label: format!("{model_short}@{provider_short}"),
                 api: config
                     .dialect
                     .clone()
@@ -951,6 +955,10 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
         }
     }
     models
+}
+
+fn short_name(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
 }
 
 /// Why there are no models to offer, when a key has been given.
@@ -1396,8 +1404,8 @@ mod tests {
         assert_eq!(models[0].api, "openai");
     }
 
-    /// What the picker shows. With two providers configured, `deepseek-chat`
-    /// alone does not say whose key is about to be spent.
+    /// What the picker shows: the bounded model and provider aliases keep the
+    /// choice distinguishable in the narrow picker without relying on clipping.
     #[test]
     fn a_model_is_named_after_the_provider_and_its_own_id() {
         let providers = provider_map(vec![(
@@ -1411,7 +1419,7 @@ mod tests {
             },
         )]);
         let models = configured_models(&providers);
-        assert_eq!(models[0].label, "DeepSeek:deepseek-v4-flash");
+        assert_eq!(models[0].label, "deepseek-v4-@deeps");
         assert!(models[0].reasoning, "v4-flash reasons");
     }
 

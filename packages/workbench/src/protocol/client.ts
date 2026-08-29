@@ -1746,6 +1746,7 @@ function diagnosticContext(request: Request): ClientDiagnosticDetail {
     case "git.commit":
     case "pty.open":
     case "workspace.rename":
+    case "workspace.layoutMove":
     case "workspace.remove":
     case "session.create":
       return { workspaceId: request.payload.workspaceId };

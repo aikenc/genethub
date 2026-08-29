@@ -27,6 +27,8 @@ const workspace = (id: string, name: string): WorkspaceInfo => ({
   root: `/home/me/${name}`,
   isGitRepo: true,
   folders: [{ name, root: "/home/me/" + name, rootHandle: `r_${id}` }],
+  layoutOrder: 0,
+  layoutManaged: false,
 });
 
 const session = (id: string, workspaceId: string, title: string, running = false): SessionSummary => ({
@@ -87,6 +89,7 @@ beforeEach(() => {
     openTab: vi.fn(),
     renameSession: vi.fn(async () => {}),
     renameWorkspace: vi.fn(async () => {}),
+    moveWorkspace: vi.fn(async () => true),
     removeWorkspace: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
   });
@@ -105,6 +108,15 @@ function sidebar() {
 const projectRows = (tree: HTMLElement) => Array.from(tree.children) as HTMLElement[];
 
 describe("the left edge", () => {
+  it("uses eighty percent of the phone viewport without a fixed-width cap", () => {
+    sidebar();
+
+    const drawer = screen.getByRole("complementary");
+    expect(drawer).toHaveClass("w-[80vw]");
+    expect(drawer).not.toHaveClass("max-w-xs");
+    expect(drawer).toHaveClass("md:w-64");
+  });
+
   it("puts each session under the workspace it belongs to", () => {
     const projects = projectRows(sidebar());
 
@@ -198,6 +210,96 @@ describe("the left edge", () => {
     expect(useWorkbench.getState().renameWorkspace).toHaveBeenCalledWith("w1", "核心项目");
   });
 
+  it("shows explicit move targets and supports click-to-move without native drag", async () => {
+    useWorkbench.setState((state) => ({
+      workspaces: state.workspaces.map((entry) =>
+        entry.id === "w2" ? { ...entry, parentWorkspaceId: "w1", layoutOrder: 0 } : entry,
+      ),
+    }));
+    sidebar();
+
+    const children = screen.getByRole("list", { name: "genethub 的子工作区" });
+    expect(within(children).getByText("paseo")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "移动 demo" }));
+    expect(screen.getByRole("status")).toHaveTextContent("正在移动「demo」");
+    expect(screen.getByRole("button", { name: "放入「genethub」" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "放到「paseo」前" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "移到顶层末尾" })).toBeVisible();
+
+    await userEvent.click(screen.getByRole("button", { name: "放入「genethub」" }));
+
+    expect(useWorkbench.getState().moveWorkspace).toHaveBeenCalledWith("w3", "w1", null);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("uses the same move transaction for drag, highlights the target and waits for save", async () => {
+    let finishMove!: (moved: boolean) => void;
+    useWorkbench.setState({
+      moveWorkspace: vi.fn(
+        () => new Promise<boolean>((resolve) => {
+          finishMove = resolve;
+        }),
+      ),
+    });
+    sidebar();
+
+    const dataTransfer = { effectAllowed: "", setData: vi.fn() };
+    fireEvent.dragStart(screen.getByRole("button", { name: "移动 demo" }), { dataTransfer });
+    const target = screen.getByRole("button", { name: "放入「genethub」" });
+    fireEvent.dragEnter(target, { dataTransfer });
+    expect(target).toHaveTextContent("松开放到这里");
+    fireEvent.drop(target, { dataTransfer });
+    fireEvent.dragEnd(screen.getByRole("button", { name: "移动 demo" }), { dataTransfer });
+
+    expect(screen.getByRole("status")).toHaveTextContent("正在保存");
+    expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+    finishMove(true);
+    await screen.findByRole("button", { name: "移动 demo" });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("keeps a failed move available for retry instead of silently clearing it", async () => {
+    useWorkbench.setState({ moveWorkspace: vi.fn(async () => false) });
+    sidebar();
+
+    await userEvent.click(screen.getByRole("button", { name: "移动 demo" }));
+    await userEvent.click(screen.getByRole("button", { name: "放入「genethub」" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("移动失败");
+    expect(screen.getByRole("button", { name: "放入「genethub」" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("shows why cyclic and PM-owned destinations are blocked", async () => {
+    const child = { ...workspace("w2", "child"), parentWorkspaceId: "w1" };
+    const agentSpace: WorkspaceInfo = {
+      ...workspace("w3", "review"),
+      kind: "agentSpace",
+      layoutManaged: true,
+      parentWorkspaceId: "w1",
+    };
+    useWorkbench.setState({ workspaces: [workspace("w1", "project"), child, agentSpace] });
+    sidebar();
+
+    await userEvent.click(screen.getByRole("button", { name: "移动 project" }));
+    expect(
+      screen.getByRole("button", {
+        name: "放入「child」：不能放入自己的子工作区",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", {
+        name: "放到「review」前：PM 管理的位置不能作为排序落点",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "放入「review」：不能放入自己的子工作区" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("img", { name: "review 由 PM 管理，不能单独移动" })).toBeVisible();
+  });
+
   it("shows a workspace's name, full path and owning device", async () => {
     render(
       <Sidebar
@@ -243,6 +345,7 @@ describe("the left edge", () => {
       kind: "agentSpace",
       workspaceFile: "/home/me/gameplay/gameplay.code-workspace",
       capabilities: { createSession: true, rename: false, remove: false },
+      layoutManaged: true,
     };
     useWorkbench.setState((state) => ({
       workspaces: [agentSpace, ...state.workspaces.slice(1)],

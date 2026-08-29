@@ -143,6 +143,9 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     /// What to call it on screen. Only a provider the user added needs this.
     pub label: Option<String>,
+    /// Compact provider identity used in model pickers, for example `ali`.
+    /// The presentation layer keeps this to at most five visible characters.
+    pub short_label: Option<String>,
     /// `openai` | `anthropic`. Which wire protocol the address speaks, which is
     /// not decided by whose name is on it: most services copy Chat Completions.
     pub dialect: Option<String>,
@@ -157,6 +160,9 @@ pub struct ProviderConfig {
     /// a gateway that only proxies — this is the only way to have anything in
     /// the picker. Non-empty means we do not ask.
     pub models: Vec<String>,
+    /// Compact model names keyed by the provider's full model id. The picker
+    /// keeps each value to at most twelve visible characters.
+    pub model_labels: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

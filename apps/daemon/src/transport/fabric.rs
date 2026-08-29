@@ -746,19 +746,24 @@ fn decode(bytes: &[u8]) -> Option<Frame> {
 }
 
 /// Fabric endpoint admissions are deliberately carried in the WebSocket URL:
-/// browsers cannot set an Authorization header. Accept exactly one `ticket`
-/// and the one known transport capability; every other query stays fail-closed.
+/// browsers cannot set an Authorization header. Accept exactly one `ticket`,
+/// the optional self-hosted rendezvous `route`, and the one known transport
+/// capability; every other query stays fail-closed.
 pub(crate) fn validate_fabric_url(value: &str) -> Result<()> {
     let url = crate::http::Url::parse(value).context("parsing the Fabric endpoint URL")?;
     if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         anyhow::bail!("Fabric endpoint URLs cannot contain credentials or fragments");
     }
     let mut ticket = None;
+    let mut route = None;
     let mut flow = false;
     for (name, value) in url.query_pairs() {
         match name.as_ref() {
             "ticket" if ticket.is_none() && !value.is_empty() && value.len() <= 4096 => {
                 ticket = Some(value.into_owned());
+            }
+            "route" if route.is_none() && !value.is_empty() && value.len() <= 4096 => {
+                route = Some(value.into_owned());
             }
             "flow" if !flow && value == TRANSPORT_FLOW => flow = true,
             _ => anyhow::bail!("Fabric endpoint URL has an unsupported query field"),
@@ -1178,6 +1183,7 @@ mod tests {
         for good in [
             "wss://relay.example/fabric/v2?ticket=one-use",
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1",
+            "wss://relay.example/fabric/v2?ticket=client%3Aone-use&route=one-use&flow=transport-v1",
             "ws://127.0.0.1:8787/fabric/v2?ticket=local",
             "ws://[::1]:8787/fabric/v2?ticket=local",
         ] {
@@ -1186,7 +1192,8 @@ mod tests {
         for bad in [
             "wss://relay.example/fabric/v2",
             "wss://relay.example/fabric/v2?ticket=",
-            "wss://relay.example/fabric/v2?ticket=a&route=b",
+            "wss://relay.example/fabric/v2?ticket=a&route=",
+            "wss://relay.example/fabric/v2?ticket=a&route=b&route=c",
             "wss://relay.example/fabric/v2?ticket=a&flow=unknown",
             "wss://relay.example/fabric/v2?ticket=a&flow=transport-v1&flow=transport-v1",
             "wss://user:pass@relay.example/fabric/v2?ticket=a",
