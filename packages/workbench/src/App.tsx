@@ -28,6 +28,7 @@ import { readRtcEnabled } from "./settings/rtc";
 import { Composer, resolveComposerPhase } from "./session/Composer";
 import { NewSessionPanel } from "./session/NewSessionPanel";
 import { PermissionCard } from "./session/Permission";
+import { ProjectPanel } from "./pm/ProjectPanel";
 import { TimelineView } from "./session/TimelineView";
 import type {
   ForkController,
@@ -907,6 +908,15 @@ export function App({
                 {session.work ? ` · 工作包 ${session.work.workPackageId}` : ""} · PM 管理 · 用户只读 · 可 Fork
               </span>
             </div>
+          ) : null}
+          {session?.kind === "pm" ? (
+            <ProjectPanel
+              client={workbench.client}
+              session={session}
+              workspaces={workbench.workspaces}
+              onOpenSession={(sessionId) => void workbench.selectSession(sessionId)}
+              onOpenWorkspace={(workspaceId) => void workbench.selectWorkspace(workspaceId)}
+            />
           ) : null}
 
           <div className="flex min-h-0 flex-1">

@@ -44,7 +44,7 @@ defineJourney(
 - 保留已有普通模式、每日挑战、控制、HUD、触控、声音、本地存档与分数；旧存档可迁移，用户可见规则不倒退。
 - 生产 dependency/import/bundle 不再使用 Three.js；领域/模拟层通过明确 adapter 接入 COCOS 4，H5 根 index.html 仍可启动构建产物。
 - 对迁移前后的确定性玩法、存档、UI、性能预算和浏览器 smoke 做对等验证；npm test 与 npm run build 通过，项目自有有效源码仍在 35,000–65,000 行。
-- 只能由 opencode + journey/deepseek-v4-flash WorkAgent 编写/迁移代码。按耦合拆分工作，在安全时让至少两个独立迁移包跨不同 Agent Space/分支/worktree 并发；PM 只管理、取证、答疑、合并。
+- 只能由 opencode + bailian-token-plan-personal/qwen3.8-flash WorkAgent 编写/迁移代码。按耦合拆分工作，在安全时让至少两个独立迁移包跨不同 Agent Space/分支/worktree 并发；PM 只管理、取证、答疑、合并。
 - 所有候选绑定精确 commit/tree；最终由 --role review 的专用 Agent Space 独立评审，评审后再次确认候选干净且身份未变。通过后合入 repositories/game/main，两个仓库干净，新增包 accepted，本轮 lifecycle completed。不要停在调研报告；调研结论必须落到真实项目。`,
     });
 

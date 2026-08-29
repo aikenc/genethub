@@ -443,8 +443,18 @@ pub struct DcgRun {
     pub graph_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph_version: Option<u32>,
+    /// Immutable graph semantics selected by this Run. Project catalog updates
+    /// affect new Runs only and cannot rewrite an in-flight Session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_snapshot: Option<DcgDefinition>,
     pub status: DcgRunStatus,
     pub active_nodes: BTreeSet<String>,
+    #[serde(default)]
+    pub node_instances: BTreeMap<String, DcgNodeInstance>,
+    #[serde(default)]
+    pub facts: BTreeSet<String>,
+    #[serde(default)]
+    pub history: Vec<DcgTransitionRecord>,
     pub traversals: BTreeMap<String, u32>,
     #[serde(default)]
     pub team_slots: BTreeMap<String, TeamSlot>,
@@ -462,8 +472,12 @@ impl DcgRun {
             controller_session_id: Some(controller_session_id),
             graph_id: None,
             graph_version: None,
+            definition_snapshot: None,
             status: DcgRunStatus::Discussion,
             active_nodes: BTreeSet::new(),
+            node_instances: BTreeMap::new(),
+            facts: BTreeSet::new(),
+            history: Vec::new(),
             traversals: BTreeMap::new(),
             team_slots: BTreeMap::new(),
             revision: 1,
@@ -473,7 +487,9 @@ impl DcgRun {
     pub fn select_before_start(&mut self, definition: &DcgDefinition) -> Result<()> {
         if self.status != DcgRunStatus::Discussion
             || !self.traversals.is_empty()
-            || self.active_nodes.len() > 1
+            || !self.facts.is_empty()
+            || !self.history.is_empty()
+            || !self.team_slots.is_empty()
         {
             anyhow::bail!("a started DCG Run requires an explicit graph migration");
         }
@@ -482,7 +498,11 @@ impl DcgRun {
         }
         self.graph_id = Some(definition.id.clone());
         self.graph_version = Some(definition.version);
+        self.definition_snapshot = Some(definition.clone());
         self.active_nodes = BTreeSet::from([definition.entry.clone()]);
+        self.node_instances.clear();
+        let instance = DcgNodeInstance::active(&definition.entry, 1);
+        self.node_instances.insert(instance.id.clone(), instance);
         self.revision = self.revision.saturating_add(1);
         Ok(())
     }
@@ -536,6 +556,30 @@ impl DcgRun {
         }
         self.active_nodes.remove(&edge.from);
         self.active_nodes.insert(edge.to.clone());
+        for instance in self
+            .node_instances
+            .values_mut()
+            .filter(|instance| instance.node_id == edge.from && instance.status == DcgNodeInstanceStatus::Active)
+        {
+            instance.status = DcgNodeInstanceStatus::Completed;
+        }
+        let target_iteration = self
+            .node_instances
+            .values()
+            .filter(|instance| instance.node_id == edge.to)
+            .count()
+            .saturating_add(1) as u32;
+        let target = DcgNodeInstance::active(&edge.to, target_iteration);
+        self.node_instances.insert(target.id.clone(), target);
+        self.facts.extend(facts.iter().cloned());
+        self.history.push(DcgTransitionRecord {
+            edge_id: edge.id.clone(),
+            from: edge.from.clone(),
+            to: edge.to.clone(),
+            chooser,
+            facts: facts.clone(),
+            sequence: self.history.len().saturating_add(1) as u64,
+        });
         self.traversals
             .insert(edge.id.clone(), count.saturating_add(1));
         self.status = if definition.node(&edge.to)?.kind == DcgNodeKind::Terminal {
@@ -543,6 +587,36 @@ impl DcgRun {
         } else {
             DcgRunStatus::Active
         };
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn active_node_instance(&self, node_id: &str) -> Result<&DcgNodeInstance> {
+        self.node_instances
+            .values()
+            .find(|instance| {
+                instance.node_id == node_id && instance.status == DcgNodeInstanceStatus::Active
+            })
+            .ok_or_else(|| anyhow::anyhow!("node {node_id} has no active instance in this Run"))
+    }
+
+    pub fn bind_team_slot(&mut self, slot: TeamSlot) -> Result<()> {
+        slot.validate()?;
+        let instance = self
+            .node_instances
+            .get(&slot.node_instance_id)
+            .ok_or_else(|| anyhow::anyhow!("Team Slot names an unknown node instance"))?;
+        if instance.status != DcgNodeInstanceStatus::Active {
+            anyhow::bail!("Team Slot requires an active node instance");
+        }
+        if self
+            .team_slots
+            .values()
+            .any(|existing| existing.work_package_id == slot.work_package_id && existing.id != slot.id)
+        {
+            anyhow::bail!("a WorkPackage cannot belong to two Team Slots");
+        }
+        self.team_slots.insert(slot.id.clone(), slot);
         self.revision = self.revision.saturating_add(1);
         Ok(())
     }
@@ -555,6 +629,45 @@ impl DcgRun {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DcgNodeInstanceStatus {
+    Active,
+    Completed,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DcgNodeInstance {
+    pub id: String,
+    pub node_id: String,
+    pub iteration: u32,
+    pub status: DcgNodeInstanceStatus,
+}
+
+impl DcgNodeInstance {
+    fn active(node_id: &str, iteration: u32) -> Self {
+        Self {
+            id: format!("{node_id}-{iteration}"),
+            node_id: node_id.to_string(),
+            iteration,
+            status: DcgNodeInstanceStatus::Active,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DcgTransitionRecord {
+    pub edge_id: String,
+    pub from: String,
+    pub to: String,
+    pub chooser: DcgActor,
+    pub facts: BTreeSet<String>,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

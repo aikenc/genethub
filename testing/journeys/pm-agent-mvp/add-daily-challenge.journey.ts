@@ -41,7 +41,7 @@ defineJourney(
 - 每个 UTC 日期有确定性的关卡 seed、敌人组合和限制条件；同一天同版本可复现，测试可注入日期/seed，不依赖真实时钟随机性。
 - 首页/HUD 能查看今日规则、开始挑战、查看当日最佳分数和完成状态；普通模式保持不变，旧存档可升级且不丢失。
 - 为核心规则、跨日、时区边界、存档迁移和 UI 流程增加测试；现有 npm test、npm run build 和浏览器 smoke 全部通过。
-- 自己根据当前 accepted main 选择合适的非 main 分支与隔离 worktree。实现仍只能由 opencode + journey/deepseek-v4-flash WorkAgent 完成。
+- 自己根据当前 accepted main 选择合适的非 main 分支与隔离 worktree。实现仍只能由 opencode + bailian-token-plan-personal/qwen3.8-flash WorkAgent 完成。
 - 候选必须经过 review-only Agent Space 的独立评审并绑定同一 commit/tree；通过后合入 repositories/game/main，仓库干净，Three.js 仍为锁定的默认引擎。
 - 持续推进到新增包 accepted 并把本轮 lifecycle 标为 completed；不要停在建议或计划。`,
     });

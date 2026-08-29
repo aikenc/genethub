@@ -6,7 +6,7 @@ import type { PmProjectStatus, SessionSummary } from "@genehub/proto";
 
 import { BlockedError, type CaseContext } from "../../framework/public.ts";
 
-export const PM_MODEL = "deepseek/deepseek-v4-flash";
+export const PM_MODEL = "ali/qwen3.8-flash";
 export const WORK_AGENT = "opencode";
 export const SEQUENCE_ID = "pm-agent-starport-defender";
 
@@ -49,8 +49,8 @@ export async function runRealPmDelivery(
 
   // Both configs are machine/user configuration and are written before the
   // daemon starts. No provider secret enters the project repository.
-  t.flows.main.seedHostBetaProviders(t.env);
-  const workModel = t.flows.main.configureOpencodeBuiltinAgent(t.env);
+  t.flows.main.seedAliyunQwen38Flash(t.env);
+  const workModel = t.flows.main.configureOpencodeQwen38Flash(t.env);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
     await t.flows.main.requireAgentReady(opened.client, WORK_AGENT);
@@ -146,6 +146,18 @@ export async function runRealPmDelivery(
         newPackages.every((item) => item.status === "accepted" || item.status === "cancelled"),
       `new delivery packages were not terminal and usable: ${JSON.stringify(newPackages)}`,
     );
+    const run = latest.workflowRuns.find((item) => item.controllerSessionId === pm.id);
+    t.assertions.assert(Boolean(run?.graphId), "the PM Session completed without a selected Workflow Run");
+    if (!run) throw new Error("the completed PM Session has no Workflow Run");
+    for (const item of newPackages) {
+      t.assertions.assert(
+        item.workflowRunId === run?.id &&
+          item.nodeInstanceId !== undefined &&
+          run.nodeInstances.some((node) => node.id === item.nodeInstanceId) &&
+          run.teamSlots.some((slot) => slot.workPackageId === item.id && slot.nodeInstanceId === item.nodeInstanceId),
+        `WorkPackage ${item.id} is not completely bound to its DCG node instance and Team Slot`,
+      );
+    }
     if (previous) {
       t.assertions.assert(
         (latest.intent?.revision ?? 0) > (previous.intent?.revision ?? 0),

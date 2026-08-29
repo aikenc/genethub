@@ -102,6 +102,26 @@ pub enum Request {
     /// separate from the authenticated PM control CLI and cannot mutate it.
     #[serde(rename = "pm.project.status", rename_all = "camelCase")]
     ProjectManagerStatus { workspace_id: String },
+    #[serde(rename = "pm.workflow.select", rename_all = "camelCase")]
+    ProjectManagerWorkflowSelect {
+        workspace_id: String,
+        session_id: String,
+        graph_id: String,
+    },
+    #[serde(rename = "pm.workflow.transition", rename_all = "camelCase")]
+    ProjectManagerWorkflowTransition {
+        workspace_id: String,
+        session_id: String,
+        edge_id: String,
+        #[serde(default)]
+        facts: Vec<String>,
+    },
+    #[serde(rename = "pm.improvement.approve", rename_all = "camelCase")]
+    ProjectManagerImprovementApprove {
+        workspace_id: String,
+        candidate_id: String,
+        approved: bool,
+    },
     /// Creates one PM-controlled WorkAgent conversation in an Agent Space.
     /// The controller id is derived from the authenticated caller rather than
     /// accepted from this untrusted payload.

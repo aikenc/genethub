@@ -1312,6 +1312,74 @@ async fn dispatch(
             }
         }
 
+        Request::ProjectManagerWorkflowSelect {
+            workspace_id,
+            session_id,
+            graph_id,
+        } => {
+            if let Err(error) = validate_user_pm_session(&state, &workspace_id, &session_id).await {
+                return failed(error);
+            }
+            match state
+                .projects
+                .select_session_dcg(&workspace_id, &session_id, &graph_id)
+                .await
+            {
+                Ok(_) => match state.projects.public_status(&workspace_id).await {
+                    Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
+                    Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+                    Err(error) => failed(error),
+                },
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::ProjectManagerWorkflowTransition {
+            workspace_id,
+            session_id,
+            edge_id,
+            facts,
+        } => {
+            if let Err(error) = validate_user_pm_session(&state, &workspace_id, &session_id).await {
+                return failed(error);
+            }
+            match state
+                .projects
+                .transition_session_dcg(
+                    &workspace_id,
+                    &session_id,
+                    &edge_id,
+                    facts.into_iter().collect(),
+                    crate::pm_domain::dcg::DcgActor::User,
+                )
+                .await
+            {
+                Ok(_) => match state.projects.public_status(&workspace_id).await {
+                    Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
+                    Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+                    Err(error) => failed(error),
+                },
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::ProjectManagerImprovementApprove {
+            workspace_id,
+            candidate_id,
+            approved,
+        } => match state
+            .projects
+            .approve_improvement(&workspace_id, &candidate_id, approved)
+            .await
+        {
+            Ok(_) => match state.projects.public_status(&workspace_id).await {
+                Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
+                Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+                Err(error) => failed(error),
+            },
+            Err(error) => failed(error),
+        },
+
         Request::WorkspaceOpen { root } => {
             match state.workspaces.open(Path::new(&root), None).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
@@ -1722,6 +1790,30 @@ async fn dispatch(
             Handled::ok(Reply::Ack)
         }
     }
+}
+
+async fn validate_user_pm_session(
+    state: &crate::state::Shared,
+    project_workspace_id: &str,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let project = state.workspaces.get(project_workspace_id).await?;
+    if project.kind != genehub_proto::WorkspaceKind::Folder {
+        anyhow::bail!("PM workflow control belongs to a Folder project workspace");
+    }
+    let session = state.sessions.summary(session_id).await?;
+    if session.kind != Some(genehub_proto::SessionKind::Pm) {
+        anyhow::bail!("workflow control requires a PM Session");
+    }
+    let workspace = state.workspaces.get(&session.workspace_id).await?;
+    let binding = workspace
+        .agent_space
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("the PM Session is not inside a project AgentSpace"))?;
+    if binding.project_workspace_id != project_workspace_id {
+        anyhow::bail!("the PM Session belongs to another project");
+    }
+    Ok(())
 }
 
 fn resolve_session_cwd(

@@ -74,6 +74,9 @@ mod tests {
             json!({"type": "workspace.registerAgentSpace", "payload": {"source": "/project/spaces/code/code.code-workspace"}}),
             json!({"type": "pm.session.create", "payload": {"workspaceId": "w"}}),
             json!({"type": "pm.project.status", "payload": {"workspaceId": "w"}}),
+            json!({"type": "pm.workflow.select", "payload": {"workspaceId": "w", "sessionId": "s", "graphId": "feature"}}),
+            json!({"type": "pm.workflow.transition", "payload": {"workspaceId": "w", "sessionId": "s", "edgeId": "plan", "facts": ["intent.ready"]}}),
+            json!({"type": "pm.improvement.approve", "payload": {"workspaceId": "w", "candidateId": "better-review", "approved": true}}),
             json!({"type": "workSession.create", "payload": {
                 "workspaceId": "w_space", "workPackageId": "wp-1", "agentId": "codex"
             }}),

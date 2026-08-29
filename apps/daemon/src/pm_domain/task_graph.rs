@@ -71,6 +71,10 @@ pub struct WorkPackage {
     pub agent_space: String,
     pub branch: String,
     pub worktree: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_instance_id: Option<String>,
     pub status: WorkPackageStatus,
     pub work_session_id: Option<String>,
     pub candidate: Option<CandidateEvidence>,
@@ -111,6 +115,8 @@ impl WorkPackage {
             agent_space,
             branch,
             worktree,
+            workflow_run_id: None,
+            node_instance_id: None,
             status: WorkPackageStatus::Planned,
             work_session_id: None,
             candidate: None,
@@ -118,6 +124,14 @@ impl WorkPackage {
             block_reason: None,
             updated_at_ms: now_ms,
         })
+    }
+
+    pub fn bind_to_workflow(&mut self, run_id: String, node_instance_id: String) -> Result<()> {
+        validate_identifier("workflow Run id", &run_id, 160)?;
+        validate_identifier("workflow node instance id", &node_instance_id, 200)?;
+        self.workflow_run_id = Some(run_id);
+        self.node_instance_id = Some(node_instance_id);
+        Ok(())
     }
 }
 

@@ -373,6 +373,9 @@ pub fn required(request: &Request) -> Capability {
 
         Request::SessionCreate { .. }
         | Request::ProjectManagerSessionCreate { .. }
+        | Request::ProjectManagerWorkflowSelect { .. }
+        | Request::ProjectManagerWorkflowTransition { .. }
+        | Request::ProjectManagerImprovementApprove { .. }
         | Request::WorkSessionCreate { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }

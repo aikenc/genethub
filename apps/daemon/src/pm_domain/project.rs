@@ -128,6 +128,10 @@ pub struct ProjectState {
     pub intent: Option<IntentRevision>,
     pub work_packages: BTreeMap<String, WorkPackage>,
     pub agent_spaces: BTreeMap<String, AgentSpaceRecord>,
+    /// PM-proposed Workflow/Prompt changes. Candidates are inert until an
+    /// independent review and an explicit user approval both bind the digest.
+    #[serde(default)]
+    pub improvement_candidates: BTreeMap<String, ImprovementCandidate>,
     pub supervisor: SupervisorState,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -154,6 +158,7 @@ impl ProjectState {
             intent: None,
             work_packages: BTreeMap::new(),
             agent_spaces: BTreeMap::new(),
+            improvement_candidates: BTreeMap::new(),
             supervisor: SupervisorState::idle(),
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -199,4 +204,34 @@ impl ProjectState {
         self.revision = self.revision.saturating_add(1);
         self.updated_at_ms = now_ms;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ImprovementCandidateStatus {
+    Proposed,
+    Reviewed,
+    Approved,
+    Promoted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImprovementCandidate {
+    pub id: String,
+    pub target: String,
+    pub source: PathBuf,
+    pub base_digest: String,
+    pub candidate_digest: String,
+    pub rationale: String,
+    pub status: ImprovementCandidateStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_evidence: Option<String>,
+    #[serde(default)]
+    pub user_approved: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }

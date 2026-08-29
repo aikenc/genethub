@@ -141,6 +141,9 @@ for await (const line of input) {
 const DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic";
 const DEEPSEEK_OPENAI_BASE_URL = "https://api.deepseek.com/v1";
 const DEFAULT_BARE_MODEL = "deepseek-v4-flash";
+const TOKEN_PLAN_OPENAI_BASE_URL = "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
+const TOKEN_PLAN_ANTHROPIC_BASE_URL = "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1";
+const QWEN38_FLASH = "qwen3.8-flash";
 
 export type HostBuiltinLlm = {
   apiKey: string;
@@ -169,6 +172,37 @@ export function hostBuiltinLlm(): HostBuiltinLlm {
     anthropicBaseUrl: DEEPSEEK_ANTHROPIC_BASE_URL,
     bareId: DEFAULT_BARE_MODEL,
   };
+}
+
+/** Exact real-model contract for PM MVP qualification. No fallback is allowed. */
+export function aliyunQwen38Flash(): HostBuiltinLlm {
+  const apiKey = process.env.ALIYUN_TOKENPLAN_KEY?.trim();
+  if (!apiKey) throw new BlockedError("ALIYUN_TOKENPLAN_KEY is required for the Qwen 3.8 Flash journey");
+  return {
+    apiKey,
+    openaiBaseUrl: TOKEN_PLAN_OPENAI_BASE_URL,
+    anthropicBaseUrl: TOKEN_PLAN_ANTHROPIC_BASE_URL,
+    bareId: QWEN38_FLASH,
+  };
+}
+
+export function seedAliyunQwen38Flash(lease: EnvironmentLease): void {
+  const llm = aliyunQwen38Flash();
+  const dest = path.join(lease.data, "config.json");
+  const current = existsSync(dest) ? JSON.parse(readFileSync(dest, "utf8")) as Record<string, unknown> : {};
+  const agents = current.agents && typeof current.agents === "object" ? current.agents as Record<string, unknown> : {};
+  current.agents = { ...agents, providers: {
+    ali: {
+      apiKey: llm.apiKey,
+      baseUrl: llm.openaiBaseUrl,
+      label: "Alibaba Cloud Model Studio",
+      shortLabel: "ali",
+      dialect: "openai",
+      models: [llm.bareId],
+      modelLabels: { [llm.bareId]: "qwen3.8" },
+    },
+  }};
+  writeFileSync(dest, `${JSON.stringify(current, null, 2)}\n`);
 }
 
 export function requireHostCli(name: string): string {
@@ -262,6 +296,36 @@ export function configureOpencodeBuiltinAgent(lease: EnvironmentLease): string {
   mkdirSync(configDir, { recursive: true });
   writeFileSync(path.join(configDir, "opencode.json"), `${JSON.stringify(config, null, 2)}\n`);
   return `journey/${llm.bareId}`;
+}
+
+/** OpenCode's official Token Plan personal-edition Anthropic-compatible setup. */
+export function configureOpencodeQwen38Flash(lease: EnvironmentLease): string {
+  prependHostCliPath(lease, "opencode");
+  const llm = aliyunQwen38Flash();
+  const provider = "bailian-token-plan-personal";
+  const config = {
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      [provider]: {
+        npm: "@ai-sdk/anthropic",
+        name: "Alibaba Cloud Model Studio",
+        options: { baseURL: llm.anthropicBaseUrl, apiKey: llm.apiKey },
+        models: {
+          [llm.bareId]: {
+            name: "Qwen3.8 Flash",
+            reasoning: true,
+            limit: { context: 983616, output: 131072 },
+            modalities: { input: ["text", "image"], output: ["text"] },
+            options: { effort: "xhigh" },
+          },
+        },
+      },
+    },
+  };
+  const configDir = path.join(lease.home, ".config", "opencode");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(path.join(configDir, "opencode.json"), `${JSON.stringify(config, null, 2)}\n`);
+  return `${provider}/${llm.bareId}`;
 }
 
 export function sessionEventOf(entry: { raw: unknown }): { type?: string; [key: string]: unknown } | undefined {

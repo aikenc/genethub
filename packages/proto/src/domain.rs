@@ -253,9 +253,28 @@ pub struct PmProjectStatus {
     pub intent: Option<PmIntentStatus>,
     pub work_packages: Vec<PmWorkPackageStatus>,
     pub agent_spaces: Vec<PmAgentSpaceStatus>,
+    pub workflow_catalog: PmWorkflowCatalogStatus,
+    pub workflow_runs: Vec<PmWorkflowRunStatus>,
+    pub improvement_candidates: Vec<PmImprovementCandidateStatus>,
     pub supervisor: PmSupervisorStatus,
     #[ts(type = "number")]
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PmImprovementCandidateStatus {
+    pub id: String,
+    pub target: String,
+    pub rationale: String,
+    pub status: String,
+    pub candidate_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_evidence: Option<String>,
+    pub user_approved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -282,6 +301,10 @@ pub struct PmWorkPackageStatus {
     pub agent_space: String,
     pub branch: String,
     #[ts(optional)]
+    pub workflow_run_id: Option<String>,
+    #[ts(optional)]
+    pub node_instance_id: Option<String>,
+    #[ts(optional)]
     pub work_session_id: Option<String>,
     #[ts(optional)]
     pub candidate_commit: Option<String>,
@@ -293,6 +316,108 @@ pub struct PmWorkPackageStatus {
     pub review_verdict: Option<String>,
     #[ts(optional)]
     pub block_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowCatalogStatus {
+    pub recommended: String,
+    pub workflows: Vec<PmWorkflowDefinitionStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowDefinitionStatus {
+    pub id: String,
+    pub version: u32,
+    pub entry: String,
+    pub nodes: Vec<PmWorkflowNodeStatus>,
+    pub edges: Vec<PmWorkflowEdgeStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowNodeStatus {
+    pub id: String,
+    pub kind: String,
+    #[ts(optional)]
+    pub actor: Option<String>,
+    #[ts(optional)]
+    pub objective: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowEdgeStatus {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub condition: String,
+    #[ts(optional)]
+    pub choose_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowRunStatus {
+    pub id: String,
+    #[ts(optional)]
+    pub controller_session_id: Option<String>,
+    #[ts(optional)]
+    pub graph_id: Option<String>,
+    #[ts(optional)]
+    pub graph_version: Option<u32>,
+    #[serde(default)]
+    pub definition: Option<PmWorkflowDefinitionStatus>,
+    pub status: String,
+    pub active_nodes: Vec<String>,
+    pub facts: Vec<String>,
+    pub node_instances: Vec<PmWorkflowNodeInstanceStatus>,
+    pub team_slots: Vec<PmTeamSlotStatus>,
+    pub available_edges: Vec<PmWorkflowAvailableEdgeStatus>,
+    #[ts(type = "number")]
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowNodeInstanceStatus {
+    pub id: String,
+    pub node_id: String,
+    pub iteration: u32,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmTeamSlotStatus {
+    pub id: String,
+    pub node_instance_id: String,
+    pub work_package_id: String,
+    pub responsibility: String,
+    #[ts(optional)]
+    pub work_session_id: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowAvailableEdgeStatus {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    pub condition: String,
+    #[ts(optional)]
+    pub choose_by: Option<String>,
+    pub satisfied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

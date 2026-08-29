@@ -124,6 +124,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 "space",
                 "branch",
                 "worktree",
+                "node",
             ])?;
             let worktree = project_path(&context.root, &flags.one_required("worktree")?)?;
             let package = WorkPackage::planned(
@@ -145,6 +146,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                     &context.workspace_id,
                     &context.controller_session_id,
                     package,
+                    &flags.one_required("node")?,
                 )
                 .await
                 .map_err(rejected)?;
@@ -287,6 +289,41 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 json!({"action": "transitioned", "project": project}),
             ))
         }
+        [head, verb, rest @ ..] if head == "improvement" && verb == "propose" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["id", "target", "rationale"])?;
+            let project = context.state.projects.propose_improvement(
+                &context.workspace_id,
+                &context.controller_session_id,
+                flags.one_required("id")?,
+                flags.one_required("target")?,
+                flags.one_required("rationale")?,
+            ).await.map_err(rejected)?;
+            Ok(("pm.project.improvement", json!({"action": "proposed", "project": project})))
+        }
+        [head, verb, rest @ ..] if head == "improvement" && verb == "review" => {
+            let flags = Flags::parse(rest, &["pass"])?;
+            flags.validate(&["id", "session", "evidence"])?;
+            let project = context.state.projects.review_improvement(
+                &context.workspace_id,
+                &context.controller_session_id,
+                &flags.one_required("id")?,
+                flags.one_required("session")?,
+                flags.one_required("evidence")?,
+                flags.has("pass"),
+            ).await.map_err(rejected)?;
+            Ok(("pm.project.improvement", json!({"action": "reviewed", "project": project})))
+        }
+        [head, verb, rest @ ..] if head == "improvement" && verb == "promote" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["id"])?;
+            let project = context.state.projects.promote_improvement(
+                &context.workspace_id,
+                &context.controller_session_id,
+                &flags.one_required("id")?,
+            ).await.map_err(rejected)?;
+            Ok(("pm.project.improvement", json!({"action": "promoted", "project": project})))
+        }
         [verb, rest @ ..] if verb == "observe" => {
             let flags = Flags::parse(rest, &["active-work", "waiting-user", "terminal"])?;
             flags.validate(&["digest"])?;
@@ -306,7 +343,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
             Ok(("pm.project", json!({"action": "observed", "observation": observation})))
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition | space record|repair | workflow list|show|select|transition",
+            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition | space record|repair | workflow list|show|select|transition | improvement propose|review|promote",
         )),
     }
 }
