@@ -37,11 +37,16 @@ pub fn find_executable_in(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf>
 
 fn executable_extensions() -> Vec<String> {
     if cfg!(windows) {
-        std::env::var("PATHEXT")
+        let mut extensions: Vec<String> = std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
             .split(';')
             .map(|e| e.to_lowercase())
-            .collect()
+            .filter(|e| !e.is_empty())
+            .collect();
+        // Git Bash / `curl | bash` leaves an unsuffixed shim. PATHEXT never
+        // lists that, so we try it last rather than instead of `.cmd`.
+        extensions.push(String::new());
+        extensions
     } else {
         vec![String::new()]
     }
@@ -81,6 +86,36 @@ mod tests {
         );
         assert!(
             look_in_dir(&dir, "genet-locate-probe", &[".exe".into(), ".cmd".into()],).is_none()
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Official Windows installers write `.cmd`. The Linux install script,
+    /// and Agents that follow it, write a suffixless file into `~/.local/bin`.
+    #[test]
+    fn extra_dirs_see_an_extensionless_file_after_pathext_misses() {
+        let dir = std::env::temp_dir().join(format!("genet-locate-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let bare = dir.join("genet-locate-bare");
+        std::fs::write(&bare, b"").expect("a suffixless shim");
+
+        assert!(look_in_dir(
+            &dir,
+            "genet-locate-bare",
+            &[".exe".into(), ".cmd".into(), ".bat".into()],
+        )
+        .is_none());
+        assert_eq!(
+            look_in_dir(
+                &dir,
+                "genet-locate-bare",
+                &[".exe".into(), ".cmd".into(), ".bat".into(), "".into()],
+            ),
+            Some(bare.clone())
+        );
+        assert_eq!(
+            find_executable_in("genet-locate-bare", std::slice::from_ref(&dir)),
+            Some(bare)
         );
         std::fs::remove_dir_all(&dir).ok();
     }

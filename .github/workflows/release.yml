@@ -481,8 +481,11 @@ jobs:
           name: windows-setup
           path: dist/*
 
-  # The pair `scripts/install.sh` downloads, and the whole of what Linux gets in
-  # this version. Names here have to match what that script asks for.
+  # The pair `scripts/install.sh` downloads. Linux gets the musl-static pair
+  # below; macOS gets an Apple Silicon build — unsigned, because curl does not
+  # quarantine downloads, so a CLI tarball never meets Gatekeeper (the desktop
+  # .app is the one that waits for notarisation). Names here have to match what
+  # that script asks for.
   #
   # Built for musl and linked statically so a box with an older glibc (CentOS 7,
   # Ubuntu 20.04, many cloud images) can still run the download. A dynamic build
@@ -496,12 +499,19 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
+            platform: linux-x64
+            artifact: linux-tarball
+          - os: macos-14
+            target: aarch64-apple-darwin
+            platform: darwin-arm64
+            artifact: darwin-tarball
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Install the musl toolchain
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable snapshot, verified 2026-08-04
         with:
@@ -539,14 +549,16 @@ jobs:
           mkdir -p dist "$GITHUB_WORKSPACE/target/wasm32-wasip2/release"
           cp "${{ runner.temp }}/guest-wasm/genehub_guest.wasm" \
             "$GITHUB_WORKSPACE/target/wasm32-wasip2/release/genehub_guest.wasm"
-          tar -czf "$GITHUB_WORKSPACE/dist/$TARBALL_PREFIX-linux-x64.tar.gz" \
+          tar -czf "$GITHUB_WORKSPACE/dist/$TARBALL_PREFIX-${{ matrix.platform }}.tar.gz" \
             -C "$GITHUB_WORKSPACE/target/${{ matrix.target }}/release" "$CLI_BINARY" "$HOST_BINARY" \
             -C "$GITHUB_WORKSPACE/target/wasm32-wasip2/release" genehub_guest.wasm
           ls -la dist
-      # What the tarball promises: binaries that run on a machine with no
+      # What the Linux tarball promises: binaries that run on a machine with no
       # graphical session and nothing else installed — including no particular
-      # glibc. `ldd` saying "not a dynamic executable" is the claim. Runtime
-      # smoke coverage lives in the verify matrix; this job only packs.
+      # glibc. `ldd` saying "not a dynamic executable" is the claim. (The macOS
+      # build links the system frameworks like every normal Mac binary, so the
+      # ldd check runs on Linux only; the version stamp is verified on both.)
+      # Runtime smoke coverage lives in the verify matrix; this job only packs.
       - name: Check the binaries in the tarball are static and stamped
         shell: bash
         env:
@@ -555,10 +567,14 @@ jobs:
           set -euo pipefail
           . scripts/channel.env
           root="$(mktemp -d)"
-          tar -xzf "dist/$TARBALL_PREFIX-linux-x64.tar.gz" -C "$root"
+          tar -xzf "dist/$TARBALL_PREFIX-${{ matrix.platform }}.tar.gz" -C "$root"
           # The unpacked copy, so this is a claim about what is in the tarball
           # rather than about what was left in the build directory.
           node scripts/stamp-version.mjs --verify "$root/$CLI_BINARY"
+          if [ "${{ runner.os }}" != "Linux" ]; then
+            echo "not Linux; the static-link check does not apply"
+            exit 0
+          fi
           # Static-pie prints "statically linked" and exits 0; a fully static
           # binary may exit 1 with "not a dynamic executable". Either is fine.
           # What is not fine is a list of .so dependencies on the host glibc.
@@ -575,7 +591,7 @@ jobs:
           echo "the packed binaries are static and carry the tag's version"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: linux-tarball
+          name: ${{ matrix.artifact }}
           path: dist/*
 
   publish:
@@ -596,6 +612,10 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: linux-tarball
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: darwin-tarball
           path: dist
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

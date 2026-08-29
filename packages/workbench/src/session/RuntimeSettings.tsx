@@ -55,6 +55,7 @@ export function RuntimeSettings({
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
+  onRefreshAgents,
 }: {
   selection: RuntimeSelection;
   disabled?: boolean;
@@ -65,6 +66,7 @@ export function RuntimeSettings({
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
   onPickRuntimeAxis(axisId: string, valueId: string): void;
+  onRefreshAgents?(): void;
 }) {
   const generatedId = useId();
   const bodyId = `runtime-axes-${generatedId}`;
@@ -126,6 +128,9 @@ export function RuntimeSettings({
               >
                 <AgentMark agent={agent} className="h-4 w-4" fallbackToText={false} />
                 <span className="max-w-24 truncate">{presentation.label}</span>
+                {availability ? (
+                  <span className="shrink-0 text-[10px] text-danger">{availability.shortLabel}</span>
+                ) : null}
               </button>
             );
           })}
@@ -138,6 +143,15 @@ export function RuntimeSettings({
             onClick={() => setShowAllAgents((shown) => !shown)}
           >
             {showAllAgents ? "收起" : `更多 ${agents.length - visibleAgents.length}`}
+          </button>
+        ) : null}
+        {onRefreshAgents ? (
+          <button
+            type="button"
+            className="h-8 shrink-0 rounded-lg px-2 text-xs text-accent hover:bg-raised"
+            onClick={() => onRefreshAgents()}
+          >
+            重新检测
           </button>
         ) : null}
       </div>
