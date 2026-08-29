@@ -19,6 +19,28 @@ struct PartialToolCall {
     started: bool,
 }
 
+impl PartialToolCall {
+    fn apply_delta(&mut self, call: &Value) -> Option<String> {
+        // Some OpenAI-compatible providers (including Alibaba Token Plan)
+        // repeat a tool-call shell in the final streaming frame with `id: ""`.
+        // An empty repeat is not a new identity and must not erase the id that
+        // came with the first frame: Agent uses that id to replace the draft
+        // ToolCall with its completed arguments.
+        if let Some(id) = call["id"].as_str().filter(|id| !id.is_empty()) {
+            self.id = id.to_string();
+        }
+        if let Some(name) = call["function"]["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+        {
+            self.name.push_str(name);
+        }
+        let part = call["function"]["arguments"].as_str()?;
+        self.arguments.push_str(part);
+        Some(part.to_string())
+    }
+}
+
 pub async fn stream(
     model: &ModelConfig,
     request: Request,
@@ -112,12 +134,7 @@ pub async fn stream(
                 for call in calls {
                     let index = call["index"].as_u64().unwrap_or(0);
                     let entry = tool_calls.entry(index).or_default();
-                    if let Some(id) = call["id"].as_str() {
-                        entry.id = id.to_string();
-                    }
-                    if let Some(name) = call["function"]["name"].as_str() {
-                        entry.name.push_str(name);
-                    }
+                    let argument_delta = entry.apply_delta(call);
                     if !entry.started && !entry.id.is_empty() && !entry.name.is_empty() {
                         entry.started = true;
                         let _ = events.send(ProviderEvent::ToolCallStart {
@@ -125,9 +142,8 @@ pub async fn stream(
                             name: entry.name.clone(),
                         });
                     }
-                    if let Some(part) = call["function"]["arguments"].as_str() {
-                        entry.arguments.push_str(part);
-                        let _ = events.send(ProviderEvent::ToolCallDelta(part.into()));
+                    if let Some(part) = argument_delta {
+                        let _ = events.send(ProviderEvent::ToolCallDelta(part));
                     }
                 }
             }
@@ -488,5 +504,33 @@ mod tests {
         assert_eq!(usage.input, 20);
         assert_eq!(usage.output, 6);
         assert_eq!(usage.cache_read, 15);
+    }
+
+    #[test]
+    fn empty_trailing_tool_id_does_not_erase_qwen_call_identity() {
+        let mut call = PartialToolCall::default();
+        call.apply_delta(&json!({
+            "index": 0,
+            "id": "call_qwen_1",
+            "type": "function",
+            "function": { "name": "read", "arguments": "" }
+        }));
+        call.apply_delta(&json!({
+            "index": 0,
+            "function": { "arguments": "{\"path\":\"README.md\"}" }
+        }));
+        call.apply_delta(&json!({
+            "index": 0,
+            "id": "",
+            "type": "function",
+            "function": { "arguments": "" }
+        }));
+
+        assert_eq!(call.id, "call_qwen_1");
+        assert_eq!(call.name, "read");
+        assert_eq!(
+            serde_json::from_str::<Value>(&call.arguments).unwrap(),
+            json!({"path": "README.md"})
+        );
     }
 }
