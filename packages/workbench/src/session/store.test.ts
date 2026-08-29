@@ -1781,3 +1781,97 @@ function catalogClient(
     unsubscribe: async () => {},
   } as unknown as Client;
 }
+
+describe("batchGet version-skew fallback", () => {
+  const TRUNK = {
+    summary: {
+      index: 0,
+      first_item_id: "i0",
+      blob_count: 0,
+      title: "阶段 0",
+      batches: [],
+    },
+    batches: [],
+  } as never;
+
+  function skewedClient() {
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request.type);
+        if (request.type === "round.trunk.batchGet" || request.type === "blob.batchGet") {
+          throw new Error(
+            `invalid RPC operation body: unknown variant \`${request.type}\`, expected one of \`round.trunk.get\`, \`blob.get\``,
+          );
+        }
+        if (request.type === "round.trunk.get") return { type: "roundTrunk", data: TRUNK };
+        if (request.type === "blob.get") {
+          return { type: "blob", data: { id: "b1", kind: "toolCall", value: { n: 1 } } };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    return { client, calls };
+  }
+
+  it("falls back to one-by-one fetches when the daemon predates batchGet", async () => {
+    const { client, calls } = skewedClient();
+    useWorkbench.setState({ client });
+
+    const trunks = await useWorkbench
+      .getState()
+      .fetchTrunkDetails("s1", [{ roundId: "r1", trunkIndex: 0 }]);
+    expect(trunks).toHaveLength(1);
+    expect(calls).toEqual(["round.trunk.batchGet", "round.trunk.get"]);
+    expect(
+      useWorkbench.getState().sessionTimelines["s1"]?.roundTrunks["r1:0"],
+    ).toBeDefined();
+
+    // The refusal is remembered: the next fill goes straight to single gets.
+    await useWorkbench
+      .getState()
+      .fetchBlobPayloads("s1", [{ id: "b1", kind: "toolCall" } as never]);
+    expect(calls).toEqual(["round.trunk.batchGet", "round.trunk.get", "blob.get"]);
+    expect(useWorkbench.getState().sessionTimelines["s1"]?.blobs["b1"]).toBeDefined();
+    // Expected skew is absorbed, not surfaced as an error notice.
+    expect(useWorkbench.getState().notice).toBeNull();
+  });
+
+  it("keeps using the batch RPC when the daemon answers it", async () => {
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "round.trunk.batchGet") {
+          return { type: "roundTrunks", data: [TRUNK] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+
+    const trunks = await useWorkbench
+      .getState()
+      .fetchTrunkDetails("s1", [{ roundId: "r1", trunkIndex: 0 }]);
+    expect(trunks).toHaveLength(1);
+    expect(calls).toEqual(["round.trunk.batchGet"]);
+  });
+
+  it("reports real failures instead of falling back", async () => {
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        throw new Error("connection lost");
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+
+    const trunks = await useWorkbench
+      .getState()
+      .fetchTrunkDetails("s1", [{ roundId: "r1", trunkIndex: 0 }]);
+    expect(trunks).toBeNull();
+    expect(calls).toEqual(["round.trunk.batchGet"]);
+    expect(useWorkbench.getState().notice).toContain("connection lost");
+  });
+});

@@ -529,6 +529,20 @@ async fn dispatch(
             }
         }
 
+        Request::RoundTrunkBatchGet { session_id, refs } => {
+            match state.sessions.round_trunks(&session_id, &refs).await {
+                Ok(trunks) => Handled::ok(Reply::RoundTrunks(trunks)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::BlobBatchGet { session_id, blobs } => {
+            match state.sessions.blobs(&session_id, &blobs).await {
+                Ok(blobs) => Handled::ok(Reply::Blobs(blobs)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionSend {
             session_id,
             text,
@@ -1219,14 +1233,14 @@ async fn dispatch(
         }
 
         Request::WorkspaceCreate { root, name } => {
-            let path = Path::new(&root);
-            if let Err(error) = std::fs::create_dir_all(path) {
+            let path = crate::guest_paths::guest_path(Path::new(&root));
+            if let Err(error) = std::fs::create_dir_all(&path) {
                 return Handled::err(
                     ErrorCode::BadRequest,
                     format!("could not create {root}: {error}"),
                 );
             }
-            match state.workspaces.open(path, Some(name)).await {
+            match state.workspaces.open(&path, Some(name)).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
@@ -1710,7 +1724,7 @@ mod tests {
         match handled.reply {
             Err(error) => {
                 assert_eq!(error.code, ErrorCode::NotFound);
-                assert!(error.message.contains("s1"));
+                assert_eq!(error.message, "会话不存在：s1");
             }
             Ok(_) => panic!("expected an error"),
         }

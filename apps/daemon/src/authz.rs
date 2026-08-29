@@ -344,7 +344,9 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
         | Request::RoundTrunkGet { .. }
+        | Request::RoundTrunkBatchGet { .. }
         | Request::BlobGet { .. }
+        | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
         | Request::ProjectManagerStatus { .. }
         | Request::DirectoryList { .. }

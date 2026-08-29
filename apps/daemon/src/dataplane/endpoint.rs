@@ -103,17 +103,19 @@ struct Credit {
 
 struct CreditInner {
     value: Mutex<u32>,
+    maximum: u32,
     notify: tokio::sync::Notify,
 }
 
 impl Credit {
     fn new(value: u32) -> Result<Self> {
-        if value == 0 || value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES {
+        if value == 0 || value > genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES {
             anyhow::bail!("invalid initial stream credit");
         }
         Ok(Self {
             inner: Arc::new(CreditInner {
                 value: Mutex::new(value),
+                maximum: value,
                 notify: tokio::sync::Notify::new(),
             }),
         })
@@ -142,7 +144,7 @@ impl Credit {
         let Some(next) = current.checked_add(value) else {
             return false;
         };
-        if next > genehub_proto::INITIAL_STREAM_WINDOW_BYTES {
+        if next > self.inner.maximum {
             return false;
         }
         *current = next;
@@ -572,8 +574,6 @@ fn dispatch(
             || frame.stream_id.is_multiple_of(2)
             || streams.contains_key(&frame.stream_id)
             || streams.len() >= genehub_proto::MAX_ACTIVE_DATA_STREAMS
-            || frame.value == 0
-            || frame.value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES
             || frame.payload.is_empty()
             || frame.payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES
         {
@@ -597,6 +597,20 @@ fn dispatch(
                 .timeout_ms
                 .is_some_and(|timeout| timeout == 0 || timeout > 3_600_000)
         {
+            writer.try_send(Frame {
+                kind: Kind::Reset,
+                stream_id: frame.stream_id,
+                value: RESET_PROTOCOL,
+                payload: Vec::new(),
+            })?;
+            return Ok(());
+        }
+        let maximum_window = if head.method == "asset.preview" {
+            genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES
+        } else {
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
+        };
+        if frame.value == 0 || frame.value > maximum_window {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,
@@ -1280,11 +1294,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn credit_never_exceeds_the_fixed_stream_window() {
+    async fn credit_never_exceeds_its_negotiated_stream_window() {
         let credit = Credit::new(10).unwrap();
         assert_eq!(credit.take(7).await.unwrap(), 7);
         assert!(credit.add(7));
-        assert!(!credit.add(genehub_proto::INITIAL_STREAM_WINDOW_BYTES));
+        assert!(!credit.add(1));
+        let bulk = Credit::new(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES).unwrap();
+        assert_eq!(bulk.take(1).await.unwrap(), 1);
+        assert!(bulk.add(1));
     }
 
     #[test]

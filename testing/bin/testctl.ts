@@ -207,7 +207,7 @@ async function main(): Promise<number> {
     const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
     const inflight = new Set<Promise<void>>();
 
-    const recordResult = (result: UnitResult, browserArtifacts?: string) => {
+    const recordResult = (result: UnitResult, unit: WorkUnit, browserArtifacts?: string) => {
       results.push(result);
       store.writeResult(result);
       if (result.status === "passed" && browserArtifacts) {
@@ -219,11 +219,16 @@ async function main(): Promise<number> {
           [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
         );
       }
+      if (result.status === "passed" && result.message && unit.meta.retention) {
+        store.writeReport(result);
+      }
     };
 
     for (const units of [...sequenceGroups.values()].sort((left, right) => left[0]!.id.localeCompare(right[0]!.id))) {
       const sequenceResults = await runNodeSequence(units, extraEnv, runDeadline);
-      for (const result of sequenceResults) recordResult(result);
+      for (const [index, result] of sequenceResults.entries()) {
+        recordResult(result, units[index]!);
+      }
     }
 
     const startOne = (unit: WorkUnit) => {
@@ -237,7 +242,7 @@ async function main(): Promise<number> {
       }
       const task = runUnit(unit, env, openRoot).then((result) => {
         completeUnit(scheduler, unit, result.durationMs);
-        recordResult(result, env.TESTCTL_BROWSER_ARTIFACTS);
+        recordResult(result, unit, env.TESTCTL_BROWSER_ARTIFACTS);
       }).finally(() => {
         inflight.delete(task);
       });

@@ -12,7 +12,11 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  BlobPayload,
   BlobRef,
+  Reply,
+  RoundTrunk,
+  TrunkLocator,
   SequencedEvent,
   SessionSnapshot,
   SessionImportListing,
@@ -151,6 +155,33 @@ export type ComposerDraftInsert = {
   text: string;
 };
 
+/**
+ * A forward capsule parked on a composer, shown as a removable quote card
+ * rather than poured into the text field. On send the composer prepends
+ * `capsule` to the user's own text, so the user reviews before anything is
+ * sent (proposal §3.5).
+ */
+export type ForwardDraft = {
+  /** `null` is the unstarted conversation's composer. */
+  sessionId: string | null;
+  capsule: string;
+  itemCount: number;
+  estimatedTokens: number;
+  sourceSessionId: string;
+  sourceTitle: string | null;
+};
+
+/**
+ * A finished piece of work the user may want to act on — a Fork or forward
+ * that landed on another machine. The action is theirs to take; nothing here
+ * navigates on its own.
+ */
+export type CompletionNotice = {
+  text: string;
+  actionLabel?: string;
+  onAction?: () => void;
+};
+
 let composerDraftInsertSequence = 0;
 
 interface WorkbenchState {
@@ -197,6 +228,10 @@ interface WorkbenchState {
   restoreDraft: { text: string; attachments: Attachment[] } | null;
   /** Lines waiting to be appended to a session's composer without sending it. */
   composerDraftInserts: ComposerDraftInsert[];
+  /** The forward capsule parked on a composer, if any. One at a time. */
+  forwardDraft: ForwardDraft | null;
+  /** A completed cross-machine outcome offering a follow-up action. */
+  completionNotice: CompletionNotice | null;
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -349,6 +384,17 @@ interface WorkbenchState {
   appendComposerDraftLine(sessionId: string | null, text: string): void;
   /** Acknowledges that one queued composer insertion has been applied. */
   consumedComposerDraftInsert(id: string): void;
+  /** Parks (or clears, with `null`) the forward capsule on a composer. */
+  setForwardDraft(draft: ForwardDraft | null): void;
+  /** Shows (or clears, with `null`) the completed-work banner. */
+  setCompletionNotice(notice: CompletionNotice | null): void;
+  /**
+   * Batch fetches for the forward dialog's detail fill (proposal §7.0).
+   * Results are also cached into the session's timeline, which the round
+   * layer's own expansion then reuses.
+   */
+  fetchTrunkDetails(sessionId: string, refs: TrunkLocator[]): Promise<RoundTrunk[] | null>;
+  fetchBlobPayloads(sessionId: string, refs: BlobRef[]): Promise<BlobPayload[] | null>;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
   /** Lightweight provider discovery; full history is read only after selection. */
@@ -577,6 +623,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   notice: null,
   restoreDraft: null,
   composerDraftInserts: [],
+  forwardDraft: null,
+  completionNotice: null,
   hub: null,
   claim: null,
   devices: [],
@@ -1355,6 +1403,80 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }));
   },
 
+  setForwardDraft(draft) {
+    set({ forwardDraft: draft });
+  },
+
+  setCompletionNotice(notice) {
+    set({ completionNotice: notice });
+  },
+
+  async fetchTrunkDetails(sessionId, refs) {
+    if (refs.length === 0) return [];
+    const client = require_(get().client);
+    const trunks = await batchOrSequentially(
+      client,
+      "roundTrunks",
+      () => client.call({ type: "round.trunk.batchGet", payload: { sessionId, refs } }),
+      async () => {
+        const oneByOne: RoundTrunk[] = [];
+        for (const ref of refs) {
+          const reply = await client.call({
+            type: "round.trunk.get",
+            payload: { sessionId, roundId: ref.roundId, trunkIndex: ref.trunkIndex },
+          });
+          if (reply?.type !== "roundTrunk") return null;
+          oneByOne.push(reply.data);
+        }
+        return oneByOne;
+      },
+      set,
+    );
+    if (!trunks) return null;
+    patchTimeline(sessionId, set, (timeline) => {
+      const roundTrunks = { ...timeline.roundTrunks };
+      // Responses align with request order; the locator's round id is what
+      // the timeline cache key needs, and the payload does not repeat it.
+      for (const [index, trunk] of trunks.entries()) {
+        const roundId = refs[index]?.roundId;
+        if (roundId) roundTrunks[`${roundId}:${trunk.summary.index}`] = trunk;
+      }
+      return { roundTrunks };
+    });
+    return trunks;
+  },
+
+  async fetchBlobPayloads(sessionId, refs) {
+    if (refs.length === 0) return [];
+    const client = require_(get().client);
+    const payloads = await batchOrSequentially(
+      client,
+      "blobs",
+      () => client.call({ type: "blob.batchGet", payload: { sessionId, blobs: refs } }),
+      async () => {
+        const oneByOne: BlobPayload[] = [];
+        for (const ref of refs) {
+          const reply = await client.call({
+            type: "blob.get",
+            payload: { sessionId, blob: ref },
+          });
+          if (reply?.type !== "blob") return null;
+          oneByOne.push(reply.data);
+        }
+        return oneByOne;
+      },
+      set,
+    );
+    if (!payloads) return null;
+    patchTimeline(sessionId, set, (timeline) => ({
+      blobs: {
+        ...timeline.blobs,
+        ...Object.fromEntries(payloads.map((payload) => [payload.id, payload])),
+      },
+    }));
+    return payloads;
+  },
+
   async forkSession(turnId, target) {
     const sessionId = get().activeSessionId;
     if (!sessionId) return false;
@@ -1984,6 +2106,11 @@ async function start(
   });
   set((current) => ({
     sessions: [reply.data, ...current.sessions],
+    // A forward capsule parked on the unstarted conversation belongs to the
+    // session that conversation just became; re-key it or the card vanishes.
+    ...(current.forwardDraft?.sessionId === null
+      ? { forwardDraft: { ...current.forwardDraft, sessionId: reply.data.id } }
+      : {}),
     // Seed before `selectSession` so the first paint of the new session still
     // holds the message that is in flight; otherwise subscribe's empty
     // timeline puts Send back until this function patches pending afterwards.
@@ -2251,4 +2378,45 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
 function require_(client: Client | null): Client {
   if (!client) throw new Error("the workbench is not connected yet");
   return client;
+}
+
+/**
+ * `*.batchGet` is younger than some daemons this build can be pointed at —
+ * browsing an older machine through a newer web is a normal thing to do. One
+ * "unknown variant" refusal tells us the daemon predates batch fetches; the
+ * flag makes that client go one-by-one from then on instead of paying for a
+ * refused round trip on every fill iteration.
+ */
+const batchGetSupport = new WeakMap<Client, boolean>();
+
+function isUnknownVariant(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("unknown variant");
+}
+
+async function batchOrSequentially<T>(
+  client: Client,
+  batchType: "roundTrunks" | "blobs",
+  batch: () => Promise<Reply | undefined>,
+  sequentially: () => Promise<T[] | null>,
+  set: Setter,
+): Promise<T[] | null> {
+  if (batchGetSupport.get(client) !== false) {
+    try {
+      const reply = await batch();
+      if (reply?.type !== batchType) return null;
+      return reply.data as T[];
+    } catch (error) {
+      if (!isUnknownVariant(error)) {
+        reportError(set, error);
+        return null;
+      }
+      batchGetSupport.set(client, false);
+    }
+  }
+  try {
+    return await sequentially();
+  } catch (error) {
+    reportError(set, error);
+    return null;
+  }
 }

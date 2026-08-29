@@ -619,6 +619,140 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("batch-monologue")).toHaveTextContent("然后再改代码。");
   });
 
+  it("renders a compaction marker batch inside the batch flow, not above it", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const read = { index: 0, firstItemId: "a1", blobCount: 1, text: "读取配置" };
+    const marker = {
+      index: 1,
+      firstItemId: "c1",
+      blobCount: 0,
+      text: "上下文压缩",
+      marker: "auto",
+    };
+    const write = { index: 2, firstItemId: "a5", blobCount: 1, text: "写入修改" };
+    const summary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 2,
+      title: "读取配置。",
+      batches: [read, marker, write],
+    };
+    let state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "改一下配置", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "compaction", id: "c1", reason: "auto" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a9", text: "已完成。" },
+    });
+    state = showRounds(state, {
+      rounds: [round],
+      roundLayers: { r1: { round, trunks: [summary] } },
+      roundTrunks: {
+        "r1:0": {
+          summary,
+          batches: [
+            { summary: read, monologue: "读取配置。", blobs: [] },
+            { summary: marker, blobs: [] },
+            { summary: write, monologue: "写入修改。", blobs: [] },
+          ],
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    const trunk = screen.getByTestId("round-trunk");
+    await userEvent.click(within(trunk).getByRole("button"));
+
+    const markers = screen.getAllByTestId("compaction-marker");
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toHaveTextContent("上下文压缩 · 自动");
+    const batches = within(trunk).getAllByTestId("round-batch");
+    expect(batches).toHaveLength(2);
+    expect(
+      batches[0]!.compareDocumentPosition(markers[0]!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      markers[0]!.compareDocumentPosition(batches[1]!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("keeps a legacy session's compaction marker in the flat narrative", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    // Trunk rows written before the marker field existed carry no `marker`.
+    const read = { index: 0, firstItemId: "a1", blobCount: 1, text: "读取配置" };
+    const write = { index: 1, firstItemId: "a5", blobCount: 1, text: "写入修改" };
+    const summary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 2,
+      title: "读取配置。",
+      batches: [read, write],
+    };
+    let state = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "改一下配置", attachments: [] },
+    });
+    // The built-in agent reports manual compactions as "manual:cited".
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "compaction", id: "c1", reason: "manual:cited" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a9", text: "已完成。" },
+    });
+    state = showRounds(state, {
+      rounds: [round],
+      roundLayers: { r1: { round, trunks: [summary] } },
+      roundTrunks: {
+        "r1:0": {
+          summary,
+          batches: [
+            { summary: read, monologue: "读取配置。", blobs: [] },
+            { summary: write, monologue: "写入修改。", blobs: [] },
+          ],
+        },
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    const markers = screen.getAllByTestId("compaction-marker");
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toHaveTextContent("上下文压缩 · 手动");
+    expect(
+      within(screen.getByTestId("round-trunk")).queryByTestId("compaction-marker"),
+    ).not.toBeInTheDocument();
+    expect(
+      markers[0]!.compareDocumentPosition(screen.getByTestId("round-progress")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("moves the open tail along with the round and lets a reader hold one open", async () => {
     const round = {
       roundId: "r1",
@@ -2099,6 +2233,107 @@ describe("a whole turn as the timeline sees it", () => {
     render(<TimelineView state={state} />);
 
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
+  });
+
+  it("enters multi-select from a turn's 选择 button and range-selects across bubbles", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      workspaces: [{
+        id: "w1",
+        name: "GeneHub",
+        root: "/work/genehub",
+        isGitRepo: true,
+        folders: [],
+      }],
+      agents: [agent({ id: "codex", label: "Codex" })],
+    });
+    const completedTurn = (turnId: string, userText: string, assistantText: string) => [
+      {
+        type: "item" as const,
+        turnId,
+        item: { type: "userMessage" as const, id: `u-${turnId}`, text: userText, attachments: [] },
+      },
+      { type: "turnStarted" as const, turnId, startedAtMs: 1 },
+      {
+        type: "item" as const,
+        turnId,
+        item: { type: "assistantMessage" as const, id: `a-${turnId}`, text: assistantText },
+      },
+      {
+        type: "item" as const,
+        turnId,
+        item: {
+          type: "turnSummary" as const,
+          id: `summary-${turnId}`,
+          stats: {
+            turnId,
+            outcome: "completed" as const,
+            startedAtMs: 1,
+            finishedAtMs: 2,
+            durationMs: 1,
+            usage: {
+              inputTokens: 1,
+              outputTokens: 1,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              llmRounds: 1,
+              toolOutputTokens: 0,
+              compactionCount: 0,
+              outputRateEstimated: false,
+              costUsd: undefined,
+            },
+            toolCalls: 0,
+            forkCheckpoint: undefined,
+          },
+        },
+      },
+    ];
+    let state = emptyTimeline();
+    for (const event of [
+      ...completedTurn("t1", "第一个问题", "第一个回答"),
+      ...completedTurn("t2", "第二个问题", "第二个回答"),
+    ]) {
+      state = apply(state, event);
+    }
+
+    render(<TimelineView state={state} />);
+
+    // The floating entry and the footer's old single-shot copy are gone;
+    // each completed turn's footer offers 选择 next to Fork instead.
+    expect(screen.queryByRole("button", { name: "多选" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
+    const entries = screen.getAllByRole("button", { name: "选择" });
+    expect(entries).toHaveLength(2);
+
+    // 选择 checks its own turn and anchors the bubble above the footer.
+    await userEvent.click(entries[1]!);
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 2/30 条");
+    expect(screen.getByRole("checkbox", { name: /第二个问题/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: /第二个回答/ })).toHaveAttribute("aria-checked", "true");
+    // The footer entry steps aside while selecting; the turn-level add remains.
+    expect(screen.queryByRole("button", { name: "选择" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /选择整个 Turn/ })).toHaveLength(2);
+
+    // Clicking a bubble above the anchor range-selects everything between.
+    await userEvent.click(screen.getByRole("checkbox", { name: /第一个问题/ }));
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 4/30 条");
+    expect(screen.getByRole("checkbox", { name: /第一个回答/ })).toHaveAttribute("aria-checked", "true");
+
+    // Clicking a checked bubble unchecks it (反选).
+    await userEvent.click(screen.getByRole("checkbox", { name: /第一个回答/ }));
+    expect(screen.getByTestId("selection-bar")).toHaveTextContent("已选 3/30 条");
   });
 });
 

@@ -588,11 +588,13 @@ export async function completeVerifiableTask(input: {
 export async function openSecondClient(
   opened: OpenedWorkspace,
   name = "testctl-2",
+  options: Pick<Parameters<typeof connectProductClient>[0], "socketFactory" | "onDiagnostic"> = {},
 ): Promise<ProductSession["client"]> {
   const endpoint = daemonEndpoint(opened.daemon);
   return connectProductClient({
     ...endpoint,
     name,
+    ...options,
     redial: async () => daemonEndpoint(opened.daemon),
   });
 }

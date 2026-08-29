@@ -17,6 +17,8 @@ export const FABRIC_MAX_OPERATION_METADATA_BYTES = 16 * 1024;
 export const FABRIC_INITIAL_STREAM_CREDIT = 256 * 1024;
 /** Hard protocol cap for an advertised per-stream receive window. */
 export const FABRIC_MAX_STREAM_CREDIT = 4 * 1024 * 1024;
+/** Endpoint URL capability understood by Relay; old relays safely ignore it. */
+export const FABRIC_TRANSPORT_FLOW = "transport-v1";
 
 export const FabricKind = {
   Open: 1,

@@ -770,6 +770,14 @@ pub struct RoundBatchSummary {
     pub first_item_id: String,
     pub blob_count: u32,
     pub text: String,
+    /// The compaction reason when this batch is a context-compaction marker:
+    /// a zero-blob batch whose only item (`firstItemId`) is the compaction
+    /// event, so clients render the marker at the exact batch boundary where
+    /// the context was squeezed. Rows written before this field existed read
+    /// as `None` and their markers stay in the flat narrative stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub marker: Option<String>,
 }
 
 /// A visible, bounded section of a round. Trunks are carried by the round
@@ -817,6 +825,15 @@ pub struct BlobRef {
 pub enum BlobKind {
     Reasoning,
     ToolCall,
+}
+
+/// One trunk's address inside a session's round layer, for batch fetches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct TrunkLocator {
+    pub round_id: String,
+    pub trunk_index: u32,
 }
 
 /// One compact row in a batch. Full source content is fetched by `blob.get`.

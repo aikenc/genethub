@@ -5,7 +5,12 @@ import modernScreenshotSource from "modern-screenshot/dist/index.js?raw";
 
 import { emitClientDiagnostic, registerDiagnosticClient } from "../diagnostics";
 import { detectHost, type Endpoint, type Host } from "../host";
-import { Client, type AssetPreviewResult, type ProtocolDial } from "../protocol/client";
+import {
+  Client,
+  type AssetPreviewResult,
+  type AssetPreviewTransferStats,
+  type ProtocolDial,
+} from "../protocol/client";
 import { HighlightedCode, languageForPath, Markdown } from "../session/Markdown";
 import { readRtcEnabled } from "../settings/rtc";
 import { remapHtmlSite, resolveRuntimeAssetPath } from "./htmlSite";
@@ -37,6 +42,8 @@ type ViewState =
 export type PreviewMeta = {
   documentTitle: string | null;
   infoLines: string[];
+  /** Measured entry-file transfer facts shared by page and float chrome. */
+  transfer?: AssetPreviewTransferStats;
   /**
    * Sandbox storage shim state, when the preview persists localStorage through
    * the parent. `onClear` wipes both the parent-side store and the live frame.
@@ -136,6 +143,14 @@ export function AssetPreviewPage({
           path: source.path,
           kind: result.metadata.kind,
           sourceBytes: result.metadata.sourceBytes,
+          transport: result.transfer.transport,
+          durationMs: Math.round(result.transfer.elapsedMs),
+          firstByteMs: result.transfer.firstByteMs,
+          averageBytesPerSecond:
+            result.transfer.averageBytesPerSecond === null
+              ? null
+              : Math.round(result.transfer.averageBytesPerSecond),
+          chunks: result.transfer.chunkCount,
           phase: "ready",
           shared: Boolean(sharedClient),
         });
@@ -200,7 +215,7 @@ export function AssetPreviewPage({
           <button
             type="button"
             aria-label="查看预览信息"
-            title="查看预览信息"
+            title="查看文件与传输信息"
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted hover:bg-raised hover:text-fg"
             onClick={() => setPageInfoOpen(true)}
           >
@@ -235,6 +250,7 @@ export function AssetPreviewPage({
           path={source.path}
           title={meta?.documentTitle?.trim() || basenamePath(source.path)}
           lines={meta?.infoLines ?? ["预览信息尚未就绪，请稍候再打开。"]}
+          transfer={meta?.transfer}
           storage={meta?.storage}
           onClose={() => setPageInfoOpen(false)}
         />
@@ -264,7 +280,7 @@ function PreviewDocument({
   runtimeSessionId?: string | null;
   onRuntimeReady?: () => void;
 }) {
-  const { metadata, bytes } = result;
+  const { metadata, bytes, transfer } = result;
   const rootHandle = path.split("/")[0] ?? "";
   const loadPreview = useCallback(
     async (assetPath: string) => {
@@ -277,11 +293,24 @@ function PreviewDocument({
     },
     [client, workspaceHandle],
   );
+  const text = useMemo(() => decodeText(bytes), [bytes]);
+  const artifact = useMemo(
+    () => ({
+      deviceHandle,
+      workspaceHandle,
+      folders: [{ root: "", rootHandle }],
+      documentPath: path,
+      ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
+      loadPreview,
+    }),
+    [deviceHandle, workspaceHandle, rootHandle, path, runtimeSessionId, loadPreview],
+  );
 
   useEffect(() => {
     if (metadata.kind === "html") return;
     onMetaChange?.({
       documentTitle: null,
+      transfer,
       infoLines: [
         `类型：${metadata.kind}`,
         `媒体类型：${metadata.mediaType}`,
@@ -289,35 +318,20 @@ function PreviewDocument({
         "单文件预览（无静态站点重写）",
       ],
     });
-  }, [metadata, onMetaChange]);
+  }, [metadata, onMetaChange, transfer]);
 
   if (metadata.kind === "markdown") {
     return (
       <article className="min-h-0 w-full flex-1 overflow-y-auto overscroll-contain touch-pan-y">
         <div className="mx-auto max-w-4xl px-5 py-6 sm:px-8 sm:py-10">
-          <Markdown
-            text={decodeText(bytes)}
-            variant="document"
-            artifact={{
-              deviceHandle,
-              workspaceHandle,
-              folders: [{ root: "", rootHandle }],
-              documentPath: path,
-              ...(runtimeSessionId ? { sessionId: runtimeSessionId } : {}),
-              loadPreview,
-            }}
-          />
+          <Markdown text={text} variant="document" artifact={artifact} />
         </div>
       </article>
     );
   }
   if (metadata.kind === "text") {
     return (
-      <HighlightedCode
-        text={decodeText(bytes)}
-        language={languageForPath(path)}
-        document
-      />
+      <HighlightedCode text={text} language={languageForPath(path)} document />
     );
   }
   if (metadata.kind === "html") {
@@ -325,6 +339,7 @@ function PreviewDocument({
       <HtmlDocument
         bytes={bytes}
         metadata={metadata}
+        transfer={transfer}
         entryPath={path}
         storageScope={{ deviceHandle, workspaceHandle }}
         fetchAsset={loadPreview}
@@ -374,6 +389,7 @@ function BlobDocument({
 export function HtmlDocument({
   bytes,
   metadata,
+  transfer,
   entryPath,
   storageScope,
   fetchAsset,
@@ -383,6 +399,7 @@ export function HtmlDocument({
 }: {
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
+  transfer?: AssetPreviewTransferStats;
   entryPath: string;
   /** Identifies the device/workspace the store namespace is confined to. */
   storageScope?: PreviewStorageScope;
@@ -451,11 +468,19 @@ export function HtmlDocument({
     if (!baseMeta) return;
     onMetaChange?.({
       ...baseMeta,
+      ...(transfer ? { transfer } : {}),
       ...(storageNamespace
         ? { storage: { count: storageCount, onClear: clearPreviewStorage } }
         : {}),
     });
-  }, [baseMeta, storageCount, storageNamespace, clearPreviewStorage, onMetaChange]);
+  }, [
+    baseMeta,
+    storageCount,
+    storageNamespace,
+    clearPreviewStorage,
+    onMetaChange,
+    transfer,
+  ]);
 
   const requestDomSnapshot = useCallback(() => {
     const frame = frameRef.current;
@@ -770,12 +795,14 @@ function EmbeddedInfoDialog({
   path,
   title,
   lines,
+  transfer,
   storage,
   onClose,
 }: {
   path: string;
   title: string;
   lines: string[];
+  transfer?: PreviewMeta["transfer"];
   storage?: PreviewMeta["storage"];
   onClose(): void;
 }) {
@@ -814,6 +841,7 @@ function EmbeddedInfoDialog({
               <dd className="break-all font-mono text-fg">{path}</dd>
             </div>
           </dl>
+          {transfer ? <PreviewTransferSummary stats={transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
             {lines.map((line) => (
               <li key={line} className="break-words">
@@ -840,6 +868,104 @@ function EmbeddedInfoDialog({
       </section>
     </div>
   );
+}
+
+const TRANSFER_TRANSPORT_LABELS: Record<
+  AssetPreviewTransferStats["transport"],
+  string
+> = {
+  websocket: "WebSocket 直连",
+  fabric: "Fabric Relay",
+  rtc: "WebRTC 直连",
+};
+
+/** Shared transfer facts for the standalone Preview page and PreviewFloat. */
+export function PreviewTransferSummary({
+  stats,
+}: {
+  stats: AssetPreviewTransferStats;
+}) {
+  const chunks = stats.chunkCount.toLocaleString("zh-CN");
+  return (
+    <section aria-label="入口文件传输" className="mt-4 border-y border-line py-3">
+      <div className="mb-2 flex items-baseline justify-between gap-3">
+        <h3 className="text-xs font-medium text-fg">入口文件传输</h3>
+        <span className="text-[11px] text-faint">
+          {TRANSFER_TRANSPORT_LABELS[stats.transport]}
+        </span>
+      </div>
+      <dl className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+        <TransferFact
+          label="文件大小"
+          value={formatTransferBytes(stats.responseBytes)}
+        />
+        <TransferFact label="总等待" value={formatTransferDuration(stats.elapsedMs)} />
+        <TransferFact
+          label="首字节"
+          value={
+            stats.firstByteMs === null
+              ? "无正文"
+              : formatTransferDuration(stats.firstByteMs)
+          }
+        />
+        <TransferFact
+          label="正文平均"
+          value={
+            stats.averageBytesPerSecond === null
+              ? "不可测"
+              : `${formatTransferBytes(stats.averageBytesPerSecond)}/s`
+          }
+        />
+        <TransferFact
+          label="DATA 分片"
+          value={`${chunks} 个`}
+          detail={
+            stats.chunkCount > 0
+              ? `最大 ${formatTransferBytes(stats.largestChunkBytes)}/片`
+              : undefined
+          }
+        />
+      </dl>
+      <p className="mt-2 text-[11px] leading-relaxed text-faint">
+        首字节包含请求 RTT、daemon 扫描与排队；浏览器 WebSocket
+        没有可跨链路比较的独立 RTT 读数，因此不展示估算值。DATA 分片是 GeneHub
+        逻辑记录，不是 TCP 包。
+      </p>
+    </section>
+  );
+}
+
+function TransferFact({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div className="rounded-md bg-raised px-2 py-2">
+      <dt className="text-[10px] text-faint">{label}</dt>
+      <dd className="mt-0.5 whitespace-nowrap text-xs font-medium text-fg">{value}</dd>
+      {detail ? <dd className="mt-0.5 text-[10px] text-muted">{detail}</dd> : null}
+    </div>
+  );
+}
+
+function formatTransferBytes(bytes: number): string {
+  const magnitude = Math.max(0, bytes);
+  if (magnitude >= 1024 * 1024) {
+    return `${(magnitude / (1024 * 1024)).toFixed(1)} MiB`;
+  }
+  if (magnitude >= 1024) return `${(magnitude / 1024).toFixed(1)} KiB`;
+  return `${Math.round(magnitude)} B`;
+}
+
+function formatTransferDuration(milliseconds: number): string {
+  const duration = Math.max(0, milliseconds);
+  if (duration < 1_000) return `${Math.round(duration)} ms`;
+  return `${(duration / 1_000).toFixed(duration < 10_000 ? 2 : 1)} s`;
 }
 
 function PageInfoIcon() {

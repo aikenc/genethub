@@ -581,6 +581,7 @@ mod tests {
                 ),
             },
             rtc_supported: false,
+            max_bulk_stream_window_bytes: None,
         };
         socket
             .send(tokio_tungstenite::tungstenite::Message::Binary(

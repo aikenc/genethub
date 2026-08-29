@@ -68,7 +68,7 @@ daemon（guest）              哪个 offer 值得答、谁准进来、
 
 ## 5. 完成门
 
-- `specialty.wasm.fabric.guest-opens-its-own-uplink`：站在 relay 的位置上，收到的是 daemon 发来的 `GET /fabric/v2?ticket=…` WebSocket upgrade，随后 `device.list` 的 `remote.online` 才为 true
+- `specialty.wasm.fabric.guest-opens-its-own-uplink`：站在 relay 的位置上，收到的是 daemon 发来的 `GET /fabric/v2?ticket=…&flow=transport-v1` WebSocket upgrade，且查询参数仍严格有界；随后 `device.list` 的 `remote.online` 才为 true
 - `specialty.wasm.fabric.wss-is-encrypted-before-it-is-http`：对 `wss://` 端点写下的第一批字节是 TLS record（`0x16 0x03 …`），明文 upgrade 行不出现；握手无法验证时 `remote.online` 保持 false
 - `specialty.wasm.fabric.rtc-is-offered-by-the-component-too`：component daemon 的 `connection.identity` 报 `rtcSupported: true`
 - `apps/host/src/rtc.rs` 的两条 test：一个真实 WebRTC 对端发来的 offer 被答复、约定 label 的通道双向过字节；label 不对的通道被关掉且一个字节都进不了队列

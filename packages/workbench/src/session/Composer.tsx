@@ -19,7 +19,7 @@ import {
 } from "../speech/SpeechComposer";
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
-import type { ComposerDraftInsert } from "./store";
+import type { ComposerDraftInsert, ForwardDraft } from "./store";
 
 /**
  * What the composer is in the middle of.
@@ -106,6 +106,7 @@ export function Composer({
   commands,
   restoreDraft,
   insertDraft,
+  forwardDraft,
   speech,
   onSend,
   onInterrupt,
@@ -117,6 +118,7 @@ export function Composer({
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
+  onClearForwardDraft,
   minimized,
   onExpand,
 }: {
@@ -142,6 +144,8 @@ export function Composer({
   restoreDraft?: { text: string; attachments: Attachment[] } | null;
   /** One line produced outside Chat that should be appended, never sent. */
   insertDraft?: ComposerDraftInsert | null;
+  /** A forward capsule parked here, sent ahead of the user's own text. */
+  forwardDraft?: ForwardDraft | null;
   /** Available only when the connected daemon advertises Speech Protocol v2. */
   speech?: SpeechInputTarget;
   onSend(text: string, attachments: Attachment[]): void;
@@ -157,6 +161,8 @@ export function Composer({
   onRestoreDraft?(): void;
   /** Acknowledges that `insertDraft` has been appended to the field. */
   onInsertDraft?(id: string): void;
+  /** Removes the parked forward capsule without sending it. */
+  onClearForwardDraft?(): void;
   /** Fast-scroll compact bar. The full card comes back on `onExpand`. */
   minimized?: boolean;
   onExpand?(): void;
@@ -267,14 +273,22 @@ export function Composer({
     // anything the reader did wrong.
     if (phase !== "idle" || disabled || speechInput.busy) return;
     const text = draft.trim();
-    if (!text && attachments.length === 0) return;
+    if (!text && attachments.length === 0 && !forwardDraft) return;
+    // The parked capsule travels ahead of the user's own words, inside the
+    // same message, so the receiver sees history first and the ask second.
+    const payload = forwardDraft
+      ? text
+        ? `${forwardDraft.capsule}\n\n${text}`
+        : forwardDraft.capsule
+      : text;
     speechInput.dismissReview();
     setSpeechTextRange(null);
     setActiveSpeechSpan(null);
     setDraft("");
     setAttachments([]);
     setDismissed(false);
-    onSend(text, attachments);
+    onSend(payload, attachments);
+    if (forwardDraft) onClearForwardDraft?.();
   };
 
   // A message that failed comes back whole, text and attachments together, so
@@ -432,6 +446,31 @@ export function Composer({
           focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
+        {forwardDraft ? (
+          <div className="px-4 pt-3" data-testid="forward-draft">
+            <div className="flex items-center gap-2 rounded-xl border border-line bg-raised/50 px-3 py-2">
+              <span aria-hidden className="text-muted">
+                ↪
+              </span>
+              <span className="min-w-0 flex-1 truncate text-xs text-muted">
+                转发自 {forwardDraft.sourceTitle ?? forwardDraft.sourceSessionId} ·{" "}
+                {forwardDraft.itemCount} 条 · 约{" "}
+                {forwardDraft.estimatedTokens >= 1000
+                  ? `${(forwardDraft.estimatedTokens / 1000).toFixed(1)}k`
+                  : forwardDraft.estimatedTokens}{" "}
+                tokens
+              </span>
+              <button
+                type="button"
+                aria-label="移除转发的会话历史"
+                className="shrink-0 rounded-full px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-fg"
+                onClick={() => onClearForwardDraft?.()}
+              >
+                移除
+              </button>
+            </div>
+          </div>
+        ) : null}
         {attachments.length > 0 ? (
           <div
             className="flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3"
