@@ -54,6 +54,7 @@ defineSpecialty(
           workspaceId: opened.workspaceId,
           modelId: MODEL,
           modeId: null,
+          effortId: "medium",
           title: "Project manager",
         },
       });
@@ -74,11 +75,19 @@ defineSpecialty(
 
       const duplicatePm = await opened.client.call({
         type: "pm.session.create",
-        payload: { workspaceId: opened.workspaceId, modelId: MODEL, modeId: null, title: null },
+        payload: {
+          workspaceId: opened.workspaceId,
+          modelId: MODEL,
+          modeId: null,
+          title: null,
+        },
       });
       t.assertions.assert(
-        duplicatePm?.type === "session" && duplicatePm.data.id !== pm.id && duplicatePm.data.kind === "pm",
-        "the same project did not mint an independent second PM session",
+        duplicatePm?.type === "session" &&
+          duplicatePm.data.id !== pm.id &&
+          duplicatePm.data.kind === "pm" &&
+          duplicatePm.data.effortId === "medium",
+        "the same project did not mint an independent medium-effort second PM session for a legacy caller",
       );
 
       const pmEvents = await t.flows.main.attachEventLog(opened.client, pm.id);

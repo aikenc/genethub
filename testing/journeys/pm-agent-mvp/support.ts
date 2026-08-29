@@ -79,6 +79,7 @@ export async function runRealPmDelivery(
         workspaceId: opened.workspaceId,
         modelId: PM_MODEL,
         modeId: null,
+        effortId: "medium",
         title: "Starport Defender 项目经理",
       },
     });

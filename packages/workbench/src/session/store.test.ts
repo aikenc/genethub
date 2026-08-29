@@ -805,6 +805,7 @@ describe("opening a new conversation", () => {
         workspaceId: "w1",
         modelId: null,
         modeId: null,
+        effortId: "medium",
         runtimeValues: {},
         title: "项目管理",
       },

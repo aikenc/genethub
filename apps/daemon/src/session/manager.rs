@@ -310,6 +310,7 @@ impl SessionManager {
             agent_id,
             model_id,
             mode_id,
+            None,
             runtime_values,
             title,
             SessionKind::Normal,
@@ -325,6 +326,7 @@ impl SessionManager {
         cwd: PathBuf,
         model_id: Option<String>,
         mode_id: Option<String>,
+        effort_id: Option<String>,
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
     ) -> Result<SessionSummary> {
@@ -348,6 +350,7 @@ impl SessionManager {
             "genet",
             model_id,
             mode_id,
+            effort_id,
             runtime_values,
             title,
             SessionKind::Pm,
@@ -398,6 +401,7 @@ impl SessionManager {
             agent_id,
             model_id,
             mode_id,
+            None,
             runtime_values,
             title,
             SessionKind::Work,
@@ -417,6 +421,7 @@ impl SessionManager {
         agent_id: &str,
         model_id: Option<String>,
         mode_id: Option<String>,
+        effort_id: Option<String>,
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
         kind: SessionKind,
@@ -427,7 +432,7 @@ impl SessionManager {
 
         let now = now_ms();
         let meta = SessionMeta {
-            effort_id: None,
+            effort_id,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -4076,12 +4081,14 @@ mod tests {
                 dir.path().to_path_buf(),
                 None,
                 None,
+                Some("medium".into()),
                 Default::default(),
                 None,
             )
             .await
             .unwrap();
         assert_eq!(pm.kind, Some(SessionKind::Pm));
+        assert_eq!(pm.effort_id.as_deref(), Some("medium"));
         let token = sessions.project_manager_token(&pm.id).unwrap();
         assert!(sessions.authenticate_project_manager(&pm.id, &token).await);
         assert!(
@@ -4136,12 +4143,14 @@ mod tests {
                 dir.path().to_path_buf(),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             ),
             sessions.create_project_manager(
                 "w1",
                 dir.path().to_path_buf(),
+                None,
                 None,
                 None,
                 Default::default(),

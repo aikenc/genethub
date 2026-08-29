@@ -891,6 +891,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           workspaceId,
           modelId: null,
           modeId: null,
+          effortId: "medium",
           runtimeValues: {},
           title: "项目管理",
         },

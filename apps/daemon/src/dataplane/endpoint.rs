@@ -1384,6 +1384,7 @@ mod tests {
                 workspace_id: "project".into(),
                 model_id: None,
                 mode_id: None,
+                effort_id: None,
                 runtime_values: None,
                 title: None,
             }),

@@ -278,6 +278,7 @@ async fn dispatch(
             workspace_id,
             model_id,
             mode_id,
+            effort_id,
             runtime_values,
             title,
         } => {
@@ -351,6 +352,10 @@ async fn dispatch(
                     pm_space_root,
                     model_id,
                     mode_id,
+                    // Old clients did not send this axis. Make the PM's cost
+                    // ceiling durable before its first provider request even
+                    // when such a client creates the session.
+                    effort_id.or_else(|| Some("medium".to_string())),
                     runtime_values.unwrap_or_default(),
                     title,
                 )

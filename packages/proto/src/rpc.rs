@@ -92,6 +92,12 @@ pub enum Request {
         model_id: Option<String>,
         #[serde(default)]
         mode_id: Option<String>,
+        /// Persist the PM cost/reasoning ceiling before its first provider
+        /// request. Relying on an Agent default would make the selected level
+        /// invisible until the first turn has already started.
+        #[serde(default)]
+        #[ts(optional)]
+        effort_id: Option<String>,
         #[serde(default)]
         #[ts(optional)]
         runtime_values: Option<std::collections::BTreeMap<String, String>>,
