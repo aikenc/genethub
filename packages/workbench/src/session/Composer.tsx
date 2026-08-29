@@ -115,6 +115,7 @@ export function Composer({
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
+  onRefreshAgents,
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
@@ -155,6 +156,7 @@ export function Composer({
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
   onPickRuntimeAxis?(axisId: string, valueId: string): void;
+  onRefreshAgents?(): void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
   onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
@@ -684,6 +686,7 @@ export function Composer({
               onPickMode={onPickMode}
               onPickEffort={onPickEffort ?? (() => {})}
               onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
+              onRefreshAgents={onRefreshAgents}
             />
           </div>
           <div

@@ -179,6 +179,87 @@ describe("a session's title arriving after the first message", () => {
   });
 });
 
+describe("re-probing agents after they may have been installed", () => {
+  const cursorMissing = {
+    id: "cursor",
+    label: "Cursor",
+    builtin: false,
+    probe: { state: "notInstalled" as const },
+    capabilities: {
+      interrupt: true,
+      setModel: true,
+      setEffort: false,
+      setMode: true,
+      permissions: true,
+      resume: true,
+      fork: false,
+      attachments: true,
+    },
+    catalog: {
+      models: [],
+      modes: [],
+      commands: [],
+      defaultModel: undefined,
+      defaultMode: undefined,
+      defaultEffort: undefined,
+    },
+  } as AgentInfo;
+
+  const cursorReady = {
+    ...cursorMissing,
+    probe: { state: "ready" as const },
+    catalog: {
+      ...cursorMissing.catalog,
+      models: [{ id: "auto", label: "Auto", contextWindow: null, reasoning: false, efforts: [] }],
+      defaultModel: "auto",
+    },
+  } as AgentInfo;
+
+  function probingClient() {
+    const { client, fire } = stubClient();
+    const calls: string[] = [];
+    const probing = {
+      ...client,
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "agent.refresh") {
+          return { type: "agents", data: [cursorReady] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    return { client: probing, fire, calls };
+  }
+
+  it("replaces the cached catalog when refreshAgents is asked", async () => {
+    const { client, calls } = probingClient();
+    useWorkbench.setState({ client, agents: [cursorMissing] });
+    await useWorkbench.getState().refreshAgents();
+    expect(calls).toEqual(["agent.refresh"]);
+    expect(useWorkbench.getState().agents[0]?.probe.state).toBe("ready");
+  });
+
+  it("re-probes after a turn when some Agent is still unusable", async () => {
+    const { client, fire, calls } = probingClient();
+    useWorkbench.setState({ client, agents: [cursorMissing] });
+    await useWorkbench.getState().selectSession("s1");
+    fire({ seq: 1, sessionId: "s1", event: { type: "turnCompleted" } });
+    await vi.waitFor(() => {
+      expect(useWorkbench.getState().agents[0]?.probe.state).toBe("ready");
+    });
+    expect(calls).toContain("agent.refresh");
+  });
+
+  it("does not re-probe after a turn when every Agent is already startable", async () => {
+    const { client, fire, calls } = probingClient();
+    useWorkbench.setState({ client, agents: [cursorReady] });
+    await useWorkbench.getState().selectSession("s1");
+    fire({ seq: 1, sessionId: "s1", event: { type: "turnCompleted" } });
+    await Promise.resolve();
+    expect(calls).not.toContain("agent.refresh");
+  });
+});
+
 /**
  * The daemon does not echo the user's own message until the agent process is up
  * and the prompt handed over, which is seconds for a cold third-party CLI. Until

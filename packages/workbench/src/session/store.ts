@@ -405,6 +405,12 @@ interface WorkbenchState {
   setEffort(effortId: string): Promise<void>;
   setRuntimeAxis(axisId: string, valueId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
+  /**
+   * Re-probes every Agent. Opening the picker after an install, or finishing a
+   * turn that may have installed one, must not keep showing the first answer
+   * the daemon cached for its lifetime.
+   */
+  refreshAgents(): Promise<void>;
   refreshHub(): Promise<void>;
   pair(hubUrl: string): Promise<void>;
   /** Pairs with an identity the Hub makes up on the spot, nobody to approve it. */
@@ -456,6 +462,10 @@ function patchTimeline(
  * But most events cannot have moved it, and asking after every one would put a
  * request behind every token.
  */
+function endsATurn(type: SequencedEvent["event"]["type"]): boolean {
+  return type === "turnCompleted" || type === "turnFailed" || type === "turnCanceled";
+}
+
 function changesTheRoundLayer(event: SequencedEvent): boolean {
   switch (event.event.type) {
     case "turnCompleted":
@@ -929,6 +939,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           applyTitle(sessionId, event.event.title, set);
         }
         applySessionStatus(sessionId, event.event, set);
+        if (endsATurn(event.event.type) && get().agents.some((agent) => !canStartAgent(agent))) {
+          void get().refreshAgents();
+        }
         set((state) => {
           const timeline = applySequenced(
             state.sessionTimelines[sessionId] ?? emptyTimeline(),
@@ -1784,6 +1797,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
     if (reply?.type === "settings") set({ settings: reply.data });
     const agents = await require_(get().client).call({ type: "agent.refresh" });
+    if (agents?.type === "agents") set({ agents: agents.data });
+  },
+
+  async refreshAgents() {
+    const client = get().client;
+    if (!client) return;
+    const agents = await client.call({ type: "agent.refresh" }).catch(unattended(client, get, set));
     if (agents?.type === "agents") set({ agents: agents.data });
   },
 
