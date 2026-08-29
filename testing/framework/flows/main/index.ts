@@ -186,6 +186,53 @@ export function aliyunQwen38Flash(): HostBuiltinLlm {
   };
 }
 
+/**
+ * Refuses a long real-model journey before starting its daemon when the exact
+ * required provider/model cannot serve even one token. The bounded probe is a
+ * prerequisite check, not a substitute model path, and never reports or
+ * persists the credential.
+ */
+export async function requireAliyunQwen38FlashAvailable(): Promise<void> {
+  const llm = aliyunQwen38Flash();
+  let response: Response;
+  try {
+    response = await fetch(`${llm.openaiBaseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${llm.apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: llm.bareId,
+        messages: [{ role: "user", content: "Reply OK" }],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    const kind = error instanceof Error ? error.name : "network_error";
+    throw new BlockedError(`Aliyun qwen3.8-flash prerequisite probe failed: ${kind}`);
+  }
+
+  if (!response.ok) {
+    let providerCode = `http_${response.status}`;
+    try {
+      const payload = await response.json() as { error?: { code?: unknown } };
+      if (typeof payload.error?.code === "string" && payload.error.code.trim()) {
+        providerCode = payload.error.code.trim();
+      }
+    } catch {
+      // Status plus a bounded categorical code is sufficient and avoids
+      // copying arbitrary provider text into retained journey evidence.
+    }
+    throw new BlockedError(
+      `Aliyun qwen3.8-flash prerequisite unavailable: ${response.status} ${providerCode}`,
+    );
+  }
+  await response.arrayBuffer();
+}
+
 export function seedAliyunQwen38Flash(lease: EnvironmentLease): void {
   const llm = aliyunQwen38Flash();
   const dest = path.join(lease.data, "config.json");

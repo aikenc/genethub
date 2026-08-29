@@ -63,6 +63,8 @@ export async function runRealPmDelivery(
       : "the first journey unexpectedly received predecessor state",
   );
 
+  await t.flows.main.requireAliyunQwen38FlashAvailable();
+
   // Both configs are machine/user configuration and are written before the
   // daemon starts. No provider secret enters the project repository.
   t.flows.main.seedAliyunQwen38Flash(t.env);

@@ -2,7 +2,7 @@ import { createLease, releaseLease, type CaseMeta, type EnvironmentLease } from 
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
-import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedAliyunQwen38Flash, seedHostCodexLogin, installFixtureAcpAgent, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, configureOpencodeBuiltinAgent, configureOpencodeQwen38Flash, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
+import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedAliyunQwen38Flash, requireAliyunQwen38FlashAvailable, seedHostCodexLogin, installFixtureAcpAgent, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, configureOpencodeBuiltinAgent, configureOpencodeQwen38Flash, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
 import { leftoverProcesses, reconnectAfterStop } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
@@ -39,6 +39,7 @@ export interface CaseContext {
       seedHostCursorLogin: typeof seedHostCursorLogin;
       seedHostBetaProviders: typeof seedHostBetaProviders;
       seedAliyunQwen38Flash: typeof seedAliyunQwen38Flash;
+      requireAliyunQwen38FlashAvailable: typeof requireAliyunQwen38FlashAvailable;
       seedHostCodexLogin: typeof seedHostCodexLogin;
       installFixtureAcpAgent: typeof installFixtureAcpAgent;
       pointClaudeAtBuiltinLlm: typeof pointClaudeAtBuiltinLlm;
@@ -116,6 +117,7 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         seedHostCursorLogin,
         seedHostBetaProviders,
         seedAliyunQwen38Flash,
+        requireAliyunQwen38FlashAvailable,
         seedHostCodexLogin,
         installFixtureAcpAgent,
         pointClaudeAtBuiltinLlm,
