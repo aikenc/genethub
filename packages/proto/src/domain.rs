@@ -449,6 +449,15 @@ pub struct PmSupervisorStatus {
     #[ts(type = "number")]
     pub next_check_at_ms: Option<i64>,
     pub wake_pending: bool,
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub wake_not_before_ms: Option<i64>,
+    #[ts(type = "number")]
+    pub wake_dispatch_count: u64,
+    #[ts(type = "number")]
+    pub wake_failed_count: u64,
+    #[ts(type = "number")]
+    pub coalesced_event_count: u64,
 }
 
 /// How a child session obtained the context that precedes its first new turn.

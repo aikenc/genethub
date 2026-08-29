@@ -1,6 +1,7 @@
 import { defineJourney } from "../../framework/public.ts";
 
 import {
+  AUTONOMOUS_CANDIDATE_POLICY,
   SEQUENCE_ID,
   assertCleanMainRepositories,
   assertCocos4Migration,
@@ -27,6 +28,7 @@ defineJourney(
     resources: { environments: 1, cpu: 6, memoryMb: 12288, io: 6, browser: 0, pool: "real-llm" },
     expectedDurationMs: 4 * 60 * 60_000,
     timeoutMs: 5.5 * 60 * 60_000,
+    retention: true,
     surfaces: ["daemon", "agent", "workbench-client", "git", "agent-space-builder"],
     productInterfaces: ["pm.session.create", "pm.project.status", "genet-cli", "workSession.create"],
     sequence: { id: SEQUENCE_ID, order: 3 },
@@ -37,6 +39,8 @@ defineJourney(
       requirePredecessorCheckpoint: true,
       requireConcurrentImplementationSpaces: 2,
       prompt: `把现有《Starport Defender》的生产渲染引擎从 Three.js 迁移为官方 COCOS 4。沿用同一个 PM 项目和前两次 accepted 证据；从 completed 恢复 active，记录新的 Intent revision，根据实际迁移图动态维护 Agent Space 和项目 Skill。
+
+${AUTONOMOUS_CANDIDATE_POLICY}
 
 引擎目标已经由用户明确批准：固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30；它是 Alpha，必须在交付说明和风险中如实标注。不得用 Cocos Creator 3.x、名称伪装的自制 canvas renderer，或仍由 Three.js 驱动的兼容层冒充 COCOS 4。请在 repositories/game/engine.lock.json 记录 name、version、官方 source 和可验证的 tag/commit/artifact 身份。
 

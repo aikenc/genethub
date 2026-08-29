@@ -38,8 +38,8 @@ defineSpecialty(
     tags: ["core", "authorization", "pm-agent-mvp"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "standard" },
-    expectedDurationMs: 80_000,
-    timeoutMs: 180_000,
+    expectedDurationMs: 120_000,
+    timeoutMs: 240_000,
     surfaces: ["daemon", "agent", "workbench-client"],
     productInterfaces: ["genet-cli", "@genehub/workbench/client"],
   },
@@ -223,7 +223,10 @@ defineSpecialty(
       const activateCommand = [
         `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit}`,
         '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
-        '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space implementation --branch work/gameplay --worktree worktrees/implementation/game',
+        '"$GENEHUB_CLI" pm project workflow select --graph feature',
+        '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.acceptance.ready',
+        '"$GENEHUB_CLI" pm project workflow transition --edge planned --fact plan.workstreams.ready',
+        '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space implementation --branch work/gameplay --worktree worktrees/implementation/game --node implement',
         '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to ready',
       ].join(" && ");
@@ -248,10 +251,15 @@ defineSpecialty(
         payload: { workspaceId: opened.workspaceId },
       });
       t.assertions.assert(
-        publicProject?.type === "projectStatus" &&
+          publicProject?.type === "projectStatus" &&
           publicProject.data.phase === "active" &&
           publicProject.data.agentSpaces[0]?.role === "implementation" &&
-          publicProject.data.workPackages.some((item) => item.id === "wp-gameplay"),
+          publicProject.data.workPackages.some(
+            (item) =>
+              item.id === "wp-gameplay" &&
+              Boolean(item.workflowRunId) &&
+              Boolean(item.nodeInstanceId),
+          ),
         `public PM project projection drifted: ${JSON.stringify(publicProject)}`,
       );
 
@@ -562,7 +570,7 @@ defineSpecialty(
           supervisor?: { wakePending?: boolean; wakeTurnId?: string };
         };
         return state.supervisor?.wakePending === true && Boolean(state.supervisor.wakeTurnId);
-      }, 15_000);
+      }, 30_000);
       const endpointBefore = JSON.parse(
         execFileSync(opened.daemon.genet, ["daemon", "endpoint"], {
           env: opened.daemon.env,
@@ -629,7 +637,7 @@ defineSpecialty(
           !failedWakeState.supervisor.wakeTurnId &&
           typeof failedWakeState.supervisor.wakeRetryAtMs === "number"
         );
-      }, 15_000);
+      }, 30_000);
       const persistedRetryDelay =
         (failedWakeState?.supervisor?.wakeRetryAtMs ?? 0) - (failedWakeState?.updatedAtMs ?? 0);
       t.assertions.assert(
@@ -653,7 +661,7 @@ defineSpecialty(
       }, 45_000);
       await t.tools.waitUntil(
         () => opened.mock.requests.length >= requestsAfterFailedWake + 2,
-        15_000,
+        30_000,
       );
       const observedRetryDelay = Date.now() - failedWakeObservedAt;
       t.assertions.assert(
@@ -664,6 +672,21 @@ defineSpecialty(
         opened.mock.requests.length === requestsAfterFailedWake + 2,
         `provider failure created a retry storm instead of one tool round: requests=${opened.mock.requests.length - requestsAfterFailedWake}`,
       );
+      t.assertions.assert(
+        completedAfterBackoff?.type === "projectStatus" &&
+          completedAfterBackoff.data.supervisor.wakeDispatchCount >= 2 &&
+          completedAfterBackoff.data.supervisor.wakeFailedCount >= 1,
+        `supervisor telemetry did not preserve dispatch/failure evidence: ${JSON.stringify(completedAfterBackoff)}`,
+      );
+      if (completedAfterBackoff?.type === "projectStatus") {
+        t.note(
+          `pm-supervisor-metrics ${JSON.stringify({
+            wakeDispatchCount: completedAfterBackoff.data.supervisor.wakeDispatchCount,
+            wakeFailedCount: completedAfterBackoff.data.supervisor.wakeFailedCount,
+            coalescedEventCount: completedAfterBackoff.data.supervisor.coalescedEventCount,
+          })}`,
+        );
+      }
 
       const snapshot = completedWork;
       t.assertions.assert(snapshot?.type === "snapshot", `session.get returned ${snapshot?.type}`);

@@ -22,6 +22,11 @@ AgentSpace 的状态机属于固定内核，不在 Workflow DCG 中定义，也�
 5. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
 6. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
 
+工作包按可观察结果划分，并由一个 WorkSession 自主推进到干净候选。WorkAgent 内部 checkpoint 不形成新的
+DCG 节点，也不触发 PM 逐提交复核。Supervisor 会在短窗口内合并多个 WorkSession 状态变化；每次唤醒只读
+一次项目投影、处理整批 candidate/blocked/failed 事项，不轮询仍在运行的会话。只有候选、真实阻塞、终止
+失败、连续两次无新 checkpoint 的截断，或用户/合同变化，才重新进入包级管理决策。
+
 使用活动节点指定的提示词。PM 只能在 Coordinator 返回的合法边中决策，不能代替用户完成用户决策。
 WorkAgent 目标只描述结果和证据合同，不固定 Agent runtime 或模型。
 

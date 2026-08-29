@@ -40,9 +40,19 @@ Every command derives project root and controller from this PM session. Treat a 
 
 - Translate the request into observable acceptance criteria, not implementation wishes.
 - Keep work packages outcome-sized: one owner, inputs, output, dependencies, writable branch/worktree, completion gate, and risk.
+- Size each package so one WorkSession can autonomously reach a candidate in a
+  small number of runtime turns. Do not convert its internal file order,
+  checkpoint commits, or individual gate commands into PM graph nodes.
 - Represent real ordering as dependencies. Run independent packages concurrently only when their writable worktrees do not overlap.
 - Keep integration and independent review separate from implementation.
 - Record every accepted scope or acceptance change through the PM project CLI before continuing affected WorkAgents.
+
+Once dispatched, manage a package by terminal facts rather than narration.
+Checkpoint commits are recoverability evidence, not a reason to wake the PM or
+rewrite the plan. Re-enter only for a candidate, a concrete block, a terminal
+failure, two capped continuations without progress, or a user/contract change.
+When several WorkSessions settle together, process the entire supervisor batch
+before ending the PM turn.
 
 Do not force a fixed team topology. The graph determines which Agent Spaces are needed; project type Skills may suggest recipes but never override current evidence.
 

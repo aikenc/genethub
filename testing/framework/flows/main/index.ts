@@ -316,7 +316,7 @@ export function configureOpencodeQwen38Flash(lease: EnvironmentLease): string {
             reasoning: true,
             limit: { context: 983616, output: 131072 },
             modalities: { input: ["text", "image"], output: ["text"] },
-            options: { effort: "xhigh" },
+            options: { effort: "medium" },
           },
         },
       },

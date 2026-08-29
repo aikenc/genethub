@@ -1,6 +1,7 @@
 import { defineJourney } from "../../framework/public.ts";
 
 import {
+  AUTONOMOUS_CANDIDATE_POLICY,
   SEQUENCE_ID,
   assertCleanMainRepositories,
   assertDailyChallenge,
@@ -27,6 +28,7 @@ defineJourney(
     resources: { environments: 1, cpu: 4, memoryMb: 8192, io: 4, browser: 0, pool: "real-llm" },
     expectedDurationMs: 2 * 60 * 60_000,
     timeoutMs: 3 * 60 * 60_000,
+    retention: true,
     surfaces: ["daemon", "agent", "workbench-client", "git", "agent-space-builder"],
     productInterfaces: ["pm.session.create", "pm.project.status", "genet-cli", "workSession.create"],
     sequence: { id: SEQUENCE_ID, order: 2 },
@@ -36,6 +38,8 @@ defineJourney(
       timeoutMs: 2.5 * 60 * 60_000,
       requirePredecessorCheckpoint: true,
       prompt: `在现有《Starport Defender》项目上新增“每日挑战”特性。沿用同一个 PM 项目、外层 Git、repositories/game 和已有 Agent Space/WorkSession 证据；这是新的用户交付，请从 completed 显式恢复 active、记录新的 Intent revision，并根据影响范围复用、调整或新增最小拓扑，不要重建项目。
+
+${AUTONOMOUS_CANDIDATE_POLICY}
 
 验收要求：
 - 每个 UTC 日期有确定性的关卡 seed、敌人组合和限制条件；同一天同版本可复现，测试可注入日期/seed，不依赖真实时钟随机性。

@@ -23,9 +23,10 @@ When Intent includes an effective-source-size range, treat it as an aggregate pl
 
 Assume a third-party Coding Agent may have a short turn cap even though the WorkSession survives it:
 
-- make each continuation name one immediate checkpoint, its focused verification command, and the commit to create before taking the next objective;
-- preserve and resume the same WorkSession after a cap, using its Git status and last concrete finding as the handoff;
+- give the first turn the whole outcome-sized package contract through a clean candidate. Let the WorkAgent choose and commit internal checkpoints without PM approval between them;
+- preserve and resume the same WorkSession after a cap, using its Git status and last concrete finding as the handoff. A continuation restates the remaining acceptance gap, not one file or one command unless a repeated failure has narrowed the diagnosis there;
 - run focused checks while implementing and reserve the full repository gate for candidate formation;
+- do not wake the PM for successful internal checkpoints. Wake on candidate, concrete block, terminal failure, or two capped turns without a new commit/diagnosis;
 - after two capped turns on the same failure, stop repeating a broad “continue” prompt. Narrow the diagnosis, split the remaining outcome, or add a specialist Space when the write sets can be separated;
 - keep long simulation/browser suites within a stated test budget so a WorkAgent can diagnose, fix, and checkpoint inside one turn.
 

@@ -554,7 +554,7 @@ export type PmIntentStatus = { revision: number, outcome: string, acceptance: Ar
  */
 export type PmProjectStatus = { workspaceId: string, controllerSessionId: string, phase: string, lifecycle: string, revision: number, intent?: PmIntentStatus, workPackages: Array<PmWorkPackageStatus>, agentSpaces: Array<PmAgentSpaceStatus>, workflowCatalog: PmWorkflowCatalogStatus, workflowRuns: Array<PmWorkflowRunStatus>, improvementCandidates: Array<PmImprovementCandidateStatus>, supervisor: PmSupervisorStatus, updatedAtMs: number, };
 
-export type PmSupervisorStatus = { mode: string, nextCheckAtMs?: number, wakePending: boolean, };
+export type PmSupervisorStatus = { mode: string, nextCheckAtMs?: number, wakePending: boolean, wakeNotBeforeMs?: number, wakeDispatchCount: number, wakeFailedCount: number, coalescedEventCount: number, };
 
 export type PmTeamSlotStatus = { id: string, nodeInstanceId: string, workPackageId: string, responsibility: string, workSessionId?: string, status: string, };
 

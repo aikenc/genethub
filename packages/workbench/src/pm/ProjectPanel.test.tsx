@@ -88,6 +88,12 @@ function projectStatus(): PmProjectStatus {
       availableEdges: [{ id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user", satisfied: false }],
     }],
     improvementCandidates: [],
-    supervisor: { mode: "eventDriven", wakePending: false },
+    supervisor: {
+      mode: "eventDriven",
+      wakePending: false,
+      wakeDispatchCount: 0,
+      wakeFailedCount: 0,
+      coalescedEventCount: 0,
+    },
   };
 }

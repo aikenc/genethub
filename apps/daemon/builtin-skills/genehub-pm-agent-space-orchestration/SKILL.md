@@ -85,6 +85,25 @@ The daemon resolves the session cwd from the package's exact registered worktree
 Apply the same `--message - <<'GENEHUB_PROMPT'` form to a multiline or
 shell-sensitive continuation.
 
+The initial contract owns the complete outcome through a clean immutable
+candidate, not one tiny checkpoint. It must name the owned paths, frozen
+interfaces, observable acceptance checks, exact candidate gate, and evidence
+bundle. The WorkAgent may create internal checkpoint commits, but those are
+recovery details: do not wake or continue it merely because a checkpoint
+appeared. A normal implementation session should return only when it has one
+of these package-level outcomes:
+
+- `candidate`: clean HEAD/tree plus the requested gate and artifact evidence;
+- `blocked`: a concrete external/contract decision it cannot safely make;
+- `failed`: a terminal runtime/tool failure with the last recoverable commit.
+
+If the runtime turn cap ends a non-terminal attempt, resume the same
+WorkSession with its original whole-package contract and latest Git facts. Do
+not turn every remaining file, test command, or commit into a new PM-managed
+round. After two capped continuations without a new committed checkpoint or a
+changed diagnosis, stop repeating the contract and split or re-plan the
+package.
+
 Never omit `--no-wait`, and never wrap this command in `timeout`, a pipe, command substitution, a background job, or another waiting construct. Inspect a session with one bounded `session get` or history command when reconciling evidence. Never use a hidden prompt queue, write an Agent's private session files, or let two PM packages share a writable worktree.
 
 Bind that real session before treating work as running:
@@ -96,7 +115,7 @@ Bind that real session before treating work as running:
 
 After binding every currently-ready independent package, report briefly and end the PM turn so the user can guide or question the manager. Never run `sleep`, a timer, a foreground or background wait, a polling loop, or repeated `session get` commands inside a PM turn. Do not keep the PM model turn open while a WorkAgent works.
 
-The daemon supervisor—not the PM model—owns monitoring. It samples quiet running sessions with bounded 30s, 1m, 2m, then 5m backoff. Unchanged health only advances the next daemon check; a material status change wakes a new PM turn. If a PM wake reaches the model but fails, dispatch retries use a separate persistent 30s, 1m, 2m, then 5m backoff; daemon reload interruptions remain immediately recoverable. Waiting-for-user and terminal packages have no periodic wake. On a supervisor wake, reconcile facts, act, then finish the turn again. A user message always takes priority.
+The daemon supervisor—not the PM model—owns monitoring. It samples quiet running sessions with bounded 30s, 1m, 2m, then 5m backoff. Unchanged health only advances the next daemon check; material changes arriving close together share one persisted batch wake. If a PM wake reaches the model but fails, dispatch retries use a separate persistent 30s, 1m, 2m, then 5m backoff; daemon reload interruptions remain immediately recoverable. Waiting-for-user and terminal packages have no periodic wake. On a supervisor wake, read the durable projection once, process every actionable package in the batch, inspect only terminal/failed sessions, then finish the turn again. A user message always takes priority.
 
 For candidate review, launch the same package id in a different, recorded `--role review` Agent Space only after the implementation package is in `candidate`. A review-only Space cannot own implementation packages. It must include the exact candidate worktree in its `.code-workspace`; the daemon fixes the reviewer cwd to that worktree and rejects review in every implementation Space.
 

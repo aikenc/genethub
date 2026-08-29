@@ -18,7 +18,7 @@ use crate::session::RoundOutcome;
 use crate::state::Shared;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
-const WAKE_PROMPT: &str = "PM supervisor event: one or more managed WorkSessions changed status. Reconstruct the durable project with `genet pm project show`, inspect the exact bound WorkSessions and Git evidence, then update only affected work packages. Do not infer completion from this wakeup, and answer any pending user guidance before autonomous follow-up.";
+const WAKE_PROMPT: &str = "PM supervisor batch: managed WorkSession facts changed. Read durable state once with `genet pm project show`, process every actionable item in this batch, and finish the turn. Inspect only terminal/failed WorkSessions or evidence needed for a pending transition; do not poll running work or replay already-bound gates. A user message still takes priority.";
 
 pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -186,7 +186,7 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
         .sessions
         .send(
             &project.controller_session_id,
-            WAKE_PROMPT.to_string(),
+            wake_prompt(&observations),
             Vec::new(),
             &providers,
             None,
@@ -213,6 +213,31 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
         }
     }
     Ok(())
+}
+
+fn wake_prompt(
+    observations: &[(&str, WorkPackageStatus, Option<&str>, Option<SessionStatus>)],
+) -> String {
+    let mut prompt = String::from(WAKE_PROMPT);
+    prompt.push_str("\nCurrent package/session facts:");
+    for (package, package_status, session_id, session_status) in observations.iter().take(32) {
+        let _ = write!(
+            prompt,
+            "\n- {package}: package={package_status:?}, session={}, sessionStatus={}",
+            session_id.unwrap_or("none"),
+            session_status
+                .map(|status| format!("{status:?}"))
+                .unwrap_or_else(|| "none".into())
+        );
+    }
+    if observations.len() > 32 {
+        let _ = write!(
+            prompt,
+            "\n- … {} more packages; use the durable projection",
+            observations.len() - 32
+        );
+    }
+    prompt
 }
 
 fn package_requires_manager(package: &WorkPackage, project: &ProjectState) -> bool {
@@ -327,5 +352,30 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn wake_prompt_is_bounded_and_carries_actionable_session_facts() {
+        let observations = vec![
+            (
+                "gameplay",
+                WorkPackageStatus::Running,
+                Some("s_gameplay"),
+                Some(SessionStatus::Idle),
+            ),
+            (
+                "ui",
+                WorkPackageStatus::Running,
+                Some("s_ui"),
+                Some(SessionStatus::Running),
+            ),
+        ];
+        let prompt = wake_prompt(&observations);
+        assert!(prompt.contains("process every actionable item in this batch"));
+        assert!(
+            prompt.contains("gameplay: package=Running, session=s_gameplay, sessionStatus=Idle")
+        );
+        assert!(prompt.contains("ui: package=Running, session=s_ui, sessionStatus=Running"));
+        assert!(!prompt.contains("inspect the exact bound WorkSessions and Git evidence"));
     }
 }

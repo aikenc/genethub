@@ -14,12 +14,17 @@ Read [references/evidence-gates.md](references/evidence-gates.md) when defining 
 1. Restate the user-visible acceptance criteria and the package contract.
 2. Identify the exact repository, commit, tree, dependency lock, Builder lock, and test/build evidence.
 3. Reject dirty or moving candidates. A changed commit/tree invalidates all earlier verdicts.
-4. Keep the recorded Agent Space Builder identity current. Dispatch, candidate, review, and acceptance gates re-verify the lock; changing and re-recording an implementation Space blocks its candidate/review, and changing a review Space blocks reviews in progress. Reconcile the affected package instead of bypassing the refusal.
-5. Select checks by risk: behavior, regression, integration, security, performance, compatibility, license, and operability.
-6. Create an independent Review Agent Space when code or another material artifact is accepted. The reviewer receives read-only candidate facts and no completion pressure.
-7. Require a structured verdict with findings, evidence references, unresolved risks, and explicit pass/fail. A reviewer that edits the candidate cannot approve it.
-8. Send failures back to the implementation WorkSession or a replacement with lineage. Re-run affected tests and commission a fresh review.
-9. After merging accepted slices, run the full merged baseline before branching or dispatching any downstream content, migration, or integration package. Per-slice passes do not prove the accepted baseline composes. If accepted slices conflict semantically, create a prerequisite seam-fix package and independently gate it instead of hiding the repair inside unrelated downstream scope.
+4. Require one compact evidence bundle from the implementation WorkSession:
+   exact commands and exit codes, candidate commit/tree, artifact digests,
+   known limitations, and changed contracts. Do not ask the PM to reproduce
+   every implementation checkpoint or rerun a green package gate after each
+   internal commit.
+5. Keep the recorded Agent Space Builder identity current. Dispatch, candidate, review, and acceptance gates re-verify the lock; changing and re-recording an implementation Space blocks its candidate/review, and changing a review Space blocks reviews in progress. Reconcile the affected package instead of bypassing the refusal.
+6. Select checks by risk: behavior, regression, integration, security, performance, compatibility, license, and operability.
+7. Create an independent Review Agent Space when code or another material artifact is accepted. The reviewer receives read-only candidate facts and no completion pressure.
+8. Require a structured verdict with findings, evidence references, unresolved risks, and explicit pass/fail. A reviewer that edits the candidate cannot approve it.
+9. Send failures back to the implementation WorkSession or a replacement with lineage. Re-run affected tests and commission a fresh review.
+10. After merging accepted slices, run the full merged baseline before branching or dispatching any downstream content, migration, or integration package. Per-slice passes do not prove the accepted baseline composes. If accepted slices conflict semantically, create a prerequisite seam-fix package and independently gate it instead of hiding the repair inside unrelated downstream scope.
 
 Use Demo/preview acceptance for experience claims. The user should be able to verify the delivered behavior without reading implementation details.
 

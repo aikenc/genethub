@@ -1753,6 +1753,10 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
             mode: enum_wire_name(state.supervisor.mode)?,
             next_check_at_ms: state.supervisor.next_check_at_ms,
             wake_pending: state.supervisor.wake_pending,
+            wake_not_before_ms: state.supervisor.wake_not_before_ms,
+            wake_dispatch_count: state.supervisor.wake_dispatch_count,
+            wake_failed_count: state.supervisor.wake_failed_count,
+            coalesced_event_count: state.supervisor.coalesced_event_count,
         },
         updated_at_ms: state.updated_at_ms,
     })
@@ -1964,8 +1968,15 @@ mod tests {
             .reconcile_supervisor("w_1", "s_pm", "idle".into(), true, false, 32_000)
             .await
             .unwrap();
-        assert!(changed.wake_manager);
+        assert!(!changed.wake_manager);
+        assert_eq!(changed.project.supervisor.wake_not_before_ms, Some(42_000));
         assert_eq!(changed.project.supervisor.next_check_at_ms, Some(62_000));
+
+        let batched = recovered
+            .reconcile_supervisor("w_1", "s_pm", "idle".into(), true, false, 42_000)
+            .await
+            .unwrap();
+        assert!(batched.wake_manager);
 
         drop(recovered);
         let restarted = ProjectStore::new(&data);
@@ -2028,6 +2039,11 @@ mod tests {
 
         let changed_again = after_reload
             .reconcile_supervisor("w_1", "s_pm", "new-idle".into(), true, false, 33_000)
+            .await
+            .unwrap();
+        assert!(!changed_again.wake_manager);
+        let changed_again = after_reload
+            .reconcile_supervisor("w_1", "s_pm", "new-idle".into(), true, false, 43_000)
             .await
             .unwrap();
         assert!(changed_again.wake_manager);
@@ -2122,8 +2138,15 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            store
+            !store
                 .reconcile_supervisor("w_1", "s_pm", "changed".into(), true, false, 2_000)
+                .await
+                .unwrap()
+                .wake_manager
+        );
+        assert!(
+            store
+                .reconcile_supervisor("w_1", "s_pm", "changed".into(), true, false, 12_000)
                 .await
                 .unwrap()
                 .wake_manager
@@ -2184,6 +2207,8 @@ mod tests {
         assert!(!completed.supervisor.wake_pending);
         assert_eq!(completed.supervisor.wake_retry_step, 0);
         assert!(completed.supervisor.wake_retry_at_ms.is_none());
+        assert_eq!(completed.supervisor.wake_dispatch_count, 6);
+        assert_eq!(completed.supervisor.wake_failed_count, 5);
     }
 
     #[tokio::test]

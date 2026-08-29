@@ -9,6 +9,13 @@ import { BlockedError, type CaseContext } from "../../framework/public.ts";
 export const PM_MODEL = "ali/qwen3.8-flash";
 export const WORK_AGENT = "opencode";
 export const SEQUENCE_ID = "pm-agent-starport-defender";
+export const AUTONOMOUS_CANDIDATE_POLICY = `
+执行效率与稳定性约束：
+- 每个实现 WorkPackage 必须是结果型合同：一个 WorkSession 自主完成其全部 owned paths、检查和干净 candidate；不要把文件、单条测试或 checkpoint 拆成新的 PM 管理回合。
+- checkpoint commit 只用于 WorkAgent 自恢复，不要求 PM 逐提交复核，也不因普通 checkpoint 唤醒或继续会话。
+- Supervisor 批量事件到达时一次处理全部 candidate/blocked/failed 包；仍在运行的会话不轮询、不复跑。
+- 只有候选、具体阻塞、终止失败、连续两次无新提交/新诊断的 turn cap，或用户/合同变化，才重新规划或续派。
+- 候选报告必须是紧凑 evidence bundle：commit/tree、实际命令和退出码、产物摘要、已知限制、合同变化；独立 Review 再复验精确候选。`;
 
 export interface DeliveryOptions {
   prompt: string;
@@ -24,6 +31,14 @@ export interface DeliveryProof {
   newPackages: PmProjectStatus["workPackages"];
   maxConcurrentImplementationSpaces: number;
   workSessions: SessionSummary[];
+  metrics: {
+    elapsedMs: number;
+    pmTerminalTurns: number;
+    pmFailedTurns: number;
+    supervisorDispatches: number;
+    supervisorFailures: number;
+    coalescedEvents: number;
+  };
 }
 
 /**
@@ -35,6 +50,7 @@ export async function runRealPmDelivery(
   t: CaseContext,
   options: DeliveryOptions,
 ): Promise<DeliveryProof> {
+  const deliveryStartedAt = Date.now();
   const checkpoint = process.env.TESTCTL_SEQUENCE_CHECKPOINT_SHA256 ?? "";
   t.assertions.assert(
     process.env.TESTCTL_SEQUENCE_ID === SEQUENCE_ID,
@@ -71,6 +87,7 @@ export async function runRealPmDelivery(
     const pm = created.data;
     t.assertions.assert(pm.kind === "pm", `project entry created ${pm.kind ?? "ordinary"} session`);
     t.assertions.assert(pm.modelId === PM_MODEL, `PM session used ${pm.modelId ?? "no model"}`);
+    t.assertions.assert(pm.effortId === "medium", `PM session used ${pm.effortId ?? "no"} effort instead of medium`);
     const events = await t.flows.main.attachEventLog(opened.client, pm.id);
     const deliveryEventFloor = events.length;
     await t.flows.main.sendPrompt(opened.client, pm.id, options.prompt);
@@ -238,7 +255,22 @@ export async function runRealPmDelivery(
         }
       }
     }
-    return { status: latest, previous, newPackages, maxConcurrentImplementationSpaces, workSessions };
+    const deliveryEvents = events.slice(deliveryEventFloor);
+    const metrics = {
+      elapsedMs: Date.now() - deliveryStartedAt,
+      pmTerminalTurns: terminalTurns(deliveryEvents),
+      pmFailedTurns: deliveryEvents.filter((item) => item.type === "turnFailed").length,
+      supervisorDispatches: latest.supervisor.wakeDispatchCount ?? 0,
+      supervisorFailures: latest.supervisor.wakeFailedCount ?? 0,
+      coalescedEvents: latest.supervisor.coalescedEventCount ?? 0,
+    };
+    t.note(`pm-delivery-metrics ${JSON.stringify({
+      ...metrics,
+      maxConcurrentImplementationSpaces,
+      acceptedPackages: newPackages.filter((item) => item.status === "accepted").length,
+      workSessions: workSessions.length,
+    })}`);
+    return { status: latest, previous, newPackages, maxConcurrentImplementationSpaces, workSessions, metrics };
   } finally {
     opened.client.close();
     opened.daemon.stop();

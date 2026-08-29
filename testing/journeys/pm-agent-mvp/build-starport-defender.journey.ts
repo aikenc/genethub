@@ -1,6 +1,7 @@
 import { defineJourney } from "../../framework/public.ts";
 
 import {
+  AUTONOMOUS_CANDIDATE_POLICY,
   SEQUENCE_ID,
   assertCleanMainRepositories,
   assertEffectiveProjectScale,
@@ -27,6 +28,7 @@ defineJourney(
     resources: { environments: 1, cpu: 4, memoryMb: 8192, io: 4, browser: 0, pool: "real-llm" },
     expectedDurationMs: 4.5 * 60 * 60_000,
     timeoutMs: 6.5 * 60 * 60_000,
+    retention: true,
     surfaces: ["daemon", "agent", "workbench-client", "git", "agent-space-builder"],
     productInterfaces: ["pm.session.create", "pm.project.status", "genet-cli", "workSession.create"],
     sequence: { id: SEQUENCE_ID, order: 1 },
@@ -47,6 +49,7 @@ defineJourney(
 - 项目自有有效源码规模 35,000–65,000 行；排除依赖、生成代码、vendored engine、构建产物、空行/纯注释、死代码和为凑行数的重复。保持模块化，模拟/领域逻辑与渲染适配分离，为后续更换引擎留边界。
 
 管理约束：
+${AUTONOMOUS_CANDIDATE_POLICY}
 - 只能选择已安装的 opencode WorkAgent 和 bailian-token-plan-personal/qwen3.8-flash 模型；PM 自己使用 ali/qwen3.8-flash，不得升级模型或绕过 WorkSession。
 - 根据耦合与风险动态生成最小可行拓扑和各 Space 的项目 Skill。共享基础稳定后，至少让两个真正独立的实现包在不同 Agent Space/分支/worktree 中并发运行；不要照抄固定角色表。
 - 每个实现候选都要绑定精确 commit/tree 和机械证据；评审必须在显式 --role review 的专用 Agent Space 中由独立 WorkAgent 完成，评审不得改候选。失败要回到原 WorkSession 修正并重新评审。
