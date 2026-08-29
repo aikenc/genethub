@@ -6,7 +6,7 @@
 //! real abstraction rather than a rename of one transport
 //! (`docs/architecture.md` §3.3).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,11 +65,14 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     async fn catalog(&self, providers: &ProviderMap) -> Catalog {
-        // OpenCode owns its credentials, while GeneHub owns the picker. Reuse
-        // the explicit provider/model ids already configured in GeneHub: this
-        // avoids probing a third-party process on the latency-sensitive
-        // `agent.list` path and keeps the adapter vendor-neutral.
-        let models = configured_models(providers);
+        // Model ids are runtime-owned identities. `ali/qwen3.8-flash` can be a
+        // valid built-in Agent id while the same endpoint is named
+        // `bailian-token-plan-personal/qwen3.8-flash` by OpenCode. Advertising
+        // the former and passing it to the latter makes a WorkSession fail
+        // before its first token. Read OpenCode's local, secret-free catalog
+        // shape first; retain the GeneHub provider map only as a compatibility
+        // fallback for installations without an OpenCode config file.
+        let models = configured_opencode_models().unwrap_or_else(|| configured_models(providers));
         let default_model = models.first().map(|model| model.id.clone());
         Catalog {
             runtime_axes: None,
@@ -332,6 +335,52 @@ fn configured_models(providers: &ProviderMap) -> Vec<ModelInfo> {
         }
     }
     models
+}
+
+fn configured_opencode_models() -> Option<Vec<ModelInfo>> {
+    let path = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?
+        .join("opencode")
+        .join("opencode.json");
+    let value = serde_json::from_slice::<Value>(&std::fs::read(path).ok()?).ok()?;
+    let models = models_from_opencode_config(&value);
+    (!models.is_empty()).then_some(models)
+}
+
+fn models_from_opencode_config(config: &Value) -> Vec<ModelInfo> {
+    let Some(providers) = config.get("provider").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for (provider_id, provider) in providers {
+        let provider_short = provider_id.chars().take(5).collect::<String>();
+        let Some(models) = provider.get("models").and_then(Value::as_object) else {
+            continue;
+        };
+        for (model_id, model) in models {
+            result.push(ModelInfo {
+                id: format!("{provider_id}/{model_id}"),
+                label: format!(
+                    "{}@{provider_short}",
+                    model
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(model_id)
+                        .chars()
+                        .take(12)
+                        .collect::<String>()
+                ),
+                context_window: model.pointer("/limit/context").and_then(Value::as_u64),
+                reasoning: model
+                    .get("reasoning")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                efforts: Vec::new(),
+            });
+        }
+    }
+    result
 }
 
 struct OpenCodeImportServer {
@@ -1178,6 +1227,29 @@ mod tests {
             vec!["vendor/max", "vendor/flash"]
         );
         assert_eq!(models[0].label, "model-max@vndr");
+    }
+
+    #[test]
+    fn opencode_catalog_keeps_its_native_provider_identity() {
+        let models = models_from_opencode_config(&json!({
+            "provider": {
+                "bailian-token-plan-personal": {
+                    "options": { "apiKey": "must-not-be-read-into-the-catalog" },
+                    "models": {
+                        "qwen3.8-flash": {
+                            "name": "Qwen3.8 Flash",
+                            "reasoning": true,
+                            "limit": { "context": 983616 }
+                        }
+                    }
+                }
+            }
+        }));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "bailian-token-plan-personal/qwen3.8-flash");
+        assert_eq!(models[0].label, "Qwen3.8 Flas@baili");
+        assert_eq!(models[0].context_window, Some(983616));
+        assert!(models[0].reasoning);
     }
 
     #[test]
