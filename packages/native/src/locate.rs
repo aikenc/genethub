@@ -114,7 +114,7 @@ mod tests {
             Some(bare.clone())
         );
         assert_eq!(
-            find_executable_in("genet-locate-bare", &[dir.clone()]),
+            find_executable_in("genet-locate-bare", std::slice::from_ref(&dir)),
             Some(bare)
         );
         std::fs::remove_dir_all(&dir).ok();
