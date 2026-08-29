@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { HistoryCoverage } from "@genehub/proto";
+import type {
+  ForkTarget,
+  ForkTransfer,
+  HistoryCoverage,
+  SessionSummary,
+} from "@genehub/proto";
 
 import { ChangesPanel } from "./changes/ChangesPanel";
 import { claimMachine, deviceName } from "./devices/claim";
@@ -24,8 +29,13 @@ import { Composer, resolveComposerPhase } from "./session/Composer";
 import { NewSessionPanel } from "./session/NewSessionPanel";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
-import type { ForkController } from "./session/TimelineView";
+import type {
+  ForkController,
+  ForwardController,
+  ForwardTarget,
+} from "./session/TimelineView";
 import type { ForkMachineOption } from "./session/ForkDialog";
+import type { MachineCatalog } from "./session/MachineCatalogPicker";
 import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
 import { DesktopToolsDrawer } from "./shell/DesktopToolsDrawer";
@@ -64,6 +74,31 @@ const openConnection = (
     rtcEnabled: readRtcEnabled(),
     onDiagnostic: emitClientDiagnostic,
   });
+
+/**
+ * Everything a dialog can do with a machine that is not the one on screen:
+ * read its catalogs and sessions, create and send on it, and — only when the
+ * user asks — jump over to what was made. Fork and Forward both speak to
+ * machines through this, so the dialing details live in exactly one place.
+ */
+interface MachineBroker {
+  sourceMachine: ForkMachineOption;
+  listMachines(): Promise<ForkMachineOption[]>;
+  loadCatalog(machine: ForkMachineOption): Promise<MachineCatalog>;
+  loadSessions(machine: ForkMachineOption): Promise<SessionSummary[]>;
+  /** One connection for the whole delivery: create when asked, then send. */
+  deliverForward(
+    machine: ForkMachineOption,
+    target: ForwardTarget,
+    capsule: string,
+  ): Promise<{ sessionId: string }>;
+  createFork(
+    machine: ForkMachineOption,
+    transfer: ForkTransfer,
+    target: ForkTarget,
+  ): Promise<SessionSummary>;
+  jumpTo(machine: ForkMachineOption, sessionId: string): void;
+}
 
 /**
  * The workbench shell: left session tree, closable tabs, chat in the middle,
@@ -137,7 +172,7 @@ export function App({
   // desktop asking for the room back, which starts false because the left
   // column is how the workbench is read.
   const [sidebarHidden, setSidebarHidden] = useState(false);
-  const [pendingForkSession, setPendingForkSession] = useState<string | null>(null);
+  const [pendingJumpSession, setPendingJumpSession] = useState<string | null>(null);
   const workbench = useWorkbench();
   const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
@@ -432,18 +467,18 @@ export function App({
 
   useEffect(() => {
     if (
-      !pendingForkSession ||
+      !pendingJumpSession ||
       workbench.connection !== "ready" ||
-      !workbench.sessions.some((entry) => entry.id === pendingForkSession)
+      !workbench.sessions.some((entry) => entry.id === pendingJumpSession)
     ) return;
-    const sessionId = pendingForkSession;
-    setPendingForkSession(null);
+    const sessionId = pendingJumpSession;
+    setPendingJumpSession(null);
     void useWorkbench.getState().selectSession(sessionId).catch((error: unknown) => {
       useWorkbench.setState({
         notice: error instanceof Error ? error.message : String(error),
       });
     });
-  }, [pendingForkSession, workbench.connection, workbench.sessions]);
+  }, [pendingJumpSession, workbench.connection, workbench.sessions]);
 
   const pickTarget = useCallback((picked: Target, next: Endpoint) => {
     // The local machine goes back to following the shell, which is the only
@@ -469,10 +504,22 @@ export function App({
     }),
     [endpoint, host.kind, sourceMachineId, target, workbench.connection],
   );
-  const forkController = useMemo<ForkController | undefined>(() => {
+  const machineBroker = useMemo<MachineBroker | undefined>(() => {
     if (!host.targets || !host.openTarget) return undefined;
     const listTargets = host.targets;
     const openTarget = host.openTarget;
+    const onMachine = <T,>(
+      machine: ForkMachineOption,
+      exchange: (client: Client) => Promise<T>,
+    ): Promise<T> =>
+      openTarget(machine.routeId, { remember: false }).then((opened) =>
+        withForkClient(
+          connect,
+          opened,
+          async () => dialOf(await openTarget(machine.routeId, { remember: false })),
+          exchange,
+        ),
+      );
     return {
       sourceMachine,
       async listMachines() {
@@ -498,27 +545,109 @@ export function App({
           const state = useWorkbench.getState();
           return { agents: state.agents, workspaces: state.workspaces };
         }
-        return withForkClient(
-          connect,
-          await openTarget(machine.routeId, { remember: false }),
-          async () => dialOf(await openTarget(machine.routeId, { remember: false })),
-          async (client) => {
-            const [agents, workspaces] = await Promise.all([
-              client.call({ type: "agent.list" }),
-              client.call({ type: "workspace.list" }),
-            ]);
-            if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-              throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
-            }
-            return { agents: agents.data, workspaces: workspaces.data };
-          },
-        );
+        return onMachine(machine, async (client) => {
+          const [agents, workspaces] = await Promise.all([
+            client.call({ type: "agent.list" }),
+            client.call({ type: "workspace.list" }),
+          ]);
+          if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
+            throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
+          }
+          return { agents: agents.data, workspaces: workspaces.data };
+        });
       },
+      async loadSessions(machine) {
+        if (machine.id === sourceMachine.id) return useWorkbench.getState().sessions;
+        return onMachine(machine, async (client) => {
+          const reply = await client.call({
+            type: "session.list",
+            payload: { workspaceId: null, includeArchived: false },
+          });
+          if (reply?.type !== "sessions") {
+            throw new Error("目标机器没有返回可用的会话列表。");
+          }
+          return reply.data;
+        });
+      },
+      async deliverForward(machine, target, capsule) {
+        return onMachine(machine, async (client) => {
+          let sessionId: string;
+          if (target.kind === "session") {
+            sessionId = target.sessionId;
+          } else {
+            const created = await client.call({
+              type: "session.create",
+              payload: {
+                workspaceId: target.workspaceId,
+                agentId: target.agentId,
+                modelId: null,
+                modeId: null,
+                title: null,
+                cwd: null,
+              },
+            });
+            if (created?.type !== "session") {
+              throw new Error("目标机器没有创建会话。");
+            }
+            sessionId = created.data.id;
+          }
+          await client.call({
+            type: "session.send",
+            payload: {
+              sessionId,
+              text: capsule,
+              attachments: [],
+              artifactPreviewBaseUrl: null,
+              continuesRound: null,
+            },
+          });
+          return { sessionId };
+        });
+      },
+      async createFork(machine, transfer, target) {
+        const created = await onMachine(machine, (client) =>
+          client.call({
+            type: "session.forkImport",
+            payload: { transfer, target },
+          }),
+        );
+        if (created?.type !== "session") {
+          throw new Error("目标机器没有创建 Fork 会话。");
+        }
+        return created.data;
+      },
+      jumpTo(machine, sessionId) {
+        // The one navigation cross-machine flows still perform — deliberately
+        // chosen from the completion banner, never a side effect of confirming.
+        void openTarget(machine.routeId).then((next) => {
+          setPendingJumpSession(sessionId);
+          pickTarget(
+            {
+              id: machine.routeId,
+              deviceHandle: machine.id,
+              label: machine.label,
+              kind: machine.kind,
+              online: true,
+            },
+            next,
+          );
+        });
+      },
+    };
+  }, [connect, host.openTarget, host.targets, pickTarget, sourceMachine]);
+
+  const forkController = useMemo<ForkController | undefined>(() => {
+    if (!machineBroker) return undefined;
+    const broker = machineBroker;
+    return {
+      sourceMachine: broker.sourceMachine,
+      listMachines: () => broker.listMachines(),
+      loadCatalog: (machine) => broker.loadCatalog(machine),
       async fork(turnId, selection) {
         const state = useWorkbench.getState();
         const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
         if (!source || !state.client) return false;
-        if (selection.machine.id === sourceMachine.id) {
+        if (selection.machine.id === broker.sourceMachine.id) {
           // Always send an explicit target. The daemon still takes the native
           // path when the same Agent has a checkpoint; omitting target is the
           // legacy "native only" request and would refuse Cursor-class Agents.
@@ -535,40 +664,35 @@ export function App({
         if (exported?.type !== "forkTransfer") {
           throw new Error("源机器没有返回可迁移的 Fork 历史。");
         }
-        const created = await withForkClient(
-          connect,
-          await openTarget(selection.machine.routeId, { remember: false }),
-          async () => dialOf(await openTarget(selection.machine.routeId, { remember: false })),
-          (client) => client.call({
-            type: "session.forkImport",
-            payload: {
-              transfer: exported.data,
-              target: {
-                agentId: selection.agentId,
-                workspaceId: selection.workspaceId,
-              },
-            },
-          }),
-        );
-        if (created?.type !== "session") {
-          throw new Error("目标机器没有创建 Fork 会话。");
-        }
-        const next = await openTarget(selection.machine.routeId);
-        setPendingForkSession(created.data.id);
-        pickTarget(
-          {
-            id: selection.machine.routeId,
-            deviceHandle: selection.machine.id,
-            label: selection.machine.label,
-            kind: selection.machine.kind,
-            online: true,
-          },
-          next,
-        );
+        const created = await broker.createFork(selection.machine, exported.data, {
+          agentId: selection.agentId,
+          workspaceId: selection.workspaceId,
+        });
+        // Stay where the user is. Being yanked onto another machine the moment
+        // a Fork lands is what made cross-machine Fork feel broken; the jump
+        // is offered on the completion banner, not forced.
+        useWorkbench.getState().setCompletionNotice({
+          text: `已在「${selection.machine.label}」创建 Fork 会话`,
+          actionLabel: "前往查看",
+          onAction: () => broker.jumpTo(selection.machine, created.id),
+        });
         return true;
       },
     };
-  }, [connect, host.openTarget, host.targets, pickTarget, sourceMachine]);
+  }, [machineBroker]);
+
+  const forwardController = useMemo<ForwardController | undefined>(() => {
+    if (!machineBroker) return undefined;
+    const broker = machineBroker;
+    return {
+      sourceMachine: broker.sourceMachine,
+      listMachines: () => broker.listMachines(),
+      loadCatalog: (machine) => broker.loadCatalog(machine),
+      loadSessions: (machine) => broker.loadSessions(machine),
+      deliver: (machine, target, capsule) => broker.deliverForward(machine, target, capsule),
+      jumpTo: (machine, sessionId) => broker.jumpTo(machine, sessionId),
+    };
+  }, [machineBroker]);
 
   if (claiming === "working") return <Splash>正在和这台机器配对…</Splash>;
   if (claiming !== "idle") {
@@ -717,6 +841,36 @@ export function App({
               </button>
             </p>
           ) : null}
+          {workbench.completionNotice ? (
+            <p
+              role="status"
+              className="flex shrink-0 items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-xs text-fg"
+            >
+              <span className="min-w-0 flex-1">{workbench.completionNotice.text}</span>
+              {workbench.completionNotice.actionLabel &&
+              workbench.completionNotice.onAction ? (
+                <button
+                  type="button"
+                  className="shrink-0 text-accent underline decoration-dotted hover:text-fg"
+                  onClick={() => {
+                    const notice = workbench.completionNotice;
+                    useWorkbench.setState({ completionNotice: null });
+                    notice?.onAction?.();
+                  }}
+                >
+                  {workbench.completionNotice.actionLabel}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                aria-label="关闭提示"
+                className="shrink-0 text-faint hover:text-fg"
+                onClick={() => useWorkbench.setState({ completionNotice: null })}
+              >
+                ×
+              </button>
+            </p>
+          ) : null}
           {session?.imported ? (
             <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
               <span>
@@ -762,6 +916,7 @@ export function App({
                           <TimelineView
                             state={workbench.timeline}
                             {...(forkController ? { forkController } : {})}
+                            {...(forwardController ? { forwardController } : {})}
                             bottomInset={composerHeight}
                             onScrollBack={() => setComposerMinimized(true)}
                             onReturnToBottom={() => setComposerMinimized(false)}
@@ -816,6 +971,12 @@ export function App({
                           (insert) => insert.sessionId === workbench.activeSessionId,
                         ) ?? null
                       }
+                      forwardDraft={
+                        workbench.forwardDraft?.sessionId === workbench.activeSessionId
+                          ? workbench.forwardDraft
+                          : null
+                      }
+                      onClearForwardDraft={() => workbench.setForwardDraft(null)}
                       speech={
                         workbench.client &&
                         workbench.activeWorkspaceId &&

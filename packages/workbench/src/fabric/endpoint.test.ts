@@ -125,6 +125,7 @@ function harness(
     maxQueuedInboundFrames?: number;
     maxQueuedInboundBytes?: number;
     maxBufferedBytes?: number;
+    transportFlow?: boolean;
   } = {},
 ) {
   const sockets: FakeFabricSocket[] = [];
@@ -145,6 +146,7 @@ function harness(
     },
     onError: options.onError,
     initialStreamCredit: options.initialStreamCredit,
+    transportFlow: options.transportFlow,
     ...(options.maxActiveStreams === undefined
       ? {}
       : { maxActiveStreams: options.maxActiveStreams }),
@@ -303,6 +305,46 @@ describe("a browser Fabric endpoint", () => {
       ),
     );
     expect(stack.endpoint.connectionState).toBe("open");
+    stack.endpoint.close();
+  });
+
+  it("uses local socket drain and emits no WINDOW_UPDATE in transport-flow mode", async () => {
+    const stack = harness([id(76)], {
+      transportFlow: true,
+      maxBufferedBytes: 64,
+    });
+    const socket = await connect(stack.endpoint, stack.sockets);
+    const stream = stack.endpoint.open("route:transport-flow");
+    socket.receive({
+      kind: FabricKind.Accept,
+      streamId: stream.id,
+      value: 0n,
+      payload: bytes(),
+    });
+    await stream.accepted;
+
+    socket.bufferedAmount = 64;
+    const sending = stream.sendAsync(bytes("bulk"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(decoded(socket).filter((frame) => frame.kind === FabricKind.Data)).toHaveLength(0);
+    socket.bufferedAmount = 0;
+    await sending;
+
+    const beforeReceive = decoded(socket).length;
+    const received: string[] = [];
+    stream.onData((payload) => received.push(text(payload)));
+    socket.receive({
+      kind: FabricKind.Data,
+      streamId: stream.id,
+      value: 1n,
+      payload: bytes("reply"),
+    });
+    await vi.waitFor(() => expect(received).toEqual(["reply"]));
+    expect(
+      decoded(socket)
+        .slice(beforeReceive)
+        .some((frame) => frame.kind === FabricKind.WindowUpdate),
+    ).toBe(false);
     stack.endpoint.close();
   });
 
@@ -802,6 +844,30 @@ describe("a browser Fabric endpoint", () => {
     });
     release();
     await held;
+  });
+
+  it("does not count synchronous ArrayBuffer bursts against the async Blob queue", async () => {
+    const stack = harness([], {
+      maxQueuedInboundFrames: 1,
+      maxQueuedInboundBytes: 1,
+    });
+    const socket = await connect(stack.endpoint, stack.sockets);
+
+    for (let value = 1n; value <= 128n; value += 1n) {
+      socket.receive({
+        kind: FabricKind.Ping,
+        streamId: "0".repeat(32),
+        value,
+        payload: bytes(),
+      });
+    }
+
+    await vi.waitFor(() =>
+      expect(decoded(socket).filter((frame) => frame.kind === FabricKind.Pong)).toHaveLength(128),
+    );
+    expect(socket.closes).toEqual([]);
+    expect(stack.endpoint.connectionState).toBe("open");
+    stack.endpoint.close();
   });
 
   it("fails the connection before a slow WebSocket can buffer without bound", async () => {

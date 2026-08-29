@@ -91,9 +91,19 @@ DATA* response bytes
 FIN
 ```
 
-每个客户端主动请求各占一条 logical stream。stream 有独立 sequence、256 KiB credit、receive queue、task、timeout、FIN/RESET 和精确 body-length 校验。writer 以 round-robin 每个 runnable stream 每轮一帧，因此 Preview 或慢 RPC 不会独占应用层发送链。
+每个客户端主动请求各占一条 logical stream。stream 有独立 sequence、receive queue、task、timeout、
+FIN/RESET 和精确 body-length 校验。通用/未知长度流的初始 credit 为 256 KiB；有限
+`asset.preview` 由 client 在 `PeerHello` 声明接收能力，新 client + 新 daemon 一次协商完整 64 MiB
+方法上限，首批 bulk 旧 client 仍获得 8 MiB，更老组合回退 256 KiB。64 MiB 是发送许可而不是预分配；
+健康 Preview 不再等待应用层信用 RTT，writer 仍以 round-robin 每个 runnable stream 每轮一帧，因此
+大文件也不会独占应用层发送链。
 
-carrier reader 只验证/decrypt 一条 record、decode 一条 frame 并投递到有界队列，不 await 文件 IO、Agent 或 handler。每个 incoming stream 在独立 task 中处理；原生构建的阻塞 Preview 读取使用有界槽，WASM guest 则分块并 cooperative yield，不能调用 `spawn_blocking`。单 peer 最多 256 active streams；daemon RTC registry 最多 32 peers。
+carrier reader 只验证/decrypt 一条 record、decode 一条 frame 并投递到有界队列，不 await 文件 IO、
+Agent 或 handler；队列满时等待空间而不是 reset 正常 peer。每个 incoming stream 在独立 task 中处理。
+Preview 最多 8 个 worker permit，首遍与第二遍都使用固定 256 KiB 缓冲并 cooperative yield：首遍确定
+精确长度、类型和 SHA，第二遍从同一 capability 文件句柄流式发送并复核 SHA。单 peer 最多 256 active
+streams；daemon RTC registry 最多 32 peers。这些上限约束真实 task、文件句柄与内存，不参与健康传输
+的 RTT 时钟。
 
 完整 framing、Relay 可见性和 RTC 取舍见 [e2ee-data-plane.md](./e2ee-data-plane.md)。
 

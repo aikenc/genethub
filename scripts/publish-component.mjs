@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir, userInfo } from "node:os";
+import { hostname, homedir, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -101,7 +101,7 @@ async function main() {
   // local-stamped host binary signs every channel and target/publish/signer
   // stays warm across publishes. An unchanged tree makes every one of these
   // a no-op measured in seconds.
-  const cargo = argumentsMap.get("cargo") ?? "cargo";
+  const cargo = resolveCargo(argumentsMap.get("cargo"));
   let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
   let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
   try {
@@ -265,6 +265,17 @@ function requireClean(repository, label) {
   if (git(repository, ["status", "--porcelain"])) throw new Error(`${label} must be clean before publication`);
 }
 
+// Release hosts run this under sanitized environments (systemd units, masked
+// PATH to keep a stray node away from native builds) that may not contain
+// rustup's per-user bin directory. Trust an explicit override first, then
+// look where rustup actually installs, and only then gamble on PATH.
+function resolveCargo(override) {
+  if (override) return override;
+  if (process.env.CARGO) return process.env.CARGO;
+  const rustup = join(homedir(), ".cargo", "bin", process.platform === "win32" ? "cargo.exe" : "cargo");
+  return existsSync(rustup) ? rustup : "cargo";
+}
+
 function git(repository, args) {
   return execFileSync("git", ["-C", repository, ...args], { encoding: "utf8" }).trim();
 }
@@ -335,6 +346,9 @@ Every channel signs with the one self-contained development root; the stable
 line reintroduces external keys when it graduates.
 ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
 Guest compile uses Cargo profile iterate unless --channel stable (then release).
+Cargo itself resolves as --cargo PATH, then $CARGO, then ~/.cargo/bin/cargo,
+then a bare PATH lookup — sanitized publish environments without rustup's bin
+directory in PATH still find it.
 Committed builds compile in a persistent stamped worktree under target/publish/
 (scripts/lib/publish-tree.mjs); the checkout itself is never stamped or restored.
 `);

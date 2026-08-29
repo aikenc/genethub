@@ -501,9 +501,21 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  * Capability advertisement only.  Signaling remains encrypted data-plane
  * traffic and no RTC address is ever placed in this hello.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * Optional for wire compatibility. A missing field identifies a peer
+ * from the first finite-bulk rollout, whose largest understood lease is
+ * [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+ */
+maxBulkStreamWindowBytes?: number, };
 
-export type PeerWelcome = { version: number, serverNonce: string, proof: string, };
+export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
+/**
+ * Optional for wire compatibility. A missing field is the v3 256 KiB
+ * receive lease; new clients use the larger value only for allowlisted
+ * finite bulk methods.
+ */
+maxBulkStreamWindowBytes?: number, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 
@@ -591,7 +603,7 @@ export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscr
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "blob", "data": BlobPayload } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -611,7 +623,7 @@ cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: st
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
-itemId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.rounds", "payload": { sessionId: string, throughRoundId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.context", "payload": { sessionId: string, throughRoundId: string | null, tokenBudget: number, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+itemId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.rounds", "payload": { sessionId: string, throughRoundId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.context", "payload": { sessionId: string, throughRoundId: string | null, tokenBudget: number, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "round.trunk.batchGet", "payload": { sessionId: string, refs: Array<TrunkLocator>, } } | { "type": "blob.batchGet", "payload": { sessionId: string, blobs: Array<BlobRef>, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Deprecated wire field. Current clients always send `null`; Preview
  * locators are rebound in the workbench from relative/absolute paths.
@@ -687,7 +699,15 @@ monologue?: string, blobs: Array<BlobOverview>, };
  * A semantic group inside a trunk: one monologue and the work following it,
  * bounded to sixteen blobs even when an agent never narrates.
  */
-export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, };
+export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, 
+/**
+ * The compaction reason when this batch is a context-compaction marker:
+ * a zero-blob batch whose only item (`firstItemId`) is the compaction
+ * event, so clients render the marker at the exact batch boundary where
+ * the context was squeezed. Rows written before this field existed read
+ * as `None` and their markers stay in the flat narrative stream.
+ */
+marker?: string, };
 
 /**
  * A page of visible trunks in one round. `nextCursor` asks for the preceding
@@ -1175,6 +1195,11 @@ export type ToolStatus = "pending" | "running" | "ok" | "error" | "canceled";
  * which of the three paths in `architecture.md` §1 is in use.
  */
 export type TransportKind = "loopback" | "lan" | "forwarded";
+
+/**
+ * One trunk's address inside a session's round layer, for batch fetches.
+ */
+export type TrunkLocator = { roundId: string, trunkIndex: number, };
 
 export type TurnError = { code: TurnErrorCode, 
 /**

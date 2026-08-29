@@ -280,3 +280,51 @@ describe("an agent's reply", () => {
     Reflect.deleteProperty(URL, "createObjectURL");
   });
 });
+
+describe("Preview document selection", () => {
+  it("keeps the same paragraph node when a parent re-renders around the document", () => {
+    // Workbench App subscribes to the whole store; sidebar session.list every
+    // ~2s rebuilds Preview. Inline react-markdown component types used to
+    // remount every paragraph and drop the native selection 1–5s later.
+    const loadPreview = async () => null;
+    const artifactFor = (tick: number) => ({
+      deviceHandle: "d_demo",
+      workspaceHandle: "w_demo",
+      folders: [{ root: "", rootHandle: "r_demo" }],
+      documentPath: "r_demo/note.md",
+      loadPreview,
+      sessionId: `s_${tick}`,
+    });
+    const { rerender } = render(
+      <Markdown
+        text="可选中的一段正文。"
+        variant="document"
+        artifact={artifactFor(0)}
+      />,
+    );
+    const paragraph = screen.getByText("可选中的一段正文。");
+    rerender(
+      <Markdown
+        text="可选中的一段正文。"
+        variant="document"
+        artifact={artifactFor(1)}
+      />,
+    );
+    expect(screen.getByText("可选中的一段正文。")).toBe(paragraph);
+  });
+
+  it("keeps standalone source nodes when a parent re-renders around them", () => {
+    function Host({ tick }: { tick: number }) {
+      return (
+        <div data-tick={tick}>
+          <HighlightedCode text={"const answer = 42;"} language="javascript" document />
+        </div>
+      );
+    }
+    const { container, rerender } = render(<Host tick={0} />);
+    const code = container.querySelector("code.hljs");
+    expect(code).toBeTruthy();
+    rerender(<Host tick={1} />);
+    expect(container.querySelector("code.hljs")).toBe(code);
+  });
+});

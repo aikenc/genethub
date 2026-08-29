@@ -46,15 +46,24 @@ import typescript from "highlight.js/lib/languages/typescript";
 import wasm from "highlight.js/lib/languages/wasm";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import { memo, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import {
+  createContext,
+  memo,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import {
   resolveArtifactRef,
   type ArtifactResolveContext,
 } from "../preview/resolveArtifactRef";
-import { useWorkbench } from "./store";
+import { useWorkbench, type PreviewFloatRequest } from "./store";
 
 const HIGHLIGHT_BYTES = 256 * 1024;
 const MERMAID_BYTES = 128 * 1024;
@@ -251,6 +260,178 @@ export type MarkdownArtifactProps = ArtifactResolveContext & {
   ) => Promise<{ bytes: Uint8Array; mediaType: string } | null>;
 };
 
+type MarkdownRender = {
+  artifact: MarkdownArtifactProps | null;
+  openPreviewFloat: (target: PreviewFloatRequest) => void;
+};
+
+const MarkdownRenderContext = createContext<MarkdownRender>({
+  artifact: null,
+  openPreviewFloat: () => {},
+});
+
+type MarkdownChildren = { children?: ReactNode; className?: string };
+
+function MarkdownParagraph({ children }: MarkdownChildren) {
+  return <p>{children}</p>;
+}
+function MarkdownH1({ children }: MarkdownChildren) {
+  return <h1>{children}</h1>;
+}
+function MarkdownH2({ children }: MarkdownChildren) {
+  return <h2>{children}</h2>;
+}
+function MarkdownH3({ children }: MarkdownChildren) {
+  return <h3>{children}</h3>;
+}
+function MarkdownH4({ children }: MarkdownChildren) {
+  return <h4>{children}</h4>;
+}
+function MarkdownH5({ children }: MarkdownChildren) {
+  return <h5>{children}</h5>;
+}
+function MarkdownH6({ children }: MarkdownChildren) {
+  return <h6>{children}</h6>;
+}
+function MarkdownUl({ children, className }: MarkdownChildren) {
+  return <ul className={className}>{children}</ul>;
+}
+function MarkdownOl({ children, className }: MarkdownChildren) {
+  return <ol className={className}>{children}</ol>;
+}
+function MarkdownLi({ children, className }: MarkdownChildren) {
+  return <li className={className}>{children}</li>;
+}
+function MarkdownBlockquote({ children }: MarkdownChildren) {
+  return <blockquote>{children}</blockquote>;
+}
+function MarkdownHr() {
+  return <hr />;
+}
+function MarkdownStrong({ children }: MarkdownChildren) {
+  return <strong>{children}</strong>;
+}
+function MarkdownEm({ children }: MarkdownChildren) {
+  return <em>{children}</em>;
+}
+function MarkdownDel({ children }: MarkdownChildren) {
+  return <del>{children}</del>;
+}
+function MarkdownPre({ children }: MarkdownChildren) {
+  return <>{children}</>;
+}
+function MarkdownTable({ children }: MarkdownChildren) {
+  return (
+    <div className="gh-table-wrap">
+      <table>{children}</table>
+    </div>
+  );
+}
+function MarkdownTh({ children }: MarkdownChildren) {
+  return <th>{children}</th>;
+}
+function MarkdownTd({ children }: MarkdownChildren) {
+  return <td>{children}</td>;
+}
+function MarkdownInput({
+  type,
+  checked,
+  disabled,
+}: {
+  type?: string;
+  checked?: boolean;
+  disabled?: boolean;
+}) {
+  return <input type={type} checked={checked} disabled={disabled} readOnly />;
+}
+
+function MarkdownLink({ href, children }: { href?: string; children?: ReactNode }) {
+  const { artifact, openPreviewFloat } = useContext(MarkdownRenderContext);
+  const resolved = resolveArtifactRef(href, artifact);
+  if (resolved.kind === "blocked") {
+    return (
+      <span className="gh-blocked-link" title="此链接不在当前工作区内">
+        {children}
+      </span>
+    );
+  }
+  if (
+    resolved.kind === "preview" &&
+    artifact?.deviceHandle &&
+    artifact.workspaceHandle
+  ) {
+    return (
+      <a
+        href={resolved.href}
+        onClick={(event) => {
+          event.preventDefault();
+          openPreviewFloat({
+            deviceHandle: artifact.deviceHandle,
+            workspaceHandle: artifact.workspaceHandle,
+            path: resolved.path,
+            sessionId: artifact.sessionId ?? null,
+          });
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
+  return (
+    <a href={resolved.href} target="_blank" rel="noreferrer noopener">
+      {children}
+    </a>
+  );
+}
+
+function MarkdownCode({ className, children }: MarkdownChildren) {
+  const text = String(children).replace(/\n$/, "");
+  const language = className?.replace(/^language-/, "");
+  if (!className?.startsWith("language-") && !text.includes("\n")) {
+    return <code className="gh-inline-code">{text}</code>;
+  }
+  if (language?.toLowerCase() === "mermaid") {
+    return <MermaidDiagram source={text} />;
+  }
+  return <HighlightedCode text={text} language={language} />;
+}
+
+function MarkdownImg({ src, alt }: { src?: string; alt?: string }) {
+  const { artifact } = useContext(MarkdownRenderContext);
+  return <MarkdownImage src={src} alt={alt} artifact={artifact} />;
+}
+
+/**
+ * Stable element constructors. Inline `components={{ p: () => <p/> }}` creates a
+ * new component type on every render, so React remounts the document and the
+ * native selection disappears (workbench store ticks about every 2s).
+ */
+const MARKDOWN_COMPONENTS: Components = {
+  p: MarkdownParagraph,
+  h1: MarkdownH1,
+  h2: MarkdownH2,
+  h3: MarkdownH3,
+  h4: MarkdownH4,
+  h5: MarkdownH5,
+  h6: MarkdownH6,
+  ul: MarkdownUl,
+  ol: MarkdownOl,
+  li: MarkdownLi,
+  blockquote: MarkdownBlockquote,
+  hr: MarkdownHr,
+  strong: MarkdownStrong,
+  em: MarkdownEm,
+  del: MarkdownDel,
+  a: MarkdownLink,
+  code: MarkdownCode,
+  pre: MarkdownPre,
+  table: MarkdownTable,
+  th: MarkdownTh,
+  td: MarkdownTd,
+  input: MarkdownInput,
+  img: MarkdownImg,
+};
+
 /**
  * An unclosed fence at the end of a streaming reply would otherwise swallow
  * every later line as one code block, then collapse when the closer arrives.
@@ -291,107 +472,30 @@ export const Markdown = memo(function Markdown({
   artifact?: MarkdownArtifactProps | null;
 }) {
   const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
+  const render = useMemo(
+    () => ({ artifact, openPreviewFloat }),
+    [artifact, openPreviewFloat],
+  );
   const { stable, tail } =
     variant === "chat" ? splitStreamingMarkdown(text) : { stable: text, tail: "" };
   return (
-    <div
-      className={`gh-markdown gh-markdown-${variant} break-words text-fg`}
-      data-testid="markdown"
-    >
-      {stable ? (
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          p: ({ children }) => <p>{children}</p>,
-          h1: ({ children }) => <h1>{children}</h1>,
-          h2: ({ children }) => <h2>{children}</h2>,
-          h3: ({ children }) => <h3>{children}</h3>,
-          h4: ({ children }) => <h4>{children}</h4>,
-          h5: ({ children }) => <h5>{children}</h5>,
-          h6: ({ children }) => <h6>{children}</h6>,
-          ul: ({ children, className }) => <ul className={className}>{children}</ul>,
-          ol: ({ children, className }) => <ol className={className}>{children}</ol>,
-          li: ({ children, className }) => <li className={className}>{children}</li>,
-          blockquote: ({ children }) => <blockquote>{children}</blockquote>,
-          hr: () => <hr />,
-          strong: ({ children }) => <strong>{children}</strong>,
-          em: ({ children }) => <em>{children}</em>,
-          del: ({ children }) => <del>{children}</del>,
-          a: ({ href, children }) => {
-            const resolved = resolveArtifactRef(href, artifact);
-            if (resolved.kind === "blocked") {
-              return (
-                <span className="gh-blocked-link" title="此链接不在当前工作区内">
-                  {children}
-                </span>
-              );
-            }
-            if (
-              resolved.kind === "preview" &&
-              artifact?.deviceHandle &&
-              artifact.workspaceHandle
-            ) {
-              return (
-                <a
-                  href={resolved.href}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    openPreviewFloat({
-                      deviceHandle: artifact.deviceHandle,
-                      workspaceHandle: artifact.workspaceHandle,
-                      path: resolved.path,
-                      sessionId: artifact.sessionId ?? null,
-                    });
-                  }}
-                >
-                  {children}
-                </a>
-              );
-            }
-            return (
-              <a href={resolved.href} target="_blank" rel="noreferrer noopener">
-                {children}
-              </a>
-            );
-          },
-          code: ({ className, children }) => {
-            const text = String(children).replace(/\n$/, "");
-            const language = className?.replace(/^language-/, "");
-            if (!className?.startsWith("language-") && !text.includes("\n")) {
-              return <code className="gh-inline-code">{text}</code>;
-            }
-            if (language?.toLowerCase() === "mermaid") {
-              return <MermaidDiagram source={text} />;
-            }
-            return <HighlightedCode text={text} language={language} />;
-          },
-          pre: ({ children }) => <>{children}</>,
-          table: ({ children }) => (
-            <div className="gh-table-wrap">
-              <table>{children}</table>
-            </div>
-          ),
-          th: ({ children }) => <th>{children}</th>,
-          td: ({ children }) => <td>{children}</td>,
-          input: ({ type, checked, disabled }) => (
-            <input type={type} checked={checked} disabled={disabled} readOnly />
-          ),
-          // Bare http(s) images stay blocked. Workspace-relative / absolute
-          // paths and Preview locators load through the authenticated reader.
-          img: ({ src, alt }) => (
-            <MarkdownImage src={src} alt={alt} artifact={artifact} />
-          ),
-        }}
+    <MarkdownRenderContext.Provider value={render}>
+      <div
+        className={`gh-markdown gh-markdown-${variant} break-words text-fg`}
+        data-testid="markdown"
       >
-        {stable}
-      </ReactMarkdown>
-      ) : null}
-      {tail ? (
-        <pre className="gh-markdown-stream-tail" data-testid="markdown-stream-tail">
-          {tail}
-        </pre>
-      ) : null}
-    </div>
+        {stable ? (
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+            {stable}
+          </ReactMarkdown>
+        ) : null}
+        {tail ? (
+          <pre className="gh-markdown-stream-tail" data-testid="markdown-stream-tail">
+            {tail}
+          </pre>
+        ) : null}
+      </div>
+    </MarkdownRenderContext.Provider>
   );
 });
 
@@ -461,7 +565,7 @@ function MarkdownImage({
   return <img src={url} alt={alt ?? ""} className="gh-markdown-image" />;
 }
 
-export function HighlightedCode({
+export const HighlightedCode = memo(function HighlightedCode({
   text,
   language,
   document = false,
@@ -496,7 +600,7 @@ export function HighlightedCode({
       </pre>
     </div>
   );
-}
+});
 
 function highlight(text: string, requested?: string): { html: string; language?: string } {
   if (new TextEncoder().encode(text).byteLength > HIGHLIGHT_BYTES) {
