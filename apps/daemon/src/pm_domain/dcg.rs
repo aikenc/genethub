@@ -168,6 +168,39 @@ impl DcgDefinition {
             if !can_reach_any(&self.entry, &terminals, &self.edges) {
                 anyhow::bail!("Session DCG entry cannot reach a terminal node");
             }
+            let mut supervised_stops = terminals;
+            supervised_stops.extend(
+                self.nodes
+                    .iter()
+                    .filter(|node| {
+                        node.executor
+                            .as_ref()
+                            .is_some_and(|executor| executor.actor == DcgActor::User)
+                    })
+                    .map(|node| node.id.clone()),
+            );
+            supervised_stops.extend(
+                self.edges
+                    .iter()
+                    .filter(|edge| edge.choose_by == Some(DcgActor::User))
+                    .map(|edge| edge.from.clone()),
+            );
+            let can_reach_supervision = nodes_that_can_reach_any(&supervised_stops, &self.edges);
+            let trapped_cycle = self
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node_is_in_cycle(&node.id, &self.edges)
+                        && !can_reach_supervision.contains(&node.id)
+                })
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>();
+            if !trapped_cycle.is_empty() {
+                anyhow::bail!(
+                    "DCG contains a closed autonomous cycle without terminal or user decision exit: {}",
+                    trapped_cycle.join(", ")
+                );
+            }
         }
         Ok(())
     }
@@ -809,6 +842,28 @@ fn can_reach_any(entry: &str, targets: &BTreeSet<String>, edges: &[DcgEdge]) -> 
         .any(|node| targets.contains(node))
 }
 
+fn nodes_that_can_reach_any(targets: &BTreeSet<String>, edges: &[DcgEdge]) -> BTreeSet<String> {
+    let mut reachable = targets.clone();
+    loop {
+        let before = reachable.len();
+        for edge in edges {
+            if reachable.contains(&edge.to) {
+                reachable.insert(edge.from.clone());
+            }
+        }
+        if reachable.len() == before {
+            return reachable;
+        }
+    }
+}
+
+fn node_is_in_cycle(node: &str, edges: &[DcgEdge]) -> bool {
+    edges
+        .iter()
+        .filter(|edge| edge.from == node)
+        .any(|edge| edge.to == node || reachable_nodes(&edge.to, edges).contains(node))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,5 +955,77 @@ mod tests {
         edge.max_traversals = None;
         let error = graph.validate(&catalog.root).unwrap_err().to_string();
         assert!(error.contains("maxTraversals"));
+    }
+
+    #[test]
+    fn closed_autonomous_cycle_is_rejected_even_when_another_branch_terminates() {
+        let graph: DcgDefinition = serde_yaml::from_str(
+            r#"
+schema: genehub-pm-dcg.v1
+id: closed-loop
+kind: sessionWorkflow
+version: 1
+entry: choose
+nodes:
+  - { id: choose, kind: activity, executor: { actor: system } }
+  - { id: delivered, kind: terminal, outcome: delivered }
+  - { id: spin-a, kind: activity, executor: { actor: system } }
+  - { id: spin-b, kind: activity, executor: { actor: system } }
+edges:
+  - { id: finish, from: choose, to: delivered, when: route.finish }
+  - { id: enter-loop, from: choose, to: spin-a, when: route.loop }
+  - { id: spin-forward, from: spin-a, to: spin-b, when: spin.forward }
+  - { id: spin-again, from: spin-b, to: spin-a, when: spin.again, maxTraversals: 2 }
+"#,
+        )
+        .unwrap();
+
+        let error = graph.validate(Path::new(".")).unwrap_err().to_string();
+        assert!(error.contains("closed autonomous cycle"), "{error}");
+        assert!(
+            error.contains("spin-a") && error.contains("spin-b"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bounded_cycles_with_user_supervision_are_allowed() {
+        let mut graph: DcgDefinition = serde_yaml::from_str(
+            r#"
+schema: genehub-pm-dcg.v1
+id: supervised-loop
+kind: sessionWorkflow
+version: 1
+entry: choose
+nodes:
+  - { id: choose, kind: activity, executor: { actor: system } }
+  - { id: delivered, kind: terminal, outcome: delivered }
+  - { id: wait-user, kind: activity, executor: { actor: system } }
+  - { id: retry, kind: activity, executor: { actor: system } }
+edges:
+  - { id: finish, from: choose, to: delivered, when: route.finish }
+  - { id: enter-loop, from: choose, to: wait-user, when: route.loop }
+  - { id: user-retry, from: wait-user, to: retry, when: user.retry, chooseBy: user }
+  - { id: retry-again, from: retry, to: wait-user, when: retry.failed, maxTraversals: 2 }
+"#,
+        )
+        .unwrap();
+
+        graph.validate(Path::new(".")).unwrap();
+
+        graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "wait-user")
+            .and_then(|node| node.executor.as_mut())
+            .unwrap()
+            .actor = DcgActor::User;
+        graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.id == "user-retry")
+            .unwrap()
+            .choose_by = None;
+        graph.validate(Path::new(".")).unwrap();
     }
 }
