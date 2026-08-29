@@ -1,0 +1,6 @@
+schema: genehub-pm-dcg-catalog.v1
+recommendedSessionWorkflow: {{GENEHUB_RECOMMENDED_WORKFLOW}}
+sessionWorkflows:
+  feature: dcg/feature.yaml
+  bugfix: dcg/bugfix.yaml
+  migration: dcg/migration.yaml

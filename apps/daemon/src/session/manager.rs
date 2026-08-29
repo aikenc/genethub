@@ -342,14 +342,6 @@ impl SessionManager {
                 "this project root already has an active PM Agent through another workspace view"
             );
         }
-        if let Some(existing) = self
-            .list(Some(workspace_id), false)
-            .await?
-            .into_iter()
-            .find(|summary| summary.kind == Some(SessionKind::Pm))
-        {
-            return Ok(existing);
-        }
         self.create_kind(
             workspace_id,
             cwd,
@@ -4135,7 +4127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_role_session_creation_preserves_uniqueness() {
+    async fn concurrent_pm_sessions_are_distinct_but_work_package_sessions_stay_unique() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = manager(dir.path()).with_project_manager_secret(b"machine-secret");
         let (first_pm, second_pm) = tokio::join!(
@@ -4158,7 +4150,7 @@ mod tests {
         );
         let first_pm = first_pm.unwrap();
         let second_pm = second_pm.unwrap();
-        assert_eq!(first_pm.id, second_pm.id);
+        assert_ne!(first_pm.id, second_pm.id);
         assert_eq!(
             sessions
                 .list(Some("w1"), true)
@@ -4167,7 +4159,7 @@ mod tests {
                 .into_iter()
                 .filter(|session| session.kind == Some(SessionKind::Pm))
                 .count(),
-            1
+            2
         );
 
         let (first_work, second_work) = tokio::join!(

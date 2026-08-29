@@ -1,0 +1,11 @@
+schema: genehub-pm-workflow-evaluation.v1
+cases:
+  - id: feature-route
+    request: Add one bounded player-visible feature.
+    expectedGraph: feature
+  - id: bugfix-route
+    request: Reproduce and fix a regression without expanding scope.
+    expectedGraph: bugfix
+  - id: migration-route
+    request: Replace one engine while preserving observable behavior.
+    expectedGraph: migration

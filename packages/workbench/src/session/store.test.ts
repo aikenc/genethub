@@ -773,7 +773,7 @@ describe("opening a new conversation", () => {
     expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
   });
 
-  it("creates or reopens the dedicated PM Agent immediately", async () => {
+  it("creates a new dedicated PM conversation immediately", async () => {
     const pm: SessionSummary = {
       ...SESSION,
       id: "pm-1",

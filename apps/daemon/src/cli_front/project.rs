@@ -15,11 +15,15 @@ pub async fn register_agent_space(args: &[String], selection: &Selection) -> i32
             ))
         }
     };
+    let context = match super::pm_project::Context::load().await {
+        Ok(context) => context,
+        Err(error) => return output::fail(error),
+    };
     let requested = std::path::PathBuf::from(source);
     let source = if requested.is_absolute() {
         requested
     } else {
-        super::caller_cwd().join(requested)
+        context.root.join(requested)
     };
     let rpc = match super::query::connect_selected(selection).await {
         Ok(rpc) => rpc,

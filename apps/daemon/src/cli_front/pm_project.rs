@@ -10,6 +10,7 @@ use std::path::{Component, Path, PathBuf};
 use genehub_proto::{SessionKind, SessionStatus, WorkspaceKind};
 use serde_json::json;
 
+use crate::pm_domain::dcg::DcgActor;
 use crate::pm_domain::project::{ProjectLifecycle, ProjectPhase};
 use crate::pm_domain::task_graph::{
     CandidateEvidence, ReviewEvidence, ReviewVerdict, WorkPackage, WorkPackageStatus,
@@ -196,6 +197,96 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 .map_err(rejected)?;
             Ok(("pm.project", json!({"action": "spaceRecorded", "project": project})))
         }
+        [head, verb, rest @ ..] if head == "space" && verb == "repair" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["name"])?;
+            let project = context
+                .state
+                .projects
+                .repair_agent_space(
+                    &context.workspace_id,
+                    &context.controller_session_id,
+                    &flags.one_required("name")?,
+                )
+                .await
+                .map_err(rejected)?;
+            Ok(("pm.project", json!({"action": "spaceRepaired", "project": project})))
+        }
+        [head, verb] if head == "workflow" && verb == "list" => {
+            let catalog = context
+                .state
+                .projects
+                .session_dcg_catalog(&context.workspace_id, &context.controller_session_id)
+                .await
+                .map_err(rejected)?;
+            Ok((
+                "pm.project.workflow",
+                json!({
+                    "action": "listed",
+                    "recommended": catalog.recommended_session_workflow,
+                    "sessionWorkflows": catalog.session_workflows.values().map(|graph| json!({
+                        "id": graph.id,
+                        "version": graph.version,
+                        "entry": graph.entry,
+                    })).collect::<Vec<_>>(),
+                }),
+            ))
+        }
+        [head, verb] if head == "workflow" && verb == "show" => {
+            let project = context.project().await?;
+            let run = project
+                .session_dcg_runs
+                .get(&context.controller_session_id)
+                .ok_or_else(|| {
+                    CliFailure::business(
+                        "pmWorkflowRunUnavailable",
+                        "this PM Session has no Session DCG Run",
+                        None,
+                    )
+                })?;
+            Ok((
+                "pm.project.workflow",
+                json!({"action": "shown", "run": run}),
+            ))
+        }
+        [head, verb, rest @ ..] if head == "workflow" && verb == "select" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["graph"])?;
+            let project = context
+                .state
+                .projects
+                .select_session_dcg(
+                    &context.workspace_id,
+                    &context.controller_session_id,
+                    &flags.one_required("graph")?,
+                )
+                .await
+                .map_err(rejected)?;
+            Ok((
+                "pm.project.workflow",
+                json!({"action": "selected", "project": project}),
+            ))
+        }
+        [head, verb, rest @ ..] if head == "workflow" && verb == "transition" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["edge", "fact"])?;
+            let project = context
+                .state
+                .projects
+                .transition_session_dcg(
+                    &context.workspace_id,
+                    &context.controller_session_id,
+                    &flags.one_required("edge")?,
+                    flags.many("fact").into_iter().collect(),
+                    DcgActor::Pm,
+                )
+                .await
+                .map_err(rejected)?;
+            Ok((
+                "pm.project.workflow",
+                json!({"action": "transitioned", "project": project}),
+            ))
+        }
         [verb, rest @ ..] if verb == "observe" => {
             let flags = Flags::parse(rest, &["active-work", "waiting-user", "terminal"])?;
             flags.validate(&["digest"])?;
@@ -215,7 +306,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
             Ok(("pm.project", json!({"action": "observed", "observation": observation})))
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition | space record",
+            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition | space record|repair | workflow list|show|select|transition",
         )),
     }
 }
@@ -457,22 +548,46 @@ impl Context {
                 None,
             ));
         }
-        let workspace = state
+        let session_workspace = state
             .workspaces
             .get(&summary.workspace_id)
             .await
             .map_err(rejected)?;
+        let workspace = match session_workspace.kind {
+            WorkspaceKind::Folder => session_workspace,
+            WorkspaceKind::AgentSpace => {
+                let binding = session_workspace.agent_space.as_ref().ok_or_else(|| {
+                    CliFailure::business(
+                        "invalidProjectWorkspace",
+                        "the PM AgentSpace has no project binding",
+                        None,
+                    )
+                })?;
+                state
+                    .workspaces
+                    .get(&binding.project_workspace_id)
+                    .await
+                    .map_err(rejected)?
+            }
+            WorkspaceKind::PipeSpace => {
+                return Err(CliFailure::business(
+                    "invalidProjectWorkspace",
+                    "a PM Session must run in its PM AgentSpace",
+                    None,
+                ));
+            }
+        };
         if workspace.kind != WorkspaceKind::Folder {
             return Err(CliFailure::business(
                 "invalidProjectWorkspace",
-                "a PM project must be controlled from its Folder workspace",
+                "the PM AgentSpace must belong to a Folder project workspace",
                 None,
             ));
         }
         Ok(Self {
             state,
             controller_session_id,
-            workspace_id: summary.workspace_id,
+            workspace_id: workspace.id,
             root: workspace.root,
         })
     }
@@ -588,12 +703,10 @@ impl Context {
                     None,
                 )
             })?;
-        if binding.project_workspace_id != self.workspace_id
-            || binding.controller_session_id != self.controller_session_id
-        {
+        if binding.project_workspace_id != self.workspace_id {
             return Err(CliFailure::business(
                 "wrongProjectController",
-                "the Agent Space belongs to another PM project",
+                "the Agent Space belongs to another project",
                 None,
             ));
         }

@@ -297,11 +297,58 @@ async fn dispatch(
                     "a PM project must start from a Folder workspace",
                 );
             }
+            let pm_space_root = workspace.root.join("spaces/pm");
+            let bootstrap_pm_space = !pm_space_root.join("template.json").is_file();
+            if bootstrap_pm_space {
+                let template_values = match crate::agent_space_builder::PmSpaceTemplateValues::new(
+                    &workspace.name,
+                    "zh-CN",
+                    "feature",
+                ) {
+                    Ok(values) => values,
+                    Err(error) => return failed(error.into()),
+                };
+                if let Err(error) =
+                    crate::agent_space_builder::render_pm_space(&workspace.root, &template_values)
+                {
+                    return failed(error.into());
+                }
+            }
+            let bootstrap_commands = [
+                crate::agent_space_builder::Command::Check,
+                crate::agent_space_builder::Command::Build { dry_run: true },
+                crate::agent_space_builder::Command::Build { dry_run: false },
+                crate::agent_space_builder::Command::Verify,
+            ];
+            let reopen_commands = [
+                crate::agent_space_builder::Command::Check,
+                crate::agent_space_builder::Command::Verify,
+            ];
+            let commands = if bootstrap_pm_space {
+                bootstrap_commands.as_slice()
+            } else {
+                reopen_commands.as_slice()
+            };
+            for command in commands.iter().copied() {
+                if let Err(error) =
+                    crate::agent_space_builder::run(&workspace.root, &pm_space_root, command, true)
+                {
+                    return failed(error.into());
+                }
+            }
+            let pm_workspace = match state
+                .workspaces
+                .register_pm_space(&pm_space_root.join("pm.code-workspace"), &workspace)
+                .await
+            {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
             match state
                 .sessions
                 .create_project_manager(
-                    &workspace_id,
-                    workspace.root,
+                    &pm_workspace.id,
+                    pm_space_root,
                     model_id,
                     mode_id,
                     runtime_values.unwrap_or_default(),
@@ -309,7 +356,21 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Ok(summary) => {
+                    if let Err(error) = state
+                        .projects
+                        .initialize_bootstrapped(
+                            &workspace_id,
+                            &pm_workspace.id,
+                            &summary.id,
+                            &workspace.root,
+                        )
+                        .await
+                    {
+                        return failed(error);
+                    }
+                    Handled::ok(Reply::Session(summary))
+                }
                 Err(error) => failed(error),
             }
         }
@@ -340,6 +401,28 @@ async fn dispatch(
                 Ok(summary) => summary,
                 Err(error) => return failed(error),
             };
+            let controller_workspace = match state.workspaces.get(&controller.workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let project_workspace_id = match controller_workspace.kind {
+                genehub_proto::WorkspaceKind::Folder => controller_workspace.id,
+                genehub_proto::WorkspaceKind::AgentSpace => {
+                    let Some(binding) = controller_workspace.agent_space else {
+                        return Handled::err(
+                            ErrorCode::Conflict,
+                            "the PM AgentSpace has no project binding",
+                        );
+                    };
+                    binding.project_workspace_id
+                }
+                genehub_proto::WorkspaceKind::PipeSpace => {
+                    return Handled::err(
+                        ErrorCode::Conflict,
+                        "the PM Session is not attached to a project workspace",
+                    );
+                }
+            };
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -350,18 +433,16 @@ async fn dispatch(
                     "work sessions can only be created in an Agent Space",
                 );
             };
-            if binding.controller_session_id != controller_session_id
-                || binding.project_workspace_id != controller.workspace_id
-            {
+            if binding.project_workspace_id != project_workspace_id {
                 return Handled::err(
                     ErrorCode::Forbidden,
-                    "this Agent Space belongs to another project manager",
+                    "this Agent Space belongs to another project",
                 );
             }
             let target = match state
                 .projects
                 .authorize_work_session(
-                    &controller.workspace_id,
+                    &project_workspace_id,
                     controller_session_id,
                     &workspace_id,
                     &work_package_id,
@@ -408,8 +489,39 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => Handled::ok(Reply::Session(summary)),
-                Err(error) => failed(error),
+                Ok(summary) => {
+                    if let Err(error) = state
+                        .projects
+                        .start_agent_space_work(
+                            &project_workspace_id,
+                            controller_session_id,
+                            &workspace_id,
+                            &target.lease_id,
+                            &summary.id,
+                        )
+                        .await
+                    {
+                        return failed(error);
+                    }
+                    Handled::ok(Reply::Session(summary))
+                }
+                Err(error) => {
+                    let cleanup = state
+                        .projects
+                        .cancel_agent_space_reservation(
+                            &project_workspace_id,
+                            controller_session_id,
+                            &workspace_id,
+                            &target.lease_id,
+                        )
+                        .await;
+                    match cleanup {
+                        Ok(()) => failed(error),
+                        Err(cleanup_error) => failed(anyhow::anyhow!(
+                            "WorkSession creation failed ({error:#}); reservation cleanup also failed ({cleanup_error:#})"
+                        )),
+                    }
+                }
             }
         }
 
@@ -1218,7 +1330,29 @@ async fn dispatch(
                 Ok(summary) => summary,
                 Err(error) => return failed(error),
             };
-            let project = match state.workspaces.get(&controller.workspace_id).await {
+            let controller_workspace = match state.workspaces.get(&controller.workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let project_id = match controller_workspace.kind {
+                genehub_proto::WorkspaceKind::Folder => controller_workspace.id,
+                genehub_proto::WorkspaceKind::AgentSpace => {
+                    let Some(binding) = controller_workspace.agent_space else {
+                        return Handled::err(
+                            ErrorCode::Conflict,
+                            "the PM AgentSpace has no project binding",
+                        );
+                    };
+                    binding.project_workspace_id
+                }
+                genehub_proto::WorkspaceKind::PipeSpace => {
+                    return Handled::err(
+                        ErrorCode::Conflict,
+                        "the PM Session is not attached to a project workspace",
+                    );
+                }
+            };
+            let project = match state.workspaces.get(&project_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };

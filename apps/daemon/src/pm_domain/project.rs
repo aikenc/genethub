@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use super::dcg::DcgRun;
 use super::supervisor::SupervisorState;
 use super::task_graph::WorkPackage;
 use super::topology::AgentSpaceRecord;
 
-pub const PM_PROJECT_FORMAT: u32 = 1;
+pub const PM_PROJECT_FORMAT: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,6 +115,12 @@ pub struct ProjectState {
     pub project_id: String,
     pub project_workspace_id: String,
     pub controller_session_id: String,
+    /// The manager AgentSpace shared by all PM Sessions for this project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pm_space_workspace_id: Option<String>,
+    /// Session-level DCG Runs keyed by their controller PM Session id.
+    #[serde(default)]
+    pub session_dcg_runs: BTreeMap<String, DcgRun>,
     pub root: PathBuf,
     pub phase: ProjectPhase,
     pub lifecycle: ProjectLifecycle,
@@ -138,6 +145,8 @@ impl ProjectState {
             project_id: project_workspace_id.clone(),
             project_workspace_id,
             controller_session_id,
+            pm_space_workspace_id: None,
+            session_dcg_runs: BTreeMap::new(),
             root,
             phase: ProjectPhase::PreflightPassed,
             lifecycle: ProjectLifecycle::Active,
@@ -152,7 +161,9 @@ impl ProjectState {
     }
 
     pub fn ensure_controller(&self, controller_session_id: &str) -> Result<()> {
-        if self.controller_session_id != controller_session_id {
+        if self.controller_session_id != controller_session_id
+            && !self.session_dcg_runs.contains_key(controller_session_id)
+        {
             anyhow::bail!("this PM project belongs to another project manager");
         }
         Ok(())

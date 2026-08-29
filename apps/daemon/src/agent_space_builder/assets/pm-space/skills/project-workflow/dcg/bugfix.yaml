@@ -1,0 +1,35 @@
+schema: genehub-pm-dcg.v1
+id: bugfix
+kind: sessionWorkflow
+version: 1
+entry: reproduce
+nodes:
+  - id: reproduce
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [diagnosis], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/diagnose.md }
+    outputs: [reproduction, diagnosis]
+  - id: fix
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/implement.md }
+    outputs: [candidate, regressionEvidence]
+  - id: review
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [review], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/review.md }
+    outputs: [reviewVerdict]
+  - id: delivered
+    kind: terminal
+    outcome: delivered
+edges:
+  - { id: diagnosed, from: reproduce, to: fix, when: diagnosis.rootCause.verified }
+  - { id: fixed, from: fix, to: review, when: fix.regression.passed }
+  - { id: accepted, from: review, to: delivered, when: review.verdict.pass }
+  - { id: rework, from: review, to: fix, when: review.verdict.fail, chooseBy: pm, maxTraversals: 2 }

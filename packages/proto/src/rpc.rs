@@ -81,9 +81,10 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// Creates (or returns) the one active project-manager conversation for a
-    /// local Folder workspace. The Agent/profile choice is product-owned, so a
-    /// caller cannot turn an arbitrary third-party Agent into a manager.
+    /// Creates one project-manager conversation for a local managed project.
+    /// Parallel requirements use separate PM Sessions and DCG Runs. The
+    /// Agent/profile choice is product-owned, so a caller cannot turn an
+    /// arbitrary third-party Agent into a manager.
     #[serde(rename = "pm.session.create", rename_all = "camelCase")]
     ProjectManagerSessionCreate {
         workspace_id: String,

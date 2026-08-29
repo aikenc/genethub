@@ -1,0 +1,59 @@
+schema: genehub-pm-dcg.v1
+id: feature
+kind: sessionWorkflow
+version: 1
+entry: intake
+nodes:
+  - id: intake
+    kind: activity
+    executor: { actor: pm }
+    objective: { prompt: prompts/intake.md }
+    outputs: [intent, acceptanceCriteria]
+  - id: plan
+    kind: activity
+    executor: { actor: pm }
+    objective: { prompt: prompts/plan.md }
+    outputs: [workstreams]
+  - id: implement
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/implement.md }
+    fanout: { foreach: plan.workstreams, maxItems: 4 }
+    inputs: [intent, acceptanceCriteria, acceptedBaseline]
+    outputs: [candidate, testEvidence, workReport]
+  - id: diagnose
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/diagnose.md }
+    outputs: [diagnosis, alternatives]
+  - id: review
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [review], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/review.md }
+    inputs: [candidate, acceptanceCriteria]
+    outputs: [reviewVerdict, reviewEvidence]
+  - id: integrate
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [integration], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/integrate.md }
+    outputs: [acceptedBaseline]
+  - id: delivered
+    kind: terminal
+    outcome: delivered
+edges:
+  - { id: aligned, from: intake, to: plan, when: intent.acceptance.ready }
+  - { id: planned, from: plan, to: implement, when: plan.workstreams.ready }
+  - { id: implemented, from: implement, to: review, when: implementation.candidate.verified }
+  - { id: blocked, from: implement, to: diagnose, when: implementation.blocked, chooseBy: pm }
+  - { id: retry, from: diagnose, to: implement, when: diagnosis.retryApproved, chooseBy: pm, maxTraversals: 2 }
+  - { id: approved, from: review, to: integrate, when: review.verdict.pass }
+  - { id: rework, from: review, to: implement, when: review.verdict.fail, chooseBy: pm, maxTraversals: 2 }
+  - { id: complete, from: integrate, to: delivered, when: integration.accepted }

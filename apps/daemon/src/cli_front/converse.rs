@@ -94,7 +94,8 @@ pub async fn agent(args: &[String], selection: &Selection) -> i32 {
     }
 }
 
-/// `genet pm run …` starts or continues the one PM Agent for a Folder project.
+/// `genet pm run …` starts a PM conversation or continues the explicitly
+/// selected one. A project may keep multiple PM Sessions in parallel.
 pub async fn pm(args: &[String], selection: &Selection) -> i32 {
     match parse_pm(args, selection) {
         Ok(command) => execute(command, selection).await,

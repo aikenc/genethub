@@ -1,0 +1,12 @@
+{
+  "schema": "pipespace.v1",
+  "name": "{{GENEHUB_PM_SPACE_NAME}}",
+  "description": "Project management Space for {{GENEHUB_PROJECT_NAME}}.",
+  "agents": ["codex", "cursor", "codebuddy", "claude-code"],
+  "skills": ["project-workflow"],
+  "tags": ["project-manager"],
+  "skillProviders": [
+    {"type": "folder", "path": "skills"}
+  ],
+  "children": {"scanDepth": 0}
+}

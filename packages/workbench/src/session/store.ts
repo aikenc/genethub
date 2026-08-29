@@ -354,7 +354,7 @@ interface WorkbenchState {
     agentId?: string | null,
     options?: { addressScope?: AddressScope },
   ): void;
-  /** Opens the one daemon-owned PM Agent for a Folder project. */
+  /** Opens a new daemon-owned PM conversation for a managed project. */
   openProjectManager(workspaceId: string): Promise<void>;
   selectSession(sessionId: string): Promise<void>;
   loadRound(roundId: string): Promise<void>;

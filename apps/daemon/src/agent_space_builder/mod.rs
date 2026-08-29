@@ -9,6 +9,7 @@ mod diagnostic;
 mod manifest;
 mod ownership;
 mod planner;
+mod pm_template;
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,10 @@ pub use diagnostic::{BuilderError, Diagnostic};
 use manifest::{load_manifest, load_providers, load_workspace};
 use ownership::{apply, check_conflicts, clean, load_lock, verify, BuildGuard};
 use planner::{create_plan, Plan};
+pub use pm_template::{
+    render_pm_space, PmSpaceTemplateReport, PmSpaceTemplateValues, PM_SPACE_NAME,
+    PM_SPACE_TEMPLATE_VERSION,
+};
 
 pub const VERSION: &str = "0.1.4";
 pub const REPORT_SCHEMA: &str = "pipebuilder-report.v1";

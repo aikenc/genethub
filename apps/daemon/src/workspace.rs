@@ -635,6 +635,28 @@ impl Workspaces {
         project: &WorkspaceEntry,
         controller_session_id: &str,
     ) -> Result<WorkspaceInfo> {
+        self.register_agent_space_with_scope(source, project, controller_session_id)
+            .await
+    }
+
+    /// Registers the standard manager AgentSpace before the first PM Session
+    /// exists. An empty legacy controller field means project-scoped ownership;
+    /// PM Session authority is resolved through the project's Workflow Runs.
+    pub async fn register_pm_space(
+        &self,
+        source: &Path,
+        project: &WorkspaceEntry,
+    ) -> Result<WorkspaceInfo> {
+        self.register_agent_space_with_scope(source, project, "")
+            .await
+    }
+
+    async fn register_agent_space_with_scope(
+        &self,
+        source: &Path,
+        project: &WorkspaceEntry,
+        controller_session_id: &str,
+    ) -> Result<WorkspaceInfo> {
         if project.kind != WorkspaceKind::Folder || project.agent_space.is_some() {
             anyhow::bail!("a PM project must start from a Folder workspace");
         }

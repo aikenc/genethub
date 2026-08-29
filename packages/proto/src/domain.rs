@@ -306,6 +306,13 @@ pub struct PmAgentSpaceStatus {
     pub builder_lock_digest: String,
     pub role: String,
     pub active: bool,
+    pub resource_state: String,
+    #[ts(type = "number")]
+    pub resource_revision: u64,
+    #[ts(optional)]
+    pub work_package_id: Option<String>,
+    #[ts(optional)]
+    pub work_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

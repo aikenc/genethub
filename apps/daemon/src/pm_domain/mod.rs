@@ -4,6 +4,7 @@
 //! store only keeps the controller, Intent/DAG state, immutable references,
 //! and the next supervisor check needed to recover a PM turn.
 
+pub mod dcg;
 pub mod project;
 pub mod runtime;
 pub mod supervisor;
@@ -14,6 +15,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use dcg::{DcgActor, DcgCatalog, DcgRun};
 use genehub_proto::{
     PmAgentSpaceStatus, PmIntentStatus, PmProjectStatus, PmSupervisorStatus, PmWorkPackageStatus,
 };
@@ -24,7 +26,7 @@ use task_graph::{
     validate_graph, CandidateEvidence, ReviewEvidence, WorkPackage, WorkPackageStatus,
 };
 use tokio::sync::Mutex;
-use topology::{AgentSpaceRecord, AgentSpaceRole};
+use topology::{AgentSpaceRecord, AgentSpaceResourceState, AgentSpaceRole};
 
 /// The durable project fact that authorizes one new managed WorkSession.
 /// Its cwd is derived from the work package, never from model-selected input.
@@ -38,6 +40,7 @@ pub enum WorkDispatchKind {
 pub struct WorkDispatchTarget {
     pub cwd: PathBuf,
     pub kind: WorkDispatchKind,
+    pub lease_id: String,
 }
 
 pub struct ProjectStore {
@@ -60,10 +63,15 @@ impl ProjectStore {
         project_root: &Path,
     ) -> Result<ProjectState> {
         let _guard = self.mutation.lock().await;
-        if let Some(existing) = self.load_optional(project_workspace_id)? {
-            existing.ensure_controller(controller_session_id)?;
+        if let Some(mut existing) = self.load_optional(project_workspace_id)? {
             if existing.root != project_root.canonicalize()? {
                 anyhow::bail!("the persisted PM project root no longer matches this workspace");
+            }
+            if attach_dcg_runs(&mut existing, controller_session_id)? {
+                existing.touch(now_ms());
+                self.save(&existing)?;
+            } else {
+                existing.ensure_controller(controller_session_id)?;
             }
             return Ok(existing);
         }
@@ -71,14 +79,126 @@ impl ProjectStore {
             .canonicalize()
             .with_context(|| format!("no such PM project root: {}", project_root.display()))?;
         preflight_empty_project(&root)?;
-        let state = ProjectState::new(
+        let mut state = ProjectState::new(
             project_workspace_id.to_string(),
             controller_session_id.to_string(),
             root,
             now_ms(),
         );
+        attach_dcg_runs(&mut state, controller_session_id)?;
         self.save(&state)?;
         Ok(state)
+    }
+
+    /// Initializes the vNext project after the deterministic PM Space
+    /// Bootstrapper has rendered and verified its standard AgentSpace source.
+    /// Unlike the legacy model-driven init path, the known scaffold is expected
+    /// to exist already; arbitrary project contents are still outside this API.
+    pub async fn initialize_bootstrapped(
+        &self,
+        project_workspace_id: &str,
+        pm_space_workspace_id: &str,
+        controller_session_id: &str,
+        project_root: &Path,
+    ) -> Result<ProjectState> {
+        let _guard = self.mutation.lock().await;
+        let root = project_root
+            .canonicalize()
+            .with_context(|| format!("no such PM project root: {}", project_root.display()))?;
+        let workflow_root = root.join("spaces/pm/skills/project-workflow");
+        let _catalog = DcgCatalog::load(&workflow_root)
+            .context("the bootstrapped PM Space has no valid DCG catalog")?;
+        let mut state = match self.load_optional(project_workspace_id)? {
+            Some(state) => {
+                if state.root != root {
+                    anyhow::bail!("the persisted PM project root no longer matches this workspace");
+                }
+                state
+            }
+            None => ProjectState::new(
+                project_workspace_id.to_string(),
+                controller_session_id.to_string(),
+                root,
+                now_ms(),
+            ),
+        };
+        if state
+            .pm_space_workspace_id
+            .as_deref()
+            .is_some_and(|existing| existing != pm_space_workspace_id)
+        {
+            anyhow::bail!("this project is already bound to another PM Space workspace");
+        }
+        state.pm_space_workspace_id = Some(pm_space_workspace_id.to_string());
+        attach_dcg_runs(&mut state, controller_session_id)?;
+        state.touch(now_ms());
+        self.save(&state)?;
+        Ok(state)
+    }
+
+    pub async fn select_session_dcg(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        graph_id: &str,
+    ) -> Result<ProjectState> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })?;
+        let definition = catalog.session_workflow(graph_id)?;
+        let run = state
+            .session_dcg_runs
+            .get_mut(controller_session_id)
+            .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
+        run.select_before_start(definition)?;
+        state.touch(now_ms());
+        self.save(&state)?;
+        Ok(state)
+    }
+
+    pub async fn transition_session_dcg(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        edge_id: &str,
+        facts: BTreeSet<String>,
+        chooser: DcgActor,
+    ) -> Result<ProjectState> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })?;
+        let run = state
+            .session_dcg_runs
+            .get_mut(controller_session_id)
+            .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
+        let graph_id = run
+            .graph_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("select a Session DCG before transitioning"))?;
+        let definition = catalog.session_workflow(graph_id)?;
+        run.transition(definition, edge_id, &facts, chooser)?;
+        state.touch(now_ms());
+        self.save(&state)?;
+        Ok(state)
+    }
+
+    pub async fn session_dcg_catalog(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+    ) -> Result<DcgCatalog> {
+        let _guard = self.mutation.lock().await;
+        let state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })
     }
 
     pub async fn get(
@@ -116,7 +236,7 @@ impl ProjectStore {
         work_package_id: &str,
     ) -> Result<WorkDispatchTarget> {
         let _guard = self.mutation.lock().await;
-        let state = self.load(project_workspace_id)?;
+        let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
         if state.lifecycle != ProjectLifecycle::Active || state.phase != ProjectPhase::Active {
             anyhow::bail!("the PM project is not active for WorkAgent dispatch");
@@ -125,13 +245,15 @@ impl ProjectStore {
             .work_packages
             .get(work_package_id)
             .ok_or_else(|| anyhow::anyhow!("no such work package: {work_package_id}"))?;
-        let space = state
+        let space_name = state
             .agent_spaces
             .values()
             .find(|space| space.active && space.workspace_id == agent_space_workspace_id)
+            .map(|space| space.name.clone())
             .ok_or_else(|| {
                 anyhow::anyhow!("the target Agent Space is not active in this PM project")
             })?;
+        let space = state.agent_spaces.get(&space_name).expect("found by name");
         verify_recorded_agent_space(&state, space).await?;
 
         let kind = match package.status {
@@ -182,10 +304,141 @@ impl ProjectStore {
         if !is_clean_descendant(&worktree, &worktrees_root) {
             anyhow::bail!("work package worktree escaped the PM project");
         }
+        if state.agent_spaces.values().any(|space| {
+            space
+                .lease
+                .as_ref()
+                .and_then(|lease| state.work_packages.get(&lease.work_package_id))
+                .is_some_and(|leased_package| leased_package.worktree == worktree)
+        }) {
+            anyhow::bail!("another Agent Space already holds the writable worktree lease");
+        }
+        if !crate::git::status(&worktree).await?.clean {
+            anyhow::bail!("the assigned WorkAgent worktree is not clean");
+        }
+        let lease_id = format!("lease-{}", uuid::Uuid::new_v4().simple());
+        state
+            .agent_spaces
+            .get_mut(&space_name)
+            .expect("found by name")
+            .reserve(
+                lease_id.clone(),
+                controller_session_id.to_string(),
+                work_package_id.to_string(),
+                now_ms(),
+            )?;
+        state.touch(now_ms());
+        self.save(&state)?;
         Ok(WorkDispatchTarget {
             cwd: worktree,
             kind,
+            lease_id,
         })
+    }
+
+    pub async fn start_agent_space_work(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        agent_space_workspace_id: &str,
+        lease_id: &str,
+        work_session_id: &str,
+    ) -> Result<()> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        let space = state
+            .agent_spaces
+            .values_mut()
+            .find(|space| space.workspace_id == agent_space_workspace_id)
+            .ok_or_else(|| anyhow::anyhow!("the reserved Agent Space is no longer recorded"))?;
+        let lease = space
+            .lease
+            .as_ref()
+            .filter(|lease| lease.id == lease_id)
+            .ok_or_else(|| anyhow::anyhow!("the Agent Space reservation is no longer current"))?;
+        if lease.controller_session_id != controller_session_id {
+            anyhow::bail!("the Agent Space reservation belongs to another PM Session");
+        }
+        space.start_work(lease_id, work_session_id.to_string(), now_ms())?;
+        state.touch(now_ms());
+        self.save(&state)
+    }
+
+    pub async fn cancel_agent_space_reservation(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        agent_space_workspace_id: &str,
+        lease_id: &str,
+    ) -> Result<()> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        let worktree = state
+            .agent_spaces
+            .values()
+            .find(|space| space.workspace_id == agent_space_workspace_id)
+            .and_then(|space| space.lease.as_ref())
+            .filter(|lease| lease.id == lease_id)
+            .and_then(|lease| state.work_packages.get(&lease.work_package_id))
+            .map(|package| package.worktree.clone())
+            .ok_or_else(|| anyhow::anyhow!("the Agent Space reservation is no longer current"))?;
+        let clean = crate::git::status(&worktree)
+            .await
+            .is_ok_and(|status| status.clean);
+        let space = state
+            .agent_spaces
+            .values_mut()
+            .find(|space| space.workspace_id == agent_space_workspace_id)
+            .expect("reservation resolved through this Space");
+        space.return_after_check(clean, now_ms())?;
+        state.touch(now_ms());
+        self.save(&state)
+    }
+
+    pub async fn repair_agent_space(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        name: &str,
+    ) -> Result<ProjectState> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        state.ensure_mutable()?;
+        let space = state
+            .agent_spaces
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("no such Agent Space: {name}"))?;
+        verify_recorded_agent_space(&state, space).await?;
+        let worktree = space
+            .lease
+            .as_ref()
+            .and_then(|lease| state.work_packages.get(&lease.work_package_id))
+            .map(|package| package.worktree.clone());
+        state
+            .agent_spaces
+            .get_mut(name)
+            .expect("checked Space exists")
+            .begin_repair(now_ms())?;
+        let clean = match worktree {
+            Some(worktree) => crate::git::status(&worktree)
+                .await
+                .is_ok_and(|status| status.clean),
+            None => true,
+        };
+        state
+            .agent_spaces
+            .get_mut(name)
+            .expect("checked Space exists")
+            .finish_repair_check(clean, now_ms())?;
+        state.touch(now_ms());
+        self.save(&state)?;
+        if !clean {
+            anyhow::bail!("Agent Space {name} is still dirty and remains quarantined");
+        }
+        Ok(state)
     }
 
     pub async fn set_intent(
@@ -344,6 +597,31 @@ impl ProjectStore {
             block_reason,
             now_ms(),
         )?;
+        if matches!(
+            status,
+            WorkPackageStatus::Candidate
+                | WorkPackageStatus::Review
+                | WorkPackageStatus::Blocked
+                | WorkPackageStatus::Cancelled
+        ) {
+            let worktree = state
+                .work_packages
+                .get(id)
+                .expect("transition kept the package")
+                .worktree
+                .clone();
+            let clean = crate::git::status(&worktree)
+                .await
+                .is_ok_and(|status| status.clean);
+            for space in state.agent_spaces.values_mut().filter(|space| {
+                space
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.work_package_id == id)
+            }) {
+                space.return_after_check(clean, now_ms())?;
+            }
+        }
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -425,6 +703,17 @@ impl ProjectStore {
             builder_lock_digest: verified.lock_digest,
             role,
             active: true,
+            resource_state: if identity_changed {
+                AgentSpaceResourceState::Quarantined
+            } else {
+                previous
+                    .as_ref()
+                    .map_or(AgentSpaceResourceState::Idle, |space| space.resource_state)
+            },
+            lease: (!identity_changed)
+                .then(|| previous.as_ref().and_then(|space| space.lease.clone()))
+                .flatten(),
+            resource_revision: previous.as_ref().map_or(1, |space| space.resource_revision),
             updated_at_ms: now_ms(),
         };
         state.agent_spaces.insert(name, record);
@@ -764,14 +1053,14 @@ impl ProjectStore {
             Ok(raw) => {
                 let state: ProjectState = serde_json::from_str(&raw)
                     .with_context(|| format!("parsing PM project {}", path.display()))?;
-                if state.format != PM_PROJECT_FORMAT {
+                if !matches!(state.format, 1 | PM_PROJECT_FORMAT) {
                     anyhow::bail!(
-                        "unsupported PM project format {} (supports {})",
+                        "unsupported PM project format {} (supports 1 and {})",
                         state.format,
                         PM_PROJECT_FORMAT
                     );
                 }
-                Ok(Some(state))
+                Ok(Some(upgrade_project_state(state)))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
@@ -829,14 +1118,47 @@ fn load_project_file(path: &Path) -> Result<ProjectState> {
     }
     let state: ProjectState = serde_json::from_slice(&std::fs::read(path)?)
         .with_context(|| format!("parsing PM project {}", path.display()))?;
-    if state.format != PM_PROJECT_FORMAT {
+    if !matches!(state.format, 1 | PM_PROJECT_FORMAT) {
         anyhow::bail!(
-            "unsupported PM project format {} (supports {})",
+            "unsupported PM project format {} (supports 1 and {})",
             state.format,
             PM_PROJECT_FORMAT
         );
     }
-    Ok(state)
+    Ok(upgrade_project_state(state))
+}
+
+fn upgrade_project_state(mut state: ProjectState) -> ProjectState {
+    state.format = PM_PROJECT_FORMAT;
+    state
+}
+
+fn load_dcg_catalog(project_root: &Path) -> Result<Option<DcgCatalog>> {
+    let root = project_root.join("spaces/pm/skills/project-workflow");
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    DcgCatalog::load(&root).map(Some)
+}
+
+fn attach_dcg_runs(state: &mut ProjectState, controller_session_id: &str) -> Result<bool> {
+    let Some(_catalog) = load_dcg_catalog(&state.root)? else {
+        // Format-1 projects remain usable until their standard PM Space is
+        // bootstrapped. They gain DCG Runs atomically on the next init call.
+        return Ok(false);
+    };
+    let mut changed = false;
+    if !state.session_dcg_runs.contains_key(controller_session_id) {
+        state.session_dcg_runs.insert(
+            controller_session_id.to_string(),
+            DcgRun::new_discussion(
+                format!("run-{}", controller_session_id),
+                controller_session_id.to_string(),
+            )?,
+        );
+        changed = true;
+    }
+    Ok(changed)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1005,6 +1327,16 @@ fn project_status(state: &ProjectState) -> Result<PmProjectStatus> {
                 builder_lock_digest: space.builder_lock_digest.clone(),
                 role: enum_wire_name(space.role)?,
                 active: space.active,
+                resource_state: enum_wire_name(space.resource_state)?,
+                resource_revision: space.resource_revision,
+                work_package_id: space
+                    .lease
+                    .as_ref()
+                    .map(|lease| lease.work_package_id.clone()),
+                work_session_id: space
+                    .lease
+                    .as_ref()
+                    .and_then(|lease| lease.work_session_id.clone()),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1080,6 +1412,57 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("unknown.txt"), "mine").unwrap();
         assert!(store.initialize("w_2", "s_pm2", &other).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bootstrapped_pm_space_creates_unselected_independent_workflow_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "game-project",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let pm_space = root.join("spaces/pm");
+        for command in [
+            crate::agent_space_builder::Command::Check,
+            crate::agent_space_builder::Command::Build { dry_run: true },
+            crate::agent_space_builder::Command::Build { dry_run: false },
+            crate::agent_space_builder::Command::Verify,
+        ] {
+            crate::agent_space_builder::run(&root, &pm_space, command, true).unwrap();
+        }
+
+        let store = ProjectStore::new(&temp.path().join("data"));
+        let first = store
+            .initialize_bootstrapped("w_project", "w_pm", "s_pm_1", &root)
+            .await
+            .unwrap();
+        let first_run = &first.session_dcg_runs["s_pm_1"];
+        assert_eq!(first.pm_space_workspace_id.as_deref(), Some("w_pm"));
+        assert_eq!(first_run.status, dcg::DcgRunStatus::Discussion);
+        assert_eq!(first_run.graph_id, None);
+        assert!(first_run.active_nodes.is_empty());
+
+        let second = store
+            .initialize_bootstrapped("w_project", "w_pm", "s_pm_2", &root)
+            .await
+            .unwrap();
+        assert_eq!(second.session_dcg_runs.len(), 2);
+        let selected = store
+            .select_session_dcg("w_project", "s_pm_2", "bugfix")
+            .await
+            .unwrap();
+        assert_eq!(
+            selected.session_dcg_runs["s_pm_2"].graph_id.as_deref(),
+            Some("bugfix")
+        );
+        assert_eq!(selected.session_dcg_runs["s_pm_1"].graph_id, None);
     }
 
     #[tokio::test]
@@ -1463,6 +1846,9 @@ mod tests {
                         AgentSpaceRole::Implementation
                     },
                     active: true,
+                    resource_state: AgentSpaceResourceState::Idle,
+                    lease: None,
+                    resource_revision: 1,
                     updated_at_ms: 1,
                 },
             );
@@ -1488,6 +1874,15 @@ mod tests {
             .unwrap();
         assert_eq!(implementation.kind, WorkDispatchKind::Implementation);
         assert_eq!(implementation.cwd, worktree.canonicalize().unwrap());
+        store
+            .cancel_agent_space_reservation(
+                "w_project",
+                "s_pm",
+                "w_implementation",
+                &implementation.lease_id,
+            )
+            .await
+            .unwrap();
         let manifest_path = root.join("spaces/implementation/pipespace.json");
         let manifest = std::fs::read(&manifest_path).unwrap();
         std::fs::write(&manifest_path, [manifest.as_slice(), b"\n"].concat()).unwrap();

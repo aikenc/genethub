@@ -4,7 +4,7 @@ defineJourney(
   {
     id: "journey.session.custom-provider",
     title: "A provider the user adds works like the ones we ship",
-    oracle: "settings.setProvider inhouse appears in agent.list labels; forgetProvider removes it but not deepseek",
+    oracle: "settings.setProvider inhouse appears in agent.list model@provider labels; forgetProvider removes it but not deepseek",
     catches: ["custom provider never reaches the picker"],
     tags: ["core", "session", "parity"],
     llm: { default: "mock" },
@@ -36,7 +36,7 @@ defineJourney(
       const agents = await opened.client.call({ type: "agent.refresh" });
       const genet = agents?.type === "agents" ? agents.data.find((agent) => agent.id === "genet") : undefined;
       t.assertions.assert(
-        (genet?.catalog.models ?? []).some((model) => model.label.startsWith("公司内网:")),
+        (genet?.catalog.models ?? []).some((model) => model.label.endsWith("@inhou")),
         `the added provider's models never reached the picker: ${(genet?.catalog.models ?? []).map((model) => model.label).join(",")}`,
       );
       await opened.client.call({ type: "settings.forgetProvider", payload: { providerId: "inhouse" } });

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, utimesSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 
 import { defineSpecialty } from "../../framework/public.ts";
 
@@ -24,14 +24,13 @@ defineSpecialty(
     id: "specialty.authorization.pm-agent-work-session",
     title: "A PM Agent owns Agent Space and WorkSession mutations end to end",
     oracle:
-      "a built-in PM uses the public CLI to initialize Git and Builder state, register a local Agent Space, and start a third-party-adapter WorkAgent in its DAG-bound worktree; users can observe and fork its WorkSession but cannot mutate either managed resource",
+      "a confined built-in PM uses the public CLI to initialize Builder and project state, register a local Agent Space, and start a third-party-adapter WorkAgent in its workflow-bound worktree; users can observe and fork its WorkSession but cannot mutate either managed resource",
     catches: [
       "PM identity is trusted from request payload instead of the daemon child",
       "ordinary users can mutate WorkSessions or managed Agent Spaces",
       "PM-created WorkSessions are indistinguishable from ordinary conversations",
       "a PM blocks itself by omitting --no-wait while dispatching a WorkAgent",
       "multiline PM contracts are altered by shell expansion before reaching a WorkAgent",
-      "the embedded Builder steals another process's active or stale build.lock",
       "a committed Provider Skill change can be re-recorded against a stale Builder lock",
       "a failed supervisor wake retries on every two-second sampler tick",
       "forking a WorkSession preserves its privileged role",
@@ -63,55 +62,92 @@ defineSpecialty(
       const pm = createdPm.data;
       t.assertions.assert(pm.kind === "pm", `PM kind was ${pm.kind}`);
       t.assertions.assert(pm.capabilities?.archive === false && pm.capabilities.delete === false, "PM retention capabilities drifted");
+      const workspacesAfterPmBootstrap = await opened.client.call({ type: "workspace.list" });
+      const pmWorkspace =
+        workspacesAfterPmBootstrap?.type === "workspaces"
+          ? workspacesAfterPmBootstrap.data.find((workspace) => workspace.id === pm.workspaceId)
+          : undefined;
+      t.assertions.assert(
+        pmWorkspace?.kind === "agentSpace" && pmWorkspace.parentWorkspaceId === opened.workspaceId,
+        `PM Session did not run in the project-managed PM AgentSpace: ${JSON.stringify(pmWorkspace)}`,
+      );
 
       const duplicatePm = await opened.client.call({
         type: "pm.session.create",
         payload: { workspaceId: opened.workspaceId, modelId: MODEL, modeId: null, title: null },
       });
       t.assertions.assert(
-        duplicatePm?.type === "session" && duplicatePm.data.id === pm.id,
-        "the same Folder project minted a second PM session",
+        duplicatePm?.type === "session" && duplicatePm.data.id !== pm.id && duplicatePm.data.kind === "pm",
+        "the same project did not mint an independent second PM session",
       );
 
       const pmEvents = await t.flows.main.attachEventLog(opened.client, pm.id);
+
+      // Repository contents are fixture input. The PM Space is deliberately
+      // confined to spaces/pm, so the PM may only mutate project state through
+      // its authenticated CLI/Coordinator control plane.
+      mkdirSync(`${t.env.workspace}/repositories/game`, { recursive: true });
+      mkdirSync(`${t.env.workspace}/worktrees/implementation`, { recursive: true });
+      mkdirSync(`${t.env.workspace}/spaces/implementation`, { recursive: true });
+      mkdirSync(`${t.env.workspace}/skills/project-contract`, { recursive: true });
+      writeFileSync(
+        `${t.env.workspace}/.gitignore`,
+        [
+          ".genethub/",
+          "repositories/",
+          "worktrees/",
+          "spaces/*/.pipebuilder/",
+          "spaces/*/.agents/",
+          "spaces/*/.cursor/",
+          "spaces/*/.codebuddy/",
+          "spaces/*/.claude/",
+          "spaces/pm/pm-*.log",
+          "spaces/pm/pm-*.json",
+          "spaces/*/AGENTS.md",
+          "spaces/*/CLAUDE.md",
+          "",
+        ].join("\n"),
+      );
+      writeFileSync(
+        `${t.env.workspace}/skills/project-contract/SKILL.md`,
+        "---\nname: project-contract\ndescription: Keep the gameplay contract deterministic.\n---\n\n# Project contract\n\nKeep the game deterministic.\n",
+      );
+      writeFileSync(
+        `${t.env.workspace}/spaces/implementation/pipespace.json`,
+        '{"schema":"pipespace.v1","name":"implementation","agents":["codex"],"skills":["project-contract"],"tags":[],"skillProviders":[{"type":"folder","path":"../../skills"}]}\n',
+      );
+      writeFileSync(
+        `${t.env.workspace}/spaces/implementation/implementation.code-workspace`,
+        '{"folders":[{"name":"implementation","path":"."},{"name":"game","path":"../../worktrees/implementation/game"}]}\n',
+      );
+      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: t.env.workspace });
+      execFileSync("git", ["config", "user.name", "GeneHub PM Fixture"], { cwd: t.env.workspace });
+      execFileSync("git", ["config", "user.email", "pm-fixture@genehub.invalid"], { cwd: t.env.workspace });
+      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: `${t.env.workspace}/repositories/game` });
+      execFileSync("git", ["config", "user.name", "Fixture WorkAgent"], { cwd: `${t.env.workspace}/repositories/game` });
+      execFileSync("git", ["config", "user.email", "work-fixture@genehub.invalid"], { cwd: `${t.env.workspace}/repositories/game` });
+      writeFileSync(`${t.env.workspace}/repositories/game/README.md`, "# Game baseline\n");
+      execFileSync("git", ["add", "README.md"], { cwd: `${t.env.workspace}/repositories/game` });
+      execFileSync("git", ["commit", "-qm", "Create business baseline"], { cwd: `${t.env.workspace}/repositories/game` });
+      execFileSync(
+        "git",
+        ["worktree", "add", "-q", "-b", "work/gameplay", `${t.env.workspace}/worktrees/implementation/game`, "main"],
+        { cwd: `${t.env.workspace}/repositories/game` },
+      );
+      execFileSync("git", ["add", ".gitignore", "spaces/pm", "spaces/implementation", "skills/project-contract"], {
+        cwd: t.env.workspace,
+      });
+      execFileSync("git", ["commit", "-qm", "Initialize PM project topology"], { cwd: t.env.workspace });
+
       const initializeCommand = [
-        "set -x",
-        "exec > .genethub/pm-setup.log 2>&1",
         '"$GENEHUB_CLI" pm project init',
         '"$GENEHUB_CLI" pm project intent set --outcome "Deliver a controlled gameplay package" --acceptance "The WorkAgent session is observable, isolated, and PM-controlled"',
-        "git init -q -b main",
-        'git config user.name "GeneHub PM Fixture"',
-        'git config user.email "pm-fixture@genehub.invalid"',
-        "mkdir -p spaces repositories/game worktrees/implementation",
-        "printf '%s\\n' '.genethub/' 'repositories/' 'worktrees/' 'spaces/*/.pipebuilder/' 'spaces/*/.agents/' 'spaces/*/.cursor/' 'spaces/*/.codebuddy/' 'spaces/*/.claude/' 'spaces/*/AGENTS.md' 'spaces/*/CLAUDE.md' > .gitignore",
-        "git add .gitignore",
-        'git commit -qm "Initialize PM project"',
-        "git -C repositories/game init -q -b main",
-        'git -C repositories/game config user.name "Fixture WorkAgent"',
-        'git -C repositories/game config user.email "work-fixture@genehub.invalid"',
-        "printf '%s\\n' '# Game baseline' > repositories/game/README.md",
-        "git -C repositories/game add README.md",
-        'git -C repositories/game commit -qm "Create business baseline"',
-        'git -C repositories/game worktree add -q -b work/gameplay "$PWD/worktrees/implementation/game" main',
         '"$GENEHUB_CLI" pm project advance --to git-ready',
-        '"$GENEHUB_CLI" agent-space init implementation',
-        "mkdir -p skills/project-contract",
-        "printf '%s\\n' '---' 'name: project-contract' 'description: Keep the gameplay contract deterministic.' '---' '' '# Project contract' '' 'Keep the game deterministic.' > skills/project-contract/SKILL.md",
-        `printf '%s\\n' '{"schema":"pipespace.v1","name":"implementation","agents":["codex"],"skills":["project-contract"],"tags":[],"skillProviders":[{"type":"folder","path":"../../skills"}]}' > spaces/implementation/pipespace.json`,
-        "mkdir -p spaces/implementation/.pipebuilder",
-        `printf '{"pid":2147483647,"host":"%s","startedAt":"old"}\n' "$(tr -d '\r\n' < /etc/hostname)" > spaces/implementation/.pipebuilder/build.lock`,
-        'if "$GENEHUB_CLI" agent-space build implementation --require-no-post-commands > .genethub/stale-builder-lock.json 2>&1; then exit 72; fi',
-        "grep -q PB014 .genethub/stale-builder-lock.json || { cat .genethub/stale-builder-lock.json; exit 73; }",
-        "test -f spaces/implementation/.pipebuilder/build.lock",
-        "rm spaces/implementation/.pipebuilder/build.lock",
-        "printf '%s\\n' '{\"folders\":[{\"name\":\"implementation\",\"path\":\".\"},{\"name\":\"game\",\"path\":\"../../worktrees/implementation/game\"}]}' > spaces/implementation/implementation.code-workspace",
         '"$GENEHUB_CLI" agent-space check implementation',
         '"$GENEHUB_CLI" agent-space explain implementation',
         '"$GENEHUB_CLI" agent-space build implementation --dry-run --require-no-post-commands',
         '"$GENEHUB_CLI" agent-space build implementation --require-no-post-commands',
         '"$GENEHUB_CLI" agent-space verify implementation',
-        "git add spaces/implementation/pipespace.json spaces/implementation/implementation.code-workspace skills/project-contract/SKILL.md",
-        'git commit -qm "Add implementation Agent Space"',
         '"$GENEHUB_CLI" pm project advance --to topology-verified',
       ].join(" && ");
       opened.mock.script(
@@ -134,11 +170,11 @@ defineSpecialty(
       });
       t.assertions.assert(
         existsSync(workspaceFile),
-        `PM initialization left no Agent Space source: ${existsSync(`${t.env.workspace}/.genethub/pm-setup.log`) ? readFileSync(`${t.env.workspace}/.genethub/pm-setup.log`, "utf8") : "no setup log"}; snapshot=${JSON.stringify(initializationSnapshot)}`,
+        `PM initialization left no Agent Space source: snapshot=${JSON.stringify(initializationSnapshot)}`,
       );
       t.assertions.assert(
         existsSync(`${t.env.workspace}/spaces/implementation/.pipebuilder/lock.json`),
-        `PM initialization left no Builder ownership lock: ${existsSync(`${t.env.workspace}/.genethub/pm-setup.log`) ? readFileSync(`${t.env.workspace}/.genethub/pm-setup.log`, "utf8") : "no setup log"}`,
+        `PM initialization left no Builder ownership lock: snapshot=${JSON.stringify(initializationSnapshot)}`,
       );
       opened.mock.script(
         {
@@ -167,7 +203,9 @@ defineSpecialty(
       const listedWorkspaces = await opened.client.call({ type: "workspace.list" });
       const agentSpace =
         listedWorkspaces?.type === "workspaces"
-          ? listedWorkspaces.data.find((workspace) => workspace.kind === "agentSpace")
+          ? listedWorkspaces.data.find(
+              (workspace) => workspace.kind === "agentSpace" && workspace.name === "implementation",
+            )
           : undefined;
       t.assertions.assert(agentSpace !== undefined, "the PM CLI did not register an Agent Space");
       if (!agentSpace) return;
@@ -220,18 +258,16 @@ defineSpecialty(
       const driftTerminals = terminalCount(pmEvents);
       const driftCompletions = completedCount(pmEvents);
       const manifestPath = "spaces/implementation/pipespace.json";
-      const driftResult = ".genethub/pm-space-drift-check.log";
+      const manifestAbsolutePath = `${t.env.workspace}/${manifestPath}`;
+      const manifestBeforeDrift = readFileSync(manifestAbsolutePath, "utf8");
+      writeFileSync(manifestAbsolutePath, `${manifestBeforeDrift}\n`);
+      const driftResult = "pm-space-drift-check.log";
       opened.mock.script(
         {
           tool: {
             name: "bash",
             arguments: {
-              command: [
-                `cp ${manifestPath} .genethub/pipespace.before-drift.json`,
-                `printf '\n' >> ${manifestPath}`,
-                `if "$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package wp-gameplay --no-wait "This dispatch must be rejected." > ${driftResult} 2>&1; then exit 71; fi`,
-                `mv .genethub/pipespace.before-drift.json ${manifestPath}`,
-              ].join(" && "),
+              command: `if "$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package wp-gameplay --no-wait "This dispatch must be rejected." > ${driftResult} 2>&1; then exit 71; fi`,
             },
           },
         },
@@ -239,10 +275,12 @@ defineSpecialty(
       );
       await t.flows.main.sendPrompt(opened.client, pm.id, "Prove that Agent Space drift fails closed before dispatch.");
       await t.tools.waitUntil(() => terminalCount(pmEvents) === driftTerminals + 1, 15_000);
+      writeFileSync(manifestAbsolutePath, manifestBeforeDrift);
+      const driftResultPath = `${t.env.workspace}/spaces/pm/${driftResult}`;
       t.assertions.assert(
         completedCount(pmEvents) === driftCompletions + 1 &&
-          existsSync(`${t.env.workspace}/${driftResult}`) &&
-          /Builder verification|PB017|changed/i.test(readFileSync(`${t.env.workspace}/${driftResult}`, "utf8")),
+          existsSync(driftResultPath) &&
+          /Builder verification|PB017|changed/i.test(readFileSync(driftResultPath, "utf8")),
         `drift dispatch did not fail closed: ${eventTrace(pmEvents)}`,
       );
       const sessionsAfterDrift = await opened.client.call({
@@ -257,19 +295,19 @@ defineSpecialty(
 
       const sourceDriftTerminals = terminalCount(pmEvents);
       const sourceDriftCompletions = completedCount(pmEvents);
-      const sourceDriftResult = ".genethub/pm-project-source-drift-check.log";
+      const uncommittedProviderRoot = `${t.env.workspace}/skills/uncommitted-provider`;
+      mkdirSync(uncommittedProviderRoot, { recursive: true });
+      writeFileSync(
+        `${uncommittedProviderRoot}/SKILL.md`,
+        "---\nname: uncommitted-provider\ndescription: must invalidate recorded project evidence\n---\n",
+      );
+      const sourceDriftResult = "pm-project-source-drift-check.log";
       opened.mock.script(
         {
           tool: {
             name: "bash",
             arguments: {
-              command: [
-                "mkdir -p skills/uncommitted-provider",
-                `printf '%s\\n' '---' 'name: uncommitted-provider' 'description: must invalidate recorded project evidence' '---' > skills/uncommitted-provider/SKILL.md`,
-                `if "$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package wp-gameplay --no-wait "This dispatch must also be rejected." > ${sourceDriftResult} 2>&1; then exit 74; fi`,
-                "rm skills/uncommitted-provider/SKILL.md",
-                "rmdir skills/uncommitted-provider",
-              ].join(" && "),
+              command: `if "$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package wp-gameplay --no-wait "This dispatch must also be rejected." > ${sourceDriftResult} 2>&1; then exit 74; fi`,
             },
           },
         },
@@ -281,37 +319,40 @@ defineSpecialty(
         "Prove that uncommitted root Provider source fails closed before dispatch.",
       );
       await t.tools.waitUntil(() => terminalCount(pmEvents) === sourceDriftTerminals + 1, 15_000);
+      rmSync(uncommittedProviderRoot, { recursive: true, force: true });
+      const sourceDriftResultPath = `${t.env.workspace}/spaces/pm/${sourceDriftResult}`;
       t.assertions.assert(
         completedCount(pmEvents) === sourceDriftCompletions + 1 &&
-          existsSync(`${t.env.workspace}/${sourceDriftResult}`) &&
+          existsSync(sourceDriftResultPath) &&
           /PB017|ownership lock|planned artifacts|untracked|project source|source commit|differ/i.test(
-            readFileSync(`${t.env.workspace}/${sourceDriftResult}`, "utf8"),
+            readFileSync(sourceDriftResultPath, "utf8"),
           ),
         `outer project source drift did not fail closed: ${eventTrace(pmEvents)}`,
       );
 
       const staleProviderTerminals = terminalCount(pmEvents);
       const staleProviderCompletions = completedCount(pmEvents);
-      const staleProviderResult = ".genethub/pm-stale-provider-lock-check.log";
+      const providerSkillPath = `${t.env.workspace}/skills/project-contract/SKILL.md`;
+      const providerBeforeDrift = readFileSync(providerSkillPath, "utf8");
+      writeFileSync(
+        providerSkillPath,
+        "---\nname: project-contract\ndescription: A changed contract that requires a rebuild.\n---\n\n# Changed contract\n",
+      );
+      execFileSync("git", ["add", "skills/project-contract/SKILL.md"], { cwd: t.env.workspace });
+      execFileSync("git", ["commit", "-qm", "Change Provider Skill without rebuilding"], { cwd: t.env.workspace });
+      const staleSourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: t.env.workspace,
+        encoding: "utf8",
+      }).trim();
+      const staleProviderResult = "pm-stale-provider-lock-check.log";
       opened.mock.script(
         {
           tool: {
             name: "bash",
             arguments: {
               command: [
-                "cp skills/project-contract/SKILL.md .genethub/project-contract.before",
-                "printf '%s\\n' '---' 'name: project-contract' 'description: A changed contract that requires a rebuild.' '---' '' '# Changed contract' > skills/project-contract/SKILL.md",
-                "git add skills/project-contract/SKILL.md",
-                'git commit -qm "Change Provider Skill without rebuilding"',
-                'staleSourceCommit="$(git rev-parse HEAD)"',
-                `if "$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit "$staleSourceCommit" > ${staleProviderResult} 2>&1; then exit 75; fi`,
+                `if "$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${staleSourceCommit} > ${staleProviderResult} 2>&1; then exit 75; fi`,
                 `printf '%s\\n' 'stale-provider-rejected' >> ${staleProviderResult}`,
-                "mv .genethub/project-contract.before skills/project-contract/SKILL.md",
-                "git add skills/project-contract/SKILL.md",
-                'git commit -qm "Restore Provider Skill fixture"',
-                'restoredSourceCommit="$(git rev-parse HEAD)"',
-                '"$GENEHUB_CLI" agent-space verify implementation',
-                `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit "$restoredSourceCommit"`,
               ].join(" && "),
             },
           },
@@ -324,13 +365,44 @@ defineSpecialty(
         "Prove that a committed Provider Skill cannot be re-recorded against a stale Builder lock.",
       );
       await t.tools.waitUntil(() => terminalCount(pmEvents) === staleProviderTerminals + 1, 30_000);
-      const staleProviderOutput = existsSync(`${t.env.workspace}/${staleProviderResult}`)
-        ? readFileSync(`${t.env.workspace}/${staleProviderResult}`, "utf8")
+      const staleProviderResultPath = `${t.env.workspace}/spaces/pm/${staleProviderResult}`;
+      const staleProviderOutput = existsSync(staleProviderResultPath)
+        ? readFileSync(staleProviderResultPath, "utf8")
         : "missing stale Provider result";
       t.assertions.assert(
         completedCount(pmEvents) === staleProviderCompletions + 1 &&
           staleProviderOutput.includes("stale-provider-rejected"),
         `stale Provider lock was re-recorded: output=${staleProviderOutput} events=${eventTrace(pmEvents)}`,
+      );
+
+      writeFileSync(providerSkillPath, providerBeforeDrift);
+      execFileSync("git", ["add", "skills/project-contract/SKILL.md"], { cwd: t.env.workspace });
+      execFileSync("git", ["commit", "-qm", "Restore Provider Skill fixture"], { cwd: t.env.workspace });
+      const restoredSourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: t.env.workspace,
+        encoding: "utf8",
+      }).trim();
+      const restoreTerminals = terminalCount(pmEvents);
+      const restoreCompletions = completedCount(pmEvents);
+      opened.mock.script(
+        {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: [
+                '"$GENEHUB_CLI" agent-space verify implementation',
+                `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${restoredSourceCommit}`,
+              ].join(" && "),
+            },
+          },
+        },
+        { text: "The restored Provider source and Builder lock are recorded again." },
+      );
+      await t.flows.main.sendPrompt(opened.client, pm.id, "Restore the verified Agent Space evidence.");
+      await t.tools.waitUntil(() => terminalCount(pmEvents) === restoreTerminals + 1, 15_000);
+      t.assertions.assert(
+        completedCount(pmEvents) === restoreCompletions + 1,
+        `restored Agent Space evidence was not accepted: ${eventTrace(pmEvents)}`,
       );
 
       await t.assertions.expectProtocolCode(
@@ -364,7 +436,7 @@ defineSpecialty(
         "",
       ].join("\n");
       const dispatchCommand = [
-        `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package wp-gameplay --message - > .genethub/pm-work-dispatch.json <<'GENEHUB_PROMPT'`,
+        `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package wp-gameplay --message - > pm-work-dispatch.json <<'GENEHUB_PROMPT'`,
         literalWorkPrompt,
         "GENEHUB_PROMPT",
       ].join("\n");
@@ -408,7 +480,7 @@ defineSpecialty(
         completedCount(pmEvents) === pmCompletions + 1,
         `PM WorkAgent launch turn failed: ${eventTrace(pmEvents)}`,
       );
-      const dispatchResult = `${t.env.workspace}/.genethub/pm-work-dispatch.json`;
+      const dispatchResult = `${t.env.workspace}/spaces/pm/pm-work-dispatch.json`;
       t.assertions.assert(
         existsSync(dispatchResult) && readFileSync(dispatchResult, "utf8").includes('"waited":false'),
         `PM dispatch was not forced non-blocking: ${existsSync(dispatchResult) ? readFileSync(dispatchResult, "utf8") : "missing CLI output"}`,
@@ -421,7 +493,7 @@ defineSpecialty(
           tool: {
             name: "bash",
             arguments: {
-              command: `"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to running --session ${workId} > .genethub/pm-running-transition.json`,
+              command: `"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to running --session ${workId} > pm-running-transition.json`,
             },
           },
         },
@@ -458,7 +530,7 @@ defineSpecialty(
         completedCount(pmEvents) === bindCompletions + 1,
         `PM WorkSession binding turn failed: ${eventTrace(pmEvents)}`,
       );
-      const runningTransition = `${t.env.workspace}/.genethub/pm-running-transition.json`;
+      const runningTransition = `${t.env.workspace}/spaces/pm/pm-running-transition.json`;
       t.assertions.assert(
         existsSync(runningTransition) &&
           readFileSync(runningTransition, "utf8").includes("finishTurnAfterReadyDispatches"),

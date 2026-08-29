@@ -1,0 +1,36 @@
+schema: genehub-pm-dcg.v1
+id: migration
+kind: sessionWorkflow
+version: 1
+entry: investigate
+nodes:
+  - id: investigate
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [research], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/diagnose.md }
+    outputs: [compatibilityReport, migrationSlices]
+  - id: migrate
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [migration], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/implement.md }
+    fanout: { foreach: investigate.migrationSlices, maxItems: 4 }
+    outputs: [candidate, compatibilityEvidence]
+  - id: review
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [review], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/review.md }
+    outputs: [reviewVerdict]
+  - id: delivered
+    kind: terminal
+    outcome: delivered
+edges:
+  - { id: planned, from: investigate, to: migrate, when: migration.plan.ready }
+  - { id: migrated, from: migrate, to: review, when: migration.compatibility.passed }
+  - { id: accepted, from: review, to: delivered, when: review.verdict.pass }
+  - { id: rework, from: review, to: migrate, when: review.verdict.fail, chooseBy: pm, maxTraversals: 2 }
