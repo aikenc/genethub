@@ -262,7 +262,15 @@ async fn cli(
     if !remote.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, "cli is loopback only").into_response();
     }
-    if !valid_control_challenge(&params.challenge) || params.pid != crate::host_pid::current() {
+    let challenge_valid = valid_control_challenge(&params.challenge);
+    let host_pid = crate::host_pid::current();
+    if !challenge_valid || params.pid != host_pid {
+        tracing::warn!(
+            challenge_valid,
+            presented_pid = params.pid,
+            expected_pid = host_pid,
+            "rejected cli admission before proof verification"
+        );
         return (StatusCode::UNAUTHORIZED, "invalid cli proof").into_response();
     }
     let expected = cli_proof(
@@ -273,14 +281,22 @@ async fn cli(
         &context.state.machine.fingerprint(),
         params.expires_at,
     );
-    if !token_matches(&expected, &params.proof)
-        || !consume_control_admission(
+    let proof_matches = token_matches(&expected, &params.proof);
+    let admission_fresh = proof_matches
+        && consume_control_admission(
             &context.used_control_admissions,
             "cli",
             &params.challenge,
             params.expires_at,
-        )
-    {
+        );
+    if !proof_matches || !admission_fresh {
+        tracing::warn!(
+            proof_matches,
+            admission_fresh,
+            expires_at = params.expires_at,
+            now = unix_seconds(),
+            "rejected cli admission during proof verification"
+        );
         return (StatusCode::UNAUTHORIZED, "invalid cli proof").into_response();
     }
 

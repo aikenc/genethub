@@ -159,18 +159,61 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
 }
 
 fn add_project_manager_identity(body: &mut Value) {
+    add_project_manager_identity_from(
+        body,
+        std::env::var("GENEHUB_SESSION_ID").ok(),
+        std::env::var("GENEHUB_PM_TOKEN").ok(),
+    );
+}
+
+fn add_project_manager_identity_from(
+    body: &mut Value,
+    session_id: Option<String>,
+    token: Option<String>,
+) {
     let Some(object) = body.as_object_mut() else {
         return;
     };
-    if let Ok(session_id) = std::env::var("GENEHUB_SESSION_ID") {
-        if !session_id.trim().is_empty() {
-            object.insert("callerSessionId".into(), Value::String(session_id));
+    let Some((session_id, token)) = session_id
+        .zip(token)
+        .filter(|(session_id, token)| !session_id.trim().is_empty() && !token.trim().is_empty())
+    else {
+        return;
+    };
+    object.insert("callerSessionId".into(), Value::String(session_id));
+    object.insert("projectManagerToken".into(), Value::String(token));
+}
+
+#[cfg(test)]
+mod project_manager_identity_tests {
+    use super::add_project_manager_identity_from;
+
+    #[test]
+    fn identity_is_attached_only_as_an_authenticated_pair() {
+        for (session_id, token) in [
+            (Some("session".to_string()), None),
+            (None, Some("token".to_string())),
+            (Some(" ".to_string()), Some("token".to_string())),
+            (Some("session".to_string()), Some(" ".to_string())),
+        ] {
+            let mut body = serde_json::json!({});
+            add_project_manager_identity_from(&mut body, session_id, token);
+            assert_eq!(body, serde_json::json!({}));
         }
-    }
-    if let Ok(token) = std::env::var("GENEHUB_PM_TOKEN") {
-        if !token.trim().is_empty() {
-            object.insert("projectManagerToken".into(), Value::String(token));
-        }
+
+        let mut body = serde_json::json!({});
+        add_project_manager_identity_from(
+            &mut body,
+            Some("session".to_string()),
+            Some("token".to_string()),
+        );
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "callerSessionId": "session",
+                "projectManagerToken": "token",
+            })
+        );
     }
 }
 
