@@ -144,6 +144,53 @@ impl DcgDefinition {
             }
         }
 
+        for node in &self.nodes {
+            let incoming = self
+                .edges
+                .iter()
+                .filter(|edge| edge.to == node.id)
+                .map(|edge| edge.from.as_str())
+                .collect::<BTreeSet<_>>()
+                .len() as u32;
+            let outgoing = self
+                .edges
+                .iter()
+                .filter(|edge| edge.from == node.id)
+                .count();
+            if node.fork.is_some() {
+                let automatic = self
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from == node.id && edge.choose_by.is_none())
+                    .count();
+                if automatic < 2 {
+                    anyhow::bail!(
+                        "fork node {} requires at least two automatic outgoing edges",
+                        node.id
+                    );
+                }
+            }
+            match node.kind {
+                DcgNodeKind::Join => {
+                    if incoming == 0 {
+                        anyhow::bail!("join node {} requires at least one incoming edge", node.id);
+                    }
+                    if let Some(JoinActivation::Quorum { quorum }) = node.activation.as_ref() {
+                        if *quorum == 0 || *quorum > incoming {
+                            anyhow::bail!(
+                                "join node {} quorum must be between 1 and its {incoming} unique incoming nodes",
+                                node.id
+                            );
+                        }
+                    }
+                }
+                DcgNodeKind::Terminal if outgoing != 0 => {
+                    anyhow::bail!("terminal node {} cannot have outgoing edges", node.id);
+                }
+                _ => {}
+            }
+        }
+
         let reachable = reachable_nodes(&self.entry, &self.edges);
         if reachable.len() != self.nodes.len() {
             let missing = self
@@ -239,6 +286,11 @@ pub struct DcgNode {
     pub objective: Option<DcgObjective>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fanout: Option<DcgFanout>,
+    /// Explicit graph-level AND split. WorkPackage fanout remains the normal
+    /// parallelism primitive; this flag is required before several automatic
+    /// outgoing edges may fire from the same node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<DcgForkMode>,
     #[serde(default)]
     pub inputs: Vec<String>,
     #[serde(default)]
@@ -273,6 +325,12 @@ impl DcgNode {
                 if let Some(fanout) = &self.fanout {
                     fanout.validate()?;
                 }
+                if self.fanout.is_some() && self.fork.is_some() {
+                    anyhow::bail!(
+                        "activity node {} cannot nest WorkPackage fanout and a graph fork",
+                        self.id
+                    );
+                }
                 if self.activation.is_some() || self.outcome.is_some() {
                     anyhow::bail!("activity node {} has join/terminal-only fields", self.id);
                 }
@@ -284,6 +342,7 @@ impl DcgNode {
                 if self.executor.is_some()
                     || self.objective.is_some()
                     || self.fanout.is_some()
+                    || self.fork.is_some()
                     || self.outcome.is_some()
                 {
                     anyhow::bail!("join node {} has activity/terminal-only fields", self.id);
@@ -296,6 +355,7 @@ impl DcgNode {
                 if self.executor.is_some()
                     || self.objective.is_some()
                     || self.fanout.is_some()
+                    || self.fork.is_some()
                     || self.activation.is_some()
                 {
                     anyhow::bail!("terminal node {} has activity/join-only fields", self.id);
@@ -352,6 +412,11 @@ impl DcgSpaceSelector {
         if self.match_tags.is_empty() {
             anyhow::bail!("workAgent Space selector requires at least one tag");
         }
+        if !self.clean_required {
+            anyhow::bail!(
+                "workAgent Space selector cannot disable the kernel clean-worktree invariant"
+            );
+        }
         Ok(())
     }
 }
@@ -371,18 +436,29 @@ pub struct DcgObjective {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DcgFanout {
-    pub foreach: String,
+    /// Provenance key for the PM-planned collection. `foreach` remains an
+    /// accepted alias for already-persisted V3 definitions; the kernel never
+    /// evaluates an arbitrary expression at this path. Concrete items are the
+    /// WorkPackages atomically bound to this node instance.
+    #[serde(alias = "foreach")]
+    pub source: String,
     pub max_items: u32,
 }
 
 impl DcgFanout {
     fn validate(&self) -> Result<()> {
-        validate_fact("fanout.foreach", &self.foreach)?;
+        validate_fact("fanout.source", &self.source)?;
         if self.max_items == 0 || self.max_items > 32 {
             anyhow::bail!("fanout.maxItems must be 1-32");
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DcgForkMode {
+    AllEligible,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +479,10 @@ pub enum JoinActivationKind {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DcgEdge {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub from: String,
     pub to: String,
     pub when: DcgCondition,
@@ -415,6 +495,20 @@ pub struct DcgEdge {
 impl DcgEdge {
     fn validate(&self) -> Result<()> {
         validate_id("DCG edge id", &self.id)?;
+        if self
+            .label
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 120)
+        {
+            anyhow::bail!("DCG edge label must be 1-120 characters");
+        }
+        if self
+            .description
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 500)
+        {
+            anyhow::bail!("DCG edge description must be 1-500 characters");
+        }
         validate_id("DCG edge from", &self.from)?;
         validate_id("DCG edge to", &self.to)?;
         self.when.validate()?;
@@ -481,11 +575,18 @@ pub struct DcgRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_snapshot: Option<DcgDefinition>,
     pub status: DcgRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     pub active_nodes: BTreeSet<String>,
     #[serde(default)]
     pub node_instances: BTreeMap<String, DcgNodeInstance>,
     #[serde(default)]
     pub facts: BTreeSet<String>,
+    /// Semantic outputs are scoped to the exact node attempt that produced
+    /// them. They remain auditable after a transition but never satisfy a
+    /// later retry instance by accident.
+    #[serde(default)]
+    pub instance_facts: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub history: Vec<DcgTransitionRecord>,
     pub traversals: BTreeMap<String, u32>,
@@ -507,9 +608,11 @@ impl DcgRun {
             graph_version: None,
             definition_snapshot: None,
             status: DcgRunStatus::Discussion,
+            outcome: None,
             active_nodes: BTreeSet::new(),
             node_instances: BTreeMap::new(),
             facts: BTreeSet::new(),
+            instance_facts: BTreeMap::new(),
             history: Vec::new(),
             traversals: BTreeMap::new(),
             team_slots: BTreeMap::new(),
@@ -521,6 +624,7 @@ impl DcgRun {
         if self.status != DcgRunStatus::Discussion
             || !self.traversals.is_empty()
             || !self.facts.is_empty()
+            || !self.instance_facts.is_empty()
             || !self.history.is_empty()
             || !self.team_slots.is_empty()
         {
@@ -534,8 +638,16 @@ impl DcgRun {
         self.definition_snapshot = Some(definition.clone());
         self.active_nodes = BTreeSet::from([definition.entry.clone()]);
         self.node_instances.clear();
-        let instance = DcgNodeInstance::active(&definition.entry, 1);
+        self.outcome = None;
+        let entry = definition.node(&definition.entry)?;
+        let instance = DcgNodeInstance::active(
+            &definition.entry,
+            1,
+            "root-1".into(),
+            entry.fanout.as_ref().map(|fanout| fanout.source.clone()),
+        );
         self.node_instances.insert(instance.id.clone(), instance);
+        self.status = DcgRunStatus::Active;
         self.revision = self.revision.saturating_add(1);
         Ok(())
     }
@@ -559,10 +671,68 @@ impl DcgRun {
             .collect())
     }
 
+    pub fn record_actor_facts(
+        &mut self,
+        definition: &DcgDefinition,
+        node_id: &str,
+        actor: DcgActor,
+        facts: &BTreeSet<String>,
+    ) -> Result<()> {
+        self.ensure_definition(definition)?;
+        let node = definition.node(node_id)?;
+        let executor = node
+            .executor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("only activity nodes can record semantic outputs"))?;
+        if executor.actor != actor || !matches!(actor, DcgActor::Pm | DcgActor::User) {
+            anyhow::bail!("node {node_id} outputs cannot be asserted by {actor:?}");
+        }
+        let declared = node.outputs.iter().collect::<BTreeSet<_>>();
+        if facts.is_empty() || facts.iter().any(|fact| !declared.contains(fact)) {
+            anyhow::bail!("node {node_id} may record only its declared outputs");
+        }
+        let instance_id = self.active_node_instance(node_id)?.id.clone();
+        self.instance_facts
+            .entry(instance_id)
+            .or_default()
+            .extend(facts.iter().cloned());
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn set_current_facts(&mut self, facts: BTreeSet<String>) {
+        if self.facts != facts {
+            self.facts = facts;
+            self.revision = self.revision.saturating_add(1);
+        }
+    }
+
+    pub fn actor_facts_for_active_nodes(&self) -> BTreeSet<String> {
+        self.node_instances
+            .values()
+            .filter(|instance| instance.status == DcgNodeInstanceStatus::Active)
+            .filter_map(|instance| self.instance_facts.get(&instance.id))
+            .flat_map(|facts| facts.iter().cloned())
+            .collect()
+    }
+
     pub fn transition(
         &mut self,
         definition: &DcgDefinition,
         edge_id: &str,
+        facts: &BTreeSet<String>,
+        chooser: DcgActor,
+    ) -> Result<()> {
+        self.transition_many(definition, &[edge_id], facts, chooser)
+    }
+
+    /// Atomically move one active node through one deterministic edge or an
+    /// explicit fork. A fork is represented by several satisfied, non-choice
+    /// edges with the same source and is never inferred from model text.
+    pub fn transition_many(
+        &mut self,
+        definition: &DcgDefinition,
+        edge_ids: &[&str],
         facts: &BTreeSet<String>,
         chooser: DcgActor,
     ) -> Result<()> {
@@ -573,57 +743,278 @@ impl DcgRun {
         ) {
             anyhow::bail!("terminal DCG Run cannot transition");
         }
-        let edge = definition.edge(edge_id)?;
-        if !self.active_nodes.contains(&edge.from) {
-            anyhow::bail!("edge {edge_id} does not leave an active node");
+        if edge_ids.is_empty() {
+            anyhow::bail!("a DCG transition requires at least one edge");
         }
-        if !edge.when.satisfied_by(facts) {
-            anyhow::bail!("edge {edge_id} condition is not satisfied");
-        }
-        if chooser == DcgActor::User && edge.choose_by != Some(DcgActor::User) {
-            anyhow::bail!("edge {edge_id} is not a user decision");
-        }
-        if edge.choose_by.is_some_and(|required| required != chooser) {
-            anyhow::bail!("edge {edge_id} must be chosen by {:?}", edge.choose_by);
-        }
-        let count = self.traversals.get(edge_id).copied().unwrap_or(0);
-        if edge.max_traversals.is_some_and(|limit| count >= limit) {
-            anyhow::bail!("edge {edge_id} reached maxTraversals");
-        }
-        self.active_nodes.remove(&edge.from);
-        self.active_nodes.insert(edge.to.clone());
-        for instance in self
-            .node_instances
-            .values_mut()
-            .filter(|instance| instance.node_id == edge.from && instance.status == DcgNodeInstanceStatus::Active)
+        let edges = edge_ids
+            .iter()
+            .map(|id| definition.edge(id))
+            .collect::<Result<Vec<_>>>()?;
+        if edges
+            .iter()
+            .map(|edge| edge.id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != edges.len()
         {
-            instance.status = DcgNodeInstanceStatus::Completed;
+            anyhow::bail!("an atomic DCG transition cannot repeat an edge");
         }
-        let target_iteration = self
+        let source = edges[0].from.as_str();
+        if edges.iter().any(|edge| edge.from != source) {
+            anyhow::bail!("an atomic DCG fork must share one source node");
+        }
+        if !self.active_nodes.contains(source) {
+            anyhow::bail!("DCG edge does not leave an active node");
+        }
+        let source_node = definition.node(source)?;
+        if edges.len() > 1 && source_node.fork != Some(DcgForkMode::AllEligible) {
+            anyhow::bail!(
+                "node {source} has several eligible automatic edges but is not an explicit fork"
+            );
+        }
+        let required_automatic_chooser = match source_node.kind {
+            DcgNodeKind::Join => DcgActor::System,
+            DcgNodeKind::Activity => match source_node
+                .executor
+                .as_ref()
+                .expect("validated activity executor")
+                .actor
+            {
+                DcgActor::Pm => DcgActor::Pm,
+                DcgActor::User => DcgActor::User,
+                DcgActor::WorkAgent | DcgActor::System => DcgActor::System,
+            },
+            DcgNodeKind::Terminal => anyhow::bail!("terminal nodes cannot transition"),
+        };
+        for edge in &edges {
+            if !edge.when.satisfied_by(facts) {
+                anyhow::bail!("edge {} condition is not satisfied", edge.id);
+            }
+            if chooser == DcgActor::User && edge.choose_by != Some(DcgActor::User) {
+                anyhow::bail!("edge {} is not a user decision", edge.id);
+            }
+            if edge.choose_by.is_some_and(|required| required != chooser) {
+                anyhow::bail!("edge {} must be chosen by {:?}", edge.id, edge.choose_by);
+            }
+            if edge.choose_by.is_none() && chooser != required_automatic_chooser {
+                anyhow::bail!(
+                    "edge {} must be advanced by {:?}",
+                    edge.id,
+                    required_automatic_chooser
+                );
+            }
+            if edges.len() > 1 && edge.choose_by.is_some() {
+                anyhow::bail!("decision edges cannot be taken as an automatic fork");
+            }
+            let count = self.traversals.get(&edge.id).copied().unwrap_or(0);
+            if edge.max_traversals.is_some_and(|limit| count >= limit) {
+                anyhow::bail!("edge {} reached maxTraversals", edge.id);
+            }
+        }
+        let source_instance = self.active_node_instance(source)?.clone();
+        let inherited_cohort = if source_instance.cohort_id.is_empty() {
+            format!("legacy-{}", source_instance.id)
+        } else {
+            source_instance.cohort_id.clone()
+        };
+        let target_cohort = if edges.len() > 1 {
+            format!("fork-{}-{}", source_instance.id, self.history.len() + 1)
+        } else {
+            inherited_cohort
+        };
+        self.active_nodes.remove(source);
+        self.node_instances
+            .get_mut(&source_instance.id)
+            .expect("active source instance exists")
+            .status = DcgNodeInstanceStatus::Completed;
+        for edge in edges {
+            self.activate_target(definition, edge, &source_instance, &target_cohort, facts)?;
+            let count = self.traversals.get(&edge.id).copied().unwrap_or(0);
+            self.history.push(DcgTransitionRecord {
+                edge_id: edge.id.clone(),
+                from: edge.from.clone(),
+                to: edge.to.clone(),
+                chooser,
+                facts: facts.clone(),
+                sequence: self.history.len().saturating_add(1) as u64,
+            });
+            self.traversals
+                .insert(edge.id.clone(), count.saturating_add(1));
+        }
+        // Facts are attempt-local. The Coordinator immediately derives the
+        // next active-node snapshot after this atomic move.
+        self.facts.clear();
+        self.refresh_status(definition)?;
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
+    fn activate_target(
+        &mut self,
+        definition: &DcgDefinition,
+        edge: &DcgEdge,
+        source: &DcgNodeInstance,
+        cohort_id: &str,
+        facts: &BTreeSet<String>,
+    ) -> Result<()> {
+        let node = definition.node(&edge.to)?;
+        if node.kind == DcgNodeKind::Join {
+            let existing = self
+                .node_instances
+                .values()
+                .find(|instance| instance.node_id == edge.to && instance.cohort_id == cohort_id)
+                .map(|instance| instance.id.clone());
+            let instance_id = match existing {
+                Some(id) => id,
+                None => {
+                    if self.node_instances.values().any(|instance| {
+                        instance.node_id == edge.to
+                            && matches!(
+                                instance.status,
+                                DcgNodeInstanceStatus::Waiting | DcgNodeInstanceStatus::Active
+                            )
+                    }) {
+                        anyhow::bail!("join node {} cannot mix concurrent fork cohorts", edge.to);
+                    }
+                    let iteration = self.next_iteration(&edge.to);
+                    let instance =
+                        DcgNodeInstance::waiting(&edge.to, iteration, cohort_id.to_string());
+                    let id = instance.id.clone();
+                    self.node_instances.insert(id.clone(), instance);
+                    id
+                }
+            };
+            let arrivals = {
+                let instance = self
+                    .node_instances
+                    .get_mut(&instance_id)
+                    .expect("join instance was created");
+                instance.arrived_from.insert(edge.from.clone());
+                instance.predecessor_instances.insert(source.id.clone());
+                instance.activation_facts.extend(facts.iter().cloned());
+                instance.arrived_from.len() as u32
+            };
+            if self
+                .node_instances
+                .get(&instance_id)
+                .is_some_and(|instance| instance.status == DcgNodeInstanceStatus::Completed)
+            {
+                // `any` and `quorum` joins may already have advanced. Late
+                // siblings are consumed by the same cohort instead of
+                // creating a stranded second join token.
+                return Ok(());
+            }
+            let incoming = definition
+                .edges
+                .iter()
+                .filter(|candidate| candidate.to == edge.to)
+                .map(|candidate| candidate.from.as_str())
+                .collect::<BTreeSet<_>>()
+                .len() as u32;
+            let ready = match node.activation.as_ref().expect("validated join activation") {
+                JoinActivation::Named(JoinActivationKind::All) => arrivals >= incoming,
+                JoinActivation::Named(JoinActivationKind::Any) => arrivals >= 1,
+                JoinActivation::Quorum { quorum } => arrivals >= *quorum,
+            };
+            if ready {
+                self.node_instances
+                    .get_mut(&instance_id)
+                    .expect("join instance exists")
+                    .status = DcgNodeInstanceStatus::Active;
+                self.active_nodes.insert(edge.to.clone());
+            }
+            return Ok(());
+        }
+
+        if node.kind != DcgNodeKind::Terminal
+            && self.node_instances.values().any(|instance| {
+                instance.node_id == edge.to
+                    && matches!(
+                        instance.status,
+                        DcgNodeInstanceStatus::Waiting | DcgNodeInstanceStatus::Active
+                    )
+            })
+        {
+            anyhow::bail!(
+                "restricted Workflow cannot activate node {} twice concurrently",
+                edge.to
+            );
+        }
+        let iteration = self.next_iteration(&edge.to);
+        let mut target = DcgNodeInstance::active(
+            &edge.to,
+            iteration,
+            cohort_id.to_string(),
+            node.fanout.as_ref().map(|fanout| fanout.source.clone()),
+        );
+        target.predecessor_instances.insert(source.id.clone());
+        target.activation_facts.extend(facts.iter().cloned());
+        if node.kind == DcgNodeKind::Terminal {
+            target.status = DcgNodeInstanceStatus::Completed;
+        } else {
+            self.active_nodes.insert(edge.to.clone());
+        }
+        self.node_instances.insert(target.id.clone(), target);
+        Ok(())
+    }
+
+    fn next_iteration(&self, node_id: &str) -> u32 {
+        self.node_instances
+            .values()
+            .filter(|instance| instance.node_id == node_id)
+            .map(|instance| instance.iteration)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    fn refresh_status(&mut self, definition: &DcgDefinition) -> Result<()> {
+        self.active_nodes = self
             .node_instances
             .values()
-            .filter(|instance| instance.node_id == edge.to)
-            .count()
-            .saturating_add(1) as u32;
-        let target = DcgNodeInstance::active(&edge.to, target_iteration);
-        self.node_instances.insert(target.id.clone(), target);
-        self.facts.extend(facts.iter().cloned());
-        self.history.push(DcgTransitionRecord {
-            edge_id: edge.id.clone(),
-            from: edge.from.clone(),
-            to: edge.to.clone(),
-            chooser,
-            facts: facts.clone(),
-            sequence: self.history.len().saturating_add(1) as u64,
+            .filter(|instance| instance.status == DcgNodeInstanceStatus::Active)
+            .filter(|instance| {
+                definition
+                    .node(&instance.node_id)
+                    .is_ok_and(|node| node.kind != DcgNodeKind::Terminal)
+            })
+            .map(|instance| instance.node_id.clone())
+            .collect();
+        let pending = self.node_instances.values().any(|instance| {
+            matches!(
+                instance.status,
+                DcgNodeInstanceStatus::Active | DcgNodeInstanceStatus::Waiting
+            )
         });
-        self.traversals
-            .insert(edge.id.clone(), count.saturating_add(1));
-        self.status = if definition.node(&edge.to)?.kind == DcgNodeKind::Terminal {
-            DcgRunStatus::Completed
+        let outcomes = self
+            .node_instances
+            .values()
+            .filter(|instance| instance.status == DcgNodeInstanceStatus::Completed)
+            .filter_map(|instance| definition.node(&instance.node_id).ok())
+            .filter(|node| node.kind == DcgNodeKind::Terminal)
+            .filter_map(|node| node.outcome.clone())
+            .collect::<BTreeSet<_>>();
+        if pending {
+            self.outcome = None;
+            self.status = DcgRunStatus::Active;
         } else {
-            DcgRunStatus::Active
-        };
-        self.revision = self.revision.saturating_add(1);
+            if outcomes.is_empty() {
+                anyhow::bail!("DCG Run has no active work and reached no terminal outcome");
+            }
+            if outcomes.len() != 1 {
+                anyhow::bail!(
+                    "DCG Run reached conflicting terminal outcomes: {}",
+                    outcomes.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            let outcome = outcomes.into_iter().next().expect("one outcome");
+            self.status = if outcome == "cancelled" {
+                DcgRunStatus::Cancelled
+            } else {
+                DcgRunStatus::Completed
+            };
+            self.outcome = Some(outcome);
+        }
         Ok(())
     }
 
@@ -636,6 +1027,42 @@ impl DcgRun {
             .ok_or_else(|| anyhow::anyhow!("node {node_id} has no active instance in this Run"))
     }
 
+    pub fn seal_fanout(&mut self, node_instance_id: &str) -> Result<()> {
+        let instance = self
+            .node_instances
+            .get_mut(node_instance_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown workflow node instance"))?;
+        if instance.status != DcgNodeInstanceStatus::Active {
+            anyhow::bail!("only an active workAgent node can seal its WorkPackage fanout");
+        }
+        if !instance.fanout_sealed {
+            instance.fanout_sealed = true;
+            self.revision = self.revision.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn active_ancestor_instances(&self, node_id: &str) -> Result<BTreeSet<String>> {
+        let active = self.active_node_instance(node_id)?;
+        let mut pending = active
+            .predecessor_instances
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut ancestors = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !ancestors.insert(id.clone()) {
+                continue;
+            }
+            let instance = self
+                .node_instances
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("workflow predecessor instance is missing"))?;
+            pending.extend(instance.predecessor_instances.iter().cloned());
+        }
+        Ok(ancestors)
+    }
+
     pub fn bind_team_slot(&mut self, slot: TeamSlot) -> Result<()> {
         slot.validate()?;
         let instance = self
@@ -645,11 +1072,9 @@ impl DcgRun {
         if instance.status != DcgNodeInstanceStatus::Active {
             anyhow::bail!("Team Slot requires an active node instance");
         }
-        if self
-            .team_slots
-            .values()
-            .any(|existing| existing.work_package_id == slot.work_package_id && existing.id != slot.id)
-        {
+        if self.team_slots.values().any(|existing| {
+            existing.work_package_id == slot.work_package_id && existing.id != slot.id
+        }) {
             anyhow::bail!("a WorkPackage cannot belong to two Team Slots");
         }
         self.team_slots.insert(slot.id.clone(), slot);
@@ -671,6 +1096,7 @@ impl DcgRun {
 #[serde(rename_all = "camelCase")]
 pub enum DcgNodeInstanceStatus {
     Active,
+    Waiting,
     Completed,
     Blocked,
 }
@@ -682,15 +1108,55 @@ pub struct DcgNodeInstance {
     pub node_id: String,
     pub iteration: u32,
     pub status: DcgNodeInstanceStatus,
+    /// One bounded fork cohort. Different cohorts may never occupy the same
+    /// non-join node concurrently, avoiding a general token algebra.
+    #[serde(default)]
+    pub cohort_id: String,
+    #[serde(default)]
+    pub arrived_from: BTreeSet<String>,
+    #[serde(default)]
+    pub predecessor_instances: BTreeSet<String>,
+    #[serde(default)]
+    pub activation_facts: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fanout_source: Option<String>,
+    #[serde(default)]
+    pub fanout_sealed: bool,
 }
 
 impl DcgNodeInstance {
-    fn active(node_id: &str, iteration: u32) -> Self {
+    fn active(
+        node_id: &str,
+        iteration: u32,
+        cohort_id: String,
+        fanout_source: Option<String>,
+    ) -> Self {
         Self {
             id: format!("{node_id}-{iteration}"),
             node_id: node_id.to_string(),
             iteration,
             status: DcgNodeInstanceStatus::Active,
+            cohort_id,
+            arrived_from: BTreeSet::new(),
+            predecessor_instances: BTreeSet::new(),
+            activation_facts: BTreeSet::new(),
+            fanout_source,
+            fanout_sealed: false,
+        }
+    }
+
+    fn waiting(node_id: &str, iteration: u32, cohort_id: String) -> Self {
+        Self {
+            id: format!("{node_id}-{iteration}"),
+            node_id: node_id.to_string(),
+            iteration,
+            status: DcgNodeInstanceStatus::Waiting,
+            cohort_id,
+            arrived_from: BTreeSet::new(),
+            predecessor_instances: BTreeSet::new(),
+            activation_facts: BTreeSet::new(),
+            fanout_source: None,
+            fanout_sealed: true,
         }
     }
 }
@@ -910,17 +1376,17 @@ mod tests {
         assert_eq!(run.graph_id.as_deref(), Some("bugfix"));
         assert_eq!(run.active_nodes, BTreeSet::from(["reproduce".into()]));
 
-        let facts = BTreeSet::from(["diagnosis.rootCause.verified".into()]);
+        let facts = BTreeSet::from(["work.accepted".into()]);
         assert_eq!(
             run.eligible_edges(bugfix, &facts).unwrap()[0].id,
-            "diagnosed"
+            "reproduced"
         );
         let error = run
-            .transition(bugfix, "diagnosed", &facts, DcgActor::User)
+            .transition(bugfix, "reproduced", &facts, DcgActor::User)
             .unwrap_err()
             .to_string();
         assert!(error.contains("not a user decision"), "{error}");
-        run.transition(bugfix, "diagnosed", &facts, DcgActor::System)
+        run.transition(bugfix, "reproduced", &facts, DcgActor::System)
             .unwrap();
         assert_eq!(run.active_nodes, BTreeSet::from(["fix".into()]));
         assert!(run
@@ -934,20 +1400,37 @@ mod tests {
         let feature = catalog.session_workflow("feature").unwrap();
         let mut run = DcgRun::new_discussion("run-1".into(), "s_pm".into()).unwrap();
         run.select_before_start(feature).unwrap();
-        run.active_nodes = BTreeSet::from(["review".into()]);
+        run.active_nodes = BTreeSet::from(["recover".into()]);
+        run.node_instances.clear();
+        let recover = DcgNodeInstance::active("recover", 1, "root-1".into(), None);
+        run.node_instances.insert(recover.id.clone(), recover);
         run.status = DcgRunStatus::Active;
-        let facts = BTreeSet::from(["review.verdict.fail".into()]);
+        let facts = BTreeSet::from(["decision.ready".into()]);
         assert!(run
-            .transition(feature, "rework", &facts, DcgActor::System)
+            .transition(feature, "retry", &facts, DcgActor::Pm)
             .is_err());
-        run.transition(feature, "rework", &facts, DcgActor::Pm)
+        run.transition(feature, "retry", &facts, DcgActor::User)
             .unwrap();
-        run.active_nodes = BTreeSet::from(["review".into()]);
-        run.transition(feature, "rework", &facts, DcgActor::Pm)
+        for instance in run.node_instances.values_mut() {
+            if instance.status == DcgNodeInstanceStatus::Active {
+                instance.status = DcgNodeInstanceStatus::Completed;
+            }
+        }
+        run.active_nodes = BTreeSet::from(["recover".into()]);
+        let recover = DcgNodeInstance::active("recover", 2, "root-1".into(), None);
+        run.node_instances.insert(recover.id.clone(), recover);
+        run.transition(feature, "retry", &facts, DcgActor::User)
             .unwrap();
-        run.active_nodes = BTreeSet::from(["review".into()]);
+        for instance in run.node_instances.values_mut() {
+            if instance.status == DcgNodeInstanceStatus::Active {
+                instance.status = DcgNodeInstanceStatus::Completed;
+            }
+        }
+        run.active_nodes = BTreeSet::from(["recover".into()]);
+        let recover = DcgNodeInstance::active("recover", 3, "root-1".into(), None);
+        run.node_instances.insert(recover.id.clone(), recover);
         assert!(run
-            .transition(feature, "rework", &facts, DcgActor::Pm)
+            .transition(feature, "retry", &facts, DcgActor::User)
             .is_err());
     }
 
@@ -958,7 +1441,7 @@ mod tests {
         let edge = graph
             .edges
             .iter_mut()
-            .find(|edge| edge.id == "rework")
+            .find(|edge| edge.id == "retry")
             .unwrap();
         edge.max_traversals = None;
         let error = graph.validate(&catalog.root).unwrap_err().to_string();
@@ -993,6 +1476,128 @@ edges:
         assert!(
             error.contains("spin-a") && error.contains("spin-b"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn explicit_fork_and_all_join_complete_one_bounded_cohort() {
+        let graph: DcgDefinition = serde_yaml::from_str(
+            r#"
+schema: genehub-pm-dcg.v1
+id: all-join
+kind: sessionWorkflow
+version: 1
+entry: split
+nodes:
+  - { id: split, kind: activity, executor: { actor: system }, fork: allEligible }
+  - { id: left, kind: activity, executor: { actor: system } }
+  - { id: right, kind: activity, executor: { actor: system } }
+  - { id: merge, kind: join, activation: all }
+  - { id: delivered, kind: terminal, outcome: delivered }
+edges:
+  - { id: split-left, from: split, to: left, when: split.ready }
+  - { id: split-right, from: split, to: right, when: split.ready }
+  - { id: left-done, from: left, to: merge, when: branch.done }
+  - { id: right-done, from: right, to: merge, when: branch.done }
+  - { id: merged, from: merge, to: delivered, when: join.ready }
+"#,
+        )
+        .unwrap();
+        graph.validate(Path::new(".")).unwrap();
+        let mut run = DcgRun::new_discussion("run-join".into(), "s_pm".into()).unwrap();
+        run.select_before_start(&graph).unwrap();
+        let split = BTreeSet::from(["split.ready".into()]);
+        run.transition_many(
+            &graph,
+            &["split-left", "split-right"],
+            &split,
+            DcgActor::System,
+        )
+        .unwrap();
+        assert_eq!(
+            run.active_nodes,
+            BTreeSet::from(["left".into(), "right".into()])
+        );
+
+        let branch = BTreeSet::from(["branch.done".into()]);
+        run.transition(&graph, "left-done", &branch, DcgActor::System)
+            .unwrap();
+        assert_eq!(run.active_nodes, BTreeSet::from(["right".into()]));
+        run.transition(&graph, "right-done", &branch, DcgActor::System)
+            .unwrap();
+        assert_eq!(run.active_nodes, BTreeSet::from(["merge".into()]));
+        run.transition(
+            &graph,
+            "merged",
+            &BTreeSet::from(["join.ready".into()]),
+            DcgActor::System,
+        )
+        .unwrap();
+        assert_eq!(run.status, DcgRunStatus::Completed);
+        assert_eq!(run.outcome.as_deref(), Some("delivered"));
+    }
+
+    #[test]
+    fn quorum_join_consumes_late_siblings_before_run_completion() {
+        let graph: DcgDefinition = serde_yaml::from_str(
+            r#"
+schema: genehub-pm-dcg.v1
+id: quorum-join
+kind: sessionWorkflow
+version: 1
+entry: split
+nodes:
+  - { id: split, kind: activity, executor: { actor: system }, fork: allEligible }
+  - { id: left, kind: activity, executor: { actor: system } }
+  - { id: middle, kind: activity, executor: { actor: system } }
+  - { id: right, kind: activity, executor: { actor: system } }
+  - { id: merge, kind: join, activation: { quorum: 2 } }
+  - { id: delivered, kind: terminal, outcome: delivered }
+edges:
+  - { id: split-left, from: split, to: left, when: split.ready }
+  - { id: split-middle, from: split, to: middle, when: split.ready }
+  - { id: split-right, from: split, to: right, when: split.ready }
+  - { id: left-done, from: left, to: merge, when: branch.done }
+  - { id: middle-done, from: middle, to: merge, when: branch.done }
+  - { id: right-done, from: right, to: merge, when: branch.done }
+  - { id: merged, from: merge, to: delivered, when: join.ready }
+"#,
+        )
+        .unwrap();
+        graph.validate(Path::new(".")).unwrap();
+        let mut run = DcgRun::new_discussion("run-quorum".into(), "s_pm".into()).unwrap();
+        run.select_before_start(&graph).unwrap();
+        run.transition_many(
+            &graph,
+            &["split-left", "split-middle", "split-right"],
+            &BTreeSet::from(["split.ready".into()]),
+            DcgActor::System,
+        )
+        .unwrap();
+        let branch = BTreeSet::from(["branch.done".into()]);
+        run.transition(&graph, "left-done", &branch, DcgActor::System)
+            .unwrap();
+        run.transition(&graph, "middle-done", &branch, DcgActor::System)
+            .unwrap();
+        run.transition(
+            &graph,
+            "merged",
+            &BTreeSet::from(["join.ready".into()]),
+            DcgActor::System,
+        )
+        .unwrap();
+        assert_eq!(run.status, DcgRunStatus::Active);
+        assert_eq!(run.active_nodes, BTreeSet::from(["right".into()]));
+
+        run.transition(&graph, "right-done", &branch, DcgActor::System)
+            .unwrap();
+        assert_eq!(run.status, DcgRunStatus::Completed);
+        assert_eq!(
+            run.node_instances
+                .values()
+                .filter(|instance| instance.node_id == "merge")
+                .count(),
+            1
         );
     }
 

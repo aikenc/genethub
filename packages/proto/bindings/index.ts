@@ -543,7 +543,7 @@ questions?: Array<InteractionQuestion>, };
 
 export type PermissionRequestKind = "permission" | "question" | "planApproval";
 
-export type PmAgentSpaceStatus = { name: string, purpose: string, workspaceId: string, sourceCommit: string, builderLockDigest: string, role: string, active: boolean, resourceState: string, resourceRevision: number, workPackageId?: string, workSessionId?: string, };
+export type PmAgentSpaceStatus = { name: string, purpose: string, workspaceId: string, sourceCommit: string, builderLockDigest: string, role: string, tags: Array<string>, active: boolean, resourceState: string, resourceRevision: number, workPackageId?: string, workSessionId?: string, };
 
 export type PmIntentStatus = { revision: number, outcome: string, acceptance: Array<string>, constraints: Array<string>, outOfScope: Array<string>, };
 
@@ -558,21 +558,26 @@ export type PmSupervisorStatus = { mode: string, nextCheckAtMs?: number, wakePen
 
 export type PmTeamSlotStatus = { id: string, nodeInstanceId: string, workPackageId: string, responsibility: string, workSessionId?: string, status: string, };
 
-export type PmWorkPackageStatus = { id: string, title: string, outcome: string, status: string, dependencies: Array<string>, agentSpace: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
+export type PmWorkPackageStatus = { id: string, 
+/**
+ * PM Session that owns this package. Project-wide status projections
+ * must never make another Session's work look like local progress.
+ */
+controllerSessionId: string, title: string, outcome: string, status: string, dependencies: Array<string>, agentSpace: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
 
-export type PmWorkflowAvailableEdgeStatus = { id: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
+export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 
 export type PmWorkflowCatalogStatus = { recommended: string, workflows: Array<PmWorkflowDefinitionStatus>, };
 
 export type PmWorkflowDefinitionStatus = { id: string, version: number, entry: string, nodes: Array<PmWorkflowNodeStatus>, edges: Array<PmWorkflowEdgeStatus>, };
 
-export type PmWorkflowEdgeStatus = { id: string, from: string, to: string, condition: string, chooseBy?: string, };
+export type PmWorkflowEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, };
 
-export type PmWorkflowNodeInstanceStatus = { id: string, nodeId: string, iteration: number, status: string, };
+export type PmWorkflowNodeInstanceStatus = { id: string, nodeId: string, iteration: number, status: string, cohortId: string, fanoutSource?: string, fanoutSealed: boolean, };
 
 export type PmWorkflowNodeStatus = { id: string, kind: string, actor?: string, objective?: string, };
 
-export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, teamSlots: Array<PmTeamSlotStatus>, availableEdges: Array<PmWorkflowAvailableEdgeStatus>, revision: number, };
+export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, teamSlots: Array<PmTeamSlotStatus>, availableEdges: Array<PmWorkflowAvailableEdgeStatus>, intent?: PmIntentStatus, supervisor: PmSupervisorStatus, revision: number, };
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 
@@ -657,7 +662,7 @@ cwd: string | null, } } | { "type": "pm.session.create", "payload": { workspaceI
  * request. Relying on an Agent default would make the selected level
  * invisible until the first turn has already started.
  */
-effortId?: string, runtimeValues?: { [key in string]?: string }, title: string | null, } } | { "type": "pm.project.status", "payload": { workspaceId: string, } } | { "type": "pm.workflow.select", "payload": { workspaceId: string, sessionId: string, graphId: string, } } | { "type": "pm.workflow.transition", "payload": { workspaceId: string, sessionId: string, edgeId: string, facts: Array<string>, } } | { "type": "pm.improvement.approve", "payload": { workspaceId: string, candidateId: string, approved: boolean, } } | { "type": "workSession.create", "payload": { workspaceId: string, workPackageId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+effortId?: string, runtimeValues?: { [key in string]?: string }, title: string | null, } } | { "type": "pm.project.status", "payload": { workspaceId: string, } } | { "type": "pm.workflow.select", "payload": { workspaceId: string, sessionId: string, graphId: string, } } | { "type": "pm.workflow.transition", "payload": { workspaceId: string, sessionId: string, edgeId: string, facts: Array<string>, } } | { "type": "pm.improvement.approve", "payload": { workspaceId: string, sessionId: string, candidateId: string, approved: boolean, } } | { "type": "workSession.create", "payload": { workspaceId: string, workPackageId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */

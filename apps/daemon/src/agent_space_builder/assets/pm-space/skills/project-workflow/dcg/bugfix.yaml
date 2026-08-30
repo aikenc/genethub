@@ -1,7 +1,7 @@
 schema: genehub-pm-dcg.v1
 id: bugfix
 kind: sessionWorkflow
-version: 1
+version: 2
 entry: reproduce
 nodes:
   - id: reproduce
@@ -20,16 +20,49 @@ nodes:
     outputs: [candidate, regressionEvidence]
   - id: review
     kind: activity
-    executor:
-      actor: workAgent
-      space: { matchTags: [review], lease: exclusive, cleanRequired: true }
-    objective: { prompt: prompts/review.md }
+    executor: { actor: system }
     outputs: [reviewVerdict]
+  - id: prepare-recovery
+    kind: activity
+    executor: { actor: pm }
+    objective: { prompt: prompts/repair-space.md }
+    outputs: [recovery.ready]
+  - id: recover
+    kind: activity
+    executor: { actor: user }
   - id: delivered
     kind: terminal
     outcome: delivered
+  - id: cancelled
+    kind: terminal
+    outcome: cancelled
 edges:
-  - { id: diagnosed, from: reproduce, to: fix, when: diagnosis.rootCause.verified }
-  - { id: fixed, from: fix, to: review, when: fix.regression.passed }
-  - { id: accepted, from: review, to: delivered, when: review.verdict.pass }
-  - { id: rework, from: review, to: fix, when: review.verdict.fail, chooseBy: pm, maxTraversals: 2 }
+  - { id: reproduced, from: reproduce, to: fix, when: work.accepted }
+  - { id: reproduce-blocked, from: reproduce, to: prepare-recovery, when: { any: [work.blocked, work.cancelled, space.quarantined] } }
+  - { id: fixed, from: fix, to: review, when: work.candidate }
+  - { id: fix-blocked, from: fix, to: prepare-recovery, when: { any: [work.blocked, work.cancelled, space.quarantined] } }
+  - { id: accepted, from: review, to: delivered, when: review.pass }
+  - { id: review-failed, from: review, to: prepare-recovery, when: review.fail }
+  - { id: recovery-prepared, from: prepare-recovery, to: recover, when: recovery.ready }
+  - id: retry-fix
+    label: 修正后重试
+    description: 回到修复阶段，保留复现和评审证据。
+    from: recover
+    to: fix
+    when: decision.ready
+    chooseBy: user
+    maxTraversals: 2
+  - id: retry-diagnosis
+    label: 重新诊断
+    description: 根因证据不足，重新执行复现与诊断。
+    from: recover
+    to: reproduce
+    when: decision.ready
+    chooseBy: user
+    maxTraversals: 2
+  - id: cancel
+    label: 取消本次修复
+    from: recover
+    to: cancelled
+    when: decision.ready
+    chooseBy: user

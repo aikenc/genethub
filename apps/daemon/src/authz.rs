@@ -249,6 +249,17 @@ impl Principal {
         }
     }
 
+    /// Product choices and workflow self-improvement approval must come from
+    /// an authenticated human-facing principal, never from the PM's own
+    /// session-bound CLI credential.
+    pub fn may_decide_project_manager(&self) -> bool {
+        match self {
+            Principal::LocalUser | Principal::Channel => true,
+            Principal::Device { grants, .. } => grants.allows(Capability::Session),
+            Principal::ProjectManager { .. } | Principal::Pairing => false,
+        }
+    }
+
     pub fn device_id(&self) -> Option<&str> {
         match self {
             Principal::Device { id, .. } => Some(id),

@@ -18,9 +18,15 @@ AgentSpace 的状态机属于固定内核，不在 Workflow DCG 中定义，也�
 2. 需求明确后用 `genet pm project workflow select --graph <id>` 固定本 Session 的图版本；
 3. 只为当前活动节点筹备输入、WorkPackage 和证据；每个 `package put` 必须用
    `--node <active-node>`，Coordinator 会把 WorkPackage 固定到本次遍历产生的节点实例，而不只是节点名；
-4. WorkAgent 节点只申请职责匹配的 AgentSpace，由 Coordinator 决定租约；
+4. 注册 AgentSpace 时按当前节点 `space.matchTags` 使用一个或多个 `space record --tag <tag>` 声明能力；
+   `package put` 不指定物理 Space，由 Coordinator 在匹配池中确定性选择，WorkSession 仍须使用返回的 Space；
 5. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
 6. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
+
+带 `fanout.source` 的节点由 PM 在节点仍为 Planned 时一次性创建本次遍历的全部结果型 WorkPackage；该字段
+只记录工作流来源，不执行任意表达式。任一工作包开始后 Coordinator 会封闭该节点实例的集合，后续不得悄悄
+补包。`maxItems` 是硬上限。所有兄弟包结算后，Coordinator 才从持久状态推导 candidate/blocked/cancelled
+事实；PM 不能用 `--fact` 自述这些事实。返工保留旧包及评审证据，在新节点实例中使用新 WorkPackage id。
 
 工作包按可观察结果划分，并由一个 WorkSession 自主推进到干净候选。WorkAgent 内部 checkpoint 不形成新的
 DCG 节点，也不触发 PM 逐提交复核。Supervisor 会在短窗口内合并多个 WorkSession 状态变化；每次唤醒只读
@@ -29,6 +35,10 @@ DCG 节点，也不触发 PM 逐提交复核。Supervisor 会在短窗口内合�
 
 使用活动节点指定的提示词。PM 只能在 Coordinator 返回的合法边中决策，不能代替用户完成用户决策。
 WorkAgent 目标只描述结果和证据合同，不固定 Agent runtime 或模型。
+
+异常先进入 `prepare-recovery`。PM 只负责整理可信证据、必要时修复被隔离的 Space，并把图推进到 `recover`；
+`recover` 的 `chooseBy: user` 选项必须由用户通过 Web/RPC 选择，不能由 PM CLI 冒充。作出选择前先结束相关
+运行中 WorkSession；Coordinator 会保留 Accepted 兄弟包并结算旧尝试，重试后必须创建新的包和 WorkSession。
 
 ## 安全自举
 

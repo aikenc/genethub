@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,10 @@ pub struct AgentSpaceRecord {
     pub builder_lock_digest: String,
     #[serde(default)]
     pub role: AgentSpaceRole,
+    /// Coordinator-visible capabilities used by Workflow Space selectors.
+    /// They describe the Space role, never an Agent runtime or model.
+    #[serde(default)]
+    pub tags: BTreeSet<String>,
     pub active: bool,
     #[serde(default)]
     pub resource_state: AgentSpaceResourceState,
@@ -167,6 +172,7 @@ mod tests {
             source_commit: "0".repeat(40),
             builder_lock_digest: "sha256:test".into(),
             role: AgentSpaceRole::Implementation,
+            tags: BTreeSet::from(["implementation".into()]),
             active: true,
             resource_state: AgentSpaceResourceState::Idle,
             lease: None,

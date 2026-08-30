@@ -89,6 +89,7 @@ defineSpecialty(
           duplicatePm.data.effortId === "medium",
         "the same project did not mint an independent medium-effort second PM session for a legacy caller",
       );
+      const duplicatePmId = duplicatePm?.type === "session" ? duplicatePm.data.id : "";
 
       const pmEvents = await t.flows.main.attachEventLog(opened.client, pm.id);
 
@@ -233,8 +234,8 @@ defineSpecialty(
         `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit}`,
         '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
         '"$GENEHUB_CLI" pm project workflow select --graph feature',
-        '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.acceptance.ready',
-        '"$GENEHUB_CLI" pm project workflow transition --edge planned --fact plan.workstreams.ready',
+        '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
+        '"$GENEHUB_CLI" pm project workflow transition --edge planned --fact plan.ready',
         '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space implementation --branch work/gameplay --worktree worktrees/implementation/game --node implement',
         '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to ready',
@@ -535,11 +536,11 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to cancelled && "$GENEHUB_CLI" pm project lifecycle --to completed',
+                '"$GENEHUB_CLI" pm project workflow transition --edge recovery-prepared --fact recovery.ready && "$GENEHUB_CLI" pm project lifecycle --to waiting-user',
             },
           },
         },
-        { text: "The bounded supervisor retry safely closed the fixture project." },
+        { text: "Recovery evidence is prepared. The declared choice now belongs to the user." },
       );
       await t.flows.main.sendPrompt(opened.client, pm.id, "Bind the new WorkSession to its package.");
       await t.tools.waitUntil(() => terminalCount(pmEvents) === bindTerminals + 1, 15_000);
@@ -636,21 +637,27 @@ defineSpecialty(
       );
 
       let failedWakeState:
-        | { updatedAtMs?: number; supervisor?: { wakePending?: boolean; wakeTurnId?: string; wakeRetryAtMs?: number } }
+        | {
+            sessionSupervisors?: Record<
+              string,
+              { wakePending?: boolean; wakeTurnId?: string; wakeRetryAtMs?: number }
+            >;
+          }
         | undefined;
       await t.tools.waitUntil(() => {
         if (!existsSync(projectState)) return false;
         failedWakeState = JSON.parse(readFileSync(projectState, "utf8")) as typeof failedWakeState;
+        const runSupervisor = failedWakeState?.sessionSupervisors?.[pm.id];
         return (
-          failedWakeState?.supervisor?.wakePending === true &&
-          !failedWakeState.supervisor.wakeTurnId &&
-          typeof failedWakeState.supervisor.wakeRetryAtMs === "number"
+          runSupervisor?.wakePending === true &&
+          !runSupervisor.wakeTurnId &&
+          typeof runSupervisor.wakeRetryAtMs === "number"
         );
       }, 30_000);
-      const persistedRetryDelay =
-        (failedWakeState?.supervisor?.wakeRetryAtMs ?? 0) - (failedWakeState?.updatedAtMs ?? 0);
+      const persistedRetryRemaining =
+        (failedWakeState?.sessionSupervisors?.[pm.id]?.wakeRetryAtMs ?? 0) - Date.now();
       t.assertions.assert(
-        persistedRetryDelay === 30_000,
+        persistedRetryRemaining >= 20_000 && persistedRetryRemaining <= 31_000,
         `first failed PM wake did not persist a 30-second retry: ${JSON.stringify(failedWakeState)}`,
       );
       const failedWakeObservedAt = Date.now();
@@ -660,13 +667,22 @@ defineSpecialty(
         opened.mock.requests.length === requestsAfterFailedWake,
         `failed PM supervisor wake retried on the two-second sampler: requests=${opened.mock.requests.length - requestsAfterFailedWake}`,
       );
-      let completedAfterBackoff: Awaited<ReturnType<typeof opened.client.call>> | undefined;
+      let waitingAfterBackoff: Awaited<ReturnType<typeof opened.client.call>> | undefined;
       await t.tools.waitUntil(async () => {
-        completedAfterBackoff = await opened.client.call({
+        waitingAfterBackoff = await opened.client.call({
           type: "pm.project.status",
           payload: { workspaceId: opened.workspaceId },
         });
-        return completedAfterBackoff?.type === "projectStatus" && completedAfterBackoff.data.lifecycle === "completed";
+        const run = waitingAfterBackoff?.type === "projectStatus"
+          ? waitingAfterBackoff.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)
+          : undefined;
+        return (
+          waitingAfterBackoff?.type === "projectStatus" &&
+          waitingAfterBackoff.data.lifecycle === "active" &&
+          run?.supervisor.mode === "waitingUser" &&
+          run?.activeNodes.includes("recover") === true &&
+          run.availableEdges.some((edge) => edge.id === "cancel" && edge.chooseBy === "user" && edge.satisfied)
+        );
       }, 45_000);
       await t.tools.waitUntil(
         () => opened.mock.requests.length >= requestsAfterFailedWake + 2,
@@ -681,21 +697,45 @@ defineSpecialty(
         opened.mock.requests.length === requestsAfterFailedWake + 2,
         `provider failure created a retry storm instead of one tool round: requests=${opened.mock.requests.length - requestsAfterFailedWake}`,
       );
+      const waitingRunSupervisor = waitingAfterBackoff?.type === "projectStatus"
+        ? waitingAfterBackoff.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.supervisor
+        : undefined;
       t.assertions.assert(
-        completedAfterBackoff?.type === "projectStatus" &&
-          completedAfterBackoff.data.supervisor.wakeDispatchCount >= 2 &&
-          completedAfterBackoff.data.supervisor.wakeFailedCount >= 1,
-        `supervisor telemetry did not preserve dispatch/failure evidence: ${JSON.stringify(completedAfterBackoff)}`,
+        waitingAfterBackoff?.type === "projectStatus" &&
+          (waitingRunSupervisor?.wakeDispatchCount ?? 0) >= 2 &&
+          (waitingRunSupervisor?.wakeFailedCount ?? 0) >= 1,
+        `supervisor telemetry did not preserve dispatch/failure evidence: ${JSON.stringify(waitingAfterBackoff)}`,
       );
-      if (completedAfterBackoff?.type === "projectStatus") {
+      if (waitingAfterBackoff?.type === "projectStatus") {
         t.note(
           `pm-supervisor-metrics ${JSON.stringify({
-            wakeDispatchCount: completedAfterBackoff.data.supervisor.wakeDispatchCount,
-            wakeFailedCount: completedAfterBackoff.data.supervisor.wakeFailedCount,
-            coalescedEventCount: completedAfterBackoff.data.supervisor.coalescedEventCount,
+            wakeDispatchCount: waitingRunSupervisor?.wakeDispatchCount,
+            wakeFailedCount: waitingRunSupervisor?.wakeFailedCount,
+            coalescedEventCount: waitingRunSupervisor?.coalescedEventCount,
           })}`,
         );
       }
+
+      const humanDecision = await opened.client.call({
+        type: "pm.workflow.transition",
+        payload: {
+          workspaceId: opened.workspaceId,
+          sessionId: pm.id,
+          edgeId: "cancel",
+          facts: [],
+        },
+      });
+      t.assertions.assert(
+        humanDecision?.type === "projectStatus" &&
+          humanDecision.data.lifecycle === "active" &&
+          humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.status === "cancelled" &&
+          humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.supervisor.mode ===
+            "terminal" &&
+          humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === duplicatePmId)?.status ===
+            "discussion" &&
+          humanDecision.data.workPackages.find((item) => item.id === "wp-gameplay")?.status === "cancelled",
+        `the user decision did not settle the failed attempt: ${JSON.stringify(humanDecision)}`,
+      );
 
       const snapshot = completedWork;
       t.assertions.assert(snapshot?.type === "snapshot", `session.get returned ${snapshot?.type}`);

@@ -65,6 +65,10 @@ pub struct ReviewEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct WorkPackage {
     pub id: String,
+    /// Exact PM Session/Workflow Run owner. Project-level storage is shared,
+    /// but mutation and supervision never cross this boundary.
+    #[serde(default)]
+    pub controller_session_id: String,
     pub title: String,
     pub outcome: String,
     pub dependencies: Vec<String>,
@@ -109,6 +113,7 @@ impl WorkPackage {
         }
         Ok(Self {
             id,
+            controller_session_id: String::new(),
             title,
             outcome,
             dependencies,
@@ -126,9 +131,16 @@ impl WorkPackage {
         })
     }
 
-    pub fn bind_to_workflow(&mut self, run_id: String, node_instance_id: String) -> Result<()> {
+    pub fn bind_to_workflow(
+        &mut self,
+        controller_session_id: String,
+        run_id: String,
+        node_instance_id: String,
+    ) -> Result<()> {
+        validate_identifier("controller Session id", &controller_session_id, 200)?;
         validate_identifier("workflow Run id", &run_id, 160)?;
         validate_identifier("workflow node instance id", &node_instance_id, 200)?;
+        self.controller_session_id = controller_session_id;
         self.workflow_run_id = Some(run_id);
         self.node_instance_id = Some(node_instance_id);
         Ok(())
@@ -354,8 +366,8 @@ fn allowed(from: WorkPackageStatus, to: WorkPackageStatus) -> bool {
             | (Ready, Running | Blocked | Cancelled)
             | (Running, Waiting | Candidate | Blocked | Cancelled)
             | (Waiting, Running | Blocked | Cancelled)
-            | (Candidate, Review | Ready | Blocked | Cancelled)
-            | (Review, Accepted | Ready | Blocked | Cancelled)
-            | (Blocked, Ready | Cancelled)
+            | (Candidate, Review | Blocked | Cancelled)
+            | (Review, Accepted | Blocked | Cancelled)
+            | (Blocked, Cancelled)
     )
 }

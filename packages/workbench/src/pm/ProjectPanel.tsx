@@ -8,8 +8,6 @@ import type {
 
 import type { Client } from "../protocol/client";
 
-const TERMINAL = new Set(["accepted", "cancelled"]);
-
 export function ProjectPanel({
   client,
   session,
@@ -28,7 +26,6 @@ export function ProjectPanel({
   const [status, setStatus] = useState<PmProjectStatus | null>(null);
   const [expanded, setExpanded] = useState(true);
   const [spacesExpanded, setSpacesExpanded] = useState(false);
-  const [facts, setFacts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,9 +54,16 @@ export function ProjectPanel({
   const graph = run?.definition ?? status?.workflowCatalog.workflows.find(
     (item) => item.id === run?.graphId,
   );
-  const completed = status?.workPackages.filter((item) => TERMINAL.has(item.status)).length ?? 0;
-  const total = status?.workPackages.length ?? 0;
-  const exceptions = status?.workPackages.filter((item) => item.status === "blocked") ?? [];
+  const runPackages = status?.workPackages.filter(
+    (item) => item.controllerSessionId === session.id,
+  ) ?? [];
+  // Cancelled retry attempts remain in history but must not make the current
+  // delivery look progressively more complete on every failed iteration.
+  const deliveryPackages = runPackages.filter((item) => item.status !== "cancelled");
+  const completed = deliveryPackages.filter((item) => item.status === "accepted").length;
+  const total = deliveryPackages.length;
+  const exceptions = runPackages.filter((item) => item.status === "blocked");
+  const intent = run?.intent ?? null;
 
   async function mutate(key: string, action: () => Promise<unknown>) {
     setBusy(key);
@@ -87,6 +91,7 @@ export function ProjectPanel({
           {completed}/{total || "—"}
         </span>
         {run?.graphId ? <span className="truncate text-xs text-muted">{run.graphId}</span> : null}
+        {run?.outcome ? <span className="truncate text-xs text-muted">{run.outcome}</span> : null}
         {exceptions.length ? (
           <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-xs text-red-400">
             {exceptions.length} 个异常
@@ -96,16 +101,16 @@ export function ProjectPanel({
       </button>
       {expanded ? (
         <div className="max-h-[48vh] space-y-3 overflow-y-auto border-t border-line px-4 py-3 text-xs">
-          {status?.intent ? (
+          {intent ? (
             <section>
-              <p className="text-sm font-medium text-fg">{status.intent.outcome}</p>
+              <p className="text-sm font-medium text-fg">{intent.outcome}</p>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line">
                 <div
                   className="h-full bg-accent transition-[width]"
                   style={{ width: `${total ? Math.round((completed / total) * 100) : 0}%` }}
                 />
               </div>
-              <p className="mt-1 text-muted">阶段 {status.phase} · 修订 {status.intent.revision}</p>
+              <p className="mt-1 text-muted">阶段 {status?.phase} · 修订 {intent.revision}</p>
             </section>
           ) : <p className="text-muted">PM 正在澄清需求，尚未锁定验收口径。</p>}
 
@@ -147,28 +152,22 @@ export function ProjectPanel({
                       <span className="font-medium text-fg">{edge.from} → {edge.to}</span>
                       <span className="text-muted">{edge.satisfied ? "条件已满足" : "等待证据"}</span>
                     </div>
-                    <p className="mt-1 break-all text-faint">{edge.condition}</p>
+                    {edge.description ? <p className="mt-1 text-muted">{edge.description}</p> : null}
                     {userDecision ? (
                       <div className="mt-2 flex gap-2">
-                        <input
-                          value={facts[edge.id] ?? ""}
-                          onChange={(event) => setFacts((current) => ({ ...current, [edge.id]: event.target.value }))}
-                          className="min-w-0 flex-1 rounded border border-line bg-canvas px-2 py-1 text-fg outline-none focus:border-accent"
-                          placeholder="补充条件事实，逗号分隔"
-                        />
                         <button
                           type="button"
-                          disabled={busy !== null}
+                          disabled={busy !== null || !edge.satisfied}
                           className="rounded bg-accent px-2.5 py-1 text-canvas disabled:opacity-50"
                           onClick={() => void mutate(`edge:${edge.id}`, async () => {
                             await client?.call({ type: "pm.workflow.transition", payload: {
                               workspaceId: projectWorkspaceId,
                               sessionId: session.id,
                               edgeId: edge.id,
-                              facts: (facts[edge.id] ?? "").split(",").map((item) => item.trim()).filter(Boolean),
+                              facts: [],
                             }});
                           })}
-                        >决策</button>
+                        >{edge.label ?? "确认选择"}</button>
                       </div>
                     ) : edge.chooseBy === "pm" ? (
                       <p className="mt-1 text-muted">由 PM 根据证据选择</p>
@@ -222,10 +221,10 @@ export function ProjectPanel({
                     {candidate.reviewEvidence ? <p className="mt-1 text-faint">评审：{candidate.reviewEvidence}</p> : null}
                     {candidate.status === "reviewed" ? <div className="mt-2 flex gap-2">
                       <button type="button" disabled={busy !== null} className="rounded bg-accent px-2.5 py-1 text-canvas" onClick={() => void mutate(`approve:${candidate.id}`, async () => {
-                        await client?.call({ type: "pm.improvement.approve", payload: { workspaceId: projectWorkspaceId, candidateId: candidate.id, approved: true } });
+                        await client?.call({ type: "pm.improvement.approve", payload: { workspaceId: projectWorkspaceId, sessionId: session.id, candidateId: candidate.id, approved: true } });
                       })}>批准晋级</button>
                       <button type="button" disabled={busy !== null} className="rounded border border-line px-2.5 py-1 text-fg" onClick={() => void mutate(`reject:${candidate.id}`, async () => {
-                        await client?.call({ type: "pm.improvement.approve", payload: { workspaceId: projectWorkspaceId, candidateId: candidate.id, approved: false } });
+                        await client?.call({ type: "pm.improvement.approve", payload: { workspaceId: projectWorkspaceId, sessionId: session.id, candidateId: candidate.id, approved: false } });
                       })}>拒绝</button>
                     </div> : null}
                     {candidate.status === "approved" ? <p className="mt-2 text-emerald-400">已由用户批准；等待 PM 执行晋级并重新验证。</p> : null}
@@ -267,7 +266,14 @@ export function ProjectPanel({
 }
 
 function Workflow({ graph, run }: { graph: PmWorkflowDefinitionStatus; run: NonNullable<PmProjectStatus["workflowRuns"]>[number] }) {
-  const instanceByNode = useMemo(() => new Map(run.nodeInstances.map((item) => [item.nodeId, item])), [run.nodeInstances]);
+  const instanceByNode = useMemo(() => {
+    const current = new Map<string, (typeof run.nodeInstances)[number]>();
+    for (const instance of run.nodeInstances) {
+      const previous = current.get(instance.nodeId);
+      if (!previous || instance.iteration > previous.iteration) current.set(instance.nodeId, instance);
+    }
+    return current;
+  }, [run.nodeInstances]);
   return <section>
     <p className="mb-2 font-medium text-fg">Workflow 节点</p>
     <div className="flex gap-1 overflow-x-auto pb-1">
@@ -279,6 +285,7 @@ function Workflow({ graph, run }: { graph: PmWorkflowDefinitionStatus; run: NonN
           <div className={`max-w-40 rounded-md border px-2 py-1.5 ${active ? "border-accent bg-accent/10" : instance?.status === "completed" ? "border-emerald-500/40" : "border-line"}`}>
             <p className="truncate font-medium text-fg">{node.id}</p>
             <p className="truncate text-faint">{instance?.status ?? node.kind}{instance ? ` · #${instance.iteration}` : ""}</p>
+            {instance?.fanoutSource ? <p className="truncate text-faint">{instance.fanoutSealed ? "工作包已封闭" : "筹备工作包"}</p> : null}
           </div>
         </div>;
       })}

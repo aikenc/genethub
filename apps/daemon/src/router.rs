@@ -1322,6 +1322,12 @@ async fn dispatch(
             session_id,
             graph_id,
         } => {
+            if !caller.may_decide_project_manager() {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "a project manager cannot impersonate the user who selects a Workflow",
+                );
+            }
             if let Err(error) = validate_user_pm_session(&state, &workspace_id, &session_id).await {
                 return failed(error);
             }
@@ -1332,7 +1338,9 @@ async fn dispatch(
             {
                 Ok(_) => match state.projects.public_status(&workspace_id).await {
                     Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
-                    Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+                    Ok(None) => {
+                        Handled::err(ErrorCode::NotFound, "this PM project is not initialized")
+                    }
                     Err(error) => failed(error),
                 },
                 Err(error) => failed(error),
@@ -1345,6 +1353,12 @@ async fn dispatch(
             edge_id,
             facts,
         } => {
+            if !caller.may_decide_project_manager() {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "a project manager cannot impersonate a user workflow decision",
+                );
+            }
             if let Err(error) = validate_user_pm_session(&state, &workspace_id, &session_id).await {
                 return failed(error);
             }
@@ -1361,7 +1375,9 @@ async fn dispatch(
             {
                 Ok(_) => match state.projects.public_status(&workspace_id).await {
                     Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
-                    Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+                    Ok(None) => {
+                        Handled::err(ErrorCode::NotFound, "this PM project is not initialized")
+                    }
                     Err(error) => failed(error),
                 },
                 Err(error) => failed(error),
@@ -1370,20 +1386,34 @@ async fn dispatch(
 
         Request::ProjectManagerImprovementApprove {
             workspace_id,
+            session_id,
             candidate_id,
             approved,
-        } => match state
-            .projects
-            .approve_improvement(&workspace_id, &candidate_id, approved)
-            .await
-        {
-            Ok(_) => match state.projects.public_status(&workspace_id).await {
-                Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
-                Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
+        } => {
+            if !caller.may_decide_project_manager() {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "a project manager cannot approve its own workflow improvement",
+                );
+            }
+            if let Err(error) = validate_user_pm_session(&state, &workspace_id, &session_id).await {
+                return failed(error);
+            }
+            match state
+                .projects
+                .approve_improvement(&workspace_id, &candidate_id, approved)
+                .await
+            {
+                Ok(_) => match state.projects.public_status(&workspace_id).await {
+                    Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
+                    Ok(None) => {
+                        Handled::err(ErrorCode::NotFound, "this PM project is not initialized")
+                    }
+                    Err(error) => failed(error),
+                },
                 Err(error) => failed(error),
-            },
-            Err(error) => failed(error),
-        },
+            }
+        }
 
         Request::WorkspaceOpen { root } => {
             match state.workspaces.open(Path::new(&root), None).await {

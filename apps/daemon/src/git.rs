@@ -74,7 +74,14 @@ pub async fn status(root: &Path) -> Result<GitStatus> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty() && value != "HEAD");
 
-    let raw = git(root, &["status", "--porcelain=v1", "-z"]).await?;
+    // Expand untracked directories to individual files. Security-sensitive
+    // callers compare exact candidate paths and must not receive Git's
+    // directory-collapsed shorthand.
+    let raw = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    .await?;
     let changes = parse_status(&raw);
     Ok(GitStatus {
         branch,
@@ -177,6 +184,17 @@ pub async fn commit(root: &Path, message: &str, paths: &[String]) -> Result<Stri
 
     git(root, &["commit", "-m", message]).await?;
     Ok(git(root, &["rev-parse", "HEAD"]).await?.trim().to_string())
+}
+
+/// Restore only the index entries staged by a failed controlled commit. This
+/// never changes working-tree bytes.
+pub async fn unstage(root: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Err(anyhow!("unstage requires at least one bounded path"));
+    }
+    let mut args = vec!["reset", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    git(root, &args).await.map(|_| ())
 }
 
 /// Prove that the current outer project HEAD exactly represents every

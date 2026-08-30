@@ -44,23 +44,40 @@ async fn tick(state: &Shared) -> anyhow::Result<()> {
         if project.lifecycle != ProjectLifecycle::Active {
             continue;
         }
-        if let Err(error) = supervise_project(state, project.clone()).await {
-            tracing::warn!(
-                %error,
-                project_workspace_id = %project.project_workspace_id,
-                "PM supervisor project tick failed"
-            );
-            state
-                .diagnostics
-                .record("pm", "supervisor", "project-error", Some("tick"));
+        let controllers = if project.session_dcg_runs.is_empty() {
+            vec![project.controller_session_id.clone()]
+        } else {
+            project.session_dcg_runs.keys().cloned().collect::<Vec<_>>()
+        };
+        for controller_session_id in controllers {
+            if let Err(error) = supervise_run(state, project.clone(), &controller_session_id).await
+            {
+                tracing::warn!(
+                    %error,
+                    project_workspace_id = %project.project_workspace_id,
+                    %controller_session_id,
+                    "PM supervisor Workflow Run tick failed"
+                );
+                state
+                    .diagnostics
+                    .record("pm", "supervisor", "run-error", Some("tick"));
+            }
         }
     }
     Ok(())
 }
 
-async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Result<()> {
+async fn supervise_run(
+    state: &Shared,
+    project: ProjectState,
+    controller_session_id: &str,
+) -> anyhow::Result<()> {
     let mut observations = Vec::new();
-    for package in project.work_packages.values() {
+    for package in project
+        .work_packages
+        .values()
+        .filter(|package| package.controller_session_id == controller_session_id)
+    {
         let session_id = match package.status {
             WorkPackageStatus::Running => package.work_session_id.as_deref(),
             WorkPackageStatus::Review
@@ -96,26 +113,38 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
     }
     observations.sort_by(|left, right| left.0.cmp(right.0));
     let digest = observation_digest(&observations);
-    let active_work = !observations.is_empty();
+    let run = project.session_dcg_runs.get(controller_session_id);
+    // Once a Workflow Run is terminal, its WorkPackages remain durable
+    // evidence but must not keep waking that PM Session. Legacy projects with
+    // no Run still derive liveness from their package observations.
+    let active_work = run_has_active_work(run.map(|run| run.status), !observations.is_empty());
     let wake_when_quiet = observations
         .iter()
         .any(|(_, _, _, status)| status.is_some_and(|status| status != SessionStatus::Running))
         || project
             .work_packages
             .values()
+            .filter(|package| package.controller_session_id == controller_session_id)
             .any(|package| package_requires_manager(package, &project))
-        || (!project.work_packages.is_empty()
-            && project.work_packages.values().all(|package| {
-                matches!(
-                    package.status,
-                    WorkPackageStatus::Accepted | WorkPackageStatus::Cancelled
-                )
-            }));
+        || (!observations.is_empty()
+            && project
+                .work_packages
+                .values()
+                .filter(|package| package.controller_session_id == controller_session_id)
+                .all(|package| {
+                    matches!(
+                        package.status,
+                        WorkPackageStatus::Accepted | WorkPackageStatus::Cancelled
+                    )
+                }))
+        || run.is_some_and(|run| {
+            run.status == super::dcg::DcgRunStatus::Active && observations.is_empty()
+        });
     let decision = state
         .projects
         .reconcile_supervisor(
             &project.project_workspace_id,
-            &project.controller_session_id,
+            controller_session_id,
             digest.clone(),
             active_work,
             wake_when_quiet,
@@ -126,7 +155,7 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
         return Ok(());
     }
 
-    let manager = match state.sessions.summary(&project.controller_session_id).await {
+    let manager = match state.sessions.summary(controller_session_id).await {
         Ok(summary) => summary,
         Err(error) => {
             tracing::warn!(%error, "PM supervisor cannot resolve controller session");
@@ -139,10 +168,15 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
     ) {
         return Ok(());
     }
-    if let Some(turn_id) = decision.project.supervisor.wake_turn_id.as_deref() {
+    let run_supervisor = decision
+        .project
+        .session_supervisors
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("Workflow Run supervisor is unavailable"))?;
+    if let Some(turn_id) = run_supervisor.wake_turn_id.as_deref() {
         let outcome = match state
             .sessions
-            .turn_outcome(&project.controller_session_id, turn_id)
+            .turn_outcome(controller_session_id, turn_id)
             .await
         {
             Ok(Some(RoundOutcome::Completed)) => WakeDispatchOutcome::Completed,
@@ -156,7 +190,7 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
             .projects
             .settle_supervisor_wake_dispatch(
                 &project.project_workspace_id,
-                &project.controller_session_id,
+                controller_session_id,
                 &digest,
                 turn_id,
                 outcome,
@@ -185,7 +219,7 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
     match state
         .sessions
         .send(
-            &project.controller_session_id,
+            controller_session_id,
             wake_prompt(&observations),
             Vec::new(),
             &providers,
@@ -199,7 +233,7 @@ async fn supervise_project(state: &Shared, project: ProjectState) -> anyhow::Res
                 .projects
                 .mark_supervisor_wake_dispatched(
                     &project.project_workspace_id,
-                    &project.controller_session_id,
+                    controller_session_id,
                     &digest,
                     &turn_id,
                 )
@@ -256,6 +290,17 @@ fn package_requires_manager(package: &WorkPackage, project: &ProjectState) -> bo
         | WorkPackageStatus::Review
         | WorkPackageStatus::Accepted
         | WorkPackageStatus::Cancelled => false,
+    }
+}
+
+fn run_has_active_work(
+    status: Option<super::dcg::DcgRunStatus>,
+    has_package_observations: bool,
+) -> bool {
+    match status {
+        Some(super::dcg::DcgRunStatus::Discussion | super::dcg::DcgRunStatus::Active) => true,
+        Some(super::dcg::DcgRunStatus::Completed | super::dcg::DcgRunStatus::Cancelled) => false,
+        None => has_package_observations,
     }
 }
 
@@ -377,5 +422,22 @@ mod tests {
         );
         assert!(prompt.contains("ui: package=Running, session=s_ui, sessionStatus=Running"));
         assert!(!prompt.contains("inspect the exact bound WorkSessions and Git evidence"));
+    }
+
+    #[test]
+    fn terminal_workflow_runs_do_not_treat_retained_packages_as_active_work() {
+        assert!(run_has_active_work(
+            Some(crate::pm_domain::dcg::DcgRunStatus::Active),
+            false
+        ));
+        assert!(!run_has_active_work(
+            Some(crate::pm_domain::dcg::DcgRunStatus::Completed),
+            true
+        ));
+        assert!(!run_has_active_work(
+            Some(crate::pm_domain::dcg::DcgRunStatus::Cancelled),
+            true
+        ));
+        assert!(run_has_active_work(None, true));
     }
 }

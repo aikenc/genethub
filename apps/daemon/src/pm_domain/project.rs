@@ -9,7 +9,7 @@ use super::supervisor::SupervisorState;
 use super::task_graph::WorkPackage;
 use super::topology::AgentSpaceRecord;
 
-pub const PM_PROJECT_FORMAT: u32 = 2;
+pub const PM_PROJECT_FORMAT: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,6 +126,10 @@ pub struct ProjectState {
     pub lifecycle: ProjectLifecycle,
     pub revision: u64,
     pub intent: Option<IntentRevision>,
+    /// Session-scoped intent prevents two concurrent PM conversations from
+    /// invalidating or presenting each other's requirement revision.
+    #[serde(default)]
+    pub session_intents: BTreeMap<String, IntentRevision>,
     pub work_packages: BTreeMap<String, WorkPackage>,
     pub agent_spaces: BTreeMap<String, AgentSpaceRecord>,
     /// PM-proposed Workflow/Prompt changes. Candidates are inert until an
@@ -133,6 +137,10 @@ pub struct ProjectState {
     #[serde(default)]
     pub improvement_candidates: BTreeMap<String, ImprovementCandidate>,
     pub supervisor: SupervisorState,
+    /// One durable supervisor per PM Workflow Run. `supervisor` remains a
+    /// compatibility projection for pre-v3 records and aggregate UI clients.
+    #[serde(default)]
+    pub session_supervisors: BTreeMap<String, SupervisorState>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
@@ -144,6 +152,9 @@ impl ProjectState {
         root: PathBuf,
         now_ms: i64,
     ) -> Self {
+        let primary_supervisor = SupervisorState::idle();
+        let session_supervisors =
+            BTreeMap::from([(controller_session_id.clone(), primary_supervisor.clone())]);
         Self {
             format: PM_PROJECT_FORMAT,
             project_id: project_workspace_id.clone(),
@@ -156,20 +167,40 @@ impl ProjectState {
             lifecycle: ProjectLifecycle::Active,
             revision: 1,
             intent: None,
+            session_intents: BTreeMap::new(),
             work_packages: BTreeMap::new(),
             agent_spaces: BTreeMap::new(),
             improvement_candidates: BTreeMap::new(),
-            supervisor: SupervisorState::idle(),
+            supervisor: primary_supervisor,
+            session_supervisors,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
         }
     }
 
     pub fn ensure_controller(&self, controller_session_id: &str) -> Result<()> {
-        if self.controller_session_id != controller_session_id
+        // Format-1 projects predate Workflow Runs and still use the original
+        // controller binding. Bootstrapped projects admit additional PM
+        // Sessions only when an exact per-Session Run exists.
+        if controller_session_id != self.controller_session_id
             && !self.session_dcg_runs.contains_key(controller_session_id)
         {
             anyhow::bail!("this PM project belongs to another project manager");
+        }
+        Ok(())
+    }
+
+    pub fn ensure_package_owner(
+        &self,
+        controller_session_id: &str,
+        package_id: &str,
+    ) -> Result<()> {
+        let package = self
+            .work_packages
+            .get(package_id)
+            .ok_or_else(|| anyhow::anyhow!("no such work package: {package_id}"))?;
+        if package.controller_session_id != controller_session_id {
+            anyhow::bail!("work package belongs to another PM Session");
         }
         Ok(())
     }
@@ -232,6 +263,8 @@ pub struct ImprovementCandidate {
     pub review_evidence: Option<String>,
     #[serde(default)]
     pub user_approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promoted_commit: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }

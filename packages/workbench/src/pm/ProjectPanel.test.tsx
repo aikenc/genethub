@@ -22,26 +22,25 @@ describe("ProjectPanel", () => {
     />);
 
     expect(await screen.findByText("交付可玩的 H5 游戏")).toBeInTheDocument();
+    expect(screen.getByText("0/1")).toBeInTheDocument();
     expect(screen.getByText("implement")).toBeInTheDocument();
     expect(screen.getByText(/等待资源/)).toBeInTheDocument();
     expect(screen.getByText("实现战斗循环")).toBeInTheDocument();
     expect(screen.getByText("由 PM 根据证据选择")).toBeInTheDocument();
     expect(screen.getByText("由 Coordinator 根据证据推进")).toBeInTheDocument();
-    expect(screen.getAllByText("决策")).toHaveLength(1);
+    expect(screen.getByText("采用修正方案重试")).toBeInTheDocument();
     fireEvent.click(screen.getByText("实现战斗循环"));
     expect(open).toHaveBeenCalledWith("s_work");
 
-    fireEvent.change(screen.getByPlaceholderText("补充条件事实，逗号分隔"), {
-      target: { value: "diagnosis.retryApproved" },
-    });
-    fireEvent.click(screen.getByText("决策"));
+    expect(screen.queryByText("diagnosis.retryApproved")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("采用修正方案重试"));
     await waitFor(() => expect(call).toHaveBeenCalledWith({
       type: "pm.workflow.transition",
       payload: {
         workspaceId: "w_project",
         sessionId: "s_pm",
         edgeId: "retry",
-        facts: ["diagnosis.retryApproved"],
+        facts: [],
       },
     }));
   });
@@ -66,22 +65,28 @@ function projectStatus(): PmProjectStatus {
   return {
     workspaceId: "w_project", controllerSessionId: "s_pm", phase: "active", lifecycle: "active",
     revision: 3, updatedAtMs: 3,
-    intent: { revision: 1, outcome: "交付可玩的 H5 游戏", acceptance: ["可玩"], constraints: [], outOfScope: [] },
+    intent: { revision: 9, outcome: "另一条需求", acceptance: ["不应展示"], constraints: [], outOfScope: [] },
     workPackages: [{
       id: "combat", title: "战斗", outcome: "实现战斗循环", status: "blocked", dependencies: [],
+      controllerSessionId: "s_pm",
       agentSpace: "implementation-1", branch: "work/combat", workflowRunId: "run-s_pm",
       nodeInstanceId: "implement-1", workSessionId: "s_work", blockReason: "等待资源",
+    }, {
+      id: "other", title: "其他", outcome: "另一会话的工作", status: "accepted", dependencies: [],
+      controllerSessionId: "s_other",
+      agentSpace: "implementation-2", branch: "work/other", workflowRunId: "run-s_other",
+      nodeInstanceId: "implement-1",
     }],
     agentSpaces: [{
       name: "implementation-1", purpose: "实现", workspaceId: "w_impl", sourceCommit: "a".repeat(40),
-      builderLockDigest: "b".repeat(64), role: "implementation", active: true,
+      builderLockDigest: "b".repeat(64), role: "implementation", tags: ["implementation"], active: true,
       resourceState: "quarantined", resourceRevision: 2, workPackageId: "combat", workSessionId: "s_work",
     }],
     workflowCatalog: { recommended: "feature", workflows: [{
       id: "feature", version: 1, entry: "intake",
       nodes: [{ id: "intake", kind: "activity" }, { id: "implement", kind: "activity" }, { id: "diagnose", kind: "activity" }, { id: "delivered", kind: "terminal" }],
       edges: [
-        { id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" },
+        { id: "retry", label: "采用修正方案重试", description: "保留验收目标并重新执行。", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" },
         { id: "alternative", from: "diagnose", to: "implement", condition: "diagnosis.alternativeReady", chooseBy: "pm" },
         { id: "finish", from: "diagnose", to: "delivered", condition: "diagnosis.resolved" },
       ],
@@ -90,21 +95,30 @@ function projectStatus(): PmProjectStatus {
       id: "run-s_pm", controllerSessionId: "s_pm", graphId: "feature", graphVersion: 1, status: "active",
       definition: null,
       activeNodes: ["diagnose"], facts: [], revision: 3,
-      nodeInstances: [{ id: "implement-1", nodeId: "implement", iteration: 1, status: "blocked" }, { id: "diagnose-1", nodeId: "diagnose", iteration: 1, status: "active" }],
+      intent: { revision: 1, outcome: "交付可玩的 H5 游戏", acceptance: ["可玩"], constraints: [], outOfScope: [] },
+      supervisor: supervisor(),
+      nodeInstances: [
+        { id: "implement-1", nodeId: "implement", iteration: 1, status: "blocked", cohortId: "root-1", fanoutSource: "plan.workstreams", fanoutSealed: true },
+        { id: "diagnose-1", nodeId: "diagnose", iteration: 1, status: "active", cohortId: "root-1", fanoutSealed: false },
+      ],
       teamSlots: [{ id: "slot-combat", nodeInstanceId: "implement-1", workPackageId: "combat", responsibility: "实现战斗循环", workSessionId: "s_work", status: "blocked" }],
       availableEdges: [
-        { id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user", satisfied: false },
+        { id: "retry", label: "采用修正方案重试", description: "保留验收目标并重新执行。", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user", satisfied: true },
         { id: "alternative", from: "diagnose", to: "implement", condition: "diagnosis.alternativeReady", chooseBy: "pm", satisfied: true },
         { id: "finish", from: "diagnose", to: "delivered", condition: "diagnosis.resolved", satisfied: true },
       ],
     }],
     improvementCandidates: [],
-    supervisor: {
-      mode: "eventDriven",
-      wakePending: false,
-      wakeDispatchCount: 0,
-      wakeFailedCount: 0,
-      coalescedEventCount: 0,
-    },
+    supervisor: supervisor(),
+  };
+}
+
+function supervisor() {
+  return {
+    mode: "idle",
+    wakePending: false,
+    wakeDispatchCount: 0,
+    wakeFailedCount: 0,
+    coalescedEventCount: 0,
   };
 }

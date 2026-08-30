@@ -125,6 +125,7 @@ pub enum Request {
     #[serde(rename = "pm.improvement.approve", rename_all = "camelCase")]
     ProjectManagerImprovementApprove {
         workspace_id: String,
+        session_id: String,
         candidate_id: String,
         approved: bool,
     },

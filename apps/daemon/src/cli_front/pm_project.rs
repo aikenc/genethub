@@ -132,7 +132,9 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 flags.one_required("title")?,
                 flags.one_required("outcome")?,
                 flags.many("depends-on"),
-                flags.one_required("space")?,
+                flags
+                    .one("space")?
+                    .unwrap_or_else(|| "coordinator-pending".into()),
                 flags.one_required("branch")?,
                 worktree,
                 chrono::Utc::now().timestamp_millis(),
@@ -157,7 +159,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
         }
         [head, verb, rest @ ..] if head == "space" && verb == "record" => {
             let flags = Flags::parse(rest, &[])?;
-            flags.validate(&["name", "purpose", "path", "workspace", "commit", "role"])?;
+            flags.validate(&["name", "purpose", "path", "workspace", "commit", "role", "tag"])?;
             let name = flags.one_required("name")?;
             let purpose = flags.one_required("purpose")?;
             let source = project_path(&context.root, &flags.one_required("path")?)?;
@@ -194,6 +196,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                     workspace_id,
                     source_commit,
                     role,
+                    flags.many("tag"),
                 )
                 .await
                 .map_err(rejected)?;

@@ -15,22 +15,26 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use dcg::{DcgActor, DcgCatalog, DcgRun, TeamSlot, TeamSlotStatus};
+use dcg::{
+    DcgActor, DcgCatalog, DcgDefinition, DcgNodeKind, DcgRun, DcgSpaceSelector, TeamSlot,
+    TeamSlotStatus,
+};
 use genehub_proto::{
-    PmAgentSpaceStatus, PmImprovementCandidateStatus, PmIntentStatus, PmProjectStatus, PmSupervisorStatus, PmTeamSlotStatus,
-    PmWorkflowAvailableEdgeStatus, PmWorkflowCatalogStatus, PmWorkflowDefinitionStatus,
-    PmWorkflowEdgeStatus, PmWorkflowNodeInstanceStatus, PmWorkflowNodeStatus, PmWorkflowRunStatus,
-    PmWorkPackageStatus,
+    PmAgentSpaceStatus, PmImprovementCandidateStatus, PmIntentStatus, PmProjectStatus,
+    PmSupervisorStatus, PmTeamSlotStatus, PmWorkPackageStatus, PmWorkflowAvailableEdgeStatus,
+    PmWorkflowCatalogStatus, PmWorkflowDefinitionStatus, PmWorkflowEdgeStatus,
+    PmWorkflowNodeInstanceStatus, PmWorkflowNodeStatus, PmWorkflowRunStatus,
 };
 use project::{
     ImprovementCandidate, ImprovementCandidateStatus, IntentRevision, ProjectLifecycle,
     ProjectPhase, ProjectState, PM_PROJECT_FORMAT,
 };
-use sha2::{Digest, Sha256};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use supervisor::WakeDispatchOutcome;
 use task_graph::{
-    validate_graph, CandidateEvidence, ReviewEvidence, WorkPackage, WorkPackageStatus,
+    validate_graph, CandidateEvidence, ReviewEvidence, ReviewVerdict, WorkPackage,
+    WorkPackageStatus,
 };
 use tokio::sync::Mutex;
 use topology::{AgentSpaceRecord, AgentSpaceResourceState, AgentSpaceRole};
@@ -180,19 +184,29 @@ impl ProjectStore {
         let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
             anyhow::anyhow!("this PM project has no verified project-workflow catalog")
         })?;
+        let definition = run_definition(&state, controller_session_id, &catalog)?;
+        let source = definition.edge(edge_id)?.from.clone();
+        if chooser == DcgActor::User && !facts.is_empty() {
+            anyhow::bail!("user decisions select a declared option and cannot inject facts");
+        }
+        if chooser == DcgActor::User {
+            settle_user_decision_packages(&mut state, controller_session_id, &definition, edge_id)?;
+        }
+        if !facts.is_empty() {
+            state
+                .session_dcg_runs
+                .get_mut(controller_session_id)
+                .expect("validated workflow Run")
+                .record_actor_facts(&definition, &source, chooser, &facts)?;
+        }
+        let trusted = trusted_run_facts(&state, controller_session_id, &definition)?;
         let run = state
             .session_dcg_runs
             .get_mut(controller_session_id)
-            .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
-        let definition = match run.definition_snapshot.clone() {
-            Some(definition) => definition,
-            None => catalog
-                .session_workflow(run.graph_id.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("select a Session DCG before transitioning")
-                })?)?
-                .clone(),
-        };
-        run.transition(&definition, edge_id, &facts, chooser)?;
+            .expect("validated workflow Run");
+        run.set_current_facts(trusted.clone());
+        run.transition(&definition, edge_id, &trusted, chooser)?;
+        reconcile_session_dcg(&mut state, controller_session_id, &definition)?;
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -226,20 +240,24 @@ impl ProjectStore {
         let active_bytes = std::fs::read(&active)
             .with_context(|| format!("missing active target: {}", active.display()))?;
         let now = now_ms();
-        state.improvement_candidates.insert(id.clone(), ImprovementCandidate {
-            id,
-            target,
-            source,
-            base_digest: digest_bytes(&active_bytes),
-            candidate_digest: digest_bytes(&source_bytes),
-            rationale,
-            status: ImprovementCandidateStatus::Proposed,
-            review_session_id: None,
-            review_evidence: None,
-            user_approved: false,
-            created_at_ms: now,
-            updated_at_ms: now,
-        });
+        state.improvement_candidates.insert(
+            id.clone(),
+            ImprovementCandidate {
+                id,
+                target,
+                source,
+                base_digest: digest_bytes(&active_bytes),
+                candidate_digest: digest_bytes(&source_bytes),
+                rationale,
+                status: ImprovementCandidateStatus::Proposed,
+                review_session_id: None,
+                review_evidence: None,
+                user_approved: false,
+                promoted_commit: None,
+                created_at_ms: now,
+                updated_at_ms: now,
+            },
+        );
         state.touch(now);
         self.save(&state)?;
         Ok(state)
@@ -257,7 +275,9 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
-        let candidate = state.improvement_candidates.get_mut(id)
+        let candidate = state
+            .improvement_candidates
+            .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("no such improvement candidate: {id}"))?;
         if candidate.status != ImprovementCandidateStatus::Proposed {
             anyhow::bail!("only a proposed candidate can be reviewed");
@@ -271,7 +291,11 @@ impl ProjectStore {
         }
         candidate.review_session_id = Some(review_session_id);
         candidate.review_evidence = Some(evidence);
-        candidate.status = if passed { ImprovementCandidateStatus::Reviewed } else { ImprovementCandidateStatus::Rejected };
+        candidate.status = if passed {
+            ImprovementCandidateStatus::Reviewed
+        } else {
+            ImprovementCandidateStatus::Rejected
+        };
         candidate.updated_at_ms = now_ms();
         state.touch(now_ms());
         self.save(&state)?;
@@ -286,13 +310,19 @@ impl ProjectStore {
     ) -> Result<ProjectState> {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
-        let candidate = state.improvement_candidates.get_mut(id)
+        let candidate = state
+            .improvement_candidates
+            .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("no such improvement candidate: {id}"))?;
         if candidate.status != ImprovementCandidateStatus::Reviewed {
             anyhow::bail!("only an independently reviewed candidate can be approved");
         }
         candidate.user_approved = approved;
-        candidate.status = if approved { ImprovementCandidateStatus::Approved } else { ImprovementCandidateStatus::Rejected };
+        candidate.status = if approved {
+            ImprovementCandidateStatus::Approved
+        } else {
+            ImprovementCandidateStatus::Rejected
+        };
         candidate.updated_at_ms = now_ms();
         state.touch(now_ms());
         self.save(&state)?;
@@ -308,7 +338,9 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
-        let candidate = state.improvement_candidates.get(id)
+        let candidate = state
+            .improvement_candidates
+            .get(id)
             .ok_or_else(|| anyhow::anyhow!("no such improvement candidate: {id}"))?
             .clone();
         if candidate.status != ImprovementCandidateStatus::Approved || !candidate.user_approved {
@@ -318,8 +350,28 @@ impl ProjectStore {
         let active = workflow_root.join(&candidate.target);
         let previous = std::fs::read(&active)?;
         let next = std::fs::read(&candidate.source)?;
-        if digest_bytes(&previous) != candidate.base_digest || digest_bytes(&next) != candidate.candidate_digest {
+        if digest_bytes(&previous) != candidate.base_digest
+            || digest_bytes(&next) != candidate.candidate_digest
+        {
             anyhow::bail!("active or candidate content drifted; rebase as a new candidate");
+        }
+        let candidate_relative = candidate
+            .source
+            .strip_prefix(&state.root)
+            .context("improvement candidate escaped the project root")?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let before_git = crate::git::status(&state.root)
+            .await
+            .context("workflow promotion requires a project Git repository")?;
+        if before_git
+            .changes
+            .iter()
+            .any(|change| change.path != candidate_relative)
+        {
+            anyhow::bail!(
+                "workflow promotion requires a clean project except for its exact candidate file"
+            );
         }
         std::fs::write(&active, &next)?;
         let pm_space = state.root.join("spaces/pm");
@@ -336,7 +388,7 @@ impl ProjectStore {
             Ok(())
         })();
         if let Err(error) = validation {
-            std::fs::write(&active, previous)?;
+            std::fs::write(&active, &previous)?;
             // Restore generated projections from the last accepted source too.
             let _ = crate::agent_space_builder::run(
                 &state.root,
@@ -344,10 +396,56 @@ impl ProjectStore {
                 crate::agent_space_builder::Command::Build { dry_run: false },
                 true,
             );
-            return Err(error).context("candidate failed catalog/Builder validation and was rolled back");
+            return Err(error)
+                .context("candidate failed catalog/Builder validation and was rolled back");
         }
-        let promoted = state.improvement_candidates.get_mut(id).expect("candidate exists");
+        let after_validation = crate::git::status(&state.root).await?;
+        if after_validation
+            .changes
+            .iter()
+            .any(|change| !change.path.starts_with("spaces/pm/"))
+        {
+            std::fs::write(&active, &previous)?;
+            let _ = crate::agent_space_builder::run(
+                &state.root,
+                &pm_space,
+                crate::agent_space_builder::Command::Build { dry_run: false },
+                true,
+            );
+            anyhow::bail!("workflow promotion observed unrelated project changes and rolled back");
+        }
+        let commit_paths = vec!["spaces/pm".to_string()];
+        let promoted_commit = match crate::git::commit(
+            &state.root,
+            &format!("Promote PM workflow improvement {id}"),
+            &commit_paths,
+        )
+        .await
+        {
+            Ok(commit) => commit,
+            Err(error) => {
+                let _ = crate::git::unstage(&state.root, &commit_paths).await;
+                std::fs::write(&active, &previous)?;
+                let _ = crate::agent_space_builder::run(
+                    &state.root,
+                    &pm_space,
+                    crate::agent_space_builder::Command::Build { dry_run: false },
+                    true,
+                );
+                return Err(error).context(
+                    "candidate passed validation but could not be committed; source was rolled back",
+                );
+            }
+        };
+        if !crate::git::status(&state.root).await?.clean {
+            anyhow::bail!("workflow promotion commit left project source changes");
+        }
+        let promoted = state
+            .improvement_candidates
+            .get_mut(id)
+            .expect("candidate exists");
         promoted.status = ImprovementCandidateStatus::Promoted;
+        promoted.promoted_commit = Some(promoted_commit);
         promoted.updated_at_ms = now_ms();
         state.touch(now_ms());
         self.save(&state)?;
@@ -416,6 +514,9 @@ impl ProjectStore {
             .work_packages
             .get(work_package_id)
             .ok_or_else(|| anyhow::anyhow!("no such work package: {work_package_id}"))?;
+        if package.controller_session_id != controller_session_id {
+            anyhow::bail!("work package belongs to another PM Session");
+        }
         let space_name = state
             .agent_spaces
             .values()
@@ -452,6 +553,12 @@ impl ProjectStore {
                 if space.name == package.agent_space {
                     anyhow::bail!(
                         "candidate review requires a different Agent Space from implementation"
+                    );
+                }
+                let selected = select_review_space(&state, package)?;
+                if space.name != selected {
+                    anyhow::bail!(
+                        "Coordinator selected review Agent Space {selected} for this candidate"
                     );
                 }
                 WorkDispatchKind::Review
@@ -647,6 +754,9 @@ impl ProjectStore {
                 .work_packages
                 .get_mut(package_id)
                 .ok_or_else(|| anyhow::anyhow!("no such affected work package: {package_id}"))?;
+            if package.controller_session_id != controller_session_id {
+                anyhow::bail!("affected work package belongs to another PM Session");
+            }
             if package.status != WorkPackageStatus::Cancelled {
                 package.status = WorkPackageStatus::Blocked;
                 package.block_reason = Some("invalidated by a newer Intent revision".into());
@@ -656,7 +766,8 @@ impl ProjectStore {
             }
         }
         let revision = state
-            .intent
+            .session_intents
+            .get(controller_session_id)
             .as_ref()
             .map_or(1, |intent| intent.revision.saturating_add(1));
         let intent = IntentRevision {
@@ -669,6 +780,10 @@ impl ProjectStore {
             recorded_at_ms: now_ms(),
         };
         intent.validate()?;
+        state
+            .session_intents
+            .insert(controller_session_id.to_string(), intent.clone());
+        // Compatibility projection: the most recently revised Session intent.
         state.intent = Some(intent);
         state.touch(now_ms());
         self.save(&state)?;
@@ -702,21 +817,18 @@ impl ProjectStore {
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
         state.ensure_mutable()?;
-        let (run_id, node_instance_id) = {
-            let run = state
-                .session_dcg_runs
-                .get(controller_session_id)
-                .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?;
-            (run.id.clone(), run.active_node_instance(node_id)?.id.clone())
-        };
-        package.bind_to_workflow(run_id, node_instance_id.clone())?;
-        if !state
-            .agent_spaces
-            .get(&package.agent_space)
-            .is_some_and(|space| space.active && space.role == AgentSpaceRole::Implementation)
-        {
-            anyhow::bail!("work package requires an active implementation Agent Space");
-        }
+        let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })?;
+        let definition = run_definition(&state, controller_session_id, &catalog)?;
+        let node = definition.node(node_id)?;
+        let selector = node
+            .executor
+            .as_ref()
+            .filter(|executor| executor.actor == DcgActor::WorkAgent)
+            .and_then(|executor| executor.space.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("WorkPackage requires an active workAgent node"))?
+            .clone();
         let worktrees_root = state
             .root
             .join("worktrees")
@@ -731,30 +843,88 @@ impl ProjectStore {
         }
         package.worktree = worktree;
         if let Some(existing) = state.work_packages.get(&package.id) {
-            if !matches!(
-                existing.status,
-                WorkPackageStatus::Planned | WorkPackageStatus::Blocked
-            ) {
-                anyhow::bail!("an active or completed work package cannot be redefined");
+            state.ensure_package_owner(controller_session_id, &package.id)?;
+            let same_node = existing
+                .node_instance_id
+                .as_deref()
+                .and_then(|id| {
+                    state
+                        .session_dcg_runs
+                        .get(controller_session_id)?
+                        .node_instances
+                        .get(id)
+                })
+                .is_some_and(|instance| instance.node_id == node_id);
+            if same_node
+                && existing.title == package.title
+                && existing.outcome == package.outcome
+                && existing.dependencies == package.dependencies
+                && existing.branch == package.branch
+                && existing.worktree == package.worktree
+            {
+                return Ok(state);
             }
-            package.status = existing.status;
-            package.block_reason = existing.block_reason.clone();
+            anyhow::bail!(
+                "WorkPackage {} is immutable after binding; create a new package id for a retry",
+                package.id
+            );
         }
+        let (run_id, node_instance_id) = {
+            let run = state
+                .session_dcg_runs
+                .get(controller_session_id)
+                .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?;
+            let instance = run.active_node_instance(node_id)?;
+            if instance.fanout_sealed {
+                anyhow::bail!(
+                    "workAgent node {node_id} already started; create all sibling WorkPackages before the first Ready transition"
+                );
+            }
+            (run.id.clone(), instance.id.clone())
+        };
+        let existing_slots = state
+            .session_dcg_runs
+            .get(controller_session_id)
+            .expect("validated workflow Run")
+            .team_slots
+            .values()
+            .filter(|slot| {
+                slot.node_instance_id == node_instance_id && slot.work_package_id != package.id
+            })
+            .count() as u32;
+        let limit = node.fanout.as_ref().map_or(1, |fanout| fanout.max_items);
+        if existing_slots >= limit {
+            anyhow::bail!("workAgent node {node_id} reached its fanout maxItems {limit}");
+        }
+        package.agent_space = select_agent_space(&state, &selector, &node_instance_id)?;
+        package.bind_to_workflow(
+            controller_session_id.to_string(),
+            run_id,
+            node_instance_id.clone(),
+        )?;
         let mut next = state.work_packages.clone();
         next.insert(package.id.clone(), package.clone());
         validate_graph(&next)?;
+        for dependency in &package.dependencies {
+            if next
+                .get(dependency)
+                .is_some_and(|dependency| dependency.controller_session_id != controller_session_id)
+            {
+                anyhow::bail!("WorkPackage dependencies cannot cross PM Sessions");
+            }
+        }
         state
             .session_dcg_runs
             .get_mut(controller_session_id)
             .expect("workflow Run was validated")
             .bind_team_slot(TeamSlot {
-            id: format!("slot-{}", package.id),
-            node_instance_id,
-            work_package_id: package.id.clone(),
-            responsibility: package.outcome.clone(),
-            space_lease_id: None,
-            current_work_session_id: None,
-            status: TeamSlotStatus::Planned,
+                id: format!("slot-{}", package.id),
+                node_instance_id,
+                work_package_id: package.id.clone(),
+                responsibility: package.outcome.clone(),
+                space_lease_id: None,
+                current_work_session_id: None,
+                status: TeamSlotStatus::Planned,
             })?;
         state.work_packages = next;
         state.touch(now_ms());
@@ -778,6 +948,7 @@ impl ProjectStore {
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
         state.ensure_mutable()?;
+        state.ensure_package_owner(controller_session_id, id)?;
         if matches!(
             status,
             WorkPackageStatus::Candidate | WorkPackageStatus::Review | WorkPackageStatus::Accepted
@@ -805,10 +976,24 @@ impl ProjectStore {
             block_reason,
             now_ms(),
         )?;
+        if status != WorkPackageStatus::Planned {
+            let node_instance_id = state
+                .work_packages
+                .get(id)
+                .and_then(|package| package.node_instance_id.clone())
+                .ok_or_else(|| anyhow::anyhow!("WorkPackage is not bound to a node instance"))?;
+            state
+                .session_dcg_runs
+                .get_mut(controller_session_id)
+                .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?
+                .seal_fanout(&node_instance_id)?;
+        }
         let slot_status = match status {
             WorkPackageStatus::Planned | WorkPackageStatus::Ready => TeamSlotStatus::Planned,
             WorkPackageStatus::Running => TeamSlotStatus::Working,
-            WorkPackageStatus::Waiting | WorkPackageStatus::Candidate | WorkPackageStatus::Review => TeamSlotStatus::Waiting,
+            WorkPackageStatus::Waiting
+            | WorkPackageStatus::Candidate
+            | WorkPackageStatus::Review => TeamSlotStatus::Waiting,
             WorkPackageStatus::Accepted => TeamSlotStatus::Completed,
             WorkPackageStatus::Blocked | WorkPackageStatus::Cancelled => TeamSlotStatus::Blocked,
         };
@@ -842,6 +1027,11 @@ impl ProjectStore {
                 space.return_after_check(clean, now_ms())?;
             }
         }
+        let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })?;
+        let definition = run_definition(&state, controller_session_id, &catalog)?;
+        reconcile_session_dcg(&mut state, controller_session_id, &definition)?;
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -858,6 +1048,7 @@ impl ProjectStore {
         workspace_id: String,
         source_commit: String,
         role: AgentSpaceRole,
+        tags: Vec<String>,
     ) -> Result<ProjectState> {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
@@ -871,6 +1062,10 @@ impl ProjectStore {
             anyhow::bail!("Agent Space workspace id is required");
         }
         validate_git_object(&source_commit)?;
+        unique_values("Agent Space tag", &tags)?;
+        for tag in &tags {
+            validate_kebab_name(tag)?;
+        }
         let source_path = source_path
             .canonicalize()
             .with_context(|| format!("no such Agent Space: {}", source_path.display()))?;
@@ -914,6 +1109,8 @@ impl ProjectStore {
         let identity_changed = previous
             .as_ref()
             .is_some_and(|existing| existing.builder_lock_digest != verified.lock_digest);
+        let mut recorded_tags = inferred_space_tags(role, &name, &purpose);
+        recorded_tags.extend(tags);
         let record = AgentSpaceRecord {
             name: name.clone(),
             purpose,
@@ -922,6 +1119,7 @@ impl ProjectStore {
             source_commit,
             builder_lock_digest: verified.lock_digest,
             role,
+            tags: recorded_tags,
             active: true,
             resource_state: if identity_changed {
                 AgentSpaceResourceState::Quarantined
@@ -979,13 +1177,19 @@ impl ProjectStore {
         if digest.trim().is_empty() || digest.len() > 512 {
             anyhow::bail!("supervisor observation digest must be 1-512 characters");
         }
-        let wake_manager =
-            state
-                .supervisor
-                .observe(digest, active_work, waiting_user, terminal, now_ms());
+        let wake_manager = state
+            .session_supervisors
+            .entry(controller_session_id.to_string())
+            .or_insert_with(supervisor::SupervisorState::idle)
+            .observe(digest, active_work, waiting_user, terminal, now_ms());
         // This command is called by an already-awake PM turn. It reports
         // whether the fact changed, but must not schedule a duplicate turn.
-        state.supervisor.acknowledge_wake();
+        state
+            .session_supervisors
+            .get_mut(controller_session_id)
+            .expect("Session supervisor was initialized")
+            .acknowledge_wake();
+        sync_primary_supervisor(&mut state);
         state.touch(now_ms());
         self.save(&state)?;
         Ok(Observation {
@@ -1009,6 +1213,7 @@ impl ProjectStore {
         if state.lifecycle == ProjectLifecycle::Cancelled {
             anyhow::bail!("a cancelled PM project is retained and cannot be resumed");
         }
+        let mut next_lifecycle = lifecycle;
         match lifecycle {
             ProjectLifecycle::Active => {
                 if !matches!(
@@ -1020,27 +1225,48 @@ impl ProjectStore {
                 // `completed` closes one accepted delivery, not the Folder's
                 // lifetime. A later explicit user request may reopen the same
                 // PM, topology, and Git lineage for a new Intent revision.
-                state.supervisor = supervisor::SupervisorState::idle();
+                state.session_supervisors.insert(
+                    controller_session_id.to_string(),
+                    supervisor::SupervisorState::idle(),
+                );
             }
             ProjectLifecycle::WaitingUser => {
                 state.ensure_mutable()?;
-                if has_running_work(&state) {
+                if has_running_work_for_session(&state, controller_session_id) {
                     anyhow::bail!("pause running work packages before waiting for the user");
                 }
-                state.supervisor.observe(
-                    format!("lifecycle:waiting-user:{}", state.revision),
-                    false,
-                    true,
-                    false,
-                    now_ms(),
-                );
+                state
+                    .session_supervisors
+                    .entry(controller_session_id.to_string())
+                    .or_insert_with(supervisor::SupervisorState::idle)
+                    .observe(
+                        format!("lifecycle:waiting-user:{}", state.revision),
+                        false,
+                        true,
+                        false,
+                        now_ms(),
+                    );
+                if state.session_dcg_runs.iter().any(|(session_id, run)| {
+                    session_id != controller_session_id
+                        && matches!(
+                            run.status,
+                            dcg::DcgRunStatus::Discussion | dcg::DcgRunStatus::Active
+                        )
+                }) {
+                    next_lifecycle = ProjectLifecycle::Active;
+                }
             }
             ProjectLifecycle::Completed => {
                 state.ensure_mutable()?;
-                if state.phase != ProjectPhase::Active || state.work_packages.is_empty() {
+                let owned_packages = state
+                    .work_packages
+                    .values()
+                    .filter(|package| package.controller_session_id == controller_session_id)
+                    .collect::<Vec<_>>();
+                if state.phase != ProjectPhase::Active || owned_packages.is_empty() {
                     anyhow::bail!("only an active project with work packages can complete");
                 }
-                if state.work_packages.values().any(|package| {
+                if owned_packages.iter().any(|package| {
                     !matches!(
                         package.status,
                         WorkPackageStatus::Accepted | WorkPackageStatus::Cancelled
@@ -1050,13 +1276,44 @@ impl ProjectStore {
                         "all work packages must be accepted or cancelled before completion"
                     );
                 }
-                state.supervisor.observe(
-                    format!("lifecycle:completed:{}", state.revision),
-                    false,
-                    false,
-                    true,
-                    now_ms(),
-                );
+                if state
+                    .session_dcg_runs
+                    .get(controller_session_id)
+                    .is_some_and(|run| {
+                        !matches!(
+                            run.status,
+                            dcg::DcgRunStatus::Completed | dcg::DcgRunStatus::Cancelled
+                        )
+                    })
+                {
+                    anyhow::bail!("the PM Session Workflow Run has not reached a terminal outcome");
+                }
+                state
+                    .session_supervisors
+                    .entry(controller_session_id.to_string())
+                    .or_insert_with(supervisor::SupervisorState::idle)
+                    .observe(
+                        format!("lifecycle:completed:{}", state.revision),
+                        false,
+                        false,
+                        true,
+                        now_ms(),
+                    );
+                let all_runs_terminal = state.session_dcg_runs.values().all(|run| {
+                    matches!(
+                        run.status,
+                        dcg::DcgRunStatus::Completed | dcg::DcgRunStatus::Cancelled
+                    )
+                });
+                let all_packages_terminal = state.work_packages.values().all(|package| {
+                    matches!(
+                        package.status,
+                        WorkPackageStatus::Accepted | WorkPackageStatus::Cancelled
+                    )
+                });
+                if !(all_runs_terminal && all_packages_terminal) {
+                    next_lifecycle = ProjectLifecycle::Active;
+                }
             }
             ProjectLifecycle::Cancelled => {
                 state.ensure_mutable()?;
@@ -1065,16 +1322,19 @@ impl ProjectStore {
                         "cancel or block running work packages before cancelling the project"
                     );
                 }
-                state.supervisor.observe(
-                    format!("lifecycle:cancelled:{}", state.revision),
-                    false,
-                    false,
-                    true,
-                    now_ms(),
-                );
+                for supervisor in state.session_supervisors.values_mut() {
+                    supervisor.observe(
+                        format!("lifecycle:cancelled:{}", state.revision),
+                        false,
+                        false,
+                        true,
+                        now_ms(),
+                    );
+                }
             }
         }
-        state.lifecycle = lifecycle;
+        state.lifecycle = next_lifecycle;
+        sync_primary_supervisor(&mut state);
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -1139,38 +1399,43 @@ impl ProjectStore {
             });
         }
 
-        let mut changed_state = false;
-        if active_work
-            && (state.supervisor.mode != supervisor::SupervisorMode::Active
-                || state.supervisor.observation_digest.is_none())
-        {
-            state.supervisor.baseline(digest, now_ms);
-            changed_state = true;
-        } else if active_work {
-            let changed = state.supervisor.observation_digest.as_deref() != Some(&digest);
-            let due = state.supervisor.due(now_ms);
-            if changed || due {
-                state.supervisor.observe(digest, true, false, false, now_ms);
-                if !changed && due && wake_when_quiet {
-                    state.supervisor.request_quiet_wake(now_ms);
+        let (changed_state, wake_manager) = {
+            let supervisor = state
+                .session_supervisors
+                .entry(controller_session_id.to_string())
+                .or_insert_with(supervisor::SupervisorState::idle);
+            let mut changed_state = false;
+            if active_work
+                && (supervisor.mode != supervisor::SupervisorMode::Active
+                    || supervisor.observation_digest.is_none())
+            {
+                supervisor.baseline(digest, now_ms);
+                changed_state = true;
+            } else if active_work {
+                let changed = supervisor.observation_digest.as_deref() != Some(&digest);
+                let due = supervisor.due(now_ms);
+                if changed || due {
+                    supervisor.observe(digest, true, false, false, now_ms);
+                    if !changed && due && wake_when_quiet {
+                        supervisor.request_quiet_wake(now_ms);
+                    }
+                    changed_state = true;
                 }
+            } else if supervisor.mode != supervisor::SupervisorMode::Idle || supervisor.wake_pending
+            {
+                supervisor.observe(digest, false, false, false, now_ms);
                 changed_state = true;
             }
-        } else if state.supervisor.mode != supervisor::SupervisorMode::Idle
-            || state.supervisor.wake_pending
-        {
-            state
-                .supervisor
-                .observe(digest, false, false, false, now_ms);
-            changed_state = true;
-        }
+            (changed_state, supervisor.wake_ready(now_ms))
+        };
 
         if changed_state {
+            sync_primary_supervisor(&mut state);
             state.touch(now_ms);
             self.save(&state)?;
         }
         Ok(SupervisorDecision {
-            wake_manager: state.supervisor.wake_ready(now_ms),
+            wake_manager,
             project: state,
         })
     }
@@ -1186,10 +1451,15 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
-        if state.supervisor.observation_digest.as_deref() == Some(expected_digest)
-            && state.supervisor.wake_pending
+        let supervisor = state
+            .session_supervisors
+            .entry(controller_session_id.to_string())
+            .or_insert_with(supervisor::SupervisorState::idle);
+        if supervisor.observation_digest.as_deref() == Some(expected_digest)
+            && supervisor.wake_pending
         {
-            state.supervisor.acknowledge_wake();
+            supervisor.acknowledge_wake();
+            sync_primary_supervisor(&mut state);
             state.touch(now_ms());
             self.save(&state)?;
         }
@@ -1211,10 +1481,15 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
-        if state.supervisor.observation_digest.as_deref() == Some(expected_digest)
-            && state.supervisor.wake_pending
+        let supervisor = state
+            .session_supervisors
+            .entry(controller_session_id.to_string())
+            .or_insert_with(supervisor::SupervisorState::idle);
+        if supervisor.observation_digest.as_deref() == Some(expected_digest)
+            && supervisor.wake_pending
         {
-            state.supervisor.mark_wake_dispatched(turn_id.to_string());
+            supervisor.mark_wake_dispatched(turn_id.to_string());
+            sync_primary_supervisor(&mut state);
             state.touch(now_ms());
             self.save(&state)?;
         }
@@ -1238,17 +1513,20 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
-        if state.supervisor.observation_digest.as_deref() == Some(expected_digest)
-            && state.supervisor.wake_pending
-            && state.supervisor.wake_turn_id.as_deref() == Some(expected_turn_id)
+        let supervisor = state
+            .session_supervisors
+            .entry(controller_session_id.to_string())
+            .or_insert_with(supervisor::SupervisorState::idle);
+        if supervisor.observation_digest.as_deref() == Some(expected_digest)
+            && supervisor.wake_pending
+            && supervisor.wake_turn_id.as_deref() == Some(expected_turn_id)
         {
             match outcome {
-                WakeDispatchOutcome::Completed => state.supervisor.acknowledge_wake(),
-                WakeDispatchOutcome::Failed => state.supervisor.defer_failed_wake_dispatch(now_ms),
-                WakeDispatchOutcome::Interrupted => {
-                    state.supervisor.release_interrupted_wake_dispatch()
-                }
+                WakeDispatchOutcome::Completed => supervisor.acknowledge_wake(),
+                WakeDispatchOutcome::Failed => supervisor.defer_failed_wake_dispatch(now_ms),
+                WakeDispatchOutcome::Interrupted => supervisor.release_interrupted_wake_dispatch(),
             }
+            sync_primary_supervisor(&mut state);
             state.touch(now_ms);
             self.save(&state)?;
         }
@@ -1273,7 +1551,7 @@ impl ProjectStore {
             Ok(raw) => {
                 let state: ProjectState = serde_json::from_str(&raw)
                     .with_context(|| format!("parsing PM project {}", path.display()))?;
-                if !matches!(state.format, 1 | PM_PROJECT_FORMAT) {
+                if !(1..=PM_PROJECT_FORMAT).contains(&state.format) {
                     anyhow::bail!(
                         "unsupported PM project format {} (supports 1 and {})",
                         state.format,
@@ -1338,7 +1616,7 @@ fn load_project_file(path: &Path) -> Result<ProjectState> {
     }
     let state: ProjectState = serde_json::from_slice(&std::fs::read(path)?)
         .with_context(|| format!("parsing PM project {}", path.display()))?;
-    if !matches!(state.format, 1 | PM_PROJECT_FORMAT) {
+    if !(1..=PM_PROJECT_FORMAT).contains(&state.format) {
         anyhow::bail!(
             "unsupported PM project format {} (supports 1 and {})",
             state.format,
@@ -1349,8 +1627,56 @@ fn load_project_file(path: &Path) -> Result<ProjectState> {
 }
 
 fn upgrade_project_state(mut state: ProjectState) -> ProjectState {
+    if state.session_intents.is_empty() {
+        if let Some(intent) = state.intent.clone() {
+            state
+                .session_intents
+                .insert(state.controller_session_id.clone(), intent);
+        }
+    }
+    if state.session_supervisors.is_empty() {
+        state.session_supervisors.insert(
+            state.controller_session_id.clone(),
+            state.supervisor.clone(),
+        );
+    }
+    for (controller, run) in &state.session_dcg_runs {
+        state
+            .session_supervisors
+            .entry(controller.clone())
+            .or_insert_with(supervisor::SupervisorState::idle);
+        for package in state.work_packages.values_mut().filter(|package| {
+            package.controller_session_id.is_empty()
+                && package.workflow_run_id.as_deref() == Some(run.id.as_str())
+        }) {
+            package.controller_session_id = controller.clone();
+        }
+    }
+    for package in state
+        .work_packages
+        .values_mut()
+        .filter(|package| package.controller_session_id.is_empty())
+    {
+        package.controller_session_id = state.controller_session_id.clone();
+    }
+    for space in state.agent_spaces.values_mut() {
+        if space.tags.is_empty() {
+            space.tags = inferred_space_tags(space.role, &space.name, &space.purpose);
+        }
+    }
+    sync_primary_supervisor(&mut state);
     state.format = PM_PROJECT_FORMAT;
     state
+}
+
+fn sync_primary_supervisor(state: &mut ProjectState) {
+    if let Some(supervisor) = state
+        .session_supervisors
+        .get(&state.controller_session_id)
+        .cloned()
+    {
+        state.supervisor = supervisor;
+    }
 }
 
 fn load_dcg_catalog(project_root: &Path) -> Result<Option<DcgCatalog>> {
@@ -1359,6 +1685,401 @@ fn load_dcg_catalog(project_root: &Path) -> Result<Option<DcgCatalog>> {
         return Ok(None);
     }
     DcgCatalog::load(&root).map(Some)
+}
+
+fn run_definition(
+    state: &ProjectState,
+    controller_session_id: &str,
+    catalog: &DcgCatalog,
+) -> Result<DcgDefinition> {
+    let run = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
+    match run.definition_snapshot.clone() {
+        Some(definition) => Ok(definition),
+        None => catalog
+            .session_workflow(
+                run.graph_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("select a Session DCG before execution"))?,
+            )
+            .cloned(),
+    }
+}
+
+/// Choose a reusable Space using only Coordinator-owned facts. The PM may
+/// describe the package and worktree, but cannot point at a mismatching Space.
+fn select_agent_space(
+    state: &ProjectState,
+    selector: &DcgSpaceSelector,
+    _node_instance_id: &str,
+) -> Result<String> {
+    let mut candidates = state
+        .agent_spaces
+        .values()
+        .filter(|space| {
+            space.active
+                && space.role == AgentSpaceRole::Implementation
+                && !matches!(
+                    space.resource_state,
+                    AgentSpaceResourceState::Quarantined | AgentSpaceResourceState::Repairing
+                )
+                && selector
+                    .match_tags
+                    .iter()
+                    .all(|tag| space.tags.contains(tag))
+        })
+        .map(|space| {
+            let active_assignments = state
+                .work_packages
+                .values()
+                .filter(|package| {
+                    package.agent_space == space.name
+                        && !matches!(
+                            package.status,
+                            WorkPackageStatus::Accepted
+                                | WorkPackageStatus::Cancelled
+                                | WorkPackageStatus::Blocked
+                        )
+                })
+                .count();
+            (active_assignments, space.name.clone())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, name)| name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no active Agent Space matches Workflow tags [{}]",
+                selector.match_tags.join(", ")
+            )
+        })
+}
+
+fn select_review_space(state: &ProjectState, package: &WorkPackage) -> Result<String> {
+    state
+        .agent_spaces
+        .values()
+        .filter(|space| {
+            space.active
+                && space.role == AgentSpaceRole::Review
+                && space.name != package.agent_space
+                && space.resource_state == AgentSpaceResourceState::Idle
+                && space.lease.is_none()
+                && space.tags.contains("review")
+        })
+        .map(|space| space.name.clone())
+        .min()
+        .ok_or_else(|| anyhow::anyhow!("no idle independent review Agent Space is available"))
+}
+
+/// A human retry starts a new node instance and therefore a new immutable
+/// WorkPackage identity. Failed evidence stays on the previous package, which
+/// is settled as cancelled; already accepted siblings remain reusable.
+fn settle_user_decision_packages(
+    state: &mut ProjectState,
+    controller_session_id: &str,
+    definition: &DcgDefinition,
+    edge_id: &str,
+) -> Result<()> {
+    let edge = definition.edge(edge_id)?;
+    if edge.choose_by != Some(DcgActor::User) {
+        return Ok(());
+    }
+    let cancel_run = definition.node(&edge.to).is_ok_and(|node| {
+        node.kind == DcgNodeKind::Terminal && node.outcome.as_deref() == Some("cancelled")
+    });
+    let ancestor_instances = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?
+        .active_ancestor_instances(&edge.from)?;
+    let run_id = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .expect("validated Workflow Run")
+        .id
+        .clone();
+    let package_ids = state
+        .work_packages
+        .values()
+        .filter(|package| {
+            package.controller_session_id == controller_session_id
+                && package.workflow_run_id.as_deref() == Some(run_id.as_str())
+                && (cancel_run
+                    || package
+                        .node_instance_id
+                        .as_ref()
+                        .is_some_and(|id| ancestor_instances.contains(id)))
+        })
+        .map(|package| package.id.clone())
+        .collect::<Vec<_>>();
+    for id in &package_ids {
+        let package = state
+            .work_packages
+            .get(id)
+            .expect("selected package exists");
+        if matches!(
+            package.status,
+            WorkPackageStatus::Running | WorkPackageStatus::Waiting
+        ) || (package.status == WorkPackageStatus::Review
+            && package
+                .review
+                .as_ref()
+                .and_then(|review| review.verdict)
+                .is_none())
+        {
+            anyhow::bail!(
+                "settle the active WorkSession for package {id} before taking a user decision"
+            );
+        }
+    }
+    let settled_at = now_ms();
+    for id in package_ids {
+        if state.work_packages.get(&id).is_some_and(|package| {
+            matches!(
+                package.status,
+                WorkPackageStatus::Accepted | WorkPackageStatus::Cancelled
+            )
+        }) {
+            continue;
+        }
+        task_graph::transition(
+            &mut state.work_packages,
+            &id,
+            WorkPackageStatus::Cancelled,
+            None,
+            None,
+            None,
+            None,
+            settled_at,
+        )?;
+        update_team_slot(state, &id, TeamSlotStatus::Blocked, None, None)?;
+    }
+    Ok(())
+}
+
+/// Build the only fact set allowed to drive system/WorkAgent edges. Semantic
+/// PM outputs are predeclared on the active node; work, review, lease and
+/// quarantine facts are derived from durable lower-layer evidence.
+fn trusted_run_facts(
+    state: &ProjectState,
+    controller_session_id: &str,
+    definition: &DcgDefinition,
+) -> Result<BTreeSet<String>> {
+    let run = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
+    let mut facts = run.actor_facts_for_active_nodes();
+    if state.session_intents.contains_key(controller_session_id) {
+        facts.insert("intent.persisted".into());
+    }
+    for instance in run
+        .node_instances
+        .values()
+        .filter(|instance| instance.status == dcg::DcgNodeInstanceStatus::Active)
+    {
+        let node = definition.node(&instance.node_id)?;
+        if node.kind == DcgNodeKind::Join {
+            facts.insert("join.ready".into());
+            continue;
+        }
+        let Some(executor) = node.executor.as_ref() else {
+            continue;
+        };
+        match executor.actor {
+            DcgActor::Pm => {}
+            DcgActor::User => {
+                facts.insert("decision.ready".into());
+            }
+            DcgActor::WorkAgent => {
+                let packages = state
+                    .work_packages
+                    .values()
+                    .filter(|package| {
+                        package.controller_session_id == controller_session_id
+                            && package.workflow_run_id.as_deref() == Some(run.id.as_str())
+                            && package.node_instance_id.as_deref() == Some(instance.id.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                if packages.is_empty() || !instance.fanout_sealed {
+                    continue;
+                }
+                let settled = packages.iter().all(|package| {
+                    matches!(
+                        package.status,
+                        WorkPackageStatus::Candidate
+                            | WorkPackageStatus::Review
+                            | WorkPackageStatus::Accepted
+                            | WorkPackageStatus::Blocked
+                            | WorkPackageStatus::Cancelled
+                    )
+                });
+                if settled {
+                    if packages
+                        .iter()
+                        .any(|package| package.status == WorkPackageStatus::Blocked)
+                    {
+                        facts.insert("work.blocked".into());
+                    } else if packages
+                        .iter()
+                        .any(|package| package.status == WorkPackageStatus::Cancelled)
+                    {
+                        facts.insert("work.cancelled".into());
+                    }
+                    if packages.iter().all(|package| {
+                        matches!(
+                            package.status,
+                            WorkPackageStatus::Candidate
+                                | WorkPackageStatus::Review
+                                | WorkPackageStatus::Accepted
+                        )
+                    }) {
+                        facts.insert("work.candidate".into());
+                    }
+                    if packages
+                        .iter()
+                        .all(|package| package.status == WorkPackageStatus::Accepted)
+                    {
+                        facts.insert("work.accepted".into());
+                    }
+                }
+                if packages
+                    .iter()
+                    .any(|package| package.status == WorkPackageStatus::Running)
+                {
+                    facts.insert("work.running".into());
+                }
+                if packages.iter().any(|package| {
+                    state
+                        .agent_spaces
+                        .get(&package.agent_space)
+                        .is_some_and(|space| {
+                            space.resource_state == AgentSpaceResourceState::Quarantined
+                        })
+                }) {
+                    facts.insert("space.quarantined".into());
+                }
+            }
+            DcgActor::System => {
+                let incoming_instances = instance
+                    .predecessor_instances
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                let packages = state
+                    .work_packages
+                    .values()
+                    .filter(|package| {
+                        package.controller_session_id == controller_session_id
+                            && package.workflow_run_id.as_deref() == Some(run.id.as_str())
+                            && package
+                                .node_instance_id
+                                .as_deref()
+                                .is_some_and(|id| incoming_instances.contains(id))
+                    })
+                    .collect::<Vec<_>>();
+                let review_settled = !packages.is_empty()
+                    && packages.iter().all(|package| {
+                        package.status == WorkPackageStatus::Accepted
+                            || package.status == WorkPackageStatus::Blocked
+                            || package.status == WorkPackageStatus::Cancelled
+                            || package
+                                .review
+                                .as_ref()
+                                .and_then(|review| review.verdict)
+                                .is_some()
+                    });
+                if review_settled
+                    && packages.iter().any(|package| {
+                        package.status == WorkPackageStatus::Blocked
+                            || package.status == WorkPackageStatus::Cancelled
+                            || package.review.as_ref().and_then(|review| review.verdict)
+                                == Some(ReviewVerdict::Fail)
+                    })
+                {
+                    facts.insert("review.fail".into());
+                } else if !packages.is_empty()
+                    && packages
+                        .iter()
+                        .all(|package| package.status == WorkPackageStatus::Accepted)
+                {
+                    facts.insert("review.pass".into());
+                } else {
+                    facts.insert("system.waiting".into());
+                }
+            }
+        }
+    }
+    Ok(facts)
+}
+
+fn reconcile_session_dcg(
+    state: &mut ProjectState,
+    controller_session_id: &str,
+    definition: &DcgDefinition,
+) -> Result<()> {
+    for _ in 0..128 {
+        let facts = trusted_run_facts(state, controller_session_id, definition)?;
+        let (selected, terminal_marker) = {
+            let run = state
+                .session_dcg_runs
+                .get_mut(controller_session_id)
+                .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
+            run.set_current_facts(facts.clone());
+            let mut selected = None;
+            for node_id in &run.active_nodes {
+                let node = definition.node(node_id)?;
+                let automatic = node.kind == DcgNodeKind::Join
+                    || node.executor.as_ref().is_some_and(|executor| {
+                        matches!(executor.actor, DcgActor::WorkAgent | DcgActor::System)
+                    });
+                if !automatic {
+                    continue;
+                }
+                let edges = run
+                    .eligible_edges(definition, &facts)?
+                    .into_iter()
+                    .filter(|edge| edge.from == *node_id && edge.choose_by.is_none())
+                    .map(|edge| edge.id.clone())
+                    .collect::<Vec<_>>();
+                if !edges.is_empty() {
+                    selected = Some((node_id.clone(), edges));
+                    break;
+                }
+            }
+            let terminal_marker = matches!(
+                run.status,
+                dcg::DcgRunStatus::Completed | dcg::DcgRunStatus::Cancelled
+            )
+            .then(|| format!("workflow:terminal:{}:{}", run.id, run.revision));
+            (selected, terminal_marker)
+        };
+        let Some((source, edge_ids)) = selected else {
+            if let Some(marker) = terminal_marker {
+                state
+                    .session_supervisors
+                    .entry(controller_session_id.to_string())
+                    .or_insert_with(supervisor::SupervisorState::idle)
+                    .observe(marker, false, false, true, now_ms());
+                sync_primary_supervisor(state);
+            }
+            return Ok(());
+        };
+        let refs = edge_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        state
+            .session_dcg_runs
+            .get_mut(controller_session_id)
+            .expect("validated workflow Run")
+            .transition_many(definition, &refs, &facts, DcgActor::System)
+            .with_context(|| format!("automatically advancing Workflow node {source}"))?;
+    }
+    anyhow::bail!("Workflow automatic transition limit exceeded")
 }
 
 fn attach_dcg_runs(state: &mut ProjectState, controller_session_id: &str) -> Result<bool> {
@@ -1375,6 +2096,16 @@ fn attach_dcg_runs(state: &mut ProjectState, controller_session_id: &str) -> Res
                 format!("run-{}", controller_session_id),
                 controller_session_id.to_string(),
             )?,
+        );
+        changed = true;
+    }
+    if !state
+        .session_supervisors
+        .contains_key(controller_session_id)
+    {
+        state.session_supervisors.insert(
+            controller_session_id.to_string(),
+            supervisor::SupervisorState::idle(),
         );
         changed = true;
     }
@@ -1475,6 +2206,13 @@ fn has_running_work(state: &ProjectState) -> bool {
         .any(|package| package.status == WorkPackageStatus::Running)
 }
 
+fn has_running_work_for_session(state: &ProjectState, controller_session_id: &str) -> bool {
+    state.work_packages.values().any(|package| {
+        package.controller_session_id == controller_session_id
+            && package.status == WorkPackageStatus::Running
+    })
+}
+
 fn validate_kebab_name(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 80
@@ -1487,6 +2225,23 @@ fn validate_kebab_name(value: &str) -> Result<()> {
         anyhow::bail!("Agent Space name must be lowercase kebab-case");
     }
     Ok(())
+}
+
+fn inferred_space_tags(role: AgentSpaceRole, name: &str, purpose: &str) -> BTreeSet<String> {
+    let mut tags = BTreeSet::from([match role {
+        AgentSpaceRole::Implementation => "implementation".to_string(),
+        AgentSpaceRole::Review => "review".to_string(),
+    }]);
+    for value in [name, purpose] {
+        for token in value
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .map(str::to_ascii_lowercase)
+            .filter(|token| !token.is_empty() && token.len() <= 80)
+        {
+            tags.insert(token);
+        }
+    }
+    tags
 }
 
 fn validate_git_object(value: &str) -> Result<()> {
@@ -1519,12 +2274,16 @@ fn update_team_slot(
         .work_packages
         .get(work_package_id)
         .and_then(|package| package.workflow_run_id.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("WorkPackage {work_package_id} is not bound to a workflow Run"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("WorkPackage {work_package_id} is not bound to a workflow Run")
+        })?;
     let run = state
         .session_dcg_runs
         .values_mut()
         .find(|run| run.id == run_id)
-        .ok_or_else(|| anyhow::anyhow!("WorkPackage {work_package_id} names a missing workflow Run"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("WorkPackage {work_package_id} names a missing workflow Run")
+        })?;
     let slot = run
         .team_slots
         .values_mut()
@@ -1543,7 +2302,9 @@ fn update_team_slot(
 
 fn validate_improvement_target(target: &str) -> Result<()> {
     let path = Path::new(target);
-    let allowed = path.components().all(|part| matches!(part, std::path::Component::Normal(_)))
+    let allowed = path
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
         && ((target.starts_with("dcg/") && target.ends_with(".yaml"))
             || (target.starts_with("prompts/") && target.ends_with(".md")));
     if !allowed {
@@ -1563,6 +2324,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
         .map(|package| {
             Ok(PmWorkPackageStatus {
                 id: package.id.clone(),
+                controller_session_id: package.controller_session_id.clone(),
                 title: package.title.clone(),
                 outcome: package.outcome.clone(),
                 status: enum_wire_name(package.status)?,
@@ -1596,6 +2358,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 source_commit: space.source_commit.clone(),
                 builder_lock_digest: space.builder_lock_digest.clone(),
                 role: enum_wire_name(space.role)?,
+                tags: space.tags.iter().cloned().collect(),
                 active: space.active,
                 resource_state: enum_wire_name(space.resource_state)?,
                 resource_revision: space.resource_revision,
@@ -1642,6 +2405,8 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                         .map(|edge| {
                             Ok(PmWorkflowEdgeStatus {
                                 id: edge.id.clone(),
+                                label: edge.label.clone(),
+                                description: edge.description.clone(),
                                 from: edge.from.clone(),
                                 to: edge.to.clone(),
                                 condition: serde_json::to_string(&edge.when)?,
@@ -1658,22 +2423,41 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
         .values()
         .map(|run| {
             let definition = run.definition_snapshot.as_ref().or_else(|| {
-                run.graph_id.as_deref().and_then(|id| catalog.session_workflows.get(id))
+                run.graph_id
+                    .as_deref()
+                    .and_then(|id| catalog.session_workflows.get(id))
             });
+            let trusted_facts = definition
+                .map(|definition| {
+                    let controller_session_id = run
+                        .controller_session_id
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("workflow Run has no controller Session"))?;
+                    trusted_run_facts(state, controller_session_id, definition)
+                })
+                .transpose()?
+                .unwrap_or_default();
             let available_edges = definition
                 .map(|definition| {
                     definition
                         .edges
                         .iter()
                         .filter(|edge| run.active_nodes.contains(&edge.from))
+                        .filter(|edge| {
+                            edge.max_traversals.is_none_or(|limit| {
+                                run.traversals.get(&edge.id).copied().unwrap_or(0) < limit
+                            })
+                        })
                         .map(|edge| {
                             Ok(PmWorkflowAvailableEdgeStatus {
                                 id: edge.id.clone(),
+                                label: edge.label.clone(),
+                                description: edge.description.clone(),
                                 from: edge.from.clone(),
                                 to: edge.to.clone(),
                                 condition: serde_json::to_string(&edge.when)?,
                                 choose_by: edge.choose_by.map(enum_wire_name).transpose()?,
-                                satisfied: edge.when.satisfied_by(&run.facts),
+                                satisfied: edge.when.satisfied_by(&trusted_facts),
                             })
                         })
                         .collect::<Result<Vec<_>>>()
@@ -1687,6 +2471,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 graph_version: run.graph_version,
                 definition: definition.map(workflow_definition_status).transpose()?,
                 status: enum_wire_name(run.status)?,
+                outcome: run.outcome.clone(),
                 active_nodes: run.active_nodes.iter().cloned().collect(),
                 facts: run.facts.iter().cloned().collect(),
                 node_instances: run
@@ -1698,6 +2483,9 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                             node_id: instance.node_id.clone(),
                             iteration: instance.iteration,
                             status: enum_wire_name(instance.status)?,
+                            cohort_id: instance.cohort_id.clone(),
+                            fanout_source: instance.fanout_source.clone(),
+                            fanout_sealed: instance.fanout_sealed,
                         })
                     })
                     .collect::<Result<Vec<_>>>()?,
@@ -1716,6 +2504,18 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                     })
                     .collect::<Result<Vec<_>>>()?,
                 available_edges,
+                intent: run
+                    .controller_session_id
+                    .as_ref()
+                    .and_then(|session_id| state.session_intents.get(session_id))
+                    .map(intent_status),
+                supervisor: run
+                    .controller_session_id
+                    .as_ref()
+                    .and_then(|session_id| state.session_supervisors.get(session_id))
+                    .map(supervisor_status)
+                    .transpose()?
+                    .unwrap_or(supervisor_status(&supervisor::SupervisorState::idle())?),
                 revision: run.revision,
             })
         })
@@ -1726,60 +2526,152 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
         phase: enum_wire_name(state.phase)?,
         lifecycle: enum_wire_name(state.lifecycle)?,
         revision: state.revision,
-        intent: state.intent.as_ref().map(|intent| PmIntentStatus {
-            revision: intent.revision,
-            outcome: intent.outcome.clone(),
-            acceptance: intent.acceptance.clone(),
-            constraints: intent.constraints.clone(),
-            out_of_scope: intent.out_of_scope.clone(),
-        }),
+        intent: state.intent.as_ref().map(intent_status),
         work_packages,
         agent_spaces,
         workflow_catalog,
         workflow_runs,
-        improvement_candidates: state.improvement_candidates.values().map(|candidate| {
-            Ok(PmImprovementCandidateStatus {
-                id: candidate.id.clone(),
-                target: candidate.target.clone(),
-                rationale: candidate.rationale.clone(),
-                status: enum_wire_name(candidate.status)?,
-                candidate_digest: candidate.candidate_digest.clone(),
-                review_session_id: candidate.review_session_id.clone(),
-                review_evidence: candidate.review_evidence.clone(),
-                user_approved: candidate.user_approved,
+        improvement_candidates: state
+            .improvement_candidates
+            .values()
+            .map(|candidate| {
+                Ok(PmImprovementCandidateStatus {
+                    id: candidate.id.clone(),
+                    target: candidate.target.clone(),
+                    rationale: candidate.rationale.clone(),
+                    status: enum_wire_name(candidate.status)?,
+                    candidate_digest: candidate.candidate_digest.clone(),
+                    review_session_id: candidate.review_session_id.clone(),
+                    review_evidence: candidate.review_evidence.clone(),
+                    user_approved: candidate.user_approved,
+                    promoted_commit: candidate.promoted_commit.clone(),
+                })
             })
-        }).collect::<Result<Vec<_>>>()?,
-        supervisor: PmSupervisorStatus {
-            mode: enum_wire_name(state.supervisor.mode)?,
-            next_check_at_ms: state.supervisor.next_check_at_ms,
-            wake_pending: state.supervisor.wake_pending,
-            wake_not_before_ms: state.supervisor.wake_not_before_ms,
-            wake_dispatch_count: state.supervisor.wake_dispatch_count,
-            wake_failed_count: state.supervisor.wake_failed_count,
-            coalesced_event_count: state.supervisor.coalesced_event_count,
-        },
+            .collect::<Result<Vec<_>>>()?,
+        supervisor: aggregate_supervisor_status(state)?,
         updated_at_ms: state.updated_at_ms,
     })
 }
 
-fn workflow_definition_status(definition: &dcg::DcgDefinition) -> Result<PmWorkflowDefinitionStatus> {
+fn workflow_definition_status(
+    definition: &dcg::DcgDefinition,
+) -> Result<PmWorkflowDefinitionStatus> {
     Ok(PmWorkflowDefinitionStatus {
         id: definition.id.clone(),
         version: definition.version,
         entry: definition.entry.clone(),
-        nodes: definition.nodes.iter().map(|node| Ok(PmWorkflowNodeStatus {
-            id: node.id.clone(),
-            kind: enum_wire_name(node.kind)?,
-            actor: node.executor.as_ref().map(|executor| enum_wire_name(executor.actor)).transpose()?,
-            objective: node.objective.as_ref().map(|item| item.prompt.clone()),
-        })).collect::<Result<Vec<_>>>()?,
-        edges: definition.edges.iter().map(|edge| Ok(PmWorkflowEdgeStatus {
-            id: edge.id.clone(),
-            from: edge.from.clone(),
-            to: edge.to.clone(),
-            condition: serde_json::to_string(&edge.when)?,
-            choose_by: edge.choose_by.map(enum_wire_name).transpose()?,
-        })).collect::<Result<Vec<_>>>()?,
+        nodes: definition
+            .nodes
+            .iter()
+            .map(|node| {
+                Ok(PmWorkflowNodeStatus {
+                    id: node.id.clone(),
+                    kind: enum_wire_name(node.kind)?,
+                    actor: node
+                        .executor
+                        .as_ref()
+                        .map(|executor| enum_wire_name(executor.actor))
+                        .transpose()?,
+                    objective: node.objective.as_ref().map(|item| item.prompt.clone()),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+        edges: definition
+            .edges
+            .iter()
+            .map(|edge| {
+                Ok(PmWorkflowEdgeStatus {
+                    id: edge.id.clone(),
+                    label: edge.label.clone(),
+                    description: edge.description.clone(),
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    condition: serde_json::to_string(&edge.when)?,
+                    choose_by: edge.choose_by.map(enum_wire_name).transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn intent_status(intent: &IntentRevision) -> PmIntentStatus {
+    PmIntentStatus {
+        revision: intent.revision,
+        outcome: intent.outcome.clone(),
+        acceptance: intent.acceptance.clone(),
+        constraints: intent.constraints.clone(),
+        out_of_scope: intent.out_of_scope.clone(),
+    }
+}
+
+fn supervisor_status(value: &supervisor::SupervisorState) -> Result<PmSupervisorStatus> {
+    Ok(PmSupervisorStatus {
+        mode: enum_wire_name(value.mode)?,
+        next_check_at_ms: value.next_check_at_ms,
+        wake_pending: value.wake_pending,
+        wake_not_before_ms: value.wake_not_before_ms,
+        wake_dispatch_count: value.wake_dispatch_count,
+        wake_failed_count: value.wake_failed_count,
+        coalesced_event_count: value.coalesced_event_count,
+    })
+}
+
+fn aggregate_supervisor_status(state: &ProjectState) -> Result<PmSupervisorStatus> {
+    if state.session_supervisors.is_empty() {
+        return supervisor_status(&state.supervisor);
+    }
+    let mode = if state
+        .session_supervisors
+        .values()
+        .any(|value| value.mode == supervisor::SupervisorMode::WaitingUser)
+    {
+        supervisor::SupervisorMode::WaitingUser
+    } else if state
+        .session_supervisors
+        .values()
+        .any(|value| value.mode == supervisor::SupervisorMode::Active)
+    {
+        supervisor::SupervisorMode::Active
+    } else if state
+        .session_supervisors
+        .values()
+        .all(|value| value.mode == supervisor::SupervisorMode::Terminal)
+    {
+        supervisor::SupervisorMode::Terminal
+    } else {
+        supervisor::SupervisorMode::Idle
+    };
+    Ok(PmSupervisorStatus {
+        mode: enum_wire_name(mode)?,
+        next_check_at_ms: state
+            .session_supervisors
+            .values()
+            .filter_map(|value| value.next_check_at_ms)
+            .min(),
+        wake_pending: state
+            .session_supervisors
+            .values()
+            .any(|value| value.wake_pending),
+        wake_not_before_ms: state
+            .session_supervisors
+            .values()
+            .filter_map(|value| value.wake_not_before_ms)
+            .min(),
+        wake_dispatch_count: state
+            .session_supervisors
+            .values()
+            .map(|value| value.wake_dispatch_count)
+            .sum(),
+        wake_failed_count: state
+            .session_supervisors
+            .values()
+            .map(|value| value.wake_failed_count)
+            .sum(),
+        coalesced_event_count: state
+            .session_supervisors
+            .values()
+            .map(|value| value.coalesced_event_count)
+            .sum(),
     })
 }
 
@@ -1856,6 +2748,15 @@ mod tests {
         ] {
             crate::agent_space_builder::run(&root, &pm_space, command, true).unwrap();
         }
+        test_git(&root, &["init"]).await;
+        test_git(&root, &["config", "user.name", "GeneHub Test"]).await;
+        test_git(
+            &root,
+            &["config", "user.email", "genehub-test@example.invalid"],
+        )
+        .await;
+        test_git(&root, &["add", "spaces/pm"]).await;
+        test_git(&root, &["commit", "-m", "Initialize PM Space"]).await;
 
         let store = ProjectStore::new(&temp.path().join("data"));
         let first = store
@@ -1883,11 +2784,11 @@ mod tests {
         );
         assert_eq!(selected.session_dcg_runs["s_pm_1"].graph_id, None);
 
-        let candidate_dir = root.join(
-            "spaces/pm/skills/project-workflow/candidates/clearer-intake/prompts",
-        );
+        let candidate_dir =
+            root.join("spaces/pm/skills/project-workflow/candidates/clearer-intake/prompts");
         std::fs::create_dir_all(&candidate_dir).unwrap();
-        let candidate_text = "# Intake v2\n\nRecord explicit acceptance evidence before planning.\n";
+        let candidate_text =
+            "# Intake v2\n\nRecord explicit acceptance evidence before planning.\n";
         std::fs::write(candidate_dir.join("intake.md"), candidate_text).unwrap();
         let proposed = store
             .propose_improvement(
@@ -1930,6 +2831,12 @@ mod tests {
             promoted.improvement_candidates["clearer-intake"].status,
             ImprovementCandidateStatus::Promoted
         );
+        let promoted_commit = promoted.improvement_candidates["clearer-intake"]
+            .promoted_commit
+            .as_deref()
+            .expect("promotion records its durable Git commit");
+        assert_eq!(promoted_commit.len(), 40);
+        assert!(crate::git::status(&root).await.unwrap().clean);
         assert_eq!(
             std::fs::read_to_string(
                 root.join("spaces/pm/skills/project-workflow/prompts/intake.md")
@@ -1937,6 +2844,193 @@ mod tests {
             .unwrap(),
             candidate_text
         );
+    }
+
+    #[tokio::test]
+    async fn one_pm_session_can_finish_without_stopping_another_active_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "parallel-project",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ProjectStore::new(&temp.path().join("data"));
+        store
+            .initialize_bootstrapped("w_project", "w_pm", "s_one", &root)
+            .await
+            .unwrap();
+        store
+            .initialize_bootstrapped("w_project", "w_pm", "s_two", &root)
+            .await
+            .unwrap();
+        store
+            .select_session_dcg("w_project", "s_one", "feature")
+            .await
+            .unwrap();
+        let mut project = store
+            .select_session_dcg("w_project", "s_two", "bugfix")
+            .await
+            .unwrap();
+        project.phase = ProjectPhase::Active;
+        project.session_dcg_runs.get_mut("s_one").unwrap().status = dcg::DcgRunStatus::Completed;
+        project.session_dcg_runs.get_mut("s_one").unwrap().outcome = Some("delivered".into());
+
+        for (id, owner, status) in [
+            ("one-package", "s_one", WorkPackageStatus::Accepted),
+            ("two-package", "s_two", WorkPackageStatus::Running),
+        ] {
+            let mut package = WorkPackage::planned(
+                id.into(),
+                id.into(),
+                format!("deliver {id}"),
+                vec![],
+                "implementation".into(),
+                format!("work/{id}"),
+                PathBuf::from(format!("/project/worktrees/{id}")),
+                1,
+            )
+            .unwrap();
+            package.controller_session_id = owner.into();
+            package.status = status;
+            if status == WorkPackageStatus::Running {
+                package.work_session_id = Some("s_work_two".into());
+            }
+            project.work_packages.insert(id.into(), package);
+        }
+        store.save(&project).unwrap();
+
+        let after_one = store
+            .set_lifecycle("w_project", "s_one", ProjectLifecycle::Completed)
+            .await
+            .unwrap();
+        assert_eq!(after_one.lifecycle, ProjectLifecycle::Active);
+        assert_eq!(
+            after_one.session_supervisors["s_one"].mode,
+            supervisor::SupervisorMode::Terminal
+        );
+        assert_ne!(
+            after_one.session_supervisors["s_two"].mode,
+            supervisor::SupervisorMode::Terminal
+        );
+        assert!(store
+            .set_lifecycle("w_project", "s_two", ProjectLifecycle::Completed)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn workflow_completion_facts_come_from_a_sealed_workpackage_cohort() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "facts-project",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalog = DcgCatalog::load(&root.join("spaces/pm/skills/project-workflow")).unwrap();
+        let definition = catalog.session_workflow("feature").unwrap();
+        let mut state = ProjectState::new("w_project".into(), "s_pm".into(), root, 1);
+        let mut run = DcgRun::new_discussion("run-s_pm".into(), "s_pm".into()).unwrap();
+        run.select_before_start(definition).unwrap();
+        run.record_actor_facts(
+            definition,
+            "intake",
+            DcgActor::Pm,
+            &BTreeSet::from(["intent.aligned".into()]),
+        )
+        .unwrap();
+        run.transition(
+            definition,
+            "aligned",
+            &BTreeSet::from(["intent.persisted".into(), "intent.aligned".into()]),
+            DcgActor::Pm,
+        )
+        .unwrap();
+        run.record_actor_facts(
+            definition,
+            "plan",
+            DcgActor::Pm,
+            &BTreeSet::from(["plan.ready".into()]),
+        )
+        .unwrap();
+        run.transition(
+            definition,
+            "planned",
+            &BTreeSet::from(["plan.ready".into()]),
+            DcgActor::Pm,
+        )
+        .unwrap();
+        assert!(run
+            .record_actor_facts(
+                definition,
+                "implement",
+                DcgActor::Pm,
+                &BTreeSet::from(["work.candidate".into()]),
+            )
+            .is_err());
+        let node_instance_id = run.active_node_instance("implement").unwrap().id.clone();
+        run.seal_fanout(&node_instance_id).unwrap();
+        state.session_dcg_runs.insert("s_pm".into(), run);
+        state.session_intents.insert(
+            "s_pm".into(),
+            IntentRevision {
+                revision: 1,
+                outcome: "deliver".into(),
+                acceptance: vec!["accepted".into()],
+                constraints: vec![],
+                out_of_scope: vec![],
+                affected_work_packages: vec![],
+                recorded_at_ms: 1,
+            },
+        );
+
+        for (id, status) in [
+            ("running", WorkPackageStatus::Running),
+            ("blocked", WorkPackageStatus::Blocked),
+        ] {
+            let mut package = WorkPackage::planned(
+                id.into(),
+                id.into(),
+                format!("deliver {id}"),
+                vec![],
+                "implementation".into(),
+                format!("work/{id}"),
+                PathBuf::from(format!("/project/worktrees/{id}")),
+                1,
+            )
+            .unwrap();
+            package.status = status;
+            package
+                .bind_to_workflow("s_pm".into(), "run-s_pm".into(), node_instance_id.clone())
+                .unwrap();
+            state.work_packages.insert(id.into(), package);
+        }
+
+        let facts = trusted_run_facts(&state, "s_pm", definition).unwrap();
+        assert!(facts.contains("work.running"));
+        assert!(!facts.contains("work.blocked"));
+        assert!(!facts.contains("work.candidate"));
+
+        state.work_packages.get_mut("running").unwrap().status = WorkPackageStatus::Candidate;
+        let facts = trusted_run_facts(&state, "s_pm", definition).unwrap();
+        assert!(facts.contains("work.blocked"));
+        assert!(!facts.contains("work.candidate"));
+
+        state.work_packages.get_mut("blocked").unwrap().status = WorkPackageStatus::Candidate;
+        let facts = trusted_run_facts(&state, "s_pm", definition).unwrap();
+        assert!(facts.contains("work.candidate"));
+        assert!(!facts.contains("work.blocked"));
     }
 
     #[tokio::test]
@@ -2283,15 +3377,18 @@ mod tests {
         let store = ProjectStore::new(&data);
         crate::agent_space_builder::render_pm_space(
             &root,
-            &crate::agent_space_builder::PmSpaceTemplateValues::new("game", "zh-CN", "feature").unwrap(),
-        ).unwrap();
+            &crate::agent_space_builder::PmSpaceTemplateValues::new("game", "zh-CN", "feature")
+                .unwrap(),
+        )
+        .unwrap();
         let pm_space = root.join("spaces/pm");
         crate::agent_space_builder::run(
             &root,
             &pm_space,
             crate::agent_space_builder::Command::Build { dry_run: false },
             true,
-        ).unwrap();
+        )
+        .unwrap();
         let mut project = store
             .initialize_bootstrapped("w_project", "w_pm", "s_pm", &root)
             .await
@@ -2354,6 +3451,7 @@ mod tests {
                     } else {
                         AgentSpaceRole::Implementation
                     },
+                    tags: BTreeSet::from([name.to_string()]),
                     active: true,
                     resource_state: AgentSpaceResourceState::Idle,
                     lease: None,
@@ -2379,13 +3477,23 @@ mod tests {
             .unwrap();
         let run = project.session_dcg_runs.get_mut("s_pm").unwrap();
         run.select_before_start(definition).unwrap();
-        let node_instance_id = run
-            .active_node_instance(&definition.entry)
-            .unwrap()
-            .id
-            .clone();
+        run.transition(
+            definition,
+            "aligned",
+            &BTreeSet::from(["intent.persisted".into(), "intent.aligned".into()]),
+            DcgActor::Pm,
+        )
+        .unwrap();
+        run.transition(
+            definition,
+            "planned",
+            &BTreeSet::from(["plan.ready".into()]),
+            DcgActor::Pm,
+        )
+        .unwrap();
+        let node_instance_id = run.active_node_instance("implement").unwrap().id.clone();
         package
-            .bind_to_workflow(run.id.clone(), node_instance_id.clone())
+            .bind_to_workflow("s_pm".into(), run.id.clone(), node_instance_id.clone())
             .unwrap();
         run.bind_team_slot(TeamSlot {
             id: "slot-gameplay".into(),
@@ -2630,7 +3738,7 @@ mod tests {
     }
 
     #[test]
-    fn review_rework_returns_to_a_clean_dispatchable_attempt() {
+    fn review_rework_preserves_failed_evidence_and_requires_a_new_package() {
         let mut package = WorkPackage::planned(
             "a".into(),
             "A".into(),
@@ -2659,7 +3767,7 @@ mod tests {
         });
         let mut graph = [(package.id.clone(), package)].into_iter().collect();
 
-        task_graph::transition(
+        assert!(task_graph::transition(
             &mut graph,
             "a",
             WorkPackageStatus::Ready,
@@ -2669,12 +3777,25 @@ mod tests {
             None,
             2,
         )
+        .is_err());
+        task_graph::transition(
+            &mut graph,
+            "a",
+            WorkPackageStatus::Cancelled,
+            None,
+            None,
+            None,
+            None,
+            3,
+        )
         .unwrap();
 
-        assert_eq!(graph["a"].status, WorkPackageStatus::Ready);
-        assert!(graph["a"].work_session_id.is_none());
-        assert!(graph["a"].candidate.is_none());
-        assert!(graph["a"].review.is_none());
+        assert_eq!(graph["a"].status, WorkPackageStatus::Cancelled);
+        assert!(graph["a"].candidate.is_some());
+        assert_eq!(
+            graph["a"].review.as_ref().and_then(|review| review.verdict),
+            Some(ReviewVerdict::Fail)
+        );
     }
 
     #[test]

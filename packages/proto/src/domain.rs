@@ -275,6 +275,8 @@ pub struct PmImprovementCandidateStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_evidence: Option<String>,
     pub user_approved: bool,
+    #[ts(optional)]
+    pub promoted_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -294,6 +296,9 @@ pub struct PmIntentStatus {
 #[ts(export, export_to = "index.ts")]
 pub struct PmWorkPackageStatus {
     pub id: String,
+    /// PM Session that owns this package. Project-wide status projections
+    /// must never make another Session's work look like local progress.
+    pub controller_session_id: String,
     pub title: String,
     pub outcome: String,
     pub status: String,
@@ -354,6 +359,10 @@ pub struct PmWorkflowNodeStatus {
 #[ts(export, export_to = "index.ts")]
 pub struct PmWorkflowEdgeStatus {
     pub id: String,
+    #[ts(optional)]
+    pub label: Option<String>,
+    #[ts(optional)]
+    pub description: Option<String>,
     pub from: String,
     pub to: String,
     pub condition: String,
@@ -375,11 +384,16 @@ pub struct PmWorkflowRunStatus {
     #[serde(default)]
     pub definition: Option<PmWorkflowDefinitionStatus>,
     pub status: String,
+    #[ts(optional)]
+    pub outcome: Option<String>,
     pub active_nodes: Vec<String>,
     pub facts: Vec<String>,
     pub node_instances: Vec<PmWorkflowNodeInstanceStatus>,
     pub team_slots: Vec<PmTeamSlotStatus>,
     pub available_edges: Vec<PmWorkflowAvailableEdgeStatus>,
+    #[ts(optional)]
+    pub intent: Option<PmIntentStatus>,
+    pub supervisor: PmSupervisorStatus,
     #[ts(type = "number")]
     pub revision: u64,
 }
@@ -392,6 +406,10 @@ pub struct PmWorkflowNodeInstanceStatus {
     pub node_id: String,
     pub iteration: u32,
     pub status: String,
+    pub cohort_id: String,
+    #[ts(optional)]
+    pub fanout_source: Option<String>,
+    pub fanout_sealed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -412,6 +430,10 @@ pub struct PmTeamSlotStatus {
 #[ts(export, export_to = "index.ts")]
 pub struct PmWorkflowAvailableEdgeStatus {
     pub id: String,
+    #[ts(optional)]
+    pub label: Option<String>,
+    #[ts(optional)]
+    pub description: Option<String>,
     pub from: String,
     pub to: String,
     pub condition: String,
@@ -430,6 +452,7 @@ pub struct PmAgentSpaceStatus {
     pub source_commit: String,
     pub builder_lock_digest: String,
     pub role: String,
+    pub tags: Vec<String>,
     pub active: bool,
     pub resource_state: String,
     #[ts(type = "number")]
