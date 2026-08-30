@@ -50,8 +50,11 @@ defineJourney(
       // workers, must create the concurrency observed by this case.
       environments: 1,
       cpu: 8,
-      memoryMb: 16_384,
-      io: 8,
+      // These are scheduler weights, not cgroup limits. Claim the complete
+      // single-environment pool so testctl can launch exactly one product
+      // environment; concurrency is created by PM Sessions inside it.
+      memoryMb: 2_048,
+      io: 1,
       browser: 0,
       pool: "real-llm",
     },
