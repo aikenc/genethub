@@ -568,7 +568,12 @@ controllerSessionId: string, title: string, outcome: string, status: string, dep
  * Capability narrowing for one fanout item. The Coordinator combines
  * these with the node selector before choosing a concrete Agent Space.
  */
-requiredSpaceTags: Array<string>, agentSpace: string, repository: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
+requiredSpaceTags: Array<string>, agentSpace: string, repository: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, 
+/**
+ * Coordinator-proven local main baseline that contains this exact
+ * independently accepted candidate.
+ */
+integratedCommit?: string, integratedTree?: string, integrationError?: string, blockReason?: string, };
 
 export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 

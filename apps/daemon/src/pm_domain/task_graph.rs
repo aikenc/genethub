@@ -61,6 +61,20 @@ pub struct ReviewEvidence {
     pub evidence: Vec<String>,
 }
 
+/// Deterministic evidence that an independently accepted candidate is now
+/// reachable from the project's local `main` baseline. The Coordinator owns
+/// this record; neither the PM nor a WorkAgent may self-declare integration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationEvidence {
+    pub repository: String,
+    pub candidate_commit: String,
+    pub candidate_tree: String,
+    pub previous_head: String,
+    pub integrated_commit: String,
+    pub integrated_tree: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkPackage {
@@ -92,6 +106,13 @@ pub struct WorkPackage {
     pub work_session_id: Option<String>,
     pub candidate: Option<CandidateEvidence>,
     pub review: Option<ReviewEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration: Option<IntegrationEvidence>,
+    /// Bounded Coordinator-owned reason why the accepted candidate could not
+    /// be integrated into the current clean baseline. Workflow facts derive
+    /// from this record; the PM cannot self-declare an integration failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integration_error: Option<String>,
     pub block_reason: Option<String>,
     pub updated_at_ms: i64,
 }
@@ -143,6 +164,8 @@ impl WorkPackage {
             work_session_id: None,
             candidate: None,
             review: None,
+            integration: None,
+            integration_error: None,
             block_reason: None,
             updated_at_ms: now_ms,
         })
@@ -392,6 +415,8 @@ pub fn transition(
         package.work_session_id = None;
         package.candidate = None;
         package.review = None;
+        package.integration = None;
+        package.integration_error = None;
     }
     if work_session_id.is_some() {
         package.work_session_id = work_session_id;
@@ -399,6 +424,8 @@ pub fn transition(
     if candidate.is_some() {
         package.candidate = candidate;
         package.review = None;
+        package.integration = None;
+        package.integration_error = None;
     }
     if review.is_some() {
         package.review = review;
@@ -412,6 +439,79 @@ pub fn transition(
     } else {
         None
     };
+    package.updated_at_ms = now_ms;
+    Ok(())
+}
+
+pub fn record_integration(
+    packages: &mut BTreeMap<String, WorkPackage>,
+    id: &str,
+    evidence: IntegrationEvidence,
+    now_ms: i64,
+) -> Result<()> {
+    let current = packages
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("no such work package: {id}"))?;
+    if current.status != WorkPackageStatus::Accepted {
+        anyhow::bail!("only an accepted WorkPackage can be integrated");
+    }
+    let candidate = current
+        .candidate
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("integration requires immutable candidate evidence"))?;
+    if current.review.as_ref().and_then(|review| review.verdict) != Some(ReviewVerdict::Pass) {
+        anyhow::bail!("integration requires an independent passing review");
+    }
+    validate_text("integration repository", &evidence.repository, 2_000)?;
+    for (label, value) in [
+        ("integration candidate commit", &evidence.candidate_commit),
+        ("integration candidate tree", &evidence.candidate_tree),
+        ("integration previous HEAD", &evidence.previous_head),
+        ("integration result commit", &evidence.integrated_commit),
+        ("integration result tree", &evidence.integrated_tree),
+    ] {
+        validate_git_object(label, value)?;
+    }
+    if evidence.repository != candidate.repository
+        || evidence.candidate_commit != candidate.commit
+        || evidence.candidate_tree != candidate.tree
+    {
+        anyhow::bail!("integration evidence must bind the accepted candidate");
+    }
+    if let Some(existing) = current.integration.as_ref() {
+        if existing == &evidence {
+            return Ok(());
+        }
+        anyhow::bail!("an integrated WorkPackage cannot change baseline evidence");
+    }
+    let package = packages.get_mut(id).expect("checked package exists");
+    package.integration = Some(evidence);
+    package.integration_error = None;
+    package.updated_at_ms = now_ms;
+    Ok(())
+}
+
+pub fn record_integration_failure(
+    packages: &mut BTreeMap<String, WorkPackage>,
+    id: &str,
+    reason: String,
+    now_ms: i64,
+) -> Result<()> {
+    let current = packages
+        .get(id)
+        .ok_or_else(|| anyhow::anyhow!("no such work package: {id}"))?;
+    if current.status != WorkPackageStatus::Accepted
+        || current.candidate.is_none()
+        || current.review.as_ref().and_then(|review| review.verdict) != Some(ReviewVerdict::Pass)
+    {
+        anyhow::bail!("integration failure requires an independently accepted candidate");
+    }
+    if current.integration.is_some() {
+        anyhow::bail!("an integrated WorkPackage cannot record an integration failure");
+    }
+    validate_text("integration failure", &reason, 4_000)?;
+    let package = packages.get_mut(id).expect("checked package exists");
+    package.integration_error = Some(reason);
     package.updated_at_ms = now_ms;
     Ok(())
 }

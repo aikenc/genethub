@@ -34,8 +34,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use supervisor::WakeDispatchOutcome;
 use task_graph::{
-    validate_graph, CandidateEvidence, ReviewEvidence, ReviewVerdict, WorkPackage,
-    WorkPackageStatus,
+    validate_graph, CandidateEvidence, IntegrationEvidence, ReviewEvidence, ReviewVerdict,
+    WorkPackage, WorkPackageStatus,
 };
 use tokio::sync::Mutex;
 use topology::{AgentSpaceRecord, AgentSpaceResourceState, AgentSpaceRole};
@@ -1186,6 +1186,129 @@ impl ProjectStore {
         Ok(state)
     }
 
+    /// Merge one exact, independently accepted candidate into the project's
+    /// clean local `main` baseline and persist typed integration evidence.
+    /// The PM may request this operation only while its active Workflow node
+    /// has an outgoing `baseline.integrated` condition; Git identity, review
+    /// binding, cleanliness and ancestry remain Coordinator-owned checks.
+    pub async fn integrate_work_package(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        id: &str,
+    ) -> Result<ProjectState> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        state.ensure_mutable()?;
+        state.ensure_package_owner(controller_session_id, id)?;
+        ensure_run_budget_open(&state, controller_session_id, now_ms())?;
+        if state
+            .work_packages
+            .get(id)
+            .is_some_and(|package| package.integration.is_some())
+        {
+            return Ok(state);
+        }
+
+        let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })?;
+        let definition = run_definition(&state, controller_session_id, &catalog)?;
+        let run = state
+            .session_dcg_runs
+            .get(controller_session_id)
+            .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?;
+        let integration_sources = active_integration_source_instances(run, &definition)?;
+        if integration_sources.is_empty() {
+            anyhow::bail!(
+                "accepted candidates may be integrated only from an active PM integration node"
+            );
+        }
+
+        let package = state
+            .work_packages
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("no such work package: {id}"))?
+            .clone();
+        if package.status != WorkPackageStatus::Accepted {
+            anyhow::bail!("only an accepted WorkPackage can be integrated");
+        }
+        if !package
+            .node_instance_id
+            .as_ref()
+            .is_some_and(|instance| integration_sources.contains(instance))
+        {
+            anyhow::bail!("WorkPackage does not belong to the active integration cohort");
+        }
+        let candidate = package
+            .candidate
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("integration requires immutable candidate evidence"))?;
+        if package.review.as_ref().and_then(|review| review.verdict) != Some(ReviewVerdict::Pass) {
+            anyhow::bail!("integration requires an independent passing review");
+        }
+        crate::git::verify_worktree_candidate(
+            &package.worktree,
+            &state.root.join("repositories").join(&package.repository),
+            &package.branch,
+            &candidate.commit,
+            &candidate.tree,
+        )
+        .await?;
+
+        let repositories_root = state
+            .root
+            .join("repositories")
+            .canonicalize()
+            .context("the PM project has no repositories directory")?;
+        let repository_root = repositories_root
+            .join(&package.repository)
+            .canonicalize()
+            .with_context(|| format!("no such package repository: {}", package.repository))?;
+        if repository_root.parent() != Some(repositories_root.as_path()) {
+            anyhow::bail!("package repository must be directly under project repositories/");
+        }
+        let integrated = match crate::git::integrate_candidate(
+            &repository_root,
+            &candidate.commit,
+            &candidate.tree,
+        )
+        .await
+        {
+            Ok(integrated) => integrated,
+            Err(error) => {
+                task_graph::record_integration_failure(
+                    &mut state.work_packages,
+                    id,
+                    format!("{error:#}"),
+                    now_ms(),
+                )?;
+                reconcile_session_dcg(&mut state, controller_session_id, &definition)?;
+                state.touch(now_ms());
+                self.save(&state)?;
+                return Err(error);
+            }
+        };
+        task_graph::record_integration(
+            &mut state.work_packages,
+            id,
+            IntegrationEvidence {
+                repository: candidate.repository.clone(),
+                candidate_commit: candidate.commit.clone(),
+                candidate_tree: candidate.tree.clone(),
+                previous_head: integrated.previous_head,
+                integrated_commit: integrated.integrated_commit,
+                integrated_tree: integrated.integrated_tree,
+            },
+            now_ms(),
+        )?;
+        reconcile_session_dcg(&mut state, controller_session_id, &definition)?;
+        state.touch(now_ms());
+        self.save(&state)?;
+        Ok(state)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn record_agent_space(
         &self,
@@ -1764,9 +1887,16 @@ impl ProjectStore {
             } else if active_work {
                 let changed = supervisor.observation_digest.as_deref() != Some(&digest);
                 let due = supervisor.due(now_ms);
-                if changed || due {
+                if changed {
+                    if wake_when_quiet {
+                        supervisor.observe(digest, true, false, false, now_ms);
+                    } else {
+                        supervisor.observe_quiet(digest, now_ms);
+                    }
+                    changed_state = true;
+                } else if due {
                     supervisor.observe(digest, true, false, false, now_ms);
-                    if !changed && due && wake_when_quiet {
+                    if wake_when_quiet {
                         supervisor.request_quiet_wake(now_ms);
                     }
                     changed_state = true;
@@ -2509,6 +2639,42 @@ fn trusted_run_facts(
     if state.session_intents.contains_key(controller_session_id) {
         facts.insert("intent.persisted".into());
     }
+    let integration_sources = active_integration_source_instances(run, definition)?;
+    let accepted_candidates = state
+        .work_packages
+        .values()
+        .filter(|package| {
+            package.controller_session_id == controller_session_id
+                && package.workflow_run_id.as_deref() == Some(run.id.as_str())
+                && package.status == WorkPackageStatus::Accepted
+                && package.candidate.is_some()
+                && package
+                    .node_instance_id
+                    .as_ref()
+                    .is_some_and(|instance| integration_sources.contains(instance))
+        })
+        .collect::<Vec<_>>();
+    if accepted_candidates
+        .iter()
+        .any(|package| package.integration_error.is_some())
+    {
+        facts.insert("integration.blocked".into());
+    }
+    if !accepted_candidates.is_empty()
+        && accepted_candidates.iter().all(|package| {
+            package
+                .candidate
+                .as_ref()
+                .zip(package.integration.as_ref())
+                .is_some_and(|(candidate, integration)| {
+                    integration.repository == candidate.repository
+                        && integration.candidate_commit == candidate.commit
+                        && integration.candidate_tree == candidate.tree
+                })
+        })
+    {
+        facts.insert("baseline.integrated".into());
+    }
     for instance in run
         .node_instances
         .values()
@@ -2646,6 +2812,51 @@ fn trusted_run_facts(
     Ok(facts)
 }
 
+/// Resolve the WorkAgent node instances whose accepted candidates feed the
+/// currently active PM integration node. System review/join nodes are walked
+/// backwards, but older retry cohorts remain outside this set.
+fn active_integration_source_instances(
+    run: &dcg::DcgRun,
+    definition: &DcgDefinition,
+) -> Result<BTreeSet<String>> {
+    let mut pending = Vec::new();
+    for instance in run.node_instances.values().filter(|instance| {
+        instance.status == dcg::DcgNodeInstanceStatus::Active
+            && definition
+                .node(&instance.node_id)
+                .ok()
+                .and_then(|node| node.executor.as_ref())
+                .is_some_and(|executor| executor.actor == DcgActor::Pm)
+            && definition.edges.iter().any(|edge| {
+                edge.from == instance.node_id && edge.when.mentions_fact("baseline.integrated")
+            })
+    }) {
+        pending.extend(instance.predecessor_instances.iter().cloned());
+    }
+    let mut visited = BTreeSet::new();
+    let mut sources = BTreeSet::new();
+    while let Some(instance_id) = pending.pop() {
+        if !visited.insert(instance_id.clone()) {
+            continue;
+        }
+        let instance = run
+            .node_instances
+            .get(&instance_id)
+            .ok_or_else(|| anyhow::anyhow!("integration predecessor instance is missing"))?;
+        let node = definition.node(&instance.node_id)?;
+        if node
+            .executor
+            .as_ref()
+            .is_some_and(|executor| executor.actor == DcgActor::WorkAgent)
+        {
+            sources.insert(instance_id);
+        } else {
+            pending.extend(instance.predecessor_instances.iter().cloned());
+        }
+    }
+    Ok(sources)
+}
+
 fn reconcile_session_dcg(
     state: &mut ProjectState,
     controller_session_id: &str,
@@ -2664,7 +2875,10 @@ fn reconcile_session_dcg(
                 let node = definition.node(node_id)?;
                 let automatic = node.kind == DcgNodeKind::Join
                     || node.executor.as_ref().is_some_and(|executor| {
-                        matches!(executor.actor, DcgActor::WorkAgent | DcgActor::System)
+                        matches!(
+                            executor.actor,
+                            DcgActor::Pm | DcgActor::WorkAgent | DcgActor::System
+                        )
                     });
                 if !automatic {
                     continue;
@@ -2701,11 +2915,21 @@ fn reconcile_session_dcg(
             return Ok(());
         };
         let refs = edge_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        let chooser =
+            definition
+                .node(&source)?
+                .executor
+                .as_ref()
+                .map_or(DcgActor::System, |executor| match executor.actor {
+                    DcgActor::Pm => DcgActor::Pm,
+                    DcgActor::User => DcgActor::User,
+                    DcgActor::WorkAgent | DcgActor::System => DcgActor::System,
+                });
         state
             .session_dcg_runs
             .get_mut(controller_session_id)
             .expect("validated workflow Run")
-            .transition_many(definition, &refs, &facts, DcgActor::System)
+            .transition_many(definition, &refs, &facts, chooser)
             .with_context(|| format!("automatically advancing Workflow node {source}"))?;
     }
     anyhow::bail!("Workflow automatic transition limit exceeded")
@@ -3088,6 +3312,15 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                     .and_then(|item| item.verdict)
                     .map(enum_wire_name)
                     .transpose()?,
+                integrated_commit: package
+                    .integration
+                    .as_ref()
+                    .map(|item| item.integrated_commit.clone()),
+                integrated_tree: package
+                    .integration
+                    .as_ref()
+                    .map(|item| item.integrated_tree.clone()),
+                integration_error: package.integration_error.clone(),
                 block_reason: package.block_reason.clone(),
             })
         })
@@ -4453,7 +4686,7 @@ edges: []
         assert_eq!(quiet.project.supervisor.next_check_at_ms, Some(91_000));
 
         let changed = recovered
-            .reconcile_supervisor("w_1", "s_pm", "idle".into(), true, false, 32_000)
+            .reconcile_supervisor("w_1", "s_pm", "idle".into(), true, true, 32_000)
             .await
             .unwrap();
         assert!(!changed.wake_manager);
@@ -4461,7 +4694,7 @@ edges: []
         assert_eq!(changed.project.supervisor.next_check_at_ms, Some(62_000));
 
         let batched = recovered
-            .reconcile_supervisor("w_1", "s_pm", "idle".into(), true, false, 42_000)
+            .reconcile_supervisor("w_1", "s_pm", "idle".into(), true, true, 42_000)
             .await
             .unwrap();
         assert!(batched.wake_manager);
@@ -4526,12 +4759,12 @@ edges: []
         );
 
         let changed_again = after_reload
-            .reconcile_supervisor("w_1", "s_pm", "new-idle".into(), true, false, 33_000)
+            .reconcile_supervisor("w_1", "s_pm", "new-idle".into(), true, true, 33_000)
             .await
             .unwrap();
         assert!(!changed_again.wake_manager);
         let changed_again = after_reload
-            .reconcile_supervisor("w_1", "s_pm", "new-idle".into(), true, false, 43_000)
+            .reconcile_supervisor("w_1", "s_pm", "new-idle".into(), true, true, 43_000)
             .await
             .unwrap();
         assert!(changed_again.wake_manager);
@@ -4616,6 +4849,36 @@ edges: []
     }
 
     #[tokio::test]
+    async fn a_changed_but_still_running_observation_does_not_spend_a_pm_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        let store = ProjectStore::new(&temp.path().join("data"));
+        store.initialize("w_1", "s_pm", &root).await.unwrap();
+        store
+            .reconcile_supervisor("w_1", "s_pm", "running-a".into(), true, false, 1_000)
+            .await
+            .unwrap();
+
+        let rebound = store
+            .reconcile_supervisor("w_1", "s_pm", "running-b".into(), true, false, 2_000)
+            .await
+            .unwrap();
+        assert!(!rebound.wake_manager);
+        assert!(!rebound.project.supervisor.wake_pending);
+        assert_eq!(
+            rebound.project.supervisor.observation_digest.as_deref(),
+            Some("running-b")
+        );
+
+        let due = store
+            .reconcile_supervisor("w_1", "s_pm", "running-b".into(), true, false, 32_000)
+            .await
+            .unwrap();
+        assert!(!due.wake_manager);
+        assert!(!due.project.supervisor.wake_pending);
+    }
+
+    #[tokio::test]
     async fn failed_supervisor_wakes_use_bounded_provider_backoff() {
         let temp = tempfile::tempdir().unwrap();
         let root = project_root(&temp);
@@ -4627,14 +4890,14 @@ edges: []
             .unwrap();
         assert!(
             !store
-                .reconcile_supervisor("w_1", "s_pm", "changed".into(), true, false, 2_000)
+                .reconcile_supervisor("w_1", "s_pm", "changed".into(), true, true, 2_000)
                 .await
                 .unwrap()
                 .wake_manager
         );
         assert!(
             store
-                .reconcile_supervisor("w_1", "s_pm", "changed".into(), true, false, 12_000)
+                .reconcile_supervisor("w_1", "s_pm", "changed".into(), true, true, 12_000)
                 .await
                 .unwrap()
                 .wake_manager
@@ -4788,8 +5051,30 @@ edges: []
             .await
             .unwrap();
 
+        let repository = root.join("repositories/game");
+        std::fs::create_dir_all(&repository).unwrap();
+        test_git(&repository, &["init", "-q"]).await;
+        test_git(&repository, &["config", "user.email", "test@example.com"]).await;
+        test_git(&repository, &["config", "user.name", "Test"]).await;
+        test_git(&repository, &["config", "commit.gpgsign", "false"]).await;
+        std::fs::write(repository.join("base.txt"), "base\n").unwrap();
+        test_git(&repository, &["add", "-A"]).await;
+        test_git(&repository, &["commit", "-qm", "Base"]).await;
+        test_git(&repository, &["branch", "-M", "main"]).await;
         let worktree = root.join("worktrees/implementation/game");
-        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        test_git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work/gameplay",
+                worktree.to_str().unwrap(),
+            ],
+        )
+        .await;
         std::fs::create_dir_all(root.join("spaces")).unwrap();
         project.phase = ProjectPhase::Active;
         let mut spaces = Vec::new();
@@ -5092,10 +5377,21 @@ edges: []
                 .is_err(),
             "running work cannot use withdrawal to bypass failure evidence"
         );
+        std::fs::write(worktree.join("feature.txt"), "candidate\n").unwrap();
+        test_git(&worktree, &["add", "-A"]).await;
+        test_git(&worktree, &["commit", "-qm", "Candidate"]).await;
+        let candidate_commit = test_git(&worktree, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let candidate_tree = test_git(&worktree, &["show", "-s", "--format=%T", "HEAD"])
+            .await
+            .trim()
+            .to_string();
         let candidate_evidence = CandidateEvidence {
             repository: "game".into(),
-            commit: "a".repeat(40),
-            tree: "b".repeat(40),
+            commit: candidate_commit,
+            tree: candidate_tree,
             evidence: vec!["tests passed".into()],
         };
         let after_candidate = store
@@ -5220,6 +5516,29 @@ edges: []
         assert!(accepted.session_dcg_runs["s_pm"]
             .active_nodes
             .contains("integrate"));
+        let integrated = store
+            .integrate_work_package("w_project", "s_pm", "gameplay")
+            .await
+            .unwrap();
+        assert_eq!(
+            integrated.session_dcg_runs["s_pm"].status,
+            dcg::DcgRunStatus::Completed
+        );
+        assert!(integrated.session_dcg_runs["s_pm"]
+            .history
+            .iter()
+            .any(|transition| transition.edge_id == "complete"));
+        assert_eq!(
+            integrated.work_packages["gameplay"]
+                .integration
+                .as_ref()
+                .map(|evidence| evidence.candidate_commit.as_str()),
+            Some(candidate_evidence.commit.as_str())
+        );
+        assert_eq!(
+            test_git(&repository, &["rev-parse", "HEAD"]).await.trim(),
+            candidate_evidence.commit
+        );
     }
 
     #[test]

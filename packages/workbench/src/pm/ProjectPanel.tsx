@@ -62,7 +62,9 @@ export function ProjectPanel({
   const deliveryPackages = runPackages.filter((item) => item.status !== "cancelled");
   const completed = deliveryPackages.filter((item) => item.status === "accepted").length;
   const total = deliveryPackages.length;
-  const exceptions = runPackages.filter((item) => item.status === "blocked");
+  const exceptions = runPackages.filter(
+    (item) => item.status === "blocked" || item.integrationError,
+  );
   const intent = run?.intent ?? null;
 
   async function mutate(key: string, action: () => Promise<unknown>) {
@@ -230,7 +232,7 @@ export function ProjectPanel({
 
           {exceptions.map((item) => (
             <p key={item.id} role="alert" className="rounded border border-red-500/30 bg-red-500/5 p-2 text-red-300">
-              {item.title}：{item.blockReason ?? "执行受阻，等待 PM 选择异常分支"}
+              {item.title}：{item.integrationError ?? item.blockReason ?? "执行受阻，等待 PM 选择异常分支"}
             </p>
           ))}
           {status?.improvementCandidates.length ? (

@@ -16,6 +16,13 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateIntegration {
+    pub previous_head: String,
+    pub integrated_commit: String,
+    pub integrated_tree: String,
+}
+
 async fn git(root: &Path, args: &[&str]) -> Result<String> {
     let mut child = Command::new("git")
         .args(args)
@@ -314,6 +321,128 @@ pub async fn verify_worktree_candidate(
     Ok(())
 }
 
+/// Integrate one exact, independently accepted local candidate into the clean
+/// `main` baseline. The operation is idempotent: a retry after a successful
+/// merge but before PM state persistence simply re-proves ancestry and records
+/// the current baseline. Conflicts are aborted before returning an error.
+pub async fn integrate_candidate(
+    repository_root: &Path,
+    candidate_commit: &str,
+    candidate_tree: &str,
+) -> Result<CandidateIntegration> {
+    validate_object_id("candidate commit", candidate_commit)?;
+    validate_object_id("candidate tree", candidate_tree)?;
+    let repository_root = repository_root
+        .canonicalize()
+        .context("canonicalizing integration repository")?;
+    reject_unsafe_integration_config(&repository_root).await?;
+    let before = status(&repository_root).await?;
+    if before.branch.as_deref() != Some("main") {
+        anyhow::bail!("accepted candidates can be integrated only into local main");
+    }
+    if !before.clean {
+        anyhow::bail!("integration baseline is not clean");
+    }
+    let candidate_object = format!("{candidate_commit}^{{commit}}");
+    git(
+        &repository_root,
+        &["rev-parse", "--verify", &candidate_object],
+    )
+    .await
+    .context("candidate commit is not a local commit object")?;
+    let actual_candidate_tree = git(
+        &repository_root,
+        &["show", "-s", "--format=%T", candidate_commit],
+    )
+    .await?;
+    if !actual_candidate_tree
+        .trim()
+        .eq_ignore_ascii_case(candidate_tree)
+    {
+        anyhow::bail!("candidate tree does not match the candidate commit");
+    }
+
+    let previous_head = git(&repository_root, &["rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_string();
+    let already_integrated = git(
+        &repository_root,
+        &["merge-base", "--is-ancestor", candidate_commit, "HEAD"],
+    )
+    .await
+    .is_ok();
+    if !already_integrated {
+        let merge = git(
+            &repository_root,
+            &[
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "merge",
+                "--no-edit",
+                candidate_commit,
+            ],
+        )
+        .await;
+        if let Err(error) = merge {
+            let abort = git(&repository_root, &["merge", "--abort"]).await;
+            if let Err(abort_error) = abort {
+                return Err(error.context(format!(
+                    "integration conflicted and git merge --abort also failed: {abort_error:#}"
+                )));
+            }
+            return Err(error.context("accepted candidate could not be merged cleanly"));
+        }
+    }
+
+    let after = status(&repository_root).await?;
+    if after.branch.as_deref() != Some("main") || !after.clean {
+        anyhow::bail!("integration did not leave a clean local main baseline");
+    }
+    git(
+        &repository_root,
+        &["merge-base", "--is-ancestor", candidate_commit, "HEAD"],
+    )
+    .await
+    .context("integrated baseline does not contain the accepted candidate")?;
+    let integrated_commit = git(&repository_root, &["rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_string();
+    let integrated_tree = git(&repository_root, &["show", "-s", "--format=%T", "HEAD"])
+        .await?
+        .trim()
+        .to_string();
+    Ok(CandidateIntegration {
+        previous_head,
+        integrated_commit,
+        integrated_tree,
+    })
+}
+
+async fn reject_unsafe_integration_config(repository_root: &Path) -> Result<()> {
+    let names = git(
+        repository_root,
+        &["config", "--local", "--name-only", "--list"],
+    )
+    .await?;
+    for name in names.lines().map(str::trim).filter(|name| !name.is_empty()) {
+        let normalized = name.to_ascii_lowercase();
+        let executable = normalized == "core.fsmonitor"
+            || (normalized.starts_with("merge.") && normalized.ends_with(".driver"))
+            || (normalized.starts_with("filter.")
+                && [".clean", ".smudge", ".process"]
+                    .iter()
+                    .any(|suffix| normalized.ends_with(suffix)));
+        if executable {
+            anyhow::bail!("integration repository config {name} may execute an external command");
+        }
+    }
+    Ok(())
+}
+
 fn validate_object_id(label: &str, value: &str) -> Result<()> {
     if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         anyhow::bail!("{label} must be a full Git object id");
@@ -524,6 +653,106 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn accepted_candidate_integration_is_clean_typed_and_idempotent() {
+        let dir = repo().await;
+        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        let base = commit(dir.path(), "base", &[]).await.unwrap();
+        git(dir.path(), &["branch", "-M", "main"]).await.unwrap();
+        git(dir.path(), &["checkout", "-qb", "work/candidate"])
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("candidate.txt"), "candidate\n").unwrap();
+        let candidate = commit(dir.path(), "candidate", &[]).await.unwrap();
+        let candidate_tree = git(dir.path(), &["show", "-s", "--format=%T", &candidate])
+            .await
+            .unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]).await.unwrap();
+
+        let integrated = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
+            .await
+            .unwrap();
+        assert_eq!(integrated.previous_head, base);
+        assert_eq!(integrated.integrated_commit, candidate);
+        assert_eq!(integrated.integrated_tree, candidate_tree.trim());
+        assert!(status(dir.path()).await.unwrap().clean);
+
+        let replay = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
+            .await
+            .unwrap();
+        assert_eq!(replay.previous_head, candidate);
+        assert_eq!(replay.integrated_commit, candidate);
+        assert!(status(dir.path()).await.unwrap().clean);
+    }
+
+    #[tokio::test]
+    async fn integration_conflict_is_aborted_without_dirtying_main() {
+        let dir = repo().await;
+        std::fs::write(dir.path().join("shared.txt"), "base\n").unwrap();
+        commit(dir.path(), "base", &[]).await.unwrap();
+        git(dir.path(), &["branch", "-M", "main"]).await.unwrap();
+        git(dir.path(), &["checkout", "-qb", "work/candidate"])
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("shared.txt"), "candidate\n").unwrap();
+        let candidate = commit(dir.path(), "candidate", &[]).await.unwrap();
+        let candidate_tree = git(dir.path(), &["show", "-s", "--format=%T", &candidate])
+            .await
+            .unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]).await.unwrap();
+        std::fs::write(dir.path().join("shared.txt"), "main\n").unwrap();
+        let main = commit(dir.path(), "main diverged", &[]).await.unwrap();
+
+        let error = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("could not be merged cleanly"));
+        assert_eq!(
+            git(dir.path(), &["rev-parse", "HEAD"])
+                .await
+                .unwrap()
+                .trim(),
+            main
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("shared.txt")).unwrap(),
+            "main\n"
+        );
+        assert!(status(dir.path()).await.unwrap().clean);
+    }
+
+    #[tokio::test]
+    async fn integration_rejects_repository_config_that_can_execute_commands() {
+        let dir = repo().await;
+        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+        commit(dir.path(), "base", &[]).await.unwrap();
+        git(dir.path(), &["branch", "-M", "main"]).await.unwrap();
+        git(dir.path(), &["checkout", "-qb", "work/candidate"])
+            .await
+            .unwrap();
+        std::fs::write(dir.path().join("candidate.txt"), "candidate\n").unwrap();
+        let candidate = commit(dir.path(), "candidate", &[]).await.unwrap();
+        let candidate_tree = git(dir.path(), &["show", "-s", "--format=%T", &candidate])
+            .await
+            .unwrap();
+        git(dir.path(), &["checkout", "-q", "main"]).await.unwrap();
+        git(
+            dir.path(),
+            &["config", "merge.untrusted.driver", "touch should-not-run"],
+        )
+        .await
+        .unwrap();
+
+        let error = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("may execute an external command"));
+        assert!(!dir.path().join("should-not-run").exists());
+        assert!(status(dir.path()).await.unwrap().clean);
     }
 
     #[tokio::test]

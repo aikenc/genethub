@@ -1,16 +1,10 @@
 schema: genehub-pm-dcg.v1
 id: bugfix
 kind: sessionWorkflow
-version: 3
-entry: reproduce
+version: 4
+entry: fix
 executionBudget: { wallClockMs: 600000, maxWorkSessions: 12, maxConcurrentWorkSessions: 3 }
 nodes:
-  - id: reproduce
-    kind: activity
-    executor:
-      actor: workAgent
-      space: { matchTags: [diagnosis], lease: exclusive, cleanRequired: true }
-    objective: { prompt: prompts/diagnose.md }
   - id: fix
     kind: activity
     executor:
@@ -20,6 +14,10 @@ nodes:
   - id: review
     kind: activity
     executor: { actor: system }
+  - id: integrate
+    kind: activity
+    executor: { actor: pm }
+    objective: { prompt: prompts/integrate.md }
   - id: prepare-recovery
     kind: activity
     executor: { actor: pm }
@@ -35,26 +33,18 @@ nodes:
     kind: terminal
     outcome: cancelled
 edges:
-  - { id: reproduced, from: reproduce, to: fix, when: work.accepted }
-  - { id: reproduce-blocked, from: reproduce, to: prepare-recovery, when: { any: [work.blocked, space.quarantined] } }
   - { id: fixed, from: fix, to: review, when: work.candidate }
   - { id: fix-blocked, from: fix, to: prepare-recovery, when: { any: [work.blocked, space.quarantined] } }
-  - { id: accepted, from: review, to: delivered, when: review.pass }
+  - { id: accepted, from: review, to: integrate, when: review.pass }
   - { id: review-failed, from: review, to: prepare-recovery, when: review.fail }
+  - { id: integrated, from: integrate, to: delivered, when: baseline.integrated }
+  - { id: integration-blocked, from: integrate, to: prepare-recovery, when: integration.blocked }
   - { id: recovery-prepared, from: prepare-recovery, to: recover, when: recovery.ready }
   - id: retry-fix
     label: 修正后重试
     description: 回到修复阶段，保留复现和评审证据。
     from: recover
     to: fix
-    when: decision.ready
-    chooseBy: user
-    maxTraversals: 2
-  - id: retry-diagnosis
-    label: 重新诊断
-    description: 根因证据不足，重新执行复现与诊断。
-    from: recover
-    to: reproduce
     when: decision.ready
     chooseBy: user
     maxTraversals: 2

@@ -38,7 +38,12 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
    `worktrees/<space>/<repository>`；PM 在该路径创建 worktree 后再推进 Ready，WorkSession 仍须使用
    返回的 Space。不得传旧的 `--space`/`--worktree` 参数；`--space-tag` 是能力而不是 Space 名；
 6. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
-7. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
+7. 独立 Review 通过并把包推进到 `Accepted` 后，在活动 `integrate` 节点逐包执行
+   `genet pm project package integrate --id <package-id>`。这是 Coordinator 串行执行的受控本地 Git
+   操作：它复验候选 commit/tree、评审 verdict、干净 `main`、合并结果和祖先关系，并从持久证据推导
+   `baseline.integrated`。不要为机械合并创建 WorkPackage/WorkSession；冲突时记录节点声明的
+   `integration.blocked` 并进入恢复路径；
+8. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
 
 带 `fanout.source` 的节点由 PM 在节点仍为 Planned 时一次性创建本次遍历的全部结果型 WorkPackage；该字段
 只记录工作流来源，不执行任意表达式。任一工作包开始后 Coordinator 会封闭该节点实例的集合，后续不得悄悄
@@ -53,6 +58,10 @@ Team Slot 历史、释放其 fanout 名额，并在同一活动节点允许用�
 DCG 节点，也不触发 PM 逐提交复核。Supervisor 会在短窗口内合并多个 WorkSession 状态变化；每次唤醒只读
 一次项目投影、处理整批 candidate/blocked/failed 事项，不轮询仍在运行的会话。只有候选、真实阻塞、终止
 失败、连续两次无新 checkpoint 的截断，或用户/合同变化，才重新进入包级管理决策。
+
+十分钟内的内置 bugfix/migration 图各使用一个结果型 WorkPackage：bugfix 包在同一 WorkSession 中完成复现、
+根因证据、回归测试与修复；migration 包在同一 WorkSession 中完成来源调查、版本身份固定、受控切片修改与
+合同测试。中间只读调查不是可交付候选，不单独占用独立 Review；最终候选仍必须经过另一个 Review Space。
 
 使用活动节点指定的提示词。PM 只能在 Coordinator 返回的合法边中决策，不能代替用户完成用户决策。
 WorkAgent 目标只描述结果和证据合同，不固定 Agent runtime 或模型。

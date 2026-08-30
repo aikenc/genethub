@@ -272,6 +272,10 @@ defineJourney(
             item.reviewVerdict === "pass" && Boolean(item.reviewSessionId),
             `${requirement.id}/${item.id} lacks independent passing review evidence`,
           );
+          t.assertions.assert(
+            Boolean(item.integratedCommit) && Boolean(item.integratedTree),
+            `${requirement.id}/${item.id} lacks Coordinator baseline integration evidence`,
+          );
           for (const sessionId of [item.workSessionId, item.reviewSessionId]) {
             if (!sessionId) continue;
             const snapshot = await opened.client.call({
@@ -486,7 +490,7 @@ async function createPmSession(
 }
 
 function concurrentRequirements(): ConcurrentRequirement[] {
-  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。正常推进只读取一次 pm project workflow status，不要读取包含所有 Session 的 pm project show。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 和 branch 让 Coordinator 从 workflow status 的既有 Space 池分配。每个 package put 只传需求中明确给出的一个 --space-tag；不得再添加 implementation、integration、diagnosis、research 或 migration 等节点基础标签，Coordinator 会单独应用这些 selector。Coordinator 返回的 worktree 已由用户创建并在实现/评审 Workspace 中精确注册；package put 后核对返回绑定并复用它，不要再建 worktree。只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。\`agent run --work-package\` 成功返回时 Coordinator 会原子绑定该 WorkSession：Ready 包直接进入 Running，Candidate 包直接进入 Review；不要再发一条 package transition 去绑定同一 session。每个候选必须绑定精确 commit/tree，经 capability 匹配的独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
+  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。正常推进只读取一次 pm project workflow status，不要读取包含所有 Session 的 pm project show。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 和 branch 让 Coordinator 从 workflow status 的既有 Space 池分配。每个 package put 只传需求中明确给出的一个 --space-tag；不得再添加 implementation、integration、diagnosis、research 或 migration 等节点基础标签，Coordinator 会单独应用这些 selector。Coordinator 返回的 worktree 已由用户创建并在实现/评审 Workspace 中精确注册；package put 后核对返回绑定并复用它，不要再建 worktree。只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。\`agent run --work-package\` 成功返回时 Coordinator 会原子绑定该 WorkSession：Ready 包直接进入 Running，Candidate 包直接进入 Review；不要再发一条 package transition 去绑定同一 session。每个候选必须绑定精确 commit/tree，经 capability 匹配的独立 review Space 复验后 Accepted；进入 integrate 节点后对每个 Accepted 包执行一次 \`pm project package integrate --id <id>\`，由 Coordinator 串行复验并合入 repositories/game/main。不要创建 integration WorkPackage/WorkSession，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
   return [
     {
       id: "daily",
@@ -494,7 +498,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "feature",
       prompt: `${common}
 
-选择 feature。Intent 是新增一个小而完整的每日挑战模块；implement 和 integrate 包都使用 --branch work/daily-challenge --space-tag daily。验收：新增 src/features/daily-challenge.js，按 UTC 日期稳定生成 seed、规则和完成 key；新增 Node 测试覆盖同日稳定与跨日变化；从 src/main.js 导出。不要改存档迁移或渲染适配。`,
+选择 feature。Intent 是新增一个小而完整的每日挑战模块；只在 implement 节点创建一个包，使用 --branch work/daily-challenge --space-tag daily。验收：新增 src/features/daily-challenge.js，按 UTC 日期稳定生成 seed、规则和完成 key；新增 Node 测试覆盖同日稳定与跨日变化；从 src/main.js 导出。不要改存档迁移或渲染适配。`,
     },
     {
       id: "save",
@@ -502,7 +506,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "bugfix",
       prompt: `${common}
 
-选择 bugfix。reproduce 和 fix 包都使用 --branch work/save-migration --space-tag bugfix。复现并修复 src/save.js：v1 存档迁移到 v2 时必须保留有限数值 score，非法值回落 0，同时保持 mode；先用测试证据复现，再形成修复候选。不要改每日挑战或渲染适配。`,
+选择 bugfix。只在 fix 节点创建一个结果包，使用 --branch work/save-migration --space-tag bugfix；同一个 WorkSession 必须先增加失败回归测试并记录复现证据，再修复 src/save.js：v1 存档迁移到 v2 时保留有限数值 score，非法值回落 0，同时保持 mode，最终返回一个干净候选。不要改每日挑战或渲染适配。`,
     },
     {
       id: "cocos",
@@ -510,7 +514,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "migration",
       prompt: `${common}
 
-选择 migration。investigate 与 migrate 包都使用 --branch work/cocos4-adapter --space-tag cocos。完成一个受控渲染适配切片：调研证据固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30；investigate WorkAgent 的第一次结论必须同时返回该只读 worktree 的精确 HEAD commit/tree、分支、git status --porcelain 与调查命令退出码，不得追加回合补身份；更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试。不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
+选择 migration。只在 migrate 节点创建一个结果包，使用 --branch work/cocos4-adapter --space-tag cocos。一个 WorkSession 内先固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30 来源与版本证据，再更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试并形成一个干净候选。不要把只读调查作为单独候选或单独评审，不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
     },
   ];
 }

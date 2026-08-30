@@ -613,6 +613,22 @@ impl DcgCondition {
             Self::Not { not } => !not.satisfied_by(facts),
         }
     }
+
+    /// Whether this condition structurally references one exact fact.
+    /// Coordinator-owned commands use this to prove that typed evidence is
+    /// relevant to the active Workflow node without hard-coding node ids.
+    pub fn mentions_fact(&self, expected: &str) -> bool {
+        match self {
+            Self::Fact(fact) => fact == expected,
+            Self::All { all } => all
+                .iter()
+                .any(|condition| condition.mentions_fact(expected)),
+            Self::Any { any } => any
+                .iter()
+                .any(|condition| condition.mentions_fact(expected)),
+            Self::Not { not } => not.mentions_fact(expected),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1638,21 +1654,18 @@ mod tests {
         assert!(run.active_nodes.is_empty());
         run.select_before_start(bugfix).unwrap();
         assert_eq!(run.graph_id.as_deref(), Some("bugfix"));
-        assert_eq!(run.active_nodes, BTreeSet::from(["reproduce".into()]));
+        assert_eq!(run.active_nodes, BTreeSet::from(["fix".into()]));
 
-        let facts = BTreeSet::from(["work.accepted".into()]);
-        assert_eq!(
-            run.eligible_edges(bugfix, &facts).unwrap()[0].id,
-            "reproduced"
-        );
+        let facts = BTreeSet::from(["work.candidate".into()]);
+        assert_eq!(run.eligible_edges(bugfix, &facts).unwrap()[0].id, "fixed");
         let error = run
-            .transition(bugfix, "reproduced", &facts, DcgActor::User)
+            .transition(bugfix, "fixed", &facts, DcgActor::User)
             .unwrap_err()
             .to_string();
         assert!(error.contains("not a user decision"), "{error}");
-        run.transition(bugfix, "reproduced", &facts, DcgActor::System)
+        run.transition(bugfix, "fixed", &facts, DcgActor::System)
             .unwrap();
-        assert_eq!(run.active_nodes, BTreeSet::from(["fix".into()]));
+        assert_eq!(run.active_nodes, BTreeSet::from(["review".into()]));
         assert!(run
             .select_before_start(catalog.session_workflow("feature").unwrap())
             .is_err());

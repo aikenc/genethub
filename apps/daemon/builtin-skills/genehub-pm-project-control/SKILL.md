@@ -39,6 +39,7 @@ Use only the authenticated control commands below; never edit daemon PM state fi
   --space-tag <capability> --repository <repository-name> --branch <branch> --node <node-id> \
   [--depends-on <package-id>...]
 "$GENEHUB_CLI" pm project package transition --id <id> --to <status> [...evidence]
+"$GENEHUB_CLI" pm project package integrate --id <accepted-id>
 "$GENEHUB_CLI" pm project advance --to <next-phase>
 "$GENEHUB_CLI" pm project lifecycle --to active|waiting-user|completed|cancelled
 ```
@@ -76,7 +77,9 @@ Every command derives project root and controller from this PM session. Treat a 
   small number of runtime turns. Do not convert its internal file order,
   checkpoint commits, or individual gate commands into PM graph nodes.
 - Represent real ordering as dependencies. Run independent packages concurrently only when their writable worktrees do not overlap.
-- Keep integration and independent review separate from implementation.
+- Keep independent review separate from implementation. After acceptance, use
+  the Coordinator's `package integrate` command at the active integration
+  node; do not allocate another WorkAgent merely to perform a clean Git merge.
 - Record every accepted scope or acceptance change through the PM project CLI before continuing affected WorkAgents.
 
 Once dispatched, manage a package by terminal facts rather than narration.

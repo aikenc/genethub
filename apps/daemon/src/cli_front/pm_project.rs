@@ -194,6 +194,24 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
         [head, verb, rest @ ..] if head == "package" && verb == "transition" => {
             transition(&context, rest).await
         }
+        [head, verb, rest @ ..] if head == "package" && verb == "integrate" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["id"])?;
+            let project = context
+                .state
+                .projects
+                .integrate_work_package(
+                    &context.workspace_id,
+                    &context.controller_session_id,
+                    &flags.one_required("id")?,
+                )
+                .await
+                .map_err(rejected)?;
+            Ok((
+                "pm.project",
+                json!({"action": "packageIntegrated", "project": project}),
+            ))
+        }
         [head, verb, rest @ ..] if head == "space" && verb == "record" => {
             let flags = Flags::parse(rest, &[])?;
             flags.validate(&["name", "purpose", "path", "workspace", "commit", "role", "tag"])?;
@@ -447,7 +465,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
             Ok(("pm.project", json!({"action": "observed", "observation": observation})))
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition | space record|repair | workflow list|show|select|transition | improvement propose|review|promote",
+            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition|integrate | space record|repair | workflow list|show|select|transition | improvement propose|review|promote",
         )),
     }
 }

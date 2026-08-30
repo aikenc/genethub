@@ -159,6 +159,24 @@ impl SupervisorState {
         }
     }
 
+    /// Advance the sampler baseline for a material-but-non-actionable change
+    /// such as a newly bound WorkSession that is still Running. Existing
+    /// actionable wake state is preserved, but this observation alone never
+    /// spends another PM model turn.
+    pub fn observe_quiet(&mut self, digest: String, now_ms: i64) -> bool {
+        let changed = self.observation_digest.as_deref() != Some(digest.as_str());
+        self.observation_digest = Some(digest);
+        self.mode = SupervisorMode::Active;
+        if changed {
+            self.backoff_step = 0;
+            self.last_event_at_ms = Some(now_ms);
+        } else {
+            self.backoff_step = (self.backoff_step + 1).min(BACKOFF_MS.len() - 1);
+        }
+        self.next_check_at_ms = Some(now_ms.saturating_add(BACKOFF_MS[self.backoff_step]));
+        changed
+    }
+
     pub fn observe(
         &mut self,
         digest: String,

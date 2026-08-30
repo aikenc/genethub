@@ -323,6 +323,14 @@ pub struct PmWorkPackageStatus {
     pub review_session_id: Option<String>,
     #[ts(optional)]
     pub review_verdict: Option<String>,
+    /// Coordinator-proven local main baseline that contains this exact
+    /// independently accepted candidate.
+    #[ts(optional)]
+    pub integrated_commit: Option<String>,
+    #[ts(optional)]
+    pub integrated_tree: Option<String>,
+    #[ts(optional)]
+    pub integration_error: Option<String>,
     #[ts(optional)]
     pub block_reason: Option<String>,
 }

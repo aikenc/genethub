@@ -39,6 +39,7 @@ Record each gate through the PM control plane. Evidence flags are repeatable:
 "$GENEHUB_CLI" pm project package transition --id <id> --to accepted \
   --review-session <same-review-session> --candidate-commit <same-commit> \
   --candidate-tree <same-tree> --verdict pass --review-evidence <verdict-evidence>
+"$GENEHUB_CLI" pm project package integrate --id <id>
 ```
 
 The successful `agent run --work-package` atomically enters `review`, binds the
@@ -47,6 +48,13 @@ the review-only Agent Space leased until a verdict is recorded. Do not issue a
 separate `--to review` command merely to bind the returned session. The daemon
 rejects missing evidence, moving candidate identities, self-review, and
 acceptance without an explicit passing verdict.
+
+Integration is a Coordinator-owned deterministic Git operation, not another
+WorkAgent package. It is available only at an active PM integration node and
+re-proves the exact accepted candidate, passing review, clean local `main`,
+merge result, and ancestry before recording `baseline.integrated`. A conflict
+or dirty baseline must take the declared recovery path; never merge it by
+hand from the PM session or report the Run as delivered.
 
 ## Learn from execution
 

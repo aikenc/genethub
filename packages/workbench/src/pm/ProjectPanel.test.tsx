@@ -27,7 +27,7 @@ describe("ProjectPanel", () => {
     expect(screen.getByText("可分配 0/4 · 已占 1")).toBeInTheDocument();
     expect(screen.getByText("执行预算剩余 9:00")).toBeInTheDocument();
     expect(screen.getByText("并发会话 1/4 · 累计会话 2/16")).toBeInTheDocument();
-    expect(screen.getByText(/等待资源/)).toBeInTheDocument();
+    expect(screen.getByText(/合并冲突/)).toBeInTheDocument();
     expect(screen.getByText("实现战斗循环")).toBeInTheDocument();
     expect(screen.getByText("由 PM 根据证据选择")).toBeInTheDocument();
     expect(screen.getByText("由 Coordinator 根据证据推进")).toBeInTheDocument();
@@ -75,7 +75,7 @@ function projectStatus(): PmProjectStatus {
       controllerSessionId: "s_pm",
       requiredSpaceTags: ["gameplay"],
       agentSpace: "implementation-1", repository: "game", branch: "work/combat", workflowRunId: "run-s_pm",
-      nodeInstanceId: "implement-1", workSessionId: "s_work", blockReason: "等待资源",
+      nodeInstanceId: "implement-1", workSessionId: "s_work", blockReason: "等待资源", integrationError: "合并冲突",
     }, {
       id: "other", title: "其他", outcome: "另一会话的工作", status: "accepted", dependencies: [],
       controllerSessionId: "s_other",
