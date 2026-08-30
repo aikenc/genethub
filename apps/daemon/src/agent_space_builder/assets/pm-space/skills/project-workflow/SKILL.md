@@ -45,6 +45,30 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
    `integration.blocked` 并进入恢复路径；
 8. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
 
+### PM Activity 快速路径
+
+`activity + actor: pm` 节点的语义输出由 PM 明确记录；它们不是 Coordinator 能从 Git、WorkSession 或
+租约中自动推导的事实。不要用 `--help` 试探参数，也不要 grep/read GeneHub 产品源码来猜公共 CLI。
+完整命令形态如下：
+
+```text
+genet pm project intent set --outcome <目标> --acceptance <标准> [--acceptance <标准> ...] [--constraint <约束> ...] [--out-of-scope <不做事项> ...]
+genet pm project workflow transition --edge <当前 PM 出边> --fact <该活动声明且已经完成的 output>
+```
+
+内置 `feature` 图在需求已经明确时采用这条精确路径：
+
+```text
+genet pm project intent set --outcome <目标> --acceptance <标准> ...
+genet pm project workflow transition --edge aligned --fact intent.aligned
+genet pm project workflow transition --edge planned --fact plan.ready
+```
+
+同一次转换可以重复 `--fact` 记录多个已完成输出，但只能使用当前 PM 节点在 Workflow YAML 中声明的
+`outputs`。`work.*`、`review.*`、`baseline.*`、`integration.*`、租约和 Space 状态均由 Coordinator
+从持久证据推导，PM 不得注入。条件尚未满足时 CLI 会返回缺失的 PM output 及可直接执行的命令；按该公开
+错误恢复，不要搜索实现源码。
+
 带 `fanout.source` 的节点由 PM 在节点仍为 Planned 时一次性创建本次遍历的全部结果型 WorkPackage；该字段
 只记录工作流来源，不执行任意表达式。任一工作包开始后 Coordinator 会封闭该节点实例的集合，后续不得悄悄
 补包。`maxItems` 是硬上限。所有兄弟包结算后，Coordinator 才从持久状态推导 candidate/blocked

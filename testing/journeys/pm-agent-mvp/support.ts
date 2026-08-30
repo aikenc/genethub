@@ -508,12 +508,7 @@ export function assertDailyChallenge(t: CaseContext, game: string): void {
 
 export function assertCocos4Migration(t: CaseContext, game: string): void {
   const lockPath = path.join(game, "engine.lock.json");
-  t.assertions.assert(existsSync(lockPath), "migration has no machine-readable engine.lock.json");
-  const lock = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
-  const identity = JSON.stringify(lock);
-  t.assertions.assert(/COCOS 4/i.test(identity), `engine lock does not identify COCOS 4: ${identity}`);
-  t.assertions.assert(identity.includes("4.0.0-alpha.30"), `engine lock is not pinned to 4.0.0-alpha.30: ${identity}`);
-  t.assertions.assert(identity.includes("github.com/cocos/cocos4"), "engine lock does not name the official COCOS 4 source");
+  assertCocos4EngineLock(t, lockPath);
 
   const manifest = JSON.parse(readFileSync(path.join(game, "package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
@@ -529,6 +524,28 @@ export function assertCocos4Migration(t: CaseContext, game: string): void {
     "production source still imports Three.js",
   );
   t.assertions.assert(/cocos/i.test(production), "production source has no COCOS runtime integration");
+}
+
+export function assertCocos4EngineLock(t: CaseContext, lockPath: string): void {
+  t.assertions.assert(existsSync(lockPath), "migration has no machine-readable engine.lock.json");
+  const lock = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
+  const identity = JSON.stringify(lock);
+  const canonicalName =
+    typeof lock.name === "string" ? lock.name.replace(/[\s_-]+/g, "").toLowerCase() : "";
+  t.assertions.assert(
+    canonicalName === "cocos4",
+    `engine lock name does not identify COCOS 4: ${identity}`,
+  );
+  t.assertions.assert(
+    lock.version === "4.0.0-alpha.30",
+    `engine lock is not pinned to 4.0.0-alpha.30: ${identity}`,
+  );
+  const canonicalSource =
+    typeof lock.source === "string" ? lock.source.replace(/\/+$/, "") : "";
+  t.assertions.assert(
+    canonicalSource === "https://github.com/cocos/cocos4",
+    `engine lock does not name the official COCOS 4 source: ${identity}`,
+  );
 }
 
 function git(cwd: string, args: string[]): string {

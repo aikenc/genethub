@@ -18,7 +18,7 @@ import {
   type HumanDecisionRequest,
 } from "../../framework/public.ts";
 
-import { PM_MODEL, WORK_AGENT } from "./support.ts";
+import { assertCocos4EngineLock, PM_MODEL, WORK_AGENT } from "./support.ts";
 
 const RUN_BUDGET_MS = 10 * 60_000;
 const SETUP_BUDGET_MS = 8 * 60_000;
@@ -651,11 +651,7 @@ function assertConcurrentDeliverables(t: CaseContext, workspace: string): void {
   t.assertions.assert(/utc|date|seed/i.test(readFileSync(daily, "utf8")), "daily challenge is not deterministic");
   const save = readFileSync(path.join(game, "src", "save.js"), "utf8");
   t.assertions.assert(/score/.test(save) && !/score:\s*0\s*,\s*mode/.test(save), "save migration still drops score");
-  const engine = readFileSync(path.join(game, "engine.lock.json"), "utf8");
-  t.assertions.assert(
-    /COCOS 4/i.test(engine) && /4\.0\.0-alpha\.30/.test(engine) && /github\.com\/cocos\/cocos4/.test(engine),
-    "COCOS 4 adapter identity is incomplete",
-  );
+  assertCocos4EngineLock(t, path.join(game, "engine.lock.json"));
   const renderer = readFileSync(path.join(game, "src", "render", "adapter.js"), "utf8");
   t.assertions.assert(/cocos/i.test(renderer) && /drawFrame/.test(renderer), "renderer contract was not migrated");
   for (const script of ["test", "build"]) {

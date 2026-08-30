@@ -203,6 +203,26 @@ impl ProjectStore {
                 .record_actor_facts(&definition, &source, chooser, &facts)?;
         }
         let trusted = trusted_run_facts(&state, controller_session_id, &definition)?;
+        let edge = definition.edge(edge_id)?;
+        if chooser == DcgActor::Pm && !edge.when.satisfied_by(&trusted) {
+            let missing_outputs = definition
+                .node(&source)?
+                .outputs
+                .iter()
+                .filter(|fact| edge.when.mentions_fact(fact) && !trusted.contains(*fact))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing_outputs.is_empty() {
+                let flags = missing_outputs
+                    .iter()
+                    .map(|fact| format!(" --fact {fact}"))
+                    .collect::<String>();
+                anyhow::bail!(
+                    "edge {edge_id} condition is not satisfied; PM activity {source} has unrecorded declared output(s): {}. After producing those semantic outputs, retry exactly: genet pm project workflow transition --edge {edge_id}{flags}. Work, review, integration, lease, and Space facts are Coordinator-owned and cannot be supplied by PM",
+                    missing_outputs.join(", ")
+                );
+            }
+        }
         let run = state
             .session_dcg_runs
             .get_mut(controller_session_id)
@@ -3833,6 +3853,50 @@ mod tests {
             Some("bugfix")
         );
         assert_eq!(selected.session_dcg_runs["s_pm_1"].graph_id, None);
+
+        store
+            .select_session_dcg("w_project", "s_pm_1", "feature")
+            .await
+            .unwrap();
+        store
+            .set_intent(
+                "w_project",
+                "s_pm_1",
+                "Deliver one feature".into(),
+                vec!["The feature is observable".into()],
+                vec![],
+                vec![],
+                vec![],
+            )
+            .await
+            .unwrap();
+        let error = store
+            .transition_session_dcg(
+                "w_project",
+                "s_pm_1",
+                "aligned",
+                BTreeSet::new(),
+                DcgActor::Pm,
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error
+            .contains("genet pm project workflow transition --edge aligned --fact intent.aligned"));
+        let aligned = store
+            .transition_session_dcg(
+                "w_project",
+                "s_pm_1",
+                "aligned",
+                BTreeSet::from(["intent.aligned".into()]),
+                DcgActor::Pm,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            aligned.session_dcg_runs["s_pm_1"].active_nodes,
+            BTreeSet::from(["plan".into()])
+        );
 
         let candidate_dir =
             root.join("spaces/pm/skills/project-workflow/candidates/clearer-intake/prompts");
