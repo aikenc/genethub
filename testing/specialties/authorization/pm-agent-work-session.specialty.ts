@@ -627,6 +627,14 @@ defineSpecialty(
         existsSync(dispatchResult) && readFileSync(dispatchResult, "utf8").includes('"waited":false'),
         `PM dispatch was not forced non-blocking: ${existsSync(dispatchResult) ? readFileSync(dispatchResult, "utf8") : "missing CLI output"}`,
       );
+      const atomicallyBound = JSON.parse(readFileSync(`${t.env.data}/pm-projects/${opened.workspaceId}.json`, "utf8")) as {
+        workPackages?: Record<string, { status?: string; workSessionId?: string }>;
+      };
+      t.assertions.assert(
+        atomicallyBound.workPackages?.["wp-gameplay"]?.status === "running" &&
+          atomicallyBound.workPackages?.["wp-gameplay"]?.workSessionId === workId,
+        `agent run did not atomically bind the WorkSession: ${JSON.stringify(atomicallyBound.workPackages?.["wp-gameplay"])}`,
+      );
 
       const bindTerminals = terminalCount(pmEvents);
       const bindCompletions = completedCount(pmEvents);

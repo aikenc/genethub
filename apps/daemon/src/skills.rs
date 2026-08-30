@@ -20,7 +20,7 @@ pub const ENTRYPOINT_MANIFEST: &str = ".entrypoints";
 pub const PROJECT_MANAGER_ENTRYPOINT_MANIFEST: &str = ".entrypoints-project-manager";
 const PROJECT_MANAGER_SKILL_PREFIX: &str = "genehub-pm-";
 const PROJECT_MANAGER_AVAILABILITY_GUIDANCE: &str = r#"<project_manager_availability>
-A PM session must remain available for user guidance while WorkSessions run. Create and continue owned WorkSessions with a top-level GeneHub CLI command using `--no-wait`; the PM control surface also forces those turns to return non-blocking if the flag is accidentally omitted. Never wrap them in timeout, a pipe, a background job, or another waiting construct. Never execute sleep, timer, foreground or background wait, polling loop, or repeated `session get` commands merely to monitor work. After dispatching and binding every currently-ready package and recording immediate state transitions, briefly report progress and finish the PM turn. The daemon supervisor owns quiet-session backoff checks and wakes the PM only for material WorkSession changes. A newly arrived user message takes priority over a supervisor wake.
+A PM session must remain available for user guidance while WorkSessions run. Create and continue owned WorkSessions with a top-level GeneHub CLI command using `--no-wait`; the PM control surface also forces those turns to return non-blocking if the flag is accidentally omitted. Never wrap them in timeout, a pipe, a background job, or another waiting construct. Never execute sleep, timer, foreground or background wait, polling loop, or repeated `session get` commands merely to monitor work. A successful `agent run --work-package` atomically binds the created WorkSession, advances a ready package to running or a candidate package to review, and marks the leased Agent Space working. Do not issue a second package transition merely to bind that session. After dispatching every currently-ready package and recording any other immediate state transitions, briefly report progress and finish the PM turn. The daemon supervisor owns quiet-session backoff checks and wakes the PM only for material WorkSession changes. A newly arrived user message takes priority over a supervisor wake.
 </project_manager_availability>"#;
 
 /// Product-owned Skill catalog selected for one durable session role.
@@ -392,20 +392,23 @@ mod tests {
         .unwrap();
         assert!(agent_space_contract.contains("never put `opencode`"));
         assert!(agent_space_contract.contains("dispatch `--agent opencode`"));
-        let orchestration = std::fs::read_to_string(
-            root.join("genehub-pm-agent-space-orchestration/SKILL.md"),
-        )
-        .unwrap();
+        let orchestration =
+            std::fs::read_to_string(root.join("genehub-pm-agent-space-orchestration/SKILL.md"))
+                .unwrap();
         assert!(orchestration.contains("pm project workflow status"));
         assert!(orchestration.contains(
             "\"$GENEHUB_CLI\" workspace register-agent-space \"spaces/<name>/<name>.code-workspace\""
         ));
         assert!(orchestration.contains("spaces/*/.pipebuilder/"));
         assert!(orchestration.contains("recursively scan product source"));
-        let project_control = std::fs::read_to_string(
-            root.join("genehub-pm-project-control/SKILL.md"),
-        )
-        .unwrap();
+        assert!(
+            orchestration.contains("atomically binds that\nWorkSession to its reserved package")
+        );
+        let quality =
+            std::fs::read_to_string(root.join("genehub-pm-quality-governance/SKILL.md")).unwrap();
+        assert!(quality.contains("atomically enters `review`, binds the"));
+        let project_control =
+            std::fs::read_to_string(root.join("genehub-pm-project-control/SKILL.md")).unwrap();
         assert!(project_control.contains("pm project advance --to active"));
         assert!(project_control.contains("only `ProjectLifecycle` and cannot finish"));
     }

@@ -660,21 +660,83 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
-        let space = state
+        let (space_name, work_package_id) = state
             .agent_spaces
-            .values_mut()
+            .values()
             .find(|space| space.workspace_id == agent_space_workspace_id)
+            .map(|space| {
+                let lease = space
+                    .lease
+                    .as_ref()
+                    .filter(|lease| lease.id == lease_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("the Agent Space reservation is no longer current")
+                    })?;
+                if lease.controller_session_id != controller_session_id {
+                    anyhow::bail!("the Agent Space reservation belongs to another PM Session");
+                }
+                Ok((space.name.clone(), lease.work_package_id.clone()))
+            })
+            .transpose()?
             .ok_or_else(|| anyhow::anyhow!("the reserved Agent Space is no longer recorded"))?;
-        let lease = space
-            .lease
-            .as_ref()
-            .filter(|lease| lease.id == lease_id)
-            .ok_or_else(|| anyhow::anyhow!("the Agent Space reservation is no longer current"))?;
-        if lease.controller_session_id != controller_session_id {
-            anyhow::bail!("the Agent Space reservation belongs to another PM Session");
-        }
-        let work_package_id = lease.work_package_id.clone();
-        space.start_work(lease_id, work_session_id.to_string(), now_ms())?;
+        let started_at_ms = now_ms();
+        let package = state
+            .work_packages
+            .get(&work_package_id)
+            .ok_or_else(|| anyhow::anyhow!("the reserved WorkPackage no longer exists"))?;
+        let (status, implementation_session, review) = match package.status {
+            WorkPackageStatus::Ready => (
+                WorkPackageStatus::Running,
+                Some(work_session_id.to_string()),
+                None,
+            ),
+            WorkPackageStatus::Candidate => {
+                let candidate = package.candidate.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("candidate review requires immutable candidate evidence")
+                })?;
+                (
+                    WorkPackageStatus::Review,
+                    None,
+                    Some(ReviewEvidence {
+                        session_id: work_session_id.to_string(),
+                        candidate_commit: candidate.commit.clone(),
+                        candidate_tree: candidate.tree.clone(),
+                        verdict: None,
+                        evidence: vec![format!(
+                            "Coordinator authorized independent Review WorkSession {work_session_id} in Agent Space {space_name}"
+                        )],
+                    }),
+                )
+            }
+            status => anyhow::bail!(
+                "reserved WorkPackage {work_package_id} cannot bind a new WorkSession from {status:?}"
+            ),
+        };
+        task_graph::transition(
+            &mut state.work_packages,
+            &work_package_id,
+            status,
+            implementation_session,
+            None,
+            review,
+            None,
+            started_at_ms,
+        )?;
+        let node_instance_id = state
+            .work_packages
+            .get(&work_package_id)
+            .and_then(|package| package.node_instance_id.clone())
+            .ok_or_else(|| anyhow::anyhow!("WorkPackage is not bound to a node instance"))?;
+        state
+            .session_dcg_runs
+            .get_mut(controller_session_id)
+            .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?
+            .seal_fanout(&node_instance_id)?;
+        state
+            .agent_spaces
+            .get_mut(&space_name)
+            .expect("reserved Agent Space was resolved by name")
+            .start_work(lease_id, work_session_id.to_string(), started_at_ms)?;
         update_team_slot(
             &mut state,
             &work_package_id,
@@ -682,7 +744,8 @@ impl ProjectStore {
             Some(lease_id.to_string()),
             Some(work_session_id.to_string()),
         )?;
-        state.touch(now_ms());
+        reconcile_selected_session_dcg_isolated(&mut state, controller_session_id);
+        state.touch(started_at_ms);
         self.save(&state)
     }
 
@@ -1066,18 +1129,35 @@ impl ProjectStore {
             WorkPackageStatus::Blocked => TeamSlotStatus::Blocked,
             WorkPackageStatus::Cancelled => TeamSlotStatus::Cancelled,
         };
-        let active_session = state
-            .work_packages
-            .get(id)
-            .and_then(|package| package.work_session_id.clone());
+        let active_session = state.work_packages.get(id).and_then(|package| {
+            if matches!(
+                status,
+                WorkPackageStatus::Review | WorkPackageStatus::Accepted
+            ) {
+                package
+                    .review
+                    .as_ref()
+                    .map(|review| review.session_id.clone())
+            } else {
+                package.work_session_id.clone()
+            }
+        });
         update_team_slot(&mut state, id, slot_status, None, active_session)?;
+        let review_finished = status == WorkPackageStatus::Review
+            && state
+                .work_packages
+                .get(id)
+                .and_then(|package| package.review.as_ref())
+                .and_then(|review| review.verdict)
+                .is_some();
         if matches!(
             status,
             WorkPackageStatus::Candidate
-                | WorkPackageStatus::Review
+                | WorkPackageStatus::Accepted
                 | WorkPackageStatus::Blocked
                 | WorkPackageStatus::Cancelled
-        ) {
+        ) || review_finished
+        {
             let worktree = state
                 .work_packages
                 .get(id)
@@ -4952,6 +5032,37 @@ edges: []
             .await
             .is_err());
 
+        let implementation = store
+            .authorize_work_session("w_project", "s_pm", "w_implementation", "gameplay")
+            .await
+            .unwrap();
+        store
+            .start_agent_space_work(
+                "w_project",
+                "s_pm",
+                "w_implementation",
+                &implementation.lease_id,
+                "s_implementation",
+            )
+            .await
+            .unwrap();
+        let automatically_running = store.load("w_project").unwrap();
+        assert_eq!(
+            automatically_running.work_packages["gameplay"].status,
+            WorkPackageStatus::Running
+        );
+        assert_eq!(
+            automatically_running.work_packages["gameplay"]
+                .work_session_id
+                .as_deref(),
+            Some("s_implementation")
+        );
+        assert!(
+            automatically_running.session_dcg_runs["s_pm"]
+                .active_node_instance("implement")
+                .unwrap()
+                .fanout_sealed
+        );
         store
             .transition_work_package(
                 "w_project",
@@ -5030,13 +5141,30 @@ edges: []
             )
             .await
             .unwrap();
+        let automatically_reviewing = store.load("w_project").unwrap();
+        assert_eq!(
+            automatically_reviewing.work_packages["gameplay"].status,
+            WorkPackageStatus::Review
+        );
+        assert_eq!(
+            automatically_reviewing.work_packages["gameplay"]
+                .review
+                .as_ref()
+                .map(|review| review.session_id.as_str()),
+            Some("s_review")
+        );
+        assert_eq!(
+            automatically_reviewing.agent_spaces["review-daily"].resource_state,
+            AgentSpaceResourceState::Working,
+            "an in-flight review keeps its review-only Space lease"
+        );
         assert_eq!(
             store.load("w_project").unwrap().session_dcg_runs["s_pm"]
                 .budget
                 .as_ref()
                 .unwrap()
                 .work_sessions_started,
-            2,
+            3,
             "implementation and review reservations consume distinct monotonic slots"
         );
         let passing_review = ReviewEvidence {
@@ -5059,6 +5187,19 @@ edges: []
             )
             .await
             .unwrap();
+        let reviewed = store.load("w_project").unwrap();
+        assert_eq!(
+            reviewed.work_packages["gameplay"]
+                .review
+                .as_ref()
+                .and_then(|review| review.verdict),
+            Some(ReviewVerdict::Pass)
+        );
+        assert_eq!(
+            reviewed.agent_spaces["review-daily"].resource_state,
+            AgentSpaceResourceState::Idle,
+            "a terminal review verdict releases the review-only Space"
+        );
         let accepted = store
             .transition_work_package(
                 "w_project",

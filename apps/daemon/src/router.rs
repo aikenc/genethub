@@ -567,7 +567,22 @@ async fn dispatch(
                         )
                         .await
                     {
-                        return failed(error);
+                        if let Err(close_error) = state.sessions.close(&summary.id).await {
+                            tracing::warn!(
+                                work_session_id = %summary.id,
+                                %close_error,
+                                "failed to stop a WorkSession after atomic project binding was rejected"
+                            );
+                        }
+                        return reject_after_work_session_reservation(
+                            &state,
+                            &project_workspace_id,
+                            controller_session_id,
+                            &workspace_id,
+                            &target.lease_id,
+                            failed(error),
+                        )
+                        .await;
                     }
                     Handled::ok(Reply::Session(summary))
                 }

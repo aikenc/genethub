@@ -36,15 +36,17 @@ Record each gate through the PM control plane. Evidence flags are repeatable:
 "$GENEHUB_CLI" agent run --agent <third-party-id> --model <model> \
   --workspace <different-review-space-id> --work-package <same-id> --no-wait \
   "Review only the bound candidate; do not edit it. Return findings and a pass/fail verdict with evidence."
-"$GENEHUB_CLI" pm project package transition --id <id> --to review \
-  --review-session <independent-work-session> --candidate-commit <full-commit> \
-  --candidate-tree <full-tree> --review-evidence <check-performed>
 "$GENEHUB_CLI" pm project package transition --id <id> --to accepted \
   --review-session <same-review-session> --candidate-commit <same-commit> \
   --candidate-tree <same-tree> --verdict pass --review-evidence <verdict-evidence>
 ```
 
-The daemon rejects missing evidence, moving candidate identities, self-review, and acceptance without an explicit passing verdict.
+The successful `agent run --work-package` atomically enters `review`, binds the
+independent WorkSession to the exact current candidate commit/tree, and keeps
+the review-only Agent Space leased until a verdict is recorded. Do not issue a
+separate `--to review` command merely to bind the returned session. The daemon
+rejects missing evidence, moving candidate identities, self-review, and
+acceptance without an explicit passing verdict.
 
 ## Learn from execution
 

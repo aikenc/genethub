@@ -198,12 +198,14 @@ package.
 
 Never omit `--no-wait`, and never wrap this command in `timeout`, a pipe, command substitution, a background job, or another waiting construct. Inspect a session with one bounded `session get` or history command when reconciling evidence. Never use a hidden prompt queue, write an Agent's private session files, or let two PM packages share a writable worktree.
 
-Bind that real session before treating work as running:
-
-```text
-"$GENEHUB_CLI" pm project package transition --id <package-id> --to running \
-  --session <work-session-id>
-```
+A successful top-level `agent run --work-package` atomically binds that
+WorkSession to its reserved package before returning: a `ready` implementation
+package enters `running`, while a `candidate` package enters `review` with its
+exact immutable commit/tree and Review WorkSession identity. The leased Agent
+Space enters `working` in the same Project State mutation. Do not issue a
+second package transition merely to bind the returned session id. If session
+creation fails, the reservation is cancelled and the package remains eligible
+for a later dispatch.
 
 After binding every currently-ready independent package, report briefly and end the PM turn so the user can guide or question the manager. Never run `sleep`, a timer, a foreground or background wait, a polling loop, or repeated `session get` commands inside a PM turn. Do not keep the PM model turn open while a WorkAgent works.
 

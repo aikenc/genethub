@@ -275,7 +275,36 @@ pub fn transition(
             }
         }
         if let Some(review) = review.as_ref() {
-            if current.review.as_ref() != Some(review) {
+            if to == WorkPackageStatus::Review {
+                validate_text("review WorkSession id", &review.session_id, 200)?;
+                validate_git_object("review candidate commit", &review.candidate_commit)?;
+                validate_git_object("review candidate tree", &review.candidate_tree)?;
+                validate_evidence("review evidence", &review.evidence)?;
+                let existing = current.review.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("idempotent review transition has no bound Review WorkSession")
+                })?;
+                if existing.session_id != review.session_id
+                    || existing.candidate_commit != review.candidate_commit
+                    || existing.candidate_tree != review.candidate_tree
+                    || (existing.verdict.is_some()
+                        && review.verdict.is_some()
+                        && existing.verdict != review.verdict)
+                {
+                    anyhow::bail!("idempotent review transition changed bound evidence");
+                }
+                let package = packages.get_mut(id).expect("checked package exists");
+                let bound = package.review.as_mut().expect("checked review exists");
+                if bound.verdict.is_none() {
+                    bound.verdict = review.verdict;
+                }
+                for evidence in &review.evidence {
+                    if !bound.evidence.contains(evidence) {
+                        bound.evidence.push(evidence.clone());
+                    }
+                }
+                validate_evidence("review evidence", &bound.evidence)?;
+                package.updated_at_ms = now_ms;
+            } else if current.review.as_ref() != Some(review) {
                 anyhow::bail!("idempotent review transition changed bound evidence");
             }
         }
