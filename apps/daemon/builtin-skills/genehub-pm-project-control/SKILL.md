@@ -18,12 +18,14 @@ If the retained project is `completed` and the user explicitly asks for a new fe
 
 For a new project, read [references/project-lifecycle.md](references/project-lifecycle.md) and follow the fail-closed initialization stages. Never initialize a non-empty unfamiliar directory.
 
-Project phase and lifecycle are shared by every PM Session attached to the
-Folder. One initialization Session advances the project through `active` after
-the topology is registered. A requirement Session joining an already-active
-project must not repeat `pm project init`, phase advancement, or lifecycle
-transitions merely to start its own Workflow Run; it records only its own
-Intent, graph, and WorkPackages.
+Project phase and lifecycle are separate shared fields for every PM Session
+attached to the Folder. One initialization Session advances the phase through
+`ProjectPhase.active` after the topology is registered. Do that with
+`pm project advance --to active`; `pm project lifecycle --to active` changes
+only `ProjectLifecycle` and cannot finish project initialization. A requirement
+Session joining a project whose phase is already `active` must not repeat
+`pm project init`, phase advancement, or lifecycle transitions merely to start
+its own Workflow Run; it records only its own Intent, graph, and WorkPackages.
 
 Use only the authenticated control commands below; never edit daemon PM state files:
 

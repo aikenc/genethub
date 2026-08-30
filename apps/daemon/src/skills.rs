@@ -392,6 +392,12 @@ mod tests {
         .unwrap();
         assert!(agent_space_contract.contains("never put `opencode`"));
         assert!(agent_space_contract.contains("dispatch `--agent opencode`"));
+        let project_control = std::fs::read_to_string(
+            root.join("genehub-pm-project-control/SKILL.md"),
+        )
+        .unwrap();
+        assert!(project_control.contains("pm project advance --to active"));
+        assert!(project_control.contains("only `ProjectLifecycle` and cannot finish"));
     }
 
     #[test]
