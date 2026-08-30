@@ -36,9 +36,11 @@ The outer repository ignores `.genethub/`, `repositories/`, `worktrees/`, every 
   for semantic capabilities, while the Coordinator combines those tags with
   the Workflow node selector, atomically assigns the concrete Space, and
   derives `worktrees/<space>/<repository>` from the package repository. The PM
-  creates that returned worktree before the Ready gate. A ready package
-  starts only in that assigned implementation Space; a candidate starts only
-  in a different review-only Space.
+  creates that returned worktree and adds the exact path to the assigned
+  Workspace before the Ready gate. A ready package starts only in that
+  assigned implementation Space; a candidate starts only in a different
+  review-only Space whose declared capability tags include the package tags
+  and whose Workspace already contains that exact worktree.
 - Users may read and fork WorkSessions and may open ordinary sessions in the same Agent Space. They cannot mutate the managed WorkSession or remove the Agent Space.
 - A normal user session that changes a managed worktree is an external project change: pause affected packages, invalidate stale candidates/reviews, and rebaseline explicitly.
 
@@ -60,4 +62,6 @@ Space while one of its review sessions is running or its verdict has not yet
 been recorded. Do not expose all sibling worktrees and all project Skills to
 every implementation Space. Add a new review node for a new candidate unless
 the stable review Space already contained that exact candidate worktree when
-it was recorded.
+it was recorded. A deterministic pool bootstrap may pre-record a dedicated
+review Space only when its future branch/worktree and capability are already
+fixed; it must contain that one worktree, not a broad or speculative set.

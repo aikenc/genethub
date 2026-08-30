@@ -2280,10 +2280,21 @@ fn select_review_space(state: &ProjectState, package: &WorkPackage) -> Result<St
                 && space.resource_state == AgentSpaceResourceState::Idle
                 && space.lease.is_none()
                 && space.tags.contains("review")
+                && package.required_space_tags.is_subset(&space.tags)
         })
         .map(|space| space.name.clone())
         .min()
-        .ok_or_else(|| anyhow::anyhow!("no idle independent review Agent Space is available"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no idle independent review Agent Space matches WorkPackage capability tags [{}]",
+                package
+                    .required_space_tags
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
 }
 
 /// A human retry starts a new node instance and therefore a new immutable
@@ -4675,6 +4686,7 @@ edges: []
         for (name, workspace_id) in [
             ("implementation", "w_implementation"),
             ("review", "w_review"),
+            ("review-daily", "w_review_daily"),
         ] {
             let source_path = root.join("spaces").join(name);
             crate::agent_space_builder::run(
@@ -4719,13 +4731,23 @@ edges: []
                     workspace_id: workspace_id.into(),
                     source_commit: source_commit.clone(),
                     builder_lock_digest,
-                    role: if name == "review" {
+                    role: if name.starts_with("review") {
                         AgentSpaceRole::Review
                     } else {
                         AgentSpaceRole::Implementation
                     },
-                    tags: BTreeSet::from([name.to_string()]),
-                    declared_tags: BTreeSet::new(),
+                    tags: if name == "implementation" {
+                        BTreeSet::from(["implementation".into(), "daily".into()])
+                    } else if name == "review-daily" {
+                        BTreeSet::from(["review".into(), "daily".into()])
+                    } else {
+                        BTreeSet::from(["review".into()])
+                    },
+                    declared_tags: if matches!(name, "implementation" | "review-daily") {
+                        BTreeSet::from(["daily".into()])
+                    } else {
+                        BTreeSet::new()
+                    },
                     active: true,
                     resource_state: AgentSpaceResourceState::Idle,
                     lease: None,
@@ -4757,7 +4779,7 @@ edges: []
         store.save(&project).unwrap();
 
         let new_package = |id: &str, title: &str| {
-            WorkPackage::planned(
+            let mut package = WorkPackage::planned(
                 id.into(),
                 title.into(),
                 "Playable slice".into(),
@@ -4767,7 +4789,9 @@ edges: []
                 root.join("worktrees/coordinator-pending/game"),
                 1,
             )
-            .unwrap()
+            .unwrap();
+            package.require_space_tags(vec!["daily".into()]).unwrap();
+            package
         };
         // Fill the entire declared maxItems history with pre-dispatch mistakes.
         // Each withdrawal must vacate capacity and reopen the same node so a
@@ -4937,8 +4961,15 @@ edges: []
             .authorize_work_session("w_project", "s_pm", "w_implementation", "gameplay",)
             .await
             .is_err());
+        assert!(
+            store
+                .authorize_work_session("w_project", "s_pm", "w_review", "gameplay")
+                .await
+                .is_err(),
+            "a generic review Space must not claim a capability-specific package"
+        );
         let review = store
-            .authorize_work_session("w_project", "s_pm", "w_review", "gameplay")
+            .authorize_work_session("w_project", "s_pm", "w_review_daily", "gameplay")
             .await
             .unwrap();
         assert_eq!(review.kind, WorkDispatchKind::Review);
@@ -4947,7 +4978,7 @@ edges: []
             .start_agent_space_work(
                 "w_project",
                 "s_pm",
-                "w_review",
+                "w_review_daily",
                 &review.lease_id,
                 "s_review",
             )

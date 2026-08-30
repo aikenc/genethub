@@ -330,20 +330,32 @@ async function prepareSharedTopology(
   await t.flows.main.sendPrompt(
     opened.client,
     setup.id,
-    `只准备现有项目的共享 AgentSpace 池，不选择 Workflow、不创建 WorkPackage、不修改 repositories/game。外层 main、本地 repositories/game 和 worktrees/ 已由用户准备。
+    `只准备现有项目的共享 AgentSpace 池，不选择 Workflow、不创建 WorkPackage、不修改 repositories/game 的文件内容。外层 main、本地 repositories/game 和 worktrees/ 已由用户准备。这是 pool-only bootstrap：六个 Space 的最终名称、角色、标签、分支和 worktree 已全部给定，不需要调研或设计。
 
 通过公开 genet CLI 完成并取证：
 1. 将项目依次推进到 preflight-passed、git-ready。
-2. 创建并 Builder check/build/verify 六个 Space：task-feature、task-bugfix、task-migration、review-a、review-b、review-c。前三个为 implementation；后三个为 review。
-3. 把 spaces/pm 和六个 Space 的受管源提交到外层 main，保持外层 Git 干净。
-4. 用 workspace register-agent-space 注册六个 workspace，再用 pm project space record 记录同一精确外层 commit。能力标签必须是：
+2. 只用 Git 管理命令从 repositories/game/main 创建三个已知分支和 worktree，不读取业务文件：
+   - work/daily-challenge -> worktrees/task-feature/game
+   - work/save-migration -> worktrees/task-bugfix/game
+   - work/cocos4-adapter -> worktrees/task-migration/game
+3. 用 agent-space init 创建六个最小 Space：task-feature、task-bugfix、task-migration、review-a、review-b、review-c。禁止创建任何自定义 Skill、Provider 或项目契约；capability tag 只是 Coordinator 元数据，不要求同名 Skill。
+4. 每个 .code-workspace 保持 Space 根目录为第一个 folder，并且只追加以下精确第二 folder：
+   - task-feature 与 review-a: ../../worktrees/task-feature/game
+   - task-bugfix 与 review-b: ../../worktrees/task-bugfix/game
+   - task-migration 与 review-c: ../../worktrees/task-migration/game
+   不得把多个 sibling worktree 暴露给同一个 Space。
+5. 批量执行六个 Space 的 Builder check、build --dry-run --require-no-post-commands、build --require-no-post-commands、verify；不要运行 explain，不要用 schema/help 探测，不要尝试无效 flag。
+6. 把 spaces/pm 和六个 Space 的受管源提交到外层 main，保持外层 Git 干净。
+7. 用 workspace register-agent-space 注册六个 workspace，再用 pm project space record 记录同一精确外层 commit。能力标签必须是：
    - task-feature: daily、integration
    - task-bugfix: diagnosis、bugfix
    - task-migration: research、migration、cocos
-   - review-a/review-b/review-c: --role review
-5. 推进到 topology-verified、workspaces-registered，再推进项目级 active 后结束本回合。active 只表示共享拓扑可执行，不要选择需求 Workflow、创建 Intent 或 WorkPackage。
+   - review-a: --role review、daily
+   - review-b: --role review、bugfix
+   - review-c: --role review、cocos
+8. 推进到 topology-verified、workspaces-registered，再推进项目级 active 后结束本回合。active 只表示共享拓扑可执行，不要选择需求 Workflow、创建 Intent 或 WorkPackage。
 
-不要安装 Agent、不要改变模型，也不要等待后续消息。`,
+使用已加载 Skill 中的既定命令形式，把同类操作合并成尽量少的 bash 工具调用。禁止读取 repositories/game 源码、禁止安装 Agent、禁止改变模型，也不要等待后续消息。`,
   );
 
   const deadline = Date.now() + SETUP_BUDGET_MS;
@@ -373,11 +385,81 @@ async function prepareSharedTopology(
           "discussion",
         "topology setup consumed a delivery Workflow Run",
       );
+      assertPreboundTopology(t, status);
       return;
     }
     await sleep(1_000);
   }
   throw new Error("shared same-project AgentSpace topology was not ready within eight minutes");
+}
+
+function assertPreboundTopology(
+  t: CaseContext,
+  status: PmProjectStatus,
+): void {
+  const bindings = [
+    {
+      implementation: "task-feature",
+      review: "review-a",
+      capability: "daily",
+      branch: "work/daily-challenge",
+    },
+    {
+      implementation: "task-bugfix",
+      review: "review-b",
+      capability: "bugfix",
+      branch: "work/save-migration",
+    },
+    {
+      implementation: "task-migration",
+      review: "review-c",
+      capability: "cocos",
+      branch: "work/cocos4-adapter",
+    },
+  ] as const;
+
+  for (const binding of bindings) {
+    const worktree = path.join(
+      t.env.workspace,
+      "worktrees",
+      binding.implementation,
+      "game",
+    );
+    t.assertions.assert(existsSync(worktree), `${binding.implementation} worktree is missing`);
+    t.assertions.assert(
+      git(worktree, ["branch", "--show-current"]) === binding.branch,
+      `${binding.implementation} is not bound to ${binding.branch}`,
+    );
+
+    for (const [spaceName, expectedRole] of [
+      [binding.implementation, "implementation"],
+      [binding.review, "review"],
+    ] as const) {
+      const record = status.agentSpaces.find((space) => space.name === spaceName);
+      t.assertions.assert(Boolean(record), `${spaceName} was not recorded`);
+      t.assertions.assert(record?.role === expectedRole, `${spaceName} has role ${record?.role}`);
+      t.assertions.assert(
+        record?.tags.includes(binding.capability) === true,
+        `${spaceName} lacks ${binding.capability} capability`,
+      );
+      const workspaceFile = path.join(
+        t.env.workspace,
+        "spaces",
+        spaceName,
+        `${spaceName}.code-workspace`,
+      );
+      const parsed = JSON.parse(readFileSync(workspaceFile, "utf8")) as {
+        folders?: Array<{ path?: string }>;
+      };
+      const folders = parsed.folders?.map((folder) => folder.path) ?? [];
+      t.assertions.assert(
+        folders.length === 2 &&
+          folders[0] === "." &&
+          folders[1] === `../../worktrees/${binding.implementation}/game`,
+        `${spaceName} exposes unexpected folders: ${JSON.stringify(folders)}`,
+      );
+    }
+  }
 }
 
 async function createPmSession(
@@ -404,7 +486,7 @@ async function createPmSession(
 }
 
 function concurrentRequirements(): ConcurrentRequirement[] {
-  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 让 Coordinator 从 pm project show 中的既有 Space 池分配；只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
+  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 和 branch 让 Coordinator 从 pm project show 中的既有 Space 池分配。Coordinator 返回的 worktree 已由用户创建并在实现/评审 Workspace 中精确注册；package put 后核对返回绑定并复用它，不要再建 worktree。只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经 capability 匹配的独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
   return [
     {
       id: "daily",
@@ -412,7 +494,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "feature",
       prompt: `${common}
 
-选择 feature。Intent 是新增一个小而完整的每日挑战模块；implement 和 integrate 包都加 --space-tag daily。验收：新增 src/features/daily-challenge.js，按 UTC 日期稳定生成 seed、规则和完成 key；新增 Node 测试覆盖同日稳定与跨日变化；从 src/main.js 导出。不要改存档迁移或渲染适配。`,
+选择 feature。Intent 是新增一个小而完整的每日挑战模块；implement 和 integrate 包都使用 --branch work/daily-challenge --space-tag daily。验收：新增 src/features/daily-challenge.js，按 UTC 日期稳定生成 seed、规则和完成 key；新增 Node 测试覆盖同日稳定与跨日变化；从 src/main.js 导出。不要改存档迁移或渲染适配。`,
     },
     {
       id: "save",
@@ -420,7 +502,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "bugfix",
       prompt: `${common}
 
-选择 bugfix。reproduce 和 fix 包都加 --space-tag bugfix。复现并修复 src/save.js：v1 存档迁移到 v2 时必须保留有限数值 score，非法值回落 0，同时保持 mode；先用测试证据复现，再形成修复候选。不要改每日挑战或渲染适配。`,
+选择 bugfix。reproduce 和 fix 包都使用 --branch work/save-migration --space-tag bugfix。复现并修复 src/save.js：v1 存档迁移到 v2 时必须保留有限数值 score，非法值回落 0，同时保持 mode；先用测试证据复现，再形成修复候选。不要改每日挑战或渲染适配。`,
     },
     {
       id: "cocos",
@@ -428,7 +510,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "migration",
       prompt: `${common}
 
-选择 migration。investigate 与 migrate 包都加 --space-tag cocos。完成一个受控渲染适配切片：调研证据固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30；更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试。不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
+选择 migration。investigate 与 migrate 包都使用 --branch work/cocos4-adapter --space-tag cocos。完成一个受控渲染适配切片：调研证据固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30；更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试。不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
     },
   ];
 }

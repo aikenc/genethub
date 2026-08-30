@@ -64,6 +64,33 @@ idempotent rediscovery; it does not transfer rename/removal ownership. Do not
 rebuild, re-register, or re-record shared Spaces merely because the current
 requirement has a different PM Session id.
 
+### Pool-only bootstrap fast path
+
+When the user explicitly asks only for a shared pool scaffold and supplies the
+final Space names, roles, capability tags, repository, branches, and worktree
+paths, treat that mapping as the complete topology contract for this step:
+
+- do not inspect business source files, infer architecture, or create
+  speculative project/Provider Skills;
+- capability tags are Coordinator registration metadata and do not require a
+  same-named Skill; use the minimal `agent-space init` inputs unless the user
+  explicitly supplies a package-specific Skill;
+- create each supplied local Git branch/worktree first, then place only that
+  exact worktree beside the Space root in the corresponding
+  `.code-workspace`;
+- a pre-provisioned review Space is allowed only when it declares the same
+  capability tag as one implementation Space and contains only that exact
+  implementation worktree; never place all sibling worktrees in one reviewer;
+- batch homologous init, check, dry-build, build, verify, register, and record
+  operations. Read a documented command contract once and do not spend model
+  turns probing invalid flag combinations.
+
+This fast path creates deterministic capacity, not permission to dispatch
+underspecified work. Before execution, every WorkPackage still needs a
+self-contained contract and must pass the normal package, worktree, lease,
+candidate, and review gates. If branch/worktree identity is not known, use the
+normal allocation-first flow below instead of inventing speculative paths.
+
 1. Run `"$GENEHUB_CLI" agent-space init <name>` to create or validate the two required PipeBuilder inputs. Then edit `spaces/<name>/pipespace.json`, `<name>.code-workspace`, optional role source, and Git-managed Provider Skills for the actual work package. Keep the Space root first in the workspace folder list.
 2. Run, in order, with the exact injected CLI:
 
@@ -156,13 +183,19 @@ After binding every currently-ready independent package, report briefly and end 
 
 The daemon supervisor—not the PM model—owns monitoring. It samples quiet running sessions with bounded 30s, 1m, 2m, then 5m backoff. Unchanged health only advances the next daemon check; material changes arriving close together share one persisted batch wake. If a PM wake reaches the model but fails, dispatch retries use a separate persistent 30s, 1m, 2m, then 5m backoff; daemon reload interruptions remain immediately recoverable. Waiting-for-user and terminal packages have no periodic wake. On a supervisor wake, read the durable projection once, process every actionable package in the batch, inspect only terminal/failed sessions, then finish the turn again. A user message always takes priority.
 
-For candidate review, create or freeze a different, recorded `--role review`
-Agent Space only after the implementation package is in `candidate` and its
-implementation lease has returned. A review-only Space cannot own
-implementation packages. It must include the exact candidate worktree in its
-`.code-workspace`; the daemon fixes the reviewer cwd to that worktree and
-rejects review in every implementation Space. Do not pre-create a broad review
-Space containing speculative worktrees before candidates exist.
+For candidate review, use a different, recorded `--role review` Agent Space
+after the implementation package is in `candidate` and its implementation
+lease has returned. A review-only Space cannot own implementation packages.
+It must declare every capability tag requested by that package and include the
+exact candidate worktree in its `.code-workspace`; the daemon fixes the
+reviewer cwd to that worktree, matches package capabilities again, and rejects
+review in every implementation or generic non-matching review Space.
+
+Normally create or freeze the reviewer only after the candidate exists. The
+pool-only fast path may pre-register a reviewer when its exact future
+repository, branch, worktree, and capability are supplied and immutable. This
+is a dedicated pre-bound reviewer, not a broad speculative review pool: do not
+include sibling worktrees or omit the matching capability tag.
 
 Freeze a review Agent Space's source commit, Builder lock, workspace id, and
 candidate worktree set from dispatch until its verdict is recorded. Never
