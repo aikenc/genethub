@@ -686,6 +686,7 @@ impl ProjectStore {
             .find(|space| space.workspace_id == agent_space_workspace_id)
             .expect("reservation resolved through this Space");
         space.return_after_check(clean, now_ms())?;
+        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
         state.touch(now_ms());
         self.save(&state)
     }
@@ -726,6 +727,7 @@ impl ProjectStore {
             .get_mut(name)
             .expect("checked Space exists")
             .finish_repair_check(clean, now_ms())?;
+        reconcile_all_session_dcgs(&mut state)?;
         state.touch(now_ms());
         self.save(&state)?;
         if !clean {
@@ -785,6 +787,7 @@ impl ProjectStore {
             .insert(controller_session_id.to_string(), intent.clone());
         // Compatibility projection: the most recently revised Session intent.
         state.intent = Some(intent);
+        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -859,6 +862,7 @@ impl ProjectStore {
                 && existing.title == package.title
                 && existing.outcome == package.outcome
                 && existing.dependencies == package.dependencies
+                && existing.required_space_tags == package.required_space_tags
                 && existing.branch == package.branch
                 && existing.worktree == package.worktree
             {
@@ -896,7 +900,28 @@ impl ProjectStore {
         if existing_slots >= limit {
             anyhow::bail!("workAgent node {node_id} reached its fanout maxItems {limit}");
         }
-        package.agent_space = select_agent_space(&state, &selector, &node_instance_id)?;
+        package.agent_space = select_agent_space(
+            &state,
+            &selector,
+            &package.required_space_tags,
+            &node_instance_id,
+        )?;
+        let package_space_root = package
+            .worktree
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("work package worktree has no Agent Space parent"))?;
+        if package_space_root.parent() != Some(worktrees_root.as_path())
+            || package_space_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                != Some(package.agent_space.as_str())
+        {
+            anyhow::bail!(
+                "Coordinator-selected Agent Space {} requires a worktree at worktrees/{}/<repository>",
+                package.agent_space,
+                package.agent_space
+            );
+        }
         package.bind_to_workflow(
             controller_session_id.to_string(),
             run_id,
@@ -1109,8 +1134,12 @@ impl ProjectStore {
         let identity_changed = previous
             .as_ref()
             .is_some_and(|existing| existing.builder_lock_digest != verified.lock_digest);
-        let mut recorded_tags = inferred_space_tags(role, &name, &purpose);
-        recorded_tags.extend(tags);
+        let declared_tags = tags.into_iter().collect::<BTreeSet<_>>();
+        let mut recorded_tags = role_space_tags(role);
+        recorded_tags.extend(declared_tags.iter().cloned());
+        let capability_changed = previous
+            .as_ref()
+            .is_some_and(|existing| existing.declared_tags != declared_tags);
         let record = AgentSpaceRecord {
             name: name.clone(),
             purpose,
@@ -1120,22 +1149,23 @@ impl ProjectStore {
             builder_lock_digest: verified.lock_digest,
             role,
             tags: recorded_tags,
+            declared_tags,
             active: true,
-            resource_state: if identity_changed {
+            resource_state: if identity_changed || capability_changed {
                 AgentSpaceResourceState::Quarantined
             } else {
                 previous
                     .as_ref()
                     .map_or(AgentSpaceResourceState::Idle, |space| space.resource_state)
             },
-            lease: (!identity_changed)
+            lease: (!(identity_changed || capability_changed))
                 .then(|| previous.as_ref().and_then(|space| space.lease.clone()))
                 .flatten(),
             resource_revision: previous.as_ref().map_or(1, |space| space.resource_revision),
             updated_at_ms: now_ms(),
         };
         state.agent_spaces.insert(name, record);
-        if identity_changed {
+        if identity_changed || capability_changed {
             for package in state.work_packages.values_mut() {
                 let implementation_changed = package.agent_space == previous.as_ref().unwrap().name;
                 let active_review_changed =
@@ -1156,6 +1186,7 @@ impl ProjectStore {
                 }
             }
         }
+        reconcile_all_session_dcgs(&mut state)?;
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -1189,6 +1220,10 @@ impl ProjectStore {
             .get_mut(controller_session_id)
             .expect("Session supervisor was initialized")
             .acknowledge_wake();
+        // A supervisor observation is also the crash-recovery clock for the
+        // deterministic interpreter. Reconcile trusted evidence even when no
+        // PM transition happened after the underlying Space/package event.
+        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
         sync_primary_supervisor(&mut state);
         state.touch(now_ms());
         self.save(&state)?;
@@ -1399,6 +1434,21 @@ impl ProjectStore {
             });
         }
 
+        // The daemon sampler is the deterministic interpreter's recovery
+        // clock as well as the PM wake clock. Public mutations normally
+        // reconcile in the same transaction, but a restarted daemon must not
+        // depend on another PM command to consume already-durable evidence.
+        let run_revision_before = state
+            .session_dcg_runs
+            .get(controller_session_id)
+            .map(|run| run.revision);
+        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
+        let dcg_changed = state
+            .session_dcg_runs
+            .get(controller_session_id)
+            .map(|run| run.revision)
+            != run_revision_before;
+
         let (changed_state, wake_manager) = {
             let supervisor = state
                 .session_supervisors
@@ -1429,7 +1479,7 @@ impl ProjectStore {
             (changed_state, supervisor.wake_ready(now_ms))
         };
 
-        if changed_state {
+        if changed_state || dcg_changed {
             sync_primary_supervisor(&mut state);
             state.touch(now_ms);
             self.save(&state)?;
@@ -1627,6 +1677,7 @@ fn load_project_file(path: &Path) -> Result<ProjectState> {
 }
 
 fn upgrade_project_state(mut state: ProjectState) -> ProjectState {
+    let stored_format = state.format;
     if state.session_intents.is_empty() {
         if let Some(intent) = state.intent.clone() {
             state
@@ -1660,9 +1711,15 @@ fn upgrade_project_state(mut state: ProjectState) -> ProjectState {
         package.controller_session_id = state.controller_session_id.clone();
     }
     for space in state.agent_spaces.values_mut() {
-        if space.tags.is_empty() {
-            space.tags = inferred_space_tags(space.role, &space.name, &space.purpose);
+        // V3 mixed prose-derived tokens and explicit tags in one field, so it
+        // cannot prove which capabilities were actually declared. Migrate it
+        // fail-closed to the kernel role tag; the PM must re-record any
+        // specialized capability explicitly.
+        if stored_format < 4 {
+            space.declared_tags.clear();
         }
+        space.tags = role_space_tags(space.role);
+        space.tags.extend(space.declared_tags.iter().cloned());
     }
     sync_primary_supervisor(&mut state);
     state.format = PM_PROJECT_FORMAT;
@@ -1713,7 +1770,8 @@ fn run_definition(
 fn select_agent_space(
     state: &ProjectState,
     selector: &DcgSpaceSelector,
-    _node_instance_id: &str,
+    required_space_tags: &BTreeSet<String>,
+    node_instance_id: &str,
 ) -> Result<String> {
     let mut candidates = state
         .agent_spaces
@@ -1721,14 +1779,25 @@ fn select_agent_space(
         .filter(|space| {
             space.active
                 && space.role == AgentSpaceRole::Implementation
-                && !matches!(
-                    space.resource_state,
-                    AgentSpaceResourceState::Quarantined | AgentSpaceResourceState::Repairing
-                )
+                && space.resource_state == AgentSpaceResourceState::Idle
+                && space.lease.is_none()
                 && selector
                     .match_tags
                     .iter()
                     .all(|tag| space.tags.contains(tag))
+                && required_space_tags
+                    .iter()
+                    .all(|tag| space.tags.contains(tag))
+                && !state.work_packages.values().any(|package| {
+                    package.agent_space == space.name
+                        && package.node_instance_id.as_deref() == Some(node_instance_id)
+                        && !matches!(
+                            package.status,
+                            WorkPackageStatus::Accepted
+                                | WorkPackageStatus::Cancelled
+                                | WorkPackageStatus::Blocked
+                        )
+                })
         })
         .map(|space| {
             let active_assignments = state
@@ -1754,8 +1823,9 @@ fn select_agent_space(
         .map(|(_, name)| name)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no active Agent Space matches Workflow tags [{}]",
-                selector.match_tags.join(", ")
+                "no active Agent Space matches Workflow tags [{}] and WorkPackage capability tags [{}]",
+                selector.match_tags.join(", "),
+                required_space_tags.iter().cloned().collect::<Vec<_>>().join(", ")
             )
         })
 }
@@ -2082,6 +2152,31 @@ fn reconcile_session_dcg(
     anyhow::bail!("Workflow automatic transition limit exceeded")
 }
 
+fn reconcile_selected_session_dcg(
+    state: &mut ProjectState,
+    controller_session_id: &str,
+) -> Result<()> {
+    let Some(run) = state.session_dcg_runs.get(controller_session_id) else {
+        return Ok(());
+    };
+    if run.definition_snapshot.is_none() && run.graph_id.is_none() {
+        return Ok(());
+    }
+    let Some(catalog) = load_dcg_catalog(&state.root)? else {
+        return Ok(());
+    };
+    let definition = run_definition(state, controller_session_id, &catalog)?;
+    reconcile_session_dcg(state, controller_session_id, &definition)
+}
+
+fn reconcile_all_session_dcgs(state: &mut ProjectState) -> Result<()> {
+    let controllers = state.session_dcg_runs.keys().cloned().collect::<Vec<_>>();
+    for controller in controllers {
+        reconcile_selected_session_dcg(state, &controller)?;
+    }
+    Ok(())
+}
+
 fn attach_dcg_runs(state: &mut ProjectState, controller_session_id: &str) -> Result<bool> {
     let Some(_catalog) = load_dcg_catalog(&state.root)? else {
         // Format-1 projects remain usable until their standard PM Space is
@@ -2227,21 +2322,11 @@ fn validate_kebab_name(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn inferred_space_tags(role: AgentSpaceRole, name: &str, purpose: &str) -> BTreeSet<String> {
-    let mut tags = BTreeSet::from([match role {
+fn role_space_tags(role: AgentSpaceRole) -> BTreeSet<String> {
+    BTreeSet::from([match role {
         AgentSpaceRole::Implementation => "implementation".to_string(),
         AgentSpaceRole::Review => "review".to_string(),
-    }]);
-    for value in [name, purpose] {
-        for token in value
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .map(str::to_ascii_lowercase)
-            .filter(|token| !token.is_empty() && token.len() <= 80)
-        {
-            tags.insert(token);
-        }
-    }
-    tags
+    }])
 }
 
 fn validate_git_object(value: &str) -> Result<()> {
@@ -2329,6 +2414,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 outcome: package.outcome.clone(),
                 status: enum_wire_name(package.status)?,
                 dependencies: package.dependencies.clone(),
+                required_space_tags: package.required_space_tags.iter().cloned().collect(),
                 agent_space: package.agent_space.clone(),
                 branch: package.branch.clone(),
                 workflow_run_id: package.workflow_run_id.clone(),
@@ -3034,6 +3120,228 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn supervisor_tick_reconciles_durable_workpackage_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "recovery-clock",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalog = DcgCatalog::load(&root.join("spaces/pm/skills/project-workflow")).unwrap();
+        let definition = catalog.session_workflow("feature").unwrap();
+        let store = ProjectStore::new(&temp.path().join("data"));
+        let mut state = ProjectState::new("w_project".into(), "s_pm".into(), root, 1);
+        let mut run = DcgRun::new_discussion("run-s_pm".into(), "s_pm".into()).unwrap();
+        run.select_before_start(definition).unwrap();
+        run.record_actor_facts(
+            definition,
+            "intake",
+            DcgActor::Pm,
+            &BTreeSet::from(["intent.aligned".into()]),
+        )
+        .unwrap();
+        run.transition(
+            definition,
+            "aligned",
+            &BTreeSet::from(["intent.persisted".into(), "intent.aligned".into()]),
+            DcgActor::Pm,
+        )
+        .unwrap();
+        run.record_actor_facts(
+            definition,
+            "plan",
+            DcgActor::Pm,
+            &BTreeSet::from(["plan.ready".into()]),
+        )
+        .unwrap();
+        run.transition(
+            definition,
+            "planned",
+            &BTreeSet::from(["plan.ready".into()]),
+            DcgActor::Pm,
+        )
+        .unwrap();
+        let node_instance_id = run.active_node_instance("implement").unwrap().id.clone();
+        run.seal_fanout(&node_instance_id).unwrap();
+        let run_id = run.id.clone();
+        state.session_dcg_runs.insert("s_pm".into(), run);
+        state.session_intents.insert(
+            "s_pm".into(),
+            IntentRevision {
+                revision: 1,
+                outcome: "deliver".into(),
+                acceptance: vec!["accepted".into()],
+                constraints: vec![],
+                out_of_scope: vec![],
+                affected_work_packages: vec![],
+                recorded_at_ms: 1,
+            },
+        );
+        let mut package = WorkPackage::planned(
+            "candidate".into(),
+            "Candidate".into(),
+            "deliver candidate".into(),
+            vec![],
+            "implementation".into(),
+            "work/candidate".into(),
+            PathBuf::from("/project/worktrees/implementation/game"),
+            1,
+        )
+        .unwrap();
+        package
+            .bind_to_workflow("s_pm".into(), run_id, node_instance_id)
+            .unwrap();
+        package.status = WorkPackageStatus::Candidate;
+        state.work_packages.insert(package.id.clone(), package);
+        store.save(&state).unwrap();
+
+        let decision = store
+            .reconcile_supervisor("w_project", "s_pm", "candidate".into(), true, true, 2)
+            .await
+            .unwrap();
+        assert!(decision.project.session_dcg_runs["s_pm"]
+            .active_nodes
+            .contains("review"));
+    }
+
+    #[test]
+    fn package_capability_tags_narrow_coordinator_space_choice() {
+        let mut state = ProjectState::new(
+            "w_project".into(),
+            "s_pm".into(),
+            PathBuf::from("/project"),
+            1,
+        );
+        for (name, capability) in [
+            ("implementation-content", "content"),
+            ("implementation-foundation", "foundation"),
+        ] {
+            state.agent_spaces.insert(
+                name.into(),
+                AgentSpaceRecord {
+                    name: name.into(),
+                    purpose: capability.into(),
+                    source_path: PathBuf::from(format!("/project/spaces/{name}")),
+                    workspace_id: format!("w_{capability}"),
+                    source_commit: "0".repeat(40),
+                    builder_lock_digest: format!("sha256:{capability}"),
+                    role: AgentSpaceRole::Implementation,
+                    tags: BTreeSet::from(["implementation".into(), capability.into()]),
+                    declared_tags: BTreeSet::from([capability.into()]),
+                    active: true,
+                    resource_state: AgentSpaceResourceState::Idle,
+                    lease: None,
+                    resource_revision: 1,
+                    updated_at_ms: 1,
+                },
+            );
+        }
+        let selector = DcgSpaceSelector {
+            match_tags: vec!["implementation".into()],
+            lease: dcg::SpaceLeaseMode::Exclusive,
+            clean_required: true,
+        };
+
+        assert_eq!(
+            select_agent_space(
+                &state,
+                &selector,
+                &BTreeSet::from(["foundation".into()]),
+                "implement@1",
+            )
+            .unwrap(),
+            "implementation-foundation"
+        );
+        let mut sibling = WorkPackage::planned(
+            "sibling".into(),
+            "Sibling".into(),
+            "Deliver sibling".into(),
+            vec![],
+            "implementation-foundation".into(),
+            "work/sibling".into(),
+            PathBuf::from("/project/worktrees/implementation-foundation/repo"),
+            1,
+        )
+        .unwrap();
+        sibling.node_instance_id = Some("implement@1".into());
+        state.work_packages.insert(sibling.id.clone(), sibling);
+        assert!(select_agent_space(
+            &state,
+            &selector,
+            &BTreeSet::from(["foundation".into()]),
+            "implement@1",
+        )
+        .is_err());
+        state.work_packages.clear();
+        state
+            .agent_spaces
+            .get_mut("implementation-foundation")
+            .unwrap()
+            .resource_state = AgentSpaceResourceState::Working;
+        assert!(select_agent_space(
+            &state,
+            &selector,
+            &BTreeSet::from(["foundation".into()]),
+            "implement@2",
+        )
+        .is_err());
+        assert!(select_agent_space(
+            &state,
+            &selector,
+            &BTreeSet::from(["unknown".into()]),
+            "implement@1",
+        )
+        .is_err());
+
+        let mut package = WorkPackage::planned(
+            "wp".into(),
+            "Package".into(),
+            "Deliver package".into(),
+            vec![],
+            "coordinator-pending".into(),
+            "work/wp".into(),
+            PathBuf::from("/project/worktrees/wp"),
+            1,
+        )
+        .unwrap();
+        package
+            .require_space_tags(vec!["foundation".into(), "webgl2".into()])
+            .unwrap();
+        assert_eq!(
+            package.required_space_tags,
+            BTreeSet::from(["foundation".into(), "webgl2".into()])
+        );
+        assert!(package
+            .require_space_tags(vec!["foundation".into(), "foundation".into()])
+            .is_err());
+        assert!(package
+            .require_space_tags(vec!["Not-Kebab".into()])
+            .is_err());
+
+        let mut legacy = state;
+        legacy.format = 3;
+        let legacy_space = legacy
+            .agent_spaces
+            .get_mut("implementation-content")
+            .unwrap();
+        legacy_space
+            .tags
+            .extend(["not".into(), "integration".into()]);
+        legacy_space.declared_tags.clear();
+        let upgraded = upgrade_project_state(legacy);
+        assert_eq!(
+            upgraded.agent_spaces["implementation-content"].tags,
+            BTreeSet::from(["implementation".into()])
+        );
+    }
+
+    #[tokio::test]
     async fn supervisor_backoff_and_pending_wake_survive_daemon_restart() {
         let temp = tempfile::tempdir().unwrap();
         let root = project_root(&temp);
@@ -3452,6 +3760,7 @@ mod tests {
                         AgentSpaceRole::Implementation
                     },
                     tags: BTreeSet::from([name.to_string()]),
+                    declared_tags: BTreeSet::new(),
                     active: true,
                     resource_state: AgentSpaceResourceState::Idle,
                     lease: None,
@@ -3537,9 +3846,41 @@ mod tests {
             .await
             .is_err());
 
-        let mut candidate = store.get("w_project", "s_pm").await.unwrap();
-        candidate.work_packages.get_mut("gameplay").unwrap().status = WorkPackageStatus::Candidate;
-        store.save(&candidate).unwrap();
+        store
+            .transition_work_package(
+                "w_project",
+                "s_pm",
+                "gameplay",
+                WorkPackageStatus::Running,
+                Some("s_implementation".into()),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let candidate_evidence = CandidateEvidence {
+            repository: "game".into(),
+            commit: "a".repeat(40),
+            tree: "b".repeat(40),
+            evidence: vec!["tests passed".into()],
+        };
+        let after_candidate = store
+            .transition_work_package(
+                "w_project",
+                "s_pm",
+                "gameplay",
+                WorkPackageStatus::Candidate,
+                None,
+                Some(candidate_evidence.clone()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(after_candidate.session_dcg_runs["s_pm"]
+            .active_nodes
+            .contains("review"));
         assert!(store
             .authorize_work_session("w_project", "s_pm", "w_implementation", "gameplay",)
             .await
@@ -3550,6 +3891,56 @@ mod tests {
             .unwrap();
         assert_eq!(review.kind, WorkDispatchKind::Review);
         assert_eq!(review.cwd, worktree.canonicalize().unwrap());
+        store
+            .start_agent_space_work(
+                "w_project",
+                "s_pm",
+                "w_review",
+                &review.lease_id,
+                "s_review",
+            )
+            .await
+            .unwrap();
+        let passing_review = ReviewEvidence {
+            session_id: "s_review".into(),
+            candidate_commit: candidate_evidence.commit.clone(),
+            candidate_tree: candidate_evidence.tree.clone(),
+            verdict: Some(ReviewVerdict::Pass),
+            evidence: vec!["independent review passed".into()],
+        };
+        store
+            .transition_work_package(
+                "w_project",
+                "s_pm",
+                "gameplay",
+                WorkPackageStatus::Review,
+                None,
+                None,
+                Some(passing_review),
+                None,
+            )
+            .await
+            .unwrap();
+        let accepted = store
+            .transition_work_package(
+                "w_project",
+                "s_pm",
+                "gameplay",
+                WorkPackageStatus::Accepted,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted.work_packages["gameplay"].status,
+            WorkPackageStatus::Accepted
+        );
+        assert!(accepted.session_dcg_runs["s_pm"]
+            .active_nodes
+            .contains("integrate"));
     }
 
     #[test]

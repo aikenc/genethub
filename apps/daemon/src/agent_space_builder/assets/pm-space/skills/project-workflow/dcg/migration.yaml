@@ -10,7 +10,6 @@ nodes:
       actor: workAgent
       space: { matchTags: [research], lease: exclusive, cleanRequired: true }
     objective: { prompt: prompts/diagnose.md }
-    outputs: [compatibilityReport, migrationSlices]
   - id: migrate
     kind: activity
     executor:
@@ -18,11 +17,9 @@ nodes:
       space: { matchTags: [migration], lease: exclusive, cleanRequired: true }
     objective: { prompt: prompts/implement.md }
     fanout: { source: investigate.migrationSlices, maxItems: 4 }
-    outputs: [candidate, compatibilityEvidence]
   - id: review
     kind: activity
     executor: { actor: system }
-    outputs: [reviewVerdict]
   - id: prepare-recovery
     kind: activity
     executor: { actor: pm }

@@ -563,7 +563,12 @@ export type PmWorkPackageStatus = { id: string,
  * PM Session that owns this package. Project-wide status projections
  * must never make another Session's work look like local progress.
  */
-controllerSessionId: string, title: string, outcome: string, status: string, dependencies: Array<string>, agentSpace: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
+controllerSessionId: string, title: string, outcome: string, status: string, dependencies: Array<string>, 
+/**
+ * Capability narrowing for one fanout item. The Coordinator combines
+ * these with the node selector before choosing a concrete Agent Space.
+ */
+requiredSpaceTags: Array<string>, agentSpace: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
 
 export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 

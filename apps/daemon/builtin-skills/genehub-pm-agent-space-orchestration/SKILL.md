@@ -21,6 +21,13 @@ For every proposed node, name:
 - upstream dependencies and downstream consumer;
 - completion and review gate.
 
+Give every Space explicit capability tags when its responsibility is narrower
+than the Workflow node's base selector. Keep each Space's Skills and workspace
+folders limited to that capability and its exact package worktree; do not make
+all implementation Spaces general-purpose just to let the PM choose among
+them. A fanout package requests its capability with `package put --space-tag
+<capability>`, and the Coordinator chooses the concrete idle Space.
+
 Merge nodes that need the same context and writable branch. Split nodes when they can progress independently, need different Skills, or require an independent reviewer. Never pre-create Gameplay/UI/Test roles merely because the project is a game.
 
 ## Build and register a Space
@@ -42,7 +49,7 @@ Merge nodes that need the same context and writable branch. Split nodes when the
 ```text
 "$GENEHUB_CLI" pm project space record --name <space-name> --purpose <contract> \
   --path spaces/<space-name> --workspace <workspace-id> --commit <full-space-source-commit> \
-  --role implementation|review
+  --role implementation|review [--tag <capability>...]
 ```
 
 Builder does not create Git repositories, branches, worktrees, or commits. Use ordinary Git for those responsibilities and verify every target path before mutation.
@@ -117,12 +124,18 @@ After binding every currently-ready independent package, report briefly and end 
 
 The daemon supervisor—not the PM model—owns monitoring. It samples quiet running sessions with bounded 30s, 1m, 2m, then 5m backoff. Unchanged health only advances the next daemon check; material changes arriving close together share one persisted batch wake. If a PM wake reaches the model but fails, dispatch retries use a separate persistent 30s, 1m, 2m, then 5m backoff; daemon reload interruptions remain immediately recoverable. Waiting-for-user and terminal packages have no periodic wake. On a supervisor wake, read the durable projection once, process every actionable package in the batch, inspect only terminal/failed sessions, then finish the turn again. A user message always takes priority.
 
-For candidate review, launch the same package id in a different, recorded `--role review` Agent Space only after the implementation package is in `candidate`. A review-only Space cannot own implementation packages. It must include the exact candidate worktree in its `.code-workspace`; the daemon fixes the reviewer cwd to that worktree and rejects review in every implementation Space.
+For candidate review, create or freeze a different, recorded `--role review`
+Agent Space only after the implementation package is in `candidate` and its
+implementation lease has returned. A review-only Space cannot own
+implementation packages. It must include the exact candidate worktree in its
+`.code-workspace`; the daemon fixes the reviewer cwd to that worktree and
+rejects review in every implementation Space. Do not pre-create a broad review
+Space containing speculative worktrees before candidates exist.
 
 Freeze a review Agent Space's source commit, Builder lock, workspace id, and
 candidate worktree set from dispatch until its verdict is recorded. Never
 rebuild or re-record that node to squeeze another candidate into an active
-review. Prefer one stable review Space that includes every already-known
-candidate worktree, or add a new per-candidate review node. Topology remains
-dynamic by adding/replacing nodes between evidence boundaries, not by mutating
-the identity underneath a running WorkSession.
+review. Reuse it only when the exact candidate worktree was already present at
+the evidence boundary; otherwise add a per-candidate review node. Topology
+remains dynamic by adding/replacing nodes between evidence boundaries, not by
+mutating the identity underneath a running WorkSession.

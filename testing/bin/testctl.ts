@@ -18,6 +18,10 @@ import { runNodeUnit } from "../infrastructure/adapters/node.ts";
 import { runNodeSequence } from "../infrastructure/adapters/node.ts";
 import { runRustLegacyUnit } from "../infrastructure/adapters/rust-legacy.ts";
 import { createRunStore } from "../infrastructure/evidence/run-store.ts";
+import {
+  listHumanDecisions,
+  recordHumanDecision,
+} from "../infrastructure/interaction/human-decision.ts";
 import { parseSummaryLanguage, renderRunSummary } from "../infrastructure/evidence/summary.ts";
 import { checkGovernance } from "../infrastructure/lint/governance.ts";
 import { lintLayers } from "../infrastructure/lint/layers.ts";
@@ -60,12 +64,14 @@ function tagsOf(args: string[]): string[] {
 }
 
 function usage(): string {
-  return `testctl <lint|governance|plan|run|inspect|compare|list|prune> [options]
+  return `testctl <lint|governance|plan|run|inspect|interactions|decide|compare|list|prune> [options]
   lint [--open <path>] [--cloud <path>]
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>]
   run --space <abs> --gate <gate> --topic <slug> [--tags <tag>] [--environments <n>] [--summary-language <en|zh-CN>] [--open <path>] [--cloud <path>] [--max-run-ms <ms>]
   inspect --run <abs> [--failed|--case <id>]
+  interactions --run <abs>
+  decide --run <abs> --request <id> --edge <id>
   compare --base <run> --candidate <run>
   list --space <abs>
   prune --space <abs> --before <yyyy-mm-dd> --apply
@@ -106,6 +112,8 @@ async function main(): Promise<number> {
     "--max-run-ms",
     "--run",
     "--case",
+    "--request",
+    "--edge",
     "--base",
     "--candidate",
     "--before",
@@ -203,6 +211,7 @@ async function main(): Promise<number> {
       TESTCTL_OPEN_ROOT: openRoot,
       TESTCTL_CLOUD_ROOT: cloudRoot ?? "",
       GENEHUB_TEST_COMPONENT_CACHE_DIR: componentCache,
+      TESTCTL_INTERACTION_DIR: path.join(store.dir, "interactions"),
     };
     const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
     const inflight = new Set<Promise<void>>();
@@ -402,6 +411,35 @@ async function main(): Promise<number> {
     // after it made `inspect --case/--failed` hide the very failure requested.
     process.stdout.write(`${JSON.stringify({ results: filtered, diagnostics, manifest }, null, 2)}\n`);
     return 0;
+  }
+
+  if (command === "interactions") {
+    const runDir = flag(args, "--run");
+    if (!runDir) {
+      process.stderr.write("--run is required\n");
+      return 2;
+    }
+    process.stdout.write(`${JSON.stringify({ requests: listHumanDecisions(runDir) }, null, 2)}\n`);
+    return 0;
+  }
+
+  if (command === "decide") {
+    const runDir = flag(args, "--run");
+    const requestId = flag(args, "--request");
+    const edgeId = flag(args, "--edge");
+    if (!runDir || !requestId || !edgeId) {
+      process.stderr.write("decide requires --run, --request, and --edge\n");
+      return 2;
+    }
+    try {
+      process.stdout.write(
+        `${JSON.stringify(recordHumanDecision(runDir, requestId, edgeId), null, 2)}\n`,
+      );
+      return 0;
+    } catch (error) {
+      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      return 2;
+    }
   }
 
   if (command === "compare") {

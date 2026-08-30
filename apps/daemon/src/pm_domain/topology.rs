@@ -49,6 +49,10 @@ pub struct AgentSpaceRecord {
     /// They describe the Space role, never an Agent runtime or model.
     #[serde(default)]
     pub tags: BTreeSet<String>,
+    /// Human-declared capability contract. `tags` is the effective union of
+    /// this set and the one kernel-owned role tag; prose is never parsed.
+    #[serde(default)]
+    pub declared_tags: BTreeSet<String>,
     pub active: bool,
     #[serde(default)]
     pub resource_state: AgentSpaceResourceState,
@@ -173,6 +177,7 @@ mod tests {
             builder_lock_digest: "sha256:test".into(),
             role: AgentSpaceRole::Implementation,
             tags: BTreeSet::from(["implementation".into()]),
+            declared_tags: BTreeSet::new(),
             active: true,
             resource_state: AgentSpaceResourceState::Idle,
             lease: None,

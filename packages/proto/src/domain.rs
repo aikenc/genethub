@@ -303,6 +303,9 @@ pub struct PmWorkPackageStatus {
     pub outcome: String,
     pub status: String,
     pub dependencies: Vec<String>,
+    /// Capability narrowing for one fanout item. The Coordinator combines
+    /// these with the node selector before choosing a concrete Agent Space.
+    pub required_space_tags: Vec<String>,
     pub agent_space: String,
     pub branch: String,
     #[ts(optional)]

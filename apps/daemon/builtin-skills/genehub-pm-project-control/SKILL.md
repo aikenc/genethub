@@ -27,7 +27,7 @@ Use only the authenticated control commands below; never edit daemon PM state fi
   --acceptance <observable-check> [--acceptance <check>...] \
   [--constraint <constraint>...] [--out-of-scope <item>...] [--affects <package-id>...]
 "$GENEHUB_CLI" pm project package put --id <id> --title <title> --outcome <outcome> \
-  --space <agent-space> --branch <branch> --worktree <project-relative-path> \
+  --space-tag <capability> --branch <branch> --worktree <project-relative-path> \
   [--depends-on <package-id>...]
 "$GENEHUB_CLI" pm project package transition --id <id> --to <status> [...evidence]
 "$GENEHUB_CLI" pm project advance --to <next-phase>
@@ -40,6 +40,10 @@ Every command derives project root and controller from this PM session. Treat a 
 
 - Translate the request into observable acceptance criteria, not implementation wishes.
 - Keep work packages outcome-sized: one owner, inputs, output, dependencies, writable branch/worktree, completion gate, and risk.
+- Ask for semantic Space capabilities with repeatable `--space-tag`; never select
+  a concrete Agent Space name. The Coordinator combines these tags with the
+  active Workflow node selector and deterministically assigns a compatible
+  idle Space. The returned `agentSpace` is the only Space valid for dispatch.
 - Size each package so one WorkSession can autonomously reach a candidate in a
   small number of runtime turns. Do not convert its internal file order,
   checkpoint commits, or individual gate commands into PM graph nodes.

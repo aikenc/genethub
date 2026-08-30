@@ -13,3 +13,8 @@ export type { DefineInput } from "./engine/registry.ts";
 export { createLease, releaseLease, type EnvironmentLease } from "./environment/lease.ts";
 export { allocatePort } from "./environment/ports.ts";
 export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
+export {
+  awaitHumanDecision,
+  type HumanDecisionRequest,
+  type HumanDecisionResponse,
+} from "./interaction/human-decision.ts";

@@ -10,18 +10,15 @@ nodes:
       actor: workAgent
       space: { matchTags: [diagnosis], lease: exclusive, cleanRequired: true }
     objective: { prompt: prompts/diagnose.md }
-    outputs: [reproduction, diagnosis]
   - id: fix
     kind: activity
     executor:
       actor: workAgent
       space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
     objective: { prompt: prompts/implement.md }
-    outputs: [candidate, regressionEvidence]
   - id: review
     kind: activity
     executor: { actor: system }
-    outputs: [reviewVerdict]
   - id: prepare-recovery
     kind: activity
     executor: { actor: pm }

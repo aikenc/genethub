@@ -122,12 +122,13 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 "outcome",
                 "depends-on",
                 "space",
+                "space-tag",
                 "branch",
                 "worktree",
                 "node",
             ])?;
             let worktree = project_path(&context.root, &flags.one_required("worktree")?)?;
-            let package = WorkPackage::planned(
+            let mut package = WorkPackage::planned(
                 flags.one_required("id")?,
                 flags.one_required("title")?,
                 flags.one_required("outcome")?,
@@ -140,6 +141,9 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 chrono::Utc::now().timestamp_millis(),
             )
             .map_err(rejected)?;
+            package
+                .require_space_tags(flags.many("space-tag"))
+                .map_err(rejected)?;
             context.validate_package_worktree(&package).await?;
             let project = context
                 .state
@@ -783,10 +787,10 @@ impl Context {
         let worktree = package.worktree.canonicalize().map_err(rejected)?;
         let relative = worktree.strip_prefix(&worktrees).map_err(rejected)?;
         let parts = relative.components().collect::<Vec<_>>();
-        if parts.len() != 2 || parts[0].as_os_str().to_str() != Some(package.agent_space.as_str()) {
+        if parts.len() != 2 {
             return Err(CliFailure::business(
                 "invalidPackageWorktree",
-                "package worktree must be worktrees/<agent-space>/<repository>",
+                "package worktree must be worktrees/<coordinator-selected-space>/<repository>",
                 None,
             ));
         }

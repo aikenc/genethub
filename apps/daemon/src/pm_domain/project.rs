@@ -9,7 +9,7 @@ use super::supervisor::SupervisorState;
 use super::task_graph::WorkPackage;
 use super::topology::AgentSpaceRecord;
 
-pub const PM_PROJECT_FORMAT: u32 = 3;
+pub const PM_PROJECT_FORMAT: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

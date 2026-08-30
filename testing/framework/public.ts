@@ -45,7 +45,15 @@ export { startRelay, type RelayHandle } from "./drivers/relay.ts";
 export { data } from "./builders/index.ts";
 export { compareQueueTails } from "./queue.ts";
 export { qualificationReasons } from "../policies/gates.ts";
-export { BlockedError, UnstableError, parseSummaryLanguage, renderRunSummary } from "../infrastructure/public.ts";
+export {
+  awaitHumanDecision,
+  BlockedError,
+  parseSummaryLanguage,
+  renderRunSummary,
+  UnstableError,
+  type HumanDecisionRequest,
+  type HumanDecisionResponse,
+} from "../infrastructure/public.ts";
 export type { RunManifest, UnitResult } from "../infrastructure/public.ts";
 
 function callerFile(): string {

@@ -4,7 +4,12 @@ import path from "node:path";
 
 import type { PmProjectStatus, SessionSummary } from "@genehub/proto";
 
-import { BlockedError, type CaseContext } from "../../framework/public.ts";
+import {
+  awaitHumanDecision,
+  BlockedError,
+  type CaseContext,
+  type HumanDecisionRequest,
+} from "../../framework/public.ts";
 
 export const PM_MODEL = "ali/qwen3.8-flash";
 export const WORK_AGENT = "opencode";
@@ -109,6 +114,99 @@ export async function runRealPmDelivery(
       }
       latest = await projectStatus(opened.client, opened.workspaceId);
       if (latest) {
+        const workflowRun = latest.workflowRuns.find(
+          (item) => item.controllerSessionId === pm.id,
+        );
+        const humanEdges =
+          workflowRun?.availableEdges.filter(
+            (edge) => edge.chooseBy === "user" && edge.satisfied,
+          ) ?? [];
+        if (workflowRun && humanEdges.length > 0) {
+          const requestId = `${pm.id}-${workflowRun.id}-${workflowRun.revision}`;
+          const request: HumanDecisionRequest = {
+            schema: "genehub.test-human-decision-request.v1",
+            requestId,
+            createdAt: new Date().toISOString(),
+            caseId: process.env.TESTCTL_CASE_ID ?? "unknown",
+            projectWorkspaceId: opened.workspaceId,
+            sessionId: pm.id,
+            workflowRunId: workflowRun.id,
+            workflowRevision: workflowRun.revision,
+            ...(workflowRun.graphId ? { graphId: workflowRun.graphId } : {}),
+            activeNodes: workflowRun.activeNodes,
+            edges: humanEdges.map((edge) => ({
+              id: edge.id,
+              ...(edge.label ? { label: edge.label } : {}),
+              ...(edge.description ? { description: edge.description } : {}),
+              from: edge.from,
+              to: edge.to,
+              condition: edge.condition,
+            })),
+            evidence: {
+              packages: latest.workPackages
+                .filter((item) => item.controllerSessionId === pm.id)
+                .map((item) => ({
+                  id: item.id,
+                  title: item.title,
+                  status: item.status,
+                  agentSpace: item.agentSpace,
+                  ...(item.workSessionId ? { workSessionId: item.workSessionId } : {}),
+                  ...(item.candidateCommit ? { candidateCommit: item.candidateCommit } : {}),
+                  ...(item.candidateTree ? { candidateTree: item.candidateTree } : {}),
+                  ...(item.reviewSessionId ? { reviewSessionId: item.reviewSessionId } : {}),
+                  ...(item.blockReason ? { blockReason: item.blockReason } : {}),
+                  ...(item.reviewVerdict ? { reviewVerdict: item.reviewVerdict } : {}),
+                })),
+              quarantinedSpaces: latest.agentSpaces
+                .filter((space) => space.resourceState === "quarantined")
+                .map((space) => ({
+                  name: space.name,
+                  purpose: space.purpose,
+                  resourceState: space.resourceState,
+                })),
+            },
+          };
+          const decision = await awaitHumanDecision(request, deadline);
+          const current = await projectStatus(opened.client, opened.workspaceId);
+          const currentRun = current?.workflowRuns.find(
+            (item) => item.controllerSessionId === pm.id,
+          );
+          const edgeStillEligible = currentRun?.availableEdges.some(
+            (edge) =>
+              edge.id === decision.edgeId && edge.chooseBy === "user" && edge.satisfied,
+          );
+          if (
+            !currentRun ||
+            currentRun.id !== workflowRun.id ||
+            currentRun.revision !== workflowRun.revision ||
+            !edgeStillEligible
+          ) {
+            throw new Error(
+              `human decision ${decision.requestId} became stale before transition`,
+            );
+          }
+          const transitioned = await opened.client.call({
+            type: "pm.workflow.transition",
+            payload: {
+              workspaceId: opened.workspaceId,
+              sessionId: pm.id,
+              edgeId: decision.edgeId,
+              facts: [],
+            },
+          });
+          t.assertions.assert(
+            transitioned?.type === "projectStatus",
+            `pm.workflow.transition returned ${transitioned?.type}`,
+          );
+          if (transitioned?.type !== "projectStatus") {
+            throw new Error("human workflow transition did not return project status");
+          }
+          latest = transitioned.data;
+          t.note(
+            `test-operator selected human edge ${decision.edgeId} for ${workflowRun.id}@${workflowRun.revision}`,
+          );
+          continue;
+        }
         const runningSpaces = new Set(
           latest.workPackages
             .filter((item) => item.status === "running")

@@ -72,6 +72,11 @@ pub struct WorkPackage {
     pub title: String,
     pub outcome: String,
     pub dependencies: Vec<String>,
+    /// Semantic capabilities required by this fanout item in addition to the
+    /// Workflow node's base Space selector. The PM asks for capabilities; the
+    /// Coordinator still chooses the concrete Agent Space.
+    #[serde(default)]
+    pub required_space_tags: BTreeSet<String>,
     pub agent_space: String,
     pub branch: String,
     pub worktree: PathBuf,
@@ -117,6 +122,7 @@ impl WorkPackage {
             title,
             outcome,
             dependencies,
+            required_space_tags: BTreeSet::new(),
             agent_space,
             branch,
             worktree,
@@ -129,6 +135,30 @@ impl WorkPackage {
             block_reason: None,
             updated_at_ms: now_ms,
         })
+    }
+
+    pub fn require_space_tags(&mut self, tags: Vec<String>) -> Result<()> {
+        let unique = tags.iter().collect::<BTreeSet<_>>();
+        if unique.len() != tags.len() {
+            anyhow::bail!("WorkPackage Space capability tags must be unique");
+        }
+        for tag in &tags {
+            if tag.is_empty()
+                || tag.len() > 80
+                || !tag.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || (byte == b'-' && index > 0)
+                })
+                || tag.ends_with('-')
+            {
+                anyhow::bail!(
+                    "WorkPackage Space capability tag must be lowercase kebab-case (1-80 characters)"
+                );
+            }
+        }
+        self.required_space_tags = tags.into_iter().collect();
+        Ok(())
     }
 
     pub fn bind_to_workflow(

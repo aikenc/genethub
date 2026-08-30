@@ -10,7 +10,8 @@
   },
   "scripts": {
     "testctl": "tsx bin/testctl.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "unit": "node --import tsx --test infrastructure/interaction/human-decision.test.ts"
   },
   "dependencies": {
     "@genehub/proto": "file:../packages/proto",

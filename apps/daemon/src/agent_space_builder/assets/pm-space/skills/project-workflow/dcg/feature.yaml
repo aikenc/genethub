@@ -21,19 +21,15 @@ nodes:
       space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
     objective: { prompt: prompts/implement.md }
     fanout: { source: plan.workstreams, maxItems: 4 }
-    inputs: [intent, acceptanceCriteria, acceptedBaseline]
-    outputs: [candidate, testEvidence, workReport]
   - id: review
     kind: activity
     executor: { actor: system }
-    outputs: [reviewVerdict, reviewEvidence]
   - id: integrate
     kind: activity
     executor:
       actor: workAgent
       space: { matchTags: [integration], lease: exclusive, cleanRequired: true }
     objective: { prompt: prompts/integrate.md }
-    outputs: [acceptedBaseline]
   - id: prepare-recovery
     kind: activity
     executor: { actor: pm }

@@ -306,12 +306,26 @@ impl DcgNode {
         validate_id("DCG node id", &self.id)?;
         unique_ids("node input", &self.inputs)?;
         unique_ids("node output", &self.outputs)?;
+        if !self.inputs.is_empty() {
+            anyhow::bail!(
+                "node {} inputs are not an executable MVP contract; remove them until a kernel consumer exists",
+                self.id
+            );
+        }
         match self.kind {
             DcgNodeKind::Activity => {
                 let executor = self.executor.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("activity node {} requires an executor", self.id)
                 })?;
                 executor.validate()?;
+                if matches!(executor.actor, DcgActor::WorkAgent | DcgActor::System)
+                    && !self.outputs.is_empty()
+                {
+                    anyhow::bail!(
+                        "node {} WorkAgent/system facts are kernel-derived and cannot declare semantic outputs",
+                        self.id
+                    );
+                }
                 if let Some(objective) = &self.objective {
                     let prompt = resolve_resource(resource_root, &objective.prompt)?;
                     if !prompt.is_file() {
@@ -347,6 +361,9 @@ impl DcgNode {
                 {
                     anyhow::bail!("join node {} has activity/terminal-only fields", self.id);
                 }
+                if !self.outputs.is_empty() {
+                    anyhow::bail!("join node {} cannot declare semantic outputs", self.id);
+                }
             }
             DcgNodeKind::Terminal => {
                 if self.outcome.as_deref().is_none_or(str::is_empty) {
@@ -359,6 +376,9 @@ impl DcgNode {
                     || self.activation.is_some()
                 {
                     anyhow::bail!("terminal node {} has activity/join-only fields", self.id);
+                }
+                if !self.outputs.is_empty() {
+                    anyhow::bail!("terminal node {} cannot declare semantic outputs", self.id);
                 }
             }
         }
@@ -1032,13 +1052,18 @@ impl DcgRun {
             .node_instances
             .get_mut(node_instance_id)
             .ok_or_else(|| anyhow::anyhow!("unknown workflow node instance"))?;
+        // The cohort is sealed exactly once when its first package leaves
+        // Planned. Packages deliberately keep progressing through review
+        // after their source node advances, so later package transitions must
+        // treat the already-sealed completed instance as idempotent.
+        if instance.fanout_sealed {
+            return Ok(());
+        }
         if instance.status != DcgNodeInstanceStatus::Active {
             anyhow::bail!("only an active workAgent node can seal its WorkPackage fanout");
         }
-        if !instance.fanout_sealed {
-            instance.fanout_sealed = true;
-            self.revision = self.revision.saturating_add(1);
-        }
+        instance.fanout_sealed = true;
+        self.revision = self.revision.saturating_add(1);
         Ok(())
     }
 

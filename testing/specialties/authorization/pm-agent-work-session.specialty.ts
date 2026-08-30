@@ -35,7 +35,7 @@ defineSpecialty(
       "a failed supervisor wake retries on every two-second sampler tick",
       "forking a WorkSession preserves its privileged role",
     ],
-    tags: ["core", "authorization", "pm-agent-mvp"],
+    tags: ["core", "authorization", "pm-agent-mvp", "pm-agent-work-session"],
     llm: { default: "mock" },
     resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0, pool: "standard" },
     expectedDurationMs: 120_000,
@@ -231,12 +231,12 @@ defineSpecialty(
         encoding: "utf8",
       }).trim();
       const activateCommand = [
-        `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit}`,
+        `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit} --tag gameplay`,
         '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
         '"$GENEHUB_CLI" pm project workflow select --graph feature',
         '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
         '"$GENEHUB_CLI" pm project workflow transition --edge planned --fact plan.ready',
-        '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space implementation --branch work/gameplay --worktree worktrees/implementation/game --node implement',
+        '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space-tag gameplay --branch work/gameplay --worktree worktrees/implementation/game --node implement',
         '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to ready',
       ].join(" && ");
@@ -267,6 +267,8 @@ defineSpecialty(
           publicProject.data.workPackages.some(
             (item) =>
               item.id === "wp-gameplay" &&
+              item.requiredSpaceTags.includes("gameplay") &&
+              item.agentSpace === "implementation" &&
               Boolean(item.workflowRunId) &&
               Boolean(item.nodeInstanceId),
           ),
@@ -409,7 +411,7 @@ defineSpecialty(
             arguments: {
               command: [
                 '"$GENEHUB_CLI" agent-space verify implementation',
-                `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${restoredSourceCommit}`,
+                `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${restoredSourceCommit} --tag gameplay`,
               ].join(" && "),
             },
           },
@@ -421,6 +423,51 @@ defineSpecialty(
       t.assertions.assert(
         completedCount(pmEvents) === restoreCompletions + 1,
         `restored Agent Space evidence was not accepted: ${eventTrace(pmEvents)}`,
+      );
+
+      const rejectedCwdTerminals = terminalCount(pmEvents);
+      const rejectedCwdCompletions = completedCount(pmEvents);
+      const rejectedCwdResult = "pm-invalid-cwd-dispatch.log";
+      opened.mock.script(
+        {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: `if "$GENEHUB_CLI" agent run --agent ${workAgentId} --work-package wp-gameplay --cwd ${t.env.workspace}/spaces/implementation --no-wait "This dispatch must be rejected before session creation." > ${rejectedCwdResult} 2>&1; then exit 76; fi`,
+            },
+          },
+        },
+        { text: "The invalid cwd was rejected without leaking the Agent Space reservation." },
+      );
+      await t.flows.main.sendPrompt(
+        opened.client,
+        pm.id,
+        "Prove that a rejected WorkAgent cwd releases its reservation atomically.",
+      );
+      await t.tools.waitUntil(
+        () => terminalCount(pmEvents) === rejectedCwdTerminals + 1,
+        15_000,
+      );
+      const rejectedCwdOutput = `${t.env.workspace}/spaces/pm/${rejectedCwdResult}`;
+      const statusAfterRejectedCwd = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      t.assertions.assert(
+        completedCount(pmEvents) === rejectedCwdCompletions + 1 &&
+          existsSync(rejectedCwdOutput) &&
+          /fixed by its durable work package/i.test(readFileSync(rejectedCwdOutput, "utf8")) &&
+          statusAfterRejectedCwd?.type === "projectStatus" &&
+          statusAfterRejectedCwd.data.agentSpaces.some(
+            (space) =>
+              space.workspaceId === agentSpace.id &&
+              space.resourceState === "idle" &&
+              !space.workPackageId &&
+              !space.workSessionId,
+          ),
+        `rejected cwd leaked a reservation: output=${
+          existsSync(rejectedCwdOutput) ? readFileSync(rejectedCwdOutput, "utf8") : "missing"
+        } status=${JSON.stringify(statusAfterRejectedCwd)}`,
       );
 
       await t.assertions.expectProtocolCode(

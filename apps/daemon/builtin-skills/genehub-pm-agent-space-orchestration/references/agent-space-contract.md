@@ -25,7 +25,12 @@ The outer repository ignores `.genethub/`, `repositories/`, `worktrees/`, every 
   the live daemon catalog.
 - Select the runtime at dispatch from the daemon's live Agent catalog.
 - A PM-bound CLI may create WorkSessions only in its registered Agent Spaces. Each recorded Space is explicitly `implementation` or review-only; this role belongs to the topology, not to the selected runtime.
-- The daemon authorizes every new WorkSession against an active durable work package and fixes its cwd to that package's exact worktree. A ready package starts only in its assigned implementation Space; a candidate starts only in a different review-only Space.
+- The daemon authorizes every new WorkSession against an active durable work
+  package and fixes its cwd to that package's exact worktree. The package asks
+  for semantic capabilities, while the Coordinator combines those tags with
+  the Workflow node selector and assigns the concrete Space. A ready package
+  starts only in that assigned implementation Space; a candidate starts only
+  in a different review-only Space.
 - Users may read and fork WorkSessions and may open ordinary sessions in the same Agent Space. They cannot mutate the managed WorkSession or remove the Agent Space.
 - A normal user session that changes a managed worktree is an external project change: pause affected packages, invalidate stale candidates/reviews, and rebaseline explicitly.
 
@@ -44,5 +49,7 @@ Once a WorkSession is dispatched, keep that Space's source commit, Builder
 lock, workspace id, and worktree membership immutable through the package's
 current evidence boundary. In particular, never rebuild or re-record a review
 Space while one of its review sessions is running or its verdict has not yet
-been recorded. Add a new review node for a new candidate unless the stable
-review Space already contained that candidate worktree when it was recorded.
+been recorded. Do not expose all sibling worktrees and all project Skills to
+every implementation Space. Add a new review node for a new candidate unless
+the stable review Space already contained that exact candidate worktree when
+it was recorded.

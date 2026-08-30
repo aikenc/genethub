@@ -124,6 +124,31 @@ fn failed(error: anyhow::Error) -> Handled {
     }
 }
 
+async fn reject_after_work_session_reservation(
+    state: &Shared,
+    project_workspace_id: &str,
+    controller_session_id: &str,
+    workspace_id: &str,
+    lease_id: &str,
+    rejection: Handled,
+) -> Handled {
+    match state
+        .projects
+        .cancel_agent_space_reservation(
+            project_workspace_id,
+            controller_session_id,
+            workspace_id,
+            lease_id,
+        )
+        .await
+    {
+        Ok(()) => rejection,
+        Err(cleanup_error) => failed(anyhow::anyhow!(
+            "WorkSession preparation was rejected and reservation cleanup also failed ({cleanup_error:#})"
+        )),
+    }
+}
+
 /// Handles one request on behalf of `caller`.
 ///
 /// The caller is passed in rather than re-derived here because the gate above
@@ -458,25 +483,61 @@ async fn dispatch(
                 Err(error) => return failed(error),
             };
             let Some(target_cwd) = target.cwd.to_str() else {
-                return Handled::err(
-                    ErrorCode::BadRequest,
-                    "the assigned WorkAgent worktree is not a UTF-8 path",
-                );
+                return reject_after_work_session_reservation(
+                    &state,
+                    &project_workspace_id,
+                    controller_session_id,
+                    &workspace_id,
+                    &target.lease_id,
+                    Handled::err(
+                        ErrorCode::BadRequest,
+                        "the assigned WorkAgent worktree is not a UTF-8 path",
+                    ),
+                )
+                .await;
             };
             let start_in = match resolve_session_cwd(&workspace, Some(target_cwd)) {
                 Ok(start_in) => start_in,
-                Err(error) => return failed(error),
+                Err(error) => {
+                    return reject_after_work_session_reservation(
+                        &state,
+                        &project_workspace_id,
+                        controller_session_id,
+                        &workspace_id,
+                        &target.lease_id,
+                        failed(error),
+                    )
+                    .await;
+                }
             };
             if let Some(requested) = cwd.as_deref() {
                 let requested = match resolve_session_cwd(&workspace, Some(requested)) {
                     Ok(requested) => requested,
-                    Err(error) => return failed(error),
+                    Err(error) => {
+                        return reject_after_work_session_reservation(
+                            &state,
+                            &project_workspace_id,
+                            controller_session_id,
+                            &workspace_id,
+                            &target.lease_id,
+                            failed(error),
+                        )
+                        .await;
+                    }
                 };
                 if requested != start_in {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "a WorkAgent cwd is fixed by its durable work package",
-                    );
+                    return reject_after_work_session_reservation(
+                        &state,
+                        &project_workspace_id,
+                        controller_session_id,
+                        &workspace_id,
+                        &target.lease_id,
+                        Handled::err(
+                            ErrorCode::Forbidden,
+                            "a WorkAgent cwd is fixed by its durable work package",
+                        ),
+                    )
+                    .await;
                 }
             }
             match state
@@ -511,21 +572,15 @@ async fn dispatch(
                     Handled::ok(Reply::Session(summary))
                 }
                 Err(error) => {
-                    let cleanup = state
-                        .projects
-                        .cancel_agent_space_reservation(
-                            &project_workspace_id,
-                            controller_session_id,
-                            &workspace_id,
-                            &target.lease_id,
-                        )
-                        .await;
-                    match cleanup {
-                        Ok(()) => failed(error),
-                        Err(cleanup_error) => failed(anyhow::anyhow!(
-                            "WorkSession creation failed ({error:#}); reservation cleanup also failed ({cleanup_error:#})"
-                        )),
-                    }
+                    reject_after_work_session_reservation(
+                        &state,
+                        &project_workspace_id,
+                        controller_session_id,
+                        &workspace_id,
+                        &target.lease_id,
+                        failed(error),
+                    )
+                    .await
                 }
             }
         }
