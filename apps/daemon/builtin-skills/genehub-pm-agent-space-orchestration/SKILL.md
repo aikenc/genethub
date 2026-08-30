@@ -37,7 +37,7 @@ dispatch.
 Merge nodes that need the same context and writable branch. Split nodes when they can progress independently, need different Skills, or require an independent reviewer. Never pre-create Gameplay/UI/Test roles merely because the project is a game.
 
 Before fixing the number of parallel workstreams, read the selected Run's
-`resourceCapacities` from one `pm project show`. For each WorkAgent node,
+`resourceCapacities` from one `pm project workflow status`. For each WorkAgent node,
 `availableSlots` is the number of base-capability packages that the Coordinator
 can allocate now after fanout and cross-Session exclusions; package-specific
 `--space-tag` requirements may reduce it further. If the desired fanout exceeds
@@ -83,7 +83,10 @@ paths, treat that mapping as the complete topology contract for this step:
   implementation worktree; never place all sibling worktrees in one reviewer;
 - batch homologous init, check, dry-build, build, verify, register, and record
   operations. Read a documented command contract once and do not spend model
-  turns probing invalid flag combinations.
+  turns probing invalid flag combinations;
+- treat the command forms and ignore list below as authoritative. Never
+  recursively scan product source, build output, dependency trees, or the
+  installation directory to rediscover them.
 
 This fast path creates deterministic capacity, not permission to dispatch
 underspecified work. Before execution, every WorkPackage still needs a
@@ -102,8 +105,31 @@ normal allocation-first flow below instead of inventing speculative paths.
    "$GENEHUB_CLI" agent-space verify <space>
    ```
 
-3. Commit only human-owned Space and Provider sources in the outer Space-management repository. Builder output and `.pipebuilder/` state remain ignored.
-4. Register the verified `.code-workspace` with `workspace register-agent-space`, then record its workspace id, source commit, and lock digest in PM state.
+3. Before the first pool commit, keep the outer repository's existing entries
+   and ensure these generated/runtime paths are ignored exactly once:
+
+   ```gitignore
+   .genethub/
+   repositories/
+   worktrees/
+   spaces/*/.pipebuilder/
+   spaces/*/.agents/
+   spaces/*/.claude/
+   spaces/*/.codebuddy/
+   spaces/*/.cursor/
+   spaces/*/AGENTS.md
+   ```
+
+   Commit only human-owned Space and Provider sources in the outer
+   Space-management repository. Do not recursively search another repository
+   for an ignore template.
+4. Register each verified Workspace with this exact public command, relative
+   to the project root, then record its workspace id, source commit, and lock
+   digest in PM state:
+
+   ```text
+   "$GENEHUB_CLI" workspace register-agent-space "spaces/<name>/<name>.code-workspace"
+   ```
 
 ```text
 "$GENEHUB_CLI" pm project space record --name <space-name> --purpose <contract> \

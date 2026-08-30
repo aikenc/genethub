@@ -392,6 +392,16 @@ mod tests {
         .unwrap();
         assert!(agent_space_contract.contains("never put `opencode`"));
         assert!(agent_space_contract.contains("dispatch `--agent opencode`"));
+        let orchestration = std::fs::read_to_string(
+            root.join("genehub-pm-agent-space-orchestration/SKILL.md"),
+        )
+        .unwrap();
+        assert!(orchestration.contains("pm project workflow status"));
+        assert!(orchestration.contains(
+            "\"$GENEHUB_CLI\" workspace register-agent-space \"spaces/<name>/<name>.code-workspace\""
+        ));
+        assert!(orchestration.contains("spaces/*/.pipebuilder/"));
+        assert!(orchestration.contains("recursively scan product source"));
         let project_control = std::fs::read_to_string(
             root.join("genehub-pm-project-control/SKILL.md"),
         )

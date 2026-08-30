@@ -355,7 +355,7 @@ async function prepareSharedTopology(
    - review-c: --role review、cocos
 8. 依次执行 pm project advance --to topology-verified、pm project advance --to workspaces-registered、pm project advance --to active 后结束本回合。这里要求的是 ProjectPhase=active，不是 lifecycle --to active；active phase 只表示共享拓扑可执行，不要选择需求 Workflow、创建 Intent 或 WorkPackage。
 
-使用已加载 Skill 中的既定命令形式，把同类操作合并成尽量少的 bash 工具调用。禁止读取 repositories/game 源码、禁止安装 Agent、禁止改变模型，也不要等待后续消息。`,
+使用已加载 Skill 中的既定命令形式，把同类操作合并成尽量少的 bash 工具调用。内置 Skill 给出的标准 ignore 清单和 register-agent-space 命令就是完整合同，禁止为重新发现它们而递归扫描产品源码、target、node_modules 或安装目录。禁止读取 repositories/game 源码、禁止安装 Agent、禁止改变模型，也不要等待后续消息。`,
   );
 
   const deadline = Date.now() + SETUP_BUDGET_MS;
