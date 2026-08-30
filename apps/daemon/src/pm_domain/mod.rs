@@ -497,6 +497,24 @@ impl ProjectStore {
             .transpose()
     }
 
+    /// Controller-authorized status used by the PM CLI. The caller still
+    /// receives a public projection rather than the mutable ProjectState, so
+    /// the CLI can derive a compact per-Session view without exposing another
+    /// Session's control records or duplicating every pinned Workflow graph.
+    pub async fn controller_status(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+    ) -> Result<PmProjectStatus> {
+        let _guard = self.mutation.lock().await;
+        let state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
+            anyhow::anyhow!("this PM project has no verified project-workflow catalog")
+        })?;
+        project_status(&state, &catalog)
+    }
+
     /// Resolve public WorkSession creation against the current Intent/DAG.
     /// Implementers must use their assigned Agent Space; reviewers may start
     /// only after an immutable candidate exists and in another recorded Space.
@@ -843,6 +861,18 @@ impl ProjectStore {
             .and_then(|executor| executor.space.as_ref())
             .ok_or_else(|| anyhow::anyhow!("WorkPackage requires an active workAgent node"))?
             .clone();
+        let repeated_selector_tags = package
+            .required_space_tags
+            .iter()
+            .filter(|tag| selector.match_tags.contains(tag))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !repeated_selector_tags.is_empty() {
+            anyhow::bail!(
+                "WorkPackage capability tags [{}] repeat Workflow node selector tags; --space-tag declares only package-specific capabilities because the Coordinator applies node selector tags separately",
+                repeated_selector_tags.join(", ")
+            );
+        }
         let worktrees_root = state
             .root
             .join("worktrees")
@@ -4793,6 +4823,22 @@ edges: []
             package.require_space_tags(vec!["daily".into()]).unwrap();
             package
         };
+        let mut redundant_selector = new_package("redundant-selector", "Invalid package");
+        redundant_selector
+            .require_space_tags(vec!["daily".into(), "implementation".into()])
+            .unwrap();
+        let error = store
+            .put_work_package("w_project", "s_pm", redundant_selector, "implement")
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("repeat Workflow node selector tags"));
+        assert!(!store
+            .load("w_project")
+            .unwrap()
+            .work_packages
+            .contains_key("redundant-selector"));
         // Fill the entire declared maxItems history with pre-dispatch mistakes.
         // Each withdrawal must vacate capacity and reopen the same node so a
         // replacement package can be bound without erasing the old evidence.

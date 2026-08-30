@@ -303,6 +303,14 @@ mod tests {
         assert!(root
             .join("skills/project-workflow/dcg/feature.yaml")
             .is_file());
+        let workflow_skill =
+            std::fs::read_to_string(root.join("skills/project-workflow/SKILL.md")).unwrap();
+        assert!(workflow_skill.contains("不要重复当前节点的 `space.matchTags`"));
+        assert!(workflow_skill.contains("只有包级能力会固化为"));
+        let diagnose_prompt =
+            std::fs::read_to_string(root.join("skills/project-workflow/prompts/diagnose.md"))
+                .unwrap();
+        assert!(diagnose_prompt.contains("第一次结论也必须返回 worktree 的精确 HEAD commit/tree"));
     }
 
     #[test]

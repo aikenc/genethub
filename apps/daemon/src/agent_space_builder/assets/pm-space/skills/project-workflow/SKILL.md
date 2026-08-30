@@ -23,15 +23,18 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
    与 `maxConcurrentWorkSessions`，预算到期或进入 `budgetExhausting/budgetExhausted` 后不得继续派工，
    也不得把预算耗尽报告成完成；派发保留会单调消耗总会话额度，provider/session 创建失败、清除绑定或
    重试都不会返还；
-3. 用一次 `genet pm project show` 读取当前 Run 的 `resourceCapacities`，按节点的 `availableSlots`
+3. 正常需求推进只用一次 `genet pm project workflow status` 读取本 Session 的 Run、WorkPackage、精简
+   AgentSpace 池和 `resourceCapacities`；不要在每次 Supervisor 唤醒时读取包含所有 Session 的
+   `pm project show`。按节点的 `availableSlots`
    决定本轮可立即分配的基础并行度；`maxItems` 只是上限，不代表已有足够 Space，包级 `--space-tag`
    还可能进一步收窄匹配。容量不足时先补建并注册 Space 或缩小 cohort，不要用失败的 `package put` 探测容量；
 4. 只为当前活动节点筹备输入、WorkPackage 和证据；每个 `package put` 必须用
    `--node <active-node>`，Coordinator 会把 WorkPackage 固定到本次遍历产生的节点实例，而不只是节点名；
 5. 注册 AgentSpace 时按当前节点 `space.matchTags` 使用一个或多个 `space record --tag <tag>` 声明能力；
    `package put` 不指定物理 Space。若同一 fanout 含不同专业能力，用一个或多个
-   `--space-tag <capability>` 声明该工作包需要的能力；Coordinator 会把节点基础标签与包级标签合并，在
-   匹配池中确定性选择具体 Space。`package put` 只接收 `--repository` 与 `--branch`，并返回派生的
+   `--space-tag <capability>` 声明该工作包独有的专业能力；不要重复当前节点的 `space.matchTags`，
+   Coordinator 会单独应用节点基础标签与包级标签，并在创建时拒绝二者重叠。只有包级能力会固化为
+   `requiredSpaceTags` 并用于选择对应能力的独立 Review Space。`package put` 只接收 `--repository` 与 `--branch`，并返回派生的
    `worktrees/<space>/<repository>`；PM 在该路径创建 worktree 后再推进 Ready，WorkSession 仍须使用
    返回的 Space。不得传旧的 `--space`/`--worktree` 参数；`--space-tag` 是能力而不是 Space 名；
 6. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；

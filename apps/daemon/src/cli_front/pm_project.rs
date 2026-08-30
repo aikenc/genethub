@@ -291,6 +291,70 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 json!({"action": "shown", "run": run}),
             ))
         }
+        [head, verb] if head == "workflow" && verb == "status" => {
+            let status = context
+                .state
+                .projects
+                .controller_status(&context.workspace_id, &context.controller_session_id)
+                .await
+                .map_err(rejected)?;
+            let run = status
+                .workflow_runs
+                .iter()
+                .find(|run| {
+                    run.controller_session_id.as_deref()
+                        == Some(context.controller_session_id.as_str())
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    CliFailure::business(
+                        "pmWorkflowRunUnavailable",
+                        "this PM Session has no Session DCG Run",
+                        None,
+                    )
+                })?;
+            let work_packages = status
+                .work_packages
+                .iter()
+                .filter(|package| {
+                    package.controller_session_id == context.controller_session_id
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let agent_spaces = status
+                .agent_spaces
+                .iter()
+                .map(|space| {
+                    json!({
+                        "name": space.name,
+                        "workspaceId": space.workspace_id,
+                        "role": space.role,
+                        "tags": space.tags,
+                        "active": space.active,
+                        "resourceState": space.resource_state,
+                        "resourceRevision": space.resource_revision,
+                        "workPackageId": space.work_package_id,
+                        "workSessionId": space.work_session_id,
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok((
+                "pm.project.workflow",
+                json!({
+                    "action": "status",
+                    "project": {
+                        "workspaceId": status.workspace_id,
+                        "phase": status.phase,
+                        "lifecycle": status.lifecycle,
+                        "revision": status.revision,
+                        "updatedAtMs": status.updated_at_ms,
+                    },
+                    "run": run,
+                    "workPackages": work_packages,
+                    "agentSpaces": agent_spaces,
+                }),
+            ))
+        }
         [head, verb, rest @ ..] if head == "workflow" && verb == "select" => {
             let flags = Flags::parse(rest, &[])?;
             flags.validate(&["graph"])?;

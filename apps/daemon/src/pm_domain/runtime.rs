@@ -19,7 +19,7 @@ use crate::state::Shared;
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const BUDGET_INTERRUPT_GRACE_MS: i64 = 15_000;
-const WAKE_PROMPT: &str = "PM supervisor batch: managed WorkSession facts changed. Read durable state once with `genet pm project show`, process every actionable item in this batch, and finish the turn. Inspect only terminal/failed WorkSessions or evidence needed for a pending transition; do not poll running work or replay already-bound gates. A user message still takes priority.";
+const WAKE_PROMPT: &str = "PM supervisor batch: managed WorkSession facts changed. Read this Session's compact durable state once with `genet pm project workflow status`, process every actionable item in this batch, and finish the turn. Use project-level `pm project show` only for explicit topology repair or initialization. Inspect only terminal/failed WorkSessions or evidence needed for a pending transition; do not poll running work or replay already-bound gates. A user message still takes priority.";
 
 pub fn spawn(state: Shared) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

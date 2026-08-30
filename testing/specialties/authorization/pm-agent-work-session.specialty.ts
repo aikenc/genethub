@@ -267,6 +267,7 @@ defineSpecialty(
         '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space-tag gameplay --repository game --branch work/gameplay --node implement',
         `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit} --tag gameplay --tag webgl2`,
         '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to ready',
+        '"$GENEHUB_CLI" pm project workflow status > pm-workflow-status.json',
       ].join(" && ");
       const terminalsBeforeActivation = terminalCount(pmEvents);
       const completionsBeforeActivation = completedCount(pmEvents);
@@ -282,6 +283,30 @@ defineSpecialty(
       t.assertions.assert(
         completedCount(pmEvents) === completionsBeforeActivation + 1,
         `PM activation turn failed: ${eventTrace(pmEvents)}`,
+      );
+
+      const compactStatusPath = `${t.env.workspace}/spaces/pm/pm-workflow-status.json`;
+      const compactStatusRaw = readFileSync(compactStatusPath, "utf8");
+      const compactStatus = JSON.parse(compactStatusRaw) as {
+        data?: {
+          project?: { phase?: string };
+          run?: { controllerSessionId?: string; resourceCapacities?: unknown[] };
+          workPackages?: Array<{ controllerSessionId?: string }>;
+          agentSpaces?: Array<{ name?: string; tags?: string[] }>;
+        };
+      };
+      t.assertions.assert(
+        Buffer.byteLength(compactStatusRaw) < 64 * 1024 &&
+          compactStatus.data?.project?.phase === "active" &&
+          compactStatus.data.run?.controllerSessionId === pm.id &&
+          (compactStatus.data.run.resourceCapacities?.length ?? 0) > 0 &&
+          compactStatus.data.workPackages?.every(
+            (item) => item.controllerSessionId === pm.id,
+          ) === true &&
+          compactStatus.data.agentSpaces?.some(
+            (space) => space.name === "implementation" && space.tags?.includes("gameplay"),
+          ),
+        `compact PM Session status drifted: bytes=${Buffer.byteLength(compactStatusRaw)} status=${compactStatusRaw}`,
       );
 
       const publicProject = await opened.client.call({

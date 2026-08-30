@@ -486,7 +486,7 @@ async function createPmSession(
 }
 
 function concurrentRequirements(): ConcurrentRequirement[] {
-  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 和 branch 让 Coordinator 从 pm project show 中的既有 Space 池分配。Coordinator 返回的 worktree 已由用户创建并在实现/评审 Workspace 中精确注册；package put 后核对返回绑定并复用它，不要再建 worktree。只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经 capability 匹配的独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
+  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。正常推进只读取一次 pm project workflow status，不要读取包含所有 Session 的 pm project show。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 和 branch 让 Coordinator 从 workflow status 的既有 Space 池分配。每个 package put 只传需求中明确给出的一个 --space-tag；不得再添加 implementation、integration、diagnosis、research 或 migration 等节点基础标签，Coordinator 会单独应用这些 selector。Coordinator 返回的 worktree 已由用户创建并在实现/评审 Workspace 中精确注册；package put 后核对返回绑定并复用它，不要再建 worktree。只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经 capability 匹配的独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
   return [
     {
       id: "daily",
@@ -510,7 +510,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "migration",
       prompt: `${common}
 
-选择 migration。investigate 与 migrate 包都使用 --branch work/cocos4-adapter --space-tag cocos。完成一个受控渲染适配切片：调研证据固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30；更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试。不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
+选择 migration。investigate 与 migrate 包都使用 --branch work/cocos4-adapter --space-tag cocos。完成一个受控渲染适配切片：调研证据固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30；investigate WorkAgent 的第一次结论必须同时返回该只读 worktree 的精确 HEAD commit/tree、分支、git status --porcelain 与调查命令退出码，不得追加回合补身份；更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试。不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
     },
   ];
 }
