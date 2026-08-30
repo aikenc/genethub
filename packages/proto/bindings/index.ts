@@ -568,7 +568,7 @@ controllerSessionId: string, title: string, outcome: string, status: string, dep
  * Capability narrowing for one fanout item. The Coordinator combines
  * these with the node selector before choosing a concrete Agent Space.
  */
-requiredSpaceTags: Array<string>, agentSpace: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
+requiredSpaceTags: Array<string>, agentSpace: string, repository: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, blockReason?: string, };
 
 export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 
@@ -582,7 +582,7 @@ export type PmWorkflowNodeInstanceStatus = { id: string, nodeId: string, iterati
 
 export type PmWorkflowNodeStatus = { id: string, kind: string, actor?: string, objective?: string, };
 
-export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, teamSlots: Array<PmTeamSlotStatus>, availableEdges: Array<PmWorkflowAvailableEdgeStatus>, intent?: PmIntentStatus, supervisor: PmSupervisorStatus, revision: number, };
+export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, interpreterError?: string, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, teamSlots: Array<PmTeamSlotStatus>, availableEdges: Array<PmWorkflowAvailableEdgeStatus>, intent?: PmIntentStatus, supervisor: PmSupervisorStatus, revision: number, };
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 

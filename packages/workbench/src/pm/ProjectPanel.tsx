@@ -139,6 +139,12 @@ export function ProjectPanel({
             </section>
           ) : null}
 
+          {run?.interpreterError ? (
+            <p role="alert" className="rounded border border-red-500/30 bg-red-500/5 p-2 text-red-300">
+              Workflow 解释器需要人工介入：{run.interpreterError}
+            </p>
+          ) : null}
+
           {graph && run ? <Workflow graph={graph} run={run} /> : null}
 
           {run?.availableEdges.length ? (

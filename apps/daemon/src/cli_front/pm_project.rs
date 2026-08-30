@@ -121,21 +121,55 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 "title",
                 "outcome",
                 "depends-on",
-                "space",
                 "space-tag",
+                "repository",
                 "branch",
-                "worktree",
                 "node",
             ])?;
-            let worktree = project_path(&context.root, &flags.one_required("worktree")?)?;
+            let repository_name = flags.one_required("repository")?;
+            let repositories_root = context
+                .root
+                .join("repositories")
+                .canonicalize()
+                .map_err(rejected)?;
+            let repository = exact_project_child(
+                &context.root.join("repositories"),
+                &repository_name,
+                "package repository",
+            )?
+            .canonicalize()
+            .map_err(rejected)?;
+            if repository.parent() != Some(repositories_root.as_path()) {
+                return Err(CliFailure::business(
+                    "invalidPackageRepository",
+                    "package repository must be directly under project repositories/",
+                    None,
+                ));
+            }
+            let repository_name = repository
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    CliFailure::business(
+                        "invalidPackageRepository",
+                        "package repository name must be UTF-8",
+                        None,
+                    )
+                })?
+                .to_string();
+            // Package creation is the allocation boundary. The Coordinator
+            // replaces this placeholder with worktrees/<selected-space>/<repo>
+            // atomically; the PM creates that returned worktree before Ready.
+            let worktree = context
+                .root
+                .join("worktrees/coordinator-pending")
+                .join(&repository_name);
             let mut package = WorkPackage::planned(
                 flags.one_required("id")?,
                 flags.one_required("title")?,
                 flags.one_required("outcome")?,
                 flags.many("depends-on"),
-                flags
-                    .one("space")?
-                    .unwrap_or_else(|| "coordinator-pending".into()),
+                "coordinator-pending".into(),
                 flags.one_required("branch")?,
                 worktree,
                 chrono::Utc::now().timestamp_millis(),
@@ -144,7 +178,6 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
             package
                 .require_space_tags(flags.many("space-tag"))
                 .map_err(rejected)?;
-            context.validate_package_worktree(&package).await?;
             let project = context
                 .state
                 .projects
@@ -382,6 +415,18 @@ async fn transition(
     let session_id = flags.one("session")?;
     let candidate = candidate_from(&flags)?;
     let review = review_from(&flags)?;
+
+    if status == WorkPackageStatus::Ready {
+        let project = context.project().await?;
+        let package = project.work_packages.get(&id).ok_or_else(|| {
+            CliFailure::business(
+                "unknownWorkPackage",
+                format!("no such work package: {id}"),
+                None,
+            )
+        })?;
+        context.validate_package_worktree(package).await?;
+    }
 
     if status == WorkPackageStatus::Candidate {
         let candidate = candidate.as_ref().ok_or_else(|| {
@@ -801,6 +846,13 @@ impl Context {
                 None,
             )
         })?;
+        if repository_name != package.repository {
+            return Err(CliFailure::business(
+                "invalidPackageWorktree",
+                "package worktree repository does not match its durable repository identity",
+                None,
+            ));
+        }
         let repository = self.root.join("repositories").join(repository_name);
         crate::git::verify_worktree_binding(&worktree, &repository, &package.branch)
             .await

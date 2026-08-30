@@ -236,7 +236,9 @@ defineSpecialty(
         '"$GENEHUB_CLI" pm project workflow select --graph feature',
         '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
         '"$GENEHUB_CLI" pm project workflow transition --edge planned --fact plan.ready',
-        '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space-tag gameplay --branch work/gameplay --worktree worktrees/implementation/game --node implement',
+        'if "$GENEHUB_CLI" pm project package put --id legacy-space --title "Legacy package" --outcome "Must be rejected" --space implementation --repository game --branch work/gameplay --node implement; then exit 76; fi',
+        '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space-tag gameplay --repository game --branch work/gameplay --node implement',
+        `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit} --tag gameplay --tag webgl2`,
         '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to ready',
       ].join(" && ");
@@ -264,11 +266,14 @@ defineSpecialty(
           publicProject?.type === "projectStatus" &&
           publicProject.data.phase === "active" &&
           publicProject.data.agentSpaces[0]?.role === "implementation" &&
+          publicProject.data.agentSpaces[0]?.resourceState === "idle" &&
+          publicProject.data.agentSpaces[0]?.tags.includes("webgl2") &&
           publicProject.data.workPackages.some(
             (item) =>
               item.id === "wp-gameplay" &&
               item.requiredSpaceTags.includes("gameplay") &&
               item.agentSpace === "implementation" &&
+              item.repository === "game" &&
               Boolean(item.workflowRunId) &&
               Boolean(item.nodeInstanceId),
           ),
@@ -411,7 +416,7 @@ defineSpecialty(
             arguments: {
               command: [
                 '"$GENEHUB_CLI" agent-space verify implementation',
-                `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${restoredSourceCommit} --tag gameplay`,
+                `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${restoredSourceCommit} --tag gameplay --tag webgl2`,
               ].join(" && "),
             },
           },

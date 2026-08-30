@@ -29,6 +29,7 @@ describe("ProjectPanel", () => {
     expect(screen.getByText("由 PM 根据证据选择")).toBeInTheDocument();
     expect(screen.getByText("由 Coordinator 根据证据推进")).toBeInTheDocument();
     expect(screen.getByText("采用修正方案重试")).toBeInTheDocument();
+    expect(screen.getByText(/Workflow 解释器需要人工介入/)).toBeInTheDocument();
     fireEvent.click(screen.getByText("实现战斗循环"));
     expect(open).toHaveBeenCalledWith("s_work");
 
@@ -70,13 +71,13 @@ function projectStatus(): PmProjectStatus {
       id: "combat", title: "战斗", outcome: "实现战斗循环", status: "blocked", dependencies: [],
       controllerSessionId: "s_pm",
       requiredSpaceTags: ["gameplay"],
-      agentSpace: "implementation-1", branch: "work/combat", workflowRunId: "run-s_pm",
+      agentSpace: "implementation-1", repository: "game", branch: "work/combat", workflowRunId: "run-s_pm",
       nodeInstanceId: "implement-1", workSessionId: "s_work", blockReason: "等待资源",
     }, {
       id: "other", title: "其他", outcome: "另一会话的工作", status: "accepted", dependencies: [],
       controllerSessionId: "s_other",
       requiredSpaceTags: [],
-      agentSpace: "implementation-2", branch: "work/other", workflowRunId: "run-s_other",
+      agentSpace: "implementation-2", repository: "game", branch: "work/other", workflowRunId: "run-s_other",
       nodeInstanceId: "implement-1",
     }],
     agentSpaces: [{
@@ -96,6 +97,7 @@ function projectStatus(): PmProjectStatus {
     workflowRuns: [{
       id: "run-s_pm", controllerSessionId: "s_pm", graphId: "feature", graphVersion: 1, status: "active",
       definition: null,
+      interpreterError: "automatic transition limit exceeded",
       activeNodes: ["diagnose"], facts: [], revision: 3,
       intent: { revision: 1, outcome: "交付可玩的 H5 游戏", acceptance: ["可玩"], constraints: [], outOfScope: [] },
       supervisor: supervisor(),

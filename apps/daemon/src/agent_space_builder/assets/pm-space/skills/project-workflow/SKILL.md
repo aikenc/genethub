@@ -21,7 +21,9 @@ AgentSpace 的状态机属于固定内核，不在 Workflow DCG 中定义，也�
 4. 注册 AgentSpace 时按当前节点 `space.matchTags` 使用一个或多个 `space record --tag <tag>` 声明能力；
    `package put` 不指定物理 Space。若同一 fanout 含不同专业能力，用一个或多个
    `--space-tag <capability>` 声明该工作包需要的能力；Coordinator 会把节点基础标签与包级标签合并，在
-   匹配池中确定性选择具体 Space，WorkSession 仍须使用返回的 Space。`--space-tag` 是能力而不是 Space 名；
+   匹配池中确定性选择具体 Space。`package put` 只接收 `--repository` 与 `--branch`，并返回派生的
+   `worktrees/<space>/<repository>`；PM 在该路径创建 worktree 后再推进 Ready，WorkSession 仍须使用
+   返回的 Space。不得传旧的 `--space`/`--worktree` 参数；`--space-tag` 是能力而不是 Space 名；
 5. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
 6. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
 

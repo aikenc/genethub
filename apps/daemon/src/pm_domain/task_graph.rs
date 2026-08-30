@@ -78,6 +78,10 @@ pub struct WorkPackage {
     #[serde(default)]
     pub required_space_tags: BTreeSet<String>,
     pub agent_space: String,
+    /// Stable business repository identity. The concrete worktree path is a
+    /// Coordinator-derived projection of this name and the selected Space.
+    #[serde(default)]
+    pub repository: String,
     pub branch: String,
     pub worktree: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +116,12 @@ impl WorkPackage {
         if !worktree.is_absolute() {
             anyhow::bail!("work package worktree must be absolute");
         }
+        let repository = worktree
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow::anyhow!("work package repository name must be UTF-8"))?
+            .to_string();
+        validate_path_component("work package repository name", &repository, 200)?;
         let unique: BTreeSet<_> = dependencies.iter().collect();
         if unique.len() != dependencies.len() || dependencies.iter().any(|item| item == &id) {
             anyhow::bail!("work package dependencies must be unique and cannot include itself");
@@ -124,6 +134,7 @@ impl WorkPackage {
             dependencies,
             required_space_tags: BTreeSet::new(),
             agent_space,
+            repository,
             branch,
             worktree,
             workflow_run_id: None,
@@ -180,6 +191,14 @@ impl WorkPackage {
 fn validate_identifier(label: &str, value: &str, max: usize) -> Result<()> {
     if value.trim().is_empty() || value.len() > max || value.chars().any(char::is_control) {
         anyhow::bail!("{label} must be 1-{max} printable characters");
+    }
+    Ok(())
+}
+
+fn validate_path_component(label: &str, value: &str, max: usize) -> Result<()> {
+    validate_identifier(label, value, max)?;
+    if value == "." || value == ".." || value.contains('/') || value.contains('\\') {
+        anyhow::bail!("{label} must be one path component");
     }
     Ok(())
 }

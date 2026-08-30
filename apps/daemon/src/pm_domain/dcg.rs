@@ -612,6 +612,10 @@ pub struct DcgRun {
     pub traversals: BTreeMap<String, u32>,
     #[serde(default)]
     pub team_slots: BTreeMap<String, TeamSlot>,
+    /// Durable interpreter diagnostic. Resource repair and other Sessions
+    /// remain available while this Run waits for PM/user intervention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpreter_error: Option<String>,
     pub revision: u64,
 }
 
@@ -636,6 +640,7 @@ impl DcgRun {
             history: Vec::new(),
             traversals: BTreeMap::new(),
             team_slots: BTreeMap::new(),
+            interpreter_error: None,
             revision: 1,
         })
     }
@@ -667,6 +672,7 @@ impl DcgRun {
             entry.fanout.as_ref().map(|fanout| fanout.source.clone()),
         );
         self.node_instances.insert(instance.id.clone(), instance);
+        self.interpreter_error = None;
         self.status = DcgRunStatus::Active;
         self.revision = self.revision.saturating_add(1);
         Ok(())

@@ -307,6 +307,7 @@ pub struct PmWorkPackageStatus {
     /// these with the node selector before choosing a concrete Agent Space.
     pub required_space_tags: Vec<String>,
     pub agent_space: String,
+    pub repository: String,
     pub branch: String,
     #[ts(optional)]
     pub workflow_run_id: Option<String>,
@@ -389,6 +390,8 @@ pub struct PmWorkflowRunStatus {
     pub status: String,
     #[ts(optional)]
     pub outcome: Option<String>,
+    #[ts(optional)]
+    pub interpreter_error: Option<String>,
     pub active_nodes: Vec<String>,
     pub facts: Vec<String>,
     pub node_instances: Vec<PmWorkflowNodeInstanceStatus>,

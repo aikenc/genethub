@@ -686,7 +686,7 @@ impl ProjectStore {
             .find(|space| space.workspace_id == agent_space_workspace_id)
             .expect("reservation resolved through this Space");
         space.return_after_check(clean, now_ms())?;
-        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
+        reconcile_selected_session_dcg_isolated(&mut state, controller_session_id);
         state.touch(now_ms());
         self.save(&state)
     }
@@ -727,7 +727,7 @@ impl ProjectStore {
             .get_mut(name)
             .expect("checked Space exists")
             .finish_repair_check(clean, now_ms())?;
-        reconcile_all_session_dcgs(&mut state)?;
+        reconcile_all_session_dcgs_isolated(&mut state);
         state.touch(now_ms());
         self.save(&state)?;
         if !clean {
@@ -787,7 +787,7 @@ impl ProjectStore {
             .insert(controller_session_id.to_string(), intent.clone());
         // Compatibility projection: the most recently revised Session intent.
         state.intent = Some(intent);
-        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
+        reconcile_selected_session_dcg_isolated(&mut state, controller_session_id);
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -837,14 +837,6 @@ impl ProjectStore {
             .join("worktrees")
             .canonicalize()
             .context("the PM project has no worktrees directory")?;
-        let worktree = package
-            .worktree
-            .canonicalize()
-            .with_context(|| format!("no such package worktree: {}", package.worktree.display()))?;
-        if !is_clean_descendant(&worktree, &worktrees_root) {
-            anyhow::bail!("work package worktree must stay under the PM project's worktrees/");
-        }
-        package.worktree = worktree;
         if let Some(existing) = state.work_packages.get(&package.id) {
             state.ensure_package_owner(controller_session_id, &package.id)?;
             let same_node = existing
@@ -863,8 +855,8 @@ impl ProjectStore {
                 && existing.outcome == package.outcome
                 && existing.dependencies == package.dependencies
                 && existing.required_space_tags == package.required_space_tags
+                && existing.repository == package.repository
                 && existing.branch == package.branch
-                && existing.worktree == package.worktree
             {
                 return Ok(state);
             }
@@ -900,28 +892,10 @@ impl ProjectStore {
         if existing_slots >= limit {
             anyhow::bail!("workAgent node {node_id} reached its fanout maxItems {limit}");
         }
-        package.agent_space = select_agent_space(
-            &state,
-            &selector,
-            &package.required_space_tags,
-            &node_instance_id,
-        )?;
-        let package_space_root = package
-            .worktree
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("work package worktree has no Agent Space parent"))?;
-        if package_space_root.parent() != Some(worktrees_root.as_path())
-            || package_space_root
-                .file_name()
-                .and_then(|value| value.to_str())
-                != Some(package.agent_space.as_str())
-        {
-            anyhow::bail!(
-                "Coordinator-selected Agent Space {} requires a worktree at worktrees/{}/<repository>",
-                package.agent_space,
-                package.agent_space
-            );
-        }
+        package.agent_space = select_agent_space(&state, &selector, &package.required_space_tags)?;
+        package.worktree = worktrees_root
+            .join(&package.agent_space)
+            .join(&package.repository);
         package.bind_to_workflow(
             controller_session_id.to_string(),
             run_id,
@@ -1140,6 +1114,16 @@ impl ProjectStore {
         let capability_changed = previous
             .as_ref()
             .is_some_and(|existing| existing.declared_tags != declared_tags);
+        if previous.as_ref().is_some_and(|existing| {
+            existing.lease.is_some() && (identity_changed || capability_changed)
+        }) {
+            anyhow::bail!(
+                "an Agent Space capability or Builder identity cannot change while it has an active lease"
+            );
+        }
+        let capability_narrowed = previous
+            .as_ref()
+            .is_some_and(|existing| !existing.declared_tags.is_subset(&declared_tags));
         let record = AgentSpaceRecord {
             name: name.clone(),
             purpose,
@@ -1151,21 +1135,21 @@ impl ProjectStore {
             tags: recorded_tags,
             declared_tags,
             active: true,
-            resource_state: if identity_changed || capability_changed {
+            resource_state: if identity_changed {
                 AgentSpaceResourceState::Quarantined
             } else {
                 previous
                     .as_ref()
                     .map_or(AgentSpaceResourceState::Idle, |space| space.resource_state)
             },
-            lease: (!(identity_changed || capability_changed))
+            lease: (!identity_changed)
                 .then(|| previous.as_ref().and_then(|space| space.lease.clone()))
                 .flatten(),
             resource_revision: previous.as_ref().map_or(1, |space| space.resource_revision),
             updated_at_ms: now_ms(),
         };
-        state.agent_spaces.insert(name, record);
-        if identity_changed || capability_changed {
+        state.agent_spaces.insert(name.clone(), record);
+        if identity_changed {
             for package in state.work_packages.values_mut() {
                 let implementation_changed = package.agent_space == previous.as_ref().unwrap().name;
                 let active_review_changed =
@@ -1186,7 +1170,39 @@ impl ProjectStore {
                 }
             }
         }
-        reconcile_all_session_dcgs(&mut state)?;
+        if capability_narrowed {
+            let affected = state
+                .work_packages
+                .values()
+                .filter(|package| {
+                    package.agent_space == name
+                        && matches!(
+                            package.status,
+                            WorkPackageStatus::Planned
+                                | WorkPackageStatus::Ready
+                                | WorkPackageStatus::Running
+                                | WorkPackageStatus::Waiting
+                        )
+                        && !package_space_contract_satisfied(&state, package)
+                })
+                .map(|package| package.id.clone())
+                .collect::<Vec<_>>();
+            for id in affected {
+                let package = state
+                    .work_packages
+                    .get_mut(&id)
+                    .expect("selected incompatible WorkPackage exists");
+                package.status = WorkPackageStatus::Blocked;
+                package.block_reason = Some(
+                    "assigned Agent Space no longer declares the package capability contract"
+                        .into(),
+                );
+                package.work_session_id = None;
+                package.updated_at_ms = now_ms();
+                update_team_slot(&mut state, &id, TeamSlotStatus::Blocked, None, None)?;
+            }
+        }
+        reconcile_all_session_dcgs_isolated(&mut state);
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -1223,7 +1239,7 @@ impl ProjectStore {
         // A supervisor observation is also the crash-recovery clock for the
         // deterministic interpreter. Reconcile trusted evidence even when no
         // PM transition happened after the underlying Space/package event.
-        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
+        reconcile_selected_session_dcg_isolated(&mut state, controller_session_id);
         sync_primary_supervisor(&mut state);
         state.touch(now_ms());
         self.save(&state)?;
@@ -1442,12 +1458,21 @@ impl ProjectStore {
             .session_dcg_runs
             .get(controller_session_id)
             .map(|run| run.revision);
-        reconcile_selected_session_dcg(&mut state, controller_session_id)?;
+        let interpreter_failed =
+            reconcile_selected_session_dcg_isolated(&mut state, controller_session_id);
         let dcg_changed = state
             .session_dcg_runs
             .get(controller_session_id)
             .map(|run| run.revision)
             != run_revision_before;
+        let digest = if interpreter_failed {
+            format!(
+                "workflow-interpreter-error:{}",
+                digest_bytes(digest.as_bytes())
+            )
+        } else {
+            digest
+        };
 
         let (changed_state, wake_manager) = {
             let supervisor = state
@@ -1455,7 +1480,10 @@ impl ProjectStore {
                 .entry(controller_session_id.to_string())
                 .or_insert_with(supervisor::SupervisorState::idle);
             let mut changed_state = false;
-            if active_work
+            if interpreter_failed {
+                supervisor.observe(digest, true, false, false, now_ms);
+                changed_state = true;
+            } else if active_work
                 && (supervisor.mode != supervisor::SupervisorMode::Active
                     || supervisor.observation_digest.is_none())
             {
@@ -1710,6 +1738,15 @@ fn upgrade_project_state(mut state: ProjectState) -> ProjectState {
     {
         package.controller_session_id = state.controller_session_id.clone();
     }
+    for package in state.work_packages.values_mut() {
+        if package.repository.is_empty() {
+            package.repository = package
+                .worktree
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+        }
+    }
     for space in state.agent_spaces.values_mut() {
         // V3 mixed prose-derived tokens and explicit tags in one field, so it
         // cannot prove which capabilities were actually declared. Migrate it
@@ -1771,7 +1808,6 @@ fn select_agent_space(
     state: &ProjectState,
     selector: &DcgSpaceSelector,
     required_space_tags: &BTreeSet<String>,
-    node_instance_id: &str,
 ) -> Result<String> {
     let mut candidates = state
         .agent_spaces
@@ -1790,7 +1826,6 @@ fn select_agent_space(
                     .all(|tag| space.tags.contains(tag))
                 && !state.work_packages.values().any(|package| {
                     package.agent_space == space.name
-                        && package.node_instance_id.as_deref() == Some(node_instance_id)
                         && !matches!(
                             package.status,
                             WorkPackageStatus::Accepted
@@ -1799,35 +1834,20 @@ fn select_agent_space(
                         )
                 })
         })
-        .map(|space| {
-            let active_assignments = state
-                .work_packages
-                .values()
-                .filter(|package| {
-                    package.agent_space == space.name
-                        && !matches!(
-                            package.status,
-                            WorkPackageStatus::Accepted
-                                | WorkPackageStatus::Cancelled
-                                | WorkPackageStatus::Blocked
-                        )
-                })
-                .count();
-            (active_assignments, space.name.clone())
-        })
+        .map(|space| space.name.clone())
         .collect::<Vec<_>>();
     candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .map(|(_, name)| name)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no active Agent Space matches Workflow tags [{}] and WorkPackage capability tags [{}]",
-                selector.match_tags.join(", "),
-                required_space_tags.iter().cloned().collect::<Vec<_>>().join(", ")
-            )
-        })
+    candidates.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no active Agent Space matches Workflow tags [{}] and WorkPackage capability tags [{}]",
+            selector.match_tags.join(", "),
+            required_space_tags
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })
 }
 
 fn select_review_space(state: &ProjectState, package: &WorkPackage) -> Result<String> {
@@ -1977,6 +1997,19 @@ fn trusted_run_facts(
                             && package.node_instance_id.as_deref() == Some(instance.id.as_str())
                     })
                     .collect::<Vec<_>>();
+                // A bound Space can become unsafe while the cohort is still
+                // being planned. Quarantine is a durable resource fact and
+                // must not wait for fanout sealing or a worker transition.
+                if packages.iter().any(|package| {
+                    state
+                        .agent_spaces
+                        .get(&package.agent_space)
+                        .is_some_and(|space| {
+                            space.resource_state == AgentSpaceResourceState::Quarantined
+                        })
+                }) {
+                    facts.insert("space.quarantined".into());
+                }
                 if packages.is_empty() || !instance.fanout_sealed {
                     continue;
                 }
@@ -2024,16 +2057,6 @@ fn trusted_run_facts(
                     .any(|package| package.status == WorkPackageStatus::Running)
                 {
                     facts.insert("work.running".into());
-                }
-                if packages.iter().any(|package| {
-                    state
-                        .agent_spaces
-                        .get(&package.agent_space)
-                        .is_some_and(|space| {
-                            space.resource_state == AgentSpaceResourceState::Quarantined
-                        })
-                }) {
-                    facts.insert("space.quarantined".into());
                 }
             }
             DcgActor::System => {
@@ -2166,15 +2189,77 @@ fn reconcile_selected_session_dcg(
         return Ok(());
     };
     let definition = run_definition(state, controller_session_id, &catalog)?;
-    reconcile_session_dcg(state, controller_session_id, &definition)
+    let original = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .cloned()
+        .expect("workflow Run was checked above");
+    match reconcile_session_dcg(state, controller_session_id, &definition) {
+        Ok(()) => {
+            let run = state
+                .session_dcg_runs
+                .get_mut(controller_session_id)
+                .expect("workflow Run survived reconciliation");
+            if run.interpreter_error.take().is_some() {
+                run.revision = run.revision.saturating_add(1);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            state
+                .session_dcg_runs
+                .insert(controller_session_id.to_string(), original);
+            Err(error)
+        }
+    }
 }
 
-fn reconcile_all_session_dcgs(state: &mut ProjectState) -> Result<()> {
+fn record_interpreter_error(
+    state: &mut ProjectState,
+    controller_session_id: &str,
+    error: &anyhow::Error,
+) {
+    let mut message = format!("{error:#}");
+    if message.len() > 2_000 {
+        let boundary = message
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= 2_000)
+            .last()
+            .unwrap_or(0);
+        message.truncate(boundary);
+    }
+    if let Some(run) = state.session_dcg_runs.get_mut(controller_session_id) {
+        if run.interpreter_error.as_deref() != Some(message.as_str()) {
+            run.interpreter_error = Some(message);
+            run.revision = run.revision.saturating_add(1);
+        }
+    }
+}
+
+fn reconcile_selected_session_dcg_isolated(
+    state: &mut ProjectState,
+    controller_session_id: &str,
+) -> bool {
+    match reconcile_selected_session_dcg(state, controller_session_id) {
+        Ok(()) => false,
+        Err(error) => {
+            tracing::warn!(
+                controller_session_id,
+                %error,
+                "isolating PM Workflow interpreter failure"
+            );
+            record_interpreter_error(state, controller_session_id, &error);
+            true
+        }
+    }
+}
+
+fn reconcile_all_session_dcgs_isolated(state: &mut ProjectState) {
     let controllers = state.session_dcg_runs.keys().cloned().collect::<Vec<_>>();
     for controller in controllers {
-        reconcile_selected_session_dcg(state, &controller)?;
+        reconcile_selected_session_dcg_isolated(state, &controller);
     }
-    Ok(())
 }
 
 fn attach_dcg_runs(state: &mut ProjectState, controller_session_id: &str) -> Result<bool> {
@@ -2329,6 +2414,42 @@ fn role_space_tags(role: AgentSpaceRole) -> BTreeSet<String> {
     }])
 }
 
+fn package_space_contract_satisfied(state: &ProjectState, package: &WorkPackage) -> bool {
+    let Some(space) = state.agent_spaces.get(&package.agent_space) else {
+        return false;
+    };
+    if !package
+        .required_space_tags
+        .iter()
+        .all(|tag| space.tags.contains(tag))
+    {
+        return false;
+    }
+    let Some(run) = state.session_dcg_runs.get(&package.controller_session_id) else {
+        return false;
+    };
+    let Some(instance) = package
+        .node_instance_id
+        .as_deref()
+        .and_then(|id| run.node_instances.get(id))
+    else {
+        return false;
+    };
+    let Some(selector) = run
+        .definition_snapshot
+        .as_ref()
+        .and_then(|definition| definition.node(&instance.node_id).ok())
+        .and_then(|node| node.executor.as_ref())
+        .and_then(|executor| executor.space.as_ref())
+    else {
+        return false;
+    };
+    selector
+        .match_tags
+        .iter()
+        .all(|tag| space.tags.contains(tag))
+}
+
 fn validate_git_object(value: &str) -> Result<()> {
     if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         anyhow::bail!("source commit must be a full Git object id");
@@ -2416,6 +2537,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 dependencies: package.dependencies.clone(),
                 required_space_tags: package.required_space_tags.iter().cloned().collect(),
                 agent_space: package.agent_space.clone(),
+                repository: package.repository.clone(),
                 branch: package.branch.clone(),
                 workflow_run_id: package.workflow_run_id.clone(),
                 node_instance_id: package.node_instance_id.clone(),
@@ -2558,6 +2680,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 definition: definition.map(workflow_definition_status).transpose()?,
                 status: enum_wire_name(run.status)?,
                 outcome: run.outcome.clone(),
+                interpreter_error: run.interpreter_error.clone(),
                 active_nodes: run.active_nodes.iter().cloned().collect(),
                 facts: run.facts.iter().cloned().collect(),
                 node_instances: run
@@ -3066,7 +3189,6 @@ mod tests {
             )
             .is_err());
         let node_instance_id = run.active_node_instance("implement").unwrap().id.clone();
-        run.seal_fanout(&node_instance_id).unwrap();
         state.session_dcg_runs.insert("s_pm".into(), run);
         state.session_intents.insert(
             "s_pm".into(),
@@ -3080,6 +3202,51 @@ mod tests {
                 recorded_at_ms: 1,
             },
         );
+
+        state.agent_spaces.insert(
+            "implementation".into(),
+            AgentSpaceRecord {
+                name: "implementation".into(),
+                purpose: "implementation".into(),
+                source_path: PathBuf::from("/project/spaces/implementation"),
+                workspace_id: "w_implementation".into(),
+                source_commit: "0".repeat(40),
+                builder_lock_digest: "sha256:implementation".into(),
+                role: AgentSpaceRole::Implementation,
+                tags: BTreeSet::from(["implementation".into()]),
+                declared_tags: BTreeSet::new(),
+                active: true,
+                resource_state: AgentSpaceResourceState::Quarantined,
+                lease: None,
+                resource_revision: 1,
+                updated_at_ms: 1,
+            },
+        );
+        let mut planned = WorkPackage::planned(
+            "planned".into(),
+            "Planned".into(),
+            "deliver planned".into(),
+            vec![],
+            "implementation".into(),
+            "work/planned".into(),
+            PathBuf::from("/project/worktrees/implementation/game"),
+            1,
+        )
+        .unwrap();
+        planned
+            .bind_to_workflow("s_pm".into(), "run-s_pm".into(), node_instance_id.clone())
+            .unwrap();
+        state.work_packages.insert(planned.id.clone(), planned);
+        let planning_facts = trusted_run_facts(&state, "s_pm", definition).unwrap();
+        assert!(planning_facts.contains("space.quarantined"));
+        assert!(!planning_facts.contains("work.candidate"));
+        state.work_packages.clear();
+        state
+            .session_dcg_runs
+            .get_mut("s_pm")
+            .unwrap()
+            .seal_fanout(&node_instance_id)
+            .unwrap();
 
         for (id, status) in [
             ("running", WorkPackageStatus::Running),
@@ -3210,6 +3377,50 @@ mod tests {
             .contains("review"));
     }
 
+    #[tokio::test]
+    async fn interpreter_failure_is_durable_and_does_not_break_supervisor_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "interpreter-isolation",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalog = DcgCatalog::load(&root.join("spaces/pm/skills/project-workflow")).unwrap();
+        let definition = catalog.session_workflow("feature").unwrap();
+        let mut state = ProjectState::new("w_project".into(), "s_pm".into(), root, 1);
+        let mut run = DcgRun::new_discussion("run-s_pm".into(), "s_pm".into()).unwrap();
+        run.select_before_start(definition).unwrap();
+        run.active_nodes = BTreeSet::from(["missing-node".into()]);
+        state.session_dcg_runs.insert("s_pm".into(), run);
+        let store = ProjectStore::new(&temp.path().join("data"));
+        store.save(&state).unwrap();
+
+        let first = store
+            .reconcile_supervisor("w_project", "s_pm", "broken".into(), false, false, 1_000)
+            .await
+            .unwrap();
+        assert!(first.project.session_dcg_runs["s_pm"]
+            .interpreter_error
+            .as_deref()
+            .is_some_and(|message| message.contains("missing-node")));
+        assert!(!first.wake_manager);
+
+        let due = store
+            .reconcile_supervisor("w_project", "s_pm", "broken".into(), false, false, 11_000)
+            .await
+            .unwrap();
+        assert!(due.wake_manager);
+        assert!(due.project.session_dcg_runs["s_pm"]
+            .interpreter_error
+            .is_some());
+    }
+
     #[test]
     fn package_capability_tags_narrow_coordinator_space_choice() {
         let mut state = ProjectState::new(
@@ -3249,13 +3460,7 @@ mod tests {
         };
 
         assert_eq!(
-            select_agent_space(
-                &state,
-                &selector,
-                &BTreeSet::from(["foundation".into()]),
-                "implement@1",
-            )
-            .unwrap(),
+            select_agent_space(&state, &selector, &BTreeSet::from(["foundation".into()]),).unwrap(),
             "implementation-foundation"
         );
         let mut sibling = WorkPackage::planned(
@@ -3269,35 +3474,24 @@ mod tests {
             1,
         )
         .unwrap();
-        sibling.node_instance_id = Some("implement@1".into());
+        sibling.controller_session_id = "s_other".into();
+        sibling.node_instance_id = Some("other-session-implement@1".into());
         state.work_packages.insert(sibling.id.clone(), sibling);
-        assert!(select_agent_space(
-            &state,
-            &selector,
-            &BTreeSet::from(["foundation".into()]),
-            "implement@1",
-        )
-        .is_err());
+        assert!(
+            select_agent_space(&state, &selector, &BTreeSet::from(["foundation".into()]),).is_err()
+        );
         state.work_packages.clear();
         state
             .agent_spaces
             .get_mut("implementation-foundation")
             .unwrap()
             .resource_state = AgentSpaceResourceState::Working;
-        assert!(select_agent_space(
-            &state,
-            &selector,
-            &BTreeSet::from(["foundation".into()]),
-            "implement@2",
-        )
-        .is_err());
-        assert!(select_agent_space(
-            &state,
-            &selector,
-            &BTreeSet::from(["unknown".into()]),
-            "implement@1",
-        )
-        .is_err());
+        assert!(
+            select_agent_space(&state, &selector, &BTreeSet::from(["foundation".into()]),).is_err()
+        );
+        assert!(
+            select_agent_space(&state, &selector, &BTreeSet::from(["unknown".into()]),).is_err()
+        );
 
         let mut package = WorkPackage::planned(
             "wp".into(),

@@ -28,7 +28,9 @@ The outer repository ignores `.genethub/`, `repositories/`, `worktrees/`, every 
 - The daemon authorizes every new WorkSession against an active durable work
   package and fixes its cwd to that package's exact worktree. The package asks
   for semantic capabilities, while the Coordinator combines those tags with
-  the Workflow node selector and assigns the concrete Space. A ready package
+  the Workflow node selector, atomically assigns the concrete Space, and
+  derives `worktrees/<space>/<repository>` from the package repository. The PM
+  creates that returned worktree before the Ready gate. A ready package
   starts only in that assigned implementation Space; a candidate starts only
   in a different review-only Space.
 - Users may read and fork WorkSessions and may open ordinary sessions in the same Agent Space. They cannot mutate the managed WorkSession or remove the Agent Space.

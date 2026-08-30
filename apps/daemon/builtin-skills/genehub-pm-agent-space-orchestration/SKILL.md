@@ -27,6 +27,12 @@ folders limited to that capability and its exact package worktree; do not make
 all implementation Spaces general-purpose just to let the PM choose among
 them. A fanout package requests its capability with `package put --space-tag
 <capability>`, and the Coordinator chooses the concrete idle Space.
+The package names only its business repository and branch. After `package put`
+returns the Coordinator-selected `agentSpace` and derived `worktree`, create the
+Git worktree at that exact path before moving the package to `ready`. This
+allocation-first sequence prevents the PM from guessing a physical Space and
+prevents another Session from claiming the same Space between planning and
+dispatch.
 
 Merge nodes that need the same context and writable branch. Split nodes when they can progress independently, need different Skills, or require an independent reviewer. Never pre-create Gameplay/UI/Test roles merely because the project is a game.
 

@@ -27,7 +27,7 @@ Use only the authenticated control commands below; never edit daemon PM state fi
   --acceptance <observable-check> [--acceptance <check>...] \
   [--constraint <constraint>...] [--out-of-scope <item>...] [--affects <package-id>...]
 "$GENEHUB_CLI" pm project package put --id <id> --title <title> --outcome <outcome> \
-  --space-tag <capability> --branch <branch> --worktree <project-relative-path> \
+  --space-tag <capability> --repository <repository-name> --branch <branch> --node <node-id> \
   [--depends-on <package-id>...]
 "$GENEHUB_CLI" pm project package transition --id <id> --to <status> [...evidence]
 "$GENEHUB_CLI" pm project advance --to <next-phase>
@@ -43,7 +43,12 @@ Every command derives project root and controller from this PM session. Treat a 
 - Ask for semantic Space capabilities with repeatable `--space-tag`; never select
   a concrete Agent Space name. The Coordinator combines these tags with the
   active Workflow node selector and deterministically assigns a compatible
-  idle Space. The returned `agentSpace` is the only Space valid for dispatch.
+  idle Space. `package put` atomically binds that Space and returns both
+  `agentSpace` and the derived `worktree` path. Create the named branch/worktree
+  at that exact returned path, then transition the package to `ready`; the Ready
+  gate verifies the repository, branch, and worktree binding. Never pass the
+  removed `--space` or `--worktree` flags and never infer allocation from an
+  error message.
 - Size each package so one WorkSession can autonomously reach a candidate in a
   small number of runtime turns. Do not convert its internal file order,
   checkpoint commits, or individual gate commands into PM graph nodes.
