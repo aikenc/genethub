@@ -2677,11 +2677,11 @@ fn validate_phase_evidence(state: &ProjectState, phase: ProjectPhase) -> Result<
             }
         }
         ProjectPhase::Active => {
-            if state.intent.is_none()
-                || state.work_packages.is_empty()
-                || state.agent_spaces.is_empty()
-            {
-                anyhow::bail!("active requires Intent, work packages, and registered Agent Spaces");
+            // Active is project-level readiness. Session intents and packages
+            // belong to independent Workflow Runs and may not exist yet when
+            // a shared project is opened for several concurrent requirements.
+            if state.agent_spaces.is_empty() {
+                anyhow::bail!("active requires registered Agent Spaces");
             }
         }
     }
@@ -3267,6 +3267,44 @@ mod tests {
         let root = temp.path().join("project");
         std::fs::create_dir_all(root.join(".genethub/sessions")).unwrap();
         root
+    }
+
+    #[test]
+    fn active_phase_is_shared_project_readiness_before_session_work_exists() {
+        let mut state = ProjectState::new(
+            "w_project".into(),
+            "s_pm".into(),
+            PathBuf::from("/project"),
+            1,
+        );
+        state.phase = ProjectPhase::WorkspacesRegistered;
+        state.agent_spaces.insert(
+            "implementation".into(),
+            AgentSpaceRecord {
+                name: "implementation".into(),
+                purpose: "shared implementation".into(),
+                source_path: PathBuf::from("/project/spaces/implementation"),
+                workspace_id: "w_implementation".into(),
+                source_commit: "0".repeat(40),
+                builder_lock_digest: "sha256:implementation".into(),
+                role: AgentSpaceRole::Implementation,
+                tags: BTreeSet::from(["implementation".into()]),
+                declared_tags: BTreeSet::new(),
+                active: true,
+                resource_state: AgentSpaceResourceState::Idle,
+                lease: None,
+                resource_revision: 1,
+                updated_at_ms: 1,
+            },
+        );
+
+        assert!(state.intent.is_none());
+        assert!(state.session_intents.is_empty());
+        assert!(state.work_packages.is_empty());
+        validate_phase_evidence(&state, ProjectPhase::Active).unwrap();
+
+        state.agent_spaces.clear();
+        assert!(validate_phase_evidence(&state, ProjectPhase::Active).is_err());
     }
 
     #[tokio::test]

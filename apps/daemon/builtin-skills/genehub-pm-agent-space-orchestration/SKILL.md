@@ -56,6 +56,14 @@ interrupt exact owned sessions and settle their Space leases.
 
 ## Build and register a Space
 
+The registered AgentSpace pool is project-scoped. Before building or
+registering anything, read `pm project show`: a sibling PM Session must reuse
+an existing compatible recorded Space and its workspace id. Re-running
+`workspace register-agent-space` for the same active source is only an
+idempotent rediscovery; it does not transfer rename/removal ownership. Do not
+rebuild, re-register, or re-record shared Spaces merely because the current
+requirement has a different PM Session id.
+
 1. Run `"$GENEHUB_CLI" agent-space init <name>` to create or validate the two required PipeBuilder inputs. Then edit `spaces/<name>/pipespace.json`, `<name>.code-workspace`, optional role source, and Git-managed Provider Skills for the actual work package. Keep the Space root first in the workspace folder list.
 2. Run, in order, with the exact injected CLI:
 

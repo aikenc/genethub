@@ -17,6 +17,12 @@ The outer repository ignores `.genethub/`, `repositories/`, `worktrees/`, every 
 
 ## Runtime and session ownership
 
+- The AgentSpace registry and dispatch pool belong to the project, not to one
+  requirement Session. Sibling PM Sessions may reuse an active recorded Space
+  through Coordinator allocation. The Session that first registered the
+  Workspace retains rename/removal authority, so idempotent rediscovery never
+  transfers destructive ownership.
+
 - `pipespace.json.agents` means Builder targets, not a bound WorkAgent. The
   PipeBuilder v1 target ids are exactly `codex`, `cursor`, `codebuddy`, and
   `claude-code`; never put `opencode` or another daemon runtime id there. For

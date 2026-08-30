@@ -325,7 +325,7 @@ async function prepareSharedTopology(
    - task-bugfix: diagnosis、bugfix
    - task-migration: research、migration、cocos
    - review-a/review-b/review-c: --role review
-5. 推进到 topology-verified、workspaces-registered 后结束本回合。不要推进 active；并发需求 Session 会创建自己的 Intent 和 WorkPackage。
+5. 推进到 topology-verified、workspaces-registered，再推进项目级 active 后结束本回合。active 只表示共享拓扑可执行，不要选择需求 Workflow、创建 Intent 或 WorkPackage。
 
 不要安装 Agent、不要改变模型，也不要等待后续消息。`,
   );
@@ -346,7 +346,7 @@ async function prepareSharedTopology(
       payload: { sessionId: setup.id },
     });
     if (
-      status.phase === "workspacesRegistered" &&
+      status.phase === "active" &&
       implementations.length >= 3 &&
       reviews.length >= 3 &&
       snapshot?.type === "snapshot" &&
@@ -388,7 +388,7 @@ async function createPmSession(
 }
 
 function concurrentRequirements(): ConcurrentRequirement[] {
-  const common = `这是同一项目内三个并行需求之一。只管理当前 PM Session 的 Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 让 Coordinator 分配既有 Space；只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经独立 review Space 复验后 Accepted；最终合入 repositories/game/main 并保持仓库干净。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
+  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 让 Coordinator 从 pm project show 中的既有 Space 池分配；只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
   return [
     {
       id: "daily",

@@ -743,10 +743,26 @@ impl Workspaces {
                 return Ok(describe(&existing));
             }
             if let Some(binding) = agent_space.as_ref() {
-                if existing.kind == WorkspaceKind::AgentSpace
-                    && existing.agent_space.as_ref() != Some(binding)
-                {
-                    anyhow::bail!("this Agent Space belongs to another project manager");
+                if existing.kind == WorkspaceKind::AgentSpace {
+                    let existing_binding = existing
+                        .agent_space
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("the Agent Space has no project binding"))?;
+                    if existing_binding.project_workspace_id != binding.project_workspace_id {
+                        anyhow::bail!("this Agent Space belongs to another project");
+                    }
+                    if existing_binding.controller_session_id != binding.controller_session_id {
+                        if existing.removed {
+                            anyhow::bail!(
+                                "an Agent Space can only be reactivated by its original project manager"
+                            );
+                        }
+                        // The pool belongs to the project. A sibling PM Session
+                        // may rediscover the same active source without taking
+                        // over rename/removal authority from the Session that
+                        // originally registered it.
+                        return Ok(describe(&existing));
+                    }
                 }
             }
             let mut updated = candidate;
@@ -1541,6 +1557,15 @@ mod tests {
         );
         let binding = spaces.get(&promoted.id).await.unwrap().agent_space.unwrap();
         assert_eq!(binding.project_workspace_id, project.id);
+        assert_eq!(binding.controller_session_id, "s_pm");
+
+        let sibling = spaces
+            .register_agent_space(&source, &project_entry, "s_other")
+            .await
+            .unwrap();
+        assert_eq!(sibling.id, promoted.id);
+        assert_eq!(sibling.kind, Some(WorkspaceKind::AgentSpace));
+        let binding = spaces.get(&promoted.id).await.unwrap().agent_space.unwrap();
         assert_eq!(binding.controller_session_id, "s_pm");
 
         let reopened = spaces.open(&source, None).await.unwrap();

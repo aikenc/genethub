@@ -9,9 +9,12 @@ Use the project Folder Workspace root as the PM cwd for the entire project.
 3. `gitReady`: initialize the outer Space-management repository on `main`, add the standard ignores, create the independent business repository and its empty baseline, then record the stage. Do not change global Git config.
 4. `topologyVerified`: create only the Agent Spaces needed by the current graph. Run Agent Space Builder check, explain, dry-run, build, and verify; commit source Skills and Space definitions in the outer repository.
 5. `workspacesRegistered`: register each verified Agent Space through the bound CLI and record its workspace id, Space commit, and Builder lock digest.
-6. `active`: dispatch WorkAgents only after packages, branches, worktrees, and gates are durable.
+6. `active`: mark the shared project topology ready for independent PM Session Workflow Runs. The project does not need a requirement-specific Intent or WorkPackage yet; each Session records those after selecting its own graph. Dispatch still requires that Session's durable package, branch, worktree, budget, and gates.
 
 Every stage is idempotent. On resume, validate the already-recorded fact and continue at the first incomplete stage; do not create a second repository or baseline.
+Only the project-initialization Session advances these shared stages. Sibling
+requirement Sessions reuse the active project and must not race each other by
+replaying global phase transitions.
 
 ## PM turn boundary
 

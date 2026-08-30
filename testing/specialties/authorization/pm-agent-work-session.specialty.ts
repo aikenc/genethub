@@ -226,6 +226,32 @@ defineSpecialty(
         `unexpected Agent Space capabilities: ${JSON.stringify(agentSpace.capabilities)}`,
       );
 
+      t.assertions.assert(Boolean(duplicatePmId), "the sibling PM Session id is missing");
+      const siblingEvents = await t.flows.main.attachEventLog(opened.client, duplicatePmId);
+      opened.mock.script(
+        {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: '"$GENEHUB_CLI" workspace register-agent-space spaces/implementation/implementation.code-workspace',
+            },
+          },
+        },
+        { text: "The existing project Agent Space is reused without changing its owner." },
+      );
+      const siblingTerminals = terminalCount(siblingEvents);
+      const siblingCompletions = completedCount(siblingEvents);
+      await t.flows.main.sendPrompt(
+        opened.client,
+        duplicatePmId,
+        "Reuse the project's already-registered implementation Agent Space idempotently.",
+      );
+      await t.tools.waitUntil(() => terminalCount(siblingEvents) === siblingTerminals + 1, 15_000);
+      t.assertions.assert(
+        completedCount(siblingEvents) === siblingCompletions + 1,
+        `sibling PM could not rediscover the shared Agent Space: ${eventTrace(siblingEvents)}`,
+      );
+
       const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
         cwd: t.env.workspace,
         encoding: "utf8",
@@ -233,13 +259,13 @@ defineSpecialty(
       const activateCommand = [
         `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit} --tag gameplay`,
         '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
+        '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project workflow select --graph feature',
         '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
         '"$GENEHUB_CLI" pm project workflow transition --edge planned --fact plan.ready',
         'if "$GENEHUB_CLI" pm project package put --id legacy-space --title "Legacy package" --outcome "Must be rejected" --space implementation --repository game --branch work/gameplay --node implement; then exit 76; fi',
         '"$GENEHUB_CLI" pm project package put --id wp-gameplay --title "Gameplay package" --outcome "Produce the gameplay candidate" --space-tag gameplay --repository game --branch work/gameplay --node implement',
         `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit} --tag gameplay --tag webgl2`,
-        '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project package transition --id wp-gameplay --to ready',
       ].join(" && ");
       const terminalsBeforeActivation = terminalCount(pmEvents);

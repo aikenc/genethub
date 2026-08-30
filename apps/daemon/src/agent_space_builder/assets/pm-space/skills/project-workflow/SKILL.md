@@ -11,6 +11,9 @@ description: 对齐用户需求，选择并执行项目 Workflow DCG，动态组
 Project Coordinator 是图版本、节点实例、合法边、AgentSpace 资源状态、租约和转换证据的事实来源。
 AgentSpace 的状态机属于固定内核，不在 Workflow DCG 中定义，也不得通过提示词绕过。不得在 Coordinator
 已接受状态之外虚构图、边、Space 租约、WorkSession 或转换。
+项目 phase、lifecycle 和 AgentSpace 池是所有 PM Session 共享的项目级事实。项目初始化 Session 将拓扑推进
+到 `active` 后，后续需求 Session 只维护自己的 Intent、Run 和 WorkPackage；不得重复初始化项目、推进共享
+phase，或仅因 Session id 不同就重新注册、重建、重录已有 AgentSpace。
 
 执行顺序：
 
