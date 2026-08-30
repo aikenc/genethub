@@ -580,6 +580,9 @@ impl DcgRun {
         if !edge.when.satisfied_by(facts) {
             anyhow::bail!("edge {edge_id} condition is not satisfied");
         }
+        if chooser == DcgActor::User && edge.choose_by != Some(DcgActor::User) {
+            anyhow::bail!("edge {edge_id} is not a user decision");
+        }
         if edge.choose_by.is_some_and(|required| required != chooser) {
             anyhow::bail!("edge {edge_id} must be chosen by {:?}", edge.choose_by);
         }
@@ -912,6 +915,11 @@ mod tests {
             run.eligible_edges(bugfix, &facts).unwrap()[0].id,
             "diagnosed"
         );
+        let error = run
+            .transition(bugfix, "diagnosed", &facts, DcgActor::User)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a user decision"), "{error}");
         run.transition(bugfix, "diagnosed", &facts, DcgActor::System)
             .unwrap();
         assert_eq!(run.active_nodes, BTreeSet::from(["fix".into()]));

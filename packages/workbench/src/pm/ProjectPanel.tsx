@@ -140,7 +140,7 @@ export function ProjectPanel({
             <section className="space-y-2">
               <p className="font-medium text-fg">下一步与异常分支</p>
               {run.availableEdges.map((edge) => {
-                const userDecision = !edge.chooseBy || edge.chooseBy === "user";
+                const userDecision = edge.chooseBy === "user";
                 return (
                   <div key={edge.id} className="rounded-lg border border-line bg-canvas/40 p-2">
                     <div className="flex items-center gap-2">
@@ -170,7 +170,11 @@ export function ProjectPanel({
                           })}
                         >决策</button>
                       </div>
-                    ) : <p className="mt-1 text-muted">由 PM 根据证据推进</p>}
+                    ) : edge.chooseBy === "pm" ? (
+                      <p className="mt-1 text-muted">由 PM 根据证据选择</p>
+                    ) : (
+                      <p className="mt-1 text-muted">由 Coordinator 根据证据推进</p>
+                    )}
                   </div>
                 );
               })}

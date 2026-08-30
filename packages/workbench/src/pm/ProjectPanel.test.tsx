@@ -25,6 +25,9 @@ describe("ProjectPanel", () => {
     expect(screen.getByText("implement")).toBeInTheDocument();
     expect(screen.getByText(/等待资源/)).toBeInTheDocument();
     expect(screen.getByText("实现战斗循环")).toBeInTheDocument();
+    expect(screen.getByText("由 PM 根据证据选择")).toBeInTheDocument();
+    expect(screen.getByText("由 Coordinator 根据证据推进")).toBeInTheDocument();
+    expect(screen.getAllByText("决策")).toHaveLength(1);
     fireEvent.click(screen.getByText("实现战斗循环"));
     expect(open).toHaveBeenCalledWith("s_work");
 
@@ -76,8 +79,12 @@ function projectStatus(): PmProjectStatus {
     }],
     workflowCatalog: { recommended: "feature", workflows: [{
       id: "feature", version: 1, entry: "intake",
-      nodes: [{ id: "intake", kind: "activity" }, { id: "implement", kind: "activity" }, { id: "diagnose", kind: "activity" }],
-      edges: [{ id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" }],
+      nodes: [{ id: "intake", kind: "activity" }, { id: "implement", kind: "activity" }, { id: "diagnose", kind: "activity" }, { id: "delivered", kind: "terminal" }],
+      edges: [
+        { id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" },
+        { id: "alternative", from: "diagnose", to: "implement", condition: "diagnosis.alternativeReady", chooseBy: "pm" },
+        { id: "finish", from: "diagnose", to: "delivered", condition: "diagnosis.resolved" },
+      ],
     }] },
     workflowRuns: [{
       id: "run-s_pm", controllerSessionId: "s_pm", graphId: "feature", graphVersion: 1, status: "active",
@@ -85,7 +92,11 @@ function projectStatus(): PmProjectStatus {
       activeNodes: ["diagnose"], facts: [], revision: 3,
       nodeInstances: [{ id: "implement-1", nodeId: "implement", iteration: 1, status: "blocked" }, { id: "diagnose-1", nodeId: "diagnose", iteration: 1, status: "active" }],
       teamSlots: [{ id: "slot-combat", nodeInstanceId: "implement-1", workPackageId: "combat", responsibility: "实现战斗循环", workSessionId: "s_work", status: "blocked" }],
-      availableEdges: [{ id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user", satisfied: false }],
+      availableEdges: [
+        { id: "retry", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user", satisfied: false },
+        { id: "alternative", from: "diagnose", to: "implement", condition: "diagnosis.alternativeReady", chooseBy: "pm", satisfied: true },
+        { id: "finish", from: "diagnose", to: "delivered", condition: "diagnosis.resolved", satisfied: true },
+      ],
     }],
     improvementCandidates: [],
     supervisor: {
