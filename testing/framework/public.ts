@@ -48,6 +48,7 @@ export { qualificationReasons } from "../policies/gates.ts";
 export {
   awaitHumanDecision,
   BlockedError,
+  humanDecisionResponseDeadline,
   parseSummaryLanguage,
   renderRunSummary,
   UnstableError,

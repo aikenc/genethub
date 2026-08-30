@@ -1285,6 +1285,26 @@ impl DcgRun {
         Ok(())
     }
 
+    /// Reopens a cohort only when the PM withdraws a package before any work
+    /// in that cohort has started. The package and Team Slot remain durable
+    /// history; reopening merely allows a replacement identity to consume the
+    /// vacated fanout capacity.
+    pub fn reopen_fanout_for_withdrawal(&mut self, node_instance_id: &str) -> Result<()> {
+        let instance = self
+            .node_instances
+            .get_mut(node_instance_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown workflow node instance"))?;
+        if instance.status != DcgNodeInstanceStatus::Active {
+            anyhow::bail!("only an active workAgent node can replace a withdrawn WorkPackage");
+        }
+        if !instance.fanout_sealed {
+            return Ok(());
+        }
+        instance.fanout_sealed = false;
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
     pub fn active_ancestor_instances(&self, node_id: &str) -> Result<BTreeSet<String>> {
         let active = self.active_node_instance(node_id)?;
         let mut pending = active
@@ -1425,6 +1445,7 @@ pub enum TeamSlotStatus {
     Returning,
     Completed,
     Blocked,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -896,7 +896,12 @@ impl ProjectStore {
             .team_slots
             .values()
             .filter(|slot| {
-                slot.node_instance_id == node_instance_id && slot.work_package_id != package.id
+                slot.node_instance_id == node_instance_id
+                    && slot.work_package_id != package.id
+                    && state
+                        .work_packages
+                        .get(&slot.work_package_id)
+                        .is_none_or(|package| package.status != WorkPackageStatus::Cancelled)
             })
             .count() as u32;
         let limit = node.fanout.as_ref().map_or(1, |fanout| fanout.max_items);
@@ -960,6 +965,22 @@ impl ProjectStore {
         state.ensure_mutable()?;
         state.ensure_package_owner(controller_session_id, id)?;
         ensure_run_budget_open(&state, controller_session_id, now_ms())?;
+        let current_status = state
+            .work_packages
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("no such work package: {id}"))?
+            .status;
+        let withdrawn_node_instance = if status == WorkPackageStatus::Cancelled
+            && current_status != WorkPackageStatus::Cancelled
+        {
+            Some(validate_predispatch_withdrawal(
+                &state,
+                controller_session_id,
+                id,
+            )?)
+        } else {
+            None
+        };
         if matches!(
             status,
             WorkPackageStatus::Candidate | WorkPackageStatus::Review | WorkPackageStatus::Accepted
@@ -987,7 +1008,13 @@ impl ProjectStore {
             block_reason,
             now_ms(),
         )?;
-        if status != WorkPackageStatus::Planned {
+        if let Some(node_instance_id) = withdrawn_node_instance {
+            state
+                .session_dcg_runs
+                .get_mut(controller_session_id)
+                .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?
+                .reopen_fanout_for_withdrawal(&node_instance_id)?;
+        } else if status != WorkPackageStatus::Planned && status != WorkPackageStatus::Cancelled {
             let node_instance_id = state
                 .work_packages
                 .get(id)
@@ -1006,7 +1033,8 @@ impl ProjectStore {
             | WorkPackageStatus::Candidate
             | WorkPackageStatus::Review => TeamSlotStatus::Waiting,
             WorkPackageStatus::Accepted => TeamSlotStatus::Completed,
-            WorkPackageStatus::Blocked | WorkPackageStatus::Cancelled => TeamSlotStatus::Blocked,
+            WorkPackageStatus::Blocked => TeamSlotStatus::Blocked,
+            WorkPackageStatus::Cancelled => TeamSlotStatus::Cancelled,
         };
         let active_session = state
             .work_packages
@@ -2037,7 +2065,12 @@ fn workflow_resource_capacities(
             let allocated_items = active_instance.map_or(0, |instance| {
                 run.team_slots
                     .values()
-                    .filter(|slot| slot.node_instance_id == instance.id)
+                    .filter(|slot| {
+                        slot.node_instance_id == instance.id
+                            && state.work_packages.get(&slot.work_package_id).is_none_or(
+                                |package| package.status != WorkPackageStatus::Cancelled,
+                            )
+                    })
                     .count() as u32
             });
             let matching_spaces = state
@@ -2165,6 +2198,77 @@ fn ensure_run_budget_open(
     Ok(())
 }
 
+/// A PM cancellation is a planning correction, not an execution failure. It
+/// is therefore allowed only before this package or any sibling in the same
+/// cohort has acquired a lease or begun work. Later failures must be recorded
+/// as Blocked and follow the declared recovery path.
+fn validate_predispatch_withdrawal(
+    state: &ProjectState,
+    controller_session_id: &str,
+    work_package_id: &str,
+) -> Result<String> {
+    let package = state
+        .work_packages
+        .get(work_package_id)
+        .ok_or_else(|| anyhow::anyhow!("no such work package: {work_package_id}"))?;
+    if !matches!(
+        package.status,
+        WorkPackageStatus::Planned | WorkPackageStatus::Ready
+    ) {
+        anyhow::bail!(
+            "only a Planned or unstarted Ready WorkPackage may be withdrawn; record execution failures as Blocked"
+        );
+    }
+    if package.work_session_id.is_some() {
+        anyhow::bail!("a WorkPackage with WorkSession history cannot be withdrawn");
+    }
+    let node_instance_id = package
+        .node_instance_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("WorkPackage is not bound to a node instance"))?;
+    let run = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?;
+    if run
+        .node_instances
+        .get(node_instance_id)
+        .is_none_or(|instance| instance.status != dcg::DcgNodeInstanceStatus::Active)
+    {
+        anyhow::bail!("a WorkPackage cannot be withdrawn after its source node advances");
+    }
+
+    let leased_packages = state
+        .agent_spaces
+        .values()
+        .filter_map(|space| {
+            space
+                .lease
+                .as_ref()
+                .map(|lease| lease.work_package_id.as_str())
+        })
+        .collect::<BTreeSet<_>>();
+    if leased_packages.contains(work_package_id) {
+        anyhow::bail!("release the WorkPackage Agent Space lease before withdrawing it");
+    }
+    if state.work_packages.values().any(|sibling| {
+        sibling.id != work_package_id
+            && sibling.controller_session_id == controller_session_id
+            && sibling.node_instance_id.as_deref() == Some(node_instance_id)
+            && sibling.status != WorkPackageStatus::Cancelled
+            && (!matches!(
+                sibling.status,
+                WorkPackageStatus::Planned | WorkPackageStatus::Ready
+            ) || sibling.work_session_id.is_some()
+                || leased_packages.contains(sibling.id.as_str()))
+    }) {
+        anyhow::bail!(
+            "a WorkPackage cannot be withdrawn after another package in its cohort begins work"
+        );
+    }
+    Ok(node_instance_id.to_string())
+}
+
 fn select_review_space(state: &ProjectState, package: &WorkPackage) -> Result<String> {
     state
         .agent_spaces
@@ -2263,7 +2367,7 @@ fn settle_user_decision_packages(
             None,
             settled_at,
         )?;
-        update_team_slot(state, &id, TeamSlotStatus::Blocked, None, None)?;
+        update_team_slot(state, &id, TeamSlotStatus::Cancelled, None, None)?;
     }
     Ok(())
 }
@@ -2310,6 +2414,7 @@ fn trusted_run_facts(
                         package.controller_session_id == controller_session_id
                             && package.workflow_run_id.as_deref() == Some(run.id.as_str())
                             && package.node_instance_id.as_deref() == Some(instance.id.as_str())
+                            && package.status != WorkPackageStatus::Cancelled
                     })
                     .collect::<Vec<_>>();
                 // A bound Space can become unsafe while the cohort is still
@@ -2335,7 +2440,6 @@ fn trusted_run_facts(
                             | WorkPackageStatus::Review
                             | WorkPackageStatus::Accepted
                             | WorkPackageStatus::Blocked
-                            | WorkPackageStatus::Cancelled
                     )
                 });
                 if settled {
@@ -2344,11 +2448,6 @@ fn trusted_run_facts(
                         .any(|package| package.status == WorkPackageStatus::Blocked)
                     {
                         facts.insert("work.blocked".into());
-                    } else if packages
-                        .iter()
-                        .any(|package| package.status == WorkPackageStatus::Cancelled)
-                    {
-                        facts.insert("work.cancelled".into());
                     }
                     if packages.iter().all(|package| {
                         matches!(
@@ -2390,13 +2489,13 @@ fn trusted_run_facts(
                                 .node_instance_id
                                 .as_deref()
                                 .is_some_and(|id| incoming_instances.contains(id))
+                            && package.status != WorkPackageStatus::Cancelled
                     })
                     .collect::<Vec<_>>();
                 let review_settled = !packages.is_empty()
                     && packages.iter().all(|package| {
                         package.status == WorkPackageStatus::Accepted
                             || package.status == WorkPackageStatus::Blocked
-                            || package.status == WorkPackageStatus::Cancelled
                             || package
                                 .review
                                 .as_ref()
@@ -2406,7 +2505,6 @@ fn trusted_run_facts(
                 if review_settled
                     && packages.iter().any(|package| {
                         package.status == WorkPackageStatus::Blocked
-                            || package.status == WorkPackageStatus::Cancelled
                             || package.review.as_ref().and_then(|review| review.verdict)
                                 == Some(ReviewVerdict::Fail)
                     })
@@ -4636,17 +4734,6 @@ edges: []
                 },
             );
         }
-        let mut package = WorkPackage::planned(
-            "gameplay".into(),
-            "Gameplay".into(),
-            "Playable slice".into(),
-            vec![],
-            "implementation".into(),
-            "work/gameplay".into(),
-            worktree.canonicalize().unwrap(),
-            1,
-        )
-        .unwrap();
         let catalog = load_dcg_catalog(&root).unwrap().unwrap();
         let definition = catalog
             .session_workflow(&catalog.recommended_session_workflow)
@@ -4667,23 +4754,96 @@ edges: []
             DcgActor::Pm,
         )
         .unwrap();
-        let node_instance_id = run.active_node_instance("implement").unwrap().id.clone();
-        package
-            .bind_to_workflow("s_pm".into(), run.id.clone(), node_instance_id.clone())
-            .unwrap();
-        run.bind_team_slot(TeamSlot {
-            id: "slot-gameplay".into(),
-            node_instance_id,
-            work_package_id: package.id.clone(),
-            responsibility: package.outcome.clone(),
-            space_lease_id: None,
-            current_work_session_id: None,
-            status: TeamSlotStatus::Planned,
-        })
-        .unwrap();
-        package.status = WorkPackageStatus::Ready;
-        project.work_packages.insert(package.id.clone(), package);
         store.save(&project).unwrap();
+
+        let new_package = |id: &str, title: &str| {
+            WorkPackage::planned(
+                id.into(),
+                title.into(),
+                "Playable slice".into(),
+                vec![],
+                "coordinator-pending".into(),
+                format!("work/{id}"),
+                root.join("worktrees/coordinator-pending/game"),
+                1,
+            )
+            .unwrap()
+        };
+        // Fill the entire declared maxItems history with pre-dispatch mistakes.
+        // Each withdrawal must vacate capacity and reopen the same node so a
+        // replacement package can be bound without erasing the old evidence.
+        for attempt in 1..=4 {
+            let id = format!("mistake-{attempt}");
+            store
+                .put_work_package(
+                    "w_project",
+                    "s_pm",
+                    new_package(&id, "Mistaken package"),
+                    "implement",
+                )
+                .await
+                .unwrap();
+            store
+                .transition_work_package(
+                    "w_project",
+                    "s_pm",
+                    &id,
+                    WorkPackageStatus::Ready,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let withdrawn = store
+                .transition_work_package(
+                    "w_project",
+                    "s_pm",
+                    &id,
+                    WorkPackageStatus::Cancelled,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let run = &withdrawn.session_dcg_runs["s_pm"];
+            assert!(run.active_nodes.contains("implement"));
+            assert!(!run.active_node_instance("implement").unwrap().fanout_sealed);
+            assert!(!run.facts.contains("work.cancelled"));
+            assert_eq!(
+                run.team_slots[&format!("slot-{id}")].status,
+                TeamSlotStatus::Cancelled
+            );
+        }
+        let replacement = store
+            .put_work_package(
+                "w_project",
+                "s_pm",
+                new_package("gameplay", "Gameplay"),
+                "implement",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replacement.work_packages["gameplay"].agent_space,
+            "implementation"
+        );
+        store
+            .transition_work_package(
+                "w_project",
+                "s_pm",
+                "gameplay",
+                WorkPackageStatus::Ready,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         let implementation = store
             .authorize_work_session("w_project", "s_pm", "w_implementation", "gameplay")
@@ -4735,6 +4895,22 @@ edges: []
             )
             .await
             .unwrap();
+        assert!(
+            store
+                .transition_work_package(
+                    "w_project",
+                    "s_pm",
+                    "gameplay",
+                    WorkPackageStatus::Cancelled,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .is_err(),
+            "running work cannot use withdrawal to bypass failure evidence"
+        );
         let candidate_evidence = CandidateEvidence {
             repository: "game".into(),
             commit: "a".repeat(40),

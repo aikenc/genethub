@@ -24,6 +24,8 @@ export interface HumanDecisionRequest {
   schema: "genehub.test-human-decision-request.v1";
   requestId: string;
   createdAt: string;
+  responseDeadlineAt?: string;
+  runDeadlineAt?: string;
   caseId: string;
   projectWorkspaceId: string;
   sessionId: string;
@@ -104,6 +106,51 @@ function validateRequest(request: HumanDecisionRequest): void {
   if (ids.size !== request.edges.length) {
     throw new Error("human decision request edge ids must be unique");
   }
+  const responseDeadline = request.responseDeadlineAt
+    ? Date.parse(request.responseDeadlineAt)
+    : undefined;
+  const runDeadline = request.runDeadlineAt ? Date.parse(request.runDeadlineAt) : undefined;
+  if (responseDeadline !== undefined && !Number.isFinite(responseDeadline)) {
+    throw new Error("human decision response deadline must be RFC3339");
+  }
+  if (runDeadline !== undefined && !Number.isFinite(runDeadline)) {
+    throw new Error("human decision Run deadline must be RFC3339");
+  }
+  if (
+    responseDeadline !== undefined &&
+    runDeadline !== undefined &&
+    responseDeadline > runDeadline
+  ) {
+    throw new Error("human decision response deadline cannot exceed its Run deadline");
+  }
+}
+
+/**
+ * Carves a bounded operator response window out of an existing hard Run
+ * deadline. It never extends that deadline and returns undefined when there is
+ * not enough time left for both a response and post-decision execution.
+ */
+export function humanDecisionResponseDeadline(input: {
+  nowMs: number;
+  runDeadlineMs: number;
+  responseBudgetMs: number;
+  postDecisionReserveMs: number;
+}): number | undefined {
+  if (
+    !Number.isFinite(input.nowMs) ||
+    !Number.isFinite(input.runDeadlineMs) ||
+    !Number.isFinite(input.responseBudgetMs) ||
+    !Number.isFinite(input.postDecisionReserveMs) ||
+    input.responseBudgetMs <= 0 ||
+    input.postDecisionReserveMs < 0
+  ) {
+    throw new Error("human decision budgets must be finite and non-negative");
+  }
+  const deadline = Math.min(
+    input.nowMs + input.responseBudgetMs,
+    input.runDeadlineMs - input.postDecisionReserveMs,
+  );
+  return deadline > input.nowMs ? deadline : undefined;
 }
 
 function validateResponse(response: HumanDecisionResponse, requestId: string): void {
@@ -162,7 +209,9 @@ export async function awaitHumanDecision(
     }
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
-  throw new Error(`human decision ${request.requestId} was not answered before the journey deadline`);
+  throw new Error(
+    `human decision ${request.requestId} was not answered before its operator response deadline`,
+  );
 }
 
 export function listHumanDecisions(runDir: string): HumanDecisionRecord[] {

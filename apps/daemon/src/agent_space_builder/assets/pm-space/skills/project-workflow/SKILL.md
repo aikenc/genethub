@@ -39,8 +39,12 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
 
 带 `fanout.source` 的节点由 PM 在节点仍为 Planned 时一次性创建本次遍历的全部结果型 WorkPackage；该字段
 只记录工作流来源，不执行任意表达式。任一工作包开始后 Coordinator 会封闭该节点实例的集合，后续不得悄悄
-补包。`maxItems` 是硬上限。所有兄弟包结算后，Coordinator 才从持久状态推导 candidate/blocked/cancelled
+补包。`maxItems` 是硬上限。所有兄弟包结算后，Coordinator 才从持久状态推导 candidate/blocked
 事实；PM 不能用 `--fact` 自述这些事实。返工保留旧包及评审证据，在新节点实例中使用新 WorkPackage id。
+
+`Cancelled` 只表示 PM 在派发前撤回误建的 Planned 或尚未持租约的 Ready 包。Coordinator 保留原包和
+Team Slot 历史、释放其 fanout 名额，并在同一活动节点允许用新 id 补位；一旦本包或任一兄弟包取得租约、
+开始 WorkSession、形成候选或节点已经前进，就不得用取消规避证据，必须记录为 `Blocked` 并走恢复路径。
 
 工作包按可观察结果划分，并由一个 WorkSession 自主推进到干净候选。WorkAgent 内部 checkpoint 不形成新的
 DCG 节点，也不触发 PM 逐提交复核。Supervisor 会在短窗口内合并多个 WorkSession 状态变化；每次唤醒只读

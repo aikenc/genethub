@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  humanDecisionResponseDeadline,
   listHumanDecisions,
   publishHumanDecisionRequest,
   readHumanDecisionResponse,
@@ -21,6 +22,8 @@ test("human decision requests expose only offered edges and persist one operator
       schema: "genehub.test-human-decision-request.v1",
       requestId: "run-1-revision-7",
       createdAt: "2026-08-30T00:00:00.000Z",
+      responseDeadlineAt: "2026-08-30T00:01:00.000Z",
+      runDeadlineAt: "2026-08-30T00:03:00.000Z",
       caseId: "journey.pm-agent-mvp.test",
       projectWorkspaceId: "w_project",
       sessionId: "s_pm",
@@ -76,4 +79,25 @@ test("human decision requests expose only offered edges and persist one operator
     else process.env.TESTCTL_INTERACTION_DIR = previous;
     rmSync(runDir, { recursive: true, force: true });
   }
+});
+
+test("human response budget is carved from rather than added to the Run deadline", () => {
+  assert.equal(
+    humanDecisionResponseDeadline({
+      nowMs: 1_000,
+      runDeadlineMs: 10_000,
+      responseBudgetMs: 2_000,
+      postDecisionReserveMs: 3_000,
+    }),
+    3_000,
+  );
+  assert.equal(
+    humanDecisionResponseDeadline({
+      nowMs: 8_000,
+      runDeadlineMs: 10_000,
+      responseBudgetMs: 2_000,
+      postDecisionReserveMs: 3_000,
+    }),
+    undefined,
+  );
 });

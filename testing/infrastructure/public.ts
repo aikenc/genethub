@@ -15,6 +15,7 @@ export { allocatePort } from "./environment/ports.ts";
 export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
 export {
   awaitHumanDecision,
+  humanDecisionResponseDeadline,
   type HumanDecisionRequest,
   type HumanDecisionResponse,
 } from "./interaction/human-decision.ts";

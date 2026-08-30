@@ -7,6 +7,7 @@ import type { PmProjectStatus, SessionSummary } from "@genehub/proto";
 import {
   awaitHumanDecision,
   BlockedError,
+  humanDecisionResponseDeadline,
   type CaseContext,
   type HumanDecisionRequest,
 } from "../../framework/public.ts";
@@ -14,6 +15,8 @@ import {
 export const PM_MODEL = "ali/qwen3.8-flash";
 export const WORK_AGENT = "opencode";
 export const SEQUENCE_ID = "pm-agent-starport-defender";
+const HUMAN_DECISION_RESPONSE_MS = 60_000;
+const POST_DECISION_RUN_RESERVE_MS = 2 * 60_000;
 export const AUTONOMOUS_CANDIDATE_POLICY = `
 执行效率与稳定性约束：
 - 每个实现 WorkPackage 必须是结果型合同：一个 WorkSession 自主完成其全部 owned paths、检查和干净 candidate；不要把文件、单条测试或 checkpoint 拆成新的 PM 管理回合。
@@ -122,11 +125,24 @@ export async function runRealPmDelivery(
             (edge) => edge.chooseBy === "user" && edge.satisfied,
           ) ?? [];
         if (workflowRun && humanEdges.length > 0) {
+          const responseDeadline = humanDecisionResponseDeadline({
+            nowMs: Date.now(),
+            runDeadlineMs: deadline,
+            responseBudgetMs: HUMAN_DECISION_RESPONSE_MS,
+            postDecisionReserveMs: POST_DECISION_RUN_RESERVE_MS,
+          });
+          if (responseDeadline === undefined) {
+            throw new BlockedError(
+              "the Workflow reached a human decision too late to preserve both the operator response window and post-decision execution inside its existing deadline",
+            );
+          }
           const requestId = `${pm.id}-${workflowRun.id}-${workflowRun.revision}`;
           const request: HumanDecisionRequest = {
             schema: "genehub.test-human-decision-request.v1",
             requestId,
             createdAt: new Date().toISOString(),
+            responseDeadlineAt: new Date(responseDeadline).toISOString(),
+            runDeadlineAt: new Date(deadline).toISOString(),
             caseId: process.env.TESTCTL_CASE_ID ?? "unknown",
             projectWorkspaceId: opened.workspaceId,
             sessionId: pm.id,
@@ -166,7 +182,7 @@ export async function runRealPmDelivery(
                 })),
             },
           };
-          const decision = await awaitHumanDecision(request, deadline);
+          const decision = await awaitHumanDecision(request, responseDeadline);
           const current = await projectStatus(opened.client, opened.workspaceId);
           const currentRun = current?.workflowRuns.find(
             (item) => item.controllerSessionId === pm.id,

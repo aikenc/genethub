@@ -13,6 +13,7 @@ import {
   awaitHumanDecision,
   BlockedError,
   defineJourney,
+  humanDecisionResponseDeadline,
   type CaseContext,
   type HumanDecisionRequest,
 } from "../../framework/public.ts";
@@ -21,6 +22,8 @@ import { PM_MODEL, WORK_AGENT } from "./support.ts";
 
 const RUN_BUDGET_MS = 10 * 60_000;
 const SETUP_BUDGET_MS = 8 * 60_000;
+const HUMAN_DECISION_RESPONSE_MS = 60_000;
+const POST_DECISION_RUN_RESERVE_MS = 2 * 60_000;
 
 interface ConcurrentRequirement {
   id: "daily" | "save" | "cocos";
@@ -168,6 +171,17 @@ defineJourney(
             (edge) => edge.chooseBy === "user" && edge.satisfied,
           );
           if (humanEdges.length > 0) {
+            const responseDeadline = humanDecisionResponseDeadline({
+              nowMs: Date.now(),
+              runDeadlineMs: deadline,
+              responseBudgetMs: HUMAN_DECISION_RESPONSE_MS,
+              postDecisionReserveMs: POST_DECISION_RUN_RESERVE_MS,
+            });
+            if (responseDeadline === undefined) {
+              throw new BlockedError(
+                `${requirement.id} reached a human decision too late to preserve both the operator response window and two minutes of post-decision execution inside its ten-minute Run budget`,
+              );
+            }
             const decision = await awaitHumanDecision(
               humanDecisionRequest(
                 latest,
@@ -176,8 +190,10 @@ defineJourney(
                 requirement.id,
                 run,
                 humanEdges,
+                responseDeadline,
+                deadline,
               ),
-              deadline,
+              responseDeadline,
             );
             const current = await requireProjectStatus(opened.client, opened.workspaceId);
             const currentRun = current.workflowRuns.find(
@@ -388,7 +404,7 @@ async function createPmSession(
 }
 
 function concurrentRequirements(): ConcurrentRequirement[] {
-  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 让 Coordinator 从 pm project show 中的既有 Space 池分配；只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
+  const common = `这是同一项目内三个并行需求之一。项目初始化和共享拓扑已完成且 phase=active；不要再次执行 pm project init/advance/lifecycle，不要重新 workspace register-agent-space、重建或 space record 现有 Space。只管理当前 PM Session 的 Intent、Run 和 WorkPackage；不得读取、推进、取消或复用其他 PM Session 的包。立即选择指定 Workflow，10 分钟预算不可延长。每个活动 WorkAgent 节点只创建一个结果型包，使用指定 capability tag 让 Coordinator 从 pm project show 中的既有 Space 池分配；只用 OpenCode + bailian-token-plan-personal/qwen3.8-flash，PM 保持 ali/qwen3.8-flash medium。每个候选必须绑定精确 commit/tree，经独立 review Space 复验后 Accepted；最终通过受控 PM CLI 合入 repositories/game/main 并保持仓库干净，PM 自己不得 cd 或用 bash 进入业务仓库/worktree。误建且尚未派发的 Planned/Ready 包可用 cancelled 撤回并立即以新 id 补位；WorkSession 已开始、形成候选或真实执行失败时必须记录 blocked，禁止用 cancelled 绕过恢复和评审。不要轮询 WorkSession；--no-wait 派发后结束回合，等待 Supervisor 唤醒。`;
   return [
     {
       id: "daily",
@@ -424,11 +440,15 @@ function humanDecisionRequest(
   requirementId: string,
   run: PmProjectStatus["workflowRuns"][number],
   edges: PmProjectStatus["workflowRuns"][number]["availableEdges"],
+  responseDeadline: number,
+  runDeadline: number,
 ): HumanDecisionRequest {
   return {
     schema: "genehub.test-human-decision-request.v1",
     requestId: `${requirementId}-${sessionId}-${run.id}-${run.revision}`,
     createdAt: new Date().toISOString(),
+    responseDeadlineAt: new Date(responseDeadline).toISOString(),
+    runDeadlineAt: new Date(runDeadline).toISOString(),
     caseId: process.env.TESTCTL_CASE_ID ?? "unknown",
     projectWorkspaceId,
     sessionId,
