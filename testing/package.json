@@ -11,7 +11,7 @@
   "scripts": {
     "testctl": "tsx bin/testctl.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "unit": "node --import tsx --test infrastructure/interaction/human-decision.test.ts"
+    "unit": "node --import tsx --test infrastructure/engine/*.test.ts infrastructure/evidence/*.test.ts infrastructure/interaction/*.test.ts infrastructure/process/*.test.ts"
   },
   "dependencies": {
     "@genehub/proto": "file:../packages/proto",

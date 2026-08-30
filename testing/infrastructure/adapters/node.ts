@@ -20,8 +20,9 @@ import type { UnitResult, WorkUnit } from "../types.ts";
 import { createLease, releaseLease, type EnvironmentLease } from "../environment/lease.ts";
 import { killProcessGroup } from "../environment/cleanup.ts";
 import { spawnGroup } from "../process/group.ts";
-import { waitForExit } from "../process/wait.ts";
+import { collectOutput, waitForExit } from "../process/wait.ts";
 import { collectFailureDiagnostic } from "../evidence/failure-diagnostic.ts";
+import { collectFailureArtifacts } from "../evidence/failure-artifacts.ts";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.resolve(HERE, "../../framework/worker.ts");
@@ -176,18 +177,47 @@ async function runNodeUnitInLease(
       TESTCTL_LEASE_ROOT: lease.root,
     },
   });
+  // Always drain both pipes. Besides preserving runner diagnostics on failure,
+  // this prevents a verbose case from blocking on a full OS pipe.
+  const runnerOutput = collectOutput(child);
+  const effectiveEnv = {
+    ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+    ...lease.env,
+    ...extraEnv,
+    TESTCTL_UNIT_ID: unit.id,
+    TESTCTL_CASE_ID: unit.caseId,
+    TESTCTL_VARIANT: unit.variant,
+  };
+  const attachFailureEvidence = (result: UnitResult): UnitResult => {
+    result.diagnostic = collectFailureDiagnostic(lease);
+    const stagingRoot = extraEnv.TESTCTL_FAILURE_STAGING_DIR;
+    if (stagingRoot) {
+      try {
+        result.failureArtifacts = collectFailureArtifacts({
+          lease,
+          unit,
+          stagingRoot,
+          effectiveEnv,
+          runnerOutput,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        result.diagnostic = `${result.diagnostic ?? ""}\n\n## artifact collection\n\nUnable to collect the structured failure bundle: ${message}\n`;
+      }
+    }
+    return result;
+  };
   try {
     await waitForExit(child, unit.meta.timeoutMs);
     const raw = readFileSync(resultPath, "utf8");
     const result = JSON.parse(raw) as UnitResult;
     if (result.status !== "passed" && result.status !== "not-applicable") {
-      result.diagnostic = collectFailureDiagnostic(lease);
+      attachFailureEvidence(result);
     }
     return result;
   } catch (error) {
-    if (child.pid) killProcessGroup(child.pid);
     const message = error instanceof Error ? error.message : String(error);
-    return {
+    return attachFailureEvidence({
       id: unit.id,
       caseId: unit.caseId,
       variant: unit.variant,
@@ -196,8 +226,7 @@ async function runNodeUnitInLease(
       endedAt: new Date().toISOString(),
       durationMs: 0,
       message,
-      diagnostic: collectFailureDiagnostic(lease),
-    };
+    });
   } finally {
     if (child.pid) killProcessGroup(child.pid);
     rmSync(resultDir, { recursive: true, force: true });

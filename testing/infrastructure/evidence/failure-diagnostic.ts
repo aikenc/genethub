@@ -7,9 +7,13 @@ export const FAILURE_DIAGNOSTIC_LIMIT = 32 * 1024;
 
 /** Captures only the bounded tail; the run store owns mandatory redaction before persistence. */
 export function collectFailureDiagnostic(lease: EnvironmentLease): string | undefined {
-  const logs = ["daemon.log", "cli-start.log"]
-    .map((name) => ({ name, file: path.join(lease.data, "logs", name) }))
-    .filter(({ file }) => existsSync(file));
+  const logs = [
+    { name: "lease/daemon.log", file: path.join(lease.logs, "daemon.log") },
+    { name: "product/daemon.log", file: path.join(lease.data, "logs", "daemon.log") },
+    { name: "product/cli-start.log", file: path.join(lease.data, "logs", "cli-start.log") },
+  ].filter(({ file }, index, values) =>
+    existsSync(file) && values.findIndex((candidate) => path.resolve(candidate.file) === path.resolve(file)) === index
+  );
   if (logs.length === 0) {
     return `## daemon logs\n\nNo daemon or launcher log was created at the product log path.\n`;
   }

@@ -96,6 +96,8 @@ export interface UnitResult {
   blockedReason?: string;
   /** Bounded failure-only evidence. Kept out of results.ndjson and redacted by the run store. */
   diagnostic?: string;
+  /** Sanitized staging bundle captured before the isolated lease is destroyed. */
+  failureArtifacts?: string;
 }
 
 export interface RepoIdentity {

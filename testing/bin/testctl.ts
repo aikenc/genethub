@@ -69,7 +69,7 @@ function usage(): string {
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>]
   run --space <abs> --gate <gate> --topic <slug> [--tags <tag>] [--environments <n>] [--summary-language <en|zh-CN>] [--open <path>] [--cloud <path>] [--max-run-ms <ms>]
-  inspect --run <abs> [--failed|--case <id>]
+  inspect --run <abs> [--failed|--case <id>] [--artifacts]
   interactions --run <abs>
   decide --run <abs> --request <id> --edge <id>
   compare --base <run> --candidate <run>
@@ -212,6 +212,7 @@ async function main(): Promise<number> {
       TESTCTL_CLOUD_ROOT: cloudRoot ?? "",
       GENEHUB_TEST_COMPONENT_CACHE_DIR: componentCache,
       TESTCTL_INTERACTION_DIR: path.join(store.dir, "interactions"),
+      TESTCTL_FAILURE_STAGING_DIR: path.join(store.dir, ".internal", "failure-evidence"),
     };
     const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
     const inflight = new Set<Promise<void>>();
@@ -222,7 +223,7 @@ async function main(): Promise<number> {
       if (result.status === "passed" && browserArtifacts) {
         rmSync(browserArtifacts, { recursive: true, force: true });
       }
-      if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
+      if (result.status !== "passed" && result.status !== "not-applicable") {
         store.writeFailure(
           result,
           [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
@@ -406,10 +407,62 @@ async function main(): Promise<number> {
           return [item.caseId, existsSync(file) ? readFileSync(file, "utf8") : null];
         }),
     );
+    const artifacts = Object.fromEntries(
+      filtered
+        .filter((item) => item.status !== "passed" && item.status !== "not-applicable")
+        .map((item) => {
+          const evidence = path.join(
+            runDir,
+            "failures",
+            item.caseId.replace(/[^\w.-]+/g, "_"),
+            "evidence",
+          );
+          if (!existsSync(evidence)) return [item.caseId, []];
+          const indexes: unknown[] = [];
+          for (const unit of readdirSync(evidence, { withFileTypes: true })) {
+            if (!unit.isDirectory()) continue;
+            const index = path.join(evidence, unit.name, "artifact-index.json");
+            if (!existsSync(index)) continue;
+            const parsed = JSON.parse(readFileSync(index, "utf8")) as {
+              storageMap?: unknown;
+              sessions?: unknown[];
+              files?: Array<{ kind?: string; truncated?: boolean; omittedReason?: string }>;
+              diagnostics?: unknown[];
+              [key: string]: unknown;
+            };
+            const root = path.relative(runDir, path.dirname(index)).split(path.sep).join("/");
+            if (has(args, "--artifacts")) {
+              indexes.push({ root, index: parsed });
+              continue;
+            }
+            const kinds: Record<string, number> = {};
+            for (const file of parsed.files ?? []) {
+              const kind = file.kind ?? "unknown";
+              kinds[kind] = (kinds[kind] ?? 0) + 1;
+            }
+            indexes.push({
+              root,
+              indexPath: `${root}/artifact-index.json`,
+              storageMap: parsed.storageMap,
+              sessions: parsed.sessions ?? [],
+              fileCount: parsed.files?.length ?? 0,
+              filesByKind: kinds,
+              truncatedFiles: parsed.files?.filter((file) => file.truncated).length ?? 0,
+              omittedFiles: parsed.files?.filter((file) => file.omittedReason).length ?? 0,
+              diagnostics: parsed.diagnostics ?? [],
+            });
+          }
+          return [item.caseId, indexes];
+        }),
+    );
+    const selectedCases = new Set(filtered.map((item) => item.caseId));
+    const interactions = listHumanDecisions(runDir).filter((record) =>
+      selectedCases.has(record.request.caseId)
+    );
     // Keep the requested evidence first. Large catalogs can make
     // manifest.notExecuted exceed bounded terminal capture; putting results
     // after it made `inspect --case/--failed` hide the very failure requested.
-    process.stdout.write(`${JSON.stringify({ results: filtered, diagnostics, manifest }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ results: filtered, diagnostics, artifacts, interactions, manifest }, null, 2)}\n`);
     return 0;
   }
 
