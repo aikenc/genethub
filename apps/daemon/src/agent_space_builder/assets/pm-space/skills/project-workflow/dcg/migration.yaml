@@ -3,6 +3,7 @@ id: migration
 kind: sessionWorkflow
 version: 2
 entry: investigate
+executionBudget: { wallClockMs: 600000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4 }
 nodes:
   - id: investigate
     kind: activity

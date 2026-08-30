@@ -11,7 +11,7 @@ pub mod supervisor;
 pub mod task_graph;
 pub mod topology;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -22,8 +22,9 @@ use dcg::{
 use genehub_proto::{
     PmAgentSpaceStatus, PmImprovementCandidateStatus, PmIntentStatus, PmProjectStatus,
     PmSupervisorStatus, PmTeamSlotStatus, PmWorkPackageStatus, PmWorkflowAvailableEdgeStatus,
-    PmWorkflowCatalogStatus, PmWorkflowDefinitionStatus, PmWorkflowEdgeStatus,
-    PmWorkflowNodeInstanceStatus, PmWorkflowNodeStatus, PmWorkflowRunStatus,
+    PmWorkflowBudgetPolicyStatus, PmWorkflowCatalogStatus, PmWorkflowDefinitionStatus,
+    PmWorkflowEdgeStatus, PmWorkflowNodeCapacityStatus, PmWorkflowNodeInstanceStatus,
+    PmWorkflowNodeStatus, PmWorkflowRunBudgetStatus, PmWorkflowRunStatus,
 };
 use project::{
     ImprovementCandidate, ImprovementCandidateStatus, IntentRevision, ProjectLifecycle,
@@ -156,6 +157,7 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
+        ensure_run_budget_open(&state, controller_session_id, now_ms())?;
         let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
             anyhow::anyhow!("this PM project has no verified project-workflow catalog")
         })?;
@@ -164,7 +166,7 @@ impl ProjectStore {
             .session_dcg_runs
             .get_mut(controller_session_id)
             .ok_or_else(|| anyhow::anyhow!("this PM Session has no DCG Run"))?;
-        run.select_before_start(definition)?;
+        run.select_before_start_at(definition, now_ms())?;
         state.touch(now_ms());
         self.save(&state)?;
         Ok(state)
@@ -181,6 +183,7 @@ impl ProjectStore {
         let _guard = self.mutation.lock().await;
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
+        ensure_run_budget_open(&state, controller_session_id, now_ms())?;
         let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
             anyhow::anyhow!("this PM project has no verified project-workflow catalog")
         })?;
@@ -510,6 +513,7 @@ impl ProjectStore {
         if state.lifecycle != ProjectLifecycle::Active || state.phase != ProjectPhase::Active {
             anyhow::bail!("the PM project is not active for WorkAgent dispatch");
         }
+        ensure_run_dispatch_budget(&state, controller_session_id, now_ms())?;
         let package = state
             .work_packages
             .get(work_package_id)
@@ -605,6 +609,12 @@ impl ProjectStore {
                 work_package_id.to_string(),
                 now_ms(),
             )?;
+        let observed_work_sessions = observed_work_session_count(&state, controller_session_id);
+        state
+            .session_dcg_runs
+            .get_mut(controller_session_id)
+            .expect("authorized Workflow Run exists")
+            .consume_work_session_dispatch(now_ms(), observed_work_sessions)?;
         update_team_slot(
             &mut state,
             work_package_id,
@@ -820,6 +830,7 @@ impl ProjectStore {
         let mut state = self.load(project_workspace_id)?;
         state.ensure_controller(controller_session_id)?;
         state.ensure_mutable()?;
+        ensure_run_budget_open(&state, controller_session_id, now_ms())?;
         let catalog = load_dcg_catalog(&state.root)?.ok_or_else(|| {
             anyhow::anyhow!("this PM project has no verified project-workflow catalog")
         })?;
@@ -948,6 +959,7 @@ impl ProjectStore {
         state.ensure_controller(controller_session_id)?;
         state.ensure_mutable()?;
         state.ensure_package_owner(controller_session_id, id)?;
+        ensure_run_budget_open(&state, controller_session_id, now_ms())?;
         if matches!(
             status,
             WorkPackageStatus::Candidate | WorkPackageStatus::Review | WorkPackageStatus::Accepted
@@ -1301,7 +1313,9 @@ impl ProjectStore {
                     session_id != controller_session_id
                         && matches!(
                             run.status,
-                            dcg::DcgRunStatus::Discussion | dcg::DcgRunStatus::Active
+                            dcg::DcgRunStatus::Discussion
+                                | dcg::DcgRunStatus::Active
+                                | dcg::DcgRunStatus::BudgetExhausting
                         )
                 }) {
                     next_lifecycle = ProjectLifecycle::Active;
@@ -1421,6 +1435,126 @@ impl ProjectStore {
             }
         }
         Ok(projects)
+    }
+
+    /// Move one Run through the budget-exhaustion barrier. The supervisor
+    /// interrupts exact owned WorkSessions first and reports whether every
+    /// turn has settled. Resources are returned only after that point; dirty
+    /// worktrees fail closed into quarantine.
+    pub async fn reconcile_run_budget(
+        &self,
+        project_workspace_id: &str,
+        controller_session_id: &str,
+        all_work_sessions_settled: bool,
+        now_ms: i64,
+    ) -> Result<ProjectState> {
+        let _guard = self.mutation.lock().await;
+        let mut state = self.load(project_workspace_id)?;
+        state.ensure_controller(controller_session_id)?;
+        let Some(run) = state.session_dcg_runs.get(controller_session_id) else {
+            return Ok(state);
+        };
+        let should_begin = run.budget_expired(now_ms);
+        let exhausting = run.status == dcg::DcgRunStatus::BudgetExhausting;
+        if !should_begin && !exhausting {
+            return Ok(state);
+        }
+        if should_begin {
+            state
+                .session_dcg_runs
+                .get_mut(controller_session_id)
+                .expect("budgeted Run exists")
+                .begin_budget_exhaustion(now_ms);
+        }
+        if !all_work_sessions_settled {
+            state.touch(now_ms);
+            self.save(&state)?;
+            return Ok(state);
+        }
+
+        let owned_ids = state
+            .work_packages
+            .values()
+            .filter(|package| package.controller_session_id == controller_session_id)
+            .map(|package| package.id.clone())
+            .collect::<Vec<_>>();
+        for id in &owned_ids {
+            let status = state
+                .work_packages
+                .get(id)
+                .expect("owned package exists")
+                .status;
+            if matches!(
+                status,
+                WorkPackageStatus::Accepted | WorkPackageStatus::Cancelled
+            ) {
+                continue;
+            }
+            if status != WorkPackageStatus::Blocked {
+                task_graph::transition(
+                    &mut state.work_packages,
+                    id,
+                    WorkPackageStatus::Blocked,
+                    None,
+                    None,
+                    None,
+                    Some("Workflow Run wall-clock budget exhausted".into()),
+                    now_ms,
+                )?;
+            }
+            update_team_slot(&mut state, id, TeamSlotStatus::Blocked, None, None)?;
+        }
+
+        let leased_spaces = state
+            .agent_spaces
+            .values()
+            .filter(|space| {
+                space
+                    .lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.controller_session_id == controller_session_id)
+            })
+            .map(|space| space.name.clone())
+            .collect::<Vec<_>>();
+        for name in leased_spaces {
+            let worktree = state
+                .agent_spaces
+                .get(&name)
+                .and_then(|space| space.lease.as_ref())
+                .and_then(|lease| state.work_packages.get(&lease.work_package_id))
+                .map(|package| package.worktree.clone());
+            let clean = match worktree {
+                Some(worktree) => crate::git::status(&worktree)
+                    .await
+                    .is_ok_and(|status| status.clean),
+                None => false,
+            };
+            state
+                .agent_spaces
+                .get_mut(&name)
+                .expect("leased Agent Space exists")
+                .return_after_check(clean, now_ms)?;
+        }
+        state
+            .session_dcg_runs
+            .get_mut(controller_session_id)
+            .expect("budgeted Run exists")
+            .finish_budget_exhaustion(now_ms);
+        state
+            .session_supervisors
+            .entry(controller_session_id.to_string())
+            .or_insert_with(supervisor::SupervisorState::idle)
+            .observe(
+                format!("workflow:budget-exhausted:{controller_session_id}:{now_ms}"),
+                false,
+                false,
+                true,
+                now_ms,
+            );
+        sync_primary_supervisor(&mut state);
+        state.touch(now_ms);
+        self.save(&state)?;
+        Ok(state)
     }
 
     /// Record a cheap daemon observation. The first observation is normally a
@@ -1747,6 +1881,22 @@ fn upgrade_project_state(mut state: ProjectState) -> ProjectState {
                 .unwrap_or_default();
         }
     }
+    let observed_work_sessions = state
+        .session_dcg_runs
+        .keys()
+        .map(|controller| {
+            (
+                controller.clone(),
+                observed_work_session_count(&state, controller),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (controller, run) in &mut state.session_dcg_runs {
+        run.backfill_execution_budget(
+            state.updated_at_ms,
+            observed_work_sessions.get(controller).copied().unwrap_or(0),
+        );
+    }
     for space in state.agent_spaces.values_mut() {
         // V3 mixed prose-derived tokens and explicit tags in one field, so it
         // cannot prove which capabilities were actually declared. Migrate it
@@ -1813,26 +1963,11 @@ fn select_agent_space(
         .agent_spaces
         .values()
         .filter(|space| {
-            space.active
-                && space.role == AgentSpaceRole::Implementation
-                && space.resource_state == AgentSpaceResourceState::Idle
-                && space.lease.is_none()
-                && selector
-                    .match_tags
-                    .iter()
-                    .all(|tag| space.tags.contains(tag))
+            implementation_space_matches(space, selector)
                 && required_space_tags
                     .iter()
                     .all(|tag| space.tags.contains(tag))
-                && !state.work_packages.values().any(|package| {
-                    package.agent_space == space.name
-                        && !matches!(
-                            package.status,
-                            WorkPackageStatus::Accepted
-                                | WorkPackageStatus::Cancelled
-                                | WorkPackageStatus::Blocked
-                        )
-                })
+                && implementation_space_is_available(state, &space.name)
         })
         .map(|space| space.name.clone())
         .collect::<Vec<_>>();
@@ -1848,6 +1983,186 @@ fn select_agent_space(
                 .join(", ")
         )
     })
+}
+
+fn implementation_space_matches(space: &AgentSpaceRecord, selector: &DcgSpaceSelector) -> bool {
+    space.active
+        && space.role == AgentSpaceRole::Implementation
+        && selector
+            .match_tags
+            .iter()
+            .all(|tag| space.tags.contains(tag))
+}
+
+fn implementation_space_is_available(state: &ProjectState, space_name: &str) -> bool {
+    let Some(space) = state.agent_spaces.get(space_name) else {
+        return false;
+    };
+    space.resource_state == AgentSpaceResourceState::Idle
+        && space.lease.is_none()
+        && !state.work_packages.values().any(|package| {
+            package.agent_space == space.name
+                && !matches!(
+                    package.status,
+                    WorkPackageStatus::Accepted
+                        | WorkPackageStatus::Cancelled
+                        | WorkPackageStatus::Blocked
+                )
+        })
+}
+
+fn workflow_resource_capacities(
+    state: &ProjectState,
+    run: &DcgRun,
+    definition: &DcgDefinition,
+) -> Vec<PmWorkflowNodeCapacityStatus> {
+    definition
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let executor = node.executor.as_ref()?;
+            if executor.actor != DcgActor::WorkAgent {
+                return None;
+            }
+            let selector = executor.space.as_ref()?;
+            let max_items = node.fanout.as_ref().map_or(1, |fanout| fanout.max_items);
+            let active_instance = run
+                .node_instances
+                .values()
+                .filter(|instance| {
+                    instance.node_id == node.id
+                        && instance.status == dcg::DcgNodeInstanceStatus::Active
+                })
+                .max_by_key(|instance| instance.iteration);
+            let allocated_items = active_instance.map_or(0, |instance| {
+                run.team_slots
+                    .values()
+                    .filter(|slot| slot.node_instance_id == instance.id)
+                    .count() as u32
+            });
+            let matching_spaces = state
+                .agent_spaces
+                .values()
+                .filter(|space| implementation_space_matches(space, selector))
+                .count() as u32;
+            let available_spaces = state
+                .agent_spaces
+                .values()
+                .filter(|space| {
+                    implementation_space_matches(space, selector)
+                        && implementation_space_is_available(state, &space.name)
+                })
+                .count() as u32;
+            let remaining_fanout = active_instance.map_or(max_items, |instance| {
+                if instance.fanout_sealed {
+                    0
+                } else {
+                    max_items.saturating_sub(allocated_items)
+                }
+            });
+            let available_slots = if run.status == dcg::DcgRunStatus::Active {
+                remaining_fanout.min(available_spaces)
+            } else {
+                0
+            };
+            Some(PmWorkflowNodeCapacityStatus {
+                node_id: node.id.clone(),
+                space_tags: selector.match_tags.clone(),
+                max_items,
+                allocated_items,
+                matching_spaces,
+                available_spaces,
+                available_slots,
+            })
+        })
+        .collect()
+}
+
+fn workflow_run_session_counts(state: &ProjectState, controller_session_id: &str) -> (u32, u32) {
+    let persisted = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .and_then(|run| run.budget.as_ref())
+        .map_or(0, |budget| budget.work_sessions_started);
+    let observed = observed_work_session_count(state, controller_session_id);
+    let active = state
+        .agent_spaces
+        .values()
+        .filter_map(|space| space.lease.as_ref())
+        .filter(|lease| lease.controller_session_id == controller_session_id)
+        .count() as u32;
+    (persisted.max(observed), active)
+}
+
+fn observed_work_session_count(state: &ProjectState, controller_session_id: &str) -> u32 {
+    let mut sessions = BTreeSet::new();
+    for package in state
+        .work_packages
+        .values()
+        .filter(|package| package.controller_session_id == controller_session_id)
+    {
+        if let Some(session_id) = package.work_session_id.as_ref() {
+            sessions.insert(session_id.clone());
+        }
+        if let Some(session_id) = package.review.as_ref().map(|review| &review.session_id) {
+            sessions.insert(session_id.clone());
+        }
+    }
+    sessions.len() as u32
+}
+
+fn ensure_run_dispatch_budget(
+    state: &ProjectState,
+    controller_session_id: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let run = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?;
+    if run.status != dcg::DcgRunStatus::Active {
+        anyhow::bail!("Workflow Run is not active for WorkSession dispatch");
+    }
+    let budget = run
+        .budget
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Workflow Run has no execution budget"))?;
+    if now_ms >= budget.deadline_at_ms {
+        anyhow::bail!("Workflow Run wall-clock budget is exhausted");
+    }
+    let (total, active) = workflow_run_session_counts(state, controller_session_id);
+    if total >= budget.max_work_sessions {
+        anyhow::bail!(
+            "Workflow Run reached its maxWorkSessions budget ({})",
+            budget.max_work_sessions
+        );
+    }
+    if active >= budget.max_concurrent_work_sessions {
+        anyhow::bail!(
+            "Workflow Run reached its maxConcurrentWorkSessions budget ({})",
+            budget.max_concurrent_work_sessions
+        );
+    }
+    Ok(())
+}
+
+fn ensure_run_budget_open(
+    state: &ProjectState,
+    controller_session_id: &str,
+    now_ms: i64,
+) -> Result<()> {
+    let run = state
+        .session_dcg_runs
+        .get(controller_session_id)
+        .ok_or_else(|| anyhow::anyhow!("this PM Session has no workflow Run"))?;
+    if matches!(
+        run.status,
+        dcg::DcgRunStatus::BudgetExhausting | dcg::DcgRunStatus::BudgetExhausted
+    ) || run.budget_expired(now_ms)
+    {
+        anyhow::bail!("Workflow Run wall-clock budget is exhausted");
+    }
+    Ok(())
 }
 
 fn select_review_space(state: &ProjectState, package: &WorkPackage) -> Result<String> {
@@ -2148,7 +2463,9 @@ fn reconcile_session_dcg(
             }
             let terminal_marker = matches!(
                 run.status,
-                dcg::DcgRunStatus::Completed | dcg::DcgRunStatus::Cancelled
+                dcg::DcgRunStatus::BudgetExhausted
+                    | dcg::DcgRunStatus::Completed
+                    | dcg::DcgRunStatus::Cancelled
             )
             .then(|| format!("workflow:terminal:{}:{}", run.id, run.revision));
             (selected, terminal_marker)
@@ -2524,6 +2841,7 @@ fn digest_bytes(bytes: &[u8]) -> String {
 }
 
 fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjectStatus> {
+    let projection_now_ms = now_ms();
     let work_packages = state
         .work_packages
         .values()
@@ -2591,6 +2909,7 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                     id: definition.id.clone(),
                     version: definition.version,
                     entry: definition.entry.clone(),
+                    execution_budget: workflow_budget_policy_status(definition.execution_budget),
                     nodes: definition
                         .nodes
                         .iter()
@@ -2672,6 +2991,11 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 })
                 .transpose()?
                 .unwrap_or_default();
+            let (work_sessions_started, active_work_sessions) = run
+                .controller_session_id
+                .as_deref()
+                .map(|session_id| workflow_run_session_counts(state, session_id))
+                .unwrap_or_default();
             Ok(PmWorkflowRunStatus {
                 id: run.id.clone(),
                 controller_session_id: run.controller_session_id.clone(),
@@ -2681,6 +3005,21 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                 status: enum_wire_name(run.status)?,
                 outcome: run.outcome.clone(),
                 interpreter_error: run.interpreter_error.clone(),
+                budget: run.budget.as_ref().map(|budget| PmWorkflowRunBudgetStatus {
+                    wall_clock_ms: budget.wall_clock_ms,
+                    max_work_sessions: budget.max_work_sessions,
+                    max_concurrent_work_sessions: budget.max_concurrent_work_sessions,
+                    started_at_ms: budget.started_at_ms,
+                    deadline_at_ms: budget.deadline_at_ms,
+                    remaining_ms: budget
+                        .deadline_at_ms
+                        .saturating_sub(projection_now_ms)
+                        .max(0),
+                    exhaustion_started_at_ms: budget.exhaustion_started_at_ms,
+                    exhausted_at_ms: budget.exhausted_at_ms,
+                    work_sessions_started: budget.work_sessions_started.max(work_sessions_started),
+                    active_work_sessions,
+                }),
                 active_nodes: run.active_nodes.iter().cloned().collect(),
                 facts: run.facts.iter().cloned().collect(),
                 node_instances: run
@@ -2698,6 +3037,9 @@ fn project_status(state: &ProjectState, catalog: &DcgCatalog) -> Result<PmProjec
                         })
                     })
                     .collect::<Result<Vec<_>>>()?,
+                resource_capacities: definition
+                    .map(|definition| workflow_resource_capacities(state, run, definition))
+                    .unwrap_or_default(),
                 team_slots: run
                     .team_slots
                     .values()
@@ -2769,6 +3111,7 @@ fn workflow_definition_status(
         id: definition.id.clone(),
         version: definition.version,
         entry: definition.entry.clone(),
+        execution_budget: workflow_budget_policy_status(definition.execution_budget),
         nodes: definition
             .nodes
             .iter()
@@ -2801,6 +3144,14 @@ fn workflow_definition_status(
             })
             .collect::<Result<Vec<_>>>()?,
     })
+}
+
+fn workflow_budget_policy_status(budget: dcg::DcgExecutionBudget) -> PmWorkflowBudgetPolicyStatus {
+    PmWorkflowBudgetPolicyStatus {
+        wall_clock_ms: budget.wall_clock_ms,
+        max_work_sessions: budget.max_work_sessions,
+        max_concurrent_work_sessions: budget.max_concurrent_work_sessions,
+    }
 }
 
 fn intent_status(intent: &IntentRevision) -> PmIntentStatus {
@@ -3131,6 +3482,192 @@ mod tests {
             .set_lifecycle("w_project", "s_two", ProjectLifecycle::Completed)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn one_run_budget_exhaustion_isolatedly_blocks_its_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "budget-project",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let store = ProjectStore::new(&temp.path().join("data"));
+        store
+            .initialize_bootstrapped("w_project", "w_pm", "s_expired", &root)
+            .await
+            .unwrap();
+        store
+            .initialize_bootstrapped("w_project", "w_pm", "s_live", &root)
+            .await
+            .unwrap();
+        store
+            .select_session_dcg("w_project", "s_expired", "feature")
+            .await
+            .unwrap();
+        let mut project = store
+            .select_session_dcg("w_project", "s_live", "bugfix")
+            .await
+            .unwrap();
+        project.phase = ProjectPhase::Active;
+        let catalog = load_dcg_catalog(&root).unwrap().unwrap();
+        let feature = catalog.session_workflow("feature").unwrap();
+        let (expired_run_id, node_instance_id) = {
+            let expired_run = project.session_dcg_runs.get_mut("s_expired").unwrap();
+            expired_run
+                .transition(
+                    feature,
+                    "aligned",
+                    &BTreeSet::from(["intent.persisted".into(), "intent.aligned".into()]),
+                    DcgActor::Pm,
+                )
+                .unwrap();
+            expired_run
+                .transition(
+                    feature,
+                    "planned",
+                    &BTreeSet::from(["plan.ready".into()]),
+                    DcgActor::Pm,
+                )
+                .unwrap();
+            let node_instance_id = expired_run
+                .active_node_instance("implement")
+                .unwrap()
+                .id
+                .clone();
+            expired_run.budget.as_mut().unwrap().deadline_at_ms = 10;
+            (expired_run.id.clone(), node_instance_id)
+        };
+        project
+            .session_dcg_runs
+            .get_mut("s_live")
+            .unwrap()
+            .budget
+            .as_mut()
+            .unwrap()
+            .deadline_at_ms = 10_000;
+        let mut package = WorkPackage::planned(
+            "expired-work".into(),
+            "Expired work".into(),
+            "Must stop at the Run budget".into(),
+            vec![],
+            "implementation".into(),
+            "work/expired".into(),
+            root.join("worktrees/implementation/repository"),
+            1,
+        )
+        .unwrap();
+        package
+            .bind_to_workflow("s_expired".into(), expired_run_id, node_instance_id.clone())
+            .unwrap();
+        package.status = WorkPackageStatus::Ready;
+        project
+            .session_dcg_runs
+            .get_mut("s_expired")
+            .unwrap()
+            .bind_team_slot(TeamSlot {
+                id: "slot-expired-work".into(),
+                node_instance_id,
+                work_package_id: package.id.clone(),
+                responsibility: package.outcome.clone(),
+                space_lease_id: None,
+                current_work_session_id: None,
+                status: TeamSlotStatus::Preparing,
+            })
+            .unwrap();
+        project.work_packages.insert(package.id.clone(), package);
+        store.save(&project).unwrap();
+
+        let exhausting = store
+            .reconcile_run_budget("w_project", "s_expired", false, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            exhausting.session_dcg_runs["s_expired"].status,
+            dcg::DcgRunStatus::BudgetExhausting
+        );
+        assert_eq!(
+            exhausting.work_packages["expired-work"].status,
+            WorkPackageStatus::Ready
+        );
+        assert!(ensure_run_dispatch_budget(&exhausting, "s_expired", 10).is_err());
+
+        let exhausted = store
+            .reconcile_run_budget("w_project", "s_expired", true, 11)
+            .await
+            .unwrap();
+        assert_eq!(
+            exhausted.session_dcg_runs["s_expired"].status,
+            dcg::DcgRunStatus::BudgetExhausted
+        );
+        assert_eq!(
+            exhausted.work_packages["expired-work"].status,
+            WorkPackageStatus::Blocked
+        );
+        assert_eq!(
+            exhausted.session_dcg_runs["s_live"].status,
+            dcg::DcgRunStatus::Active
+        );
+    }
+
+    #[test]
+    fn format_four_run_budget_migration_is_deterministic_and_non_refunding() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = project_root(&temp);
+        crate::agent_space_builder::render_pm_space(
+            &root,
+            &crate::agent_space_builder::PmSpaceTemplateValues::new(
+                "legacy-budget-project",
+                "zh-CN",
+                "feature",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let catalog = load_dcg_catalog(&root).unwrap().unwrap();
+        let mut run = DcgRun::new_discussion("run-s_pm".into(), "s_pm".into()).unwrap();
+        run.select_before_start_at(catalog.session_workflow("feature").unwrap(), 1)
+            .unwrap();
+        run.budget = None;
+
+        let mut state = ProjectState::new("w_project".into(), "s_pm".into(), root, 1_000);
+        state.format = 4;
+        state.session_dcg_runs.insert("s_pm".into(), run);
+        let mut package = WorkPackage::planned(
+            "legacy-work".into(),
+            "Legacy work".into(),
+            "Preserve observed budget use".into(),
+            vec![],
+            "implementation".into(),
+            "work/legacy".into(),
+            PathBuf::from("/project/worktrees/implementation/game"),
+            1,
+        )
+        .unwrap();
+        package.controller_session_id = "s_pm".into();
+        package.work_session_id = Some("s_legacy_work".into());
+        state.work_packages.insert(package.id.clone(), package);
+
+        let upgraded = upgrade_project_state(state);
+        assert_eq!(upgraded.format, PM_PROJECT_FORMAT);
+        let budget = upgraded.session_dcg_runs["s_pm"].budget.as_ref().unwrap();
+        assert_eq!(budget.started_at_ms, 1_000);
+        assert_eq!(budget.deadline_at_ms, 601_000);
+        assert_eq!(budget.work_sessions_started, 1);
+
+        let upgraded_again = upgrade_project_state(upgraded);
+        let stable = upgraded_again.session_dcg_runs["s_pm"]
+            .budget
+            .as_ref()
+            .unwrap();
+        assert_eq!(stable.started_at_ms, 1_000);
+        assert_eq!(stable.work_sessions_started, 1);
     }
 
     #[test]
@@ -3533,6 +4070,104 @@ mod tests {
             upgraded.agent_spaces["implementation-content"].tags,
             BTreeSet::from(["implementation".into()])
         );
+    }
+
+    #[test]
+    fn workflow_projection_reports_current_base_space_capacity() {
+        let definition: DcgDefinition = serde_yaml::from_str(
+            r#"
+schema: genehub-pm-dcg.v1
+id: capacity
+kind: sessionWorkflow
+version: 1
+entry: implement
+nodes:
+  - id: implement
+    kind: activity
+    executor:
+      actor: workAgent
+      space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
+    fanout: { source: plan.workstreams, maxItems: 4 }
+edges: []
+"#,
+        )
+        .unwrap();
+        let mut run = DcgRun::new_discussion("run-s_pm".into(), "s_pm".into()).unwrap();
+        run.select_before_start(&definition).unwrap();
+        let node_instance_id = run.active_node_instance("implement").unwrap().id.clone();
+        let mut state = ProjectState::new(
+            "w_project".into(),
+            "s_pm".into(),
+            PathBuf::from("/project"),
+            1,
+        );
+        for name in ["implementation-a", "implementation-b"] {
+            state.agent_spaces.insert(
+                name.into(),
+                AgentSpaceRecord {
+                    name: name.into(),
+                    purpose: "implementation".into(),
+                    source_path: PathBuf::from(format!("/project/spaces/{name}")),
+                    workspace_id: format!("w_{name}"),
+                    source_commit: "0".repeat(40),
+                    builder_lock_digest: format!("sha256:{name}"),
+                    role: AgentSpaceRole::Implementation,
+                    tags: BTreeSet::from(["implementation".into()]),
+                    declared_tags: BTreeSet::new(),
+                    active: true,
+                    resource_state: AgentSpaceResourceState::Idle,
+                    lease: None,
+                    resource_revision: 1,
+                    updated_at_ms: 1,
+                },
+            );
+        }
+
+        let initial = workflow_resource_capacities(&state, &run, &definition);
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].max_items, 4);
+        assert_eq!(initial[0].allocated_items, 0);
+        assert_eq!(initial[0].matching_spaces, 2);
+        assert_eq!(initial[0].available_spaces, 2);
+        assert_eq!(initial[0].available_slots, 2);
+
+        run.bind_team_slot(TeamSlot {
+            id: "slot-a".into(),
+            node_instance_id: node_instance_id.clone(),
+            work_package_id: "package-a".into(),
+            responsibility: "Implement A".into(),
+            space_lease_id: None,
+            current_work_session_id: None,
+            status: TeamSlotStatus::Planned,
+        })
+        .unwrap();
+        let mut package = WorkPackage::planned(
+            "package-a".into(),
+            "Package A".into(),
+            "Deliver A".into(),
+            vec![],
+            "implementation-a".into(),
+            "work/package-a".into(),
+            PathBuf::from("/project/worktrees/implementation-a/game"),
+            1,
+        )
+        .unwrap();
+        package
+            .bind_to_workflow("s_pm".into(), run.id.clone(), node_instance_id)
+            .unwrap();
+        state.work_packages.insert(package.id.clone(), package);
+
+        let allocated = workflow_resource_capacities(&state, &run, &definition);
+        assert_eq!(allocated[0].allocated_items, 1);
+        assert_eq!(allocated[0].matching_spaces, 2);
+        assert_eq!(allocated[0].available_spaces, 1);
+        assert_eq!(allocated[0].available_slots, 1);
+
+        let active_instance_id = run.active_node_instance("implement").unwrap().id.clone();
+        run.seal_fanout(&active_instance_id).unwrap();
+        let sealed = workflow_resource_capacities(&state, &run, &definition);
+        assert_eq!(sealed[0].available_spaces, 1);
+        assert_eq!(sealed[0].available_slots, 0);
     }
 
     #[tokio::test]
@@ -4027,6 +4662,15 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            store.load("w_project").unwrap().session_dcg_runs["s_pm"]
+                .budget
+                .as_ref()
+                .unwrap()
+                .work_sessions_started,
+            1,
+            "cancelled provider/session creation must not refund a dispatch slot"
+        );
         let manifest_path = root.join("spaces/implementation/pipespace.json");
         let manifest = std::fs::read(&manifest_path).unwrap();
         std::fs::write(&manifest_path, [manifest.as_slice(), b"\n"].concat()).unwrap();
@@ -4095,6 +4739,15 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            store.load("w_project").unwrap().session_dcg_runs["s_pm"]
+                .budget
+                .as_ref()
+                .unwrap()
+                .work_sessions_started,
+            2,
+            "implementation and review reservations consume distinct monotonic slots"
+        );
         let passing_review = ReviewEvidence {
             session_id: "s_review".into(),
             candidate_commit: candidate_evidence.commit.clone(),

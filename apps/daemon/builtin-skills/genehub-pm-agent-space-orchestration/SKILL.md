@@ -36,6 +36,24 @@ dispatch.
 
 Merge nodes that need the same context and writable branch. Split nodes when they can progress independently, need different Skills, or require an independent reviewer. Never pre-create Gameplay/UI/Test roles merely because the project is a game.
 
+Before fixing the number of parallel workstreams, read the selected Run's
+`resourceCapacities` from one `pm project show`. For each WorkAgent node,
+`availableSlots` is the number of base-capability packages that the Coordinator
+can allocate now after fanout and cross-Session exclusions; package-specific
+`--space-tag` requirements may reduce it further. If the desired fanout exceeds
+that value, either build and record the missing specialized Spaces first or
+reduce the current cohort. Never probe capacity by repeatedly issuing failing
+`package put` commands, and never treat `maxItems` as guaranteed capacity.
+
+Also read the Run's immutable execution budget before dispatch. The
+Coordinator enforces both total and concurrently active WorkSession counts.
+Each dispatch reservation consumes one total slot even if provider/session
+creation later fails; clearing a binding or retrying never refunds that slot.
+Prefer independent, result-sized packages that can finish inside the remaining
+wall-clock window; do not split a bounded task into checkpoint-sized sessions.
+When the Run enters budget exhaustion, stop planning and let the Coordinator
+interrupt exact owned sessions and settle their Space leases.
+
 ## Build and register a Space
 
 1. Run `"$GENEHUB_CLI" agent-space init <name>` to create or validate the two required PipeBuilder inputs. Then edit `spaces/<name>/pipespace.json`, `<name>.code-workspace`, optional role source, and Git-managed Provider Skills for the actual work package. Keep the Space root first in the workspace folder list.

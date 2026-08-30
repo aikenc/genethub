@@ -40,6 +40,20 @@ Every command derives project root and controller from this PM session. Treat a 
 
 - Translate the request into observable acceptance criteria, not implementation wishes.
 - Keep work packages outcome-sized: one owner, inputs, output, dependencies, writable branch/worktree, completion gate, and risk.
+- Treat the selected Workflow Run's `budget` as a hard execution envelope.
+  `remainingMs`, `maxWorkSessions`, and `maxConcurrentWorkSessions` are
+  Coordinator facts. Select the graph promptly, keep one bounded result per
+  WorkSession, and never attempt to extend the deadline or dispatch after
+  `budgetExhausting`/`budgetExhausted`. Budget exhaustion is a failed-closed
+  outcome, never delivery.
+  A WorkSession dispatch reservation consumes one total slot permanently;
+  provider/session creation failure, package rebinding, and retry do not refund
+  it. Use the persisted counter instead of estimating from visible sessions.
+- Before fixing a fanout cohort, read the selected Run's `resourceCapacities`.
+  `availableSlots` is current base-capability capacity after cross-Session
+  exclusions; it may be lower than `maxItems`, and package-specific tags may
+  reduce it further. Add verified Spaces first or reduce the cohort instead of
+  probing capacity with failed package writes.
 - Ask for semantic Space capabilities with repeatable `--space-tag`; never select
   a concrete Agent Space name. The Coordinator combines these tags with the
   active Workflow node selector and deterministically assigns a compatible

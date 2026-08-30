@@ -3,6 +3,7 @@ id: bugfix
 kind: sessionWorkflow
 version: 2
 entry: reproduce
+executionBudget: { wallClockMs: 600000, maxWorkSessions: 12, maxConcurrentWorkSessions: 3 }
 nodes:
   - id: reproduce
     kind: activity

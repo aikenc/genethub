@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 pub const DCG_SCHEMA: &str = "genehub-pm-dcg.v1";
 pub const DCG_CATALOG_SCHEMA: &str = "genehub-pm-dcg-catalog.v1";
+pub const DEFAULT_RUN_WALL_CLOCK_MS: u64 = 10 * 60 * 1_000;
+pub const DEFAULT_RUN_MAX_WORK_SESSIONS: u32 = 16;
+pub const DEFAULT_RUN_MAX_CONCURRENT_WORK_SESSIONS: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -89,8 +92,48 @@ pub struct DcgDefinition {
     pub kind: DcgKind,
     pub version: u32,
     pub entry: String,
+    /// Project-owned execution envelope. The kernel measures and enforces the
+    /// envelope; prompts cannot extend it and a selected Run pins this value
+    /// together with the rest of the Workflow definition.
+    #[serde(default)]
+    pub execution_budget: DcgExecutionBudget,
     pub nodes: Vec<DcgNode>,
     pub edges: Vec<DcgEdge>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DcgExecutionBudget {
+    pub wall_clock_ms: u64,
+    pub max_work_sessions: u32,
+    pub max_concurrent_work_sessions: u32,
+}
+
+impl Default for DcgExecutionBudget {
+    fn default() -> Self {
+        Self {
+            wall_clock_ms: DEFAULT_RUN_WALL_CLOCK_MS,
+            max_work_sessions: DEFAULT_RUN_MAX_WORK_SESSIONS,
+            max_concurrent_work_sessions: DEFAULT_RUN_MAX_CONCURRENT_WORK_SESSIONS,
+        }
+    }
+}
+
+impl DcgExecutionBudget {
+    fn validate(&self) -> Result<()> {
+        if !(60_000..=24 * 60 * 60 * 1_000).contains(&self.wall_clock_ms) {
+            anyhow::bail!("executionBudget.wallClockMs must be between 60000 and 86400000");
+        }
+        if !(1..=128).contains(&self.max_work_sessions) {
+            anyhow::bail!("executionBudget.maxWorkSessions must be 1-128");
+        }
+        if self.max_concurrent_work_sessions == 0
+            || self.max_concurrent_work_sessions > self.max_work_sessions
+        {
+            anyhow::bail!("executionBudget.maxConcurrentWorkSessions must be 1-maxWorkSessions");
+        }
+        Ok(())
+    }
 }
 
 impl DcgDefinition {
@@ -111,6 +154,7 @@ impl DcgDefinition {
         if self.version == 0 {
             anyhow::bail!("DCG version must be positive");
         }
+        self.execution_budget.validate()?;
         if self.nodes.is_empty() {
             anyhow::bail!("DCG must define at least one node");
         }
@@ -576,8 +620,53 @@ impl DcgCondition {
 pub enum DcgRunStatus {
     Discussion,
     Active,
+    /// The wall-clock deadline passed and the supervisor is interrupting the
+    /// exact WorkSessions owned by this Run before resources are settled.
+    BudgetExhausting,
+    /// All owned WorkSessions settled and the Coordinator closed the Run
+    /// without claiming delivery.
+    BudgetExhausted,
     Completed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DcgRunBudget {
+    pub wall_clock_ms: u64,
+    pub max_work_sessions: u32,
+    pub max_concurrent_work_sessions: u32,
+    pub started_at_ms: i64,
+    pub deadline_at_ms: i64,
+    /// Monotonic dispatch allowance consumption. A reservation consumes one
+    /// slot even when provider/session creation later fails, so clearing a
+    /// package binding or retrying cannot reset the Run's cost envelope.
+    #[serde(default)]
+    pub work_sessions_started: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhaustion_started_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhausted_at_ms: Option<i64>,
+}
+
+impl DcgRunBudget {
+    fn from_policy(policy: DcgExecutionBudget, now_ms: i64) -> Self {
+        // Validation caps this at 24 hours, so conversion is exact. Saturating
+        // addition also keeps a corrupt legacy timestamp from panicking while
+        // still failing closed at the platform clock boundary.
+        let wall_clock_ms = policy.wall_clock_ms as i64;
+        let deadline_at_ms = now_ms.saturating_add(wall_clock_ms);
+        Self {
+            wall_clock_ms: policy.wall_clock_ms,
+            max_work_sessions: policy.max_work_sessions,
+            max_concurrent_work_sessions: policy.max_concurrent_work_sessions,
+            started_at_ms: now_ms,
+            deadline_at_ms,
+            work_sessions_started: 0,
+            exhaustion_started_at_ms: None,
+            exhausted_at_ms: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,6 +683,9 @@ pub struct DcgRun {
     /// affect new Runs only and cannot rewrite an in-flight Session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_snapshot: Option<DcgDefinition>,
+    /// Immutable execution envelope copied from the selected Workflow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<DcgRunBudget>,
     pub status: DcgRunStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
@@ -631,6 +723,7 @@ impl DcgRun {
             graph_id: None,
             graph_version: None,
             definition_snapshot: None,
+            budget: None,
             status: DcgRunStatus::Discussion,
             outcome: None,
             active_nodes: BTreeSet::new(),
@@ -646,6 +739,14 @@ impl DcgRun {
     }
 
     pub fn select_before_start(&mut self, definition: &DcgDefinition) -> Result<()> {
+        self.select_before_start_at(definition, chrono::Utc::now().timestamp_millis())
+    }
+
+    pub fn select_before_start_at(
+        &mut self,
+        definition: &DcgDefinition,
+        now_ms: i64,
+    ) -> Result<()> {
         if self.status != DcgRunStatus::Discussion
             || !self.traversals.is_empty()
             || !self.facts.is_empty()
@@ -661,6 +762,10 @@ impl DcgRun {
         self.graph_id = Some(definition.id.clone());
         self.graph_version = Some(definition.version);
         self.definition_snapshot = Some(definition.clone());
+        self.budget = Some(DcgRunBudget::from_policy(
+            definition.execution_budget,
+            now_ms,
+        ));
         self.active_nodes = BTreeSet::from([definition.entry.clone()]);
         self.node_instances.clear();
         self.outcome = None;
@@ -678,12 +783,110 @@ impl DcgRun {
         Ok(())
     }
 
+    pub fn budget_expired(&self, now_ms: i64) -> bool {
+        self.status == DcgRunStatus::Active
+            && self
+                .budget
+                .as_ref()
+                .is_some_and(|budget| now_ms >= budget.deadline_at_ms)
+    }
+
+    pub fn backfill_execution_budget(
+        &mut self,
+        started_at_ms: i64,
+        observed_work_sessions: u32,
+    ) -> bool {
+        if self.graph_id.is_none() || self.status == DcgRunStatus::Discussion {
+            return false;
+        }
+        let mut changed = false;
+        if self.budget.is_none() {
+            let policy = self
+                .definition_snapshot
+                .as_ref()
+                .map(|definition| definition.execution_budget)
+                .unwrap_or_default();
+            self.budget = Some(DcgRunBudget::from_policy(policy, started_at_ms));
+            changed = true;
+        }
+        let budget = self.budget.as_mut().expect("selected Run has a budget");
+        if budget.work_sessions_started < observed_work_sessions {
+            budget.work_sessions_started = observed_work_sessions;
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn consume_work_session_dispatch(
+        &mut self,
+        now_ms: i64,
+        observed_work_sessions: u32,
+    ) -> Result<()> {
+        if self.status != DcgRunStatus::Active {
+            anyhow::bail!("Workflow Run is not active for WorkSession dispatch");
+        }
+        let budget = self
+            .budget
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Workflow Run has no execution budget"))?;
+        if now_ms >= budget.deadline_at_ms {
+            anyhow::bail!("Workflow Run wall-clock budget is exhausted");
+        }
+        budget.work_sessions_started = budget.work_sessions_started.max(observed_work_sessions);
+        if budget.work_sessions_started >= budget.max_work_sessions {
+            anyhow::bail!(
+                "Workflow Run reached its maxWorkSessions budget ({})",
+                budget.max_work_sessions
+            );
+        }
+        budget.work_sessions_started = budget.work_sessions_started.saturating_add(1);
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn begin_budget_exhaustion(&mut self, now_ms: i64) -> bool {
+        if self.status != DcgRunStatus::Active {
+            return false;
+        }
+        self.status = DcgRunStatus::BudgetExhausting;
+        self.interpreter_error = None;
+        if let Some(budget) = self.budget.as_mut() {
+            budget.exhaustion_started_at_ms = Some(now_ms);
+        }
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
+    pub fn finish_budget_exhaustion(&mut self, now_ms: i64) -> bool {
+        if self.status != DcgRunStatus::BudgetExhausting {
+            return false;
+        }
+        self.status = DcgRunStatus::BudgetExhausted;
+        self.outcome = Some("budget-exhausted".into());
+        self.active_nodes.clear();
+        if let Some(budget) = self.budget.as_mut() {
+            budget.exhausted_at_ms = Some(now_ms);
+        }
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            DcgRunStatus::BudgetExhausted | DcgRunStatus::Completed | DcgRunStatus::Cancelled
+        )
+    }
+
     pub fn eligible_edges<'a>(
         &self,
         definition: &'a DcgDefinition,
         facts: &BTreeSet<String>,
     ) -> Result<Vec<&'a DcgEdge>> {
         self.ensure_definition(definition)?;
+        if self.status != DcgRunStatus::Active {
+            return Ok(Vec::new());
+        }
         Ok(definition
             .edges
             .iter()
@@ -765,7 +968,10 @@ impl DcgRun {
         self.ensure_definition(definition)?;
         if matches!(
             self.status,
-            DcgRunStatus::Completed | DcgRunStatus::Cancelled
+            DcgRunStatus::BudgetExhausting
+                | DcgRunStatus::BudgetExhausted
+                | DcgRunStatus::Completed
+                | DcgRunStatus::Cancelled
         ) {
             anyhow::bail!("terminal DCG Run cannot transition");
         }
@@ -995,6 +1201,12 @@ impl DcgRun {
     }
 
     fn refresh_status(&mut self, definition: &DcgDefinition) -> Result<()> {
+        if matches!(
+            self.status,
+            DcgRunStatus::BudgetExhausting | DcgRunStatus::BudgetExhausted
+        ) {
+            return Ok(());
+        }
         self.active_nodes = self
             .node_instances
             .values()
@@ -1423,6 +1635,52 @@ mod tests {
         assert!(run
             .select_before_start(catalog.session_workflow("feature").unwrap())
             .is_err());
+    }
+
+    #[test]
+    fn selected_run_pins_a_deterministic_ten_minute_execution_budget() {
+        let (_temporary, catalog) = catalog_fixture();
+        let feature = catalog.session_workflow("feature").unwrap();
+        assert_eq!(feature.execution_budget.wall_clock_ms, 600_000);
+        assert_eq!(feature.execution_budget.max_work_sessions, 16);
+        assert_eq!(feature.execution_budget.max_concurrent_work_sessions, 4);
+
+        let mut run = DcgRun::new_discussion("run-budget".into(), "s_pm".into()).unwrap();
+        run.select_before_start_at(feature, 1_000).unwrap();
+        let budget = run.budget.as_ref().expect("selected Run pins its budget");
+        assert_eq!(budget.started_at_ms, 1_000);
+        assert_eq!(budget.deadline_at_ms, 601_000);
+        assert_eq!(budget.work_sessions_started, 0);
+        assert!(!run.budget_expired(600_999));
+        run.consume_work_session_dispatch(600_999, 0).unwrap();
+        assert_eq!(run.budget.as_ref().unwrap().work_sessions_started, 1);
+        assert!(run.budget_expired(601_000));
+
+        assert!(run.begin_budget_exhaustion(601_000));
+        assert_eq!(run.status, DcgRunStatus::BudgetExhausting);
+        assert!(run
+            .eligible_edges(feature, &BTreeSet::new())
+            .unwrap()
+            .is_empty());
+        assert!(run.finish_budget_exhaustion(601_001));
+        assert_eq!(run.status, DcgRunStatus::BudgetExhausted);
+        assert_eq!(run.outcome.as_deref(), Some("budget-exhausted"));
+        assert!(run.active_nodes.is_empty());
+
+        let mut invalid = feature.clone();
+        invalid.execution_budget.max_concurrent_work_sessions =
+            invalid.execution_budget.max_work_sessions + 1;
+        assert!(invalid.validate(&catalog.root).is_err());
+
+        let mut legacy = DcgRun::new_discussion("run-legacy".into(), "s_legacy".into()).unwrap();
+        legacy.select_before_start_at(feature, 10).unwrap();
+        legacy.budget = None;
+        assert!(legacy.backfill_execution_budget(20, 3));
+        let migrated = legacy.budget.as_ref().unwrap();
+        assert_eq!(migrated.started_at_ms, 20);
+        assert_eq!(migrated.deadline_at_ms, 600_020);
+        assert_eq!(migrated.work_sessions_started, 3);
+        assert!(!legacy.backfill_execution_budget(30, 2));
     }
 
     #[test]

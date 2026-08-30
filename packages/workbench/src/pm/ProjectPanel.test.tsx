@@ -24,6 +24,9 @@ describe("ProjectPanel", () => {
     expect(await screen.findByText("交付可玩的 H5 游戏")).toBeInTheDocument();
     expect(screen.getByText("0/1")).toBeInTheDocument();
     expect(screen.getByText("implement")).toBeInTheDocument();
+    expect(screen.getByText("可分配 0/4 · 已占 1")).toBeInTheDocument();
+    expect(screen.getByText("执行预算剩余 9:00")).toBeInTheDocument();
+    expect(screen.getByText("并发会话 1/4 · 累计会话 2/16")).toBeInTheDocument();
     expect(screen.getByText(/等待资源/)).toBeInTheDocument();
     expect(screen.getByText("实现战斗循环")).toBeInTheDocument();
     expect(screen.getByText("由 PM 根据证据选择")).toBeInTheDocument();
@@ -87,6 +90,7 @@ function projectStatus(): PmProjectStatus {
     }],
     workflowCatalog: { recommended: "feature", workflows: [{
       id: "feature", version: 1, entry: "intake",
+      executionBudget: { wallClockMs: 600_000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4 },
       nodes: [{ id: "intake", kind: "activity" }, { id: "implement", kind: "activity" }, { id: "diagnose", kind: "activity" }, { id: "delivered", kind: "terminal" }],
       edges: [
         { id: "retry", label: "采用修正方案重试", description: "保留验收目标并重新执行。", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" },
@@ -98,12 +102,25 @@ function projectStatus(): PmProjectStatus {
       id: "run-s_pm", controllerSessionId: "s_pm", graphId: "feature", graphVersion: 1, status: "active",
       definition: null,
       interpreterError: "automatic transition limit exceeded",
+      budget: {
+        wallClockMs: 600_000,
+        maxWorkSessions: 16,
+        maxConcurrentWorkSessions: 4,
+        startedAtMs: 1,
+        deadlineAtMs: 600_001,
+        remainingMs: 540_000,
+        workSessionsStarted: 2,
+        activeWorkSessions: 1,
+      },
       activeNodes: ["diagnose"], facts: [], revision: 3,
       intent: { revision: 1, outcome: "交付可玩的 H5 游戏", acceptance: ["可玩"], constraints: [], outOfScope: [] },
       supervisor: supervisor(),
       nodeInstances: [
         { id: "implement-1", nodeId: "implement", iteration: 1, status: "blocked", cohortId: "root-1", fanoutSource: "plan.workstreams", fanoutSealed: true },
         { id: "diagnose-1", nodeId: "diagnose", iteration: 1, status: "active", cohortId: "root-1", fanoutSealed: false },
+      ],
+      resourceCapacities: [
+        { nodeId: "implement", spaceTags: ["implementation"], maxItems: 4, allocatedItems: 1, matchingSpaces: 2, availableSpaces: 1, availableSlots: 0 },
       ],
       teamSlots: [{ id: "slot-combat", nodeInstanceId: "implement-1", workPackageId: "combat", responsibility: "实现战斗循环", workSessionId: "s_work", status: "blocked" }],
       availableEdges: [

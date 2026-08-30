@@ -15,17 +15,24 @@ AgentSpace 的状态机属于固定内核，不在 Workflow DCG 中定义，也�
 执行顺序：
 
 1. `genet pm project workflow list` 查看项目 Workflow；
-2. 需求明确后用 `genet pm project workflow select --graph <id>` 固定本 Session 的图版本；
-3. 只为当前活动节点筹备输入、WorkPackage 和证据；每个 `package put` 必须用
+2. 需求明确后立即用 `genet pm project workflow select --graph <id>` 固定本 Session 的图版本和
+   `executionBudget`；内核从此计时，提示词无权延长。每次派工前读取 `remainingMs`、`maxWorkSessions`
+   与 `maxConcurrentWorkSessions`，预算到期或进入 `budgetExhausting/budgetExhausted` 后不得继续派工，
+   也不得把预算耗尽报告成完成；派发保留会单调消耗总会话额度，provider/session 创建失败、清除绑定或
+   重试都不会返还；
+3. 用一次 `genet pm project show` 读取当前 Run 的 `resourceCapacities`，按节点的 `availableSlots`
+   决定本轮可立即分配的基础并行度；`maxItems` 只是上限，不代表已有足够 Space，包级 `--space-tag`
+   还可能进一步收窄匹配。容量不足时先补建并注册 Space 或缩小 cohort，不要用失败的 `package put` 探测容量；
+4. 只为当前活动节点筹备输入、WorkPackage 和证据；每个 `package put` 必须用
    `--node <active-node>`，Coordinator 会把 WorkPackage 固定到本次遍历产生的节点实例，而不只是节点名；
-4. 注册 AgentSpace 时按当前节点 `space.matchTags` 使用一个或多个 `space record --tag <tag>` 声明能力；
+5. 注册 AgentSpace 时按当前节点 `space.matchTags` 使用一个或多个 `space record --tag <tag>` 声明能力；
    `package put` 不指定物理 Space。若同一 fanout 含不同专业能力，用一个或多个
    `--space-tag <capability>` 声明该工作包需要的能力；Coordinator 会把节点基础标签与包级标签合并，在
    匹配池中确定性选择具体 Space。`package put` 只接收 `--repository` 与 `--branch`，并返回派生的
    `worktrees/<space>/<repository>`；PM 在该路径创建 worktree 后再推进 Ready，WorkSession 仍须使用
    返回的 Space。不得传旧的 `--space`/`--worktree` 参数；`--space-tag` 是能力而不是 Space 名；
-5. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
-6. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
+6. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
+7. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
 
 带 `fanout.source` 的节点由 PM 在节点仍为 Planned 时一次性创建本次遍历的全部结果型 WorkPackage；该字段
 只记录工作流来源，不执行任意表达式。任一工作包开始后 Coordinator 会封闭该节点实例的集合，后续不得悄悄

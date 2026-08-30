@@ -3,6 +3,7 @@ id: feature
 kind: sessionWorkflow
 version: 2
 entry: intake
+executionBudget: { wallClockMs: 600000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4 }
 nodes:
   - id: intake
     kind: activity

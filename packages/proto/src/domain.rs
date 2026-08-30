@@ -342,8 +342,19 @@ pub struct PmWorkflowDefinitionStatus {
     pub id: String,
     pub version: u32,
     pub entry: String,
+    pub execution_budget: PmWorkflowBudgetPolicyStatus,
     pub nodes: Vec<PmWorkflowNodeStatus>,
     pub edges: Vec<PmWorkflowEdgeStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowBudgetPolicyStatus {
+    #[ts(type = "number")]
+    pub wall_clock_ms: u64,
+    pub max_work_sessions: u32,
+    pub max_concurrent_work_sessions: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -392,9 +403,16 @@ pub struct PmWorkflowRunStatus {
     pub outcome: Option<String>,
     #[ts(optional)]
     pub interpreter_error: Option<String>,
+    #[ts(optional)]
+    pub budget: Option<PmWorkflowRunBudgetStatus>,
     pub active_nodes: Vec<String>,
     pub facts: Vec<String>,
     pub node_instances: Vec<PmWorkflowNodeInstanceStatus>,
+    /// Current project-level allocation capacity for every WorkAgent node in
+    /// this Run's pinned Workflow definition. These are Coordinator-derived
+    /// facts, not a promise that package-specific capability tags will match.
+    #[serde(default)]
+    pub resource_capacities: Vec<PmWorkflowNodeCapacityStatus>,
     pub team_slots: Vec<PmTeamSlotStatus>,
     pub available_edges: Vec<PmWorkflowAvailableEdgeStatus>,
     #[ts(optional)]
@@ -402,6 +420,50 @@ pub struct PmWorkflowRunStatus {
     pub supervisor: PmSupervisorStatus,
     #[ts(type = "number")]
     pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowRunBudgetStatus {
+    #[ts(type = "number")]
+    pub wall_clock_ms: u64,
+    pub max_work_sessions: u32,
+    pub max_concurrent_work_sessions: u32,
+    #[ts(type = "number")]
+    pub started_at_ms: i64,
+    #[ts(type = "number")]
+    pub deadline_at_ms: i64,
+    #[ts(type = "number")]
+    pub remaining_ms: i64,
+    #[ts(optional)]
+    pub exhaustion_started_at_ms: Option<i64>,
+    #[ts(optional)]
+    pub exhausted_at_ms: Option<i64>,
+    pub work_sessions_started: u32,
+    pub active_work_sessions: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmWorkflowNodeCapacityStatus {
+    pub node_id: String,
+    /// Base capability tags declared by the Workflow node selector.
+    pub space_tags: Vec<String>,
+    /// Maximum packages allowed in one node instance by the Workflow.
+    pub max_items: u32,
+    /// Team Slots already bound to the current active node instance.
+    pub allocated_items: u32,
+    /// Active implementation Spaces matching the node's base tags, including
+    /// Spaces currently occupied or quarantined.
+    pub matching_spaces: u32,
+    /// Matching Spaces that can be allocated immediately after applying the
+    /// Coordinator's resource and cross-Session prebinding rules.
+    pub available_spaces: u32,
+    /// New base-capability packages that can be created now, capped by both
+    /// remaining fanout allowance and available Spaces.
+    pub available_slots: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

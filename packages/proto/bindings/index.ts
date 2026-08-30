@@ -572,17 +572,56 @@ requiredSpaceTags: Array<string>, agentSpace: string, repository: string, branch
 
 export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 
+export type PmWorkflowBudgetPolicyStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, };
+
 export type PmWorkflowCatalogStatus = { recommended: string, workflows: Array<PmWorkflowDefinitionStatus>, };
 
-export type PmWorkflowDefinitionStatus = { id: string, version: number, entry: string, nodes: Array<PmWorkflowNodeStatus>, edges: Array<PmWorkflowEdgeStatus>, };
+export type PmWorkflowDefinitionStatus = { id: string, version: number, entry: string, executionBudget: PmWorkflowBudgetPolicyStatus, nodes: Array<PmWorkflowNodeStatus>, edges: Array<PmWorkflowEdgeStatus>, };
 
 export type PmWorkflowEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, };
+
+export type PmWorkflowNodeCapacityStatus = { nodeId: string, 
+/**
+ * Base capability tags declared by the Workflow node selector.
+ */
+spaceTags: Array<string>, 
+/**
+ * Maximum packages allowed in one node instance by the Workflow.
+ */
+maxItems: number, 
+/**
+ * Team Slots already bound to the current active node instance.
+ */
+allocatedItems: number, 
+/**
+ * Active implementation Spaces matching the node's base tags, including
+ * Spaces currently occupied or quarantined.
+ */
+matchingSpaces: number, 
+/**
+ * Matching Spaces that can be allocated immediately after applying the
+ * Coordinator's resource and cross-Session prebinding rules.
+ */
+availableSpaces: number, 
+/**
+ * New base-capability packages that can be created now, capped by both
+ * remaining fanout allowance and available Spaces.
+ */
+availableSlots: number, };
 
 export type PmWorkflowNodeInstanceStatus = { id: string, nodeId: string, iteration: number, status: string, cohortId: string, fanoutSource?: string, fanoutSealed: boolean, };
 
 export type PmWorkflowNodeStatus = { id: string, kind: string, actor?: string, objective?: string, };
 
-export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, interpreterError?: string, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, teamSlots: Array<PmTeamSlotStatus>, availableEdges: Array<PmWorkflowAvailableEdgeStatus>, intent?: PmIntentStatus, supervisor: PmSupervisorStatus, revision: number, };
+export type PmWorkflowRunBudgetStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, startedAtMs: number, deadlineAtMs: number, remainingMs: number, exhaustionStartedAtMs?: bigint, exhaustedAtMs?: bigint, workSessionsStarted: number, activeWorkSessions: number, };
+
+export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, interpreterError?: string, budget?: PmWorkflowRunBudgetStatus, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, 
+/**
+ * Current project-level allocation capacity for every WorkAgent node in
+ * this Run's pinned Workflow definition. These are Coordinator-derived
+ * facts, not a promise that package-specific capability tags will match.
+ */
+resourceCapacities: Array<PmWorkflowNodeCapacityStatus>, teamSlots: Array<PmTeamSlotStatus>, availableEdges: Array<PmWorkflowAvailableEdgeStatus>, intent?: PmIntentStatus, supervisor: PmSupervisorStatus, revision: number, };
 
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 

@@ -145,6 +145,27 @@ export function ProjectPanel({
             </p>
           ) : null}
 
+          {run?.budget ? (
+            <section
+              role={run.status === "budgetExhausting" || run.status === "budgetExhausted" ? "alert" : undefined}
+              className={`rounded border p-2 ${run.status === "budgetExhausting" || run.status === "budgetExhausted"
+                ? "border-red-500/30 bg-red-500/5 text-red-300"
+                : "border-line bg-canvas/40 text-muted"}`}
+            >
+              <p className="font-medium text-fg">
+                {run.status === "budgetExhausted"
+                  ? "本轮 10 分钟执行预算已耗尽"
+                  : run.status === "budgetExhausting"
+                    ? "本轮预算已到期，正在停止所属工作会话"
+                    : `执行预算剩余 ${formatDuration(run.budget.remainingMs)}`}
+              </p>
+              <p className="mt-1">
+                并发会话 {run.budget.activeWorkSessions}/{run.budget.maxConcurrentWorkSessions}
+                {" · "}累计会话 {run.budget.workSessionsStarted}/{run.budget.maxWorkSessions}
+              </p>
+            </section>
+          ) : null}
+
           {graph && run ? <Workflow graph={graph} run={run} /> : null}
 
           {run?.availableEdges.length ? (
@@ -280,11 +301,16 @@ function Workflow({ graph, run }: { graph: PmWorkflowDefinitionStatus; run: NonN
     }
     return current;
   }, [run.nodeInstances]);
+  const capacityByNode = useMemo(
+    () => new Map(run.resourceCapacities.map((capacity) => [capacity.nodeId, capacity])),
+    [run.resourceCapacities],
+  );
   return <section>
     <p className="mb-2 font-medium text-fg">Workflow 节点</p>
     <div className="flex gap-1 overflow-x-auto pb-1">
       {graph.nodes.map((node, index) => {
         const instance = instanceByNode.get(node.id);
+        const capacity = capacityByNode.get(node.id);
         const active = run.activeNodes.includes(node.id);
         return <div key={node.id} className="flex shrink-0 items-center gap-1">
           {index ? <span className="text-faint">→</span> : null}
@@ -292,6 +318,11 @@ function Workflow({ graph, run }: { graph: PmWorkflowDefinitionStatus; run: NonN
             <p className="truncate font-medium text-fg">{node.id}</p>
             <p className="truncate text-faint">{instance?.status ?? node.kind}{instance ? ` · #${instance.iteration}` : ""}</p>
             {instance?.fanoutSource ? <p className="truncate text-faint">{instance.fanoutSealed ? "工作包已封闭" : "筹备工作包"}</p> : null}
+            {capacity ? (
+              <p className="truncate text-faint" title={`匹配 ${capacity.matchingSpaces} 个 Space；当前空闲 ${capacity.availableSpaces} 个`}>
+                可分配 {capacity.availableSlots}/{capacity.maxItems} · 已占 {capacity.allocatedItems}
+              </p>
+            ) : null}
           </div>
         </div>;
       })}
@@ -301,4 +332,10 @@ function Workflow({ graph, run }: { graph: PmWorkflowDefinitionStatus; run: NonN
 
 function messageOf(cause: unknown) {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+function formatDuration(valueMs: number) {
+  const seconds = Math.max(0, Math.ceil(valueMs / 1_000));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
 }

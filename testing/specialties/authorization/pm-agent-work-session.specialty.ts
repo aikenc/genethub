@@ -262,12 +262,33 @@ defineSpecialty(
         type: "pm.project.status",
         payload: { workspaceId: opened.workspaceId },
       });
+      const projectedRun =
+        publicProject?.type === "projectStatus"
+          ? publicProject.data.workflowRuns.find(
+              (run) => run.controllerSessionId === pm.id,
+            )
+          : undefined;
       t.assertions.assert(
           publicProject?.type === "projectStatus" &&
           publicProject.data.phase === "active" &&
           publicProject.data.agentSpaces[0]?.role === "implementation" &&
           publicProject.data.agentSpaces[0]?.resourceState === "idle" &&
           publicProject.data.agentSpaces[0]?.tags.includes("webgl2") &&
+          projectedRun?.budget?.wallClockMs === 600_000 &&
+          projectedRun.budget.remainingMs > 0 &&
+          projectedRun.budget.maxWorkSessions === 16 &&
+          projectedRun.budget.maxConcurrentWorkSessions === 4 &&
+          projectedRun.budget.workSessionsStarted === 0 &&
+          projectedRun.budget.activeWorkSessions === 0 &&
+          projectedRun.resourceCapacities.some(
+              (capacity) =>
+                capacity.nodeId === "implement" &&
+                capacity.maxItems === 4 &&
+                capacity.allocatedItems === 1 &&
+                capacity.matchingSpaces === 1 &&
+                capacity.availableSpaces === 0 &&
+                capacity.availableSlots === 0,
+            ) &&
           publicProject.data.workPackages.some(
             (item) =>
               item.id === "wp-gameplay" &&
