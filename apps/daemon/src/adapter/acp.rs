@@ -14,9 +14,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent,
-    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    AgentSetup, AuthState, Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOption,
+    PermissionOptionKind, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -41,6 +41,20 @@ pub struct AcpAdapter {
     /// What `session/new` told us about models and modes, read once per daemon
     /// run so the picker can be drawn before anyone opens a session.
     hello: tokio::sync::OnceCell<Option<Hello>>,
+    /// What the setup wizard shows. None for a bare `acp:*` declaration, which
+    /// gets the honest fallback: its own documentation and nothing invented.
+    setup: Option<AgentSetup>,
+    /// How to ask this CLI whether it is signed in, when it publishes a way.
+    auth_status: Option<AuthStatusProbe>,
+}
+
+/// A CLI's non-interactive sign-in check, described declaratively: run the
+/// program with these arguments, read this boolean field from the JSON it
+/// prints. `cursor-agent status --format json` answering `isAuthenticated` is
+/// the shape this exists for.
+pub struct AuthStatusProbe {
+    pub args: Vec<String>,
+    pub json_field: String,
 }
 
 /// What one `session/new` told us about this install.
@@ -72,7 +86,19 @@ impl AcpAdapter {
             label: label.into(),
             command,
             hello: tokio::sync::OnceCell::new(),
+            setup: None,
+            auth_status: None,
         }
+    }
+
+    pub fn with_setup(mut self, setup: AgentSetup) -> Self {
+        self.setup = Some(setup);
+        self
+    }
+
+    pub fn with_auth_status(mut self, probe: AuthStatusProbe) -> Self {
+        self.auth_status = Some(probe);
+        self
     }
 
     fn program(&self) -> Option<PathBuf> {
@@ -122,6 +148,22 @@ impl AgentAdapter for AcpAdapter {
             // missing — went away when Codex got its own adapter.
             None => ProbeState::NotInstalled,
         }
+    }
+
+    async fn auth(&self) -> AuthState {
+        let (Some(program), Some(probe)) = (self.program(), &self.auth_status) else {
+            return AuthState::Unknown;
+        };
+        let args: Vec<&str> = probe.args.iter().map(String::as_str).collect();
+        super::json_auth_status(&program, &args, &probe.json_field).await
+    }
+
+    async fn version(&self) -> Option<String> {
+        super::binary_version(&self.program()?).await
+    }
+
+    fn setup(&self) -> AgentSetup {
+        self.setup.clone().unwrap_or_default()
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {

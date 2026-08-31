@@ -13,6 +13,8 @@ import { Composer } from "./session/Composer";
 import { PermissionCard } from "./session/Permission";
 import { TimelineView } from "./session/TimelineView";
 import { defaultAgent, useWorkbench } from "./session/store";
+import { AgentSetupWizard } from "./setup/AgentSetupWizard";
+import { FirstRunAgents } from "./setup/FirstRunAgents";
 import { Sidebar } from "./shell/Sidebar";
 import { MobileToolsDrawer } from "./shell/MobileToolsDrawer";
 import { TabBar } from "./shell/TabBar";
@@ -442,11 +444,7 @@ export function App({
                     />
                   </>
                 ) : (
-                  <FirstRun
-                    host={host}
-                    endpoint={endpoint}
-                    onOpenSettings={() => workbench.openTab("settings")}
-                  />
+                  <FirstRun host={host} endpoint={endpoint} />
                 )
               ) : null}
 
@@ -515,6 +513,9 @@ export function App({
       {/* Outside every tab, because a finished download is not about whichever
           panel happens to be open. */}
       <UpdateToast host={host} />
+      {/* Same reasoning: the setup wizard is reachable from first-run, the
+          settings page and the composer chip, and outlives all three. */}
+      <AgentSetupWizard host={host} />
     </div>
   );
 }
@@ -525,11 +526,9 @@ export function App({
 function FirstRun({
   host,
   endpoint,
-  onOpenSettings,
 }: {
   host: Host;
   endpoint: Endpoint;
-  onOpenSettings(): void;
 }) {
   const {
     workspaces,
@@ -586,21 +585,10 @@ function FirstRun({
   }
 
   if (!agent) {
-    return (
-      <Splash>
-        <p className="text-sm">还差一个模型密钥。</p>
-        <p className="mb-3 text-xs text-muted">
-          密钥只保存在这台机器上，填好之后这里会直接可用。
-        </p>
-        <button
-          type="button"
-          className="rounded-md bg-accent px-3 py-1.5 text-xs text-white"
-          onClick={onOpenSettings}
-        >
-          去填密钥
-        </button>
-      </Splash>
-    );
+    // Not one button into a bare settings form: the three ways to a running
+    // agent, each of them guided. fb_OIS75VEa4j6i was a new user staring at a
+    // ready-looking machine with no next step; this screen is that step.
+    return <FirstRunAgents />;
   }
 
   return (

@@ -100,6 +100,12 @@ function removedAgent(id: string): AgentInfo {
       defaultMode: undefined,
       defaultEffort: undefined,
     },
+    // Gone from the daemon, so there is nothing to probe, sign in, or guide:
+    // the fields below exist so the row renders, not because anyone can act.
+    platform: "linux",
+    version: undefined,
+    auth: "unknown",
+    setup: { install: [] },
   };
 }
 

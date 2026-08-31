@@ -1,5 +1,5 @@
 import type { AgentInfo, Reply, Request } from "@genehub/proto";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -87,6 +87,16 @@ const READY_AGENT: AgentInfo = {
     defaultModel: "deepseek/deepseek-v4-flash",
     defaultMode: undefined,
   },
+  platform: "linux",
+  auth: "notApplicable",
+  setup: {
+    install: [],
+    apiKey: {
+      kind: "builtinProvider",
+      envVars: [],
+      hint: "内置 Agent 的密钥就是模型密钥里配置的 provider，只保存在这台机器上。",
+    },
+  },
 };
 
 const UNCONFIGURED_AGENT: AgentInfo = {
@@ -130,6 +140,7 @@ beforeEach(() => {
     agents: [],
     settings: null,
     notice: null,
+    setupAgentId: null,
   });
 });
 
@@ -257,8 +268,11 @@ describe("the first run", () => {
    * The agent's catalog is built from the providers that are configured, so an
    * empty one means there is no key — a more truthful signal than reading the
    * settings, because it is the same thing that decides whether a turn can run.
+   *
+   * What a new user meets now is not a door to a bare form but the three ways
+   * forward, with the fastest one — the built-in agent's key — already inline.
    */
-  it("points at the key when a project is open but no model is reachable", async () => {
+  it("offers the three ways to a running agent, key inline, when nothing can start yet", async () => {
     const { client, calls } = stubClient({
       "agent.list": () => ({ type: "agents", data: [UNCONFIGURED_AGENT] }),
       "workspace.list": () => ({
@@ -268,14 +282,43 @@ describe("the first run", () => {
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
       "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "settings.setProvider": () => ({
+        type: "settings",
+        data: {
+          lanEnabled: false,
+          providers: [
+            {
+              id: "deepseek",
+              label: "DeepSeek",
+              hasApiKey: true,
+              baseUrl: "https://api.deepseek.com/v1",
+              dialect: "openai",
+              custom: false,
+              models: ["deepseek-v4-flash"],
+            },
+          ],
+        },
+      }),
+      "agent.refresh": () => ({ type: "agents", data: [READY_AGENT] }),
     });
     await start(client, hostWith());
 
-    expect(await screen.findByText("还差一个模型密钥。")).toBeInTheDocument();
+    expect(await screen.findByText("先让一个 Agent 跑起来。")).toBeInTheDocument();
+    expect(screen.getByTestId("first-run-third-party")).toBeInTheDocument();
+    expect(screen.getByTestId("first-run-browse")).toBeInTheDocument();
     expect(calls.some((call) => call.type === "session.create")).toBe(false);
 
-    await userEvent.click(screen.getByRole("button", { name: "去填密钥" }));
-    expect(await screen.findByLabelText("DeepSeek API Key")).toBeInTheDocument();
+    // The one-minute path: key in, saved write-only, agents re-probed, and the
+    // screen turns into "ready" without anyone leaving the page.
+    fireEvent.change(await screen.findByLabelText("API Key"), { target: { value: "sk-test" } });
+    await userEvent.click(screen.getByTestId("setup-save-key"));
+
+    await waitFor(() => {
+      const saved = calls.find((call) => call.type === "settings.setProvider");
+      expect(saved?.payload).toMatchObject({ providerId: "deepseek", apiKey: "sk-test" });
+    });
+    expect(calls.some((call) => call.type === "agent.refresh")).toBe(true);
+    expect(await screen.findByText("app 已就绪。")).toBeInTheDocument();
   });
 
   it("does not misdiagnose an empty OpenCode catalog as a missing GeneHub key", async () => {
@@ -284,6 +327,7 @@ describe("the first run", () => {
       id: "opencode",
       label: "OpenCode",
       builtin: false,
+      auth: "unknown",
       capabilities: {
         ...UNCONFIGURED_AGENT.capabilities,
         setEffort: false,
@@ -304,7 +348,7 @@ describe("the first run", () => {
     await start(client, hostWith());
 
     expect(await screen.findByPlaceholderText(/描述任务/)).toBeInTheDocument();
-    expect(screen.queryByText("还差一个模型密钥。")).not.toBeInTheDocument();
+    expect(screen.queryByText("先让一个 Agent 跑起来。")).not.toBeInTheDocument();
     expect(useWorkbench.getState().draft?.agentId).toBe("opencode");
   });
 

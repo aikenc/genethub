@@ -14,6 +14,7 @@ import {
   resolveModelPresentation,
 } from "../presentation/catalog/resolve";
 import type { RuntimeSelection } from "./ComposerControls";
+import { useWorkbench } from "./store";
 
 export function RuntimeSettingsPanel({
   id,
@@ -40,6 +41,7 @@ export function RuntimeSettingsPanel({
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
+  const openAgentSetup = useWorkbench((state) => state.openAgentSetup);
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -174,14 +176,34 @@ export function RuntimeSettingsPanel({
                         </span>
                       </span>
                       {availability ? (
-                        availability.fullLabel === availability.shortLabel ? null : (
-                          <span
-                            className="block truncate text-[10px] text-danger"
-                            title={availability.fullLabel}
-                          >
-                            {availability.fullLabel}
-                          </span>
-                        )
+                        <>
+                          {availability.fullLabel === availability.shortLabel ? null : (
+                            <span
+                              className="block truncate text-[10px] text-danger"
+                              title={availability.fullLabel}
+                            >
+                              {availability.fullLabel}
+                            </span>
+                          )}
+                          {/* The reason line used to be a dead end; now it is
+                              the way into the guided fix. Outside the disabled
+                              radios' concern: configuring another agent is
+                              allowed mid-session, picking it is not. */}
+                          {!agentLocked && !settingsDisabled ? (
+                            <button
+                              type="button"
+                              data-testid={`configure-${agent.id}`}
+                              className="mt-0.5 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:border-accent hover:text-fg"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                onClose();
+                                openAgentSetup(agent.id);
+                              }}
+                            >
+                              去配置
+                            </button>
+                          ) : null}
+                        </>
                       ) : null}
                       <span className="block truncate text-[10px] text-faint">
                         {axes || "基础对话"}

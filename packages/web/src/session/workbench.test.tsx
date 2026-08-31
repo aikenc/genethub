@@ -52,6 +52,9 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
     defaultMode: undefined,
     defaultEffort: "high",
   },
+  platform: "linux",
+  auth: "notApplicable",
+  setup: { install: [] },
   ...overrides,
 });
 

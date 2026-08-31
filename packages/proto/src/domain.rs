@@ -108,6 +108,137 @@ pub enum ProbeState {
     Unavailable { reason: String },
 }
 
+/// Whether the agent has usable credentials, as far as a non-interactive check
+/// can tell.
+///
+/// `Unknown` is a first-class answer, not a failure: several CLIs publish no
+/// status command, and claiming either way would put a made-up badge on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AuthState {
+    Authenticated,
+    Unauthenticated,
+    Unknown,
+    /// Credentials are not the CLI's own concern — the built-in agent uses the
+    /// daemon's provider keys, so there is nothing to ask it.
+    NotApplicable,
+}
+
+/// The operating system of the machine an agent (and its daemon) runs on.
+///
+/// Sent with every agent so a browser on any device can pick the install
+/// command that can actually run there — the terminal the wizard pastes into
+/// lives on that machine, not on the device showing the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "index.ts")]
+pub enum GuidePlatform {
+    Macos,
+    Linux,
+    Windows,
+}
+
+/// One way to install an agent, in the words of its own documentation.
+///
+/// `command` is pasted into the workbench's embedded terminal and left for the
+/// user to run — the wizard never executes it by itself.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct InstallMethod {
+    /// `官方安装脚本`, `npm`, `Homebrew` — the name its own docs give it.
+    pub label: String,
+    pub platforms: Vec<GuidePlatform>,
+    pub command: String,
+}
+
+/// The agent's official sign-in flow.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct LoginGuide {
+    /// What starts it, pasted into the embedded terminal (never auto-run).
+    pub command: String,
+    /// True when the flow continues in the browser, so the wizard can say so
+    /// before the window appears.
+    pub opens_browser: bool,
+    /// What to expect, in one sentence.
+    pub hint: String,
+}
+
+/// How an API key (or compatible endpoint) reaches this agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum ApiKeyKind {
+    /// The built-in agent: the key is stored by the daemon itself through
+    /// `settings.setProvider`, write-only, exactly as on the settings page.
+    BuiltinProvider,
+    /// The CLI's own command takes the key (e.g. `codex login --with-api-key`).
+    /// The user pastes the key into the terminal itself; it never passes
+    /// through GeneHub.
+    TerminalCommand,
+    /// The CLI reads environment variables. The wizard can paste the lines,
+    /// but they only reach the daemon's children after a restart — this is the
+    /// last resort, not the recommended path.
+    Environment,
+}
+
+/// One environment variable a CLI reads, and what it is for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct EnvVarGuide {
+    pub name: String,
+    pub purpose: String,
+}
+
+/// The API-key path for an agent that has one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ApiKeyGuide {
+    pub kind: ApiKeyKind,
+    /// For `TerminalCommand`: the command to paste. The key itself is typed by
+    /// the user into the terminal, not into any GeneHub field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub command: Option<String>,
+    /// For `Environment`: the variables involved.
+    #[serde(default)]
+    pub env_vars: Vec<EnvVarGuide>,
+    /// Where a key is issued, opened in the browser.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub key_url: Option<String>,
+    pub hint: String,
+}
+
+/// Everything the setup wizard knows about an agent.
+///
+/// Declared by the adapter (boundary B1: only the adapter may know its agent),
+/// rendered generically by the client. A section that is absent is a section
+/// the wizard does not show; an agent with an empty profile gets the honest
+/// fallback — a link to its own documentation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSetup {
+    /// Ways to install it. Empty for the built-in agent, which ships installed.
+    #[serde(default)]
+    pub install: Vec<InstallMethod>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub login: Option<LoginGuide>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub api_key: Option<ApiKeyGuide>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub docs_url: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -120,6 +251,15 @@ pub struct AgentInfo {
     /// True for the agent shipped in the installer, which is preselected on
     /// first run so a new user can run something immediately.
     pub builtin: bool,
+    /// The machine this agent runs on — which is also where the embedded
+    /// terminal executes, so it decides which install command applies.
+    pub platform: GuidePlatform,
+    /// The installed version as the CLI itself reports it, when it will say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    pub auth: AuthState,
+    pub setup: AgentSetup,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

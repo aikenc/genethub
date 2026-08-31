@@ -725,13 +725,20 @@ pub async fn handle(
             cols,
             rows,
         } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
+            // Without a workspace the shell opens in the machine's home
+            // directory: installing or signing in an agent is not about any
+            // project, and the setup wizard needs a terminal before the user
+            // has opened a folder at all.
+            let cwd = match &workspace_id {
+                Some(id) => match state.workspaces.get(id).await {
+                    Ok(workspace) => workspace.root.clone(),
+                    Err(error) => return failed(error),
+                },
+                None => dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
             };
             match state
                 .terminals
-                .open(&workspace.root, cols.unwrap_or(80), rows.unwrap_or(24))
+                .open(&cwd, cols.unwrap_or(80), rows.unwrap_or(24))
                 .await
             {
                 Ok(pty_id) => Handled::ok(Reply::Pty { pty_id }),

@@ -424,6 +424,9 @@ describe("opening a new conversation", () => {
         defaultMode: undefined,
         defaultEffort: undefined,
       },
+      platform: "linux",
+      auth: "unknown",
+      setup: { install: [] },
     } as AgentInfo;
     expect(defaultAgent([external])?.id).toBe("opencode");
 

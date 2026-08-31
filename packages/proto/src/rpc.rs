@@ -318,7 +318,12 @@ pub enum Request {
     // -- terminal ----------------------------------------------------------
     #[serde(rename = "pty.open", rename_all = "camelCase")]
     PtyOpen {
-        workspace_id: String,
+        /// The workspace whose root becomes the shell's cwd. Absent when the
+        /// terminal is not about any project — the setup wizard needs one to
+        /// install or sign in an agent before the user has opened a folder at
+        /// all — and the shell then starts in the machine's home directory.
+        #[serde(default)]
+        workspace_id: Option<String>,
         #[serde(default)]
         cols: Option<u16>,
         #[serde(default)]
