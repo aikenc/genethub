@@ -169,6 +169,8 @@ export type ForwardDraft = {
   estimatedTokens: number;
   sourceSessionId: string;
   sourceTitle: string | null;
+  /** Inlined image thumbs that travel with the capsule on send. */
+  attachments?: Attachment[];
 };
 
 /**
@@ -1017,6 +1019,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const existingFirst = existing?.trunks[0]?.index;
         const keptOlder =
           existingFirst !== undefined && existingFirst < (layer.trunks[0]?.index ?? 0);
+        const expanded = layer.expandedTrunk;
+        const nextRoundTrunks = expanded
+          ? {
+              ...timeline.roundTrunks,
+              [`${layer.round.roundId}:${expanded.summary.index}`]: expanded,
+            }
+          : timeline.roundTrunks;
         return {
           rounds: [
             ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
@@ -1030,6 +1039,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
               nextCursor: keptOlder ? existing?.nextCursor : layer.nextCursor,
             },
           },
+          roundTrunks: nextRoundTrunks,
         };
       });
     });

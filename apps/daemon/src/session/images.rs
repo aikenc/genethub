@@ -4,19 +4,24 @@
 //! source bytes. This module is the single intake point that strips them:
 //! images the agent *read* keep only a workspace-relative path (the original
 //! stays on disk and is opened through `asset.preview`); images the agent
-//! *produced* move to the blob layer. Either way a thumbnail is inlined so
-//! the batch strip renders with zero extra round trips. Source base64 never
-//! reaches the timeline, the log or the tool blob.
+//! *produced* are written under the session directory so Preview can open
+//! the original the same way, and a copy is kept in the blob layer for
+//! fork. Either way a thumbnail is inlined so the batch strip renders with
+//! zero extra round trips. Source base64 never reaches the timeline, the
+//! log or the tool blob.
 
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
+use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use genehub_proto::domain::ImageThumb;
+use base64::Engine;
+use genehub_proto::domain::{BlobKind, BlobRef, ImageThumb};
 use genehub_proto::timeline::ToolImage;
-use image::ImageReader;
+use genehub_proto::{BlobPayload, RoundTrunk};
 use image::imageops::FilterType;
-use serde_json::{Value, json};
+use image::ImageReader;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// Read images are the common case and pure navigation aids.
 pub const READ_THUMB_WIDTH: u32 = 64;
@@ -36,12 +41,15 @@ pub struct ImageBlobPut {
 /// Strips `data_base64` from every image in place and returns the blob
 /// payloads to preserve. `cwd` resolves relative tool paths; `workspace_root`
 /// decides whether a read image stays a path reference (inside) or becomes a
-/// blob (outside — the workspace boundary is the preview boundary).
+/// produced file (outside — the workspace boundary is the preview boundary).
+/// Produced originals are written under the session directory so click
+/// reuses `asset.preview`.
 pub fn shed_tool_images(
     item_id: &str,
     images: &mut Vec<ToolImage>,
     cwd: &Path,
     workspace_root: &Path,
+    session_id: &str,
 ) -> Vec<ImageBlobPut> {
     let mut puts = Vec::new();
     for (index, image) in images.iter_mut().enumerate() {
@@ -55,8 +63,7 @@ pub fn shed_tool_images(
             Some(data) => data,
             None => {
                 if let Some(relative) = &workspace_path {
-                    let bytes =
-                        std::fs::read(workspace_root.join(relative)).unwrap_or_default();
+                    let bytes = std::fs::read(workspace_root.join(relative)).unwrap_or_default();
                     image.thumb = make_thumb(&bytes, &image.mime, READ_THUMB_WIDTH);
                     image.path = Some(relative.clone());
                 }
@@ -74,11 +81,18 @@ pub fn shed_tool_images(
             image.path = Some(relative);
             continue;
         }
-        image.path = None;
         if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+            image.path = None;
             image.alt = format!("{} [image omitted: too large]", image.alt);
             image.thumb = None;
             continue;
+        }
+        let relative = produced_image_relpath(session_id, &bytes, &image.mime);
+        if let Err(error) = write_produced_image(workspace_root, &relative, &bytes) {
+            tracing::warn!("could not write produced image {relative}: {error}");
+            image.path = None;
+        } else {
+            image.path = Some(relative);
         }
         puts.push(ImageBlobPut {
             item_id: format!("{item_id}:img:{index}"),
@@ -89,6 +103,105 @@ pub fn shed_tool_images(
         });
     }
     puts
+}
+
+/// Workspace-relative path for a produced original. Content-addressed so
+/// hydrating an older blob row lands on the same file as intake.
+pub fn produced_image_relpath(session_id: &str, bytes: &[u8], mime: &str) -> String {
+    let digest = Sha256::digest(bytes);
+    let id: String = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(24)
+        .collect();
+    let ext = match mime {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    };
+    format!(".genethub/sessions/{session_id}/images/{id}.{ext}")
+}
+
+fn write_produced_image(workspace_root: &Path, relative: &str, bytes: &[u8]) -> Result<()> {
+    let path = workspace_root.join(relative);
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        crate::config::restrict_dir_to_owner(parent).ok();
+    }
+    crate::config::save_private(&path, bytes)
+}
+
+fn image_bytes_from_blob(value: &Value) -> Option<(String, Vec<u8>)> {
+    let mime = value.get("mime")?.as_str()?.to_string();
+    if !mime.starts_with("image/") {
+        return None;
+    }
+    let data = value.get("dataBase64")?.as_str()?;
+    let bytes = BASE64.decode(data).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    Some((mime, bytes))
+}
+
+/// Fills missing produced-image paths (and thumbs) from the blob layer so a
+/// session written before files were persisted still opens through Preview.
+pub fn hydrate_produced_images(
+    workspace_root: &Path,
+    session_id: &str,
+    mut get_blob: impl FnMut(&BlobRef) -> Result<Option<BlobPayload>>,
+    trunk: &mut RoundTrunk,
+) {
+    for batch in &mut trunk.batches {
+        for row in &mut batch.blobs {
+            if row.kind != BlobKind::Image || row.path.is_some() {
+                continue;
+            }
+            let Some(blob) = row.blob.as_ref() else {
+                continue;
+            };
+            let Ok(Some(payload)) = get_blob(blob) else {
+                continue;
+            };
+            let Some((mime, bytes)) = image_bytes_from_blob(&payload.value) else {
+                continue;
+            };
+            let relative = produced_image_relpath(session_id, &bytes, &mime);
+            if write_produced_image(workspace_root, &relative, &bytes).is_err() {
+                continue;
+            }
+            if row.thumb.is_none() {
+                row.thumb = make_thumb(&bytes, &mime, OUTPUT_THUMB_WIDTH);
+            }
+            row.path = Some(relative);
+        }
+    }
+}
+
+/// Best-effort mime for a base64 payload, by magic-prefix. Codex's
+/// `imageGeneration` items carry raw base64 with no mime and an extensionless
+/// `savedPath`, so the signature is the only reliable source. `None` when the
+/// prefix matches no known image format.
+pub fn sniff_image_mime_base64(data_base64: &str) -> Option<String> {
+    let mime = if data_base64.starts_with("iVBORw0KGgo") {
+        "image/png"
+    } else if data_base64.starts_with("/9j/") {
+        "image/jpeg"
+    } else if data_base64.starts_with("R0lGOD") {
+        "image/gif"
+    } else if data_base64.starts_with("UklGR") {
+        "image/webp"
+    } else {
+        return None;
+    };
+    Some(mime.to_string())
 }
 
 /// Best-effort mime for a path-only image reference, by extension.
@@ -167,6 +280,27 @@ fn workspace_relative(path: &str, cwd: &Path, workspace_root: &Path) -> Option<S
 mod tests {
     use super::*;
 
+    #[test]
+    fn sniff_image_mime_base64_recognizes_magic_prefixes() {
+        assert_eq!(
+            sniff_image_mime_base64("iVBORw0KGgoAAAA").as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            sniff_image_mime_base64("/9j/4AAQSkZJRg").as_deref(),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            sniff_image_mime_base64("R0lGODdhAQAB").as_deref(),
+            Some("image/gif")
+        );
+        assert_eq!(
+            sniff_image_mime_base64("UklGRhIAAABX").as_deref(),
+            Some("image/webp")
+        );
+        assert_eq!(sniff_image_mime_base64("aGVsbG8"), None);
+    }
+
     fn png_bytes(width: u32, height: u32) -> Vec<u8> {
         let mut out = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgb8(width, height)
@@ -181,11 +315,13 @@ mod tests {
         let thumb = make_thumb(&bytes, "image/png", READ_THUMB_WIDTH).unwrap();
         assert_eq!(thumb.mime, "image/jpeg");
         assert_eq!((thumb.width, thumb.height), (800, 400));
-        let decoded = ImageReader::new(std::io::Cursor::new(BASE64.decode(&thumb.data_base64).unwrap()))
-            .with_guessed_format()
-            .unwrap()
-            .decode()
-            .unwrap();
+        let decoded = ImageReader::new(std::io::Cursor::new(
+            BASE64.decode(&thumb.data_base64).unwrap(),
+        ))
+        .with_guessed_format()
+        .unwrap()
+        .decode()
+        .unwrap();
         assert_eq!(decoded.width(), READ_THUMB_WIDTH);
         assert_eq!(decoded.height(), READ_THUMB_WIDTH / 2);
     }
@@ -212,6 +348,7 @@ mod tests {
             &mut images,
             Path::new("/repo"),
             Path::new("/repo"),
+            "s1",
         );
         assert!(puts.is_empty());
         assert_eq!(images[0].path.as_deref(), Some("assets/logo.png"));
@@ -220,7 +357,9 @@ mod tests {
     }
 
     #[test]
-    fn produced_images_move_to_the_blob_layer() {
+    fn produced_images_write_a_workspace_file_and_a_blob() {
+        let dir = std::env::temp_dir().join(format!("genet-produced-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let bytes = png_bytes(100, 100);
         let mut images = vec![ToolImage {
             alt: "generate_image".into(),
@@ -229,17 +368,23 @@ mod tests {
             thumb: None,
             path: None,
         }];
-        let puts = shed_tool_images("t1", &mut images, Path::new("/repo"), Path::new("/repo"));
+        let puts = shed_tool_images("t1", &mut images, &dir, &dir, "s1");
         assert_eq!(puts.len(), 1);
         assert_eq!(puts[0].item_id, "t1:img:0");
         assert_eq!(puts[0].value["mime"], "image/png");
         assert!(images[0].data_base64.is_none());
-        assert!(images[0].path.is_none());
+        let relative = images[0].path.as_deref().expect("produced file path");
+        assert!(relative.starts_with(".genethub/sessions/s1/images/"));
+        assert!(relative.ends_with(".png"));
+        assert_eq!(std::fs::read(dir.join(relative)).unwrap(), bytes);
         assert!(images[0].thumb.is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn paths_outside_the_workspace_become_blobs() {
+    fn paths_outside_the_workspace_become_session_files() {
+        let dir = std::env::temp_dir().join(format!("genet-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let bytes = png_bytes(10, 10);
         let mut images = vec![ToolImage {
             alt: "Read: /etc/secret.png".into(),
@@ -248,9 +393,11 @@ mod tests {
             thumb: None,
             path: Some("/etc/secret.png".into()),
         }];
-        let puts = shed_tool_images("t1", &mut images, Path::new("/repo"), Path::new("/repo"));
+        let puts = shed_tool_images("t1", &mut images, &dir, &dir, "s1");
         assert_eq!(puts.len(), 1);
-        assert!(images[0].path.is_none());
+        let relative = images[0].path.as_deref().expect("session file");
+        assert!(relative.starts_with(".genethub/sessions/s1/images/"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -262,7 +409,13 @@ mod tests {
             thumb: None,
             path: None,
         }];
-        let puts = shed_tool_images("t1", &mut images, Path::new("/repo"), Path::new("/repo"));
+        let puts = shed_tool_images(
+            "t1",
+            &mut images,
+            Path::new("/repo"),
+            Path::new("/repo"),
+            "s1",
+        );
         assert!(puts.is_empty());
         assert!(images[0].alt.contains("too large"));
         assert!(images[0].thumb.is_none());
@@ -280,10 +433,13 @@ mod tests {
             thumb: None,
             path: Some("assets/pic.png".into()),
         }];
-        let puts = shed_tool_images("t1", &mut images, &dir, &dir);
+        let puts = shed_tool_images("t1", &mut images, &dir, &dir, "s1");
         assert!(puts.is_empty());
         assert_eq!(images[0].path.as_deref(), Some("assets/pic.png"));
-        let thumb = images[0].thumb.as_ref().expect("workspace file thumbnailed");
+        let thumb = images[0]
+            .thumb
+            .as_ref()
+            .expect("workspace file thumbnailed");
         assert_eq!((thumb.width, thumb.height), (200, 100));
         std::fs::remove_dir_all(&dir).ok();
     }

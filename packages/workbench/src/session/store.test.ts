@@ -1354,6 +1354,57 @@ describe("asking the machine about rounds", () => {
     expect(useWorkbench.getState().timeline.roundLayers.r1?.nextCursor).toBeUndefined();
   });
 
+  it("seeds the expanded trunk into roundTrunks so the last gallery can hoist", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "t1",
+      blobCount: 1,
+      title: "画",
+      batches: [{ index: 0, firstItemId: "t1:img:0", blobCount: 1, text: "1 张图片" }],
+    };
+    const expanded = {
+      summary,
+      batches: [
+        {
+          summary: summary.batches[0]!,
+          monologue: "",
+          blobs: [
+            {
+              itemId: "t1:img:0",
+              kind: "image" as const,
+              overview: "山",
+              path: ".genethub/sessions/s1/images/aa.png",
+            },
+          ],
+        },
+      ],
+    };
+    const client = {
+      call: async () => ({
+        type: "roundLayer",
+        data: { round, trunks: [summary], expandedTrunk: expanded },
+      }),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      timeline: emptyTimeline(),
+      sessionTimelines: { s1: emptyTimeline() },
+    });
+
+    await useWorkbench.getState().loadRound("r1");
+
+    expect(useWorkbench.getState().timeline.roundTrunks["r1:0"]).toEqual(expanded);
+  });
+
   function counting() {
     let inFlight = 0;
     let peak = 0;

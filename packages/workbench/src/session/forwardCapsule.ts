@@ -1,4 +1,5 @@
 import type {
+  Attachment,
   BlobPayload,
   BlobRef,
   RoundSummary,
@@ -7,6 +8,12 @@ import type {
   TrunkLocator,
 } from "@genehub/proto";
 
+import {
+  appendUnlinkedThumbs,
+  attachmentsFromInlineImages,
+  inlineImagesFromTrunks,
+  type InlineImage,
+} from "./roundGallery";
 import { formatClock } from "./selectionCopy";
 import type { SelectableMessage } from "./selection";
 
@@ -96,6 +103,8 @@ export interface BuiltCapsule {
   overBudget: boolean;
   stats: CapsuleStats;
   wanted: CapsuleWanted;
+  /** Inlined thumbs so the receiving composer can attach real pictures. */
+  imageAttachments: Attachment[];
 }
 
 export function estimateTokens(text: string): number {
@@ -144,14 +153,22 @@ function referenceId(sessionId: string, itemId: string): string {
   return `ghref:item:${sessionId}:${itemId}`;
 }
 
-function renderMessage(source: ForwardSource, message: CapsuleMessage): string {
+function renderMessage(
+  source: ForwardSource,
+  message: CapsuleMessage,
+  images: readonly InlineImage[],
+): string {
   const at = message.atMs === null ? "unknown" : formatClock(message.atMs);
   const round = message.roundId ?? "none";
   const tag = message.role;
+  const text =
+    message.role === "assistant" && images.length > 0
+      ? appendUnlinkedThumbs(message.text, images)
+      : message.text;
   const attachmentLines = message.attachments
     .map((attachment) => `[attachment name="${attachment.name}" mime="${attachment.mime}"]`)
     .join("\n");
-  const body = attachmentLines ? `${message.text}\n${attachmentLines}` : message.text;
+  const body = attachmentLines ? `${text}\n${attachmentLines}` : text;
   return `[${tag} at="${at}" round="${round}"]\n${body}\n[/${tag}]\n[source-ref id="${referenceId(source.sessionId, message.id)}"]`;
 }
 
@@ -272,6 +289,8 @@ export function buildForwardCapsule(
     return payload ? renderBlobBody(payload) : null;
   };
 
+  const inlineImages = inlineImagesFromTrunks(Object.values(data.trunks));
+
   const assemble = (coverage: string): string => {
     const parts: string[] = [buildHeader(source, messages, options)];
     parts.push("\n[selected-history]");
@@ -280,7 +299,7 @@ export function buildForwardCapsule(
         clippedMessages.has(message.id) && [...message.text].length > MESSAGE_CLIP_CHARS
           ? { ...message, text: clip(message.text, MESSAGE_CLIP_CHARS) }
           : message;
-      parts.push(renderMessage(source, rendered));
+      parts.push(renderMessage(source, rendered, inlineImages));
     }
     parts.push("[/selected-history]");
 
@@ -426,6 +445,7 @@ export function buildForwardCapsule(
     overBudget,
     stats,
     wanted: { trunks: wantedTrunks, blobs: wantedBlobs },
+    imageAttachments: attachmentsFromInlineImages(inlineImages),
   };
 }
 

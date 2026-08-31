@@ -40,6 +40,52 @@ describe("buildSelectionCopy", () => {
     expect(built.text.indexOf("## 用户")).toBeLessThan(built.text.indexOf("## 助手"));
   });
 
+  it("把未写入助手正文的汇总图补成 markdown 图片链接", () => {
+    const built = buildSelectionCopy(
+      { sessionId: "s-1", agentLabel: "Codex", spanMs: null },
+      [
+        {
+          id: "a1",
+          role: "assistant",
+          text: "画好了。",
+          attachments: [],
+          atMs: null,
+          gallery: [
+            { alt: "山", path: ".genethub/sessions/s1/images/aa.png" },
+            { alt: "海", path: ".genethub/sessions/s1/images/bb.png" },
+          ],
+        },
+      ],
+    );
+    expect(built.text).toContain("画好了。");
+    expect(built.text).toContain("![山](.genethub/sessions/s1/images/aa.png)");
+    expect(built.text).toContain("![海](.genethub/sessions/s1/images/bb.png)");
+  });
+
+  it("prefers an inlined thumb data URL over the workspace path", () => {
+    const built = buildSelectionCopy(
+      { sessionId: "s-1", agentLabel: "Codex", spanMs: null },
+      [
+        {
+          id: "a1",
+          role: "assistant",
+          text: "画好了。",
+          attachments: [],
+          atMs: null,
+          gallery: [
+            {
+              alt: "山",
+              path: ".genethub/sessions/s1/images/aa.png",
+              dataUrl: "data:image/jpeg;base64,dGh1bWI=",
+            },
+          ],
+        },
+      ],
+    );
+    expect(built.text).toContain("![山](data:image/jpeg;base64,dGh1bWI=)");
+    expect(built.text).not.toContain(".genethub/sessions/s1/images/aa.png");
+  });
+
   it("超过软上限时标记，由调用方提示", () => {
     const built = buildSelectionCopy(
       { sessionId: "s-1", agentLabel: null, spanMs: null },

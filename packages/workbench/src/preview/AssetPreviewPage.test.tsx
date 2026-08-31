@@ -1,10 +1,12 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AssetPreviewMetadata } from "@genehub/proto";
 
+import type { Client } from "../protocol/client";
 import {
+  AssetPreviewPage,
   HtmlDocument,
   PreviewTransferSummary,
   isolatedHtml,
@@ -359,5 +361,63 @@ describe("active single-file HTML Preview", () => {
       "dom.jsonl",
       "frame-001.webp",
     ]);
+  });
+});
+
+describe("image Preview", () => {
+  afterEach(() => {
+    cleanup();
+    Reflect.deleteProperty(URL, "createObjectURL");
+    Reflect.deleteProperty(URL, "revokeObjectURL");
+  });
+
+  it("renders a PNG through <img> without decoding it as UTF-8", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff]);
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: () => "blob:preview-png",
+    });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: () => {} });
+    const client = {
+      identity: { machineId: "m_device" },
+      preview: vi.fn(async () => ({
+        metadata: {
+          kind: "image" as const,
+          mediaType: "image/png",
+          sourceBytes: png.byteLength,
+          version: "a".repeat(32),
+        },
+        bytes: png,
+        transfer: {
+          transport: "fabric" as const,
+          responseBytes: png.byteLength,
+          elapsedMs: 12,
+          firstByteMs: 3,
+          transferMs: 9,
+          averageBytesPerSecond: 1000,
+          chunkCount: 1,
+          largestChunkBytes: png.byteLength,
+        },
+      })),
+    };
+
+    render(
+      <AssetPreviewPage
+        source={{
+          deviceHandle: "m_device",
+          workspaceHandle: "ws_1",
+          path: "r_root/.genethub/sessions/s1/images/abc.png",
+        }}
+        chrome="embedded"
+        client={client as unknown as Client}
+      />,
+    );
+
+    const image = await screen.findByRole("img", { name: "预览" });
+    expect(image).toHaveAttribute("src", "blob:preview-png");
+    expect(client.preview).toHaveBeenCalledWith(
+      "ws_1",
+      "r_root/.genethub/sessions/s1/images/abc.png",
+    );
   });
 });

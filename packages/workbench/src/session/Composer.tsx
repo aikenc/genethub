@@ -283,13 +283,14 @@ export function Composer({
         ? `${forwardDraft.capsule}\n\n${text}`
         : forwardDraft.capsule
       : text;
+    const outgoing = [...(forwardDraft?.attachments ?? []), ...attachments];
     speechInput.dismissReview();
     setSpeechTextRange(null);
     setActiveSpeechSpan(null);
     setDraft("");
     setAttachments([]);
     setDismissed(false);
-    onSend(payload, attachments);
+    onSend(payload, outgoing);
     if (forwardDraft) onClearForwardDraft?.();
   };
 
@@ -461,6 +462,9 @@ export function Composer({
                   ? `${(forwardDraft.estimatedTokens / 1000).toFixed(1)}k`
                   : forwardDraft.estimatedTokens}{" "}
                 tokens
+                {forwardDraft.attachments && forwardDraft.attachments.length > 0
+                  ? ` · ${forwardDraft.attachments.length} 张图`
+                  : ""}
               </span>
               <button
                 type="button"
@@ -808,7 +812,11 @@ export function Composer({
                 aria-label="发送"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => send()}
-                disabled={disabled || speechInput.busy || (draft.trim().length === 0 && attachments.length === 0)}
+                disabled={
+                  disabled ||
+                  speechInput.busy ||
+                  (draft.trim().length === 0 && attachments.length === 0 && !forwardDraft)
+                }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >
                 <svg

@@ -259,6 +259,9 @@ export function ForwardDialog({
           estimatedTokens: built.estimatedTokens,
           sourceSessionId: stableSource.sessionId,
           sourceTitle: stableSource.sessionTitle,
+          ...(built.imageAttachments.length > 0
+            ? { attachments: built.imageAttachments }
+            : {}),
         });
       } else if (targetSessionId) {
         setForwardDraft({
@@ -268,6 +271,9 @@ export function ForwardDialog({
           estimatedTokens: built.estimatedTokens,
           sourceSessionId: stableSource.sessionId,
           sourceTitle: stableSource.sessionTitle,
+          ...(built.imageAttachments.length > 0
+            ? { attachments: built.imageAttachments }
+            : {}),
         });
         void selectSession(targetSessionId);
       }

@@ -1,6 +1,6 @@
 import type { BlobRef, ImageThumb } from "@genehub/proto";
-import { useState } from "react";
 
+import { resolveArtifactRef } from "../preview/resolveArtifactRef";
 import { useWorkbench } from "./store";
 import { useSessionArtifact } from "./useSessionArtifact";
 
@@ -9,52 +9,62 @@ export type StripImage = {
   id: string;
   alt: string;
   thumb?: ImageThumb;
-  /** Workspace-relative path of an image the agent read; opens via preview. */
+  /** Workspace-relative path; click opens the original through asset.preview. */
   path?: string;
-  /** Blob of an image the agent produced; expands in place via `blob.get`. */
+  /** Blob of an image the agent produced; kept for fork, not for Preview. */
   blob?: BlobRef;
 };
 
 /**
- * A horizontal strip of image thumbnails. Read images (workspace files) open
- * through the preview float; produced images expand in place from their blob,
- * falling back to the thumbnail when no ref is at hand (the flat timeline
- * carries no refs — the batch layer does). Every raster renders through
- * `<img>` and never inline markup, which is what keeps a script-bearing SVG
- * inert.
+ * A horizontal strip of image thumbnails. Read images and produced images
+ * both open the same Preview float: the path is resolved the way Markdown
+ * file links are, then `asset.preview` loads the original. Every raster
+ * renders through `<img>` and never inline markup, which is what keeps a
+ * script-bearing SVG inert.
  */
-export function ImageThumbStrip({ images }: { images: StripImage[] }) {
+export function ImageThumbStrip({
+  images,
+  size = "process",
+}: {
+  images: StripImage[];
+  /** Process cards stay compact; turn-body galleries use document sizing. */
+  size?: "process" | "document";
+}) {
   const artifact = useSessionArtifact();
   const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
-  const loadBlob = useWorkbench((state) => state.loadBlob);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const expanded = images.find((image) => image.id === expandedId) ?? null;
+  const previewFloat = useWorkbench((state) => state.previewFloat);
+
+  const openImage = (image: StripImage) => {
+    if (!image.path || !artifact) return;
+    const resolved = resolveArtifactRef(image.path, artifact);
+    if (resolved.kind !== "preview") return;
+    openPreviewFloat({
+      deviceHandle: artifact.deviceHandle,
+      workspaceHandle: artifact.workspaceHandle,
+      path: resolved.path,
+      sessionId: artifact.sessionId ?? null,
+    });
+  };
+
   return (
     <div data-testid="image-thumb-strip">
       <div className="flex flex-wrap gap-1.5 py-1">
-        {images.map((image) => (
-          <ImageThumbTile
-            key={image.id}
-            image={image}
-            selected={expandedId === image.id}
-            onOpen={() => {
-              if (image.path && artifact?.deviceHandle && artifact.workspaceHandle) {
-                openPreviewFloat({
-                  deviceHandle: artifact.deviceHandle,
-                  workspaceHandle: artifact.workspaceHandle,
-                  path: image.path,
-                  sessionId: artifact.sessionId ?? null,
-                });
-                return;
-              }
-              const next = expandedId === image.id ? null : image.id;
-              setExpandedId(next);
-              if (next && image.blob) void loadBlob(image.blob);
-            }}
-          />
-        ))}
+        {images.map((image) => {
+          const resolved =
+            image.path && artifact ? resolveArtifactRef(image.path, artifact) : null;
+          const selected =
+            resolved?.kind === "preview" && previewFloat?.path === resolved.path;
+          return (
+            <ImageThumbTile
+              key={image.id}
+              image={image}
+              selected={selected}
+              size={size}
+              onOpen={() => openImage(image)}
+            />
+          );
+        })}
       </div>
-      {expanded ? <ExpandedImage image={expanded} /> : null}
     </div>
   );
 }
@@ -62,14 +72,40 @@ export function ImageThumbStrip({ images }: { images: StripImage[] }) {
 function ImageThumbTile({
   image,
   selected,
+  size,
   onOpen,
 }: {
   image: StripImage;
   selected: boolean;
+  size: "process" | "document";
   onOpen: () => void;
 }) {
   const thumb = image.thumb;
   const ratio = thumb && thumb.height > 0 ? thumb.width / thumb.height : 1;
+  if (size === "document") {
+    return (
+      <button
+        type="button"
+        onClick={onOpen}
+        title={image.alt}
+        aria-pressed={selected}
+        className={`gh-markdown-image-ref ${selected ? "border-accent" : ""}`}
+        data-testid="image-thumb"
+        data-size="document"
+      >
+        {thumb ? (
+          <img
+            src={`data:${thumb.mime};base64,${thumb.dataBase64}`}
+            alt={image.alt}
+            className="gh-markdown-image"
+          />
+        ) : (
+          <span className="px-2 py-6 text-xs text-muted">图片</span>
+        )}
+        {image.alt ? <span className="gh-markdown-image-ref-label">{image.alt}</span> : null}
+      </button>
+    );
+  }
   return (
     <button
       type="button"
@@ -94,40 +130,5 @@ function ImageThumbTile({
         </span>
       )}
     </button>
-  );
-}
-
-function ExpandedImage({ image }: { image: StripImage }) {
-  const payload = useWorkbench((state) =>
-    image.blob ? state.timeline.blobs[image.blob.id] : undefined,
-  );
-  const value = payload?.value;
-  const source =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? (value as { mime?: unknown; dataBase64?: unknown })
-      : null;
-  const mime = typeof source?.mime === "string" ? source.mime : "";
-  const data = typeof source?.dataBase64 === "string" ? source.dataBase64 : "";
-  const fallback = image.thumb
-    ? { src: `data:${image.thumb.mime};base64,${image.thumb.dataBase64}`, blurred: true }
-    : null;
-  return (
-    <div className="max-h-96 overflow-auto border-t border-line p-2" data-testid="image-expanded">
-      {mime.startsWith("image/") && data ? (
-        <img
-          src={`data:${mime};base64,${data}`}
-          alt={image.alt}
-          className="max-h-[352px] max-w-full rounded-md"
-        />
-      ) : fallback ? (
-        <img
-          src={fallback.src}
-          alt={image.alt}
-          className="max-h-[352px] max-w-full rounded-md"
-        />
-      ) : (
-        <p className="text-xs text-muted">正在加载…</p>
-      )}
-    </div>
   );
 }

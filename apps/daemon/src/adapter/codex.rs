@@ -2213,6 +2213,37 @@ fn item_frame(
                 }],
             });
         }
+        // Native image generation. The picture crosses the wire as raw base64
+        // in `result` with no mime and an extensionless `savedPath`, so the
+        // mime comes from the payload signature. Treated as a produced image:
+        // no workspace path, the daemon moves the payload to the blob layer.
+        "imageGeneration" => {
+            let (mime, data) = match item.get("result").and_then(Value::as_str) {
+                Some(raw) => split_image_payload(raw),
+                None => (None, None),
+            };
+            let alt = text_of("revisedPrompt");
+            emit(TimelineItem::ToolCall {
+                id,
+                name: "Generate image".into(),
+                status: tool_status(item, settled),
+                detail: ToolCallDetail::Unknown { raw: item.clone() },
+                images: match data {
+                    Some(data_base64) => vec![ToolImage {
+                        alt: if alt.is_empty() {
+                            "Generate image".into()
+                        } else {
+                            alt
+                        },
+                        mime: mime.unwrap_or_else(|| "image/png".into()),
+                        data_base64: Some(data_base64),
+                        thumb: None,
+                        path: None,
+                    }],
+                    None => vec![],
+                },
+            });
+        }
         "webSearch" => emit(TimelineItem::ToolCall {
             id,
             name: "Web search".into(),
@@ -2417,6 +2448,22 @@ fn plan(params: &Value, state: &mut TurnState, events: &broadcast::Sender<Sessio
 /// MCP tool results carry content blocks; the image ones would otherwise be
 /// dropped by the text-only detail path. They are produced bytes, never
 /// workspace reads, so no source path is attached.
+/// Splits an image payload into (mime, raw base64). Accepts both a bare
+/// base64 string (mime sniffed from the magic prefix) and a `data:` URL
+/// (mime taken from the mediatype).
+fn split_image_payload(raw: &str) -> (Option<String>, Option<String>) {
+    if let Some(rest) = raw.strip_prefix("data:") {
+        if let Some((mediatype, data)) = rest.split_once(";base64,") {
+            return (Some(mediatype.to_string()), Some(data.to_string()));
+        }
+        return (None, None);
+    }
+    (
+        crate::session::images::sniff_image_mime_base64(raw),
+        Some(raw.to_string()),
+    )
+}
+
 fn mcp_result_images(item: &Value, name: &str) -> Vec<ToolImage> {
     item.get("result")
         .and_then(|result| result.get("content"))
@@ -3554,6 +3601,57 @@ mod tests {
         assert_eq!(decode_base64("aGk=").expect("decodes"), b"hi");
         assert_eq!(decode_base64("YQ==").expect("decodes"), b"a");
         assert!(decode_base64("!!!").is_err());
+    }
+
+    /// Native image generation hands the picture over as raw base64 in
+    /// `result`; it must surface as a produced image, not vanish into an
+    /// unknown-tool payload.
+    #[test]
+    fn image_generation_result_becomes_a_produced_tool_image() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        let item = json!({
+            "type": "imageGeneration",
+            "id": "exec-1",
+            "status": "completed",
+            "result": "iVBORw0KGgoAAAANSUhEUg==",
+            "revisedPrompt": "a landscape",
+            "savedPath": "/root/.codex/generated_images/t/exec-1",
+        });
+
+        item_frame(&item, true, &mut state, &events);
+
+        match seen.try_recv().expect("a tool call") {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { name, images, .. },
+                ..
+            } => {
+                assert_eq!(name, "Generate image");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].alt, "a landscape");
+                assert_eq!(images[0].mime, "image/png");
+                assert!(images[0].path.is_none());
+                assert_eq!(
+                    images[0].data_base64.as_deref(),
+                    Some("iVBORw0KGgoAAAANSUhEUg==")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_image_payload_accepts_data_urls_and_sniffs_bare_base64() {
+        assert_eq!(
+            split_image_payload("data:image/webp;base64,UklGRhI="),
+            (Some("image/webp".into()), Some("UklGRhI=".into()))
+        );
+        assert_eq!(
+            split_image_payload("/9j/4AAQ"),
+            (Some("image/jpeg".into()), Some("/9j/4AAQ".into()))
+        );
+        assert_eq!(split_image_payload("abcdef"), (None, Some("abcdef".into())));
+        assert_eq!(split_image_payload("data:broken"), (None, None));
     }
 
     #[test]

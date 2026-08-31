@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import mermaid from "mermaid";
 import { describe, expect, it, vi } from "vitest";
@@ -177,6 +177,111 @@ describe("an agent's reply", () => {
     useWorkbench.setState({ previewFloat: null });
   });
 
+  it("renders a workspace image link inline and opens Preview on click", async () => {
+    const create = vi.fn((_blob: Blob) => "blob:painting");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    useWorkbench.setState({ previewFloat: null });
+    const loadPreview = vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3]),
+      mediaType: "image/png",
+    }));
+    const { unmount } = render(
+      <Markdown
+        text="可在这里打开预览：[landscape-painting.png](assets/landscape-painting.png)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+          sessionId: "s_origin",
+          loadPreview,
+        }}
+      />,
+    );
+
+    expect(loadPreview).toHaveBeenCalledWith("r_product/assets/landscape-painting.png");
+    const ref = await screen.findByTestId("markdown-image-ref");
+    expect(ref.querySelector("img")).toHaveAttribute("src", "blob:painting");
+    expect(ref).toHaveTextContent("landscape-painting.png");
+
+    await userEvent.click(ref);
+    expect(useWorkbench.getState().previewFloat).toEqual({
+      deviceHandle: "m_device",
+      workspaceHandle: "w_docs",
+      path: "r_product/assets/landscape-painting.png",
+      sessionId: "s_origin",
+    });
+    useWorkbench.setState({ previewFloat: null });
+    unmount();
+    Reflect.deleteProperty(URL, "createObjectURL");
+    Reflect.deleteProperty(URL, "revokeObjectURL");
+  });
+
+  it("opens Preview when an inline workspace image is clicked", async () => {
+    const create = vi.fn((_blob: Blob) => "blob:inline-painting");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: create });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    useWorkbench.setState({ previewFloat: null });
+    const loadPreview = vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3]),
+      mediaType: "image/png",
+    }));
+    const { unmount } = render(
+      <Markdown
+        text="![高山湖泊](assets/alpine-lake.png)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+          sessionId: "s_origin",
+          loadPreview,
+        }}
+      />,
+    );
+
+    const embed = await screen.findByTestId("markdown-image-embed");
+    expect(embed.querySelector("img")).toHaveAttribute("src", "blob:inline-painting");
+    expect(embed.querySelector("img")).toHaveAttribute("alt", "高山湖泊");
+
+    await userEvent.click(embed);
+    expect(useWorkbench.getState().previewFloat).toEqual({
+      deviceHandle: "m_device",
+      workspaceHandle: "w_docs",
+      path: "r_product/assets/alpine-lake.png",
+      sessionId: "s_origin",
+    });
+    useWorkbench.setState({ previewFloat: null });
+    unmount();
+    Reflect.deleteProperty(URL, "createObjectURL");
+    Reflect.deleteProperty(URL, "revokeObjectURL");
+  });
+
+  it("keeps an image link as a plain link when the read fails", async () => {
+    const loadPreview = vi.fn(async () => null);
+    render(
+      <Markdown
+        text="[丢了](assets/gone.png)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+          loadPreview,
+        }}
+      />,
+    );
+
+    // The link never disappears into a broken frame: while the read is pending
+    // and after it fails, the caption stays a working Preview link.
+    const link = await screen.findByRole("link", { name: "丢了" });
+    await waitFor(() => expect(loadPreview).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(link).toHaveAttribute(
+      "href",
+      "http://localhost:3000/assets/preview/v2/m_device/w_docs/r_product/assets/gone.png",
+    );
+    expect(screen.queryByTestId("markdown-image-ref")).toBeNull();
+  });
+
   it("puts a code block behind a copy button rather than in the prose", async () => {
     const write = vi.fn(async () => {});
     // Only the clipboard: replacing the whole of `navigator` would drop every
@@ -311,6 +416,50 @@ describe("Preview document selection", () => {
       />,
     );
     expect(screen.getByText("可选中的一段正文。")).toBe(paragraph);
+  });
+
+  it("paints a session thumb without fetching the original file", async () => {
+    const loadPreview = vi.fn(async () => ({
+      bytes: new Uint8Array([1, 2, 3]),
+      mediaType: "image/png",
+    }));
+    render(
+      <Markdown
+        text="[湖](assets/alpine-lake.png)"
+        artifact={{
+          deviceHandle: "m_device",
+          workspaceHandle: "w_docs",
+          folders: [{ root: "/srv/product", rootHandle: "r_product" }],
+          sessionId: "s_origin",
+          loadPreview,
+          inlineImages: [
+            {
+              path: "assets/alpine-lake.png",
+              mime: "image/jpeg",
+              dataBase64: "dGh1bWI=",
+            },
+          ],
+        }}
+      />,
+    );
+
+    const ref = await screen.findByTestId("markdown-image-ref");
+    expect(ref.querySelector("img")).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,dGh1bWI=",
+    );
+    expect(loadPreview).not.toHaveBeenCalled();
+  });
+
+  it("renders a forwarded data-image embed and still blocks other data URLs", () => {
+    render(
+      <Markdown text={"![山](data:image/jpeg;base64,dGh1bWI=)\n\n![坏](data:text/html;base64,PHNjcmlwdD4=)"} />,
+    );
+    expect(screen.getByRole("img", { name: "山" })).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,dGh1bWI=",
+    );
+    expect(screen.getByText("图片已阻止：坏")).toBeInTheDocument();
   });
 
   it("keeps standalone source nodes when a parent re-renders around them", () => {

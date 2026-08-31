@@ -293,7 +293,11 @@ function PreviewDocument({
     },
     [client, workspaceHandle],
   );
-  const text = useMemo(() => decodeText(bytes), [bytes]);
+  // Only markdown/text are UTF-8. Decoding a PNG here crashed the workbench.
+  const text = useMemo(() => {
+    if (metadata.kind !== "markdown" && metadata.kind !== "text") return "";
+    return decodeText(bytes);
+  }, [bytes, metadata.kind]);
   const artifact = useMemo(
     () => ({
       deviceHandle,

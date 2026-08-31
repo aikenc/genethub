@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImportContinuation,
+    BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImageThumb, ImportContinuation,
     PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
     SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
     UnsupportedFormat,
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::rounds::RoundRecord;
+use super::rounds::{self, RoundRecord};
 use crate::adapter::PersistHandle;
 
 #[derive(Debug)]
@@ -317,6 +317,10 @@ enum TrunkRow {
         overview: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blob: Option<BlobRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thumb: Option<ImageThumb>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
 }
 
@@ -731,7 +735,8 @@ impl Store {
         self.prepare_write(
             workspace_id,
             session_id,
-            path.parent().expect("fork-appendix.jsonl always has a parent"),
+            path.parent()
+                .expect("fork-appendix.jsonl always has a parent"),
         )?;
         let mut encoded = Vec::new();
         for row in rows {
@@ -1208,6 +1213,8 @@ impl Store {
                         kind: blob.kind,
                         overview: blob.overview.clone(),
                         blob: blob.blob.clone(),
+                        thumb: blob.thumb.clone(),
+                        path: blob.path.clone(),
                     })?
                 )?;
             }
@@ -1322,6 +1329,8 @@ impl Store {
                     kind,
                     overview,
                     blob,
+                    thumb,
+                    path,
                 }) => {
                     // A blob row before any batch row means a truncated write.
                     // Attaching it to a synthetic batch keeps the content
@@ -1348,8 +1357,8 @@ impl Store {
                             kind,
                             overview,
                             blob,
-                            thumb: None,
-                            path: None,
+                            thumb,
+                            path,
                         });
                 }
                 Err(error) => {
@@ -1360,10 +1369,10 @@ impl Store {
                 }
             }
         }
-        Ok(RoundTrunk {
-            summary: summary.clone(),
-            batches,
-        })
+        let batches = rounds::split_produced_image_batches(batches);
+        let mut summary = summary.clone();
+        summary.batches = batches.iter().map(|batch| batch.summary.clone()).collect();
+        Ok(RoundTrunk { summary, batches })
     }
 
     // -- blob layer ---------------------------------------------------------
@@ -1571,6 +1580,24 @@ pub fn normalize_session_title(title: &str) -> Option<String> {
     Some(trimmed.chars().take(120).collect())
 }
 
+fn has_cjk(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{4E00}'..='\u{9FFF}'
+                | '\u{3400}'..='\u{4DBF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '\u{3040}'..='\u{30FF}'
+        )
+    })
+}
+
+/// Cursor often auto-names in English. Keep the first-prompt title when the
+/// user wrote CJK and the extraction did not.
+pub fn agent_title_fits_current(current: Option<&str>, incoming: &str) -> bool {
+    !matches!(current, Some(current) if has_cjk(current) && !has_cjk(incoming))
+}
+
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -1679,6 +1706,22 @@ mod project_home_tests {
         let meta: SessionMeta = serde_json::from_str(raw).unwrap();
         assert!(!meta.title_locked);
         assert_eq!(meta.title.as_deref(), Some("旧会话"));
+    }
+
+    #[test]
+    fn latin_agent_title_does_not_replace_a_cjk_prompt_title() {
+        assert!(!agent_title_fits_current(
+            Some("生成三张风景画，简笔风"),
+            "Sketchy Scenery Creator"
+        ));
+        assert!(agent_title_fits_current(
+            Some("Fix the login redirect"),
+            "修复登录跳转"
+        ));
+        assert!(agent_title_fits_current(
+            Some("生成三张风景画，简笔风"),
+            "简笔风景"
+        ));
     }
 
     #[test]
