@@ -128,6 +128,7 @@ impl Rpc {
                 proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
+            max_bulk_stream_window_bytes: None,
         };
         timeout_send(
             &mut socket,
@@ -564,6 +565,7 @@ async fn link_up(
         client_name: format!("{}-cli", crate::channel::CLI_BINARY),
         auth,
         rtc_supported: false,
+        max_bulk_stream_window_bytes: None,
     };
     let link = crate::transport::fabric::dial(endpoint, route_ticket, &hello)
         .await

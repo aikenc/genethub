@@ -7,6 +7,26 @@ mod host;
 #[cfg(not(target_family = "wasm"))]
 pub use host::*;
 
+/// The shell a terminal opens, for the OS *behind* this build.
+///
+/// Native builds pass `cfg!(windows)`; the component passes
+/// `guest_paths::windows_host()`, because its own target is always wasm and
+/// `cfg!(windows)` can never answer for the machine it runs on. Two callers
+/// used to keep two copies of this table and the component's copy silently
+/// lost its Windows row — sharing one is how both stay right.
+///
+/// On a Windows host every environment value reaches the component in guest
+/// form (`/c/Windows/system32/cmd.exe`), which is also the form the pty
+/// import accepts: `host_path_from_guest` translates `argv[0]` back on the
+/// way out.
+fn default_shell_for(windows_host: bool, env: impl Fn(&str) -> Option<String>) -> String {
+    if windows_host {
+        env("COMSPEC").unwrap_or_else(|| "powershell.exe".into())
+    } else {
+        env("SHELL").unwrap_or_else(|| "/bin/sh".into())
+    }
+}
+
 /// The same terminals, with the fork/exec half moved out to the shell.
 ///
 /// What changes here is only where the blocking lives. Native parks a thread
@@ -198,9 +218,56 @@ mod guest {
     }
 
     fn default_shell() -> String {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        super::default_shell_for(crate::guest_paths::windows_host(), |key| {
+            std::env::var(key).ok()
+        })
     }
 }
 
 #[cfg(target_family = "wasm")]
 pub use guest::*;
+
+#[cfg(test)]
+mod tests {
+    use super::default_shell_for;
+
+    fn env_with<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    #[test]
+    fn a_windows_host_prefers_comspec() {
+        // The component sees COMSPEC in guest form; translating it back is
+        // the pty import's job, not this table's.
+        assert_eq!(
+            default_shell_for(
+                true,
+                env_with(&[("COMSPEC", "/c/Windows/system32/cmd.exe")])
+            ),
+            "/c/Windows/system32/cmd.exe"
+        );
+    }
+
+    #[test]
+    fn a_windows_host_without_comspec_falls_back_to_powershell() {
+        assert_eq!(default_shell_for(true, env_with(&[])), "powershell.exe");
+    }
+
+    #[test]
+    fn a_unix_host_prefers_shell() {
+        assert_eq!(
+            default_shell_for(false, env_with(&[("SHELL", "/bin/zsh")])),
+            "/bin/zsh"
+        );
+    }
+
+    #[test]
+    fn a_unix_host_without_shell_falls_back_to_sh() {
+        assert_eq!(default_shell_for(false, env_with(&[])), "/bin/sh");
+    }
+}

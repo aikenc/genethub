@@ -305,6 +305,10 @@ enum TrunkRow {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monologue: Option<String>,
+        /// Compaction reason when the batch is a context-compaction marker.
+        /// Rows written before this field existed read as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marker: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Blob {
@@ -1192,6 +1196,7 @@ impl Store {
                     blob_count: batch.summary.blob_count,
                     text: batch.summary.text.clone(),
                     monologue: batch.monologue.clone(),
+                    marker: batch.summary.marker.clone(),
                 })?
             )?;
             for blob in &batch.blobs {
@@ -1300,12 +1305,14 @@ impl Store {
                     blob_count,
                     text,
                     monologue,
+                    marker,
                 }) => batches.push(RoundBatch {
                     summary: RoundBatchSummary {
                         index,
                         first_item_id,
                         blob_count,
                         text,
+                        marker,
                     },
                     monologue,
                     blobs: Vec::new(),
@@ -1326,6 +1333,7 @@ impl Store {
                                 first_item_id: item_id.clone(),
                                 blob_count: 0,
                                 text: String::new(),
+                                marker: None,
                             },
                             monologue: None,
                             blobs: Vec::new(),

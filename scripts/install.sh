@@ -93,10 +93,10 @@ esac
 
 case "$(uname -s)" in
   Linux) os=linux ;;
-  # Naming it beats a 404 from curl. The build works — nothing is published
-  # because an unsigned macOS download is a security warning with an app behind
-  # it, so it waits for notarisation.
-  Darwin) die "no macOS build is published yet. Build from source: https://github.com/aikenc/genethub" ;;
+  # The CLI tarball needs no signature: curl does not quarantine downloads, so
+  # the binaries run without a Gatekeeper word. (The desktop .app is the one
+  # that waits for notarisation — a browser-downloaded app is quarantined.)
+  Darwin) os=darwin ;;
   *) die "no build for $(uname -s). Build from source: https://github.com/aikenc/genethub" ;;
 esac
 
@@ -106,9 +106,13 @@ case "$(uname -m)" in
   *) die "no build for $(uname -m)" ;;
 esac
 
-# Linux is published for x64 only so far. Saying so beats a 404 from curl.
+# Linux is published for x64 only, macOS for Apple Silicon only so far. Saying
+# so beats a 404 from curl.
 if [ "$os" = linux ] && [ "$arch" != x64 ]; then
   die "no Linux $arch build yet. Build from source: https://github.com/aikenc/genethub"
+fi
+if [ "$os" = darwin ] && [ "$arch" != arm64 ]; then
+  die "no macOS $arch build yet (Apple Silicon only). Build from source: https://github.com/aikenc/genethub"
 fi
 
 asset="$tarball_prefix-$os-$arch.tar.gz"
@@ -166,6 +170,13 @@ for binary in "$cli_binary" "$host_binary" "$component"; do
     *) chmod 755 "$bin_dir/$binary" ;;
   esac
 done
+
+# curl never quarantines, so this is a no-op in the normal `curl | sh` flow —
+# but a browser-downloaded tarball carried through by hand would otherwise
+# greet the first run with a Gatekeeper prompt.
+if [ "$os" = darwin ]; then
+  xattr -d com.apple.quarantine "$bin_dir/$cli_binary" "$bin_dir/$host_binary" "$bin_dir/$component" 2>/dev/null || true
+fi
 
 say ""
 say "Installed:"

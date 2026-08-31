@@ -1016,6 +1016,7 @@ export function App({
                       onPickRuntimeAxis={(axisId, valueId) =>
                         void workbench.setRuntimeAxis(axisId, valueId)
                       }
+                      onRefreshAgents={() => void workbench.refreshAgents()}
                     />
                   </>
                 ) : (

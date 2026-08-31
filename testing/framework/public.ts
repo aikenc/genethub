@@ -27,6 +27,22 @@ export {
 
 export type { CaseContext } from "./context.ts";
 export { assertions } from "./assertions/index.ts";
+export { connectProductClient } from "./drivers/client.ts";
+export type { ClientDiagnosticEvent } from "@genehub/workbench/client";
+export { createLatencyInjector, type LatencyInjector, type LatencyStats } from "./drivers/latency.ts";
+export {
+  measureTcpTransfer,
+  startShapedTcpProxy,
+  startTcpPayloadServer,
+  type NetworkLinkProfile,
+  type ShapedTcpProxy,
+  type ShapedTcpProxyStats,
+  type TcpPayloadServer,
+  type TcpTransferSample,
+} from "./drivers/network-link.ts";
+export { daemonEndpoint, type DaemonEndpoint, type DaemonHandle } from "./drivers/daemon.ts";
+export { startRelay, type RelayHandle } from "./drivers/relay.ts";
+export { startHub, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
 export { data } from "./builders/index.ts";
 export { compareQueueTails } from "./queue.ts";
 export { qualificationReasons } from "../policies/gates.ts";

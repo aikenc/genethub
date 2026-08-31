@@ -17,6 +17,8 @@ export {
 } from "./protocol/client";
 export type {
   AssetPreviewResult,
+  AssetPreviewTransferStats,
+  AssetPreviewTransport,
   ClientDiagnosticDetail,
   ClientDiagnosticEvent,
   ClientDiagnosticKind,

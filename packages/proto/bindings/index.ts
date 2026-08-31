@@ -541,9 +541,21 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  * Capability advertisement only.  Signaling remains encrypted data-plane
  * traffic and no RTC address is ever placed in this hello.
  */
-rtcSupported: boolean, };
+rtcSupported: boolean, 
+/**
+ * Optional for wire compatibility. A missing field identifies a peer
+ * from the first finite-bulk rollout, whose largest understood lease is
+ * [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+ */
+maxBulkStreamWindowBytes?: number, };
 
-export type PeerWelcome = { version: number, serverNonce: string, proof: string, };
+export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
+/**
+ * Optional for wire compatibility. A missing field is the v3 256 KiB
+ * receive lease; new clients use the larger value only for allowlisted
+ * finite bulk methods.
+ */
+maxBulkStreamWindowBytes?: number, };
 
 export type PermissionOption = { id: string, label: string, kind: PermissionOptionKind, };
 
@@ -727,7 +739,15 @@ monologue?: string, blobs: Array<BlobOverview>, };
  * A semantic group inside a trunk: one monologue and the work following it,
  * bounded to sixteen blobs even when an agent never narrates.
  */
-export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, };
+export type RoundBatchSummary = { index: number, firstItemId: string, blobCount: number, text: string, 
+/**
+ * The compaction reason when this batch is a context-compaction marker:
+ * a zero-blob batch whose only item (`firstItemId`) is the compaction
+ * event, so clients render the marker at the exact batch boundary where
+ * the context was squeezed. Rows written before this field existed read
+ * as `None` and their markers stay in the flat narrative stream.
+ */
+marker?: string, };
 
 /**
  * A page of visible trunks in one round. `nextCursor` asks for the preceding

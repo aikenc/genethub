@@ -10,6 +10,14 @@ export interface CaseContext {
   meta: CaseMeta;
   env: EnvironmentLease;
   openRoot: string;
+  /**
+   * Appends to the case's bounded public summary (4 KiB cap, truncated
+   * beyond it). A passing case's note lands in results.ndjson as its
+   * message; cases declaring `retention` also get a redacted report file.
+   */
+  note(text: string): void;
+  /** @internal */
+  takeNote(): string | undefined;
   flows: {
     main: {
       startLocalEnvironment: typeof startLocalEnvironment;
@@ -66,10 +74,23 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
   } satisfies EnvironmentLease;
   const lease = env.root ? env : createLease();
   const openRoot = process.env.TESTCTL_OPEN_ROOT ?? process.cwd();
+  const NOTE_BUDGET = 4096;
+  const notes: string[] = [];
+  let noteBytes = 0;
   return {
     meta,
     env: lease,
     openRoot,
+    note(text: string) {
+      const remaining = NOTE_BUDGET - noteBytes;
+      if (remaining <= 0) return;
+      const slice = text.length > remaining ? `${text.slice(0, remaining - 1)}…` : text;
+      notes.push(slice);
+      noteBytes += slice.length;
+    },
+    takeNote() {
+      return notes.length > 0 ? notes.join("\n") : undefined;
+    },
     flows: {
       main: {
         startLocalEnvironment,

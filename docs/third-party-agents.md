@@ -85,7 +85,7 @@ npm install -g @openai/codex
 codex login
 ```
 
-装好、能在 PATH 上找到，就会出现在 agent 选择器里；没装就不出现，不影响其他 agent（同 [testing.md](./testing.md) §4.2 的「未安装即隐藏」行为）。`codex` 和 `cursor` 多一种中间状态：装了但没登录时它会出现、但标成不可用，理由里分别是 `codex login` 和 `cursor-agent login`。Codex 未登录时不会拒绝一个回合，只会不回话（§4）；Cursor 还多搜官方安装目录，因为 Windows 桌面从开始菜单启动时，进程 `PATH` 常常还没有 `%LOCALAPPDATA%\cursor-agent`。
+装好、能被探测到，选择器里就可以点；没装或没登录的条目仍在，但会标成「未安装」或「不可用」，不影响其他 agent。`codex` 和 `cursor` 多一种中间状态：装了但没登录时标成不可用，理由里分别是 `codex login` 和 `cursor-agent login`。Codex 未登录时不会拒绝一个回合，只会不回话（§4）；Cursor 还多搜官方安装目录，因为 Windows 桌面从开始菜单启动时，进程 `PATH` 常常还没有 `%LOCALAPPDATA%\cursor-agent`。打开选择器或点「重新检测」会重新探测，装完不必重启 GeneHub。
 
 ---
 
@@ -178,11 +178,18 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 实际启动命令会附带 `--force --sandbox disabled --trust --approve-mcps`，因此 Cursor 自己的 CLI 层也默认放权；若仍收到 ACP 权限请求，就进入 §2.2 的持久化暂停/恢复流程。
 
 ```bash
+# Linux / macOS
 curl https://cursor.com/install -fsS | bash
 cursor-agent login
 ```
 
-探测先在 PATH 上找 `cursor-agent`，没有再到官方安装目录（Windows 的 `%LOCALAPPDATA%\cursor-agent`，以及 `~/.local/bin`）按系统 `PATHEXT` 查找，不写死 `.exe` / `.cmd` / `.bat`。找到后再跑 `cursor-agent status`（优先 `--format json`）；明确未登录才标不可用。登录态仍是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
+```powershell
+# Windows（PowerShell；不要用 Git Bash 套上面的 curl | bash）
+irm 'https://cursor.com/install?win32=true' | iex
+cursor-agent login
+```
+
+探测先在 PATH 上找 `cursor-agent`，没有再到官方安装目录（Windows 的 `%LOCALAPPDATA%\cursor-agent`，以及 `~/.local/bin`）。Windows 先按系统 `PATHEXT` 找 `.exe` / `.cmd` / `.bat`，再认无后缀文件——Agent 若按 Linux 脚本装到 `~/.local/bin/cursor-agent`，重探后也能看见。找到后再跑 `cursor-agent status`（优先 `--format json`）；明确未登录才标不可用。装完打开选择器或等该回合结束就会重探，不必重启桌面。登录态仍是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
 
 模型和模式列表来自 ACP 的 `session/new` 握手（`availableModels`、`availableModes` 或 `configOptions`）。其余 `configOptions` 会成为 Agent 声明的通用运行轴，例如 Fast；select 可以有两档或更多档，boolean 在界面里显示为开/关，切换时仍原样回传协议声明的 value ID。GeneHub 绝不解析或拼接模型 ID，也不把模型标签里的参数伪装成可切换能力；凭证和账号仍由 Cursor CLI 自己管理，不在 GeneHub 配置里出现。
 
