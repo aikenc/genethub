@@ -18,7 +18,12 @@ import {
   type HumanDecisionRequest,
 } from "../../framework/public.ts";
 
-import { assertCocos4EngineLock, PM_MODEL, WORK_AGENT } from "./support.ts";
+import {
+  assertCocos4EngineLock,
+  assertEffectiveProjectScale,
+  PM_MODEL,
+  WORK_AGENT,
+} from "./support.ts";
 
 const RUN_BUDGET_MS = 10 * 60_000;
 const SETUP_BUDGET_MS = 8 * 60_000;
@@ -35,9 +40,9 @@ interface ConcurrentRequirement {
 defineJourney(
   {
     id: "journey.pm-agent-mvp.same-project-concurrent-requirements",
-    title: "One project runs three budgeted PM requirements concurrently",
+    title: "One 50k-line project runs three budgeted PM requirements concurrently",
     oracle:
-      "one daemon project exposes three independent PM Session Workflow Runs, at least two Run-owned WorkSessions overlap on distinct Agent Spaces, and every Run delivers or fails closed within its own ten-minute budget",
+      "one deterministic 50k-line project exposes three independent PM Session Workflow Runs, at least two Run-owned WorkSessions overlap on distinct Agent Spaces, and every Run delivers or fails closed within its own ten-minute budget",
     catches: [
       "test-runner environment parallelism is mistaken for PM concurrency",
       "one PM Session receives or mutates another Session's WorkPackages",
@@ -45,6 +50,7 @@ defineJourney(
       "a Run continues dispatching after its wall-clock or WorkSession budget",
       "one completed or failed Run stops the other Session supervisors",
       "a cheaper flash model is silently upgraded to a max model",
+      "a tiny fixture is presented as proof that PM concurrency works on a 50k-line codebase",
     ],
     tags: ["pm-agent-mvp-concurrent-real", "product-journey"],
     llm: { default: "real", realEligible: true },
@@ -75,7 +81,9 @@ defineJourney(
   },
   async (t) => {
     await t.flows.main.requireAliyunQwen38FlashAvailable();
-    seedConcurrentBaseline(t.env.workspace);
+    const game = seedConcurrentBaseline(t.env.workspace);
+    const baselineLines = assertEffectiveProjectScale(t, game);
+    t.note(`same-project-scale baselineEffectiveSourceLines=${baselineLines}`);
     t.flows.main.seedAliyunQwen38Flash(t.env);
     const workModel = t.flows.main.configureOpencodeQwen38Flash(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -294,6 +302,7 @@ defineJourney(
       }
 
       assertConcurrentDeliverables(t, t.env.workspace);
+      const deliveredLines = assertEffectiveProjectScale(t, game);
       t.note(
         `same-project-concurrency ${JSON.stringify({
           environments: 1,
@@ -304,6 +313,7 @@ defineJourney(
           humanDecisions: decisionCount,
           elapsedMs: Date.now() - promptStartedAt,
           models: { pm: PM_MODEL, work: workModel },
+          scale: { baselineEffectiveSourceLines: baselineLines, deliveredEffectiveSourceLines: deliveredLines },
           runs: requirements.map((requirement) => {
             const run = latest!.workflowRuns.find(
               (item) => item.controllerSessionId === sessions.get(requirement.id)!.id,
@@ -514,7 +524,7 @@ function concurrentRequirements(): ConcurrentRequirement[] {
       graph: "migration",
       prompt: `${common}
 
-选择 migration。只在 migrate 节点创建一个结果包，使用 --branch work/cocos4-adapter --space-tag cocos。一个 WorkSession 内先固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30 来源与版本证据，再更新 engine.lock.json，并让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试并形成一个干净候选。不要把只读调查作为单独候选或单独评审，不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
+选择 migration。只在 migrate 节点创建一个结果包，使用 --branch work/cocos4-adapter --space-tag cocos。一个 WorkSession 内先固定官方 https://github.com/cocos/cocos4 的 4.0.0-alpha.30 来源与版本证据，再更新 engine.lock.json：顶层字段必须精确替换为 name="cocos4"、version="4.0.0-alpha.30"、source="https://github.com/cocos/cocos4"，不得保留顶层 Three.js 身份；可以增加 tag、commit 和验证命令等附加证据。让 src/render/adapter.js 暴露 cocos4 标识且保留 drawFrame 公共合同；添加合同测试并形成一个干净候选。不要把只读调查作为单独候选或单独评审，不要声称完成整个 5 万行引擎迁移，不要改每日挑战或存档迁移。`,
     },
   ];
 }
@@ -576,7 +586,7 @@ function humanDecisionRequest(
   };
 }
 
-function seedConcurrentBaseline(workspace: string): void {
+function seedConcurrentBaseline(workspace: string): string {
   mkdirSync(path.join(workspace, "repositories", "game", "src", "features"), {
     recursive: true,
   });
@@ -614,7 +624,7 @@ function seedConcurrentBaseline(workspace: string): void {
   );
   writeFileSync(
     path.join(game, "src", "main.js"),
-    "export { migrateSave } from './save.js';\nexport { renderer } from './render/adapter.js';\n",
+    "export { migrateSave } from './save.js';\nexport { renderer } from './render/adapter.js';\nexport { largeProjectSectors, simulateLargeProject } from './scale/index.js';\n",
   );
   writeFileSync(
     path.join(game, "src", "save.js"),
@@ -630,16 +640,105 @@ function seedConcurrentBaseline(workspace: string): void {
   );
   writeFileSync(
     path.join(game, "tests", "baseline.test.js"),
-    "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { migrateSave, renderer } from '../src/main.js';\ntest('baseline contracts', () => { assert.equal(migrateSave({ mode: 'arcade' }).mode, 'arcade'); assert.equal(renderer.drawFrame('scene').scene, 'scene'); });\n",
+    "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { largeProjectSectors, migrateSave, renderer, simulateLargeProject } from '../src/main.js';\ntest('baseline contracts', () => { assert.equal(migrateSave({ mode: 'arcade' }).mode, 'arcade'); assert.equal(renderer.drawFrame('scene').scene, 'scene'); });\ntest('all benchmark sectors are live production modules', () => { assert.equal(largeProjectSectors.length, 240); const result = simulateLargeProject({ wave: 7, resources: 9000 }); assert.equal(result.sectors, 240); assert.ok(result.threat > 0); assert.ok(result.defense > 0); });\n",
   );
   writeFileSync(
     path.join(game, "scripts", "build.mjs"),
     "import { mkdirSync, copyFileSync } from 'node:fs';\nmkdirSync('dist', { recursive: true });\ncopyFileSync('index.html', 'dist/index.html');\n",
   );
   writeFileSync(path.join(game, ".gitignore"), "dist/\nnode_modules/\n");
+  seedLargeProjectSource(game);
   gitInit(game);
   git(game, ["add", "-A"]);
   git(game, ["commit", "-qm", "Seed accepted H5 baseline"]);
+  return game;
+}
+
+/**
+ * Creates a deterministic, executable large-codebase benchmark before any LLM
+ * is started. The journey proves that PM/Coordinator/AgentSpace concurrency can
+ * change and verify a 50k-class repository; it does not claim that a model
+ * authored the baseline under the ten-minute Run budget.
+ *
+ * Every sector is imported by the production registry and exercised by the
+ * baseline test. This keeps the scale assertion about live project-owned source
+ * instead of comments, vendored dependencies, build output, or unreachable
+ * line-padding files.
+ */
+function seedLargeProjectSource(game: string): void {
+  const scaleRoot = path.join(game, "src", "scale");
+  mkdirSync(scaleRoot, { recursive: true });
+  const imports: string[] = [];
+  const names: string[] = [];
+  for (let sectorIndex = 0; sectorIndex < 240; sectorIndex += 1) {
+    const suffix = String(sectorIndex).padStart(3, "0");
+    const name = `sector${suffix}`;
+    const waves = Array.from({ length: 72 }, (_, waveIndex) => {
+      const threat = 12 + ((sectorIndex * 17 + waveIndex * 11) % 89);
+      const speed = 1 + ((sectorIndex + waveIndex * 3) % 9);
+      const armor = 2 + ((sectorIndex * 5 + waveIndex * 7) % 31);
+      return `    Object.freeze({ id: 'wave-${suffix}-${String(waveIndex).padStart(2, "0")}', threat: ${threat}, speed: ${speed}, armor: ${armor} }),`;
+    });
+    const modules = Array.from({ length: 72 }, (_, moduleIndex) => {
+      const power = 8 + ((sectorIndex * 13 + moduleIndex * 5) % 67);
+      const range = 3 + ((sectorIndex * 7 + moduleIndex * 2) % 24);
+      const cost = 40 + ((sectorIndex * 19 + moduleIndex * 23) % 360);
+      return `    Object.freeze({ id: 'module-${suffix}-${String(moduleIndex).padStart(2, "0")}', power: ${power}, range: ${range}, cost: ${cost} }),`;
+    });
+    const source = [
+      `export const ${name} = Object.freeze({`,
+      `  id: 'sector-${suffix}',`,
+      `  seed: ${10_000 + sectorIndex * 97},`,
+      "  enemyWaves: Object.freeze([",
+      ...waves,
+      "  ]),",
+      "  defenseModules: Object.freeze([",
+      ...modules,
+      "  ]),",
+      "});",
+      "",
+      `export function simulate${name[0]!.toUpperCase()}${name.slice(1)}(input = {}) {`,
+      "  const wave = Math.max(0, Number.isFinite(input.wave) ? Math.trunc(input.wave) : 0);",
+      "  const resources = Math.max(0, Number.isFinite(input.resources) ? input.resources : 0);",
+      `  const selectedWave = ${name}.enemyWaves[wave % ${name}.enemyWaves.length];`,
+      `  const affordable = ${name}.defenseModules.filter((module) => module.cost <= resources);`,
+      "  const defense = affordable.reduce((sum, module) => sum + module.power * module.range, 0);",
+      "  const threat = selectedWave.threat * selectedWave.speed + selectedWave.armor;",
+      `  return { sector: ${name}.id, wave: selectedWave.id, threat, defense, survives: defense >= threat };`,
+      "}",
+      "",
+    ].join("\n");
+    writeFileSync(path.join(scaleRoot, `${name}.js`), source);
+    imports.push(`import { ${name}, simulate${name[0]!.toUpperCase()}${name.slice(1)} } from './${name}.js';`);
+    names.push(name);
+  }
+  const simulations = names.map(
+    (name) => `  simulate${name[0]!.toUpperCase()}${name.slice(1)}(input),`,
+  );
+  writeFileSync(
+    path.join(scaleRoot, "index.js"),
+    [
+      ...imports,
+      "",
+      `export const largeProjectSectors = Object.freeze([${names.join(", ")}]);`,
+      "",
+      "export function simulateLargeProject(input = {}) {",
+      "  const snapshots = [",
+      ...simulations,
+      "  ];",
+      "  return snapshots.reduce(",
+      "    (summary, snapshot) => ({",
+      "      sectors: summary.sectors + 1,",
+      "      threat: summary.threat + snapshot.threat,",
+      "      defense: summary.defense + snapshot.defense,",
+      "      survivingSectors: summary.survivingSectors + (snapshot.survives ? 1 : 0),",
+      "    }),",
+      "    { sectors: 0, threat: 0, defense: 0, survivingSectors: 0 },",
+      "  );",
+      "}",
+      "",
+    ].join("\n"),
+  );
 }
 
 function assertConcurrentDeliverables(t: CaseContext, workspace: string): void {
