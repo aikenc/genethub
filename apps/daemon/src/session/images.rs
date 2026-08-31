@@ -46,7 +46,7 @@ pub struct ImageBlobPut {
 /// reuses `asset.preview`.
 pub fn shed_tool_images(
     item_id: &str,
-    images: &mut Vec<ToolImage>,
+    images: &mut [ToolImage],
     cwd: &Path,
     workspace_root: &Path,
     session_id: &str,
