@@ -2,6 +2,7 @@ import type {
   BlobOverview,
   RoundBatch,
   RoundSummary,
+  RoundTrunk,
   RoundTrunkSummary,
   SessionSummary,
   TimelineItem,
@@ -42,6 +43,16 @@ import {
   type SelectableMessage,
   type SelectionState,
 } from "./selection";
+import {
+  appendUnlinkedThumbs,
+  finalGalleryFromTrunks,
+  galleryNotInMarkdown,
+  hoistedImageIds,
+  inlineImagesFromTrunks,
+  isFinalSummaryBatch,
+  isImageOnlyBatch,
+  visibleProcessBatches,
+} from "./roundGallery";
 import { buildSelectionCopy } from "./selectionCopy";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
@@ -323,6 +334,22 @@ export function TimelineView({
   const copySelection = async () => {
     if (!selection || selection.selected.size === 0) return;
     const { messages } = selectedCapsuleInput();
+    const timelineState = useWorkbench.getState().timeline;
+    const messagesWithGallery = messages.map((message) => {
+      if (message.role !== "assistant") return message;
+      const turn = contextualTurns.find((block) => block.finalAssistant?.id === message.id);
+      if (!turn?.round) return message;
+      const layer = timelineState.roundLayers[turn.round.roundId];
+      if (!layer) return message;
+      const trunks = layer.trunks.map((summary) => {
+        const detail =
+          timelineState.roundTrunks[`${turn.round!.roundId}:${summary.index}`] ??
+          (layer.expandedTrunk?.summary.index === summary.index ? layer.expandedTrunk : undefined);
+        return detail ?? { summary, batches: [] };
+      });
+      const text = appendUnlinkedThumbs(message.text, inlineImagesFromTrunks(trunks));
+      return text === message.text ? message : { ...message, text };
+    });
     const source = forwardSource();
     const built = buildSelectionCopy(
       {
@@ -330,7 +357,7 @@ export function TimelineView({
         agentLabel: source.agentLabel,
         spanMs: source.spanMs,
       },
-      messages,
+      messagesWithGallery,
     );
     if (
       built.exceedsSoftLimit &&
@@ -509,6 +536,14 @@ export function TimelineView({
                   />
                 ))}
                 {finalAssistant ? renderItem(finalAssistant) : null}
+                {startedRounds.map((startedRound) => (
+                  <TurnBodyGallery
+                    key={`${startedRound.roundId}-gallery`}
+                    round={startedRound}
+                    finalSummaryText={roundFinalText}
+                    markdown={finalAssistant?.text}
+                  />
+                ))}
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
@@ -1082,6 +1117,63 @@ function contextualizeTurns(
   });
 }
 
+function useRoundGallery(round: RoundSummary, finalSummaryText?: string): BlobOverview[] {
+  const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
+  const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
+  const loadTrunk = useWorkbench((state) => state.loadTrunk);
+  const lastIndex = layer?.trunks.at(-1)?.index;
+
+  useEffect(() => {
+    if (round.outcome === "running" || lastIndex === undefined) return;
+    const key = `${round.roundId}:${lastIndex}`;
+    if (!roundTrunks[key] && layer?.expandedTrunk?.summary.index !== lastIndex) {
+      void loadTrunk(round.roundId, lastIndex);
+    }
+  }, [
+    layer?.expandedTrunk?.summary.index,
+    lastIndex,
+    loadTrunk,
+    round.outcome,
+    round.roundId,
+    roundTrunks,
+  ]);
+
+  const trunks: RoundTrunk[] = (layer?.trunks ?? []).map((summary) => {
+    const detail =
+      roundTrunks[`${round.roundId}:${summary.index}`] ??
+      (layer?.expandedTrunk?.summary.index === summary.index ? layer.expandedTrunk : undefined);
+    return detail ?? { summary, batches: [] };
+  });
+  return finalGalleryFromTrunks(trunks, round.outcome, finalSummaryText);
+}
+
+function TurnBodyGallery({
+  round,
+  finalSummaryText,
+  markdown,
+}: {
+  round: RoundSummary;
+  finalSummaryText?: string;
+  markdown?: string;
+}) {
+  const gallery = galleryNotInMarkdown(useRoundGallery(round, finalSummaryText), markdown);
+  if (gallery.length === 0) return null;
+  return (
+    <div data-testid="turn-body-gallery">
+      <ImageThumbStrip
+        size="document"
+        images={gallery.map((blob) => ({
+          id: blob.itemId,
+          alt: blob.overview,
+          thumb: blob.thumb,
+          path: blob.path,
+          blob: blob.blob,
+        }))}
+      />
+    </div>
+  );
+}
+
 function RoundProgress({
   round,
   finalSummaryText,
@@ -1090,8 +1182,10 @@ function RoundProgress({
   finalSummaryText?: string;
 }) {
   const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
+  const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
   const loadRound = useWorkbench((state) => state.loadRound);
   const loadOlder = useWorkbench((state) => state.loadOlderTrunks);
+  const hoisted = hoistedImageIds(useRoundGallery(round, finalSummaryText));
 
   useEffect(() => {
     if (!layer) void loadRound(round.roundId);
@@ -1099,14 +1193,20 @@ function RoundProgress({
 
   if (!layer) return null;
 
-  const trunks = layer.trunks.filter(
-    (trunk) =>
-      !(
-        finalSummaryText &&
-        trunk.batches.length > 0 &&
-        trunk.batches.every((batch) => isFinalSummaryBatch(batch, finalSummaryText))
-      ),
-  );
+  const trunks = layer.trunks.filter((trunk) => {
+    if (
+      finalSummaryText &&
+      trunk.batches.length > 0 &&
+      trunk.batches.every((batch) => isFinalSummaryBatch(batch, finalSummaryText))
+    ) {
+      return false;
+    }
+    const detail =
+      roundTrunks[`${round.roundId}:${trunk.index}`] ??
+      (layer.expandedTrunk?.summary.index === trunk.index ? layer.expandedTrunk : undefined);
+    if (!detail || hoisted.size === 0) return true;
+    return visibleProcessBatches(detail.batches, finalSummaryText, hoisted).length > 0;
+  });
 
   return (
     <div className="space-y-2" data-testid="round-progress">
@@ -1125,6 +1225,7 @@ function RoundProgress({
           round={round}
           summary={trunk}
           finalSummaryText={finalSummaryText}
+          hoisted={hoisted}
           active={round.outcome === "running" && index === trunks.length - 1}
         />
       ))}
@@ -1136,11 +1237,13 @@ function TrunkCard({
   round,
   summary,
   finalSummaryText,
+  hoisted,
   active,
 }: {
   round: RoundSummary;
   summary: RoundTrunkSummary;
   finalSummaryText?: string;
+  hoisted: ReadonlySet<string>;
   active: boolean;
 }) {
   const detail = useWorkbench(
@@ -1154,9 +1257,9 @@ function TrunkCard({
     if (open && !detail) void loadTrunk(round.roundId, summary.index);
   }, [detail, loadTrunk, open, round.roundId, summary.index]);
 
-  const batches = detail?.batches.filter(
-    (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
-  );
+  const batches = detail
+    ? visibleProcessBatches(detail.batches, finalSummaryText, hoisted)
+    : undefined;
   const firstBatch = batches?.[0];
   const flattenCompleted =
     !live && batches?.length === 1 && !firstBatch?.summary.marker ? firstBatch : undefined;
@@ -1198,6 +1301,8 @@ function TrunkCard({
                   key={batch.summary.firstItemId}
                   reason={batch.summary.marker}
                 />
+              ) : isImageOnlyBatch(batch) ? (
+                <ImageBatchCard key={batch.summary.index} batch={batch} />
               ) : (
                 <BatchCard key={batch.summary.index} batch={batch} />
               ),
@@ -1206,6 +1311,27 @@ function TrunkCard({
           {live && active ? <LiveTail blobs={liveBlobs} /> : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function ImageBatchCard({ batch }: { batch: RoundBatch }) {
+  const images = batch.blobs.filter((blob) => blob.kind === "image");
+  if (images.length === 0) return null;
+  return (
+    <div
+      className="overflow-hidden rounded-lg border border-line bg-surface px-2 py-2"
+      data-testid="round-image-batch"
+    >
+      <ImageThumbStrip
+        images={images.map((blob) => ({
+          id: blob.itemId,
+          alt: blob.overview,
+          thumb: blob.thumb,
+          path: blob.path,
+          blob: blob.blob,
+        }))}
+      />
     </div>
   );
 }
@@ -1363,17 +1489,6 @@ function normalizeProgressTitle(title: string): string {
 function progressTitle(title: string): string {
   const normalized = normalizeProgressTitle(title);
   return splitMonologue(normalized).first || normalized.replace(/(?:\.{3}|…)+$/u, "").trim();
-}
-
-function isFinalSummaryBatch(
-  batch: RoundBatch["summary"],
-  finalSummaryText: string,
-): boolean {
-  if (batch.blobCount !== 0) return false;
-  const compact = batch.text.trim();
-  if (!compact) return false;
-  const prefix = compact.endsWith("…") ? compact.slice(0, -1) : compact;
-  return finalSummaryText.trimStart().startsWith(prefix);
 }
 
 function BlobRow({ blob }: { blob: BlobOverview }) {

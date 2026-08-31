@@ -56,13 +56,19 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import {
   resolveArtifactRef,
   type ArtifactResolveContext,
 } from "../preview/resolveArtifactRef";
+import {
+  isSafeInlineImageDataUrl,
+  thumbDataUrl,
+  thumbForPath,
+  type InlineImage,
+} from "./roundGallery";
 import { useWorkbench, type PreviewFloatRequest } from "./store";
 
 const HIGHLIGHT_BYTES = 256 * 1024;
@@ -251,9 +257,16 @@ export function languageForPath(path: string): string | undefined {
 
 export type MarkdownVariant = "chat" | "document";
 
+/** Allow forwarded/copied image thumbs; keep the default protocol denylist. */
+function markdownUrlTransform(value: string): string {
+  return isSafeInlineImageDataUrl(value) ? value.trim() : defaultUrlTransform(value);
+}
+
 export type MarkdownArtifactProps = ArtifactResolveContext & {
   /** Session that owns links rendered in this Markdown. */
   sessionId?: string;
+  /** Session-inlined thumbs; tiles use these instead of fetching the original. */
+  inlineImages?: readonly InlineImage[];
   /** Authenticated workspace read used to inline local images. */
   loadPreview?: (
     path: string,
@@ -360,19 +373,32 @@ function MarkdownLink({ href, children }: { href?: string; children?: ReactNode 
     artifact?.deviceHandle &&
     artifact.workspaceHandle
   ) {
+    const open = (event: { preventDefault: () => void }) => {
+      event.preventDefault();
+      openPreviewFloat({
+        deviceHandle: artifact.deviceHandle,
+        workspaceHandle: artifact.workspaceHandle,
+        path: resolved.path,
+        sessionId: artifact.sessionId ?? null,
+      });
+    };
+    // Agents share workspace pictures as ordinary file links; a
+    // link that points at an image renders the picture inline and
+    // keeps the caption as the preview opener.
+    if (isImageLinkPath(resolved.path)) {
+      return (
+        <MarkdownImageRef
+          path={resolved.path}
+          href={resolved.href}
+          artifact={artifact}
+          onOpen={open}
+        >
+          {children}
+        </MarkdownImageRef>
+      );
+    }
     return (
-      <a
-        href={resolved.href}
-        onClick={(event) => {
-          event.preventDefault();
-          openPreviewFloat({
-            deviceHandle: artifact.deviceHandle,
-            workspaceHandle: artifact.workspaceHandle,
-            path: resolved.path,
-            sessionId: artifact.sessionId ?? null,
-          });
-        }}
-      >
+      <a href={resolved.href} onClick={open}>
         {children}
       </a>
     );
@@ -485,7 +511,11 @@ export const Markdown = memo(function Markdown({
         data-testid="markdown"
       >
         {stable ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={MARKDOWN_COMPONENTS}
+            urlTransform={markdownUrlTransform}
+          >
             {stable}
           </ReactMarkdown>
         ) : null}
@@ -499,24 +529,34 @@ export const Markdown = memo(function Markdown({
   );
 });
 
-function MarkdownImage({
-  src,
-  alt,
-  artifact,
-}: {
-  src?: string;
-  alt?: string;
-  artifact?: MarkdownArtifactProps | null;
-}) {
-  const resolved = resolveArtifactRef(src, artifact);
-  const previewPath = resolved.kind === "preview" ? resolved.path : null;
-  const loadPreview = artifact?.loadPreview;
-  const [url, setUrl] = useState<string | null>(null);
+const IMAGE_LINK_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+
+function isImageLinkPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return IMAGE_LINK_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+/** Authenticated inline load of a workspace image, shared by `![](…)` embeds
+ * and image file links. Prefers a session-inlined thumb so tiles do not
+ * fetch the original. */
+function usePreviewImageUrl(
+  previewPath: string | null,
+  loadPreview: MarkdownArtifactProps["loadPreview"],
+  inlineImages?: readonly InlineImage[],
+): { url: string | null; failed: boolean } {
+  const thumb = thumbForPath(inlineImages ?? [], previewPath);
+  const thumbUrl = thumb ? thumbDataUrl(thumb) : null;
+  const [url, setUrl] = useState<string | null>(thumbUrl);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
     let revoke: string | null = null;
     let cancelled = false;
+    if (thumbUrl) {
+      setUrl(thumbUrl);
+      setFailed(false);
+      return () => {};
+    }
     setUrl(null);
     setFailed(false);
     if (!previewPath || !loadPreview) {
@@ -546,7 +586,33 @@ function MarkdownImage({
       cancelled = true;
       if (revoke) URL.revokeObjectURL(revoke);
     };
-  }, [loadPreview, previewPath]);
+  }, [loadPreview, previewPath, thumbUrl]);
+
+  return { url: thumbUrl ?? url, failed: thumbUrl ? false : failed };
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  artifact,
+}: {
+  src?: string;
+  alt?: string;
+  artifact?: MarkdownArtifactProps | null;
+}) {
+  const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
+  const inlineData = src && isSafeInlineImageDataUrl(src) ? src.trim() : null;
+  const resolved = resolveArtifactRef(inlineData ? null : src, artifact);
+  const previewPath = resolved.kind === "preview" ? resolved.path : null;
+  const { url, failed } = usePreviewImageUrl(
+    previewPath,
+    artifact?.loadPreview,
+    artifact?.inlineImages,
+  );
+
+  if (inlineData) {
+    return <img src={inlineData} alt={alt ?? ""} className="gh-markdown-image" />;
+  }
 
   if (resolved.kind === "external" || resolved.kind === "blocked" || failed) {
     return (
@@ -562,7 +628,72 @@ function MarkdownImage({
       </span>
     );
   }
-  return <img src={url} alt={alt ?? ""} className="gh-markdown-image" />;
+  const image = <img src={url} alt={alt ?? ""} className="gh-markdown-image" />;
+  // An inline embed is still a workspace file: click it the same way a
+  // picture link does, so the float preview can open the original.
+  if (
+    resolved.kind === "preview" &&
+    previewPath &&
+    artifact?.deviceHandle &&
+    artifact.workspaceHandle
+  ) {
+    return (
+      <button
+        type="button"
+        className="gh-markdown-image-ref"
+        data-testid="markdown-image-embed"
+        onClick={() =>
+          openPreviewFloat({
+            deviceHandle: artifact.deviceHandle,
+            workspaceHandle: artifact.workspaceHandle,
+            path: previewPath,
+            sessionId: artifact.sessionId ?? null,
+          })
+        }
+      >
+        {image}
+      </button>
+    );
+  }
+  return image;
+}
+
+/** A file link that points at a workspace image: shows the picture inline
+ * once loaded, opens the float preview on click, and degrades to the plain
+ * link while loading or when the read fails. */
+function MarkdownImageRef({
+  path,
+  href,
+  artifact,
+  onOpen,
+  children,
+}: {
+  path: string;
+  href: string;
+  artifact?: MarkdownArtifactProps | null;
+  onOpen: (event: { preventDefault: () => void }) => void;
+  children?: ReactNode;
+}) {
+  const { url } = usePreviewImageUrl(path, artifact?.loadPreview, artifact?.inlineImages);
+
+  if (!url) {
+    return (
+      <a href={href} onClick={onOpen}>
+        {children}
+      </a>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="gh-markdown-image-ref"
+      data-testid="markdown-image-ref"
+      onClick={onOpen}
+    >
+      <img src={url} alt="" className="gh-markdown-image" />
+      <span className="gh-markdown-image-ref-label">{children}</span>
+    </button>
+  );
 }
 
 export const HighlightedCode = memo(function HighlightedCode({

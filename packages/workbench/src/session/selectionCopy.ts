@@ -19,6 +19,8 @@ export interface CopySource {
 export interface CopyMessage extends SelectableMessage {
   /** Owning round's boundary time, the honest approximation we have (§5.5). */
   atMs: number | null;
+  /** Turn-body gallery not already inlined in `text`. */
+  gallery?: Array<{ alt: string; path: string; dataUrl?: string }>;
 }
 
 export interface BuiltCopy {
@@ -49,6 +51,13 @@ export function buildSelectionCopy(
     const when = message.atMs === null ? "时间未知" : formatClock(message.atMs);
     lines.push(`## ${message.role === "user" ? "用户" : "助手"} · ${when}`);
     if (message.text) lines.push(message.text);
+    for (const image of message.gallery ?? []) {
+      const href = image.dataUrl || image.path;
+      if (!href) continue;
+      if (image.path && message.text.includes(image.path)) continue;
+      if (image.dataUrl && message.text.includes(image.dataUrl)) continue;
+      lines.push(`![${image.alt || "图片"}](${href})`);
+    }
     for (const attachment of message.attachments) {
       lines.push(`[附件：${attachment.name}（${attachment.mime}）]`);
     }

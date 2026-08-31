@@ -32,8 +32,8 @@ use super::images;
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, normalize_session_title, now_ms, title_from, ContextSeedState, ImportedSessionMeta,
-    SessionMeta, Store, SESSION_FORMAT,
+    self, agent_title_fits_current, normalize_session_title, now_ms, title_from, ContextSeedState,
+    ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -557,10 +557,8 @@ impl SessionManager {
         // image's original stays in the source session's blob layer and is
         // drilled into through its ref while the source remains reachable.
         let refs = source.blob_refs.lock().await;
-        let mut blob_appendix: Vec<BlobOverview> = selected
-            .iter()
-            .flat_map(rounds::blob_overviews)
-            .collect();
+        let mut blob_appendix: Vec<BlobOverview> =
+            selected.iter().flat_map(rounds::blob_overviews).collect();
         for row in &mut blob_appendix {
             row.blob = refs.get(&row.item_id).cloned();
         }
@@ -1378,14 +1376,30 @@ impl SessionManager {
         view: &RoundView,
         summary: &TrunkSummary,
     ) -> Result<RoundTrunk> {
-        if let Some(open) = self.open_trunk(live, view).await {
-            if open.summary.index == summary.index {
-                return Ok(open);
-            }
-        }
         let meta = live.meta.lock().await.clone();
-        self.store
-            .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)
+        let mut trunk = if let Some(open) = self.open_trunk(live, view).await {
+            if open.summary.index == summary.index {
+                open
+            } else {
+                self.store
+                    .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)?
+            }
+        } else {
+            self.store
+                .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)?
+        };
+        if let Ok(root) = self.store.workspace_root(&meta.workspace_id) {
+            let store = self.store.clone();
+            let workspace_id = meta.workspace_id.clone();
+            let session_id = meta.id.clone();
+            images::hydrate_produced_images(
+                &root,
+                &session_id,
+                |blob| store.get_blob(&workspace_id, &session_id, blob),
+                &mut trunk,
+            );
+        }
+        Ok(trunk)
     }
 
     pub async fn round_layer(
@@ -3192,8 +3206,15 @@ async fn pump_events(
                 let shed_id = item_id.clone();
                 let shed_cwd = cwd.clone();
                 let shed_root = workspace_root.clone();
+                let shed_session = session_id.clone();
                 let shed = crate::blocking::run(move || {
-                    let puts = images::shed_tool_images(&shed_id, &mut taken, &shed_cwd, &shed_root);
+                    let puts = images::shed_tool_images(
+                        &shed_id,
+                        &mut taken,
+                        &shed_cwd,
+                        &shed_root,
+                        &shed_session,
+                    );
                     (taken, puts)
                 })
                 .await;
@@ -3589,7 +3610,9 @@ async fn agent_title_would_apply(live: &Live, title: &str) -> bool {
         return false;
     };
     let meta = live.meta.lock().await;
-    !meta.title_locked && meta.title.as_deref() != Some(title.as_str())
+    !meta.title_locked
+        && meta.title.as_deref() != Some(title.as_str())
+        && agent_title_fits_current(meta.title.as_deref(), &title)
 }
 
 /// Applies an event to the in-memory timeline.
@@ -3721,7 +3744,10 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 return;
             };
             let mut meta = live.meta.lock().await;
-            if meta.title_locked || meta.title.as_deref() == Some(title.as_str()) {
+            if meta.title_locked
+                || meta.title.as_deref() == Some(title.as_str())
+                || !agent_title_fits_current(meta.title.as_deref(), &title)
+            {
                 return;
             }
             meta.title = Some(title);
@@ -4360,12 +4386,17 @@ mod tests {
         assert_eq!(image_row.kind, genehub_proto::BlobKind::Image);
         assert_eq!(image_row.path.as_deref(), Some("assets/logo.png"));
         assert_eq!(
-            image_row.thumb.as_ref().map(|thumb| thumb.data_base64.as_str()),
+            image_row
+                .thumb
+                .as_ref()
+                .map(|thumb| thumb.data_base64.as_str()),
             Some("dGh1bWI=")
         );
         // No payload crosses: nothing in the appendix or the items carries bytes.
         let encoded = serde_json::to_vec(&transfer).unwrap();
-        assert!(!encoded.windows(9).any(|window| window == b"aW1hZ2U".as_slice()));
+        assert!(!encoded
+            .windows(9)
+            .any(|window| window == b"aW1hZ2U".as_slice()));
 
         let target_dir = tempfile::tempdir().unwrap();
         let target_homes = crate::session::WorkspaceHomes::default();
@@ -5355,6 +5386,25 @@ mod tests {
         assert!(
             !live.meta.lock().await.title_locked,
             "an extracted title must stay replaceable by a later extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_latin_agent_title_does_not_replace_a_cjk_prompt_title() {
+        let (live, _dir) = live_session(SessionMeta {
+            title: Some("生成三张风景画，简笔风".into()),
+            ..meta()
+        });
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "Sketchy Scenery Creator".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            live.meta.lock().await.title.as_deref(),
+            Some("生成三张风景画，简笔风")
         );
     }
 

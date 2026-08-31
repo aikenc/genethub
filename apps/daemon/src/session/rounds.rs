@@ -431,10 +431,10 @@ pub fn trunks_from_items(items: &[TimelineItem]) -> Vec<RoundTrunk> {
                 blobs,
             });
         }
-        trunks.push(RoundTrunk {
-            summary: summary.clone(),
-            batches,
-        });
+        let batches = split_produced_image_batches(batches);
+        let mut summary = summary.clone();
+        summary.batches = batches.iter().map(|batch| batch.summary.clone()).collect();
+        trunks.push(RoundTrunk { summary, batches });
     }
     trunks
 }
@@ -476,6 +476,71 @@ pub fn blob_overviews(item: &TimelineItem) -> Vec<BlobOverview> {
         }
     }
     rows
+}
+
+/// Session-directory originals the agent produced. Read images keep a
+/// workspace path outside this prefix and stay with the tool batch.
+pub fn is_produced_image_path(path: &str) -> bool {
+    let normalized = path.trim_start_matches('/');
+    normalized.contains(".genethub/sessions/") && normalized.contains("/images/")
+}
+
+pub fn is_produced_image(row: &BlobOverview) -> bool {
+    row.kind == BlobKind::Image
+        && match row.path.as_deref() {
+            Some(path) => is_produced_image_path(path),
+            None => row.thumb.is_some(),
+        }
+}
+
+/// Pulls produced-image rows out of each work batch and places them in the
+/// following batch so the process stream is tools, then one gallery per
+/// semantic batch — not one gallery per tool.
+pub fn split_produced_image_batches(batches: Vec<RoundBatch>) -> Vec<RoundBatch> {
+    let mut out = Vec::new();
+    for batch in batches {
+        if batch.summary.marker.is_some() {
+            out.push(batch);
+            continue;
+        }
+        let mut work = Vec::new();
+        let mut produced = Vec::new();
+        for row in batch.blobs {
+            if is_produced_image(&row) {
+                produced.push(row);
+            } else {
+                work.push(row);
+            }
+        }
+        let has_work = !work.is_empty()
+            || batch
+                .monologue
+                .as_ref()
+                .is_some_and(|text| !text.trim().is_empty());
+        if has_work || produced.is_empty() {
+            out.push(RoundBatch {
+                blobs: work,
+                ..batch
+            });
+        }
+        if let Some(first) = produced.first() {
+            out.push(RoundBatch {
+                summary: RoundBatchSummary {
+                    index: 0,
+                    first_item_id: first.item_id.clone(),
+                    blob_count: produced.len() as u32,
+                    text: format!("{} 张图片", produced.len()),
+                    marker: None,
+                },
+                monologue: None,
+                blobs: produced,
+            });
+        }
+    }
+    for (index, batch) in out.iter_mut().enumerate() {
+        batch.summary.index = index as u32;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -759,5 +824,121 @@ mod tests {
     #[test]
     fn closing_an_empty_builder_produces_nothing() {
         assert!(TrunkBuilder::default().close().is_none());
+    }
+
+    fn produced(id: &str, name: &str, path: &str) -> TimelineItem {
+        TimelineItem::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            status: genehub_proto::ToolStatus::Ok,
+            detail: ToolCallDetail::Overview {
+                tool_kind: genehub_proto::ToolKind::Other,
+                overview: name.into(),
+                input: String::new(),
+                output: String::new(),
+            },
+            images: vec![genehub_proto::ToolImage {
+                alt: name.into(),
+                mime: "image/png".into(),
+                data_base64: None,
+                thumb: Some(genehub_proto::ImageThumb {
+                    mime: "image/jpeg".into(),
+                    data_base64: "dGh1bWI=".into(),
+                    width: 128,
+                    height: 64,
+                }),
+                path: Some(path.into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn produced_images_follow_the_tool_batch_as_one_gallery() {
+        let items = vec![
+            TimelineItem::AssistantMessage {
+                id: "a1".into(),
+                text: "开始画。".into(),
+            },
+            produced(
+                "t1",
+                "imageGeneration",
+                ".genethub/sessions/s1/images/aa.png",
+            ),
+            produced(
+                "t2",
+                "imageGeneration",
+                ".genethub/sessions/s1/images/bb.png",
+            ),
+        ];
+        let trunks = trunks_from_items(&items);
+        assert_eq!(trunks.len(), 1);
+        let batches = &trunks[0].batches;
+        assert_eq!(batches.len(), 2, "one work batch then one image batch");
+        assert_eq!(
+            batches[0]
+                .blobs
+                .iter()
+                .map(|row| row.kind)
+                .collect::<Vec<_>>(),
+            vec![BlobKind::ToolCall, BlobKind::ToolCall]
+        );
+        assert_eq!(batches[1].summary.text, "2 张图片");
+        assert_eq!(batches[1].summary.first_item_id, "t1:img:0");
+        assert_eq!(
+            batches[1]
+                .blobs
+                .iter()
+                .map(|row| row.item_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t1:img:0", "t2:img:0"]
+        );
+        assert_eq!(trunks[0].summary.batches.len(), 2);
+        assert_eq!(trunks[0].summary.batches[1].text, "2 张图片");
+    }
+
+    #[test]
+    fn read_images_stay_in_the_tool_batch() {
+        let items = vec![produced("t1", "Read", "assets/logo.png")];
+        let batches = &trunks_from_items(&items)[0].batches;
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].blobs.len(), 2);
+        assert_eq!(batches[0].blobs[1].kind, BlobKind::Image);
+        assert_eq!(batches[0].blobs[1].path.as_deref(), Some("assets/logo.png"));
+    }
+
+    #[test]
+    fn a_later_monologue_keeps_the_image_batch_between_work_and_narration() {
+        let items = vec![
+            produced(
+                "t1",
+                "imageGeneration",
+                ".genethub/sessions/s1/images/aa.png",
+            ),
+            TimelineItem::AssistantMessage {
+                id: "a2".into(),
+                text: "画好了。".into(),
+            },
+        ];
+        let batches = &trunks_from_items(&items)[0].batches;
+        assert_eq!(batches.len(), 3);
+        assert!(batches[0]
+            .blobs
+            .iter()
+            .all(|row| row.kind == BlobKind::ToolCall));
+        assert_eq!(batches[1].summary.text, "1 张图片");
+        assert_eq!(batches[2].monologue.as_deref(), Some("画好了。"));
+        assert!(batches[2].blobs.is_empty());
+    }
+
+    #[test]
+    fn splitting_twice_is_idempotent() {
+        let items = vec![produced(
+            "t1",
+            "imageGeneration",
+            ".genethub/sessions/s1/images/aa.png",
+        )];
+        let first = trunks_from_items(&items)[0].batches.clone();
+        let second = split_produced_image_batches(first.clone());
+        assert_eq!(first, second);
     }
 }

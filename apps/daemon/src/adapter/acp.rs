@@ -565,9 +565,11 @@ struct AcpSession {
     model_config_id: Mutex<Option<String>>,
     mode_config_id: Mutex<Option<String>>,
     runtime_axis_ids: Mutex<Vec<String>>,
-    /// ACP has no standard system/developer-instruction field. The adapter
-    /// therefore carries product guidance as a clearly delimited leading text
-    /// block on each prompt, while the daemon timeline retains only user text.
+    /// ACP has no standard system/developer-instruction field. Product
+    /// guidance is mapped per agent: Cursor gets an embedded resource plus
+    /// `_meta.systemPrompt.append` so its auto-namer sees only user text;
+    /// other ACP CLIs still get a leading text block. The daemon timeline
+    /// retains only user text either way.
     additional_system_prompt: Option<String>,
 }
 
@@ -647,7 +649,10 @@ impl AcpSession {
             let result = self
                 .call(
                     "session/new",
-                    json!({ "cwd": config.cwd, "mcpServers": [] }),
+                    session_new_params(
+                        config.cwd.as_path(),
+                        config.additional_system_prompt.as_deref(),
+                    ),
                 )
                 .await?;
             let setup = parse_session_new(&result)?;
@@ -739,6 +744,7 @@ impl AgentSession for AcpSession {
             "prompt": prompt_blocks_with_context(
                 &input,
                 self.additional_system_prompt.as_deref(),
+                guidance_placement(&self.agent_id),
             ),
         });
 
@@ -1673,15 +1679,64 @@ fn prompt_blocks(input: &PromptInput) -> Vec<Value> {
     blocks
 }
 
-fn prompt_blocks_with_context(input: &PromptInput, context: Option<&str>) -> Vec<Value> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuidancePlacement {
+    /// Default ACP: a leading `text` block. Agents that do not auto-name
+    /// from every text block still read this as ordinary prompt context.
+    LeadingText,
+    /// Cursor concatenates every `text` block into `nameAgent`. An embedded
+    /// `resource` still reaches the model as additional ACP context.
+    EmbeddedResource,
+}
+
+fn is_cursor_agent(agent_id: &str) -> bool {
+    agent_id == "cursor" || agent_id.contains("cursor")
+}
+
+fn guidance_placement(agent_id: &str) -> GuidancePlacement {
+    if is_cursor_agent(agent_id) {
+        GuidancePlacement::EmbeddedResource
+    } else {
+        GuidancePlacement::LeadingText
+    }
+}
+
+fn wrap_system_guidance(context: &str) -> String {
+    format!(
+        "<genehub_system_guidance>\n{context}\n</genehub_system_guidance>\n\nThe next block is the user's request."
+    )
+}
+
+fn session_new_params(cwd: &Path, prompt: Option<&str>) -> Value {
+    let mut params = json!({ "cwd": cwd, "mcpServers": [] });
+    if let Some(prompt) = prompt.filter(|value| !value.trim().is_empty()) {
+        params["_meta"] = json!({ "systemPrompt": { "append": prompt } });
+    }
+    params
+}
+
+fn prompt_blocks_with_context(
+    input: &PromptInput,
+    context: Option<&str>,
+    placement: GuidancePlacement,
+) -> Vec<Value> {
     let mut blocks = Vec::new();
     if let Some(context) = context.filter(|value| !value.trim().is_empty()) {
-        blocks.push(json!({
-            "type": "text",
-            "text": format!(
-                "<genehub_system_guidance>\n{context}\n</genehub_system_guidance>\n\nThe next block is the user's request."
-            ),
-        }));
+        let wrapped = wrap_system_guidance(context);
+        blocks.push(match placement {
+            GuidancePlacement::LeadingText => json!({
+                "type": "text",
+                "text": wrapped,
+            }),
+            GuidancePlacement::EmbeddedResource => json!({
+                "type": "resource",
+                "resource": {
+                    "uri": "genehub://system-guidance",
+                    "mimeType": "text/plain",
+                    "text": wrapped,
+                },
+            }),
+        });
     }
     blocks.extend(prompt_blocks(input));
     blocks
@@ -2082,16 +2137,40 @@ fn translate_update(
 
 /// ACP `session_info_update.title`. `null` or whitespace does not clear
 /// an existing name — the manager only applies a non-empty title.
+/// Titles that just repeat the Skill catalog / prompt heading are dropped
+/// so a polluted `nameAgent` pass cannot overwrite the first-prompt label.
 fn emit_session_title(update: &Value, events: &broadcast::Sender<SessionEvent>) {
     let Some(title) = update.get("title").and_then(Value::as_str) else {
         return;
     };
     let title = title.trim();
-    if title.is_empty() {
+    if title.is_empty() || is_catalog_noise_title(title) {
         return;
     }
     let title: String = title.chars().take(120).collect();
     let _ = events.send(SessionEvent::TitleChanged { title });
+}
+
+fn folded_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_catalog_noise_title(title: &str) -> bool {
+    matches!(
+        folded_title(title).as_str(),
+        "skillselectionguidance"
+            | "skilldescription"
+            | "genehubsessionhistory"
+            | "genehubspeechruntime"
+            | "genehubhtmlpreview"
+            | "htmlpreviewinfo"
+            | "myskills"
+            | "whatareyourskills"
+    )
 }
 
 /// ACP tool-call content blocks can be images (`{type:"image", data,
@@ -2315,6 +2394,7 @@ mod tests {
         let blocks = prompt_blocks_with_context(
             &input,
             Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
+            GuidancePlacement::LeadingText,
         );
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0]["text"]
@@ -2326,6 +2406,46 @@ mod tests {
             .unwrap()
             .contains("https://app.example/assets/preview/v2/device/workspace/r_root/"));
         assert_eq!(blocks[1], json!({ "type": "text", "text": "生成报告" }));
+    }
+
+    #[test]
+    fn cursor_guidance_is_an_embedded_resource_not_a_text_block() {
+        let input = PromptInput {
+            text: "生成报告".into(),
+            attachments: vec![],
+        };
+        let blocks = prompt_blocks_with_context(
+            &input,
+            Some("read genehub-session-history when inspecting a past chat"),
+            GuidancePlacement::EmbeddedResource,
+        );
+        assert_eq!(blocks[0]["type"], "resource");
+        assert_eq!(blocks[0]["resource"]["uri"], "genehub://system-guidance");
+        assert!(blocks[0]["resource"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<genehub_system_guidance>"));
+        assert_eq!(blocks[1], json!({ "type": "text", "text": "生成报告" }));
+        assert_eq!(
+            guidance_placement("cursor"),
+            GuidancePlacement::EmbeddedResource
+        );
+        assert_eq!(
+            guidance_placement("acp:goose"),
+            GuidancePlacement::LeadingText
+        );
+    }
+
+    #[test]
+    fn session_new_appends_system_prompt_through_meta() {
+        let params = session_new_params(Path::new("/tmp/project"), Some("always link index.html"));
+        assert_eq!(params["cwd"], "/tmp/project");
+        assert_eq!(
+            params["_meta"]["systemPrompt"]["append"],
+            "always link index.html"
+        );
+        let bare = session_new_params(Path::new("/tmp/project"), Some("   "));
+        assert!(bare.get("_meta").is_none());
     }
 
     /// Attachments with no inline payload (a bare path) are not forwarded —
@@ -2796,6 +2916,31 @@ mod tests {
             &tx,
         );
         assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn a_skill_catalog_title_is_not_a_session_name() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut turn = state();
+        translate_update(
+            &json!({"update": {
+                "sessionUpdate": "session_info_update",
+                "title": "Skill Selection Guidance"
+            }}),
+            &mut turn,
+            &tx,
+        );
+        translate_update(
+            &json!({"update": {
+                "sessionUpdate": "session_info_update",
+                "title": "GeneHub Session History"
+            }}),
+            &mut turn,
+            &tx,
+        );
+        assert!(drain(&mut rx).is_empty());
+        assert!(is_catalog_noise_title("  genehub-html-preview  "));
+        assert!(!is_catalog_noise_title("修复登录跳转"));
     }
 
     #[test]
