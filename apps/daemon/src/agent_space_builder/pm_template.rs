@@ -2,13 +2,14 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Component, Path};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::diagnostic::{BuilderError, BuilderResult, Diagnostic};
 use super::{is_symlink, BuildGuard};
 
-pub const PM_SPACE_TEMPLATE_VERSION: &str = "1";
+pub const PM_SPACE_TEMPLATE_VERSION: &str = "2";
 pub const PM_SPACE_NAME: &str = "pm";
+const PM_SPACE_TEMPLATE_SCHEMA: &str = "genehub-pm-space-template.v1";
 
 const TEMPLATE_FILES: &[(&str, &str)] = &[
     (
@@ -133,6 +134,61 @@ pub struct PmSpaceTemplateReport {
     pub root: String,
     pub created: Vec<String>,
     pub validated: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PmSpaceTemplateMarker {
+    schema: String,
+    version: String,
+}
+
+/// Returns whether a PM Space must be bootstrapped without ever rewriting an
+/// existing project-owned Workflow. Incompatible templates need an explicit,
+/// reviewed migration because those files may contain project customizations.
+pub fn pm_space_requires_bootstrap(root: &Path) -> BuilderResult<bool> {
+    let marker_path = root.join("template.json");
+    if is_symlink(&marker_path) {
+        return Err(BuilderError(
+            Diagnostic::error("PB011", "PM Space template marker must not be a symlink")
+                .source(marker_path.display().to_string()),
+        ));
+    }
+    let bytes = match std::fs::read(&marker_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(io_error(error)),
+    };
+    let marker: PmSpaceTemplateMarker = serde_json::from_slice(&bytes).map_err(|error| {
+        BuilderError(
+            Diagnostic::error(
+                "PB001",
+                format!("PM Space template marker is invalid JSON: {error}"),
+            )
+            .source(marker_path.display().to_string()),
+        )
+    })?;
+    if marker.schema != PM_SPACE_TEMPLATE_SCHEMA {
+        return Err(BuilderError(
+            Diagnostic::error(
+                "PB001",
+                format!("unsupported PM Space template schema: {}", marker.schema),
+            )
+            .source(marker_path.display().to_string()),
+        ));
+    }
+    if marker.version != PM_SPACE_TEMPLATE_VERSION {
+        return Err(BuilderError(
+            Diagnostic::error(
+                "PB017",
+                format!(
+                    "PM Space template version {} is incompatible with current version {}; automatic overwrite is refused because the project Workflow may be customized. Preserve the PM Space Git history and migrate its Workflow package explicitly",
+                    marker.version, PM_SPACE_TEMPLATE_VERSION
+                ),
+            )
+            .source(marker_path.display().to_string()),
+        ));
+    }
+    Ok(false)
 }
 
 pub fn render_pm_space(
@@ -290,6 +346,7 @@ mod tests {
         let values = PmSpaceTemplateValues::new("星港防线", "zh-CN", "feature").unwrap();
 
         let first = render_pm_space(&project, &values).unwrap();
+        assert_eq!(first.template_version, "2");
         assert_eq!(first.created.len(), TEMPLATE_FILES.len());
         assert!(first.validated.is_empty());
         let repeated = render_pm_space(&project, &values).unwrap();
@@ -297,6 +354,10 @@ mod tests {
         assert_eq!(repeated.validated.len(), TEMPLATE_FILES.len());
 
         let root = project.join("spaces/pm");
+        assert!(!pm_space_requires_bootstrap(&root).unwrap());
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("template.json")).unwrap()).unwrap();
+        assert_eq!(marker["version"], "2");
         let manifest = std::fs::read_to_string(root.join("pipespace.json")).unwrap();
         assert!(manifest.contains("星港防线"));
         assert!(!manifest.contains("{{GENEHUB_"));
@@ -324,5 +385,21 @@ mod tests {
         std::fs::write(project.join("spaces/pm/role.json"), "drift\n").unwrap();
         let error = render_pm_space(&project, &values).unwrap_err();
         assert_eq!(error.0.code, "PB017");
+    }
+
+    #[test]
+    fn incompatible_template_requires_explicit_migration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("spaces/pm");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(pm_space_requires_bootstrap(&root).unwrap());
+        std::fs::write(
+            root.join("template.json"),
+            r#"{"schema":"genehub-pm-space-template.v1","version":"1"}"#,
+        )
+        .unwrap();
+        let error = pm_space_requires_bootstrap(&root).unwrap_err();
+        assert_eq!(error.0.code, "PB017");
+        assert!(error.0.message.contains("automatic overwrite is refused"));
     }
 }

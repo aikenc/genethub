@@ -324,7 +324,13 @@ async fn dispatch(
                 );
             }
             let pm_space_root = workspace.root.join("spaces/pm");
-            let bootstrap_pm_space = !pm_space_root.join("template.json").is_file();
+            let bootstrap_pm_space =
+                match crate::agent_space_builder::pm_space_requires_bootstrap(&pm_space_root) {
+                    Ok(bootstrap) => bootstrap,
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Conflict, error.to_string());
+                    }
+                };
             if bootstrap_pm_space {
                 let template_values = match crate::agent_space_builder::PmSpaceTemplateValues::new(
                     &workspace.name,

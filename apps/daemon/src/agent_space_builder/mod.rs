@@ -24,8 +24,8 @@ use manifest::{load_manifest, load_providers, load_workspace};
 use ownership::{apply, check_conflicts, clean, load_lock, verify, BuildGuard};
 use planner::{create_plan, Plan};
 pub use pm_template::{
-    render_pm_space, PmSpaceTemplateReport, PmSpaceTemplateValues, PM_SPACE_NAME,
-    PM_SPACE_TEMPLATE_VERSION,
+    pm_space_requires_bootstrap, render_pm_space, PmSpaceTemplateReport, PmSpaceTemplateValues,
+    PM_SPACE_NAME, PM_SPACE_TEMPLATE_VERSION,
 };
 
 pub const VERSION: &str = "0.1.4";
