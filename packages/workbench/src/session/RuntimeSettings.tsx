@@ -13,6 +13,7 @@ import {
   resolveModeBadge,
   resolveModelPresentation,
   resolveModelTraits,
+  type AgentAvailability,
 } from "../presentation/catalog/resolve";
 import type { RuntimeSelection } from "./runtime-selection";
 
@@ -56,6 +57,7 @@ export function RuntimeSettings({
   onPickEffort,
   onPickRuntimeAxis,
   onRefreshAgents,
+  onConfigureAgent,
 }: {
   selection: RuntimeSelection;
   disabled?: boolean;
@@ -67,6 +69,9 @@ export function RuntimeSettings({
   onPickEffort(id: string): void;
   onPickRuntimeAxis(axisId: string, valueId: string): void;
   onRefreshAgents?(): void;
+  /** Opens the setup wizard for an agent. Absent where the wizard is not
+   * reachable; the configure affordance goes with it. */
+  onConfigureAgent?(id: string): void;
 }) {
   const generatedId = useId();
   const bodyId = `runtime-axes-${generatedId}`;
@@ -159,6 +164,33 @@ export function RuntimeSettings({
       {agentLocked ? (
         <p className="text-xs text-muted">当前会话已有内容；新建会话后可以切换 Agent。</p>
       ) : null}
+
+      {/* An unavailable tab is a dead end on its own; the reason line is the
+          way into the guided fix. Configuring another agent is allowed even
+          mid-session — picking it is what the lock forbids. */}
+      {onConfigureAgent
+        ? agents
+            .map((agent) => ({ agent, availability: resolveAgentAvailability(agent) }))
+            .filter(
+              (entry): entry is { agent: AgentInfo; availability: AgentAvailability } =>
+                entry.availability !== null,
+            )
+            .map(({ agent, availability }) => (
+              <p key={agent.id} className="flex items-center gap-2 text-xs text-muted">
+                <span className="min-w-0 flex-1 truncate">
+                  {resolveAgentPresentation(agent).label}：{availability.fullLabel}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`configure-${agent.id}`}
+                  className="shrink-0 rounded border border-line px-1.5 py-0.5 text-[10px] text-muted hover:border-accent hover:text-fg"
+                  onClick={() => onConfigureAgent(agent.id)}
+                >
+                  去配置
+                </button>
+              </p>
+            ))
+        : null}
 
       <div id={bodyId} role="tabpanel" className="flex min-w-0 flex-col gap-3">
         {current?.probe.state === "ready" && !hasRuntimeChoices ? (

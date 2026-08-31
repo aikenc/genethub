@@ -14,15 +14,15 @@ pub mod registry;
 pub mod stdio;
 pub mod usage;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use genehub_proto::{
-    Attachment, Capabilities, Catalog, ImportContinuation, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem,
+    AgentSetup, Attachment, AuthState, Capabilities, Catalog, ImportContinuation,
+    PermissionOutcome, ProbeState, SessionEvent, TimelineItem,
 };
 use tokio::sync::{broadcast, Mutex};
 
@@ -121,6 +121,32 @@ pub trait AgentAdapter: Send + Sync {
     /// Is it installed and does it answer? Never an error: "not installed" is a
     /// normal state that simply hides the agent from the picker.
     async fn probe(&self) -> ProbeState;
+
+    /// Whether it has usable credentials, as the CLI itself reports them and
+    /// without interacting with it. The default is the honest answer for a CLI
+    /// that publishes no way to ask: unknown, never a guess.
+    async fn auth(&self) -> AuthState {
+        AuthState::Unknown
+    }
+
+    /// The installed version as the CLI reports it. `None` when the binary is
+    /// absent or would not say — a version row is only worth showing when it is
+    /// real.
+    async fn version(&self) -> Option<String> {
+        None
+    }
+
+    /// What the setup wizard shows for this agent: how to install it, how its
+    /// own sign-in works, how a key reaches it.
+    ///
+    /// Everything stated here comes from the agent's official documentation,
+    /// and none of it is executed by the daemon — the wizard pastes commands
+    /// into a terminal the user is watching, and the user presses enter. The
+    /// boundary in `docs/third-party-agents.md` §1 stands: we guide, the CLI
+    /// configures itself.
+    fn setup(&self) -> AgentSetup {
+        AgentSetup::default()
+    }
 
     async fn catalog(&self, providers: &ProviderMap) -> Catalog;
 
@@ -420,6 +446,70 @@ pub async fn kill_tree(child: &mut crate::os_process::Child) {
     let _ = child.wait().await;
 }
 
+/// How long a status question may take before the answer is "unknown".
+///
+/// These run inside `agent.refresh`, which the setup wizard polls while the
+/// user is signing in; a CLI that hangs must not hang the whole agent list.
+pub const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Asks a program its version: `<program> --version`, first line, trimmed.
+///
+/// Bounded for the same reason as `STATUS_TIMEOUT`, and stderr is dropped:
+/// what is wanted is one line like `2.1.220 (Claude Code)`, nothing else.
+pub async fn binary_version(program: &Path) -> Option<String> {
+    let mut command = crate::os_process::Command::new(program);
+    command
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    without_a_window(&mut command);
+    let output = tokio::time::timeout(STATUS_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let said = String::from_utf8_lossy(&output.stdout);
+    let line = said.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// Asks a CLI whether it is signed in by reading one boolean field out of the
+/// JSON its status command prints (`claude auth status`, `cursor-agent status
+/// --format json`).
+///
+/// Only a definitive `true` or `false` becomes an answer. A non-zero exit, a
+/// missing field, output that is not JSON, a process that never answered — all
+/// of them are `Unknown`, because the badge this feeds must never invent a
+/// state.
+pub async fn json_auth_status(program: &Path, args: &[&str], field: &str) -> AuthState {
+    let mut command = crate::os_process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    without_a_window(&mut command);
+    let Some(Ok(output)) = tokio::time::timeout(STATUS_TIMEOUT, command.output())
+        .await
+        .ok()
+    else {
+        return AuthState::Unknown;
+    };
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return AuthState::Unknown;
+    };
+    match parsed.get(field).and_then(serde_json::Value::as_bool) {
+        Some(true) => AuthState::Authenticated,
+        Some(false) => AuthState::Unauthenticated,
+        None => AuthState::Unknown,
+    }
+}
+
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     find_executable_in(name, &[])
@@ -621,5 +711,64 @@ mod tests {
             Some(&Some("/opt/genehub/genet-beta".into()))
         );
         assert_eq!(env.get("GENEHUB_SESSION_ID"), Some(&Some("s-bound".into())));
+    }
+
+    /// A version badge is only worth showing when the program actually said
+    /// it: first line, trimmed, and nothing when the question fails.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_version_is_the_first_line_the_program_prints() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fakecli");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '1.2.3 (Fake CLI)\\nignored\\n'\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            binary_version(&fake).await.as_deref(),
+            Some("1.2.3 (Fake CLI)")
+        );
+        assert!(
+            binary_version(Path::new("/definitely/not/here"))
+                .await
+                .is_none(),
+            "a program that is not there has no version"
+        );
+    }
+
+    /// The auth badge maps a real boolean and nothing else: output that is not
+    /// JSON, or JSON without the field, is "unknown" rather than a guess.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_status_maps_only_a_real_boolean() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let signed_in = write("in", "#!/bin/sh\nprintf '{\"loggedIn\": true}'\n");
+        let signed_out = write("out", "#!/bin/sh\nprintf '{\"loggedIn\": false}'\n");
+        let silent = write("silent", "#!/bin/sh\nprintf 'not json at all'\n");
+        let wrong_field = write("other", "#!/bin/sh\nprintf '{\"somethingElse\": true}'\n");
+
+        assert_eq!(
+            json_auth_status(&signed_in, &[], "loggedIn").await,
+            AuthState::Authenticated
+        );
+        assert_eq!(
+            json_auth_status(&signed_out, &[], "loggedIn").await,
+            AuthState::Unauthenticated
+        );
+        assert_eq!(
+            json_auth_status(&silent, &[], "loggedIn").await,
+            AuthState::Unknown
+        );
+        assert_eq!(
+            json_auth_status(&wrong_field, &[], "loggedIn").await,
+            AuthState::Unknown
+        );
     }
 }

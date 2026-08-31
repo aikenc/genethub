@@ -80,8 +80,9 @@ use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
-    ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
+    AgentSetup, ApiKeyGuide, ApiKeyKind, AuthState, Capabilities, Catalog, GuidePlatform,
+    ImportContinuation, InstallMethod, InteractionOption, InteractionQuestion, ItemDelta,
+    LoginGuide, ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, TodoEntry,
     TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
@@ -291,6 +292,71 @@ impl AgentAdapter for CodexAdapter {
             // unusual `codex login status` is not a reason to hide a CLI that is
             // sitting right there.
             _ => ProbeState::Ready,
+        }
+    }
+
+    async fn auth(&self) -> AuthState {
+        let Some(program) = self.program() else {
+            return AuthState::Unknown;
+        };
+        // The same `codex login status` the probe asks, mapped onto states the
+        // wizard can badge: only a clear answer becomes one.
+        match logged_in(&program).await {
+            Some(true) => AuthState::Authenticated,
+            Some(false) => AuthState::Unauthenticated,
+            None => AuthState::Unknown,
+        }
+    }
+
+    async fn version(&self) -> Option<String> {
+        super::binary_version(&self.program()?).await
+    }
+
+    fn setup(&self) -> AgentSetup {
+        // Commands from github.com/openai/codex (README) and
+        // developers.openai.com/codex/auth.
+        AgentSetup {
+            install: vec![
+                InstallMethod {
+                    label: "官方安装脚本".into(),
+                    platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+                    command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh".into(),
+                },
+                InstallMethod {
+                    label: "官方安装脚本".into(),
+                    platforms: vec![GuidePlatform::Windows],
+                    command: "powershell -ExecutionPolicy ByPass -c \"irm https://chatgpt.com/codex/install.ps1 | iex\"".into(),
+                },
+                InstallMethod {
+                    label: "npm".into(),
+                    platforms: vec![
+                        GuidePlatform::Macos,
+                        GuidePlatform::Linux,
+                        GuidePlatform::Windows,
+                    ],
+                    command: "npm install -g @openai/codex".into(),
+                },
+                InstallMethod {
+                    label: "Homebrew".into(),
+                    platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+                    command: "brew install --cask codex".into(),
+                },
+            ],
+            login: Some(LoginGuide {
+                command: "codex login".into(),
+                opens_browser: true,
+                hint: "浏览器会打开 ChatGPT 登录页（Plus/Pro/Team 等订阅），完成后这里会自动识别。"
+                    .into(),
+            }),
+            api_key: Some(ApiKeyGuide {
+                kind: ApiKeyKind::TerminalCommand,
+                command: Some("codex login --with-api-key".into()),
+                env_vars: Vec::new(),
+                key_url: Some("https://platform.openai.com/api-keys".into()),
+                hint: "在终端里粘贴你的 OpenAI API Key 后回车；密钥由 Codex 自己保存，不经过 GeneHub。"
+                    .into(),
+            }),
+            docs_url: Some("https://developers.openai.com/codex/auth".into()),
         }
     }
 

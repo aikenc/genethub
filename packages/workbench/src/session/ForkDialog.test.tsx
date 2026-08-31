@@ -11,6 +11,9 @@ function agent(id: string, label: string, fork: boolean, ready = true): AgentInf
     label,
     builtin: false,
     probe: ready ? { state: "ready" } : { state: "notInstalled" },
+    platform: "linux",
+    auth: "unknown",
+    setup: { install: [] },
     capabilities: {
       interrupt: false,
       setModel: false,

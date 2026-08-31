@@ -1196,11 +1196,13 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::GitStatus { workspace_id }
         | Request::GitDiff { workspace_id, .. }
         | Request::GitCommit { workspace_id, .. }
-        | Request::PtyOpen { workspace_id, .. }
         | Request::SpeechContextPreview { workspace_id, .. }
         | Request::SpeechFeedbackRecord { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
+        // A workspace-less terminal is a request the router may refuse; it is
+        // still scoped to that workspace when one is named.
+        Request::PtyOpen { workspace_id, .. } => workspace_id.as_deref(),
         _ => None,
     }
 }

@@ -6,7 +6,53 @@ export type AgentInfo = { id: string, label: string, probe: ProbeState, capabili
  * True for the agent shipped in the installer, which is preselected on
  * first run so a new user can run something immediately.
  */
-builtin: boolean, };
+builtin: boolean, 
+/**
+ * The machine this agent runs on — which is also where the embedded
+ * terminal executes, so it decides which install command applies.
+ */
+platform: GuidePlatform, 
+/**
+ * The installed version as the CLI itself reports it, when it will say.
+ */
+version?: string, auth: AuthState, setup: AgentSetup, };
+
+/**
+ * Everything the setup wizard knows about an agent.
+ *
+ * Declared by the adapter (boundary B1: only the adapter may know its agent),
+ * rendered generically by the client. A section that is absent is a section
+ * the wizard does not show; an agent with an empty profile gets the honest
+ * fallback — a link to its own documentation.
+ */
+export type AgentSetup = { 
+/**
+ * Ways to install it. Empty for the built-in agent, which ships installed.
+ */
+install: Array<InstallMethod>, login?: LoginGuide, apiKey?: ApiKeyGuide, docsUrl?: string, };
+
+/**
+ * The API-key path for an agent that has one.
+ */
+export type ApiKeyGuide = { kind: ApiKeyKind, 
+/**
+ * For `TerminalCommand`: the command to paste. The key itself is typed by
+ * the user into the terminal, not into any GeneHub field.
+ */
+command?: string, 
+/**
+ * For `Environment`: the variables involved.
+ */
+envVars: Array<EnvVarGuide>, 
+/**
+ * Where a key is issued, opened in the browser.
+ */
+keyUrl?: string, hint: string, };
+
+/**
+ * How an API key (or compatible endpoint) reaches this agent.
+ */
+export type ApiKeyKind = "builtinProvider" | "terminalCommand" | "environment";
 
 export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
 
@@ -31,6 +77,15 @@ export type Attachment = { name: string, mime: string, path?: string,
  * Inline payload, base64. Only set for small pastes such as screenshots.
  */
 dataBase64?: string, };
+
+/**
+ * Whether the agent has usable credentials, as far as a non-interactive check
+ * can tell.
+ *
+ * `Unknown` is a first-class answer, not a failure: several CLIs publish no
+ * status command, and claiming either way would put a made-up badge on screen.
+ */
+export type AuthState = "authenticated" | "unauthenticated" | "unknown" | "notApplicable";
 
 /**
  * A process an agent started and did not stop.
@@ -224,6 +279,11 @@ workspaceFiles: Array<DirectoryEntry>,
  */
 roots: boolean, };
 
+/**
+ * One environment variable a CLI reads, and what it is for.
+ */
+export type EnvVarGuide = { name: string, purpose: string, };
+
 export type ErrorCode = "badRequest" | "unauthorized" | "notFound" | "conflict" | "unsupported" | "forbidden" | "internal" | "webProtocol" | "isolationUnavailable";
 
 /**
@@ -284,6 +344,15 @@ export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 export type GitChangeKind = "added" | "modified" | "deleted" | "renamed" | "untracked";
 
 export type GitStatus = { branch?: string, changes: Array<GitChange>, clean: boolean, };
+
+/**
+ * The operating system of the machine an agent (and its daemon) runs on.
+ *
+ * Sent with every agent so a browser on any device can pick the install
+ * command that can actually run there — the terminal the wizard pastes into
+ * lives on that machine, not on the device showing the page.
+ */
+export type GuidePlatform = "macos" | "linux" | "windows";
 
 export type HelloResult = { daemonVersion: string, webProtocol: number, machineId: string, 
 /**
@@ -403,6 +472,18 @@ fingerprint: string, };
  */
 export type ImportContinuation = "native" | "readOnly";
 
+/**
+ * One way to install an agent, in the words of its own documentation.
+ *
+ * `command` is pasted into the workbench's embedded terminal and left for the
+ * user to run — the wizard never executes it by itself.
+ */
+export type InstallMethod = { 
+/**
+ * `官方安装脚本`, `npm`, `Homebrew` — the name its own docs give it.
+ */
+label: string, platforms: Array<GuidePlatform>, command: string, };
+
 export type InteractionAnswer = { questionId: string, selectedOptionIds: Array<string>, freeformText?: string, };
 
 export type InteractionOption = { id: string, label: string, };
@@ -473,6 +554,24 @@ export type LogTail = { name: string, path: string, text: string,
  * Every log in the directory, newest first, with its size in bytes.
  */
 files: Array<LogEntry>, };
+
+/**
+ * The agent's official sign-in flow.
+ */
+export type LoginGuide = { 
+/**
+ * What starts it, pasted into the embedded terminal (never auto-run).
+ */
+command: string, 
+/**
+ * True when the flow continues in the browser, so the wizard can say so
+ * before the window appears.
+ */
+opensBrowser: boolean, 
+/**
+ * What to expect, in one sentence.
+ */
+hint: string, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
@@ -681,7 +780,14 @@ name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "updat
 /**
  * Empty means "everything currently changed".
  */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
+paths: Array<string>, } } | { "type": "pty.open", "payload": { 
+/**
+ * The workspace whose root becomes the shell's cwd. Absent when the
+ * terminal is not about any project — the setup wizard needs one to
+ * install or sign in an agent before the user has opened a folder at
+ * all — and the shell then starts in the machine's home directory.
+ */
+workspaceId?: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
 
 /**
  * Whether text outside the retained GeneHub window can be read again.

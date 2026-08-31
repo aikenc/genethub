@@ -13,8 +13,9 @@ use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, CommandInfo, ItemDelta, ModelInfo, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    AgentSetup, ApiKeyGuide, ApiKeyKind, AuthState, Capabilities, Catalog, CommandInfo, ItemDelta,
+    ModelInfo, PermissionOutcome, ProbeState, SessionEvent, TimelineItem, ToolCallDetail,
+    ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -142,6 +143,28 @@ impl AgentAdapter for GenetAdapter {
                 Ok(value) if !value.is_empty() => ProbeState::Ready,
                 _ => ProbeState::NotInstalled,
             },
+        }
+    }
+
+    async fn auth(&self) -> AuthState {
+        // Its credentials are the daemon's provider keys, not anything the
+        // agent process holds — there is nothing to ask the binary.
+        AuthState::NotApplicable
+    }
+
+    fn setup(&self) -> AgentSetup {
+        AgentSetup {
+            // Shipped in the installer, so there is nothing to install; the one
+            // thing that can be missing is a provider key, which is ours to
+            // collect — write-only, the same rule as the settings page.
+            api_key: Some(ApiKeyGuide {
+                kind: ApiKeyKind::BuiltinProvider,
+                command: None,
+                env_vars: Vec::new(),
+                key_url: None,
+                hint: "内置 Agent 的密钥就是模型密钥里配置的 provider，只保存在这台机器上。".into(),
+            }),
+            ..Default::default()
         }
     }
 

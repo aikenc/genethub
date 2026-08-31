@@ -64,7 +64,7 @@ async fn a_device_gets_what_its_invitation_named_and_nothing_else() {
             content: "owned".into(),
         },
         Request::PtyOpen {
-            workspace_id: journey.workspace.id.clone(),
+            workspace_id: Some(journey.workspace.id.clone()),
             cols: Some(80),
             rows: Some(24),
         },
@@ -105,7 +105,7 @@ async fn a_device_without_a_terminal_grant_is_not_sent_the_terminal_anyway() {
     let pty_id = match journey
         .client
         .call(Request::PtyOpen {
-            workspace_id: journey.workspace.id.clone(),
+            workspace_id: Some(journey.workspace.id.clone()),
             cols: Some(80),
             rows: Some(24),
         })
@@ -161,7 +161,7 @@ async fn a_device_granted_everything_still_works_exactly_as_before() {
     device.call(Request::SettingsGet).await.expect("settings");
     let pty_id = match device
         .call(Request::PtyOpen {
-            workspace_id: journey.workspace.id.clone(),
+            workspace_id: Some(journey.workspace.id.clone()),
             cols: Some(80),
             rows: Some(24),
         })
@@ -299,7 +299,7 @@ async fn a_terminal_for_someone_else_is_confined_or_refused_but_never_neither() 
         .await
         .expect("a paired device connects");
     let ask = Request::PtyOpen {
-        workspace_id: journey.workspace.id.clone(),
+        workspace_id: Some(journey.workspace.id.clone()),
         cols: Some(80),
         rows: Some(24),
     };
@@ -370,7 +370,7 @@ async fn a_terminal_for_someone_else_is_confined_or_refused_but_never_neither() 
         .expect("a paired device connects");
     device
         .call(Request::PtyOpen {
-            workspace_id: journey.workspace.id.clone(),
+            workspace_id: Some(journey.workspace.id.clone()),
             cols: Some(80),
             rows: Some(24),
         })
@@ -384,7 +384,7 @@ async fn a_terminal_for_someone_else_is_confined_or_refused_but_never_neither() 
     journey
         .client
         .call(Request::PtyOpen {
-            workspace_id: journey.workspace.id.clone(),
+            workspace_id: Some(journey.workspace.id.clone()),
             cols: Some(80),
             rows: Some(24),
         })

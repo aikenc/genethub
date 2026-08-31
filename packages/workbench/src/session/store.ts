@@ -257,6 +257,15 @@ interface WorkbenchState {
   git: GitStatus | null;
   diff: string | null;
   settings: Settings | null;
+  /**
+   * The agent whose setup wizard is open, if any.
+   *
+   * Kept here rather than in whichever panel opened it: the wizard is reachable
+   * from first-run, settings and the composer chip alike, and all of them land
+   * on the same dialog. The wizard reads the live `agents` entry, so a refresh
+   * mid-sign-in advances it without any wiring of its own.
+   */
+  setupAgentId: string | null;
   /** The log being read, if the log tab has been opened. */
   log: LogTail | null;
   /**
@@ -337,6 +346,10 @@ interface WorkbenchState {
   probeSpeechRuntime(): Promise<SpeechRuntimeStatus | null>;
   /** Removes a provider the user added. */
   forgetProvider(providerId: string): Promise<void>;
+  /** Re-probes every agent: install state, version, sign-in, catalog. */
+  refreshAgents(): Promise<void>;
+  /** Opens the setup wizard for an agent; `null` closes it. */
+  openAgentSetup(agentId: string | null): void;
   /**
    * Opens an empty conversation. Writes nothing until the first message.
    *
@@ -641,6 +654,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   git: null,
   diff: null,
   settings: null,
+  setupAgentId: null,
   log: null,
   update: null,
   appUpdate: null,
@@ -1750,8 +1764,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "settings") set({ settings: reply.data });
     // A key that just landed can change which agents are usable, and it is what
     // fills the model picker.
-    const agents = await require_(get().client).call({ type: "agent.refresh" });
-    if (agents?.type === "agents") set({ agents: agents.data });
+    await get().refreshAgents();
   },
 
   async setSpeechQwen3({
@@ -1796,15 +1809,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }),
     );
     if (reply?.type === "settings") set({ settings: reply.data });
+    await get().refreshAgents();
+  },
+
+  async refreshAgents() {
     const agents = await require_(get().client).call({ type: "agent.refresh" });
     if (agents?.type === "agents") set({ agents: agents.data });
   },
 
-  async refreshAgents() {
-    const client = get().client;
-    if (!client) return;
-    const agents = await client.call({ type: "agent.refresh" }).catch(unattended(client, get, set));
-    if (agents?.type === "agents") set({ agents: agents.data });
+  openAgentSetup(agentId) {
+    set({ setupAgentId: agentId });
   },
 
   async refreshHub() {

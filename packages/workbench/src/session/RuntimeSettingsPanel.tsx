@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 
 import { RuntimeSettings } from "./RuntimeSettings";
 import type { RuntimeSelection } from "./runtime-selection";
+import { useWorkbench } from "./store";
 
 export function RuntimeSettingsPanel({
   id,
@@ -34,6 +35,7 @@ export function RuntimeSettingsPanel({
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
+  const openAgentSetup = useWorkbench((state) => state.openAgentSetup);
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -106,6 +108,12 @@ export function RuntimeSettingsPanel({
             onPickEffort={onPickEffort}
             onPickRuntimeAxis={onPickRuntimeAxis}
             onRefreshAgents={onRefreshAgents}
+            onConfigureAgent={(agentId) => {
+              // The wizard is its own portal; keeping the modal under it would
+              // strand the user one layer deep when they finish.
+              onClose();
+              openAgentSetup(agentId);
+            }}
           />
         </div>
       </section>

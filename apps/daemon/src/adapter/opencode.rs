@@ -16,8 +16,9 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
-    Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    AgentSetup, ApiKeyGuide, ApiKeyKind, Capabilities, Catalog, GuidePlatform, ImportContinuation,
+    InstallMethod, LoginGuide, ModeInfo, ModelInfo, PermissionOutcome, ProbeState, SessionEvent,
+    TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex};
@@ -61,6 +62,64 @@ impl AgentAdapter for OpenCodeAdapter {
         match find_executable(BINARY) {
             Some(_) => ProbeState::Ready,
             None => ProbeState::NotInstalled,
+        }
+    }
+
+    async fn version(&self) -> Option<String> {
+        super::binary_version(&find_executable(BINARY)?).await
+    }
+
+    fn setup(&self) -> AgentSetup {
+        // Commands from https://opencode.ai/docs/ — its own install page.
+        AgentSetup {
+            install: vec![
+                InstallMethod {
+                    label: "官方安装脚本".into(),
+                    platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+                    command: "curl -fsSL https://opencode.ai/install | bash".into(),
+                },
+                InstallMethod {
+                    label: "npm".into(),
+                    platforms: vec![
+                        GuidePlatform::Macos,
+                        GuidePlatform::Linux,
+                        GuidePlatform::Windows,
+                    ],
+                    command: "npm install -g opencode-ai".into(),
+                },
+                InstallMethod {
+                    label: "Homebrew".into(),
+                    platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+                    command: "brew install anomalyco/tap/opencode".into(),
+                },
+                InstallMethod {
+                    label: "Chocolatey".into(),
+                    platforms: vec![GuidePlatform::Windows],
+                    command: "choco install opencode".into(),
+                },
+                InstallMethod {
+                    label: "Scoop".into(),
+                    platforms: vec![GuidePlatform::Windows],
+                    command: "scoop install opencode".into(),
+                },
+            ],
+            // Credentials live in its own store (`/connect` writes
+            // ~/.local/share/opencode/auth.json), so sign-in and API key are
+            // the same flow — its TUI's, launched in the embedded terminal.
+            login: Some(LoginGuide {
+                command: "opencode".into(),
+                opens_browser: false,
+                hint: "启动后在界面里输入 /connect，选择提供方完成登录；选 OpenCode Zen 会打开浏览器。"
+                    .into(),
+            }),
+            api_key: Some(ApiKeyGuide {
+                kind: ApiKeyKind::TerminalCommand,
+                command: Some("opencode".into()),
+                env_vars: Vec::new(),
+                key_url: Some("https://opencode.ai/auth".into()),
+                hint: "在 opencode 界面里输入 /connect 粘贴密钥；凭证由 OpenCode 自己保存。".into(),
+            }),
+            docs_url: Some("https://opencode.ai/docs/".into()),
         }
     }
 

@@ -38,6 +38,9 @@ const AGENTS: AgentInfo[] = [
       defaultMode: undefined,
       defaultEffort: "medium",
     },
+    platform: "linux",
+    auth: "notApplicable",
+    setup: { install: [] },
   },
   {
     id: "claude",
@@ -65,6 +68,9 @@ const AGENTS: AgentInfo[] = [
       defaultMode: "default",
       defaultEffort: undefined,
     },
+    platform: "linux",
+    auth: "authenticated",
+    setup: { install: [] },
   },
 ];
 

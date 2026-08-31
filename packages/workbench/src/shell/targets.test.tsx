@@ -461,6 +461,9 @@ describe("switching from the sidebar", () => {
       label: id === "codex" ? "Codex" : "Claude Code",
       builtin: false,
       probe: { state: "ready" },
+      platform: "linux",
+      auth: "unknown",
+      setup: { install: [] },
       capabilities: {
         interrupt: false,
         setModel: false,
@@ -650,6 +653,9 @@ describe("switching from the sidebar", () => {
       label: "Cursor",
       builtin: false,
       probe: { state: "ready" },
+      platform: "linux",
+      auth: "unknown",
+      setup: { install: [] },
       capabilities: {
         interrupt: false,
         setModel: false,

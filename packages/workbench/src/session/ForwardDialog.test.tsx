@@ -17,6 +17,9 @@ function agent(id: string, label: string): AgentInfo {
     label,
     builtin: false,
     probe: { state: "ready" },
+    platform: "linux",
+    auth: "unknown",
+    setup: { install: [] },
     capabilities: {
       interrupt: false,
       setModel: false,

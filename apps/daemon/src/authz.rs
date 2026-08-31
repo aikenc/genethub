@@ -480,7 +480,7 @@ mod tests {
         // possible to withhold it from a device that may still edit files.
         assert_eq!(
             required(&Request::PtyOpen {
-                workspace_id: "w".into(),
+                workspace_id: Some("w".into()),
                 cols: Some(80),
                 rows: Some(24)
             }),

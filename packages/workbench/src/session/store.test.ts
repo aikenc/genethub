@@ -185,6 +185,9 @@ describe("re-probing agents after they may have been installed", () => {
     label: "Cursor",
     builtin: false,
     probe: { state: "notInstalled" as const },
+    platform: "linux",
+    auth: "unknown",
+    setup: { install: [] },
     capabilities: {
       interrupt: true,
       setModel: true,
@@ -968,6 +971,9 @@ describe("opening a new conversation", () => {
         defaultMode: undefined,
         defaultEffort: undefined,
       },
+      platform: "linux",
+      auth: "unknown",
+      setup: { install: [] },
     } as AgentInfo;
     expect(defaultAgent([external])?.id).toBe("opencode");
 

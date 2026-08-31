@@ -19,7 +19,7 @@ export type AgentPresentation =
   | { kind: "text"; label: string };
 
 export interface AgentAvailability {
-  shortLabel: "未安装" | "不可用" | "待配置";
+  shortLabel: "未安装" | "不可用" | "待配置" | "未认证";
   fullLabel: string;
 }
 
@@ -58,8 +58,20 @@ export function resolveAgentProfile(agentId: string): {
 }
 
 export function resolveAgentAvailability(
-  agent: Pick<AgentInfo, "id" | "probe" | "catalog">,
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog" | "auth">,
 ): AgentAvailability | null {
+  // An agent its own CLI reports as signed out is never startable, whatever
+  // the rest says: offering it would hand the first turn to a process that
+  // can only fail. `unknown` is deliberately not this case — a CLI that
+  // publishes no status stays usable, because guessing would hide working
+  // installs.
+  if (agent.auth === "unauthenticated") {
+    const reason = agent.probe.state === "unavailable" ? agent.probe.reason.trim() : "";
+    return {
+      shortLabel: "未认证",
+      fullLabel: reason || "未认证：请先完成登录或配置密钥",
+    };
+  }
   if (agent.probe.state === "ready") {
     return canStartAgent(agent)
       ? null
@@ -76,12 +88,14 @@ export function resolveAgentAvailability(
 }
 
 /** A ready probe means the executable exists. Starting a turn additionally
- * needs either a concrete catalog or an Agent whose own runtime owns defaults. */
+ * needs its own sign-in intact (when the CLI will say) and either a concrete
+ * catalog or an Agent whose own runtime owns defaults. */
 export function canStartAgent(
-  agent: Pick<AgentInfo, "id" | "probe" | "catalog">,
+  agent: Pick<AgentInfo, "id" | "probe" | "catalog" | "auth">,
 ): boolean {
   return (
     agent.probe.state === "ready" &&
+    agent.auth !== "unauthenticated" &&
     (agent.catalog.models.length > 0 || resolveAgentProfile(agent.id).startWithoutModelCatalog)
   );
 }

@@ -1263,22 +1263,44 @@ async fn dispatch(
             cols,
             rows,
         } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let confinement = match crate::isolation::required_for(caller, &workspace) {
-                Ok(confinement) => confinement,
-                Err(refusal) => return Handled::err(ErrorCode::IsolationUnavailable, refusal),
+            // Without a workspace the shell opens in the machine's home
+            // directory: installing or signing in an agent is not about any
+            // project, and the setup wizard needs a terminal before the user
+            // has opened a folder at all.
+            let (cwd, confinement) = match &workspace_id {
+                Some(id) => {
+                    let workspace = match state.workspaces.get(id).await {
+                        Ok(workspace) => workspace,
+                        Err(error) => return failed(error),
+                    };
+                    let confinement = match crate::isolation::required_for(caller, &workspace) {
+                        Ok(confinement) => confinement,
+                        Err(refusal) => {
+                            return Handled::err(ErrorCode::IsolationUnavailable, refusal)
+                        }
+                    };
+                    (workspace.root.clone(), confinement)
+                }
+                // Nothing can confine a shell that belongs to no project, so
+                // this branch exists only for callers already allowed an
+                // unconfined one — a narrowed device must not widen itself by
+                // omitting the workspace.
+                None => {
+                    if !caller.allows(crate::authz::Capability::PtyUnconfined) {
+                        return Handled::err(
+                            ErrorCode::Forbidden,
+                            "a terminal outside any workspace requires pty:unconfined".to_string(),
+                        );
+                    }
+                    (
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
+                        None,
+                    )
+                }
             };
             match state
                 .terminals
-                .open(
-                    &workspace.root,
-                    cols.unwrap_or(80),
-                    rows.unwrap_or(24),
-                    confinement,
-                )
+                .open(&cwd, cols.unwrap_or(80), rows.unwrap_or(24), confinement)
                 .await
             {
                 Ok(pty_id) => Handled::ok(Reply::Pty { pty_id }),

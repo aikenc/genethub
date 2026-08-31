@@ -1744,11 +1744,13 @@ function diagnosticContext(request: Request): ClientDiagnosticDetail {
       };
     case "git.status":
     case "git.commit":
-    case "pty.open":
     case "workspace.rename":
     case "workspace.remove":
     case "session.create":
       return { workspaceId: request.payload.workspaceId };
+    case "pty.open":
+      // The setup wizard's shell belongs to no workspace.
+      return { workspaceId: request.payload.workspaceId ?? null };
     default:
       return {};
   }

@@ -10,8 +10,11 @@ import { BUILD } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
+import { AgentMark } from "../presentation/AgentMark";
+import { resolveAgentAvailability } from "../presentation/catalog/resolve";
 import type { RtcState } from "../protocol/client";
 import { useWorkbench } from "../session/store";
+import { authBadge } from "../setup/steps";
 import { UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
 import { readRtcEnabled, writeRtcEnabled } from "./rtc";
@@ -49,6 +52,7 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
     setSpeechQwen3,
     probeSpeechRuntime,
     agents,
+    openAgentSetup,
     hub,
     claim,
     pair,
@@ -104,20 +108,45 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
 
       <section>
         <h2 className="mb-2 text-sm font-medium">Agent</h2>
+        <p className="mb-3 text-xs text-muted">
+          安装、登录和密钥都有引导；点开「配置」跟着走即可，不用离开这个窗口。
+        </p>
         <ul className="flex flex-col gap-1 text-sm">
-          {agents.map((agent) => (
-            <li key={agent.id} className="flex items-center gap-2 rounded bg-surface px-3 py-2">
-              <span>{agent.label}</span>
-              {agent.builtin ? <span className="text-xs text-muted">内置</span> : null}
-              <span className="ml-auto text-xs text-muted">
-                {agent.probe.state === "ready"
-                  ? "可用"
-                  : agent.probe.state === "notInstalled"
-                    ? "未安装"
-                    : agent.probe.reason}
-              </span>
-            </li>
-          ))}
+          {agents.map((agent) => {
+            const availability = resolveAgentAvailability(agent);
+            const badge = authBadge(agent);
+            return (
+              <li
+                key={agent.id}
+                className="flex items-center gap-2 rounded bg-surface px-3 py-2"
+              >
+                <AgentMark agent={agent} className="h-5 w-5" fallbackToText={false} />
+                <span>{agent.label}</span>
+                {agent.builtin ? <span className="text-xs text-muted">内置</span> : null}
+                {agent.version ? (
+                  <span className="text-xs text-faint">{agent.version}</span>
+                ) : null}
+                {badge ? (
+                  <span
+                    className={`text-xs ${badge.tone === "ok" ? "text-faint" : "text-danger"}`}
+                  >
+                    {badge.label}
+                  </span>
+                ) : null}
+                <span className="ml-auto text-xs text-muted">
+                  {availability?.shortLabel ?? "可用"}
+                </span>
+                <button
+                  type="button"
+                  data-testid={`setup-agent-${agent.id}`}
+                  className="shrink-0 rounded border border-line px-2 py-0.5 text-xs hover:border-accent"
+                  onClick={() => openAgentSetup(agent.id)}
+                >
+                  配置
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </section>
 

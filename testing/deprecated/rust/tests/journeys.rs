@@ -1153,7 +1153,7 @@ async fn a_terminal_opens_echoes_resizes_and_closes() {
     let pty_id = match journey
         .client
         .call(Request::PtyOpen {
-            workspace_id: journey.workspace.id.clone(),
+            workspace_id: Some(journey.workspace.id.clone()),
             cols: Some(80),
             rows: Some(24),
         })

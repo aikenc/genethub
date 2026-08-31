@@ -69,8 +69,9 @@ use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, CommandInfo, ImportContinuation, ItemDelta, ModeInfo, ModelInfo,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    AgentSetup, ApiKeyGuide, ApiKeyKind, AuthState, Capabilities, Catalog, CommandInfo,
+    EnvVarGuide, GuidePlatform, ImportContinuation, InstallMethod, ItemDelta, LoginGuide, ModeInfo,
+    ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
     PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolKind,
     ToolStatus, TurnError, TurnErrorCode, Usage,
 };
@@ -527,6 +528,84 @@ impl AgentAdapter for ClaudeAdapter {
         match self.program() {
             Some(_) => ProbeState::Ready,
             None => ProbeState::NotInstalled,
+        }
+    }
+
+    async fn auth(&self) -> AuthState {
+        let Some(program) = self.program() else {
+            return AuthState::Unknown;
+        };
+        // `claude auth status` prints JSON with a `loggedIn` boolean — the one
+        // non-interactive answer this CLI publishes (verified against 2.1.220).
+        super::json_auth_status(&program, &["auth", "status"], "loggedIn").await
+    }
+
+    async fn version(&self) -> Option<String> {
+        super::binary_version(&self.program()?).await
+    }
+
+    fn setup(&self) -> AgentSetup {
+        // Commands from code.claude.com/docs/en/setup and /authentication.
+        AgentSetup {
+            install: vec![
+                InstallMethod {
+                    label: "官方安装脚本".into(),
+                    platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+                    command: "curl -fsSL https://claude.ai/install.sh | bash".into(),
+                },
+                InstallMethod {
+                    label: "官方安装脚本（CMD）".into(),
+                    platforms: vec![GuidePlatform::Windows],
+                    command: "curl -fsSL https://claude.ai/install.cmd -o install.cmd && install.cmd && del install.cmd".into(),
+                },
+                InstallMethod {
+                    label: "WinGet".into(),
+                    platforms: vec![GuidePlatform::Windows],
+                    command: "winget install Anthropic.ClaudeCode".into(),
+                },
+                InstallMethod {
+                    label: "Homebrew".into(),
+                    platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+                    command: "brew install --cask claude-code".into(),
+                },
+                InstallMethod {
+                    label: "npm".into(),
+                    platforms: vec![
+                        GuidePlatform::Macos,
+                        GuidePlatform::Linux,
+                        GuidePlatform::Windows,
+                    ],
+                    command: "npm install -g @anthropic-ai/claude-code".into(),
+                },
+            ],
+            login: Some(LoginGuide {
+                command: "claude auth login".into(),
+                opens_browser: true,
+                hint: "浏览器会打开 Claude 登录页，完成后这里会自动识别。按 API 用量计费（Console）的账号改用 claude auth login --console。"
+                    .into(),
+            }),
+            api_key: Some(ApiKeyGuide {
+                kind: ApiKeyKind::Environment,
+                command: None,
+                env_vars: vec![
+                    EnvVarGuide {
+                        name: "ANTHROPIC_API_KEY".into(),
+                        purpose: "Anthropic Console 发放的 API Key".into(),
+                    },
+                    EnvVarGuide {
+                        name: "ANTHROPIC_BASE_URL".into(),
+                        purpose: "兼容端点地址（网关或第三方兼容服务）".into(),
+                    },
+                    EnvVarGuide {
+                        name: "ANTHROPIC_AUTH_TOKEN".into(),
+                        purpose: "兼容端点的鉴权令牌（随 Authorization: Bearer 发送）".into(),
+                    },
+                ],
+                key_url: Some("https://platform.claude.com/".into()),
+                hint: "环境变量要重启 GeneHub 后才对这里启动的 Claude 生效；多数情况下用上面的浏览器登录更简单。"
+                    .into(),
+            }),
+            docs_url: Some("https://code.claude.com/docs/en/setup".into()),
         }
     }
 

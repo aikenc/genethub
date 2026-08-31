@@ -96,6 +96,9 @@ const agent: AgentInfo = {
   label: "GeneHub Agent",
   probe: { state: "ready" },
   builtin: true,
+  platform: "linux",
+  auth: "notApplicable",
+  setup: { install: [] },
   capabilities: {
     interrupt: true,
     setModel: false,

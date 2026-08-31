@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use genehub_proto::{AgentInfo, ProbeState};
+use genehub_proto::{
+    AgentInfo, AgentSetup, ApiKeyGuide, ApiKeyKind, EnvVarGuide, GuidePlatform, InstallMethod,
+    LoginGuide, ProbeState,
+};
 use tokio::sync::RwLock;
 
-use super::acp::AcpAdapter;
+use super::acp::{AcpAdapter, AuthStatusProbe};
 use super::claude::ClaudeAdapter;
 use super::codex::CodexAdapter;
 use super::genet::GenetAdapter;
@@ -19,6 +22,10 @@ use crate::config::CustomAgent;
 pub struct Registry {
     adapters: Vec<SharedAdapter>,
     cache: RwLock<Option<Vec<AgentInfo>>>,
+    /// Versions, remembered once asked: the binary cannot change under a
+    /// running daemon, but `--version` costs a process spawn and the setup
+    /// wizard polls `refresh` while the user is signing in.
+    versions: RwLock<BTreeMap<String, Option<String>>>,
 }
 
 fn cursor_command() -> Vec<String> {
@@ -56,6 +63,60 @@ fn cursor_install_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Cursor's official setup, from docs.cursor.com/cli and `cursor-agent
+/// --help`: the install script is Unix-only (its docs name no Windows
+/// command), sign-in is a browser flow, and `status --format json` answers
+/// `isAuthenticated` for the badge.
+fn cursor_setup() -> AgentSetup {
+    AgentSetup {
+        install: vec![InstallMethod {
+            label: "官方安装脚本".into(),
+            platforms: vec![GuidePlatform::Macos, GuidePlatform::Linux],
+            command: "curl https://cursor.com/install -fsS | bash".into(),
+        }],
+        login: Some(LoginGuide {
+            command: "cursor-agent login".into(),
+            opens_browser: true,
+            hint: "浏览器会打开 Cursor 账号登录页，完成后这里会自动识别。".into(),
+        }),
+        api_key: Some(ApiKeyGuide {
+            kind: ApiKeyKind::Environment,
+            command: None,
+            env_vars: vec![EnvVarGuide {
+                name: "CURSOR_API_KEY".into(),
+                purpose: "在 Cursor 网页后台生成的 API Key".into(),
+            }],
+            key_url: None,
+            hint: "环境变量要重启 GeneHub 后才对这里启动的 Cursor 生效；订阅用户用上面的登录即可。"
+                .into(),
+        }),
+        docs_url: Some("https://docs.cursor.com/cli".into()),
+    }
+}
+
+fn cursor_auth_probe() -> AuthStatusProbe {
+    AuthStatusProbe {
+        args: ["status", "--format", "json"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        json_field: "isAuthenticated".into(),
+    }
+}
+
+/// The OS this daemon — and therefore every agent it probes and every
+/// terminal it opens — runs on. Sent to clients so the wizard can offer the
+/// install command that can actually execute here.
+fn host_platform() -> GuidePlatform {
+    if cfg!(windows) {
+        GuidePlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        GuidePlatform::Macos
+    } else {
+        GuidePlatform::Linux
+    }
+}
+
 impl Registry {
     /// Builds the adapter set: the built-ins, plus whatever the user declared.
     pub fn new(custom: &BTreeMap<String, CustomAgent>) -> Self {
@@ -80,7 +141,9 @@ impl Registry {
             Arc::new(
                 AcpAdapter::new("cursor", "Cursor", cursor_command())
                     .with_extra_dirs(cursor_install_dirs())
-                    .checking_login(),
+                    .checking_login()
+                    .with_setup(cursor_setup())
+                    .with_auth_status(cursor_auth_probe()),
             ),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
@@ -107,6 +170,7 @@ impl Registry {
         Registry {
             adapters,
             cache: RwLock::new(None),
+            versions: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -117,6 +181,7 @@ impl Registry {
         Registry {
             adapters,
             cache: RwLock::new(None),
+            versions: RwLock::new(BTreeMap::new()),
         }
     }
 
@@ -153,11 +218,21 @@ impl Registry {
             futures_util::future::join_all(self.adapters.iter().map(|adapter| async move {
                 let probe = adapter.probe().await;
                 // Cataloguing an absent agent would spawn a process that is not
-                // there; skip straight to an empty catalog.
+                // there; skip straight to an empty catalog. Version and sign-in
+                // questions are skipped for the same reason.
                 let catalog = if matches!(probe, ProbeState::Ready) {
                     adapter.catalog(providers).await
                 } else {
                     Default::default()
+                };
+                // Sign-in is asked even of an absent binary: every adapter answers
+                // Unknown for one without spawning anything, and the built-in
+                // agent's NotApplicable is true whether or not it is on disk.
+                let auth = adapter.auth().await;
+                let version = if matches!(probe, ProbeState::NotInstalled) {
+                    None
+                } else {
+                    self.version_of(adapter.as_ref()).await
                 };
                 AgentInfo {
                     id: adapter.id().to_string(),
@@ -166,11 +241,30 @@ impl Registry {
                     capabilities: adapter.capabilities(),
                     catalog,
                     builtin: adapter.builtin(),
+                    platform: host_platform(),
+                    version,
+                    auth,
+                    setup: adapter.setup(),
                 }
             }))
             .await;
         *self.cache.write().await = Some(infos.clone());
         infos
+    }
+
+    /// The version an adapter reported, asked at most once per daemon run: the
+    /// binary cannot change under us, but the question costs a process spawn
+    /// and `refresh` is polled while the setup wizard is open.
+    async fn version_of(&self, adapter: &dyn super::AgentAdapter) -> Option<String> {
+        if let Some(known) = self.versions.read().await.get(adapter.id()) {
+            return known.clone();
+        }
+        let asked = adapter.version().await;
+        self.versions
+            .write()
+            .await
+            .insert(adapter.id().to_string(), asked.clone());
+        asked
     }
 
     /// Agents the user can actually pick right now.
@@ -211,6 +305,8 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use genehub_proto::AuthState;
+
     use super::*;
 
     #[tokio::test]
@@ -362,5 +458,115 @@ mod tests {
     async fn requiring_an_unknown_adapter_is_an_error_not_a_panic() {
         let registry = Registry::new(&BTreeMap::new());
         assert!(registry.require("nope").is_err());
+    }
+
+    /// Every agent carries the guide the wizard renders from, and the platform
+    /// the commands must run on. The built-in agent points at the provider
+    /// form; the CLI entries point at their own official flows.
+    #[tokio::test]
+    async fn every_agent_carries_a_setup_guide_and_the_host_platform() {
+        let registry = Registry::new(&BTreeMap::new());
+        let infos = registry.refresh(&ProviderMap::new()).await;
+
+        let expected = if cfg!(windows) {
+            GuidePlatform::Windows
+        } else if cfg!(target_os = "macos") {
+            GuidePlatform::Macos
+        } else {
+            GuidePlatform::Linux
+        };
+        for info in &infos {
+            assert_eq!(info.platform, expected, "{} reports the wrong OS", info.id);
+        }
+
+        let genet = infos.iter().find(|a| a.id == "genet").expect("genet");
+        assert_eq!(genet.auth, AuthState::NotApplicable);
+        assert!(
+            genet.setup.install.is_empty(),
+            "the built-in agent ships installed"
+        );
+        assert_eq!(
+            genet.setup.api_key.as_ref().map(|guide| guide.kind),
+            Some(ApiKeyKind::BuiltinProvider)
+        );
+
+        let claude = infos.iter().find(|a| a.id == "claude").expect("claude");
+        assert!(
+            claude
+                .setup
+                .install
+                .iter()
+                .any(|method| method.command.contains("https://claude.ai/install.sh")),
+            "Claude's official install script is missing"
+        );
+        assert_eq!(
+            claude
+                .setup
+                .login
+                .as_ref()
+                .map(|login| login.command.as_str()),
+            Some("claude auth login")
+        );
+
+        let codex = infos.iter().find(|a| a.id == "codex").expect("codex");
+        assert_eq!(
+            codex
+                .setup
+                .api_key
+                .as_ref()
+                .and_then(|guide| guide.command.as_deref()),
+            Some("codex login --with-api-key")
+        );
+
+        let cursor = infos.iter().find(|a| a.id == "cursor").expect("cursor");
+        assert_eq!(
+            cursor
+                .setup
+                .login
+                .as_ref()
+                .map(|login| login.command.as_str()),
+            Some("cursor-agent login")
+        );
+
+        // A declared ACP agent with no guide data gets an empty profile: the
+        // wizard falls back to its own documentation rather than invent steps.
+        let mut custom = BTreeMap::new();
+        custom.insert(
+            "goose".to_string(),
+            CustomAgent {
+                extends: "acp".into(),
+                command: vec!["goose".into(), "acp".into()],
+                label: None,
+            },
+        );
+        let registry = Registry::new(&custom);
+        let goose = registry
+            .refresh(&ProviderMap::new())
+            .await
+            .into_iter()
+            .find(|a| a.id == "acp:goose")
+            .expect("the custom agent");
+        assert_eq!(goose.setup, AgentSetup::default());
+        // An absent binary answers Unknown cheaply — nothing is spawned to ask.
+        assert_eq!(goose.auth, AuthState::Unknown);
+    }
+
+    /// Cursor's guide is checked against its own docs: the Unix-only install
+    /// script, the browser login, and the status command the badge reads.
+    #[test]
+    fn cursor_setup_matches_its_own_documentation() {
+        let setup = cursor_setup();
+        assert_eq!(
+            setup.install[0].command,
+            "curl https://cursor.com/install -fsS | bash"
+        );
+        assert!(
+            !setup.install[0].platforms.contains(&GuidePlatform::Windows),
+            "cursor.com/install is a Unix script; Windows gets the docs link"
+        );
+        assert!(setup.login.as_ref().unwrap().opens_browser);
+        let probe = cursor_auth_probe();
+        assert_eq!(probe.json_field, "isAuthenticated");
+        assert_eq!(probe.args, ["status", "--format", "json"]);
     }
 }
