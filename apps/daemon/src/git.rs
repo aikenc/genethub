@@ -204,14 +204,33 @@ pub async fn unstage(root: &Path, paths: &[String]) -> Result<()> {
     git(root, &args).await.map(|_| ())
 }
 
-/// Prove that the current outer project HEAD exactly represents every
-/// human-owned Agent Space and Provider source. Ignored Builder projections,
-/// business repositories, and worktrees may exist beside those sources;
-/// tracked or untracked project-source drift is rejected.
+/// Prove that an Agent Space subtree still has the exact tree recorded at one
+/// clean project commit. Later descendant commits may change unrelated project
+/// files (for example the project's own Workflow) without invalidating this
+/// Space; changes inside the recorded subtree and any uncommitted project
+/// source drift are rejected.
 pub async fn verify_clean_project_sources_at_commit(
     repository_root: &Path,
     commit: &str,
     subtree: &Path,
+) -> Result<()> {
+    verify_clean_project_sources_at_commit_allowing_untracked(repository_root, commit, subtree, &[])
+        .await
+}
+
+/// Prove that committed project-owned sources still match one exact ancestor
+/// commit, while permitting only explicitly named, project-managed staging
+/// trees.
+///
+/// Workflow improvement bundles are intentionally materialized as inert,
+/// untracked project data before independent review. They are digest-bound by
+/// the PM domain and must not force the Agent Space source verifier to accept
+/// unrelated untracked files elsewhere in the repository.
+pub async fn verify_clean_project_sources_at_commit_allowing_untracked(
+    repository_root: &Path,
+    commit: &str,
+    subtree: &Path,
+    allowed_untracked_subtrees: &[&Path],
 ) -> Result<()> {
     validate_object_id("commit", commit)?;
     let root = repository_root
@@ -225,27 +244,63 @@ pub async fn verify_clean_project_sources_at_commit(
     git(&root, &["rev-parse", "--verify", &commit_object])
         .await
         .context("source commit is not a local commit object")?;
-    let head = git(&root, &["rev-parse", "HEAD"]).await?;
-    if !head.trim().eq_ignore_ascii_case(commit) {
-        anyhow::bail!("Agent Space source commit must be the outer project HEAD");
-    }
+    git(&root, &["merge-base", "--is-ancestor", commit, "HEAD"])
+        .await
+        .context("Agent Space source commit is not an ancestor of the current project HEAD")?;
     let committed_path = format!("{commit}:{relative}");
-    git(&root, &["cat-file", "-e", &committed_path])
+    let current_path = format!("HEAD:{relative}");
+    let committed_tree = git(&root, &["rev-parse", "--verify", &committed_path])
         .await
         .context("source commit does not contain the Agent Space")?;
-    git(&root, &["diff", "--quiet", commit, "--", "."])
+    let current_tree = git(&root, &["rev-parse", "--verify", &current_path])
         .await
-        .context(
-            "project Agent Space or Provider sources differ from the supplied source commit",
-        )?;
+        .context("current project HEAD does not contain the Agent Space")?;
+    if !committed_tree
+        .trim()
+        .eq_ignore_ascii_case(current_tree.trim())
+    {
+        anyhow::bail!("Agent Space or Provider sources changed after the recorded source commit");
+    }
+    git(&root, &["diff", "--quiet", "HEAD", "--", "."])
+        .await
+        .context("the outer project has uncommitted tracked source changes")?;
+    let allowed_untracked = allowed_untracked_subtrees
+        .iter()
+        .map(|path| {
+            path.canonicalize()
+                .context("canonicalizing allowed project-managed staging subtree")
+                .and_then(|path| git_relative_path(&root, &path))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let untracked = git(
         &root,
-        &["ls-files", "--others", "--exclude-standard", "--", "."],
+        &[
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ],
     )
     .await?;
-    if !untracked.trim().is_empty() {
+    let unexpected = untracked
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter(|path| {
+            !allowed_untracked.iter().any(|allowed| {
+                *path == allowed
+                    || path
+                        .strip_prefix(allowed)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+    if !unexpected.is_empty() {
         anyhow::bail!(
-            "the outer project has untracked human-owned Agent Space or Provider sources"
+            "the outer project has untracked human-owned Agent Space or Provider sources: {}",
+            unexpected.join(", ")
         );
     }
     Ok(())

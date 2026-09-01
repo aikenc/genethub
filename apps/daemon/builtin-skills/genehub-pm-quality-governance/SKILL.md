@@ -1,102 +1,45 @@
 ---
 name: genehub-pm-quality-governance
-description: Assure PM project delivery quality without requiring the manager to master implementation details by defining evidence gates, commissioning independent Review WorkAgents, binding verdicts to exact Git candidates, testing demos, collecting execution feedback, and iterating Agent Space Skills. Use before accepting, integrating, merging, releasing, or retrying a rejected package, and whenever repeated WorkAgent friction suggests a Skill change.
+description: 通过精确候选、机械证据、独立 Reviewer 和受控集成治理 PM 交付质量。用于接受、集成、发布、返工或改进项目 Workflow/Prompt 之前。
 ---
 
-# Govern delivery quality and Skills
+# 交付质量治理
 
-Manage quality through contracts, separation, and evidence. Confidence, polished explanations, and implementation volume are not evidence.
+通过合同、角色分离和证据管理质量。自信、篇幅和“看起来没问题”都不是证据。详细字段见 [references/evidence-gates.md](references/evidence-gates.md)。
 
-Read [references/evidence-gates.md](references/evidence-gates.md) when defining or evaluating a candidate.
+## 候选门禁
 
-## Gate a candidate
+1. 重述当前 Intent 的用户可见验收标准和包边界。
+2. 固定 repository、commit、tree、Builder lock、测试/build 和产物摘要；dirty 或移动候选直接拒绝。
+3. Worker 只提交一份紧凑证据：命令与退出码、候选身份、产物、限制和接口变化。
+4. 按风险选择行为、回归、集成、安全、性能、兼容、许可和可运维性检查。
+5. 使用不同的 `review` Space 启动独立 Reviewer。Reviewer 只读精确候选，不得 checkout、revert、reset、复制候选反演基线、写入或清理 worktree。
+6. Reviewer 用结构化结果结束：
 
-1. Restate the user-visible acceptance criteria and the package contract.
-2. Identify the exact repository, commit, tree, dependency lock, Builder lock, and test/build evidence.
-3. Reject dirty or moving candidates. A changed commit/tree invalidates all earlier verdicts.
-4. Require one compact evidence bundle from the implementation WorkSession:
-   exact commands and exit codes, candidate commit/tree, artifact digests,
-   known limitations, and changed contracts. Do not ask the PM to reproduce
-   every implementation checkpoint or rerun a green package gate after each
-   internal commit.
-5. Keep the recorded Agent Space Builder identity current. Dispatch, candidate, review, and acceptance gates re-verify the lock; changing and re-recording an implementation Space blocks its candidate/review, and changing a review Space blocks reviews in progress. Reconcile the affected package instead of bypassing the refusal.
-6. Select checks by risk: behavior, regression, integration, security, performance, compatibility, license, and operability.
-7. Create an independent Review Agent Space when code or another material artifact is accepted. The reviewer receives read-only candidate facts and no completion pressure. Its contract forbids checkout, revert, reset, candidate-copy baseline experiments, and any write or cleanup in the candidate worktree. If review commands change tracked files or leave non-ignored files, the verdict must fail closed instead of cleaning the worktree and approving it.
-8. Require a structured verdict with evidence references, unresolved risks, and explicit pass/fail. A passing Review WorkSession ends with the minimal exact marker `GENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}`. A failing review ends with `GENEHUB_WORK_RESULT {"status":"review-fail","summary":"acceptance defects remain","findings":[{"severity":"blocking|high|medium|low","title":"...","acceptanceImpact":"...","recommendedAction":"...","estimatedRequests":1}]}`. `findings` is an array of objects, never strings; every finding requires `recommendedAction` inside that object. Never replace the final marker with a first-line `review-pass`, a `RESULT:` block, or prose, and never put text after it. A reviewer that edits the candidate cannot approve it.
-9. Send failures back to the implementation WorkSession or a replacement with lineage. Re-run affected tests and commission a fresh review.
-10. During each slice review, reject candidate code or tests whose truth depends on compatible sibling slices still being absent (for example an empty live registry, a missing export, or a default call returning null) unless that absence is itself a stable acceptance requirement. Slice semantics use injected fixtures; shared live state uses conditional invariants that remain true before and after sibling integration. Do not invert this rule: a final-composition gate that is unobservable only because its owning sibling has not been merged is not a defect in the bound slice. Review the slice-owned boundary with fixtures or a dynamic probe, and leave the full composed gate to the merged-baseline step. A failing finding must identify an acceptance defect attributable to the bound candidate or an explicit integration seam, not merely report an absent sibling. This is Reviewer work, not PM code inspection.
-11. After merging accepted slices, run the full merged baseline before branching or dispatching any downstream content, migration, or integration package. Per-slice passes do not prove the accepted baseline composes. If accepted slices conflict semantically, create a prerequisite seam-fix package in the Agent Space that owns that boundary and independently gate it instead of hiding the repair inside an unrelated failed slice.
+```text
+GENEHUB_WORK_RESULT {"status":"review-pass","summary":"精确候选的全部门禁通过"}
+GENEHUB_WORK_RESULT {"status":"review-fail","summary":"仍有验收缺陷","findings":[{"severity":"blocking|high|medium|low","title":"...","acceptanceImpact":"...","recommendedAction":"...","estimatedRequests":1}]}
+```
 
-Use Demo/preview acceptance for experience claims. The user should be able to verify the delivered behavior without reading implementation details.
+7. `review-fail` 必须指出绑定候选自身或明确 integration seam 的验收缺陷。兄弟切片尚未合入导致最终组合门禁暂不可观察，不是当前切片缺陷；用 fixture/动态探针评审本包边界，完整组合门禁留到 merged baseline。
+8. PM 不读代码复评。它只依据 findings 的验收影响、范围和剩余预算决定有限返工或升级用户。
+9. 返工生成新候选并重新运行受影响测试和独立 Review；旧 verdict 不复用。
+10. 多切片集成后，在派发下游包前运行完整 merged baseline。冲突属于对应 seam 的独立修复包。
 
-Record each gate through the PM control plane. Evidence flags are repeatable:
+公共命令形态：
 
 ```text
 "$GENEHUB_CLI" pm project package transition --id <id> --to candidate \
-  --repository <repo-id> --commit <full-commit> --tree <full-tree> --evidence <test-or-artifact>
-"$GENEHUB_CLI" agent run --agent <third-party-id> --model <model> \
-  --workspace <different-review-space-id> --work-package <same-id> --no-wait \
-  "Review only the bound candidate; do not edit it. Return findings and a pass/fail verdict with evidence."
-"$GENEHUB_CLI" pm project package transition --id <id> --to accepted \
-  --review-session <same-review-session> --candidate-commit <same-commit> \
-  --candidate-tree <same-tree> --verdict pass --review-evidence <verdict-evidence>
+  --repository <repo> --commit <full-commit> --tree <full-tree> --evidence <证据>
+"$GENEHUB_CLI" agent run --agent <agent> --model <model> \
+  --workspace <独立-review-space> --work-package <同一-id> --no-wait "按 Run 固定合同独立评审精确候选"
 "$GENEHUB_CLI" pm project package integrate --id <id>
 ```
 
-The successful `agent run --work-package` atomically enters `review`, binds the
-independent WorkSession to the exact current candidate commit/tree, and keeps
-the review-only Agent Space leased until a verdict is recorded. Do not issue a
-separate `--to review` command merely to bind the returned session. The daemon
-rejects missing evidence, moving candidate identities, self-review, and
-acceptance without an explicit passing verdict.
+成功的 Review `agent run --work-package` 会原子绑定候选和 Review WorkSession；不要额外执行 `--to review`。Coordinator 只允许一次有界结果协议修复；仍失败时包进入 Blocked，PM 不合成 verdict。
 
-The Coordinator owns one bounded protocol-repair turn when a terminal Reviewer
-omits or malforms the managed result marker. The PM must not send a competing
-repair prompt, synthesize a verdict, start a replacement review, or relax the
-parser. If the Coordinator's repair still fails, the package becomes blocked
-and the PM surfaces the declared recovery decision instead of looping.
+Integration 是 Coordinator 的确定性 Git 操作：重新证明候选身份、独立通过 verdict、干净 main、合并结果和祖先关系。冲突或脏基线走 Workflow 恢复边，不得由 PM 手工合并。
 
-Use only the protocol enum. An implementation result is `candidate-ready` or
-`blocked`; a review result is `review-pass`, `review-fail`, or `blocked`.
-Never put the domain labels `candidate` or `failed` in the marker status.
+## 改进 Workflow 与 Prompt
 
-Integration is a Coordinator-owned deterministic Git operation, not another
-WorkAgent package. It is available only at an active PM integration node and
-re-proves the exact accepted candidate, passing review, clean local `main`,
-merge result, and ancestry before recording `baseline.integrated`. A conflict
-or dirty baseline must take the declared recovery path; never merge it by
-hand from the PM session or report the Run as delivered.
-
-## Learn from execution
-
-After a failure, delay, review rejection, or user correction, classify the cause:
-
-- work contract or intent gap;
-- Agent Space context/topology gap;
-- Agent Space Skill instruction or tool gap;
-- Coding Agent/runtime limitation;
-- product/Builder defect;
-- external dependency or user decision.
-
-Do not turn every incident into a Skill rule. Change a Skill only when the lesson is reusable for that Space responsibility.
-
-If a package's responsibility, owned paths, input commit, checks, or completion
-contract changes, update its Git-managed Provider Skill, rebuild and verify the
-Space, and re-record its identity before the next dispatch. A one-off
-continuation prompt may recover the current checkpoint, but it must be followed
-by that durable Skill update and explicit accounting for candidates/reviews
-invalidated by the new Builder lock. Prompt-only scope drift is not an accepted
-management state.
-
-A runtime turn cap is not package failure when the WorkSession and Git lineage are intact. Resume from verified state. If the same check or defect consumes two consecutive capped turns, do not resend the same generic completion request: record the recurring cause, request a focused diagnosis and checkpoint, shrink the work contract, or introduce a genuinely independent specialist package. Repeated recovery without a changed management strategy is itself PM drift.
-
-## Iterate a Space Skill
-
-1. Resolve the Git-managed Provider source; do not edit generated `.agents`, `.claude`, `.cursor`, `.codebuddy`, `AGENTS.md`, or lock outputs.
-2. Reproduce the problem in a bounded Demo or historical failure case.
-3. Try the smallest instruction/resource change in the local override when useful.
-4. Exercise at least three trigger prompts, three adjacent non-trigger prompts, one success path, and one failure/recovery path.
-5. Promote the stable change to the root `skills/` Provider source, rebuild and verify the Agent Space, then commit it.
-6. Record which Demo evidence justified the new Skill version and which active candidates/reviews it invalidates.
-
-Keep PM Skills generic. Project-type and user-specific management rules are injectable project Skills; implementation knowledge belongs to the affected Agent Space Skill, not the PM catalog.
+只有可复现、可复用的问题才进入项目候选。候选放在 `workflow-candidates/<id>/`；该目录位于活动 Skill Provider 之外，避免惰性候选被 Builder 当成当前输入。然后依次 `improvement propose`、在 review-only Agent Space 中用 `agent run --improvement <id> --no-wait` 派发摘要绑定的独立 Reviewer、登记结构化 review、用户 approve、`promote`。不得复用评审其他 WorkPackage 的 Session。晋级只影响新 Run；已固定 Run 不热切换。模板迁移也走同一链，并以 `template.json` 的版本与内容摘要收口。

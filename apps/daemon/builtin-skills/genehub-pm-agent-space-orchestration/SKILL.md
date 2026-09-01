@@ -1,292 +1,65 @@
 ---
 name: genehub-pm-agent-space-orchestration
-description: Create and evolve a minimal dynamic Agent Space topology, local Git branches/worktrees, Agent Space Skills, and PM-controlled third-party WorkAgent sessions through GeneHub's public CLI. Use in a PM session when initializing spaces, dispatching or resuming work, adding parallel or review roles, choosing an installed Coding Agent, or recovering stalled work.
+description: 通过 GeneHub 公共 CLI 创建最小 Agent Space 拓扑、隔离 Git worktree，并派发或恢复受 PM 管理的第三方 WorkAgent/Reviewer。用于 PM Session 的建队、并行派工、评审容量和资源恢复。
 ---
 
-# Orchestrate Agent Spaces and WorkAgents
+# 编排 Agent Space 与 WorkAgent
 
-Agent Space is a user-visible Workspace role, not an Agent runtime and not a fixed team slot. Generate the smallest topology that satisfies the current task graph and risk.
+Agent Space 是用户可见的 Workspace 角色，不是模型 runtime，也不是固定团队席位。只建立当前 Workflow、能力和风险所需的最小拓扑。创建或改变 Space 前先读 [references/agent-space-contract.md](references/agent-space-contract.md)；H5 项目再读 [references/h5-game-recipe.md](references/h5-game-recipe.md)。
 
-Read [references/agent-space-contract.md](references/agent-space-contract.md) before creating or changing a Space.
-For an H5 game delivery or engine migration, also use the small-model decomposition heuristics in [references/h5-game-recipe.md](references/h5-game-recipe.md). It is a starting pattern, never a fixed topology.
+## 设计与容量
 
-## Design the topology
+每个 Space 明确职责、不负责事项、输入/输出、仓库/分支/worktree、所需 Skill、验收与评审门禁。相同上下文和写分支可合并；能独立推进、需要不同能力或独立评审时拆分。
 
-For every proposed node, name:
+Workflow 节点提供基础 selector，工作包用 `--space-tag` 声明额外语义能力，Coordinator 选择具体闲置 Space。不要把所有实现 Space 都做成通用节点，也不要让 PM 指定物理 Space。
 
-- responsibility and explicit non-responsibilities;
-- input commits/artifacts and output contract;
-- repository, branch, and isolated writable worktree;
-- Agent Space Skills needed for that responsibility;
-- upstream dependencies and downstream consumer;
-- completion and review gate.
+派工前读取 `resourceCapacities`：Work 节点受 `fanout.maxItems`，Review 节点受 `capacity`，实际可用量看 `availableSlots`。容量不足时补建已验证 Space 或缩小 cohort，禁止反复提交失败命令探测。
 
-Give every Space explicit capability tags when its responsibility is narrower
-than the Workflow node's base selector. Keep each Space's Skills and workspace
-folders limited to that capability and its exact package worktree; do not make
-all implementation Spaces general-purpose just to let the PM choose among
-them. A fanout package requests its capability with `package put --space-tag
-<capability>`, and the Coordinator chooses the concrete idle Space.
-The package names only its business repository and branch. After `package put`
-returns the Coordinator-selected `agentSpace` and derived `worktree`, create the
-Git worktree at that exact path before moving the package to `ready`. This
-allocation-first sequence prevents the PM from guessing a physical Space and
-prevents another Session from claiming the same Space between planning and
-dispatch.
+多包 fanout 必须按三段批量执行：全部 `package put` → 全部 Ready → 全部 `agent run --no-wait`。每个包要能在 Run 剩余墙钟内形成结果，并为独立 Reviewer 和 Coordinator 集成留出余量。
 
-Merge nodes that need the same context and writable branch. Split nodes when they can progress independently, need different Skills, or require an independent reviewer. Never pre-create Gameplay/UI/Test roles merely because the project is a game.
+## 构建与登记 Space
 
-Before fixing the number of parallel workstreams, read the selected Run's
-`resourceCapacities` from one `pm project workflow status`. For each WorkAgent node,
-`availableSlots` is the number of base-capability packages that the Coordinator
-can allocate now after fanout and cross-Session exclusions; package-specific
-`--space-tag` requirements may reduce it further. If the desired fanout exceeds
-that value, either build and record the missing specialized Spaces first or
-reduce the current cohort. Never probe capacity by repeatedly issuing failing
-`package put` commands, and never treat `maxItems` as guaranteed capacity.
-
-For a multi-package fanout, allocate the whole cohort before starting any
-member: issue every sibling `package put` first, then every Ready transition,
-then every non-blocking `agent run`. Never interleave those phases per package.
-The first Ready transition intentionally seals the node instance so that a
-late sibling cannot silently change the evidence cohort.
-
-Also read the Run's immutable execution budget before dispatch. The
-Coordinator enforces both total and concurrently active WorkSession counts.
-Each dispatch reservation consumes one total slot even if provider/session
-creation later fails; clearing a binding or retrying never refunds that slot.
-Prefer independent, result-sized packages that can finish inside the remaining
-wall-clock window; do not split a bounded task into checkpoint-sized sessions.
-When the Run enters budget exhaustion, stop planning and let the Coordinator
-interrupt exact owned sessions and settle their Space leases.
-
-## Build and register a Space
-
-The registered AgentSpace pool is project-scoped. Before building or
-registering anything, read `pm project show`: a sibling PM Session must reuse
-an existing compatible recorded Space and its workspace id. Re-running
-`workspace register-agent-space` for the same active source is only an
-idempotent rediscovery; it does not transfer rename/removal ownership. Do not
-rebuild, re-register, or re-record shared Spaces merely because the current
-requirement has a different PM Session id.
-
-### Pool-only bootstrap fast path
-
-When the user explicitly asks only for a shared pool scaffold and supplies the
-final Space names, roles, capability tags, repository, branches, and worktree
-paths, treat that mapping as the complete topology contract for this step:
-
-- do not inspect business source files, infer architecture, or create
-  speculative project/Provider Skills;
-- capability tags are Coordinator registration metadata and do not require a
-  same-named Skill; use the minimal `agent-space init` inputs unless the user
-  explicitly supplies a package-specific Skill;
-- create each supplied local Git branch/worktree first, then place only that
-  exact worktree beside the Space root in the corresponding
-  `.code-workspace`;
-- a pre-provisioned review Space is allowed only when it declares the same
-  capability tag as one implementation Space and contains only that exact
-  implementation worktree; never place all sibling worktrees in one reviewer;
-- batch homologous init, check, dry-build, build, verify, register, and record
-  operations. Read a documented command contract once and do not spend model
-  turns probing invalid flag combinations;
-- treat the command forms and ignore list below as authoritative. Never
-  recursively scan product source, build output, dependency trees, or the
-  installation directory to rediscover them.
-
-This fast path creates deterministic capacity, not permission to dispatch
-underspecified work. Before execution, every WorkPackage still needs a
-self-contained contract and must pass the normal package, worktree, lease,
-candidate, and review gates. If branch/worktree identity is not known, use the
-normal allocation-first flow below instead of inventing speculative paths.
-
-1. Run `"$GENEHUB_CLI" agent-space init <name>` to create or validate the two required PipeBuilder inputs. Then edit `spaces/<name>/pipespace.json`, `<name>.code-workspace`, optional role source, and Git-managed Provider Skills for the actual work package. Keep the Space root first in the workspace folder list.
-2. Run, in order, with the exact injected CLI:
-
-   ```text
-   "$GENEHUB_CLI" agent-space check <space>
-   "$GENEHUB_CLI" agent-space explain <space>
-   "$GENEHUB_CLI" agent-space build <space> --dry-run --require-no-post-commands
-   "$GENEHUB_CLI" agent-space build <space> --require-no-post-commands
-   "$GENEHUB_CLI" agent-space verify <space>
-   ```
-
-3. Before the first pool commit, keep the outer repository's existing entries
-   and ensure these generated/runtime paths are ignored exactly once:
-
-   ```gitignore
-   .genethub/
-   repositories/
-   worktrees/
-   spaces/*/.pipebuilder/
-   spaces/*/.agents/
-   spaces/*/.claude/
-   spaces/*/.codebuddy/
-   spaces/*/.cursor/
-   spaces/*/AGENTS.md
-   ```
-
-   Commit only human-owned Space and Provider sources in the outer
-   Space-management repository. Do not recursively search another repository
-   for an ignore template.
-4. Register each verified Workspace with this exact public command, relative
-   to the project root, then record its workspace id, source commit, and lock
-   digest in PM state:
-
-   ```text
-   "$GENEHUB_CLI" workspace register-agent-space "spaces/<name>/<name>.code-workspace"
-   ```
+先读取项目状态并复用兼容的共享 Space。Builder 只管理 Space 源，不创建业务 Git 仓库、分支、worktree 或 commit。
 
 ```text
-"$GENEHUB_CLI" pm project space record --name <space-name> --purpose <contract> \
-  --path spaces/<space-name> --workspace <workspace-id> --commit <full-space-source-commit> \
-  --role implementation|review [--tag <capability>...]
+"$GENEHUB_CLI" agent-space init <name>
+"$GENEHUB_CLI" agent-space check <space>
+"$GENEHUB_CLI" agent-space explain <space>
+"$GENEHUB_CLI" agent-space build <space> --dry-run --require-no-post-commands
+"$GENEHUB_CLI" agent-space build <space> --require-no-post-commands
+"$GENEHUB_CLI" agent-space verify <space>
+"$GENEHUB_CLI" workspace register-agent-space "spaces/<name>/<name>.code-workspace"
+"$GENEHUB_CLI" pm project space record --name <name> --purpose <合同> \
+  --path spaces/<name> --workspace <workspace-id> --commit <full-source-commit> \
+  --role implementation|review [--tag <能力>...]
 ```
 
-Builder does not create Git repositories, branches, worktrees, or commits. Use ordinary Git for those responsibilities and verify every target path before mutation.
+外层仓库只提交人类维护的 Space/Provider 源，并忽略 `.genethub/`、`repositories/`、`worktrees/`、各 Space 的 `.pipebuilder/`、生成 Agent 目录和 `AGENTS.md`。
 
-## Select and drive a WorkAgent
+## 派发 WorkAgent
 
-When the current structured contract does not already pin a ready third-party
-Agent, its native model id, and the selected AgentSpace workspace id, read
-`agent list` once and choose an allowed efficiency-tier model. When all three
-are already supplied, use them directly and do not spend another model round
-rediscovering the catalog. If none is ready, preserve the package and guide
-installation/login, refresh the catalog, then resume it.
-
-Create the managed session only through the public CLI:
+若合同已给出可用 Agent、原生 model id 和 Coordinator 选中的 workspace，直接使用；否则只读一次 `agent list`。不可用时保留包并引导用户安装/登录，不静默提交凭据。
 
 ```text
-"$GENEHUB_CLI" pm project package transition --id <package-id> --to ready
+"$GENEHUB_CLI" pm project package transition --id <id> --to ready
 "$GENEHUB_CLI" agent run --agent <id> --model <model> \
-  --workspace <agent-space-id> --work-package <package-id> --no-wait "<work contract>"
+  --workspace <space-workspace-id> --work-package <包-id> --no-wait <实现完整合同或 Reviewer 简短启动消息>
 ```
 
-The quoted argument form is only for a short prompt with no shell
-metacharacters. For every multiline contract, or any prompt containing
-backticks, `$`, quotes, or shell syntax, use explicit stdin and a single-quoted
-heredoc delimiter:
+多行或包含 shell 元字符的合同必须使用 `--message -` 与单引号 heredoc。禁止把合同插进双引号 shell，禁止 `timeout`、pipe、命令替换、后台任务或等待循环。
 
-```text
-"$GENEHUB_CLI" agent run --agent <id> --model <model> \
-  --workspace <agent-space-id> --work-package <package-id> --no-wait \
-  --message - <<'GENEHUB_PROMPT'
-<literal work contract, including `commands` and $VARIABLE names>
-GENEHUB_PROMPT
-```
+初始合同必须覆盖完整包结果：拥有路径、冻结接口、可观察验收、候选门禁、证据和候选截止点。Worker 只有两种包级结果：`candidate-ready` 或 `blocked`。内部 checkpoint 只是恢复证据，不触发 PM 逐步指挥。
 
-Never interpolate a WorkAgent contract into a double-quoted shell argument.
-Do not pipe the heredoc; `--message -` is the explicit public-CLI stdin
-contract.
+成功的 `agent run --work-package` 原子绑定 WorkSession 和租约；不要再做一次状态转换。当前全部 Ready 包派发后，简短报告并结束 PM turn；Supervisor 负责观察和唤醒。
 
-The daemon resolves the session cwd from the package's exact registered worktree; never try to redirect it with `--cwd`. Save the returned session id before doing anything else. Continue the same execution only with a top-level non-blocking command:
+## 隔离与有界恢复
 
-```text
-"$GENEHUB_CLI" session send <work-session-id> --no-wait "<next checkpoint>"
-```
+Worker 报告候选后，如果 Coordinator 只发现工作树尚未干净，会在原实现 Session 中自动且仅一次要求 Worker 收口提交；PM 不代替 Worker 清理、提交或改代码。仍不干净时，包进入 Blocked，Space 保持 quarantined，并保留失败 Session、分支和租约证据。
 
-Apply the same `--message - <<'GENEHUB_PROMPT'` form to a multiline or
-shell-sensitive continuation.
+`genet pm project space repair --name <space>` 只在外部修复已经完成后复验已登记 Space 并解除隔离；它不会 reset、checkout、删除文件或替用户修代码。PM 不得把这条检查当清理命令。用户选择 Workflow 的 retry 后，旧包保持 Cancelled/Blocked 证据，新 Work 节点迭代必须使用新的包 id；只可选择 Coordinator 返回的 Idle 匹配 Space。没有干净匹配容量时，应依据剩余预算向用户说明 replan/cancel 或补充已验证 Space 的影响，不得复活旧包或绕过隔离。
 
-The initial contract owns the complete outcome through a clean immutable
-candidate, not one tiny checkpoint. It must name the owned paths, frozen
-interfaces, observable acceptance checks, exact candidate gate, and evidence
-bundle. The WorkAgent may create internal checkpoint commits, but those are
-recovery details: do not wake or continue it merely because a checkpoint
-appeared. A normal implementation session should return only when it has one
-of these package-level outcomes:
+## 独立 Review
 
-- `candidate-ready`: clean HEAD/tree plus the requested gate and artifact evidence;
-- `blocked`: a concrete external/contract decision or terminal runtime/tool
-  failure it cannot safely continue, with the last recoverable commit.
+Candidate 使用不同的 `review` Space，且必须匹配包能力并包含精确候选 worktree。Review Space 从派发到 verdict 期间冻结源 commit、Builder lock、workspace id 与 worktree 集合。Coordinator 会向 Reviewer 系统合同注入 Run 固定的项目提示词、Intent、包边界和精确 commit/tree；PM 只用 Supervisor 给出的 workspace 批量启动 Reviewer，不复制或重写技术评审合同。Reviewer 只读取候选并返回 `review-pass`、`review-fail` 或 `blocked`；PM 不执行技术评审。
 
-Every managed implementation and review contract must preserve GeneHub's
-machine result protocol: the WorkAgent may put requested human-readable
-evidence above it, but its final non-empty response line must be exactly one
-`GENEHUB_WORK_RESULT` JSON object. Do not ask for a competing first-line
-verdict or a custom `RESULT:` block as the only completion signal. The
-Coordinator intentionally ignores prose-only completion claims. In the JSON
-protocol, implementation uses exactly `candidate-ready` or `blocked`; review
-uses exactly `review-pass`, `review-fail`, or `blocked`. The domain words
-`candidate` and `failed` are not protocol status values.
-
-Treat the Run's remaining execution budget as a delivery schedule, not as time
-the implementation Agent may consume by itself. Keep an explicit reserve for
-an independent Reviewer and Coordinator integration. For an interactive Run
-of fifteen minutes or less, normally require the first clean candidate by
-roughly sixty percent of the remaining active time and reserve at least ninety
-seconds for review/integration; tighten or split the package when that is not
-credible. Put the concrete candidate cutoff in the WorkAgent contract.
-
-Use the Run's provider-neutral LLM-round count as the coarse request budget.
-The Coordinator counts both completed turns and rounds already emitted by a
-currently running PM, Worker, or Reviewer, so one long turn cannot hide its
-request spend until completion. For a ten-minute fast-model Run, start with
-result packages expected to reach a clean candidate in roughly 12-18 requests
-and no more than half of the remaining active time, then adjust that estimate
-from persisted project profiles. Split along disjoint ownership and
-independently testable subsystems (for example engine versus H5 shell, or rules
-versus persistence), while keeping generated scale content cohesive. This is
-a planning heuristic under the task-level Run budget, not a new package or
-project budget and not permission to split work into file-sized checkpoints.
-
-Make that contract execution-first. Permit one bounded discovery batch, then
-require implementation, focused tests, the full gate, and a commit. Tell the
-WorkAgent not to spend the turn producing an exhaustive design essay or
-re-reading the repository. When the acceptance scale is intentionally reached
-through deterministic scaffolding (for example thousands of registry-backed
-content modules), the first mutation after discovery must be the generator and
-the Agent must run it before hand-authoring supporting modules. Generated
-source still has to be reachable, substantive, tested, and reviewed; the
-generator is a throughput mechanism, not permission for filler.
-
-Prefer one uniform generated-module interface and data-driven variation over
-category-specific export-name metaprogramming. Require the generator's first
-run to compile/import its outputs and traverse the production registry before
-the Agent expands architecture or adds polish. This keeps a bounded delivery
-contract recoverable: fix the first failing gate, then test, build, and commit,
-instead of repeatedly redesigning or self-rewriting the generator.
-
-If the runtime turn cap ends a non-terminal attempt, resume the same
-WorkSession with its original whole-package contract and latest Git facts. Do
-not turn every remaining file, test command, or commit into a new PM-managed
-round. After two capped continuations without a new committed checkpoint or a
-changed diagnosis, stop repeating the contract and split or re-plan the
-package.
-
-Never omit `--no-wait`, and never wrap this command in `timeout`, a pipe, command substitution, a background job, or another waiting construct. Inspect a session with one bounded `session get` or history command when reconciling evidence. Never use a hidden prompt queue, write an Agent's private session files, or let two PM packages share a writable worktree.
-
-A successful top-level `agent run --work-package` atomically binds that
-WorkSession to its reserved package before returning: a `ready` implementation
-package enters `running`, while a `candidate` package enters `review` with its
-exact immutable commit/tree and Review WorkSession identity. The leased Agent
-Space enters `working` in the same Project State mutation. Do not issue a
-second package transition merely to bind the returned session id. If session
-creation fails, the reservation is cancelled and the package remains eligible
-for a later dispatch.
-
-After binding every currently-ready independent package, report briefly and end the PM turn so the user can guide or question the manager. Never run `sleep`, a timer, a foreground or background wait, a polling loop, or repeated `session get` commands inside a PM turn. Do not keep the PM model turn open while a WorkAgent works.
-
-The daemon supervisor—not the PM model—owns monitoring. It samples quiet running sessions with bounded 30s, 1m, 2m, then 5m backoff. Unchanged health and material-but-non-actionable changes (for example a just-bound WorkSession that is still Running) only advance the observation baseline; candidate, block, failure, terminal, integration, or user-decision facts arriving close together share one persisted batch wake. If a PM wake reaches the model but fails, dispatch retries use a separate persistent 30s, 1m, 2m, then 5m backoff; daemon reload interruptions remain immediately recoverable. Waiting-for-user and terminal packages have no periodic wake. On a supervisor wake, read the durable projection once, process every actionable package in the batch, inspect only terminal/failed sessions, then finish the turn again. A user message always takes priority.
-
-For candidate review, use a different, recorded `--role review` Agent Space
-after the implementation package is in `candidate` and its implementation
-lease has returned. A review-only Space cannot own implementation packages.
-It must declare every capability tag requested by that package and include the
-exact candidate worktree in its `.code-workspace`; the daemon fixes the
-reviewer cwd to that worktree, matches package capabilities again, and rejects
-review in every implementation or generic non-matching review Space.
-
-Normally create or freeze the reviewer only after the candidate exists. The
-pool-only fast path may pre-register a reviewer when its exact future
-repository, branch, worktree, and capability are supplied and immutable. This
-is a dedicated pre-bound reviewer, not a broad speculative review pool: do not
-include sibling worktrees or omit the matching capability tag.
-
-Freeze a review Agent Space's source commit, Builder lock, workspace id, and
-candidate worktree set from dispatch until its verdict is recorded. Never
-rebuild or re-record that node to squeeze another candidate into an active
-review. Reuse it only when the exact candidate worktree was already present at
-the evidence boundary; otherwise add a per-candidate review node. Topology
-remains dynamic by adding/replacing nodes between evidence boundaries, not by
-mutating the identity underneath a running WorkSession.
+所有 managed WorkSession 的最后一个非空行必须是唯一的 `GENEHUB_WORK_RESULT` JSON。人类可读报告可以放在前面，但不能替代协议或跟在标记后面。

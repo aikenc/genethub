@@ -3,11 +3,12 @@ use std::io::Write as _;
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::diagnostic::{BuilderError, BuilderResult, Diagnostic};
 use super::{is_symlink, BuildGuard};
 
-pub const PM_SPACE_TEMPLATE_VERSION: &str = "2";
+pub const PM_SPACE_TEMPLATE_VERSION: &str = "3";
 pub const PM_SPACE_NAME: &str = "pm";
 const PM_SPACE_TEMPLATE_SCHEMA: &str = "genehub-pm-space-template.v1";
 
@@ -113,16 +114,20 @@ impl PmSpaceTemplateValues {
         Ok(())
     }
 
-    fn replacements(&self) -> BTreeMap<&'static str, &str> {
+    fn replacements(&self) -> BTreeMap<&'static str, String> {
         BTreeMap::from([
-            ("GENEHUB_PROJECT_NAME", self.project_name.as_str()),
-            ("GENEHUB_PM_SPACE_NAME", PM_SPACE_NAME),
+            ("GENEHUB_PROJECT_NAME", self.project_name.clone()),
+            ("GENEHUB_PM_SPACE_NAME", PM_SPACE_NAME.to_string()),
             (
                 "GENEHUB_RECOMMENDED_WORKFLOW",
-                self.recommended_workflow.as_str(),
+                self.recommended_workflow.clone(),
             ),
-            ("GENEHUB_LOCALE", self.locale.as_str()),
-            ("GENEHUB_TEMPLATE_VERSION", PM_SPACE_TEMPLATE_VERSION),
+            ("GENEHUB_LOCALE", self.locale.clone()),
+            (
+                "GENEHUB_TEMPLATE_VERSION",
+                PM_SPACE_TEMPLATE_VERSION.to_string(),
+            ),
+            ("GENEHUB_TEMPLATE_DIGEST", pm_space_template_digest()),
         ])
     }
 }
@@ -131,21 +136,69 @@ impl PmSpaceTemplateValues {
 #[serde(rename_all = "camelCase")]
 pub struct PmSpaceTemplateReport {
     pub template_version: &'static str,
+    pub template_digest: String,
     pub root: String,
     pub created: Vec<String>,
     pub validated: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmSpaceTemplateStatus {
+    pub installed_version: String,
+    pub installed_digest: String,
+    pub available_version: &'static str,
+    pub available_digest: String,
+    pub upgrade_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PmSpaceTemplateCandidateReport {
+    pub id: String,
+    pub target: &'static str,
+    pub root: String,
+    pub template_version: &'static str,
+    pub template_digest: String,
+    pub files: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PmSpaceTemplateMarker {
     schema: String,
     version: String,
+    #[serde(default)]
+    content_digest: String,
 }
 
-/// Returns whether a PM Space must be bootstrapped without ever rewriting an
-/// existing project-owned Workflow. Incompatible templates need an explicit,
-/// reviewed migration because those files may contain project customizations.
-pub fn pm_space_requires_bootstrap(root: &Path) -> BuilderResult<bool> {
+pub fn pm_space_template_digest() -> String {
+    let mut digest = Sha256::new();
+    for (relative, template) in TEMPLATE_FILES {
+        if *relative == "template.json" {
+            continue;
+        }
+        digest.update((relative.len() as u64).to_le_bytes());
+        digest.update(relative.as_bytes());
+        digest.update((template.len() as u64).to_le_bytes());
+        digest.update(template.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+pub fn pm_space_template_paths() -> Vec<&'static str> {
+    TEMPLATE_FILES
+        .iter()
+        .map(|(relative, _)| *relative)
+        .collect()
+}
+
+/// Reads the scaffold baseline without treating it as the identity of the
+/// active project-owned Workflow. A project may legitimately customize its
+/// graph and prompts after bootstrap; an available template update is an
+/// explicit migration opportunity, never a reason to make that project
+/// unopenable.
+pub fn pm_space_template_status(root: &Path) -> BuilderResult<Option<PmSpaceTemplateStatus>> {
     let marker_path = root.join("template.json");
     if is_symlink(&marker_path) {
         return Err(BuilderError(
@@ -155,7 +208,7 @@ pub fn pm_space_requires_bootstrap(root: &Path) -> BuilderResult<bool> {
     }
     let bytes = match std::fs::read(&marker_path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error(error)),
     };
     let marker: PmSpaceTemplateMarker = serde_json::from_slice(&bytes).map_err(|error| {
@@ -176,19 +229,148 @@ pub fn pm_space_requires_bootstrap(root: &Path) -> BuilderResult<bool> {
             .source(marker_path.display().to_string()),
         ));
     }
-    if marker.version != PM_SPACE_TEMPLATE_VERSION {
+    let available_digest = pm_space_template_digest();
+    let upgrade_available =
+        marker.version != PM_SPACE_TEMPLATE_VERSION || marker.content_digest != available_digest;
+    Ok(Some(PmSpaceTemplateStatus {
+        installed_version: marker.version,
+        installed_digest: marker.content_digest,
+        available_version: PM_SPACE_TEMPLATE_VERSION,
+        available_digest,
+        upgrade_available,
+    }))
+}
+
+/// Returns whether a PM Space must be bootstrapped without ever rewriting an
+/// existing project-owned Workflow. Incompatible templates need an explicit,
+/// reviewed migration because those files may contain project customizations.
+pub fn pm_space_requires_bootstrap(root: &Path) -> BuilderResult<bool> {
+    Ok(pm_space_template_status(root)?.is_none())
+}
+
+/// Materializes the current built-in PM scaffold as an inert, reviewable
+/// bundle. Nothing active is overwritten here. The project may merge its own
+/// Workflow customizations into the candidate before proposing `target=bundle`.
+pub fn render_pm_space_template_candidate(
+    project_root: &Path,
+    id: &str,
+) -> BuilderResult<PmSpaceTemplateCandidateReport> {
+    validate_candidate_id(id)?;
+    let project_root = project_root.canonicalize().map_err(io_error)?;
+    let pm_root = project_root.join("spaces/pm");
+    if !pm_root.is_dir() || is_symlink(&pm_root) {
+        return Err(BuilderError(
+            Diagnostic::error("PB011", "PM Space root must be a real directory")
+                .source(pm_root.display().to_string()),
+        ));
+    }
+    let values = existing_template_values(&project_root, &pm_root)?;
+    let candidate_root = pm_root
+        // Candidate bundles are project-owned governance evidence, not active
+        // Skill Provider input. Keeping them below project-workflow/ makes the
+        // Builder recursively project an inert bundle into `.agents/`, where
+        // workspace files can collide with the Builder's own output boundary.
+        .join("workflow-candidates")
+        .join(id)
+        .join("bundle");
+    if candidate_root.exists() || is_symlink(&candidate_root) {
         return Err(BuilderError(
             Diagnostic::error(
                 "PB017",
-                format!(
-                    "PM Space template version {} is incompatible with current version {}; automatic overwrite is refused because the project Workflow may be customized. Preserve the PM Space Git history and migrate its Workflow package explicitly",
-                    marker.version, PM_SPACE_TEMPLATE_VERSION
-                ),
+                "同名模板迁移候选已存在；请换用新的候选 ID，系统不会覆盖待评审内容",
             )
-            .source(marker_path.display().to_string()),
+            .source(candidate_root.display().to_string()),
         ));
     }
-    Ok(false)
+    let _guard = BuildGuard::acquire(&pm_root)?;
+    let replacements = values.replacements();
+    let mut files = Vec::new();
+    for (relative, template) in TEMPLATE_FILES {
+        validate_relative_path(relative)?;
+        let target = candidate_root.join(relative);
+        let parent = target.parent().ok_or_else(|| {
+            BuilderError(Diagnostic::error(
+                "PB011",
+                "template candidate target has no parent",
+            ))
+        })?;
+        std::fs::create_dir_all(parent).map_err(io_error)?;
+        let body = render_template(relative, template, &replacements)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(io_error)?;
+        file.write_all(body.as_bytes()).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        files.push((*relative).to_string());
+    }
+    Ok(PmSpaceTemplateCandidateReport {
+        id: id.to_string(),
+        target: "bundle",
+        root: candidate_root.display().to_string(),
+        template_version: PM_SPACE_TEMPLATE_VERSION,
+        template_digest: pm_space_template_digest(),
+        files,
+    })
+}
+
+fn existing_template_values(
+    project_root: &Path,
+    pm_root: &Path,
+) -> BuilderResult<PmSpaceTemplateValues> {
+    let project_name = project_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("GeneHub Project")
+        .to_string();
+    let role: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pm_root.join("role.json")).map_err(io_error)?)
+            .map_err(|error| {
+                BuilderError(Diagnostic::error(
+                    "PB001",
+                    format!("PM Space role.json is invalid: {error}"),
+                ))
+            })?;
+    let locale = role
+        .get("locale")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("zh-CN")
+        .to_string();
+    let catalog: serde_yaml::Value = serde_yaml::from_slice(
+        &std::fs::read(pm_root.join("skills/project-workflow/catalog.yaml")).map_err(io_error)?,
+    )
+    .map_err(|error| {
+        BuilderError(Diagnostic::error(
+            "PB001",
+            format!("PM Workflow catalog is invalid: {error}"),
+        ))
+    })?;
+    let recommended = catalog
+        .get("recommendedSessionWorkflow")
+        .and_then(serde_yaml::Value::as_str)
+        .unwrap_or("feature")
+        .to_string();
+    PmSpaceTemplateValues::new(project_name, locale, recommended)
+}
+
+fn validate_candidate_id(id: &str) -> BuilderResult<()> {
+    let valid = !id.is_empty()
+        && id.len() <= 64
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(BuilderError(Diagnostic::error(
+            "PB001",
+            "模板迁移候选 ID 必须是 1–64 位 kebab-case",
+        )))
+    }
 }
 
 pub fn render_pm_space(
@@ -268,6 +450,7 @@ pub fn render_pm_space(
 
     Ok(PmSpaceTemplateReport {
         template_version: PM_SPACE_TEMPLATE_VERSION,
+        template_digest: pm_space_template_digest(),
         root: root.display().to_string(),
         created,
         validated,
@@ -277,7 +460,7 @@ pub fn render_pm_space(
 fn render_template(
     relative: &str,
     template: &str,
-    replacements: &BTreeMap<&str, &str>,
+    replacements: &BTreeMap<&str, String>,
 ) -> BuilderResult<String> {
     let mut rendered = template.to_string();
     for (name, value) in replacements {

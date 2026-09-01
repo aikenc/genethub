@@ -30,7 +30,7 @@ async function createPm(t: CaseContext): Promise<{
       modelId: MODEL,
       modeId: null,
       effortId: "medium",
-      title: "Workflow interpreter fixture",
+      title: "Workflow 解释器夹具",
     },
   });
   t.assertions.assert(created?.type === "session", `pm.session.create returned ${created?.type}`);
@@ -53,9 +53,9 @@ async function runPmCommand(
   const completionsBefore = completedCount(events);
   opened.mock.script(
     { tool: { name: "bash", arguments: { command } } },
-    { text: "The requested project-control operation completed." },
+    { text: "指定的项目控制操作已完成。" },
   );
-  await t.flows.main.sendPrompt(opened.client, pmId, "Execute the prepared project-control operation exactly once.");
+  await t.flows.main.sendPrompt(opened.client, pmId, "只执行一次已经准备好的项目控制操作。");
   await t.tools.waitUntil(() => terminalCount(events) === terminalsBefore + 1, 30_000);
   t.assertions.assert(
     completedCount(events) === completionsBefore + 1,
@@ -108,10 +108,10 @@ kind: sessionWorkflow
 version: 91
 entry: choose
 nodes:
-  - { id: choose, kind: activity, executor: { actor: system } }
+  - { id: choose, kind: activity, activity: observe, executor: { actor: system } }
   - { id: delivered, kind: terminal, outcome: delivered }
-  - { id: spin-a, kind: activity, executor: { actor: system } }
-  - { id: spin-b, kind: activity, executor: { actor: system } }
+  - { id: spin-a, kind: activity, activity: observe, executor: { actor: system } }
+  - { id: spin-b, kind: activity, activity: observe, executor: { actor: system } }
 edges:
   - { id: finish, from: choose, to: delivered, when: route.finish }
   - { id: enter-loop, from: choose, to: spin-a, when: route.loop }
@@ -165,12 +165,11 @@ executionBudget:
   wallClockMs: 600000
   maxWorkSessions: 16
   maxConcurrentWorkSessions: 4
-  maxLlmRequests: 128
 nodes:
-  - { id: split, kind: activity, executor: { actor: system }, fork: allEligible }
-  - { id: left, kind: activity, executor: { actor: system } }
-  - { id: middle, kind: activity, executor: { actor: system } }
-  - { id: right, kind: activity, executor: { actor: system } }
+  - { id: split, kind: activity, activity: observe, executor: { actor: system }, fork: allEligible }
+  - { id: left, kind: activity, activity: observe, executor: { actor: system } }
+  - { id: middle, kind: activity, activity: observe, executor: { actor: system } }
+  - { id: right, kind: activity, activity: observe, executor: { actor: system } }
   - { id: merge, kind: join, activation: { quorum: 2 } }
   - { id: delivered, kind: terminal, outcome: delivered }
 edges:

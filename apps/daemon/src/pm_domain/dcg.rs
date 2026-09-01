@@ -3,17 +3,13 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const DCG_SCHEMA: &str = "genehub-pm-dcg.v1";
 pub const DCG_CATALOG_SCHEMA: &str = "genehub-pm-dcg-catalog.v1";
 pub const DEFAULT_RUN_WALL_CLOCK_MS: u64 = 10 * 60 * 1_000;
 pub const DEFAULT_RUN_MAX_WORK_SESSIONS: u32 = 16;
 pub const DEFAULT_RUN_MAX_CONCURRENT_WORK_SESSIONS: u32 = 4;
-pub const DEFAULT_RUN_MAX_LLM_REQUESTS: u32 = 96;
-
-const fn default_run_max_llm_requests() -> u32 {
-    DEFAULT_RUN_MAX_LLM_REQUESTS
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -21,12 +17,17 @@ pub struct DcgCatalogFile {
     pub schema: String,
     pub recommended_session_workflow: String,
     pub session_workflows: BTreeMap<String, String>,
+    #[serde(default)]
+    pub evaluations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcgCatalog {
     pub recommended_session_workflow: String,
     pub session_workflows: BTreeMap<String, DcgDefinition>,
+    pub workflow_digests: BTreeMap<String, String>,
+    pub evaluation_digest: String,
+    pub evaluation_count: usize,
     pub root: PathBuf,
 }
 
@@ -69,9 +70,49 @@ impl DcgCatalog {
             session_workflows.insert(id, graph);
         }
 
+        let mut evaluation_hasher = Sha256::new();
+        let mut evaluation_count = 0_usize;
+        let mut evaluation_ids = BTreeSet::new();
+        for relative in catalog.evaluations {
+            let path = resolve_resource(&root, &relative)?;
+            let raw = std::fs::read(&path)
+                .with_context(|| format!("reading PM Workflow evaluation {}", path.display()))?;
+            let suite: DcgEvaluationSuite = serde_yaml::from_slice(&raw).with_context(|| {
+                format!(
+                    "PM Workflow evaluation is not valid YAML: {}",
+                    path.display()
+                )
+            })?;
+            suite.validate(&session_workflows, &mut evaluation_ids)?;
+            evaluation_hasher.update(relative.as_bytes());
+            evaluation_hasher.update([0]);
+            evaluation_hasher.update(&raw);
+            evaluation_hasher.update([0]);
+            evaluation_count = evaluation_count.saturating_add(suite.cases.len());
+        }
+        if evaluation_count == 0 {
+            anyhow::bail!("workflow catalog must bind at least one routing evaluation case");
+        }
+        let evaluation_digest = format!("{:x}", evaluation_hasher.finalize());
+
+        let mut workflow_digests = BTreeMap::new();
+        for (id, definition) in &session_workflows {
+            let prompts = prompt_snapshots(&root, definition)?;
+            let mut hasher = Sha256::new();
+            hasher.update(serde_json::to_vec(definition)?);
+            hasher.update([0]);
+            hasher.update(serde_json::to_vec(&prompts)?);
+            hasher.update([0]);
+            hasher.update(evaluation_digest.as_bytes());
+            workflow_digests.insert(id.clone(), format!("{:x}", hasher.finalize()));
+        }
+
         Ok(Self {
             recommended_session_workflow: catalog.recommended_session_workflow,
             session_workflows,
+            workflow_digests,
+            evaluation_digest,
+            evaluation_count,
             root,
         })
     }
@@ -81,6 +122,112 @@ impl DcgCatalog {
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("unknown Session DCG: {id}"))
     }
+
+    pub fn prompt_snapshots(
+        &self,
+        definition: &DcgDefinition,
+    ) -> Result<BTreeMap<String, DcgPromptSnapshot>> {
+        prompt_snapshots(&self.root, definition)
+    }
+
+    pub fn workflow_digest(&self, id: &str) -> Result<&str> {
+        self.workflow_digests
+            .get(id)
+            .map(String::as_str)
+            .ok_or_else(|| anyhow::anyhow!("unknown Session DCG: {id}"))
+    }
+}
+
+pub const DCG_EVALUATION_SCHEMA: &str = "genehub-pm-workflow-evaluation.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DcgEvaluationSuite {
+    schema: String,
+    cases: Vec<DcgEvaluationCase>,
+}
+
+impl DcgEvaluationSuite {
+    fn validate(
+        &self,
+        workflows: &BTreeMap<String, DcgDefinition>,
+        ids: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if self.schema != DCG_EVALUATION_SCHEMA {
+            anyhow::bail!("Workflow evaluation schema must be {DCG_EVALUATION_SCHEMA}");
+        }
+        if self.cases.is_empty() || self.cases.len() > 256 {
+            anyhow::bail!("Workflow evaluation suite must contain 1-256 cases");
+        }
+        for case in &self.cases {
+            validate_id("Workflow evaluation id", &case.id)?;
+            if !ids.insert(case.id.clone()) {
+                anyhow::bail!("duplicate Workflow evaluation case: {}", case.id);
+            }
+            if case.request.trim().is_empty() || case.request.len() > 4_000 {
+                anyhow::bail!("Workflow evaluation request must be 1-4000 characters");
+            }
+            if !workflows.contains_key(&case.expected_graph) {
+                anyhow::bail!(
+                    "Workflow evaluation {} expects unknown graph {}",
+                    case.id,
+                    case.expected_graph
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DcgEvaluationCase {
+    id: String,
+    request: String,
+    expected_graph: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DcgPromptSnapshot {
+    pub path: String,
+    pub digest: String,
+    pub content: String,
+}
+
+fn prompt_snapshots(
+    root: &Path,
+    definition: &DcgDefinition,
+) -> Result<BTreeMap<String, DcgPromptSnapshot>> {
+    let mut snapshots = BTreeMap::new();
+    let mut total_bytes = 0_usize;
+    for node in &definition.nodes {
+        let Some(objective) = &node.objective else {
+            continue;
+        };
+        let path = resolve_resource(root, &objective.prompt)?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading Workflow prompt {}", path.display()))?;
+        if content.trim().is_empty() || content.len() > 64 * 1024 {
+            anyhow::bail!(
+                "Workflow prompt {} must be 1-65536 UTF-8 bytes",
+                objective.prompt
+            );
+        }
+        total_bytes = total_bytes.saturating_add(content.len());
+        if total_bytes > 256 * 1024 {
+            anyhow::bail!("one Workflow may bind at most 262144 prompt bytes");
+        }
+        snapshots.insert(
+            node.id.clone(),
+            DcgPromptSnapshot {
+                path: objective.prompt.clone(),
+                digest: format!("{:x}", Sha256::digest(content.as_bytes())),
+                content,
+            },
+        );
+    }
+    Ok(snapshots)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,11 +259,6 @@ pub struct DcgExecutionBudget {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
-    /// Provider-neutral coarse cost envelope. One adapter-reported LLM round
-    /// counts as one request; token totals and provider-specific prices are
-    /// deliberately not used for the MVP budget.
-    #[serde(default = "default_run_max_llm_requests")]
-    pub max_llm_requests: u32,
 }
 
 impl Default for DcgExecutionBudget {
@@ -125,7 +267,6 @@ impl Default for DcgExecutionBudget {
             wall_clock_ms: DEFAULT_RUN_WALL_CLOCK_MS,
             max_work_sessions: DEFAULT_RUN_MAX_WORK_SESSIONS,
             max_concurrent_work_sessions: DEFAULT_RUN_MAX_CONCURRENT_WORK_SESSIONS,
-            max_llm_requests: DEFAULT_RUN_MAX_LLM_REQUESTS,
         }
     }
 }
@@ -142,9 +283,6 @@ impl DcgExecutionBudget {
             || self.max_concurrent_work_sessions > self.max_work_sessions
         {
             anyhow::bail!("executionBudget.maxConcurrentWorkSessions must be 1-maxWorkSessions");
-        }
-        if !(1..=4_096).contains(&self.max_llm_requests) {
-            anyhow::bail!("executionBudget.maxLlmRequests must be 1-4096");
         }
         Ok(())
     }
@@ -338,12 +476,23 @@ pub enum DcgNodeKind {
 pub struct DcgNode {
     pub id: String,
     pub kind: DcgNodeKind,
+    /// Closed kernel activity. Projects configure topology, prompts, capacity
+    /// and bounded recovery, while the daemon keeps review, integration and
+    /// resource safety semantics typed instead of inferring them from actor or
+    /// edge names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<DcgActivity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<DcgExecutor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective: Option<DcgObjective>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fanout: Option<DcgFanout>,
+    /// Maximum concurrent leases for a Reviewer activity. Work activity
+    /// capacity is expressed by `fanout.maxItems`; system/PM/user activities
+    /// do not own Space capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u32>,
     /// Explicit graph-level AND split. WorkPackage fanout remains the normal
     /// parallelism primitive; this flag is required before several automatic
     /// outgoing edges may fire from the same node.
@@ -372,12 +521,34 @@ impl DcgNode {
         }
         match self.kind {
             DcgNodeKind::Activity => {
+                let activity = self.activity.ok_or_else(|| {
+                    anyhow::anyhow!("activity node {} requires an activity", self.id)
+                })?;
                 let executor = self.executor.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("activity node {} requires an executor", self.id)
                 })?;
                 executor.validate()?;
-                if matches!(executor.actor, DcgActor::WorkAgent | DcgActor::System)
-                    && !self.outputs.is_empty()
+                activity.validate_executor(self.id.as_str(), executor.actor)?;
+                match (activity, self.objective.as_ref()) {
+                    (DcgActivity::Pm | DcgActivity::Work | DcgActivity::Review, None) => {
+                        anyhow::bail!(
+                            "activity node {} requires a project-owned objective prompt",
+                            self.id
+                        )
+                    }
+                    (
+                        DcgActivity::Integrate | DcgActivity::UserDecision | DcgActivity::Observe,
+                        Some(_),
+                    ) => anyhow::bail!(
+                        "kernel activity node {} cannot replace its typed semantics with a prompt",
+                        self.id
+                    ),
+                    _ => {}
+                }
+                if matches!(
+                    executor.actor,
+                    DcgActor::WorkAgent | DcgActor::Reviewer | DcgActor::System
+                ) && !self.outputs.is_empty()
                 {
                     anyhow::bail!(
                         "node {} WorkAgent/system facts are kernel-derived and cannot declare semantic outputs",
@@ -397,6 +568,17 @@ impl DcgNode {
                 if let Some(fanout) = &self.fanout {
                     fanout.validate()?;
                 }
+                match (activity, self.capacity) {
+                    (DcgActivity::Review, Some(1..=64)) => {}
+                    (DcgActivity::Review, _) => anyhow::bail!(
+                        "review activity node {} requires capacity in 1..=64",
+                        self.id
+                    ),
+                    (_, Some(_)) => {
+                        anyhow::bail!("only review activity node {} may declare capacity", self.id)
+                    }
+                    (_, None) => {}
+                }
                 if self.fanout.is_some() && self.fork.is_some() {
                     anyhow::bail!(
                         "activity node {} cannot nest WorkPackage fanout and a graph fork",
@@ -411,9 +593,11 @@ impl DcgNode {
                 if self.activation.is_none() {
                     anyhow::bail!("join node {} requires activation", self.id);
                 }
-                if self.executor.is_some()
+                if self.activity.is_some()
+                    || self.executor.is_some()
                     || self.objective.is_some()
                     || self.fanout.is_some()
+                    || self.capacity.is_some()
                     || self.fork.is_some()
                     || self.outcome.is_some()
                 {
@@ -427,9 +611,11 @@ impl DcgNode {
                 if self.outcome.as_deref().is_none_or(str::is_empty) {
                     anyhow::bail!("terminal node {} requires outcome", self.id);
                 }
-                if self.executor.is_some()
+                if self.activity.is_some()
+                    || self.executor.is_some()
                     || self.objective.is_some()
                     || self.fanout.is_some()
+                    || self.capacity.is_some()
                     || self.fork.is_some()
                     || self.activation.is_some()
                 {
@@ -444,11 +630,46 @@ impl DcgNode {
     }
 }
 
+/// Kernel operations available to a project-owned Workflow. This is
+/// intentionally a closed vocabulary: a project may arrange these operations
+/// and own their prompts, but cannot redefine review isolation, Git
+/// integration or user-decision authority in YAML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DcgActivity {
+    Pm,
+    Work,
+    Review,
+    Integrate,
+    UserDecision,
+    Observe,
+}
+
+impl DcgActivity {
+    fn validate_executor(self, node_id: &str, actor: DcgActor) -> Result<()> {
+        let valid = matches!(
+            (self, actor),
+            (Self::Pm, DcgActor::Pm)
+                | (Self::Work, DcgActor::WorkAgent)
+                | (Self::Review, DcgActor::Reviewer)
+                | (Self::Integrate | Self::Observe, DcgActor::System)
+                | (Self::UserDecision, DcgActor::User)
+        );
+        if !valid {
+            anyhow::bail!(
+                "activity node {node_id} has incompatible activity {self:?} and actor {actor:?}"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DcgActor {
     Pm,
     WorkAgent,
+    Reviewer,
     User,
     System,
 }
@@ -464,11 +685,13 @@ pub struct DcgExecutor {
 impl DcgExecutor {
     fn validate(&self) -> Result<()> {
         match (self.actor, &self.space) {
-            (DcgActor::WorkAgent, Some(space)) => space.validate(),
-            (DcgActor::WorkAgent, None) => {
-                anyhow::bail!("workAgent executor requires a Space selector")
+            (DcgActor::WorkAgent | DcgActor::Reviewer, Some(space)) => space.validate(),
+            (DcgActor::WorkAgent | DcgActor::Reviewer, None) => {
+                anyhow::bail!("workAgent/reviewer executor requires a Space selector")
             }
-            (_, Some(_)) => anyhow::bail!("only workAgent executor may select a Space"),
+            (_, Some(_)) => {
+                anyhow::bail!("only workAgent/reviewer executor may select a Space")
+            }
             (_, None) => Ok(()),
         }
     }
@@ -590,8 +813,11 @@ impl DcgEdge {
         validate_id("DCG edge from", &self.from)?;
         validate_id("DCG edge to", &self.to)?;
         self.when.validate()?;
-        if matches!(self.choose_by, Some(DcgActor::WorkAgent)) {
-            anyhow::bail!("WorkAgent cannot choose a DCG edge");
+        if matches!(
+            self.choose_by,
+            Some(DcgActor::WorkAgent | DcgActor::Reviewer | DcgActor::System)
+        ) {
+            anyhow::bail!("only PM or user may choose a DCG edge");
         }
         if self.max_traversals == Some(0) {
             anyhow::bail!("edge maxTraversals must be positive");
@@ -666,8 +892,6 @@ pub struct DcgRunBudget {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
-    #[serde(default = "default_run_max_llm_requests")]
-    pub max_llm_requests: u32,
     pub started_at_ms: i64,
     pub deadline_at_ms: i64,
     /// Monotonic dispatch allowance consumption. A reservation consumes one
@@ -675,10 +899,6 @@ pub struct DcgRunBudget {
     /// package binding or retrying cannot reset the Run's cost envelope.
     #[serde(default)]
     pub work_sessions_started: u32,
-    /// Monotonic, adapter-reported LLM rounds observed across the PM Session
-    /// and every owned implementation/review WorkSession since Run start.
-    #[serde(default)]
-    pub llm_requests_observed: u32,
     /// User decision time is outside the execution envelope. While paused,
     /// `remaining_ms` is frozen and the absolute deadline is extended by the
     /// exact pause duration when execution resumes.
@@ -703,11 +923,9 @@ impl DcgRunBudget {
             wall_clock_ms: policy.wall_clock_ms,
             max_work_sessions: policy.max_work_sessions,
             max_concurrent_work_sessions: policy.max_concurrent_work_sessions,
-            max_llm_requests: policy.max_llm_requests,
             started_at_ms: now_ms,
             deadline_at_ms,
             work_sessions_started: 0,
-            llm_requests_observed: 0,
             user_wait_started_at_ms: None,
             user_wait_ms: 0,
             exhaustion_started_at_ms: None,
@@ -727,11 +945,6 @@ impl DcgRunBudget {
                 .unwrap_or(0),
         )
     }
-
-    pub fn llm_requests_remaining(&self) -> u32 {
-        self.max_llm_requests
-            .saturating_sub(self.llm_requests_observed)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -748,6 +961,12 @@ pub struct DcgRun {
     /// affect new Runs only and cannot rewrite an in-flight Session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition_snapshot: Option<DcgDefinition>,
+    /// Exact project-owned Workflow identity and prompt contents selected for
+    /// this Run. Later project improvements affect only new Runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_digest: Option<String>,
+    #[serde(default)]
+    pub prompt_snapshots: BTreeMap<String, DcgPromptSnapshot>,
     /// Immutable execution envelope copied from the selected Workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<DcgRunBudget>,
@@ -766,6 +985,11 @@ pub struct DcgRun {
     pub instance_facts: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     pub history: Vec<DcgTransitionRecord>,
+    /// Number of oldest transition records compacted out of `history`.
+    /// Traversal counters and the monotonic record sequence remain durable,
+    /// while the project state file has a hard storage bound.
+    #[serde(default)]
+    pub history_pruned: u64,
     pub traversals: BTreeMap<String, u32>,
     #[serde(default)]
     pub team_slots: BTreeMap<String, TeamSlot>,
@@ -788,6 +1012,8 @@ impl DcgRun {
             graph_id: None,
             graph_version: None,
             definition_snapshot: None,
+            definition_digest: None,
+            prompt_snapshots: BTreeMap::new(),
             budget: None,
             status: DcgRunStatus::Discussion,
             outcome: None,
@@ -796,6 +1022,7 @@ impl DcgRun {
             facts: BTreeSet::new(),
             instance_facts: BTreeMap::new(),
             history: Vec::new(),
+            history_pruned: 0,
             traversals: BTreeMap::new(),
             team_slots: BTreeMap::new(),
             interpreter_error: None,
@@ -803,13 +1030,25 @@ impl DcgRun {
         })
     }
 
-    pub fn select_before_start(&mut self, definition: &DcgDefinition) -> Result<()> {
-        self.select_before_start_at(definition, chrono::Utc::now().timestamp_millis())
+    pub fn select_before_start(
+        &mut self,
+        definition: &DcgDefinition,
+        definition_digest: String,
+        prompt_snapshots: BTreeMap<String, DcgPromptSnapshot>,
+    ) -> Result<()> {
+        self.select_before_start_at(
+            definition,
+            definition_digest,
+            prompt_snapshots,
+            chrono::Utc::now().timestamp_millis(),
+        )
     }
 
     pub fn select_before_start_at(
         &mut self,
         definition: &DcgDefinition,
+        definition_digest: String,
+        prompt_snapshots: BTreeMap<String, DcgPromptSnapshot>,
         now_ms: i64,
     ) -> Result<()> {
         if self.status != DcgRunStatus::Discussion
@@ -827,6 +1066,8 @@ impl DcgRun {
         self.graph_id = Some(definition.id.clone());
         self.graph_version = Some(definition.version);
         self.definition_snapshot = Some(definition.clone());
+        self.definition_digest = Some(definition_digest);
+        self.prompt_snapshots = prompt_snapshots;
         self.budget = Some(DcgRunBudget::from_policy(
             definition.execution_budget,
             now_ms,
@@ -853,26 +1094,6 @@ impl DcgRun {
             && self.budget.as_ref().is_some_and(|budget| {
                 budget.user_wait_started_at_ms.is_none() && now_ms >= budget.deadline_at_ms
             })
-    }
-
-    pub fn request_budget_exhausted(&self) -> bool {
-        self.status == DcgRunStatus::Active
-            && self
-                .budget
-                .as_ref()
-                .is_some_and(|budget| budget.llm_requests_observed >= budget.max_llm_requests)
-    }
-
-    pub fn observe_llm_requests(&mut self, observed: u32) -> bool {
-        let Some(budget) = self.budget.as_mut() else {
-            return false;
-        };
-        if observed <= budget.llm_requests_observed {
-            return false;
-        }
-        budget.llm_requests_observed = observed;
-        self.revision = self.revision.saturating_add(1);
-        true
     }
 
     /// Freeze or resume the execution clock from the graph's durable actor,
@@ -956,9 +1177,6 @@ impl DcgRun {
             .ok_or_else(|| anyhow::anyhow!("Workflow Run has no execution budget"))?;
         if budget.user_wait_started_at_ms.is_some() {
             anyhow::bail!("Workflow Run is waiting for a user decision");
-        }
-        if budget.llm_requests_observed >= budget.max_llm_requests {
-            anyhow::bail!("Workflow Run LLM request budget is exhausted");
         }
         if now_ms >= budget.deadline_at_ms {
             anyhow::bail!("Workflow Run wall-clock budget is exhausted");
@@ -1145,7 +1363,7 @@ impl DcgRun {
             {
                 DcgActor::Pm => DcgActor::Pm,
                 DcgActor::User => DcgActor::User,
-                DcgActor::WorkAgent | DcgActor::System => DcgActor::System,
+                DcgActor::WorkAgent | DcgActor::Reviewer | DcgActor::System => DcgActor::System,
             },
             DcgNodeKind::Terminal => anyhow::bail!("terminal nodes cannot transition"),
         };
@@ -1180,8 +1398,9 @@ impl DcgRun {
         } else {
             source_instance.cohort_id.clone()
         };
+        let transition_sequence = self.next_history_sequence();
         let target_cohort = if edges.len() > 1 {
-            format!("fork-{}-{}", source_instance.id, self.history.len() + 1)
+            format!("fork-{}-{transition_sequence}", source_instance.id)
         } else {
             inherited_cohort
         };
@@ -1193,13 +1412,13 @@ impl DcgRun {
         for edge in edges {
             self.activate_target(definition, edge, &source_instance, &target_cohort, facts)?;
             let count = self.traversals.get(&edge.id).copied().unwrap_or(0);
-            self.history.push(DcgTransitionRecord {
+            self.record_transition(DcgTransitionRecord {
                 edge_id: edge.id.clone(),
                 from: edge.from.clone(),
                 to: edge.to.clone(),
                 chooser,
                 facts: facts.clone(),
-                sequence: self.history.len().saturating_add(1) as u64,
+                sequence: self.next_history_sequence(),
             });
             self.traversals
                 .insert(edge.id.clone(), count.saturating_add(1));
@@ -1210,6 +1429,24 @@ impl DcgRun {
         self.refresh_status(definition)?;
         self.revision = self.revision.saturating_add(1);
         Ok(())
+    }
+
+    fn next_history_sequence(&self) -> u64 {
+        self.history
+            .last()
+            .map(|record| record.sequence.saturating_add(1))
+            .unwrap_or_else(|| self.history_pruned.saturating_add(1))
+    }
+
+    fn record_transition(&mut self, record: DcgTransitionRecord) {
+        const RETAINED_HISTORY_RECORDS: usize = 1_024;
+
+        self.history.push(record);
+        let excess = self.history.len().saturating_sub(RETAINED_HISTORY_RECORDS);
+        if excess > 0 {
+            self.history.drain(..excess);
+            self.history_pruned = self.history_pruned.saturating_add(excess as u64);
+        }
     }
 
     fn activate_target(

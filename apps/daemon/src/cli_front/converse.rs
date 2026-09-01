@@ -54,6 +54,7 @@ pub struct Run {
     pub agent_id: Option<String>,
     pub project_manager: bool,
     pub work_package_id: Option<String>,
+    pub improvement_candidate_id: Option<String>,
     pub prompt: String,
     pub session_id: Option<String>,
     pub workspace_id: Option<String>,
@@ -106,9 +107,13 @@ pub async fn pm(args: &[String], selection: &Selection) -> i32 {
 fn parse_pm(args: &[String], selection: &Selection) -> Result<Command, CliFailure> {
     match args.first().map(String::as_str) {
         Some("run") => match Options::parse(&args[1..], selection) {
-            Ok(options) if options.agent.is_some() || options.work_package.is_some() => {
+            Ok(options)
+                if options.agent.is_some()
+                    || options.work_package.is_some()
+                    || options.improvement.is_some() =>
+            {
                 Err(CliFailure::invalid_args(
-                    "genet pm run chooses the built-in PM profile; do not pass --agent or --work-package",
+                    "genet pm run 固定使用内置 PM 配置；不要传入 --agent、--work-package 或 --improvement",
                 ))
             }
             Ok(options) => options.into_run(None).map(|mut run| {
@@ -216,6 +221,7 @@ struct Options {
     positional: Vec<String>,
     agent: Option<String>,
     work_package: Option<String>,
+    improvement: Option<String>,
     session: Option<String>,
     workspace: Option<String>,
     cwd: Option<String>,
@@ -254,6 +260,7 @@ impl Options {
             match argument {
                 "--agent" => options.agent = Some(value()?),
                 "--work-package" => options.work_package = Some(value()?),
+                "--improvement" => options.improvement = Some(value()?),
                 "--session" => options.session = Some(value()?),
                 "--workspace" => options.workspace = Some(value()?),
                 "--model" => options.model = Some(value()?),
@@ -306,9 +313,14 @@ impl Options {
                 "--workspace and --cwd are two answers to the same question; give one",
             ));
         }
-        if self.session.is_some() && self.work_package.is_some() {
+        if self.work_package.is_some() && self.improvement.is_some() {
             return Err(CliFailure::invalid_args(
-                "--work-package creates a new WorkAgent session; continue it with --session only",
+                "--work-package 与 --improvement 对应不同的受管 WorkSession 合同；只能选择其中一个",
+            ));
+        }
+        if self.session.is_some() && (self.work_package.is_some() || self.improvement.is_some()) {
+            return Err(CliFailure::invalid_args(
+                "--work-package/--improvement 会创建新的受管 WorkSession；继续已有会话时只能使用 --session",
             ));
         }
         if self.prompt_from_stdin && !self.positional.is_empty() {
@@ -329,6 +341,7 @@ impl Options {
             agent_id,
             project_manager: false,
             work_package_id: self.work_package,
+            improvement_candidate_id: self.improvement,
             prompt,
             session_id: self.session,
             workspace_id: self.workspace,
@@ -651,10 +664,11 @@ async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliF
             runtime_values: None,
             title: run.title.clone(),
         }
-    } else if let Some(work_package_id) = run.work_package_id.clone() {
+    } else if run.work_package_id.is_some() || run.improvement_candidate_id.is_some() {
         Request::WorkSessionCreate {
             workspace_id,
-            work_package_id,
+            work_package_id: run.work_package_id.clone(),
+            improvement_candidate_id: run.improvement_candidate_id.clone(),
             agent_id,
             model_id: run.model_id.clone(),
             mode_id: run.mode_id.clone(),

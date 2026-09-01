@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
@@ -57,6 +57,47 @@ async function runPmCommand(
     completedCount(events) === completionsBefore + 1,
     `PM command failed: ${JSON.stringify(events.slice(-16))}`,
   );
+}
+
+async function approveDelivery(
+  t: CaseContext,
+  opened: Opened,
+  pmId: string,
+): Promise<void> {
+  let deliveryRevision: number | undefined;
+  await t.tools.waitUntil(async () => {
+    const status = await opened.client.call({
+      type: "pm.project.status",
+      payload: { workspaceId: opened.workspaceId },
+    });
+    const run = status?.type === "projectStatus"
+      ? status.data.workflowRuns.find((item) => item.controllerSessionId === pmId)
+      : undefined;
+    const ready = Boolean(
+      run?.activeNodes.includes("approve-delivery") &&
+        run.availableEdges.some(
+          (edge) => edge.id === "delivery-approved" && edge.satisfied,
+        ),
+    );
+    if (ready) deliveryRevision = run?.revision;
+    return ready;
+  }, 45_000);
+  if (deliveryRevision === undefined) {
+    throw new Error("reviewed rework did not reach the delivery decision");
+  }
+  const approved = await opened.client.call({
+    type: "pm.workflow.transition",
+    payload: {
+      workspaceId: opened.workspaceId,
+      sessionId: pmId,
+      edgeId: "delivery-approved",
+      expectedRevision: deliveryRevision,
+      facts: [],
+    },
+  });
+  if (approved?.type !== "projectStatus") {
+    throw new Error(`user delivery approval failed: ${JSON.stringify(approved)}`);
+  }
 }
 
 function writeSpace(
@@ -297,6 +338,7 @@ defineSpecialty(
           '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
           '"$GENEHUB_CLI" pm project advance --to active',
           '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
+          '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
         ].join(" && "),
         "Record the implementation and review capabilities and select the bugfix Workflow.",
       );
@@ -416,6 +458,7 @@ defineSpecialty(
         `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${workspaceIds.get("review-b")} --work-package failed-rework --no-wait "GENEHUB_FIXTURE_REVIEW_PASS"`,
         "Dispatch the independent Reviewer for the replacement candidate.",
       );
+      await approveDelivery(t, opened, pmId);
 
       let finalStatus: Awaited<ReturnType<typeof opened.client.call>> | undefined;
       await t.tools.waitUntil(async () => {
@@ -459,6 +502,122 @@ defineSpecialty(
         `Coordinator delivered without integrating the full accepted cohort: ${JSON.stringify(finalStatus)}`,
       );
 
+      // A Worker may correctly finish its implementation but leave one
+      // disposable untracked artifact behind before reporting
+      // candidate-ready. The Coordinator must keep the same Worker and lease,
+      // request exactly one bounded cleanliness repair, and only then bind the
+      // clean HEAD as Candidate. PM never cleans or commits the worktree.
+      const dirtySettlementPm = await opened.client.call({
+        type: "pm.session.create",
+        payload: {
+          workspaceId: opened.workspaceId,
+          modelId: MODEL,
+          modeId: null,
+          effortId: "medium",
+          title: "Candidate settlement repair fixture",
+        },
+      });
+      t.assertions.assert(
+        dirtySettlementPm?.type === "session",
+        `dirty-settlement pm.session.create returned ${dirtySettlementPm?.type}`,
+      );
+      if (dirtySettlementPm?.type !== "session") return;
+      const dirtySettlementPmId = dirtySettlementPm.data.id;
+      const dirtySettlementEvents = await t.flows.main.attachEventLog(
+        opened.client,
+        dirtySettlementPmId,
+      );
+      commitFile(
+        worktreeA,
+        "candidate-settlement-repair.txt",
+        "candidate whose disposable artifact needs one bounded cleanup\n",
+        "Create candidate settlement repair fixture",
+      );
+      await runPmCommand(
+        t,
+        opened,
+        dirtySettlementPmId,
+        dirtySettlementEvents,
+        [
+          '"$GENEHUB_CLI" pm project intent set --outcome "Bind a clean exact candidate after bounded Worker repair" --acceptance "The same Worker removes its disposable artifact before Candidate identity is fixed"',
+          '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
+          '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
+          '"$GENEHUB_CLI" pm project package put --id dirty-settlement --title "Dirty settlement" --outcome "Repair only the disposable candidate artifact" --space-tag a-lineage --repository game --branch work/a --node fix',
+          '"$GENEHUB_CLI" pm project package transition --id dirty-settlement --to ready',
+          `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${workspaceIds.get("impl-a")} --work-package dirty-settlement --no-wait "GENEHUB_FIXTURE_DIRTY_CANDIDATE"`,
+        ].join(" && "),
+        "Dispatch a Worker that needs one bounded candidate-settlement repair.",
+      );
+
+      let dirtySettlementStatus: Awaited<ReturnType<typeof opened.client.call>> | undefined;
+      await t.tools.waitUntil(async () => {
+        dirtySettlementStatus = await opened.client.call({
+          type: "pm.project.status",
+          payload: { workspaceId: opened.workspaceId },
+        });
+        return (
+          dirtySettlementStatus?.type === "projectStatus" &&
+          dirtySettlementStatus.data.workPackages.find(
+            (item) => item.id === "dirty-settlement",
+          )?.status === "candidate"
+        );
+      }, 45_000);
+      const dirtySettlementPackage =
+        dirtySettlementStatus?.type === "projectStatus"
+          ? dirtySettlementStatus.data.workPackages.find(
+              (item) => item.id === "dirty-settlement",
+            )
+          : undefined;
+      const dirtySettlementSession = dirtySettlementPackage?.workSessionId
+        ? await opened.client.call({
+            type: "session.get",
+            payload: { sessionId: dirtySettlementPackage.workSessionId },
+          })
+        : undefined;
+      const settlementRepairMessage =
+        dirtySettlementSession?.type === "snapshot"
+          ? dirtySettlementSession.data.items.find(
+              (item) =>
+                item.type === "userMessage" &&
+                item.text.includes("[GENEHUB_CANDIDATE_SETTLEMENT_REPAIR]"),
+            )
+          : undefined;
+      const implementationSpace =
+        dirtySettlementStatus?.type === "projectStatus"
+          ? dirtySettlementStatus.data.agentSpaces.find((space) => space.name === "impl-a")
+          : undefined;
+      t.assertions.assert(
+        dirtySettlementPackage?.status === "candidate" &&
+          Boolean(dirtySettlementPackage.candidateCommit) &&
+          Boolean(dirtySettlementPackage.candidateTree) &&
+          settlementRepairMessage !== undefined &&
+          implementationSpace?.resourceState === "idle" &&
+          !existsSync(`${worktreeA}/fixture-dirty-candidate.tmp`),
+        `bounded candidate settlement did not preserve a clean exact Candidate: package=${JSON.stringify(dirtySettlementPackage)} session=${JSON.stringify(dirtySettlementSession)} space=${JSON.stringify(implementationSpace)}`,
+      );
+      await runPmCommand(
+        t,
+        opened,
+        dirtySettlementPmId,
+        dirtySettlementEvents,
+        `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${workspaceIds.get("review-a")} --work-package dirty-settlement --no-wait "GENEHUB_FIXTURE_REVIEW_PASS"`,
+        "Independently review the repaired exact candidate.",
+      );
+      await approveDelivery(t, opened, dirtySettlementPmId);
+      await t.tools.waitUntil(async () => {
+        const status = await opened.client.call({
+          type: "pm.project.status",
+          payload: { workspaceId: opened.workspaceId },
+        });
+        const run =
+          status?.type === "projectStatus"
+            ? status.data.workflowRuns.find(
+                (item) => item.controllerSessionId === dirtySettlementPmId,
+              )
+            : undefined;
+        return run?.status === "completed" && run.outcome === "delivered";
+      }, 60_000);
+
       // A Reviewer cannot smuggle an unresolved acceptance defect through a
       // passing verdict. Exercise the strict result protocol through a new PM
       // Session after the first Run has released the shared Spaces. The
@@ -497,7 +656,9 @@ defineSpecialty(
         contradictoryPmId,
         contradictoryEvents,
         [
+          '"$GENEHUB_CLI" pm project intent set --outcome "Reject contradictory Reviewer results" --acceptance "A pass verdict containing findings is blocked and never integrated"',
           '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
+          '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
           '"$GENEHUB_CLI" pm project package put --id contradictory-review --title "Contradictory review" --outcome "Reject pass verdicts that still report findings" --space-tag b-lineage --repository game --branch work/b --node fix',
           '"$GENEHUB_CLI" pm project package transition --id contradictory-review --to ready',
           `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${workspaceIds.get("impl-b")} --work-package contradictory-review --no-wait "GENEHUB_FIXTURE_CANDIDATE_READY"`,

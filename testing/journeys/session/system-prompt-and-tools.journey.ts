@@ -136,9 +136,9 @@ defineJourney(
       }
       for (const policy of [
         "project_manager_availability",
-        "must remain available for user guidance",
-        "Never execute sleep",
-        "daemon supervisor",
+        "必须随时可响应用户指导",
+        "禁止套用 timeout",
+        "daemon Supervisor 负责",
       ]) {
         t.assertions.assert(pmBody.includes(policy), `PM system context omitted ${policy}`);
       }

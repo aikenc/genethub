@@ -20,15 +20,14 @@ pub const ENTRYPOINT_MANIFEST: &str = ".entrypoints";
 pub const PROJECT_MANAGER_ENTRYPOINT_MANIFEST: &str = ".entrypoints-project-manager";
 const PROJECT_MANAGER_SKILL_PREFIX: &str = "genehub-pm-";
 const PROJECT_MANAGER_AVAILABILITY_GUIDANCE: &str = r#"<project_manager_availability>
-A PM session must remain available for user guidance while WorkSessions run. Create and continue owned WorkSessions with a top-level GeneHub CLI command using `--no-wait`; the PM control surface also forces those turns to return non-blocking if the flag is accidentally omitted. Never wrap them in timeout, a pipe, a background job, or another waiting construct. Never execute sleep, timer, foreground or background wait, polling loop, or repeated `session get` commands merely to monitor work. A successful `agent run --work-package` atomically binds the created WorkSession, advances a ready package to running or a candidate package to review, and marks the leased Agent Space working. Do not issue a second package transition merely to bind that session. After dispatching every currently-ready package and recording any other immediate state transitions, briefly report progress and finish the PM turn. The daemon supervisor owns quiet-session backoff checks and wakes the PM only for material WorkSession changes. A newly arrived user message takes priority over a supervisor wake.
-When the built-in `genehub` tool is available, use it instead of `bash` for every GeneHub CLI operation. Put all currently-known deterministic CLI operations in one `genehub.commands` batch; do not spend model turns on `--help`, source search, or one-command-at-a-time status discovery. The batch retains the same daemon authorization and stops at the first failed command.
+WorkSession 运行期间，PM Session 必须随时可响应用户指导。创建或继续受管 WorkSession 时，只能顶层调用 GeneHub CLI 并使用 `--no-wait`。禁止套用 timeout、pipe、后台任务或其他等待结构，也禁止 sleep、计时器、轮询和为了监控而反复执行 `session get`。成功的 `agent run --work-package` 会原子绑定 WorkSession、推进包状态并占用 Agent Space；不要再执行一次包转换来绑定 Session。派发当前全部 Ready 包并记录立即状态后，简短报告并结束 PM turn。daemon Supervisor 负责退避检查并只在事实变化时唤醒；新用户消息始终优先。
+存在内置 `genehub` 工具时，所有 GeneHub CLI 操作都优先使用它而不是 `bash`。把已知的确定性命令合并到一个 `genehub.commands` 批次，不要用模型回合执行 `--help`、搜索产品源码或逐条状态探测。批次仍经过相同 daemon 鉴权，并在首个失败命令停止。
 </project_manager_availability>"#;
 const WORK_SESSION_RESULT_GUIDANCE: &str = r#"<managed_work_result>
-This is a managed WorkSession. GeneHub advances its WorkPackage only from durable evidence, never from optimistic prose. When and only when this assignment is fully settled, put exactly one machine-readable marker on the final non-empty line of your response, without a Markdown fence:
-GENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"tests passed and the assigned worktree is committed and clean"}
-Use candidate-ready only for implementation after the required work and tests are complete, all intended changes are committed on the assigned branch, and the worktree is clean. For an independent review use status review-pass or review-fail only after reviewing the exact bound candidate. A passing review should use the minimal exact shape `GENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}`. A failing review must use `GENEHUB_WORK_RESULT {"status":"review-fail","summary":"one or more acceptance defects remain","findings":[{"severity":"blocking|high|medium|low","title":"...","acceptanceImpact":"...","recommendedAction":"...","estimatedRequests":1}]}`. `findings` is an array of objects, never strings; every finding requires severity, title, acceptanceImpact, and recommendedAction, while estimatedRequests is optional. The Reviewer reports technical evidence and impact but does not make product or budget tradeoffs. Use blocked only when the assigned outcome cannot continue safely. If the turn is only a checkpoint or needs continuation, do not emit any GENEHUB_WORK_RESULT marker. The Coordinator derives commit/tree identity and enforces package, lease, review, and Git bindings; never invent those identifiers in the marker.
-An assignment may request a human-readable RESULT block, a first-line verdict, or another report layout. That layout may appear above the marker, but it never replaces this protocol. The GENEHUB_WORK_RESULT object must still be the final non-empty line, with no prose after it. A first-line `review-pass` or natural-language claim is not a managed verdict.
-The only marker status values are `candidate-ready` or `blocked` for implementation and `review-pass`, `review-fail`, or `blocked` for review. The domain words `candidate` and `failed` are not marker status values.
+这是受管 WorkSession。GeneHub 只依据持久证据推进 WorkPackage，不依据乐观叙述。只有任务真正结算时，才在最终响应的最后一个非空行放置唯一机器标记，不使用 Markdown 代码围栏：
+GENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"测试通过，指定 worktree 已提交且干净"}
+实现只有在工作与测试完成、变更全部提交到指定分支且 worktree 干净时才能使用 `candidate-ready`。独立评审只有检查精确绑定候选后才能使用 `review-pass` 或 `review-fail`。通过形态为 `GENEHUB_WORK_RESULT {"status":"review-pass","summary":"精确候选的全部门禁通过"}`。失败形态为 `GENEHUB_WORK_RESULT {"status":"review-fail","summary":"仍有验收缺陷","findings":[{"severity":"blocking|high|medium|low","title":"...","acceptanceImpact":"...","recommendedAction":"...","estimatedRequests":1}]}`。`findings` 必须是对象数组；每项都含 severity、title、acceptanceImpact、recommendedAction，estimatedRequests 可选。Reviewer 报告技术证据和影响，不做产品或预算取舍。只有无法安全继续时使用 `blocked`。checkpoint 或仍需继续时不要输出标记。commit/tree、租约、评审和 Git 绑定由 Coordinator 推导，不要在标记中编造。
+任务要求的人类可读报告可以放在标记之前，但不能替代协议。`GENEHUB_WORK_RESULT` 必须保持最后一个非空行，之后不得有文字。实现状态只允许 `candidate-ready`/`blocked`，评审只允许 `review-pass`/`review-fail`/`blocked`；`candidate` 和 `failed` 不是协议状态。
 </managed_work_result>"#;
 
 /// Product-owned Skill catalog selected for one durable session role.
@@ -219,7 +218,7 @@ pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String
     }
 
     let mut lines = vec![
-        "GeneHub provides these built-in Skills as ordinary files. When a task matches a skill description, read that file and follow it. Do not invent skill names, session ids, or channel commands.".to_string(),
+        "GeneHub 以普通文件提供以下内置 Skill。任务匹配某个 Skill 的描述时，读取对应文件并遵循它；不要编造 Skill 名称、Session id 或通道命令。".to_string(),
         String::new(),
         match front_door_cli {
             Some(path) => format!(
@@ -228,7 +227,7 @@ pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String
             ),
             None => "<genehub_cli unavailable=\"true\" />".to_string(),
         },
-        "Use exactly the GeneHub CLI path above. It is also exported to the Agent as GENEHUB_CLI. If unavailable, stop instead of guessing genet, genet-dev, genet-beta, or another command.".to_string(),
+        "必须使用上面给出的 GeneHub CLI 精确路径；该路径也通过 GENEHUB_CLI 提供给 Agent。若不可用就停止，不要猜测 genet、genet-dev、genet-beta 或其他命令。".to_string(),
         String::new(),
         "<available_skills>".to_string(),
     ];
@@ -377,7 +376,6 @@ mod tests {
         assert!(catalog.contains("<name>demo</name>"));
         assert!(catalog.contains("&lt;PDFs&gt; &amp; more"));
         assert!(catalog.contains("<location>/data/skills/demo/SKILL.md</location>"));
-        assert!(catalog.contains("Do not invent skill names"));
     }
 
     #[test]
@@ -412,7 +410,6 @@ mod tests {
         let root = temp_dir("no-cli");
         let prompt = session_guidance(Some(&root), None, SkillProfile::Common);
         assert!(prompt.contains("<genehub_cli unavailable=\"true\" />"));
-        assert!(prompt.contains("stop instead of guessing"));
     }
 
     #[test]

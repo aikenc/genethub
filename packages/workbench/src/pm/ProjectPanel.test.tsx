@@ -10,7 +10,7 @@ afterEach(cleanup);
 describe("ProjectPanel", () => {
   it("shows the demand, node-bound team, exception path and dispatches a user decision", async () => {
     const status = projectStatus();
-    const call = vi.fn(async (_request: { type: string }) => ({ type: "projectStatus", data: status }));
+    const call = vi.fn(async (_request: { type: string; payload?: unknown }) => ({ type: "projectStatus", data: status }));
     const open = vi.fn();
     const openWorkspace = vi.fn();
     render(<ProjectPanel
@@ -22,12 +22,16 @@ describe("ProjectPanel", () => {
     />);
 
     expect(await screen.findByText("交付可玩的 H5 游戏")).toBeInTheDocument();
-    expect(screen.getByText("0/1")).toBeInTheDocument();
+    expect(call).toHaveBeenCalledWith({
+      type: "pm.project.status",
+      payload: { workspaceId: "w_project", sessionId: "s_pm" },
+    });
+    expect(screen.getAllByText(/已完成节点 0/).length).toBeGreaterThan(0);
     expect(screen.getByText("implement")).toBeInTheDocument();
     expect(screen.getByText("可分配 0/4 · 已占 1")).toBeInTheDocument();
     expect(screen.getByText("执行预算剩余 9:00")).toBeInTheDocument();
     expect(screen.getByText("并发会话 1/4 · 累计会话 2/16")).toBeInTheDocument();
-    expect(screen.getByText("LLM 请求 20/96 · 剩余 76 · 用户等待 0:05")).toBeInTheDocument();
+    expect(screen.getByText("用户等待 0:05")).toBeInTheDocument();
     expect(screen.getByText("独立 Reviewer findings")).toBeInTheDocument();
     expect(screen.getByText("存档迁移丢失 v1 字段")).toBeInTheDocument();
     expect(screen.getByText("预计 2 次请求")).toBeInTheDocument();
@@ -41,7 +45,9 @@ describe("ProjectPanel", () => {
     fireEvent.click(screen.getByText("实现战斗循环"));
     expect(open).toHaveBeenCalledWith("s_work");
 
-    expect(screen.queryByText("diagnosis.retryApproved")).not.toBeInTheDocument();
+    expect(screen.getByText("Workflow 真实拓扑")).toBeInTheDocument();
+    expect(screen.getByText("边与分支")).toBeInTheDocument();
+    expect(screen.getByText(/diagnosis\.retryApproved/)).toBeInTheDocument();
     fireEvent.click(screen.getByText("采用修正方案重试"));
     await waitFor(() => expect(call).toHaveBeenCalledWith({
       type: "pm.workflow.transition",
@@ -49,9 +55,48 @@ describe("ProjectPanel", () => {
         workspaceId: "w_project",
         sessionId: "s_pm",
         edgeId: "retry",
+        expectedRevision: 3,
         facts: [],
       },
     }));
+  });
+
+  it("loads the cross-Session project overview only when requested", async () => {
+    const status = projectStatus();
+    const call = vi.fn(async (_request: { type: string; payload?: unknown }) => ({ type: "projectStatus", data: status }));
+
+    render(<ProjectPanel
+      client={{ call } as unknown as Client}
+      session={pmSession()}
+      workspaces={workspaces()}
+      onOpenSession={vi.fn()}
+      onOpenWorkspace={vi.fn()}
+    />);
+
+    expect(await screen.findByText("交付可玩的 H5 游戏")).toBeInTheDocument();
+    expect(call).not.toHaveBeenCalledWith({
+      type: "pm.project.status",
+      payload: { workspaceId: "w_project" },
+    });
+    fireEvent.click(screen.getByText("项目管理总览"));
+    await waitFor(() => expect(call).toHaveBeenCalledWith({
+      type: "pm.project.status",
+      payload: { workspaceId: "w_project" },
+    }));
+  });
+
+  it("surfaces a project status polling failure", async () => {
+    const call = vi.fn(async () => { throw new Error("daemon 已断开"); });
+
+    render(<ProjectPanel
+      client={{ call } as unknown as Client}
+      session={pmSession()}
+      workspaces={workspaces()}
+      onOpenSession={vi.fn()}
+      onOpenWorkspace={vi.fn()}
+    />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("daemon 已断开");
   });
 
   it("shows that user decision waiting pauses the task execution clock", async () => {
@@ -90,11 +135,10 @@ function workspaces(): WorkspaceInfo[] {
 
 function projectStatus(): PmProjectStatus {
   return {
-    workspaceId: "w_project", controllerSessionId: "s_pm", phase: "active", lifecycle: "active",
+    workspaceId: "w_project", phase: "active", lifecycle: "active",
     revision: 3, updatedAtMs: 3,
-    intent: { revision: 9, outcome: "另一条需求", acceptance: ["不应展示"], constraints: [], outOfScope: [] },
     workPackages: [{
-      id: "combat", title: "战斗", outcome: "实现战斗循环", status: "blocked", dependencies: [],
+      id: "combat", title: "战斗", outcome: "实现战斗循环", status: "blocked",
       controllerSessionId: "s_pm",
       requiredSpaceTags: ["gameplay"],
       agentSpace: "implementation-1", repository: "game", branch: "work/combat", workflowRunId: "run-s_pm",
@@ -108,7 +152,7 @@ function projectStatus(): PmProjectStatus {
         estimatedRequests: 2,
       }],
     }, {
-      id: "other", title: "其他", outcome: "另一会话的工作", status: "accepted", dependencies: [],
+      id: "other", title: "其他", outcome: "另一会话的工作", status: "accepted",
       controllerSessionId: "s_other",
       requiredSpaceTags: [],
       agentSpace: "implementation-2", repository: "game", branch: "work/other", workflowRunId: "run-s_other",
@@ -121,7 +165,7 @@ function projectStatus(): PmProjectStatus {
     }],
     workflowCatalog: { recommended: "feature", workflows: [{
       id: "feature", version: 1, entry: "intake",
-      executionBudget: { wallClockMs: 600_000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4, maxLlmRequests: 96 },
+      executionBudget: { wallClockMs: 600_000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4 },
       nodes: [{ id: "intake", kind: "activity" }, { id: "implement", kind: "activity" }, { id: "diagnose", kind: "activity" }, { id: "delivered", kind: "terminal" }],
       edges: [
         { id: "retry", label: "采用修正方案重试", description: "保留验收目标并重新执行。", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" },
@@ -129,6 +173,13 @@ function projectStatus(): PmProjectStatus {
         { id: "finish", from: "diagnose", to: "delivered", condition: "diagnosis.resolved" },
       ],
     }] },
+    template: {
+      installedVersion: "3",
+      installedDigest: "c".repeat(64),
+      availableVersion: "3",
+      availableDigest: "c".repeat(64),
+      upgradeAvailable: false,
+    },
     workflowRuns: [{
       id: "run-s_pm", controllerSessionId: "s_pm", graphId: "feature", graphVersion: 1, status: "active",
       definition: null,
@@ -137,15 +188,12 @@ function projectStatus(): PmProjectStatus {
         wallClockMs: 600_000,
         maxWorkSessions: 16,
         maxConcurrentWorkSessions: 4,
-        maxLlmRequests: 96,
         startedAtMs: 1,
         deadlineAtMs: 600_001,
         remainingMs: 540_000,
         userWaitMs: 5_000,
         workSessionsStarted: 2,
         activeWorkSessions: 1,
-        llmRequestsObserved: 20,
-        llmRequestsRemaining: 76,
       },
       activeNodes: ["diagnose"], facts: [], revision: 3,
       intent: { revision: 1, outcome: "交付可玩的 H5 游戏", acceptance: ["可玩"], constraints: [], outOfScope: [] },

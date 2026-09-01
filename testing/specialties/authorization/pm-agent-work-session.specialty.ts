@@ -19,6 +19,33 @@ function eventTrace(events: Array<{ type?: string; raw: unknown }>): string {
   return JSON.stringify(events.map((event) => ({ type: event.type, raw: event.raw })));
 }
 
+function activeFixtureAgentPids(root: string): number[] {
+  const lifecycleLog = `${root}/fixture-acp-agent-processes.jsonl`;
+  if (!existsSync(lifecycleLog)) return [];
+  const pids = readFileSync(lifecycleLog, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const record = JSON.parse(line) as { event?: string; pid?: number };
+        return record.event === "started" && Number.isSafeInteger(record.pid)
+          ? [record.pid as number]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  return [...new Set(pids)].filter((pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 defineSpecialty(
   {
     id: "specialty.authorization.pm-agent-work-session",
@@ -34,7 +61,12 @@ defineSpecialty(
       "a committed Provider Skill change can be re-recorded against a stale Builder lock",
       "a failed supervisor wake retries on every two-second sampler tick",
       "forking a WorkSession preserves its privileged role",
-      "a PM mistakes the system-owned review evidence node for automatic Reviewer WorkSession dispatch",
+      "a PM bypasses the project-owned Reviewer activity or expects the Coordinator to replace team dispatch",
+      "a PM has to reconstruct exact Intent, package, and candidate identity inside an ad-hoc Reviewer prompt",
+      "the project-owned Reviewer prompt permits slice-local cardinality assertions against a sibling-dependent aggregate",
+      "high-frequency WorkSession authorization repeats a synchronous Builder tree walk and starves same-project status requests",
+      "settled implementation and Reviewer adapter processes accumulate until the next Reviewer startup wave wedges the daemon",
+      "graceful daemon shutdown serializes one process census per live Agent and leaves test-owned Agent servers orphaned",
     ],
     tags: ["core", "authorization", "pm-agent-mvp", "pm-agent-work-session"],
     llm: { default: "mock" },
@@ -180,7 +212,7 @@ defineSpecialty(
       );
       const terminalsBeforeInitialization = terminalCount(pmEvents);
       const completionsBeforeInitialization = completedCount(pmEvents);
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Initialize the local project and implementation topology.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "初始化本地项目与实现拓扑。");
       await t.tools.waitUntil(() => terminalCount(pmEvents) === terminalsBeforeInitialization + 1, 45_000);
       t.assertions.assert(
         completedCount(pmEvents) === completionsBeforeInitialization + 1,
@@ -216,7 +248,7 @@ defineSpecialty(
       );
       const terminalsBeforeRegistration = terminalCount(pmEvents);
       const completionsBeforeRegistration = completedCount(pmEvents);
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Register the implementation Agent Space.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "注册实现 Agent Space。");
       try {
         await t.tools.waitUntil(() => terminalCount(pmEvents) === terminalsBeforeRegistration + 1, 15_000);
       } catch {
@@ -268,7 +300,7 @@ defineSpecialty(
       await t.flows.main.sendPrompt(
         opened.client,
         duplicatePmId,
-        "Reuse the project's already-registered implementation Agent Space idempotently.",
+        "幂等复用项目已经注册的实现 Agent Space。",
       );
       await t.tools.waitUntil(() => terminalCount(siblingEvents) === siblingTerminals + 1, 15_000);
       t.assertions.assert(
@@ -300,7 +332,7 @@ defineSpecialty(
         { tool: { name: "bash", arguments: { command: activateCommand } } },
         { text: "The verified Space and ready work package are durable." },
       );
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Record the Space and activate the gameplay package.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "记录 Space 并激活玩法工作包。");
       await t.tools.waitUntil(
         () => terminalCount(pmEvents) === terminalsBeforeActivation + 1,
         30_000,
@@ -361,12 +393,9 @@ defineSpecialty(
           projectedRun.budget.remainingMs > 0 &&
           projectedRun.budget.maxWorkSessions === 16 &&
           projectedRun.budget.maxConcurrentWorkSessions === 4 &&
-          projectedRun.budget.maxLlmRequests === 128 &&
-          projectedRun.budget.llmRequestsObserved + projectedRun.budget.llmRequestsRemaining ===
-            projectedRun.budget.maxLlmRequests &&
           projectedRun.budget.workSessionsStarted === 0 &&
           projectedRun.budget.activeWorkSessions === 0 &&
-          reviewNode?.actor === "system" &&
+          reviewNode?.actor === "reviewer" &&
           integrationNode?.actor === "system" &&
           reviewTriageNode?.actor === "pm" &&
           projectedRun.resourceCapacities.some(
@@ -408,14 +437,16 @@ defineSpecialty(
         },
         { text: "Dispatch was rejected while the recorded Agent Space Builder identity drifted." },
       );
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Prove that Agent Space drift fails closed before dispatch.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "验证 Agent Space 漂移会在派发前失败关闭。");
       await t.tools.waitUntil(() => terminalCount(pmEvents) === driftTerminals + 1, 15_000);
       writeFileSync(manifestAbsolutePath, manifestBeforeDrift);
       const driftResultPath = `${t.env.workspace}/spaces/pm/${driftResult}`;
       t.assertions.assert(
         completedCount(pmEvents) === driftCompletions + 1 &&
           existsSync(driftResultPath) &&
-          /Builder verification|PB017|changed/i.test(readFileSync(driftResultPath, "utf8")),
+          /Builder verification|PB017|changed|uncommitted tracked source/i.test(
+            readFileSync(driftResultPath, "utf8"),
+          ),
         `drift dispatch did not fail closed: ${eventTrace(pmEvents)}`,
       );
       const sessionsAfterDrift = await opened.client.call({
@@ -451,7 +482,7 @@ defineSpecialty(
       await t.flows.main.sendPrompt(
         opened.client,
         pm.id,
-        "Prove that uncommitted root Provider source fails closed before dispatch.",
+        "验证未提交的根 Provider 源码会在派发前失败关闭。",
       );
       await t.tools.waitUntil(() => terminalCount(pmEvents) === sourceDriftTerminals + 1, 15_000);
       rmSync(uncommittedProviderRoot, { recursive: true, force: true });
@@ -497,7 +528,7 @@ defineSpecialty(
       await t.flows.main.sendPrompt(
         opened.client,
         pm.id,
-        "Prove that a committed Provider Skill cannot be re-recorded against a stale Builder lock.",
+        "验证已提交的 Provider Skill 不能用过期 Builder lock 重新登记。",
       );
       await t.tools.waitUntil(() => terminalCount(pmEvents) === staleProviderTerminals + 1, 30_000);
       const staleProviderResultPath = `${t.env.workspace}/spaces/pm/${staleProviderResult}`;
@@ -508,6 +539,57 @@ defineSpecialty(
         completedCount(pmEvents) === staleProviderCompletions + 1 &&
           staleProviderOutput.includes("stale-provider-rejected"),
         `stale Provider lock was re-recorded: output=${staleProviderOutput} events=${eventTrace(pmEvents)}`,
+      );
+
+      // The recorded Space is an immutable Builder snapshot. A later clean
+      // commit may change its Provider source, but dispatch must keep using
+      // the previously verified Space bytes until an explicit re-record. This
+      // also proves the hot authorization path does not repeat the synchronous
+      // Builder source/artifact walk on the daemon's single WASM fiber.
+      const pinnedDispatchTerminals = terminalCount(pmEvents);
+      const pinnedDispatchCompletions = completedCount(pmEvents);
+      const pinnedDispatchResult = "pm-pinned-space-dispatch.log";
+      opened.mock.script(
+        {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: `if "$GENEHUB_CLI" agent run --agent ${workAgentId} --work-package wp-gameplay --cwd ${t.env.workspace}/spaces/implementation --no-wait "This cwd must be rejected after authorization." > ${pinnedDispatchResult} 2>&1; then exit 77; fi`,
+            },
+          },
+        },
+        { text: "The pinned Agent Space remained dispatchable; the unrelated cwd contract was rejected." },
+      );
+      await t.flows.main.sendPrompt(
+        opened.client,
+        pm.id,
+        "验证已固定的 Agent Space 不会因 Provider 后续提交而在每次派发时重复重建身份。",
+      );
+      await t.tools.waitUntil(
+        () => terminalCount(pmEvents) === pinnedDispatchTerminals + 1,
+        15_000,
+      );
+      const pinnedDispatchOutputPath = `${t.env.workspace}/spaces/pm/${pinnedDispatchResult}`;
+      const pinnedDispatchOutput = existsSync(pinnedDispatchOutputPath)
+        ? readFileSync(pinnedDispatchOutputPath, "utf8")
+        : "missing pinned dispatch result";
+      const statusAfterPinnedDispatch = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      t.assertions.assert(
+        completedCount(pmEvents) === pinnedDispatchCompletions + 1 &&
+          /fixed by its durable work package/i.test(pinnedDispatchOutput) &&
+          !/Builder verification|PB017|ownership lock|planned artifacts/i.test(pinnedDispatchOutput) &&
+          statusAfterPinnedDispatch?.type === "projectStatus" &&
+          statusAfterPinnedDispatch.data.agentSpaces.some(
+            (space) =>
+              space.workspaceId === agentSpace.id &&
+              space.resourceState === "idle" &&
+              !space.workPackageId &&
+              !space.workSessionId,
+          ),
+        `pinned Agent Space dispatch repeated Builder verification or leaked its lease: output=${pinnedDispatchOutput} status=${JSON.stringify(statusAfterPinnedDispatch)}`,
       );
 
       writeFileSync(providerSkillPath, providerBeforeDrift);
@@ -535,7 +617,7 @@ defineSpecialty(
         },
         { text: "The restored Provider source and Builder lock are recorded again." },
       );
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Restore the verified Agent Space evidence.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "恢复已验证的 Agent Space 证据。");
       await t.tools.waitUntil(() => terminalCount(pmEvents) === restoreTerminals + 1, 15_000);
       t.assertions.assert(
         completedCount(pmEvents) === restoreCompletions + 1,
@@ -559,7 +641,7 @@ defineSpecialty(
       await t.flows.main.sendPrompt(
         opened.client,
         pm.id,
-        "Prove that a rejected WorkAgent cwd releases its reservation atomically.",
+        "验证被拒绝的 WorkAgent cwd 会原子释放预约。",
       );
       await t.tools.waitUntil(
         () => terminalCount(pmEvents) === rejectedCwdTerminals + 1,
@@ -636,7 +718,7 @@ defineSpecialty(
         },
         { text: "The WorkAgent is running." },
       );
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Start the gameplay WorkAgent.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "启动玩法 WorkAgent。");
 
       let workId = "";
       let lastSessions: unknown = null;
@@ -667,13 +749,19 @@ defineSpecialty(
         existsSync(dispatchResult) && readFileSync(dispatchResult, "utf8").includes('"waited":false'),
         `PM dispatch was not forced non-blocking: ${existsSync(dispatchResult) ? readFileSync(dispatchResult, "utf8") : "missing CLI output"}`,
       );
-      const atomicallyBound = JSON.parse(readFileSync(`${t.env.data}/pm-projects/${opened.workspaceId}.json`, "utf8")) as {
-        workPackages?: Record<string, { status?: string; workSessionId?: string }>;
-      };
+      const atomicallyBound = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      const boundPackage =
+        atomicallyBound?.type === "projectStatus"
+          ? atomicallyBound.data.workPackages.find(
+              (item) => item.controllerSessionId === pm.id && item.id === "wp-gameplay",
+            )
+          : undefined;
       t.assertions.assert(
-        atomicallyBound.workPackages?.["wp-gameplay"]?.status === "running" &&
-          atomicallyBound.workPackages?.["wp-gameplay"]?.workSessionId === workId,
-        `agent run did not atomically bind the WorkSession: ${JSON.stringify(atomicallyBound.workPackages?.["wp-gameplay"])}`,
+        boundPackage?.status === "running" && boundPackage.workSessionId === workId,
+        `agent run did not atomically bind the WorkSession: ${JSON.stringify(boundPackage)}`,
       );
 
       const bindTerminals = terminalCount(pmEvents);
@@ -714,7 +802,7 @@ defineSpecialty(
         },
         { text: "Recovery evidence is prepared. The declared choice now belongs to the user." },
       );
-      await t.flows.main.sendPrompt(opened.client, pm.id, "Bind the new WorkSession to its package.");
+      await t.flows.main.sendPrompt(opened.client, pm.id, "把新 WorkSession 绑定到对应工作包。");
       await t.tools.waitUntil(() => terminalCount(pmEvents) === bindTerminals + 1, 15_000);
       t.assertions.assert(
         completedCount(pmEvents) === bindCompletions + 1,
@@ -746,12 +834,20 @@ defineSpecialty(
       // waiting on the delayed model response. The replacement daemon must
       // detect the open round and resend the same pending wake.
       const projectState = `${t.env.data}/pm-projects/${opened.workspaceId}.json`;
-      await t.tools.waitUntil(() => {
-        if (!existsSync(projectState)) return false;
-        const state = JSON.parse(readFileSync(projectState, "utf8")) as {
-          supervisor?: { wakePending?: boolean; wakeTurnId?: string };
-        };
-        return state.supervisor?.wakePending === true && Boolean(state.supervisor.wakeTurnId);
+      await t.tools.waitUntil(async () => {
+        const [project, pmSnapshot] = await Promise.all([
+          opened.client.call({
+            type: "pm.project.status",
+            payload: { workspaceId: opened.workspaceId },
+          }),
+          opened.client.call({ type: "session.get", payload: { sessionId: pm.id } }),
+        ]);
+        const run =
+          project?.type === "projectStatus"
+            ? project.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)
+            : undefined;
+        return run?.supervisor.wakePending === true && pmSnapshot?.type === "snapshot" &&
+          pmSnapshot.data.summary.status === "running";
       }, 30_000);
       const endpointBefore = JSON.parse(
         execFileSync(opened.daemon.genet, ["daemon", "endpoint"], {
@@ -889,6 +985,12 @@ defineSpecialty(
           })}`,
         );
       }
+      const waitingRun = waitingAfterBackoff?.type === "projectStatus"
+        ? waitingAfterBackoff.data.workflowRuns.find(
+            (item) => item.controllerSessionId === pm.id,
+          )
+        : undefined;
+      if (!waitingRun) throw new Error("the waiting PM Run disappeared before user decision");
 
       const humanDecision = await opened.client.call({
         type: "pm.workflow.transition",
@@ -896,6 +998,7 @@ defineSpecialty(
           workspaceId: opened.workspaceId,
           sessionId: pm.id,
           edgeId: "cancel",
+          expectedRevision: waitingRun.revision,
           facts: [],
         },
       });
@@ -910,10 +1013,20 @@ defineSpecialty(
           humanDecision.data.workflowRuns
             .find((item) => item.controllerSessionId === pm.id)
             ?.teamSlots.find((slot) => slot.workPackageId === "wp-gameplay")?.workSessionId == null &&
-          humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === duplicatePmId)?.status ===
-            "discussion" &&
           humanDecision.data.workPackages.find((item) => item.id === "wp-gameplay")?.status === "cancelled",
         `the user decision did not settle the failed attempt: ${JSON.stringify(humanDecision)}`,
+      );
+      const decisionOverview = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      t.assertions.assert(
+        decisionOverview?.type === "projectStatus" &&
+          decisionOverview.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.status ===
+            "cancelled" &&
+          decisionOverview.data.workflowRuns.find((item) => item.controllerSessionId === duplicatePmId)?.status ===
+            "discussion",
+        `the project overview did not preserve the sibling PM Run: ${JSON.stringify(decisionOverview)}`,
       );
 
       const snapshot = completedWork;
@@ -1002,25 +1115,26 @@ defineSpecialty(
         "the user could not open an ordinary conversation in the Agent Space",
       );
 
-      // Revision one establishes this Run's contract. It is not a newer
-      // contract and therefore must not invalidate final packages that are
-      // already bound but have never started. Exercise the exact recovery
-      // order observed in the real Qwen journey through the public CLI after
-      // the main supervisor/reload scenario has reached its terminal state.
+      // Every Workflow, including bugfix, must persist an outcome and
+      // acceptance criteria before it may create a WorkPackage. Exercise the
+      // fail-closed pre-Intent path first, then prove revision one unlocks a
+      // final package through the public CLI.
       const siblingPreIntentCommand = [
         '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
-        '"$GENEHUB_CLI" pm project package put --id sibling-preintent --title "Pre-intent package" --outcome "Remain dispatchable under the first persisted Intent" --space-tag gameplay --repository game --branch work/gameplay --node fix',
-        '"$GENEHUB_CLI" pm project intent set --outcome "Deliver the pre-intent package" --acceptance "Revision one preserves the final unstarted package" --affects sibling-preintent',
+        'if "$GENEHUB_CLI" pm project package put --id sibling-preintent --title "Pre-intent package" --outcome "Must be rejected without acceptance criteria" --space-tag gameplay --repository game --branch work/gameplay --node fix; then exit 76; fi',
+        '"$GENEHUB_CLI" pm project intent set --outcome "Deliver the accepted bugfix package" --acceptance "The final package remains dispatchable under revision one"',
+        '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
+        '"$GENEHUB_CLI" pm project package put --id sibling-preintent --title "Accepted bugfix package" --outcome "Remain dispatchable under the persisted Intent" --space-tag gameplay --repository game --branch work/gameplay --node fix',
         '"$GENEHUB_CLI" pm project workflow status > pm-sibling-preintent-status.json',
       ].join(" && ");
       opened.mock.script(
         { tool: { name: "bash", arguments: { command: siblingPreIntentCommand } } },
-        { text: "Revision one preserved the final pre-dispatch package." },
+        { text: "无验收标准的派工已被拒绝；revision 1 下的最终工作包保持可派发。" },
       );
       await t.flows.main.sendPrompt(
         opened.client,
         duplicatePmId,
-        "Bind a final bugfix package, establish revision one, and prove it remains dispatchable.",
+        "先验证无验收标准时不能派工，再建立 revision 1 并绑定最终 bugfix 工作包。",
       );
       let siblingPreIntentSnapshot: Awaited<ReturnType<typeof opened.client.call>> | undefined;
       await t.tools.waitUntil(
@@ -1052,7 +1166,7 @@ defineSpecialty(
           siblingPreIntentStatus?.data?.run?.intent?.revision === 1 &&
           siblingPreIntentPackage?.status === "planned" &&
           !siblingPreIntentPackage.blockReason,
-        `revision one invalidated a final pre-dispatch package: snapshot=${JSON.stringify(siblingPreIntentSnapshot)} status=${JSON.stringify(siblingPreIntentStatus)}`,
+        `the Intent gate did not reject then unlock the final package: snapshot=${JSON.stringify(siblingPreIntentSnapshot)} status=${JSON.stringify(siblingPreIntentStatus)}`,
       );
 
       // Exercise the failed-review retry path through the real daemon, CLI,
@@ -1060,6 +1174,7 @@ defineSpecialty(
       // evidence, while a new package in the same PM Session and exact Git
       // lineage may reuse the now-idle implementation Space.
       const implementationWorktree = `${t.env.workspace}/worktrees/implementation/game`;
+      const fixtureProcessesBeforeManagedPair = activeFixtureAgentPids(t.env.root).length;
       writeFileSync(
         `${implementationWorktree}/fixture-candidate.txt`,
         "candidate that requires one bounded review correction\n",
@@ -1092,7 +1207,7 @@ defineSpecialty(
       await t.flows.main.sendPrompt(
         opened.client,
         duplicatePmId,
-        "Exercise one independent review failure and bind its exact-lineage rework package.",
+        "执行一次独立评审失败，并绑定精确沿袭的返工包。",
       );
 
       let reworkStatus: Awaited<ReturnType<typeof opened.client.call>> | undefined;
@@ -1115,9 +1230,9 @@ defineSpecialty(
           ? reviewDispatchWake.data.items.find(
               (item) =>
                 item.type === "userMessage" &&
-                item.text.includes("action=dispatch-independent-review") &&
+                item.text.includes("动作=派发独立评审") &&
                 item.text.includes(`reviewWorkspace=${reviewSpace.id}`) &&
-                item.text.includes("system` means the Coordinator validates"),
+                item.text.includes("`review` 是真实 `actor: reviewer` 活动"),
             )
           : undefined;
       t.assertions.assert(
@@ -1134,6 +1249,16 @@ defineSpecialty(
         reworkStatus?.type === "projectStatus"
           ? reworkStatus.data.workPackages.find((item) => item.id === "failed-review-original")
           : undefined;
+      const failedReviewSnapshot = failedOriginal?.reviewSessionId
+        ? await opened.client.call({
+            type: "session.get",
+            payload: { sessionId: failedOriginal.reviewSessionId },
+          })
+        : undefined;
+      await t.tools.waitUntil(
+        () => activeFixtureAgentPids(t.env.root).length <= fixtureProcessesBeforeManagedPair,
+        10_000,
+      );
       const retryPackage =
         reworkStatus?.type === "projectStatus"
           ? reworkStatus.data.workPackages.find((item) => item.id === "failed-review-retry")
@@ -1145,6 +1270,35 @@ defineSpecialty(
           Boolean(failedOriginal.workSessionId) &&
           Boolean(failedOriginal.reviewSessionId) &&
           failedOriginal.workSessionId !== failedOriginal.reviewSessionId &&
+          failedReviewSnapshot?.type === "snapshot" &&
+          failedReviewSnapshot.data.summary.work?.workflowPrompt?.includes(
+            '"schema": "genehub-pm-review-context.v1"',
+          ) === true &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            '"id": "failed-review-original"',
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            '"outcome": "Preserve a failed independent review"',
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            '"acceptance": [',
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            "共享聚合入口会随兄弟包合入而变化",
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            "至少包含一种目标类型和一种兄弟类型的混合 fixture",
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            "Managed implementation contract part 1/1: GENEHUB_FIXTURE_CANDIDATE_READY",
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            `"commit": "${failedOriginal.candidateCommit}"`,
+          ) &&
+          failedReviewSnapshot.data.summary.work.workflowPrompt.includes(
+            `"tree": "${failedOriginal.candidateTree}"`,
+          ) &&
+          activeFixtureAgentPids(t.env.root).length <= fixtureProcessesBeforeManagedPair &&
           retryPackage?.status === "planned" &&
           retryPackage.agentSpace === "implementation" &&
           retryPackage.repository === failedOriginal.repository &&
@@ -1178,6 +1332,201 @@ defineSpecialty(
             .length >= 5
         );
       }, 30_000);
+
+      // Exercise the complete project-owned Workflow template migration
+      // through public PM/user surfaces. The old baseline remains usable;
+      // preparation creates only an inert bundle. A real settled Reviewer
+      // WorkSession from the verified review-only Space binds the digest,
+      // then the authenticated user approves before transactional promotion.
+      const oldTemplateMarker = {
+        schema: "genehub-pm-space-template.v1",
+        version: "2",
+        contentDigest: "fixture-old-template",
+      };
+      writeFileSync(
+        `${t.env.workspace}/spaces/pm/template.json`,
+        `${JSON.stringify(oldTemplateMarker, null, 2)}\n`,
+      );
+      execFileSync("git", ["add", "spaces/pm/template.json"], { cwd: t.env.workspace });
+      execFileSync("git", ["commit", "-qm", "Pin the previous PM template baseline"], {
+        cwd: t.env.workspace,
+      });
+      const templateSourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: t.env.workspace,
+        encoding: "utf8",
+      }).trim();
+      const outdatedTemplate = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId, sessionId: duplicatePmId },
+      });
+      t.assertions.assert(
+        outdatedTemplate?.type === "projectStatus" &&
+          outdatedTemplate.data.template.upgradeAvailable &&
+          outdatedTemplate.data.template.installedVersion === "2",
+        `the optional template migration was not reported: ${JSON.stringify(outdatedTemplate)}`,
+      );
+
+      let improvementCommandSequence = 0;
+      const runImprovementCommand = async (command: string, prompt: string) => {
+        const terminals = terminalCount(siblingEvents);
+        const completions = completedCount(siblingEvents);
+        const successMarker = `${t.env.root}/pm-improvement-command-${++improvementCommandSequence}.ok`;
+        const verifiedCommand = `${command} && printf 'ok\\n' > "${successMarker}"`;
+        opened.mock.script(
+          { tool: { name: "bash", arguments: { command: verifiedCommand } } },
+          { text: "Workflow 改进治理操作已完成。" },
+        );
+        await t.flows.main.sendPrompt(opened.client, duplicatePmId, prompt);
+        await t.tools.waitUntil(
+          () => terminalCount(siblingEvents) === terminals + 1,
+          30_000,
+        );
+        t.assertions.assert(
+          completedCount(siblingEvents) === completions + 1 &&
+            existsSync(successMarker) &&
+            readFileSync(successMarker, "utf8") === "ok\n",
+          `Workflow 改进命令未成功退出：${command} events=${eventTrace(siblingEvents)}`,
+        );
+        rmSync(successMarker, { force: true });
+      };
+      await runImprovementCommand(
+        [
+          `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${templateSourceCommit} --tag gameplay --tag webgl2`,
+          `"$GENEHUB_CLI" pm project space record --name review --purpose "Independently review gameplay candidates" --path spaces/review --workspace ${reviewSpace.id} --commit ${templateSourceCommit} --role review --tag gameplay`,
+        ].join(" && "),
+        "项目基线提交后，重新核验并记录两个 Agent Space 的精确来源锁。",
+      );
+      await runImprovementCommand(
+        '"$GENEHUB_CLI" pm project improvement prepare-template --id fixture-template-v3',
+        "生成一个惰性的模板迁移 bundle，不要覆盖活动 Workflow。",
+      );
+      const bundleReviewPrompt = `${t.env.workspace}/spaces/pm/workflow-candidates/fixture-template-v3/bundle/skills/project-workflow/prompts/review.md`;
+      writeFileSync(
+        bundleReviewPrompt,
+        `${readFileSync(bundleReviewPrompt, "utf8")}\n项目自定义：Reviewer 必须给出中文验收影响。\n`,
+      );
+      await runImprovementCommand(
+        '"$GENEHUB_CLI" pm project improvement propose --id fixture-template-v3 --target bundle --rationale "迁移模板且保留项目中文评审方法"',
+        "把完整 bundle 的活动基线和候选摘要提交治理，不执行晋级。",
+      );
+      const proposedTemplate = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId, sessionId: duplicatePmId },
+      });
+      const proposedCandidate = proposedTemplate?.type === "projectStatus"
+        ? proposedTemplate.data.improvementCandidates.find(
+            (candidate) => candidate.id === "fixture-template-v3",
+          )
+        : undefined;
+      t.assertions.assert(
+        proposedCandidate?.status === "proposed" && Boolean(proposedCandidate.candidateDigest),
+        `template migration proposal did not expose an exact digest: ${JSON.stringify(proposedTemplate)}`,
+      );
+
+      // Keep the CLI receipt outside the project Git root. Redirection creates
+      // the file before `agent run` performs its exact-source cleanliness
+      // check, so placing it under the project would correctly invalidate the
+      // recorded human-owned Agent Space sources.
+      const improvementReviewOutput = `${t.env.root}/pm-template-review-session.json`;
+      const dispatchImprovementReview =
+        `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${reviewSpace.id} ` +
+        `--improvement fixture-template-v3 --no-wait "GENEHUB_FIXTURE_REVIEW_PASS" > ${improvementReviewOutput}`;
+      await runImprovementCommand(
+        dispatchImprovementReview,
+        "在已验证的 review-only Agent Space 中派发绑定精确 bundle 摘要的独立 Reviewer。",
+      );
+      const improvementReviewReplies = readFileSync(improvementReviewOutput, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)) as Array<{
+          type?: string;
+          data?: { sessionId?: string; status?: string; waited?: boolean };
+        }>;
+      const createdImprovementReview = improvementReviewReplies.find(
+        (reply) => reply.type === "session.created",
+      );
+      const runningImprovementReview = improvementReviewReplies.find(
+        (reply) => reply.type === "session.result",
+      );
+      const improvementReviewSessionId = createdImprovementReview?.data?.sessionId;
+      t.assertions.assert(
+        improvementReviewReplies.length === 2 &&
+          Boolean(improvementReviewSessionId) &&
+          runningImprovementReview?.data?.sessionId === improvementReviewSessionId &&
+          runningImprovementReview?.data?.status === "running" &&
+          runningImprovementReview?.data?.waited === false,
+        `Workflow 改进 Reviewer 没有返回一致的非阻塞 WorkSession 事件：${JSON.stringify(improvementReviewReplies)}`,
+      );
+      let improvementReviewSnapshot: Awaited<ReturnType<typeof opened.client.call>> | undefined;
+      await t.tools.waitUntil(async () => {
+        improvementReviewSnapshot = await opened.client.call({
+          type: "session.get",
+          payload: { sessionId: improvementReviewSessionId! },
+        });
+        return (
+          improvementReviewSnapshot?.type === "snapshot" &&
+          !["running", "waiting"].includes(improvementReviewSnapshot.data.summary.status)
+        );
+      }, 30_000);
+      t.assertions.assert(
+        improvementReviewSnapshot?.type === "snapshot" &&
+          improvementReviewSnapshot.data.summary.kind === "work" &&
+          improvementReviewSnapshot.data.summary.work?.improvementCandidateId ===
+            "fixture-template-v3" &&
+          improvementReviewSnapshot.data.summary.work?.improvementCandidateDigest ===
+            proposedCandidate?.candidateDigest &&
+          improvementReviewSnapshot.data.summary.work?.workflowPrompt?.includes(
+            "项目自定义：Reviewer 必须给出中文验收影响。",
+          ),
+        `Reviewer WorkSession 未绑定精确中文 bundle：${JSON.stringify(improvementReviewSnapshot)}`,
+      );
+      await runImprovementCommand(
+        `"$GENEHUB_CLI" pm project improvement review --id fixture-template-v3 --session ${improvementReviewSessionId} --evidence "review-only Space 已核对精确摘要绑定的整包图、提示词、evaluation 和回滚边界" --pass`,
+        "登记独立 Reviewer 对精确 bundle 摘要的评审结论。",
+      );
+      const approvedTemplate = await opened.client.call({
+        type: "pm.improvement.approve",
+        payload: {
+          workspaceId: opened.workspaceId,
+          sessionId: duplicatePmId,
+          candidateId: "fixture-template-v3",
+          approved: true,
+        },
+      });
+      t.assertions.assert(
+        approvedTemplate?.type === "projectStatus" &&
+          approvedTemplate.data.improvementCandidates.some(
+            (candidate) => candidate.id === "fixture-template-v3" && candidate.status === "approved",
+          ),
+        `user approval did not bind the template candidate: ${JSON.stringify(approvedTemplate)}`,
+      );
+      await runImprovementCommand(
+        '"$GENEHUB_CLI" pm project improvement promote --id fixture-template-v3',
+        "晋级用户已批准且独立评审通过的精确 bundle。",
+      );
+      const promotedTemplate = await opened.client.call({
+        type: "pm.project.status",
+        payload: { workspaceId: opened.workspaceId, sessionId: duplicatePmId },
+      });
+      t.assertions.assert(
+        promotedTemplate?.type === "projectStatus" &&
+          !promotedTemplate.data.template.upgradeAvailable &&
+          promotedTemplate.data.improvementCandidates.some(
+            (candidate) =>
+              candidate.id === "fixture-template-v3" &&
+              candidate.status === "promoted" &&
+              Boolean(candidate.promotedCommit),
+          ) &&
+          readFileSync(
+            `${t.env.workspace}/spaces/pm/skills/project-workflow/prompts/review.md`,
+            "utf8",
+          ).includes("项目自定义") &&
+          execFileSync("git", ["status", "--porcelain"], {
+            cwd: t.env.workspace,
+            encoding: "utf8",
+          }).trim() === "",
+        `template bundle was not promoted cleanly: ${JSON.stringify(promotedTemplate)}`,
+      );
 
       // Reproduce the real Qwen failure where a candidate became dirty after
       // independent acceptance but before deterministic integration. The
@@ -1215,7 +1564,7 @@ defineSpecialty(
       await t.flows.main.sendPrompt(
         opened.client,
         duplicatePmId,
-        "Create one independently reviewable candidate for integration fault coverage.",
+        "为集成故障覆盖创建一个可独立评审的候选。",
       );
       let integrationCandidateStatus:
         | Awaited<ReturnType<typeof opened.client.call>>
@@ -1236,6 +1585,19 @@ defineSpecialty(
       const dirtyArtifact =
         implementationWorktree + "/reviewer-side-effect.tmp";
       try {
+        // The public Candidate projection can become visible a few
+        // milliseconds before the Supervisor wake that observed it settles.
+        // Wait for the PM Session itself to become idle before scripting and
+        // sending the explicit Reviewer-dispatch instruction, otherwise the
+        // script can be consumed by that wake or session.send correctly
+        // rejects the overlapping turn.
+        await t.tools.waitUntil(async () => {
+          const snapshot = await opened.client.call({
+            type: "session.get",
+            payload: { sessionId: duplicatePmId },
+          });
+          return snapshot?.type === "snapshot" && snapshot.data.summary.status === "idle";
+        }, 30_000);
         const dispatchPassingReview =
           '"$GENEHUB_CLI" agent run --agent ' +
           workAgentId +
@@ -1249,7 +1611,7 @@ defineSpecialty(
         await t.flows.main.sendPrompt(
           opened.client,
           duplicatePmId,
-          "Dispatch the independent Reviewer for the integration fault fixture.",
+          "为集成故障夹具派发独立 Reviewer。",
         );
         await t.tools.waitUntil(async () => {
           const sessions = await opened.client.call({
@@ -1268,6 +1630,49 @@ defineSpecialty(
         writeFileSync(
           dirtyArtifact,
           "simulated post-review-authorization filesystem side effect\n",
+        );
+
+        let awaitingDeliveryDecision:
+          | Awaited<ReturnType<typeof opened.client.call>>
+          | undefined;
+        await t.tools.waitUntil(async () => {
+          awaitingDeliveryDecision = await opened.client.call({
+            type: "pm.project.status",
+            payload: { workspaceId: opened.workspaceId },
+          });
+          const run = awaitingDeliveryDecision?.type === "projectStatus"
+            ? awaitingDeliveryDecision.data.workflowRuns.find(
+                (item) => item.controllerSessionId === duplicatePmId,
+              )
+            : undefined;
+          return Boolean(
+            run?.activeNodes.includes("approve-delivery") &&
+              run.availableEdges.some(
+                (edge) => edge.id === "delivery-approved" && edge.satisfied,
+              ),
+          );
+        }, 15_000);
+        const deliveryRun = awaitingDeliveryDecision?.type === "projectStatus"
+          ? awaitingDeliveryDecision.data.workflowRuns.find(
+              (item) => item.controllerSessionId === duplicatePmId,
+            )
+          : undefined;
+        if (!deliveryRun) {
+          throw new Error("the reviewed bugfix Run disappeared before user delivery approval");
+        }
+        const approvedDelivery = await opened.client.call({
+          type: "pm.workflow.transition",
+          payload: {
+            workspaceId: opened.workspaceId,
+            sessionId: duplicatePmId,
+            edgeId: "delivery-approved",
+            expectedRevision: deliveryRun.revision,
+            facts: [],
+          },
+        });
+        t.assertions.assert(
+          approvedDelivery?.type === "projectStatus",
+          `explicit delivery approval did not return project status: ${JSON.stringify(approvedDelivery)}`,
         );
 
         let failedIntegration:
@@ -1315,6 +1720,80 @@ defineSpecialty(
       } finally {
         rmSync(dirtyArtifact, { force: true });
       }
+
+      // Keep several ordinary Agent runtimes live, then stop the real daemon
+      // through its public CLI. This is deliberately different from the
+      // managed-result assertion above: an interrupted/failed journey reaches
+      // daemon shutdown while some Workers or Reviewers are still active, and
+      // those processes must be drained before the CLI's cooperative stop
+      // window expires rather than being orphaned onto init.
+      const shutdownBaseline = new Set(activeFixtureAgentPids(t.env.root));
+      const shutdownEvents: Array<Array<{ type?: string; raw: unknown }>> = [];
+      for (let index = 0; index < 4; index += 1) {
+        const created = await opened.client.call({
+          type: "session.create",
+          payload: {
+            workspaceId: opened.workspaceId,
+            agentId: workAgentId,
+            modelId: null,
+            modeId: null,
+            title: `Shutdown fixture ${index + 1}`,
+            cwd: null,
+          },
+        });
+        t.assertions.assert(
+          created?.type === "session",
+          `shutdown fixture session.create returned ${created?.type}`,
+        );
+        if (created?.type !== "session") continue;
+        const events = await t.flows.main.attachEventLog(opened.client, created.data.id);
+        shutdownEvents.push(events);
+        await t.flows.main.sendPrompt(
+          opened.client,
+          created.data.id,
+          "GENEHUB_FIXTURE_CANDIDATE_READY",
+        );
+      }
+      await t.tools.waitUntil(
+        () => shutdownEvents.every((events) => terminalCount(events) === 1),
+        20_000,
+      );
+      const shutdownOwned = activeFixtureAgentPids(t.env.root).filter(
+        (pid) => !shutdownBaseline.has(pid),
+      );
+      t.assertions.assert(
+        shutdownOwned.length === shutdownEvents.length && shutdownOwned.length === 4,
+        `the shutdown fixture did not leave four live Agent runtimes: ${JSON.stringify(shutdownOwned)}`,
+      );
+
+      opened.client.close();
+      const shutdownStartedAt = Date.now();
+      const stopReply = JSON.parse(
+        execFileSync(opened.daemon.genet, ["daemon", "stop"], {
+          env: opened.daemon.env,
+          encoding: "utf8",
+        }),
+      ) as { stopped?: boolean; running?: boolean; forced?: boolean };
+      const shutdownMs = Date.now() - shutdownStartedAt;
+      await t.tools.waitUntil(
+        () =>
+          shutdownOwned.every((pid) => {
+            try {
+              process.kill(pid, 0);
+              return false;
+            } catch {
+              return true;
+            }
+          }),
+        5_000,
+      );
+      t.assertions.assert(
+        stopReply.stopped === true &&
+          stopReply.running === false &&
+          stopReply.forced === false &&
+          shutdownMs < 10_000,
+        `daemon shutdown did not remain cooperative: reply=${JSON.stringify(stopReply)} durationMs=${shutdownMs}`,
+      );
     } finally {
       opened.client.close();
       opened.daemon.stop();

@@ -1,6 +1,6 @@
 ---
 name: genehub-html-preview
-description: Write, preview, or debug GeneHub H5 / HTML5 games / static sites / galleries / visualizations for Asset Preview. Use when creating index.html, linking workspace files, using relative assets, localStorage, fetch, images, WASM, or when Preview is blank, slow, throws SecurityError, or the user asks for an H5 demo, 小游戏, 相册, or 看板.
+description: 为 Asset Preview 编写、预览或调试 GeneHub H5/HTML5 游戏、静态站点、相册与可视化。创建 index.html、链接工作区文件、使用相对资源/localStorage/fetch/图片/WASM，或 Preview 空白、缓慢、出现 SecurityError，以及用户要求 H5 demo、小游戏、相册或看板时使用。
 ---
 
 # GeneHub HTML Preview

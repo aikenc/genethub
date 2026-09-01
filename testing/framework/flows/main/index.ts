@@ -91,9 +91,13 @@ export function seedHostCodexLogin(lease: EnvironmentLease): void {
  */
 export function installFixtureAcpAgent(lease: EnvironmentLease): string {
   const script = path.join(lease.root, "fixture-acp-agent.mjs");
+  const processLog = path.join(lease.root, "fixture-acp-agent-processes.jsonl");
   writeFileSync(
     script,
-    `import readline from "node:readline";
+    `import { appendFileSync, rmSync, writeFileSync } from "node:fs";
+import readline from "node:readline";
+const processLog = process.argv[2];
+appendFileSync(processLog, JSON.stringify({ event: "started", pid: process.pid }) + "\\n");
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 let nextSession = 1;
 const sessions = new Map();
@@ -112,11 +116,12 @@ for await (const line of input) {
     const prompt = JSON.stringify(frame.params.prompt ?? "");
     let text = "Fixture WorkAgent cwd=" + cwd;
     let delayMs = 5000;
-    if (prompt.includes("[GENEHUB_MANAGED_RESULT_REPAIR]")) {
-      text += '\\nGENEHUB_WORK_RESULT {"status":"blocked","summary":"fixture refused a contradictory managed result"}';
+    if (prompt.includes("[GENEHUB_CANDIDATE_SETTLEMENT_REPAIR]")) {
+      rmSync(cwd + "/fixture-dirty-candidate.tmp", { force: true });
+      text += '\\nGENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"fixture candidate was committed and cleaned"}';
       delayMs = 250;
-    } else if (prompt.includes("GENEHUB_FIXTURE_CANDIDATE_READY")) {
-      text += '\\nGENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"fixture candidate is ready"}';
+    } else if (prompt.includes("[GENEHUB_MANAGED_RESULT_REPAIR]")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"blocked","summary":"fixture refused a contradictory managed result"}';
       delayMs = 250;
     } else if (prompt.includes("GENEHUB_FIXTURE_DELAYED_REVIEW_PASS")) {
       text += '\\nGENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}';
@@ -129,6 +134,13 @@ for await (const line of input) {
       delayMs = 250;
     } else if (prompt.includes("GENEHUB_FIXTURE_REVIEW_FAIL")) {
       text += '\\nGENEHUB_WORK_RESULT {"status":"review-fail","summary":"fixture acceptance defect remains","findings":[{"severity":"low","title":"fixture finding","acceptanceImpact":"one bounded correction is required","recommendedAction":"reuse the exact candidate lineage","estimatedRequests":1}]}';
+      delayMs = 250;
+    } else if (prompt.includes("GENEHUB_FIXTURE_DIRTY_CANDIDATE")) {
+      writeFileSync(cwd + "/fixture-dirty-candidate.tmp", "bounded settlement repair fixture\\n");
+      text += '\\nGENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"fixture candidate needs one cleanliness repair"}';
+      delayMs = 250;
+    } else if (prompt.includes("GENEHUB_FIXTURE_CANDIDATE_READY")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"fixture candidate is ready"}';
       delayMs = 250;
     }
     write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: frame.params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } } });
@@ -158,7 +170,7 @@ for await (const line of input) {
       ...custom,
       fixture: {
         extends: "acp",
-        command: [process.execPath, script],
+        command: [process.execPath, script, processLog],
         label: "Fixture ACP Agent",
       },
     },
@@ -757,17 +769,21 @@ export async function sendPrompt(
   sessionId: string,
   text: string,
   continuesRound: string | null = null,
+  options: { timeoutMs?: number } = {},
 ): Promise<void> {
-  await client.call({
-    type: "session.send",
-    payload: {
-      sessionId,
-      text,
-      attachments: [],
-      artifactPreviewBaseUrl: null,
-      continuesRound,
+  await client.call(
+    {
+      type: "session.send",
+      payload: {
+        sessionId,
+        text,
+        attachments: [],
+        artifactPreviewBaseUrl: null,
+        continuesRound,
+      },
     },
-  });
+    options,
+  );
 }
 
 export async function completeVerifiableTask(input: {

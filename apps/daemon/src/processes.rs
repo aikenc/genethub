@@ -185,20 +185,54 @@ impl Processes {
 
     /// Ends everything a session left running, but not the agent itself.
     pub async fn stop_all(&self, session_id: &str) -> usize {
-        let Some(agent) = self.agents.read().await.get(session_id).copied() else {
-            return 0;
+        self.stop_all_sessions(&[session_id.to_string()]).await
+    }
+
+    /// Ends what several sessions left running from one operating-system census.
+    ///
+    /// Session shutdown used to call `ps` once per Agent. Under a wide PM fanout
+    /// that made graceful daemon shutdown scale with the number of WorkSessions;
+    /// once `genet daemon stop` reached its deadline it had to terminate the
+    /// daemon, leaving the still-live Agent servers behind. One census is both a
+    /// more coherent ownership snapshot and a bounded shutdown cost.
+    pub async fn stop_all_sessions(&self, session_ids: &[String]) -> usize {
+        let agents = {
+            let watched = self.agents.read().await;
+            session_ids
+                .iter()
+                .filter_map(|session_id| {
+                    watched
+                        .get(session_id)
+                        .copied()
+                        .map(|agent| (session_id.clone(), agent))
+                })
+                .collect::<Vec<_>>()
         };
+        if agents.is_empty() {
+            return 0;
+        }
         let Some(census) = census().await else {
-            tracing::warn!(session = %session_id, "cannot end what a session left running: the operating system did not answer");
+            tracing::warn!(
+                sessions = agents.len(),
+                "cannot end what sessions left running: the operating system did not answer"
+            );
             return 0;
         };
-        let claimed = claimed_by(&census, agent, agent.watched_at.elapsed().as_secs());
+        let mut seen = HashSet::new();
+        let mut claimed = Vec::new();
+        for (session_id, agent) in agents {
+            for row in claimed_by(&census, agent, agent.watched_at.elapsed().as_secs()) {
+                if seen.insert(row.pid) {
+                    claimed.push((session_id.clone(), row));
+                }
+            }
+        }
         // All at once. Each one is given time to finish on its own, and taking
         // those grace periods one after another would turn closing a session
         // with four stragglers into four times the wait for no benefit —
         // nothing here is ordered with respect to anything else.
         let mut ending = tokio::task::JoinSet::new();
-        for row in &claimed {
+        for (session_id, row) in &claimed {
             tracing::info!(session = %session_id, pid = row.pid, command = %row.command, "ending a process left running");
             ending.spawn(crate::process::end_tree(row.pid));
         }

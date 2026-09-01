@@ -37,7 +37,7 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
         stderr(&output)
     );
 
-    for binary in ["genet-local", "genet-agent-local"] {
+    for binary in ["genet-local", "genehub-host-local"] {
         let path = bin.join(binary);
         assert!(path.is_file(), "{binary} was not installed");
         let mode = fs::metadata(&path).expect("stat").permissions().mode();
@@ -49,6 +49,17 @@ fn installing_puts_both_binaries_where_the_path_can_find_them() {
             .expect("run the installed binary");
         assert!(ran.status.success(), "{binary} did not run");
     }
+    let component = bin.join("genehub_guest.wasm");
+    assert!(component.is_file(), "guest component was not installed");
+    let component_mode = fs::metadata(&component)
+        .expect("stat component")
+        .permissions()
+        .mode();
+    assert_eq!(
+        component_mode & 0o111,
+        0,
+        "guest component became executable"
+    );
 
     let said = String::from_utf8_lossy(&output.stdout);
     // The installer cannot edit someone's shell profile behind their back, so
@@ -89,7 +100,7 @@ fn an_explicit_install_can_restart_the_daemon_with_the_new_binary() {
 
 #[test]
 fn unsafe_download_bases_are_refused_before_fetching() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh");
     for base in [
         "http://downloads.example.invalid",
         "file:///tmp/release",
@@ -116,9 +127,10 @@ fn unsafe_download_bases_are_refused_before_fetching() {
 
 #[test]
 fn every_fetch_is_pinned_to_https_including_redirects() {
-    let script =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh"))
-            .expect("read install.sh");
+    let script = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh"),
+    )
+    .expect("read install.sh");
     assert!(script.contains("--proto '=https'"));
     assert!(script.contains("--proto-redir '=https'"));
     assert!(script.contains("--max-redirs 5"));
@@ -176,13 +188,13 @@ fn a_release_with_no_checksums_is_refused_rather_than_trusted() {
     );
 }
 
-/// The tree's own copy of the script claims channel `dev`, and a dev install
+/// The tree's own copy of the script claims channel `local`, and a local install
 /// has no artifacts to fetch. Without an explicit download base the script
 /// must refuse — the alternative is someone piping the source checkout into
 /// `sh` and quietly installing the stable line over their source checkout.
 #[test]
 fn the_tree_installer_refuses_without_an_explicit_download_base() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh");
     let output = Command::new("sh")
         .arg(script)
         .env_remove("GENEHUB_LOCAL_DOWNLOAD_BASE")
@@ -190,7 +202,7 @@ fn the_tree_installer_refuses_without_an_explicit_download_base() {
         .expect("run install.sh");
     assert!(!output.status.success(), "a dev install.sh ran anyway");
     assert!(
-        stderr(&output).contains("channel: dev"),
+        stderr(&output).contains("channel: local"),
         "the refusal does not say why:\n{}",
         stderr(&output)
     );
@@ -216,7 +228,7 @@ fn fake_release() -> TempDir {
     // Stand-ins rather than the real binaries: what is under test is the script,
     // and building the daemon here would make this test depend on a build it
     // does not care about.
-    for binary in ["genet-local", "genet-agent-local"] {
+    for binary in ["genet-local", "genehub-host-local"] {
         let path = staged.join(binary);
         let body = if binary == "genet-local" {
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${GENEHUB_TEST_CALLS:-/dev/null}\"\necho ok\n"
@@ -226,6 +238,8 @@ fn fake_release() -> TempDir {
         fs::write(&path, body).expect("write a stand-in");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
     }
+    fs::write(staged.join("genehub_guest.wasm"), b"fixture component")
+        .expect("write component stand-in");
 
     let asset = dir.path().join(asset_name());
     let tar = Command::new("tar")
@@ -234,7 +248,8 @@ fn fake_release() -> TempDir {
         .arg("-C")
         .arg(&staged)
         .arg("genet-local")
-        .arg("genet-agent-local")
+        .arg("genehub-host-local")
+        .arg("genehub_guest.wasm")
         .status()
         .expect("run tar");
     assert!(tar.success(), "tar failed");
@@ -273,7 +288,7 @@ fn install_with_restart(release: &Path, bin: &Path, calls: &Path) -> Output {
 }
 
 fn run_install(release: &Path, bin: &Path, calls: Option<&Path>) -> Output {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh");
     let tools = TempDir::new().expect("temp tools");
     let curl = tools.path().join("curl");
     fs::write(

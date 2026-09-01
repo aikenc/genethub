@@ -103,7 +103,6 @@ pub struct WorkPackage {
     pub controller_session_id: String,
     pub title: String,
     pub outcome: String,
-    pub dependencies: Vec<String>,
     /// Semantic capabilities required by this fanout item in addition to the
     /// Workflow node's base Space selector. The PM asks for capabilities; the
     /// Coordinator still chooses the concrete Agent Space.
@@ -141,7 +140,6 @@ impl WorkPackage {
         id: String,
         title: String,
         outcome: String,
-        dependencies: Vec<String>,
         agent_space: String,
         branch: String,
         worktree: PathBuf,
@@ -161,16 +159,11 @@ impl WorkPackage {
             .ok_or_else(|| anyhow::anyhow!("work package repository name must be UTF-8"))?
             .to_string();
         validate_path_component("work package repository name", &repository, 200)?;
-        let unique: BTreeSet<_> = dependencies.iter().collect();
-        if unique.len() != dependencies.len() || dependencies.iter().any(|item| item == &id) {
-            anyhow::bail!("work package dependencies must be unique and cannot include itself");
-        }
         Ok(Self {
             id,
             controller_session_id: String::new(),
             title,
             outcome,
-            dependencies,
             required_space_tags: BTreeSet::new(),
             agent_space,
             repository,
@@ -248,45 +241,6 @@ fn validate_text(label: &str, value: &str, max: usize) -> Result<()> {
     if value.trim().is_empty() || value.len() > max {
         anyhow::bail!("{label} must be 1-{max} characters");
     }
-    Ok(())
-}
-
-pub fn validate_graph(packages: &BTreeMap<String, WorkPackage>) -> Result<()> {
-    for package in packages.values() {
-        for dependency in &package.dependencies {
-            if !packages.contains_key(dependency) {
-                anyhow::bail!(
-                    "work package {} depends on unknown package {dependency}",
-                    package.id
-                );
-            }
-        }
-    }
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    for id in packages.keys() {
-        visit(id, packages, &mut visiting, &mut visited)?;
-    }
-    Ok(())
-}
-
-fn visit(
-    id: &str,
-    packages: &BTreeMap<String, WorkPackage>,
-    visiting: &mut BTreeSet<String>,
-    visited: &mut BTreeSet<String>,
-) -> Result<()> {
-    if visited.contains(id) {
-        return Ok(());
-    }
-    if !visiting.insert(id.to_string()) {
-        anyhow::bail!("work package dependency cycle includes {id}");
-    }
-    for dependency in &packages[id].dependencies {
-        visit(dependency, packages, visiting, visited)?;
-    }
-    visiting.remove(id);
-    visited.insert(id.to_string());
     Ok(())
 }
 
@@ -369,31 +323,24 @@ pub fn transition(
             to
         );
     }
-    if matches!(to, WorkPackageStatus::Ready | WorkPackageStatus::Running)
-        && current.dependencies.iter().any(|dependency| {
-            packages
-                .get(dependency)
-                .is_none_or(|package| package.status != WorkPackageStatus::Accepted)
-        })
-    {
-        anyhow::bail!("work package dependencies are not accepted");
-    }
     if to == WorkPackageStatus::Running {
         let session = work_session_id
             .as_deref()
             .filter(|session| !session.trim().is_empty())
             .ok_or_else(|| anyhow::anyhow!("running work requires a WorkSession id"))?;
         if packages.values().any(|package| {
-            package.id != id
+            (package.id != current.id
+                || package.controller_session_id != current.controller_session_id)
                 && package.status == WorkPackageStatus::Running
                 && package.worktree == current.worktree
         }) {
             anyhow::bail!("two running work packages cannot share a writable worktree");
         }
-        if packages
-            .values()
-            .any(|package| package.id != id && package.work_session_id.as_deref() == Some(session))
-        {
+        if packages.values().any(|package| {
+            (package.id != current.id
+                || package.controller_session_id != current.controller_session_id)
+                && package.work_session_id.as_deref() == Some(session)
+        }) {
             anyhow::bail!("a WorkSession cannot control two work packages");
         }
     }

@@ -107,7 +107,14 @@ pub enum Request {
     /// Reads the durable PM state projected for a human. This is intentionally
     /// separate from the authenticated PM control CLI and cannot mutate it.
     #[serde(rename = "pm.project.status", rename_all = "camelCase")]
-    ProjectManagerStatus { workspace_id: String },
+    ProjectManagerStatus {
+        workspace_id: String,
+        /// When present, return the compact projection for exactly one PM
+        /// Session instead of duplicating every pinned Workflow Run.
+        #[serde(default)]
+        #[ts(optional)]
+        session_id: Option<String>,
+    },
     #[serde(rename = "pm.workflow.select", rename_all = "camelCase")]
     ProjectManagerWorkflowSelect {
         workspace_id: String,
@@ -119,6 +126,8 @@ pub enum Request {
         workspace_id: String,
         session_id: String,
         edge_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
         #[serde(default)]
         facts: Vec<String>,
     },
@@ -135,7 +144,15 @@ pub enum Request {
     #[serde(rename = "workSession.create", rename_all = "camelCase")]
     WorkSessionCreate {
         workspace_id: String,
-        work_package_id: String,
+        /// Exactly one of `work_package_id` and `improvement_candidate_id`
+        /// must be present. The latter creates a Reviewer WorkSession bound
+        /// to the exact project-owned Workflow candidate digest.
+        #[serde(default)]
+        #[ts(optional)]
+        work_package_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        improvement_candidate_id: Option<String>,
         agent_id: String,
         #[serde(default)]
         model_id: Option<String>,

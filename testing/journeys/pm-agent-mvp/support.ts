@@ -199,6 +199,7 @@ export async function runRealPmDelivery(
               workspaceId: opened.workspaceId,
               sessionId: pm.id,
               edgeId: decision.edgeId,
+              expectedRevision: currentRun!.revision,
               facts: [],
             },
           });
@@ -285,8 +286,11 @@ export async function runRealPmDelivery(
       );
     }
     if (previous) {
+      const previousRun = previous.workflowRuns.find(
+        (item) => item.controllerSessionId === pm.id,
+      );
       t.assertions.assert(
-        (latest.intent?.revision ?? 0) > (previous.intent?.revision ?? 0),
+        (run.intent?.revision ?? 0) > (previousRun?.intent?.revision ?? 0),
         "the new user request did not create a new Intent revision",
       );
     }

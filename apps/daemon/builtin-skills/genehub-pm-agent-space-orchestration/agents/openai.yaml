@@ -1,4 +1,4 @@
 interface:
   display_name: "PM Agent Space 编排"
-  short_description: "Build dynamic spaces and supervise project WorkAgents"
-  default_prompt: "Use $genehub-pm-agent-space-orchestration to create the smallest safe Agent Space topology."
+  short_description: "构建最小安全拓扑并派发 WorkAgent"
+  default_prompt: "使用 $genehub-pm-agent-space-orchestration 创建满足当前 Workflow 的最小安全 Agent Space 拓扑。"

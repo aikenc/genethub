@@ -1186,7 +1186,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
         Request::SessionCreate { workspace_id, .. }
         | Request::ProjectManagerSessionCreate { workspace_id, .. }
-        | Request::ProjectManagerStatus { workspace_id }
+        | Request::ProjectManagerStatus { workspace_id, .. }
         | Request::WorkSessionCreate { workspace_id, .. }
         | Request::SessionImportList { workspace_id, .. }
         | Request::SessionImport { workspace_id, .. }

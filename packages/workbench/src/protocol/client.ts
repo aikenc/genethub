@@ -139,6 +139,17 @@ export interface ClientOptions {
   onDiagnostic?: (event: ClientDiagnosticEvent) => void;
 }
 
+export interface ClientCallOptions {
+  /** Deadline for this exchange after it reaches a live transport. */
+  timeoutMs?: number;
+}
+
+/**
+ * A lazy Agent may load project Skills before it can acknowledge a prompt.
+ * This stays inside the PM Run ceiling without widening ordinary RPC reads.
+ */
+export const SESSION_SEND_HANDOFF_TIMEOUT_MS = 10 * 60_000;
+
 export interface WebSocketLike extends BinaryWebSocketLike {}
 
 export interface CloseReason {
@@ -231,6 +242,7 @@ interface PendingCall {
   operation: string;
   queuedAt: number;
   request: Request;
+  timeoutMs?: number;
   bytes: number;
   resolve(value: Reply | undefined): void;
   reject(error: unknown): void;
@@ -396,7 +408,13 @@ export class Client {
     this.setState("closed");
   }
 
-  async call(request: Request): Promise<Reply | undefined> {
+  async call(request: Request, options: ClientCallOptions = {}): Promise<Reply | undefined> {
+    if (
+      options.timeoutMs !== undefined &&
+      (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0)
+    ) {
+      throw new TypeError("request timeout must be a positive finite number");
+    }
     const operation = request.type;
     const id = diagnosticId("op");
     const queuedAt = this.now();
@@ -440,6 +458,7 @@ export class Client {
         operation,
         queuedAt,
         request,
+        timeoutMs: options.timeoutMs,
         bytes,
         resolve,
         reject,
@@ -942,7 +961,7 @@ export class Client {
       queueMs: Math.round(started - pending.queuedAt),
       requestBytes: pending.bytes,
     });
-    void this.rpc(endpoint, pending.request, undefined, pending.id)
+    void this.rpc(endpoint, pending.request, pending.timeoutMs, pending.id)
       .then((reply) => {
         this.diagnostic("operation", {
           ...diagnosticContext(pending.request),

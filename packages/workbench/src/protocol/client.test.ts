@@ -288,6 +288,21 @@ describe("the v3 peer connection", () => {
     client.close();
   });
 
+  it("allows one explicitly budgeted exchange without widening other requests", async () => {
+    const { client, socket } = await connected({ requestTimeoutMs: 5 });
+    const ordinary = client.call({ type: "agent.list" });
+    const budgeted = client.call({ type: "workspace.list" }, { timeoutMs: 100 });
+    await waitFor(() =>
+      socket.sent.some((message) => message.type === "agent.list") &&
+      socket.sent.some((message) => message.type === "workspace.list")
+    );
+
+    await expect(ordinary).rejects.toBeInstanceOf(ClientRequestTimeoutError);
+    socket.reply(socket.lastOf("workspace.list").id, { type: "workspaces", data: [] });
+    await expect(budgeted).resolves.toEqual({ type: "workspaces", data: [] });
+    client.close();
+  });
+
   it("reconnects immediately when the page returns while reconnecting", async () => {
     const { client, queue } = await connected({ backoffMs: () => 3_600_000 });
     queue.latest().close(1006, "lost");

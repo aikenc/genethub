@@ -1,27 +1,24 @@
-# PM project lifecycle
+# PM 项目生命周期
 
-Use the project Folder Workspace root as the PM cwd for the entire project.
+整个项目以 Folder Workspace 根目录为 PM cwd。
 
-## New project stages
+## 新项目阶段
 
-1. `folderSelected`: call `pm project init`. It must reject unknown files, an existing `.git`, or conflicting `spaces/`, `repositories/`, and `worktrees/`. A daemon-owned `.genethub/` directory is allowed.
-2. `preflightPassed`: verify Git and at least one intended third-party Coding Agent/model. Guide the user through missing installation or login; never install or submit credentials silently.
-3. `gitReady`: initialize the outer Space-management repository on `main`, add the standard ignores, create the independent business repository and its empty baseline, then record the stage. Do not change global Git config.
-4. `topologyVerified`: create only the Agent Spaces needed by the current graph. Run Agent Space Builder check, explain, dry-run, build, and verify; commit source Skills and Space definitions in the outer repository.
-5. `workspacesRegistered`: register each verified Agent Space through the bound CLI and record its workspace id, Space commit, and Builder lock digest.
-6. `active`: mark the shared project topology ready for independent PM Session Workflow Runs with `pm project advance --to active`. This is the final project **phase** transition. Do not substitute `pm project lifecycle --to active`; lifecycle is a separate field and may already be active while the phase remains `workspacesRegistered`. The project does not need a requirement-specific Intent or WorkPackage yet; each Session records those after selecting its own graph. Dispatch still requires that Session's durable package, branch, worktree, budget, and gates.
+1. `folderSelected`：执行 `pm project init`；陌生非空目录、已有 `.git` 或冲突目录必须拒绝。
+2. `preflightPassed`：验证 Git 与至少一个可用的第三方 Coding Agent/模型；安装、登录和凭据必须由用户明确处理。
+3. `gitReady`：建立外层 Space 管理仓库、标准忽略项与独立业务仓库，不修改全局 Git 配置。
+4. `topologyVerified`：只创建当前 Workflow 所需 Space，依次执行 Builder check、explain、dry-build、build、verify，并提交人类维护的源文件。
+5. `workspacesRegistered`：注册每个已验证 Space，记录 workspace id、源 commit 和 Builder lock 摘要。
+6. `active`：用 `pm project advance --to active` 完成共享 phase；`lifecycle --to active` 不能替代 phase 推进。
 
-Every stage is idempotent. On resume, validate the already-recorded fact and continue at the first incomplete stage; do not create a second repository or baseline.
-Only the project-initialization Session advances these shared stages. Sibling
-requirement Sessions reuse the active project and must not race each other by
-replaying global phase transitions.
+每一步都必须幂等。恢复时验证已有事实，从首个未完成阶段继续。只有初始化 Session 推进共享阶段，其他 PM Session 复用项目并维护自己的 Run。
 
-## PM turn boundary
+## PM turn 边界
 
-The PM is durable across turns, not continuously busy inside one turn. Dispatch and bind all ready independent packages, record immediate facts, report briefly, then return idle. Never implement supervision with shell sleep, timers, background jobs, polling loops, or repeated session reads. The daemon supervisor owns scheduled checks and material-change wakes so the user can ask a question or redirect the project between PM turns.
+派发所有 Ready 独立包、记录立即可得事实、简短报告后返回 idle。禁止用 shell 等待或轮询；daemon Supervisor 负责有退避的检查和事件唤醒。
 
-## Terminal states
+## 终态
 
-- `waitingUser`: no timed model turn; wake on user guidance.
-- `completed`: close the current accepted delivery and retain Agent Spaces, repositories, WorkSessions, candidates, and reviews. A later explicit user request for this Folder reopens the same project with `lifecycle --to active`, records a new Intent revision, and adds new work packages; never create a second outer repository or discard accepted lineage.
-- `cancelled`: stop active work safely and retain the same evidence. MVP has no physical Agent Space deletion or automatic cleanup.
+- `waitingUser`：等待用户指导，不启动定时模型 turn。
+- `completed`：保留 Space、仓库、Session、候选和评审；后续新需求重新激活同一项目并创建新 Run。
+- `cancelled`：安全停止活动工作并保留证据；不自动删除物理资源。

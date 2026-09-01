@@ -1,4 +1,5 @@
 {
   "schema": "genehub-pm-space-template.v1",
-  "version": "{{GENEHUB_TEMPLATE_VERSION}}"
+  "version": "{{GENEHUB_TEMPLATE_VERSION}}",
+  "contentDigest": "{{GENEHUB_TEMPLATE_DIGEST}}"
 }

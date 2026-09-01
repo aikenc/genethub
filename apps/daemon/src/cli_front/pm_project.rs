@@ -19,7 +19,7 @@ use crate::pm_domain::topology::AgentSpaceRole;
 
 use super::output::{self, CliFailure};
 
-const RUNNING_MANAGER_DIRECTIVE: &str = "Do not sleep, poll, or keep this PM turn open. Create or continue owned WorkSessions only with a top-level GeneHub CLI command using --no-wait; never wrap it in timeout, a pipe, or another waiting construct. Dispatch and bind any other currently-ready independent packages, report briefly, then finish the turn; the daemon supervisor will wake the PM on material WorkSession changes.";
+const RUNNING_MANAGER_DIRECTIVE: &str = "不要 sleep、轮询或保持 PM turn 打开。创建或继续受管 WorkSession 时，只能顶层调用 GeneHub CLI 并使用 --no-wait；禁止套用 timeout、pipe 或其他等待结构。派发并绑定当前所有 Ready 的独立包，简短报告后结束 turn；daemon Supervisor 会在 WorkSession 事实变化时唤醒 PM。";
 
 pub async fn run(args: &[String]) -> i32 {
     match execute(args).await {
@@ -120,7 +120,6 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 "id",
                 "title",
                 "outcome",
-                "depends-on",
                 "space-tag",
                 "repository",
                 "branch",
@@ -168,7 +167,6 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                 flags.one_required("id")?,
                 flags.one_required("title")?,
                 flags.one_required("outcome")?,
-                flags.many("depends-on"),
                 "coordinator-pending".into(),
                 flags.one_required("branch")?,
                 worktree,
@@ -401,6 +399,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
                     &context.workspace_id,
                     &context.controller_session_id,
                     &flags.one_required("edge")?,
+                    None,
                     flags.many("fact").into_iter().collect(),
                     DcgActor::Pm,
                 )
@@ -409,6 +408,24 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
             Ok((
                 "pm.project.workflow",
                 json!({"action": "transitioned", "project": project}),
+            ))
+        }
+        [head, verb, rest @ ..] if head == "improvement" && verb == "prepare-template" => {
+            let flags = Flags::parse(rest, &[])?;
+            flags.validate(&["id"])?;
+            let report = context
+                .state
+                .projects
+                .prepare_template_improvement(
+                    &context.workspace_id,
+                    &context.controller_session_id,
+                    &flags.one_required("id")?,
+                )
+                .await
+                .map_err(rejected)?;
+            Ok((
+                "pm.project.improvement",
+                json!({"action": "templatePrepared", "candidate": report}),
             ))
         }
         [head, verb, rest @ ..] if head == "improvement" && verb == "propose" => {
@@ -426,13 +443,19 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
         [head, verb, rest @ ..] if head == "improvement" && verb == "review" => {
             let flags = Flags::parse(rest, &["pass"])?;
             flags.validate(&["id", "session", "evidence"])?;
+            let candidate_id = flags.one_required("id")?;
+            let review_session_id = flags.one_required("session")?;
+            let passed = flags.has("pass");
+            context
+                .validate_improvement_review_session(&review_session_id, &candidate_id, passed)
+                .await?;
             let project = context.state.projects.review_improvement(
                 &context.workspace_id,
                 &context.controller_session_id,
-                &flags.one_required("id")?,
-                flags.one_required("session")?,
+                &candidate_id,
+                review_session_id,
                 flags.one_required("evidence")?,
-                flags.has("pass"),
+                passed,
             ).await.map_err(rejected)?;
             Ok(("pm.project.improvement", json!({"action": "reviewed", "project": project})))
         }
@@ -465,7 +488,7 @@ async fn execute(args: &[String]) -> Result<(&'static str, serde_json::Value), C
             Ok(("pm.project", json!({"action": "observed", "observation": observation})))
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition|integrate | space record|repair | workflow list|show|select|transition | improvement propose|review|promote",
+            "用法：genet pm project init|show|advance|lifecycle|observe | intent set | package put|transition|integrate | space record|repair | workflow list|show|select|transition | improvement prepare-template|propose|review|promote",
         )),
     }
 }
@@ -500,13 +523,15 @@ async fn transition(
 
     if status == WorkPackageStatus::Ready {
         let project = context.project().await?;
-        let package = project.work_packages.get(&id).ok_or_else(|| {
-            CliFailure::business(
-                "unknownWorkPackage",
-                format!("no such work package: {id}"),
-                None,
-            )
-        })?;
+        let package = project
+            .work_package(&context.controller_session_id, &id)
+            .ok_or_else(|| {
+                CliFailure::business(
+                    "unknownWorkPackage",
+                    format!("no such work package: {id}"),
+                    None,
+                )
+            })?;
         context.validate_package_worktree(package).await?;
     }
 
@@ -529,8 +554,7 @@ async fn transition(
     ) {
         let project = context.project().await?;
         let candidate = project
-            .work_packages
-            .get(&id)
+            .work_package(&context.controller_session_id, &id)
             .and_then(|package| package.candidate.as_ref())
             .ok_or_else(|| {
                 CliFailure::business(
@@ -552,8 +576,7 @@ async fn transition(
     if let Some(review) = review.as_ref() {
         let project = context.project().await?;
         let implementation_session = project
-            .work_packages
-            .get(&id)
+            .work_package(&context.controller_session_id, &id)
             .and_then(|package| package.work_session_id.as_deref());
         context
             .validate_work_session(&review.session_id, &id, implementation_session)
@@ -563,15 +586,13 @@ async fn transition(
     if status == WorkPackageStatus::Accepted {
         let project = context.project().await?;
         let implementation_session = project
-            .work_packages
-            .get(&id)
+            .work_package(&context.controller_session_id, &id)
             .and_then(|package| package.work_session_id.as_deref());
         let review_session = review
             .as_ref()
             .or_else(|| {
                 project
-                    .work_packages
-                    .get(&id)
+                    .work_package(&context.controller_session_id, &id)
                     .and_then(|package| package.review.as_ref())
             })
             .map(|evidence| evidence.session_id.as_str())
@@ -851,6 +872,121 @@ impl Context {
         Ok(())
     }
 
+    async fn validate_improvement_review_session(
+        &self,
+        session_id: &str,
+        candidate_id: &str,
+        passed: bool,
+    ) -> Result<(), CliFailure> {
+        let summary = self
+            .state
+            .sessions
+            .summary(session_id)
+            .await
+            .map_err(rejected)?;
+        let Some(work) = summary
+            .work
+            .as_ref()
+            .filter(|_| summary.kind == Some(SessionKind::Work))
+        else {
+            return Err(CliFailure::business(
+                "independentReviewRequired",
+                "Workflow 改进评审必须引用真实的 Reviewer WorkSession",
+                None,
+            ));
+        };
+        if work.controller_session_id != self.controller_session_id {
+            return Err(CliFailure::business(
+                "wrongProjectController",
+                "Workflow 改进 Reviewer 必须属于当前 PM Session",
+                None,
+            ));
+        }
+        if work.improvement_candidate_id.as_deref() != Some(candidate_id)
+            || work.improvement_candidate_digest.is_none()
+        {
+            return Err(CliFailure::business(
+                "wrongImprovementCandidate",
+                "Reviewer WorkSession 没有绑定当前 Workflow 改进候选摘要",
+                None,
+            ));
+        }
+        if !matches!(
+            summary.status,
+            SessionStatus::Idle | SessionStatus::ReadOnly | SessionStatus::Closed
+        ) {
+            return Err(CliFailure::business(
+                "reviewNotSettled",
+                "Workflow 改进 Reviewer WorkSession 尚未成功结算",
+                None,
+            ));
+        }
+        let project = self.project().await?;
+        let candidate = project
+            .improvement_candidates
+            .get(candidate_id)
+            .ok_or_else(|| {
+                CliFailure::business(
+                    "unknownImprovementCandidate",
+                    "当前项目没有这份 Workflow 改进候选",
+                    None,
+                )
+            })?;
+        if work.improvement_candidate_digest.as_deref() != Some(candidate.candidate_digest.as_str())
+        {
+            return Err(CliFailure::business(
+                "wrongImprovementCandidate",
+                "Reviewer WorkSession 绑定的候选摘要与当前治理候选不一致",
+                None,
+            ));
+        }
+        let space = project
+            .agent_spaces
+            .values()
+            .find(|space| {
+                space.active
+                    && space.workspace_id == summary.workspace_id
+                    && space.role == AgentSpaceRole::Review
+            })
+            .ok_or_else(|| {
+                CliFailure::business(
+                    "independentReviewRequired",
+                    "Workflow 改进评审必须在项目已验证的 review-only Agent Space 中完成",
+                    None,
+                )
+            })?;
+        crate::pm_domain::verify_recorded_agent_space_allowing_project_staging(
+            &project,
+            space,
+            &[candidate.source.as_path()],
+        )
+        .await
+        .map_err(rejected)?;
+        let snapshot = self
+            .state
+            .sessions
+            .snapshot(session_id)
+            .await
+            .map_err(rejected)?;
+        let verdict = crate::pm_domain::runtime::managed_review_verdict(&snapshot.items)
+            .map_err(rejected)?
+            .ok_or_else(|| {
+                CliFailure::business(
+                    "reviewVerdictMissing",
+                    "Workflow 改进 Reviewer 必须以结构化 review-pass/review-fail 结算",
+                    None,
+                )
+            })?;
+        if verdict != passed {
+            return Err(CliFailure::business(
+                "reviewVerdictMismatch",
+                "--pass 必须与 Reviewer WorkSession 的结构化结论一致",
+                None,
+            ));
+        }
+        Ok(())
+    }
+
     async fn validate_agent_space(
         &self,
         workspace_id: &str,
@@ -948,13 +1084,15 @@ impl Context {
         candidate: &CandidateEvidence,
     ) -> Result<(), CliFailure> {
         let project = self.project().await?;
-        let package = project.work_packages.get(package_id).ok_or_else(|| {
-            CliFailure::business(
-                "unknownWorkPackage",
-                format!("no such work package: {package_id}"),
-                None,
-            )
-        })?;
+        let package = project
+            .work_package(&self.controller_session_id, package_id)
+            .ok_or_else(|| {
+                CliFailure::business(
+                    "unknownWorkPackage",
+                    format!("no such work package: {package_id}"),
+                    None,
+                )
+            })?;
         let repository = exact_project_child(
             &self.root.join("repositories"),
             &candidate.repository,

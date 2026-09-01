@@ -121,9 +121,9 @@ defineSpecialty(
 defineSpecialty(
   {
     id: "specialty.contracts.native-wire-boundary",
-    title: "Native runtime cannot take back business wire ownership",
-    oracle: "native crates do not import Request/Reply/ServerFrame",
-    catches: ["daemon owning the business codec"],
+    title: "Native shell cannot take back business wire ownership",
+    oracle: "native shell crates do not import Request/Reply/ServerFrame",
+    catches: ["host or forwarder owning the business codec"],
     tags: ["core", "contract", "parity", "v1-wasm"],
     expectedDurationMs: 800,
     timeoutMs: 15_000,
@@ -131,19 +131,18 @@ defineSpecialty(
   },
   async (t) => {
     const forbidden = [
-      "genehub_app_proto::Request",
-      "genehub_app_proto::Reply",
-      "genehub_app_proto::ServerFrame",
-      "use genehub_app_proto::{Request",
-      "use genehub_app_proto::{Reply",
-      "use genehub_app_proto::{ServerFrame",
+      "genehub_proto::Request",
+      "genehub_proto::Reply",
+      "genehub_proto::ServerFrame",
+      "use genehub_proto::{Request",
+      "use genehub_proto::{Reply",
+      "use genehub_proto::{ServerFrame",
     ];
     const roots = [
       "apps/cli/src",
-      "apps/daemon/src",
-      "packages/platform-abi/src",
-      "packages/platform-native/src",
-      "packages/platform-system/src",
+      "apps/host/src",
+      "packages/frontdoor/src",
+      "packages/native/src",
       "apps/desktop/src-tauri/src",
     ];
     for (const root of roots) {
@@ -154,7 +153,11 @@ defineSpecialty(
         }
       }
     }
-    const dataPlane = readOpen(t.openRoot, "packages/app-core/src/dataplane.rs");
-    t.assertions.assert(dataPlane.includes("PeerHello") && dataPlane.includes("ServerFrame"), "app-core lost the wire");
+    const handshake = readOpen(t.openRoot, "apps/daemon/src/dataplane/handshake.rs");
+    const endpoint = readOpen(t.openRoot, "apps/daemon/src/dataplane/endpoint.rs");
+    t.assertions.assert(
+      handshake.includes("PeerHello") && endpoint.includes("Request") && endpoint.includes("ServerFrame"),
+      "daemon guest lost the wire",
+    );
   },
 );

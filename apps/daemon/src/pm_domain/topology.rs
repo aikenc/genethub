@@ -114,6 +114,20 @@ impl AgentSpaceRecord {
     }
 
     pub fn return_after_check(&mut self, clean: bool, now_ms: i64) -> anyhow::Result<()> {
+        // Quarantine is the durable result of an earlier dirty return. A
+        // supervisor budget barrier or an idempotent package transition may
+        // observe the same still-bound lease again; preserving that evidence
+        // is already the safe terminal action. Only the explicit repair path
+        // may re-check and release a quarantined Space.
+        if self.resource_state == AgentSpaceResourceState::Quarantined {
+            if self.lease.is_none() {
+                anyhow::bail!(
+                    "quarantined Agent Space {} lost its lease evidence",
+                    self.name
+                );
+            }
+            return Ok(());
+        }
         if !matches!(
             self.resource_state,
             AgentSpaceResourceState::Reserved | AgentSpaceResourceState::Working

@@ -1,4 +1,4 @@
 interface:
   display_name: "PM 项目控制"
-  short_description: "Align intent and maintain a recoverable delivery graph"
-  default_prompt: "Use $genehub-pm-project-control to turn this request into an executable project plan."
+  short_description: "对齐目标并维护可恢复的项目 Workflow"
+  default_prompt: "使用 $genehub-pm-project-control 将当前请求转成可执行、可验证的项目计划。"

@@ -1,6 +1,6 @@
 ---
 name: genehub-speech-runtime
-description: Safely test GeneHub's built-in speech protocol Stub, inspect this PC, recommend and install through official or community instructions, and register a local speech-to-text runtime. Use when a user asks to test the speech path, implement an adapter, install, configure, replace, diagnose, verify, or remove Qwen3-ASR or another local ASR model, or when GeneHub reports that its speech runtime is unavailable. Covers GPU/VRAM-aware selection, explicit approval before mutations, the GeneHub adapter contract, honest Partial/N-best capability declarations, smoke tests, and rollback.
+description: 安全测试 GeneHub 内置语音协议 Stub、检查本机环境、依据官方或社区说明推荐/安装并注册本地语音转文字 runtime。用于测试语音链路、实现适配器、安装/配置/替换/诊断/验证/移除 Qwen3-ASR 或其他本地 ASR，或 GeneHub 报告语音 runtime 不可用时；覆盖 GPU/显存选型、变更前明确批准、适配器合同、如实声明 Partial/N-best 能力、冒烟验证与回滚。
 ---
 
 # GeneHub Speech Runtime

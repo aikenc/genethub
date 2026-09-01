@@ -552,7 +552,7 @@ export type PmIntentStatus = { revision: number, outcome: string, acceptance: Ar
  * mutable daemon internals stay out of the public protocol; the user still
  * gets enough exact state to monitor progress without spending an LLM turn.
  */
-export type PmProjectStatus = { workspaceId: string, controllerSessionId: string, phase: string, lifecycle: string, revision: number, intent?: PmIntentStatus, workPackages: Array<PmWorkPackageStatus>, agentSpaces: Array<PmAgentSpaceStatus>, workflowCatalog: PmWorkflowCatalogStatus, workflowRuns: Array<PmWorkflowRunStatus>, improvementCandidates: Array<PmImprovementCandidateStatus>, supervisor: PmSupervisorStatus, updatedAtMs: number, };
+export type PmProjectStatus = { workspaceId: string, phase: string, lifecycle: string, revision: number, workPackages: Array<PmWorkPackageStatus>, agentSpaces: Array<PmAgentSpaceStatus>, workflowCatalog: PmWorkflowCatalogStatus, workflowRuns: Array<PmWorkflowRunStatus>, template: PmTemplateStatus, improvementCandidates: Array<PmImprovementCandidateStatus>, supervisor: PmSupervisorStatus, updatedAtMs: number, };
 
 export type PmReviewFindingStatus = { severity: string, title: string, acceptanceImpact: string, recommendedAction: string, estimatedRequests?: number, };
 
@@ -560,12 +560,14 @@ export type PmSupervisorStatus = { mode: string, nextCheckAtMs?: number, wakePen
 
 export type PmTeamSlotStatus = { id: string, nodeInstanceId: string, workPackageId: string, responsibility: string, workSessionId?: string, status: string, };
 
+export type PmTemplateStatus = { installedVersion: string, installedDigest: string, availableVersion: string, availableDigest: string, upgradeAvailable: boolean, };
+
 export type PmWorkPackageStatus = { id: string, 
 /**
  * PM Session that owns this package. Project-wide status projections
  * must never make another Session's work look like local progress.
  */
-controllerSessionId: string, title: string, outcome: string, status: string, dependencies: Array<string>, 
+controllerSessionId: string, title: string, outcome: string, status: string, 
 /**
  * Capability narrowing for one fanout item. The Coordinator combines
  * these with the node selector before choosing a concrete Agent Space.
@@ -584,7 +586,7 @@ integratedCommit?: string, integratedTree?: string, integrationError?: string, b
 
 export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 
-export type PmWorkflowBudgetPolicyStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, maxLlmRequests: number, };
+export type PmWorkflowBudgetPolicyStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, };
 
 export type PmWorkflowCatalogStatus = { recommended: string, workflows: Array<PmWorkflowDefinitionStatus>, };
 
@@ -623,14 +625,14 @@ availableSlots: number, };
 
 export type PmWorkflowNodeInstanceStatus = { id: string, nodeId: string, iteration: number, status: string, cohortId: string, fanoutSource?: string, fanoutSealed: boolean, };
 
-export type PmWorkflowNodeStatus = { id: string, kind: string, actor?: string, objective?: string, };
+export type PmWorkflowNodeStatus = { id: string, kind: string, activity?: string, actor?: string, objective?: string, capacity?: number, };
 
-export type PmWorkflowRunBudgetStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, maxLlmRequests: number, startedAtMs: number, deadlineAtMs: number, remainingMs: number, 
+export type PmWorkflowRunBudgetStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, startedAtMs: number, deadlineAtMs: number, remainingMs: number, 
 /**
  * Execution time is frozen while the Workflow waits at an
  * `actor: user` node.
  */
-userWaitStartedAtMs?: number, userWaitMs: number, exhaustionStartedAtMs?: bigint, exhaustedAtMs?: bigint, workSessionsStarted: number, activeWorkSessions: number, llmRequestsObserved: number, llmRequestsRemaining: number, };
+userWaitStartedAtMs?: number, userWaitMs: number, exhaustionStartedAtMs?: bigint, exhaustedAtMs?: bigint, workSessionsStarted: number, activeWorkSessions: number, };
 
 export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, interpreterError?: string, budget?: PmWorkflowRunBudgetStatus, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, 
 /**
@@ -723,7 +725,18 @@ cwd: string | null, } } | { "type": "pm.session.create", "payload": { workspaceI
  * request. Relying on an Agent default would make the selected level
  * invisible until the first turn has already started.
  */
-effortId?: string, runtimeValues?: { [key in string]?: string }, title: string | null, } } | { "type": "pm.project.status", "payload": { workspaceId: string, } } | { "type": "pm.workflow.select", "payload": { workspaceId: string, sessionId: string, graphId: string, } } | { "type": "pm.workflow.transition", "payload": { workspaceId: string, sessionId: string, edgeId: string, facts: Array<string>, } } | { "type": "pm.improvement.approve", "payload": { workspaceId: string, sessionId: string, candidateId: string, approved: boolean, } } | { "type": "workSession.create", "payload": { workspaceId: string, workPackageId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+effortId?: string, runtimeValues?: { [key in string]?: string }, title: string | null, } } | { "type": "pm.project.status", "payload": { workspaceId: string, 
+/**
+ * When present, return the compact projection for exactly one PM
+ * Session instead of duplicating every pinned Workflow Run.
+ */
+sessionId?: string, } } | { "type": "pm.workflow.select", "payload": { workspaceId: string, sessionId: string, graphId: string, } } | { "type": "pm.workflow.transition", "payload": { workspaceId: string, sessionId: string, edgeId: string, expectedRevision: number, facts: Array<string>, } } | { "type": "pm.improvement.approve", "payload": { workspaceId: string, sessionId: string, candidateId: string, approved: boolean, } } | { "type": "workSession.create", "payload": { workspaceId: string, 
+/**
+ * Exactly one of `work_package_id` and `improvement_candidate_id`
+ * must be present. The latter creates a Reviewer WorkSession bound
+ * to the exact project-owned Workflow candidate digest.
+ */
+workPackageId?: string, improvementCandidateId?: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, cwd: string | null, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -1478,7 +1491,19 @@ outputRateEstimated: boolean, costUsd?: number, };
 /**
  * Durable controller relationship for a WorkAgent execution.
  */
-export type WorkSessionInfo = { workPackageId: string, controllerSessionId: string, };
+export type WorkSessionInfo = { workPackageId: string, controllerSessionId: string, 
+/**
+ * Immutable project-owned objective selected by the Workflow Run. It is
+ * injected into every turn as system context and is not editable by the
+ * PM dispatch message.
+ */
+workflowPrompt?: string, 
+/**
+ * Present only for a project Workflow improvement review. The synthetic
+ * `work_package_id` keeps the durable WorkSession role compatible while
+ * these fields bind the Reviewer to the exact governed candidate.
+ */
+improvementCandidateId?: string, improvementCandidateDigest?: string, };
 
 /**
  * End-user affordances computed by the daemon for one workspace.

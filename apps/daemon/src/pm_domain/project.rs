@@ -9,7 +9,17 @@ use super::supervisor::SupervisorState;
 use super::task_graph::WorkPackage;
 use super::topology::AgentSpaceRecord;
 
-pub const PM_PROJECT_FORMAT: u32 = 5;
+pub const PM_PROJECT_FORMAT: u32 = 7;
+
+/// WorkPackage ids are local to one PM Session. Persisted map keys include the
+/// owner length so two Sessions may independently use names such as `ui`
+/// without ambiguity or delimiter collisions.
+pub fn work_package_storage_key(controller_session_id: &str, package_id: &str) -> String {
+    format!(
+        "{}:{controller_session_id}:{package_id}",
+        controller_session_id.len()
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,7 +124,11 @@ pub struct ProjectState {
     pub format: u32,
     pub project_id: String,
     pub project_workspace_id: String,
-    pub controller_session_id: String,
+    /// Session that bootstrapped the shared project. This is historical
+    /// provenance only; every authorized manager, including this one, must
+    /// own an exact entry in `session_dcg_runs`.
+    #[serde(alias = "controllerSessionId")]
+    pub bootstrap_session_id: String,
     /// The manager AgentSpace shared by all PM Sessions for this project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pm_space_workspace_id: Option<String>,
@@ -125,7 +139,10 @@ pub struct ProjectState {
     pub phase: ProjectPhase,
     pub lifecycle: ProjectLifecycle,
     pub revision: u64,
-    pub intent: Option<IntentRevision>,
+    /// Read-only migration input for pre-v7 records. New records serialize
+    /// only `sessionIntents`; there is no mutable project-wide primary Intent.
+    #[serde(default, rename = "intent", skip_serializing)]
+    pub legacy_intent: Option<IntentRevision>,
     /// Session-scoped intent prevents two concurrent PM conversations from
     /// invalidating or presenting each other's requirement revision.
     #[serde(default)]
@@ -136,9 +153,11 @@ pub struct ProjectState {
     /// independent review and an explicit user approval both bind the digest.
     #[serde(default)]
     pub improvement_candidates: BTreeMap<String, ImprovementCandidate>,
-    pub supervisor: SupervisorState,
-    /// One durable supervisor per PM Workflow Run. `supervisor` remains a
-    /// compatibility projection for pre-v3 records and aggregate UI clients.
+    /// Read-only migration input for pre-v7 records. New records serialize
+    /// one Supervisor per Workflow Run only.
+    #[serde(default, rename = "supervisor", skip_serializing)]
+    pub legacy_supervisor: Option<SupervisorState>,
+    /// One durable supervisor per PM Workflow Run.
     #[serde(default)]
     pub session_supervisors: BTreeMap<String, SupervisorState>,
     pub created_at_ms: i64,
@@ -159,19 +178,19 @@ impl ProjectState {
             format: PM_PROJECT_FORMAT,
             project_id: project_workspace_id.clone(),
             project_workspace_id,
-            controller_session_id,
+            bootstrap_session_id: controller_session_id,
             pm_space_workspace_id: None,
             session_dcg_runs: BTreeMap::new(),
             root,
             phase: ProjectPhase::PreflightPassed,
             lifecycle: ProjectLifecycle::Active,
             revision: 1,
-            intent: None,
+            legacy_intent: None,
             session_intents: BTreeMap::new(),
             work_packages: BTreeMap::new(),
             agent_spaces: BTreeMap::new(),
             improvement_candidates: BTreeMap::new(),
-            supervisor: primary_supervisor,
+            legacy_supervisor: None,
             session_supervisors,
             created_at_ms: now_ms,
             updated_at_ms: now_ms,
@@ -179,13 +198,10 @@ impl ProjectState {
     }
 
     pub fn ensure_controller(&self, controller_session_id: &str) -> Result<()> {
-        // Format-1 projects predate Workflow Runs and still use the original
-        // controller binding. Bootstrapped projects admit additional PM
-        // Sessions only when an exact per-Session Run exists.
-        if controller_session_id != self.controller_session_id
-            && !self.session_dcg_runs.contains_key(controller_session_id)
-        {
-            anyhow::bail!("this PM project belongs to another project manager");
+        if !self.session_dcg_runs.contains_key(controller_session_id) {
+            anyhow::bail!(
+                "当前 PM Session 尚未附加到此项目；请通过受认证的 PM Session 创建/恢复入口建立独立 Workflow Run"
+            );
         }
         Ok(())
     }
@@ -195,14 +211,31 @@ impl ProjectState {
         controller_session_id: &str,
         package_id: &str,
     ) -> Result<()> {
-        let package = self
-            .work_packages
-            .get(package_id)
-            .ok_or_else(|| anyhow::anyhow!("no such work package: {package_id}"))?;
-        if package.controller_session_id != controller_session_id {
-            anyhow::bail!("work package belongs to another PM Session");
-        }
+        self.work_package(controller_session_id, package_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "当前 PM Session 中不存在工作包 {package_id}；工作包 ID 仅在各自 Session 内有效，请先运行 `pm project status` 核对本 Session 的工作包"
+                )
+            })?;
         Ok(())
+    }
+
+    pub fn work_package(
+        &self,
+        controller_session_id: &str,
+        package_id: &str,
+    ) -> Option<&WorkPackage> {
+        self.work_packages
+            .get(&work_package_storage_key(controller_session_id, package_id))
+    }
+
+    pub fn work_package_mut(
+        &mut self,
+        controller_session_id: &str,
+        package_id: &str,
+    ) -> Option<&mut WorkPackage> {
+        self.work_packages
+            .get_mut(&work_package_storage_key(controller_session_id, package_id))
     }
 
     pub fn ensure_mutable(&self) -> Result<()> {

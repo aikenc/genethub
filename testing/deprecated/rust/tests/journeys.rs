@@ -231,14 +231,18 @@ async fn the_picker_is_filled_from_what_the_provider_says_it_has() {
         !ids.iter().any(|id| id.contains("embedding")),
         "offered something that cannot hold a conversation: {ids:?}"
     );
-    // `DeepSeek:deepseek-v4-flash`: with more than one key configured, a bare
-    // model id does not say whose bill a turn goes on.
+    // The bounded picker label keeps both halves visible. The stable model id
+    // above remains provider-qualified and is the machine contract.
+    let model_short = genehub_testing::REAL_MODEL
+        .split_once('/')
+        .unwrap()
+        .1
+        .chars()
+        .take(12)
+        .collect::<String>();
     assert_eq!(
         genet.catalog.models[0].label,
-        format!(
-            "DeepSeek:{}",
-            genehub_testing::REAL_MODEL.split_once('/').unwrap().1
-        )
+        format!("{model_short}@deeps")
     );
 
     journey.finish().await;
@@ -286,7 +290,7 @@ async fn a_provider_the_user_adds_works_like_the_ones_we_ship() {
             .catalog
             .models
             .iter()
-            .any(|model| model.label.starts_with("公司内网:")),
+            .any(|model| model.id.starts_with("inhouse/") && model.label.ends_with("@inhou")),
         "the added provider's models never reached the picker: {:?}",
         genet
             .catalog
@@ -1069,15 +1073,15 @@ async fn what_an_agent_left_running_is_answerable_to_the_session_that_started_it
         .await;
     assert!(refused.contains("NotFound"), "{refused}");
 
-    // Asking a session with nothing to end is not an error. The caller wanted
-    // none of them running, and none of them are.
-    journey
+    // Session-scoped mutations first validate the durable Session identity so
+    // WorkSession ownership cannot be bypassed with an invented id.
+    let refused = journey
         .client
-        .call(Request::ProcessKillAll {
+        .expect_error(Request::ProcessKillAll {
             session_id: "s_nobody".into(),
         })
-        .await
-        .expect("clearing nothing succeeds");
+        .await;
+    assert!(refused.contains("NotFound"), "{refused}");
 
     journey.finish().await;
 }

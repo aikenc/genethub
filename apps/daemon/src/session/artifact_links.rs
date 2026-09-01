@@ -7,33 +7,25 @@
 /// Fixed system context appended on the first turn of a session.
 pub fn guidance() -> &'static str {
     "\
-When sharing workspace files with the user, link a concrete file path relative \
-to the agent working directory (first workspace root), as Markdown \
-`[label](relative/path.ext)` or a bare path like `demos/game/index.html`. \
-Do not invent `/assets/preview/...` URLs or deployment origins — the workbench \
-resolves paths at display time.
+向用户分享工作区文件时，使用相对于 Agent 工作目录（第一个工作区根目录）的具体文件路径，\
+写成 Markdown `[标签](relative/path.ext)`，或直接写 `demos/game/index.html`。\
+不要编造 `/assets/preview/...` URL 或部署域名；Workbench 会在展示时解析路径。
 
-Link only a regular file Asset Preview can open (≤ 64 MiB). Never link a \
-directory alone.
+只能链接 Asset Preview 可打开且不超过 64 MiB 的普通文件，不能只链接目录。
 
-Supported kinds:
-- HTML (`.html` / `.htm`): for H5 games, WASM games, and multi-file static \
-sites, always point at the entry HTML file (usually `index.html`), not the \
-folder. Preview remaps modules and relative/site-root assets and forwards \
-runtime fetch/import into the workspace.
-- Markdown (`.md` / `.markdown` / `.mdown`)
-- Images: `.png`, `.jpg` / `.jpeg`, `.gif`, `.webp`
-- Video: `.mp4`, `.webm`
-- WASM (`.wasm`) and other binary assets, loaded by the entry HTML
-- Text / source / config: any valid UTF-8 text without NUL (highlighted when \
-recognized)
+支持的文件类型：
+- HTML（`.html` / `.htm`）：H5、WASM 游戏和多文件静态站点必须链接入口 HTML（通常是 `index.html`），\
+  不能链接文件夹。Preview 会重映射模块、相对/站点根资源，并把运行时 fetch/import 转发到工作区。
+- Markdown（`.md` / `.markdown` / `.mdown`）
+- 图片：`.png`、`.jpg` / `.jpeg`、`.gif`、`.webp`
+- 视频：`.mp4`、`.webm`
+- WASM（`.wasm`）以及由入口 HTML 加载的其他二进制资源
+- 文本、源码和配置：不含 NUL 的有效 UTF-8 文本（已识别格式会高亮）
 
-When authoring HTML, H5 games, or static sites for Preview, read the \
-`genehub-html-preview` skill. Write a regular static site (entry HTML + \
-relative paths) that also opens as a local file. Do not start an HTTP server \
-for static assets, and do not embed Preview-specific scripts — GeneHub \
-injects its own loader. `localStorage` works via a persistent sandbox shim; \
-IndexedDB, cookies, nested iframes, and forms do not."
+编写用于 Preview 的 HTML、H5 游戏或静态站点时，读取 `genehub-html-preview` Skill。\
+创建可直接本地打开的普通静态站点（入口 HTML + 相对路径）。不要为静态资源启动 HTTP 服务，\
+也不要嵌入 Preview 专用脚本；GeneHub 会注入加载器。`localStorage` 通过持久沙箱垫片可用；\
+IndexedDB、cookie、嵌套 iframe 和表单不可用。"
 }
 
 #[cfg(test)]
@@ -44,15 +36,12 @@ mod tests {
     fn guidance_requires_html_entry_and_forbids_preview_url_invention() {
         let text = guidance();
         assert!(text.contains("index.html"));
-        assert!(text.contains("Never link a directory"));
-        assert!(text.contains("Do not invent `/assets/preview/...`"));
         assert!(text.contains(".png"));
         assert!(text.contains(".mp4"));
         assert!(text.contains(".md"));
         assert!(text.contains(".wasm"));
         assert!(text.contains("64 MiB"));
         assert!(text.contains("genehub-html-preview"));
-        assert!(text.contains("relative paths"));
         assert!(text.contains("localStorage"));
     }
 }

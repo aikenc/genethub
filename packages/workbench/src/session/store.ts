@@ -38,7 +38,7 @@ import {
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
-import { ConnectionOutcomeUnknownError } from "../protocol/client";
+import { ConnectionOutcomeUnknownError, SESSION_SEND_HANDOFF_TIMEOUT_MS } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
   recallRuntimeChoice,
@@ -1345,19 +1345,22 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // Artifact Preview URLs are bound at chat/document render time from the
       // current workspace roots. Agents emit relative/absolute file paths; the
       // daemon teaches path-linking rules (not a deployment-specific prefix).
-      await require_(get().client).call({
-        type: "session.send",
-        // Continuing a round after an interrupt is not wired into the UI
-        // yet — every message from here is a fresh round until it is
-        // (docs/agent-analysis-substrate-proposal.md §3.2).
-        payload: {
-          sessionId,
-          text,
-          attachments,
-          artifactPreviewBaseUrl: null,
-          continuesRound: null,
+      await require_(get().client).call(
+        {
+          type: "session.send",
+          // Continuing a round after an interrupt is not wired into the UI
+          // yet — every message from here is a fresh round until it is
+          // (docs/agent-analysis-substrate-proposal.md §3.2).
+          payload: {
+            sessionId,
+            text,
+            attachments,
+            artifactPreviewBaseUrl: null,
+            continuesRound: null,
+          },
         },
-      });
+        { timeoutMs: SESSION_SEND_HANDOFF_TIMEOUT_MS },
+      );
       // A successful RPC only proves the daemon accepted the message. Fabric
       // replies and timeline events can travel on different streams, so the
       // durable user item may still be in flight when this resolves. Keep the

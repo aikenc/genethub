@@ -130,6 +130,19 @@ pub trait AgentAdapter: Send + Sync {
 
     async fn catalog(&self, providers: &ProviderMap) -> Catalog;
 
+    /// Whether every model accepted by a session must appear in `catalog()`.
+    ///
+    /// Most Agents publish one process-wide catalog, so an unlisted durable
+    /// choice is stale and the session layer can recover it before launch.
+    /// OpenCode is different: its effective provider catalog is selected by
+    /// the session working directory, while this process-level picker can only
+    /// inspect the user's global config. Such an adapter must preserve an
+    /// explicit project-local model id even when the advisory picker does not
+    /// list it.
+    fn model_catalog_is_authoritative(&self) -> bool {
+        true
+    }
+
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>>;
 
     /// `None` means this Agent does not publish an import surface. Listing is

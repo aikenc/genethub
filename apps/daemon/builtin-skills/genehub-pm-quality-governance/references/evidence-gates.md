@@ -1,27 +1,18 @@
-# Evidence gates
+# 证据门禁
 
-## Work package contract
+## 工作包合同
 
-Record: package id, intended outcome, explicit exclusions, input commit/artifact, assigned Agent Space and WorkSession, writable branch/worktree, dependencies, acceptance checks, and risk level.
+记录 Session 内包 ID、结果、不做事项、输入 commit/产物、能力标签、分支/worktree、验收检查和风险。顺序由 Workflow 图治理，不另建包依赖图。
 
-## Candidate record
+## 候选记录
 
-Record immutable facts rather than paths alone:
+- repository、commit SHA、tree SHA；
+- Space 源 commit 与 Builder lock；
+- 测试/build 命令、退出码和产物摘要；
+- 已知限制与接口变化。
 
-- repository identity;
-- commit SHA and tree SHA;
-- relevant Space source commit and Builder lock digest;
-- mechanical test/build commands and results;
-- produced Demo/artifact digest;
-- known limitations.
+## Reviewer 裁决
 
-## Review verdict
+verdict 必须绑定同一候选和 Intent revision，记录 Reviewer WorkSession、独立 Space、检查、证据、阻断 finding、非阻断风险以及明确 pass/fail。
 
-Bind the verdict to the same candidate facts and Intent revision. Require:
-
-- reviewer WorkSession and independent Agent Space;
-- checks performed and evidence inspected;
-- blocking findings and non-blocking risks;
-- `pass` or `fail` with no ambiguous “looks good” state.
-
-Any candidate, acceptance, dependency, Skill, or Builder-lock change expires the verdict. Integration may proceed only when every required gate references the current immutable candidate.
+候选、验收、Skill、Prompt、Workflow 或 Builder lock 变化都会使 verdict 过期。只有当前精确候选的全部门禁通过，Coordinator 才能集成。

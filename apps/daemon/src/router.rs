@@ -414,6 +414,7 @@ async fn dispatch(
         Request::WorkSessionCreate {
             workspace_id,
             work_package_id,
+            improvement_candidate_id,
             agent_id,
             model_id,
             mode_id,
@@ -475,16 +476,37 @@ async fn dispatch(
                     "this Agent Space belongs to another project",
                 );
             }
-            let target = match state
-                .projects
-                .authorize_work_session(
-                    &project_workspace_id,
-                    controller_session_id,
-                    &workspace_id,
-                    &work_package_id,
-                )
-                .await
-            {
+            let target_result = match (
+                work_package_id.as_deref(),
+                improvement_candidate_id.as_deref(),
+            ) {
+                (Some(work_package_id), None) => {
+                    state
+                        .projects
+                        .authorize_work_session(
+                            &project_workspace_id,
+                            controller_session_id,
+                            &workspace_id,
+                            work_package_id,
+                        )
+                        .await
+                }
+                (None, Some(candidate_id)) => {
+                    state
+                        .projects
+                        .authorize_improvement_review_session(
+                            &project_workspace_id,
+                            controller_session_id,
+                            &workspace_id,
+                            candidate_id,
+                        )
+                        .await
+                }
+                _ => Err(anyhow::anyhow!(
+                    "workSession.create requires exactly one workPackageId or improvementCandidateId"
+                )),
+            };
+            let target = match target_result {
                 Ok(target) => target,
                 Err(error) => return failed(error),
             };
@@ -551,8 +573,10 @@ async fn dispatch(
                 .create_work_session(
                     &workspace_id,
                     start_in,
-                    &work_package_id,
+                    &target.session_binding_id,
                     controller_session_id,
+                    target.workflow_prompt.clone(),
+                    target.improvement_candidate.clone(),
                     &agent_id,
                     model_id,
                     mode_id,
@@ -562,17 +586,34 @@ async fn dispatch(
                 .await
             {
                 Ok(summary) => {
-                    if let Err(error) = state
-                        .projects
-                        .start_agent_space_work(
-                            &project_workspace_id,
-                            controller_session_id,
-                            &workspace_id,
-                            &target.lease_id,
-                            &summary.id,
-                        )
-                        .await
+                    let binding = if let Some((candidate_id, candidate_digest)) =
+                        target.improvement_candidate.as_ref()
                     {
+                        state
+                            .projects
+                            .start_improvement_review(
+                                &project_workspace_id,
+                                controller_session_id,
+                                &workspace_id,
+                                &target.lease_id,
+                                &summary.id,
+                                candidate_id,
+                                candidate_digest,
+                            )
+                            .await
+                    } else {
+                        state
+                            .projects
+                            .start_agent_space_work(
+                                &project_workspace_id,
+                                controller_session_id,
+                                &workspace_id,
+                                &target.lease_id,
+                                &summary.id,
+                            )
+                            .await
+                    };
+                    if let Err(error) = binding {
                         if let Err(close_error) = state.sessions.close(&summary.id).await {
                             tracing::warn!(
                                 work_session_id = %summary.id,
@@ -1375,7 +1416,10 @@ async fn dispatch(
 
         Request::WorkspaceList => Handled::ok(Reply::Workspaces(state.workspaces.list().await)),
 
-        Request::ProjectManagerStatus { workspace_id } => {
+        Request::ProjectManagerStatus {
+            workspace_id,
+            session_id,
+        } => {
             let workspace = match state.workspaces.get(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
@@ -1386,7 +1430,11 @@ async fn dispatch(
                     "PM project status belongs to a Folder workspace",
                 );
             }
-            match state.projects.public_status(&workspace_id).await {
+            match state
+                .projects
+                .public_status(&workspace_id, session_id.as_deref())
+                .await
+            {
                 Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
                 Ok(None) => Handled::err(ErrorCode::NotFound, "this PM project is not initialized"),
                 Err(error) => failed(error),
@@ -1412,7 +1460,11 @@ async fn dispatch(
                 .select_session_dcg(&workspace_id, &session_id, &graph_id)
                 .await
             {
-                Ok(_) => match state.projects.public_status(&workspace_id).await {
+                Ok(_) => match state
+                    .projects
+                    .public_status(&workspace_id, Some(&session_id))
+                    .await
+                {
                     Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
                     Ok(None) => {
                         Handled::err(ErrorCode::NotFound, "this PM project is not initialized")
@@ -1427,6 +1479,7 @@ async fn dispatch(
             workspace_id,
             session_id,
             edge_id,
+            expected_revision,
             facts,
         } => {
             if !caller.may_decide_project_manager() {
@@ -1444,12 +1497,17 @@ async fn dispatch(
                     &workspace_id,
                     &session_id,
                     &edge_id,
+                    Some(expected_revision),
                     facts.into_iter().collect(),
                     crate::pm_domain::dcg::DcgActor::User,
                 )
                 .await
             {
-                Ok(_) => match state.projects.public_status(&workspace_id).await {
+                Ok(_) => match state
+                    .projects
+                    .public_status(&workspace_id, Some(&session_id))
+                    .await
+                {
                     Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
                     Ok(None) => {
                         Handled::err(ErrorCode::NotFound, "this PM project is not initialized")
@@ -1480,7 +1538,11 @@ async fn dispatch(
                 .approve_improvement(&workspace_id, &candidate_id, approved)
                 .await
             {
-                Ok(_) => match state.projects.public_status(&workspace_id).await {
+                Ok(_) => match state
+                    .projects
+                    .public_status(&workspace_id, Some(&session_id))
+                    .await
+                {
                     Ok(Some(status)) => Handled::ok(Reply::ProjectStatus(status)),
                     Ok(None) => {
                         Handled::err(ErrorCode::NotFound, "this PM project is not initialized")

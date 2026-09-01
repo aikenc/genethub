@@ -24,7 +24,9 @@ export function ProjectPanel({
   const pmWorkspace = workspaces.find((item) => item.id === session.workspaceId);
   const projectWorkspaceId = pmWorkspace?.parentWorkspaceId;
   const [status, setStatus] = useState<PmProjectStatus | null>(null);
+  const [overview, setOverview] = useState<PmProjectStatus | null>(null);
   const [expanded, setExpanded] = useState(true);
+  const [overviewExpanded, setOverviewExpanded] = useState(false);
   const [spacesExpanded, setSpacesExpanded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -33,9 +35,21 @@ export function ProjectPanel({
     if (!client || !projectWorkspaceId) return;
     const reply = await client.call({
       type: "pm.project.status",
+      payload: { workspaceId: projectWorkspaceId, sessionId: session.id },
+    });
+    if (reply?.type !== "projectStatus") throw new Error("项目状态响应无效");
+    setStatus(reply.data);
+    setError(null);
+  }, [client, projectWorkspaceId, session.id]);
+
+  const refreshOverview = useCallback(async () => {
+    if (!client || !projectWorkspaceId) return;
+    const reply = await client.call({
+      type: "pm.project.status",
       payload: { workspaceId: projectWorkspaceId },
     });
-    if (reply?.type === "projectStatus") setStatus(reply.data);
+    if (reply?.type !== "projectStatus") throw new Error("项目总览响应无效");
+    setOverview(reply.data);
   }, [client, projectWorkspaceId]);
 
   useEffect(() => {
@@ -43,10 +57,19 @@ export function ProjectPanel({
     setError(null);
     void refresh().catch((cause: unknown) => setError(messageOf(cause)));
     const timer = window.setInterval(() => {
-      void refresh().catch(() => undefined);
+      void refresh().catch((cause: unknown) => setError(`项目状态已停止更新：${messageOf(cause)}`));
     }, 3_000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!overviewExpanded) return;
+    void refreshOverview().catch((cause: unknown) => setError(`项目总览加载失败：${messageOf(cause)}`));
+    const timer = window.setInterval(() => {
+      void refreshOverview().catch((cause: unknown) => setError(`项目总览已停止更新：${messageOf(cause)}`));
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [overviewExpanded, refreshOverview]);
 
   const run = status?.workflowRuns.find(
     (item) => item.controllerSessionId === session.id,
@@ -57,11 +80,8 @@ export function ProjectPanel({
   const runPackages = status?.workPackages.filter(
     (item) => item.controllerSessionId === session.id,
   ) ?? [];
-  // Cancelled retry attempts remain in history but must not make the current
-  // delivery look progressively more complete on every failed iteration.
-  const deliveryPackages = runPackages.filter((item) => item.status !== "cancelled");
-  const completed = deliveryPackages.filter((item) => item.status === "accepted").length;
-  const total = deliveryPackages.length;
+  const completedNodes = run?.nodeInstances.filter((item) => item.status === "completed").length ?? 0;
+  const activeNodes = run?.nodeInstances.filter((item) => item.status === "active").length ?? 0;
   const exceptions = runPackages.filter(
     (item) => item.status === "blocked" || item.integrationError,
   );
@@ -93,7 +113,7 @@ export function ProjectPanel({
       >
         <span className="text-sm font-medium text-fg">需求推进</span>
         <span className="rounded-full bg-accent/10 px-2 py-0.5 text-xs text-accent">
-          {completed}/{total || "—"}
+          {run ? `已完成节点 ${completedNodes}` : "准备中"}
         </span>
         {run?.graphId ? <span className="truncate text-xs text-muted">{run.graphId}</span> : null}
         {run?.outcome ? <span className="truncate text-xs text-muted">{run.outcome}</span> : null}
@@ -109,15 +129,61 @@ export function ProjectPanel({
           {intent ? (
             <section>
               <p className="text-sm font-medium text-fg">{intent.outcome}</p>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line">
-                <div
-                  className="h-full bg-accent transition-[width]"
-                  style={{ width: `${total ? Math.round((completed / total) * 100) : 0}%` }}
-                />
-              </div>
-              <p className="mt-1 text-muted">阶段 {status?.phase} · 修订 {intent.revision}</p>
+              <p className="mt-1 text-muted">
+                阶段 {status?.phase} · 已完成节点 {completedNodes} · 活动节点 {activeNodes} · 验收修订 {intent.revision}
+              </p>
             </section>
           ) : <p className="text-muted">PM 正在澄清需求，尚未锁定验收口径。</p>}
+
+          <section>
+            <button
+              type="button"
+              className="flex w-full items-center text-left font-medium text-fg"
+              onClick={() => setOverviewExpanded((value) => !value)}
+            >
+              项目管理总览
+              <span className="ml-2 text-muted">{overview?.workflowRuns.length ?? "按需加载"}</span>
+              <span className="ml-auto text-faint">{overviewExpanded ? "⌃" : "⌄"}</span>
+            </button>
+            {overviewExpanded ? (
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {overview?.workflowRuns.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`rounded-lg border p-2 text-left hover:border-accent ${item.controllerSessionId === session.id ? "border-accent bg-accent/5" : "border-line"}`}
+                    onClick={() => item.controllerSessionId && onOpenSession(item.controllerSessionId)}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-medium text-fg">{item.intent?.outcome ?? item.outcome ?? item.graphId ?? "待选择工作流"}</span>
+                      <span className="ml-auto shrink-0 text-accent">{item.status}</span>
+                    </div>
+                    <p className="mt-1 truncate text-faint">
+                      {item.controllerSessionId ?? "无所属会话"} · {item.graphId ?? "discussion"}
+                    </p>
+                    {item.budget ? (
+                      <p className="mt-1 text-muted">
+                        剩余 {formatDuration(item.budget.remainingMs)} · 活动会话 {item.budget.activeWorkSessions}/{item.budget.maxConcurrentWorkSessions}
+                      </p>
+                    ) : null}
+                  </button>
+                )) ?? <p className="text-muted">正在加载跨 Session 项目状态…</p>}
+              </div>
+            ) : null}
+          </section>
+
+          {status?.template.upgradeAvailable ? (
+            <section role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2 text-amber-200">
+              <p className="font-medium">项目 Workflow 模板有可选升级</p>
+              <p className="mt-1 text-amber-100/80">
+                当前基线 {status.template.installedVersion || "未标记"} · 可用基线 {status.template.availableVersion}。
+                项目现有图与提示词仍可继续使用，系统不会自动覆盖。
+              </p>
+              <p className="mt-1 text-amber-100/70">
+                先生成并合并 template bundle，再依次完成独立评审、用户批准和事务式晋级；已开始的 Run 继续使用自己固定的旧定义。
+              </p>
+            </section>
+          ) : null}
 
           {status && (!run?.graphId || run.status === "discussion") ? (
             <section>
@@ -170,11 +236,9 @@ export function ProjectPanel({
                 并发会话 {run.budget.activeWorkSessions}/{run.budget.maxConcurrentWorkSessions}
                 {" · "}累计会话 {run.budget.workSessionsStarted}/{run.budget.maxWorkSessions}
               </p>
-              <p className="mt-1">
-                LLM 请求 {run.budget.llmRequestsObserved}/{run.budget.maxLlmRequests}
-                {" · "}剩余 {run.budget.llmRequestsRemaining}
-                {run.budget.userWaitMs > 0 ? ` · 用户等待 ${formatDuration(run.budget.userWaitMs)}` : ""}
-              </p>
+              {run.budget.userWaitMs > 0 ? (
+                <p className="mt-1">用户等待 {formatDuration(run.budget.userWaitMs)}</p>
+              ) : null}
             </section>
           ) : null}
 
@@ -203,6 +267,7 @@ export function ProjectPanel({
                               workspaceId: projectWorkspaceId,
                               sessionId: session.id,
                               edgeId: edge.id,
+                              expectedRevision: run.revision,
                               facts: [],
                             }});
                           })}
@@ -340,27 +405,56 @@ function Workflow({ graph, run }: { graph: PmWorkflowDefinitionStatus; run: NonN
     () => new Map(run.resourceCapacities.map((capacity) => [capacity.nodeId, capacity])),
     [run.resourceCapacities],
   );
+  const incomingByNode = useMemo(() => {
+    const values = new Map<string, number>();
+    for (const edge of graph.edges) values.set(edge.to, (values.get(edge.to) ?? 0) + 1);
+    return values;
+  }, [graph.edges]);
+  const outgoingByNode = useMemo(() => {
+    const values = new Map<string, number>();
+    for (const edge of graph.edges) values.set(edge.from, (values.get(edge.from) ?? 0) + 1);
+    return values;
+  }, [graph.edges]);
   return <section>
-    <p className="mb-2 font-medium text-fg">Workflow 节点</p>
-    <div className="flex gap-1 overflow-x-auto pb-1">
-      {graph.nodes.map((node, index) => {
+    <div className="mb-2 flex items-center gap-2">
+      <p className="font-medium text-fg">Workflow 真实拓扑</p>
+      <span className="text-faint">入口：{graph.entry}</span>
+    </div>
+    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+      {graph.nodes.map((node) => {
         const instance = instanceByNode.get(node.id);
         const capacity = capacityByNode.get(node.id);
         const active = run.activeNodes.includes(node.id);
-        return <div key={node.id} className="flex shrink-0 items-center gap-1">
-          {index ? <span className="text-faint">→</span> : null}
-          <div className={`max-w-40 rounded-md border px-2 py-1.5 ${active ? "border-accent bg-accent/10" : instance?.status === "completed" ? "border-emerald-500/40" : "border-line"}`}>
-            <p className="truncate font-medium text-fg">{node.id}</p>
-            <p className="truncate text-faint">{instance?.status ?? node.kind}{instance ? ` · #${instance.iteration}` : ""}</p>
+        return <div key={node.id} className={`rounded-md border px-2 py-1.5 ${active ? "border-accent bg-accent/10" : instance?.status === "completed" ? "border-emerald-500/40" : "border-line"}`}>
+            <div className="flex items-center gap-2">
+              <p className="truncate font-medium text-fg">{node.id}</p>
+              {node.id === graph.entry ? <span className="rounded bg-accent/10 px-1 text-accent">入口</span> : null}
+            </div>
+            <p className="truncate text-faint">
+              {node.activity ?? node.kind}{node.actor ? ` · ${node.actor}` : ""}{instance ? ` · ${instance.status} #${instance.iteration}` : ""}
+            </p>
+            <p className="truncate text-faint">
+              入边 {incomingByNode.get(node.id) ?? 0} · 出边 {outgoingByNode.get(node.id) ?? 0}
+            </p>
             {instance?.fanoutSource ? <p className="truncate text-faint">{instance.fanoutSealed ? "工作包已封闭" : "筹备工作包"}</p> : null}
             {capacity ? (
               <p className="truncate text-faint" title={`匹配 ${capacity.matchingSpaces} 个 Space；当前空闲 ${capacity.availableSpaces} 个`}>
                 可分配 {capacity.availableSlots}/{capacity.maxItems} · 已占 {capacity.allocatedItems}
               </p>
             ) : null}
-          </div>
         </div>;
       })}
+    </div>
+    <div className="mt-2 space-y-1 rounded-md border border-line bg-canvas/30 p-2">
+      <p className="font-medium text-fg">边与分支</p>
+      {graph.edges.map((edge) => (
+        <div key={edge.id} className="grid gap-x-2 text-faint sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <span className="truncate text-fg">{edge.from} → {edge.to}</span>
+          <span className="truncate" title={edge.condition}>
+            {edge.label ?? edge.id}{edge.chooseBy ? ` · ${edge.chooseBy} 决策` : " · 自动"} · {edge.condition}
+          </span>
+        </div>
+      ))}
     </div>
   </section>;
 }

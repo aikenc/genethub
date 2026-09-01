@@ -1,4 +1,4 @@
 interface:
-  display_name: "PM 质量与 Skill 治理"
-  short_description: "Gate delivery quality and improve project skills with demos"
-  default_prompt: "Use $genehub-pm-quality-governance to review this candidate and its evidence."
+  display_name: "PM 质量与 Workflow 治理"
+  short_description: "用精确候选和独立评审控制交付质量"
+  default_prompt: "使用 $genehub-pm-quality-governance 核验当前候选及其证据。"

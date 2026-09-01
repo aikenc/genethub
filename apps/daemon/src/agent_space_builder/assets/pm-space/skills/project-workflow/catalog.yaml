@@ -4,3 +4,5 @@ sessionWorkflows:
   feature: dcg/feature.yaml
   bugfix: dcg/bugfix.yaml
   migration: dcg/migration.yaml
+evaluations:
+  - evaluations/smoke.yaml

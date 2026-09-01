@@ -53,6 +53,47 @@ async function runPmCommand(
   );
 }
 
+async function approveDelivery(
+  t: CaseContext,
+  opened: Opened,
+  pmId: string,
+): Promise<void> {
+  let deliveryRevision: number | undefined;
+  await t.tools.waitUntil(async () => {
+    const status = await opened.client.call({
+      type: "pm.project.status",
+      payload: { workspaceId: opened.workspaceId },
+    });
+    const run = status?.type === "projectStatus"
+      ? status.data.workflowRuns.find((item) => item.controllerSessionId === pmId)
+      : undefined;
+    const ready = Boolean(
+      run?.activeNodes.includes("approve-delivery") &&
+        run.availableEdges.some(
+          (edge) => edge.id === "delivery-approved" && edge.satisfied,
+        ),
+    );
+    if (ready) deliveryRevision = run?.revision;
+    return ready;
+  }, 45_000);
+  if (deliveryRevision === undefined) {
+    throw new Error("reviewed candidate did not reach the delivery decision");
+  }
+  const approved = await opened.client.call({
+    type: "pm.workflow.transition",
+    payload: {
+      workspaceId: opened.workspaceId,
+      sessionId: pmId,
+      edgeId: "delivery-approved",
+      expectedRevision: deliveryRevision,
+      facts: [],
+    },
+  });
+  if (approved?.type !== "projectStatus") {
+    throw new Error(`user delivery approval failed: ${JSON.stringify(approved)}`);
+  }
+}
+
 function writeSpace(workspace: string, name: string, worktreeSpace: string): void {
   mkdirSync(`${workspace}/spaces/${name}`, { recursive: true });
   writeFileSync(
@@ -279,6 +320,7 @@ defineSpecialty(
           '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
           '"$GENEHUB_CLI" pm project advance --to active',
           '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
+          '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
         ].join(" && "),
         "Record the exact integration-safety capabilities and select the first Workflow.",
       );
@@ -290,6 +332,7 @@ defineSpecialty(
         [
           '"$GENEHUB_CLI" pm project intent set --outcome "Reject executable Git configuration" --acceptance "No repository command is executed"',
           '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
+          '"$GENEHUB_CLI" pm project workflow transition --edge aligned --fact intent.aligned',
         ].join(" && "),
         "Select the independent unsafe-configuration Workflow.",
       );
@@ -330,6 +373,7 @@ defineSpecialty(
         `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${workspaceIds.get("review-conflict")} --work-package conflict-candidate --no-wait "GENEHUB_FIXTURE_REVIEW_PASS"`,
         "Dispatch the independent Reviewer for the conflicting candidate.",
       );
+      await approveDelivery(t, opened, conflictPm);
       let conflictStatus: Awaited<ReturnType<typeof opened.client.call>> | undefined;
       await t.tools.waitUntil(async () => {
         conflictStatus = await opened.client.call({
@@ -392,6 +436,7 @@ defineSpecialty(
           `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${workspaceIds.get("review-unsafe")} --work-package unsafe-candidate --no-wait "GENEHUB_FIXTURE_REVIEW_PASS"`,
           "Dispatch the independent Reviewer for the unsafe-configuration candidate.",
         );
+        await approveDelivery(t, opened, unsafePm);
         let unsafeStatus: Awaited<ReturnType<typeof opened.client.call>> | undefined;
         await t.tools.waitUntil(async () => {
           unsafeStatus = await opened.client.call({

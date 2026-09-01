@@ -1107,7 +1107,7 @@ fn command_schema(name: &str) -> Value {
         "agent.list" => ("genet agent list", true, object_input(json!({}), &[])),
         "agent.run" => (
             "genet agent run --agent <id> \"<prompt>\" [--cwd <dir> | --workspace <id>] \
-             [--session <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
+             [--session <id> | --work-package <id> | --improvement <id>] [--model <id>] [--mode <id>] [--effort <id>] [--title <t>] \
              [--wait|--no-wait] [--since-seq <n>] [--auto-approve] [--timeout <s>] \
              [--open-workspace]",
             true,
@@ -1130,6 +1130,11 @@ fn command_schema(name: &str) -> Value {
                         "type": ["string", "null"],
                         "minLength": 1,
                         "$comment": "PM-only: creates a read-only-to-users WorkAgent session in an Agent Space",
+                    },
+                    "improvementCandidateId": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "$comment": "PM-only: creates a Reviewer WorkSession bound to an exact project Workflow candidate digest",
                     },
                 }),
                 &["agentId", "prompt"],

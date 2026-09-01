@@ -22,7 +22,7 @@ import { NEW_SESSION_ID, scopedWorkbenchLocation } from "./location/workbench";
 import type { Target } from "./host";
 import { LogsPanel } from "./logs/LogsPanel";
 import { PreviewFloat } from "./preview/PreviewFloat";
-import { Client, type ProtocolDial } from "./protocol/client";
+import { Client, SESSION_SEND_HANDOFF_TIMEOUT_MS, type ProtocolDial } from "./protocol/client";
 import { SettingsPanel } from "./settings/SettingsPanel";
 import { readRtcEnabled } from "./settings/rtc";
 import { Composer, resolveComposerPhase } from "./session/Composer";
@@ -601,16 +601,19 @@ export function App({
             }
             sessionId = created.data.id;
           }
-          await client.call({
-            type: "session.send",
-            payload: {
-              sessionId,
-              text: capsule,
-              attachments: [],
-              artifactPreviewBaseUrl: null,
-              continuesRound: null,
+          await client.call(
+            {
+              type: "session.send",
+              payload: {
+                sessionId,
+                text: capsule,
+                attachments: [],
+                artifactPreviewBaseUrl: null,
+                continuesRound: null,
+              },
             },
-          });
+            { timeoutMs: SESSION_SEND_HANDOFF_TIMEOUT_MS },
+          );
           return { sessionId };
         });
       },

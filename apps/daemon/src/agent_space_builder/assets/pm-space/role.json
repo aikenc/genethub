@@ -4,5 +4,6 @@
   "mode": "project-management",
   "workflowSkill": "project-workflow",
   "locale": "{{GENEHUB_LOCALE}}",
-  "templateVersion": "{{GENEHUB_TEMPLATE_VERSION}}"
+  "templateVersion": "{{GENEHUB_TEMPLATE_VERSION}}",
+  "templateDigest": "{{GENEHUB_TEMPLATE_DIGEST}}"
 }

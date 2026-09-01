@@ -371,6 +371,8 @@ impl SessionManager {
         cwd: PathBuf,
         work_package_id: &str,
         controller_session_id: &str,
+        workflow_prompt: String,
+        improvement_candidate: Option<(String, String)>,
         agent_id: &str,
         model_id: Option<String>,
         mode_id: Option<String>,
@@ -413,6 +415,9 @@ impl SessionManager {
             Some(WorkSessionInfo {
                 work_package_id: work_package_id.to_string(),
                 controller_session_id: controller_session_id.to_string(),
+                workflow_prompt: Some(workflow_prompt),
+                improvement_candidate_id: improvement_candidate.as_ref().map(|(id, _)| id.clone()),
+                improvement_candidate_digest: improvement_candidate.map(|(_, digest)| digest),
             }),
         )
         .await
@@ -1770,6 +1775,18 @@ impl SessionManager {
         if session_kind == SessionKind::Work {
             guidance.push_str("\n\n");
             guidance.push_str(crate::skills::work_session_result_guidance());
+            if let Some(workflow_prompt) = live
+                .meta
+                .lock()
+                .await
+                .work
+                .as_ref()
+                .and_then(|work| work.workflow_prompt.as_deref())
+            {
+                guidance.push_str("\n\n<project_workflow_objective>\n");
+                guidance.push_str(workflow_prompt);
+                guidance.push_str("\n</project_workflow_objective>");
+            }
         }
         let additional_system_prompt = Some(guidance);
         {
@@ -1984,7 +2001,12 @@ impl SessionManager {
         let mut meta = live.meta.lock().await.clone();
         let adapter = self.registry.require(&meta.agent_id)?;
         let offered = adapter.catalog(providers).await;
-        if normalize_runtime_selection(&mut meta, &offered) {
+        let selection_changed = if adapter.model_catalog_is_authoritative() {
+            normalize_runtime_selection(&mut meta, &offered)
+        } else {
+            normalize_runtime_selection_with_policy(&mut meta, &offered, false)
+        };
+        if selection_changed {
             tracing::warn!(
                 agent = %meta.agent_id,
                 session = %meta.id,
@@ -2195,12 +2217,16 @@ impl SessionManager {
         match live.agent.lock().await.as_ref() {
             Some(agent) => agent.set_model(model_id).await?,
             None => {
-                let offered = self.offered(&live, providers).await?;
-                listed(
-                    "model",
-                    model_id,
-                    offered.models.iter().map(|model| model.id.as_str()),
-                )?;
+                let agent_id = live.meta.lock().await.agent_id.clone();
+                let adapter = self.registry.require(&agent_id)?;
+                if adapter.model_catalog_is_authoritative() {
+                    let offered = adapter.catalog(providers).await;
+                    listed(
+                        "model",
+                        model_id,
+                        offered.models.iter().map(|model| model.id.as_str()),
+                    )?;
+                }
             }
         }
         {
@@ -2484,14 +2510,65 @@ impl SessionManager {
     }
 
     pub async fn close(&self, session_id: &str) -> Result<()> {
-        let live = match self.sessions.write().await.remove(session_id) {
-            Some(live) => live,
-            None => return Ok(()),
-        };
-        self.end_what_it_left(session_id).await;
-        live.shutdown().await;
-        self.processes.forget(session_id).await;
+        self.close_many(&[session_id.to_string()]).await;
         Ok(())
+    }
+
+    /// Stops several live sessions with one process census and concurrent
+    /// adapter shutdowns. Durable metadata and conversation evidence stay on
+    /// disk, exactly as with [`close`].
+    pub async fn close_many(&self, session_ids: &[String]) {
+        let live = {
+            let mut sessions = self.sessions.write().await;
+            session_ids
+                .iter()
+                .filter_map(|session_id| {
+                    sessions
+                        .remove(session_id)
+                        .map(|live| (session_id.clone(), live))
+                })
+                .collect::<Vec<_>>()
+        };
+        self.shutdown_live(live).await;
+    }
+
+    async fn shutdown_live(&self, live: Vec<(String, Arc<Live>)>) {
+        if live.is_empty() {
+            return;
+        }
+        let session_ids = live
+            .iter()
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        let ended = self.processes.stop_all_sessions(&session_ids).await;
+        if ended > 0 {
+            tracing::info!(
+                sessions = session_ids.len(),
+                count = ended,
+                "ended what closing sessions left running"
+            );
+        }
+
+        let mut shutdowns = tokio::task::JoinSet::new();
+        for (session_id, live) in live {
+            shutdowns.spawn(async move {
+                let workspace_id = live.meta.lock().await.workspace_id.clone();
+                live.shutdown().await;
+                let released = live.store.release_writer(&workspace_id, &session_id);
+                (session_id, released)
+            });
+        }
+        let closed = shutdowns.join_all().await;
+        for (session_id, released) in closed {
+            if let Err(error) = released {
+                tracing::warn!(
+                    %session_id,
+                    %error,
+                    "could not release the closed session writer"
+                );
+            }
+            self.processes.forget(&session_id).await;
+        }
     }
 
     /// Ends the processes a session left running, before the agent that
@@ -2518,10 +2595,7 @@ impl SessionManager {
     /// children survive the tray exiting.
     pub async fn shutdown(&self) {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
-        for (session_id, live) in sessions {
-            self.end_what_it_left(&session_id).await;
-            live.shutdown().await;
-        }
+        self.shutdown_live(sessions).await;
     }
 }
 
@@ -4006,6 +4080,14 @@ fn listed<'a>(axis: &str, value: &str, offered: impl Iterator<Item = &'a str>) -
 /// Reconcile durable choices with what this Agent offers *now*.
 /// Catalog-less Agents remain opaque; declared catalogs are authoritative.
 fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
+    normalize_runtime_selection_with_policy(meta, catalog, true)
+}
+
+fn normalize_runtime_selection_with_policy(
+    meta: &mut SessionMeta,
+    catalog: &Catalog,
+    model_catalog_is_authoritative: bool,
+) -> bool {
     let before = (
         meta.model_id.clone(),
         meta.mode_id.clone(),
@@ -4013,7 +4095,8 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
         meta.runtime_values.clone(),
     );
 
-    if !catalog.models.is_empty()
+    if model_catalog_is_authoritative
+        && !catalog.models.is_empty()
         && meta
             .model_id
             .as_ref()
@@ -5288,7 +5371,7 @@ mod tests {
             "deployment-bound Preview prefixes must not become Agent system guidance"
         );
         assert!(
-            prompt.contains("index.html") && prompt.contains("Never link a directory"),
+            prompt.contains("index.html") && prompt.contains("不能只链接目录"),
             "Agents still need file-path linking rules, especially HTML entry files"
         );
         assert!(

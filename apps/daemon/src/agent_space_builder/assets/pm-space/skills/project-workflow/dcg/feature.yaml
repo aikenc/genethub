@@ -1,22 +1,25 @@
 schema: genehub-pm-dcg.v1
 id: feature
 kind: sessionWorkflow
-version: 6
+version: 8
 entry: intake
-executionBudget: { wallClockMs: 600000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4, maxLlmRequests: 128 }
+executionBudget: { wallClockMs: 600000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4 }
 nodes:
   - id: intake
     kind: activity
+    activity: pm
     executor: { actor: pm }
     objective: { prompt: prompts/intake.md }
     outputs: [intent.aligned]
   - id: plan
     kind: activity
+    activity: pm
     executor: { actor: pm }
     objective: { prompt: prompts/plan.md }
     outputs: [plan.ready]
   - id: implement
     kind: activity
+    activity: work
     executor:
       actor: workAgent
       space: { matchTags: [implementation], lease: exclusive, cleanRequired: true }
@@ -24,22 +27,35 @@ nodes:
     fanout: { source: plan.workstreams, maxItems: 4 }
   - id: review
     kind: activity
-    executor: { actor: system }
+    activity: review
+    executor:
+      actor: reviewer
+      space: { matchTags: [review], lease: exclusive, cleanRequired: true }
+    objective: { prompt: prompts/review.md }
+    capacity: 4
+  - id: approve-delivery
+    kind: activity
+    activity: userDecision
+    executor: { actor: user }
   - id: integrate
     kind: activity
+    activity: integrate
     executor: { actor: system }
   - id: review-triage
     kind: activity
+    activity: pm
     executor: { actor: pm }
     objective: { prompt: prompts/triage-review.md }
     outputs: [review.rework.ready, review.escalation.ready]
   - id: prepare-recovery
     kind: activity
+    activity: pm
     executor: { actor: pm }
     objective: { prompt: prompts/repair-space.md }
     outputs: [recovery.ready]
   - id: recover
     kind: activity
+    activity: userDecision
     executor: { actor: user }
   - id: delivered
     kind: terminal
@@ -55,7 +71,21 @@ edges:
   - { id: planned, from: plan, to: implement, when: plan.ready }
   - { id: implemented, from: implement, to: review, when: work.candidate }
   - { id: implementation-blocked, from: implement, to: prepare-recovery, when: { any: [work.blocked, space.quarantined] } }
-  - { id: approved, from: review, to: integrate, when: review.pass }
+  - { id: approved, from: review, to: approve-delivery, when: review.pass }
+  - id: delivery-approved
+    label: 批准集成交付
+    description: 接受独立 Reviewer 通过的候选，交给 Coordinator 集成。
+    from: approve-delivery
+    to: integrate
+    when: decision.ready
+    chooseBy: user
+  - id: delivery-cancelled
+    label: 取消本次交付
+    description: 保留候选与评审证据，但不集成本次需求。
+    from: approve-delivery
+    to: cancelled
+    when: decision.ready
+    chooseBy: user
   - { id: review-failed, from: review, to: review-triage, when: review.fail }
   - { id: review-rework, from: review-triage, to: implement, when: review.rework.ready, chooseBy: pm, maxTraversals: 2 }
   - { id: review-escalate, from: review-triage, to: recover, when: review.escalation.ready, chooseBy: pm }

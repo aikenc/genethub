@@ -1,7 +1,7 @@
 {
   "schema": "pipespace.v1",
   "name": "{{GENEHUB_PM_SPACE_NAME}}",
-  "description": "Project management Space for {{GENEHUB_PROJECT_NAME}}.",
+  "description": "{{GENEHUB_PROJECT_NAME}} 的项目管理 Space。",
   "agents": ["codex", "cursor", "codebuddy", "claude-code"],
   "skills": ["project-workflow"],
   "tags": ["project-manager"],

@@ -244,21 +244,30 @@ pub struct WorkspaceInfo {
 #[ts(export, export_to = "index.ts")]
 pub struct PmProjectStatus {
     pub workspace_id: String,
-    pub controller_session_id: String,
     pub phase: String,
     pub lifecycle: String,
     #[ts(type = "number")]
     pub revision: u64,
-    #[ts(optional)]
-    pub intent: Option<PmIntentStatus>,
     pub work_packages: Vec<PmWorkPackageStatus>,
     pub agent_spaces: Vec<PmAgentSpaceStatus>,
     pub workflow_catalog: PmWorkflowCatalogStatus,
     pub workflow_runs: Vec<PmWorkflowRunStatus>,
+    pub template: PmTemplateStatus,
     pub improvement_candidates: Vec<PmImprovementCandidateStatus>,
     pub supervisor: PmSupervisorStatus,
     #[ts(type = "number")]
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmTemplateStatus {
+    pub installed_version: String,
+    pub installed_digest: String,
+    pub available_version: String,
+    pub available_digest: String,
+    pub upgrade_available: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -302,7 +311,6 @@ pub struct PmWorkPackageStatus {
     pub title: String,
     pub outcome: String,
     pub status: String,
-    pub dependencies: Vec<String>,
     /// Capability narrowing for one fanout item. The Coordinator combines
     /// these with the node selector before choosing a concrete Agent Space.
     pub required_space_tags: Vec<String>,
@@ -380,7 +388,6 @@ pub struct PmWorkflowBudgetPolicyStatus {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
-    pub max_llm_requests: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -390,9 +397,13 @@ pub struct PmWorkflowNodeStatus {
     pub id: String,
     pub kind: String,
     #[ts(optional)]
+    pub activity: Option<String>,
+    #[ts(optional)]
     pub actor: Option<String>,
     #[ts(optional)]
     pub objective: Option<String>,
+    #[ts(optional)]
+    pub capacity: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -456,7 +467,6 @@ pub struct PmWorkflowRunBudgetStatus {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
-    pub max_llm_requests: u32,
     #[ts(type = "number")]
     pub started_at_ms: i64,
     #[ts(type = "number")]
@@ -476,8 +486,6 @@ pub struct PmWorkflowRunBudgetStatus {
     pub exhausted_at_ms: Option<i64>,
     pub work_sessions_started: u32,
     pub active_work_sessions: u32,
-    pub llm_requests_observed: u32,
-    pub llm_requests_remaining: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -953,6 +961,21 @@ pub enum SessionKind {
 pub struct WorkSessionInfo {
     pub work_package_id: String,
     pub controller_session_id: String,
+    /// Immutable project-owned objective selected by the Workflow Run. It is
+    /// injected into every turn as system context and is not editable by the
+    /// PM dispatch message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_prompt: Option<String>,
+    /// Present only for a project Workflow improvement review. The synthetic
+    /// `work_package_id` keeps the durable WorkSession role compatible while
+    /// these fields bind the Reviewer to the exact governed candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub improvement_candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub improvement_candidate_digest: Option<String>,
 }
 
 /// End-user affordances computed from the durable session kind.

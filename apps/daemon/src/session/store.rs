@@ -703,6 +703,14 @@ impl Store {
         Store { homes }
     }
 
+    /// Releases this daemon's writer claim after every live producer for the
+    /// session has stopped. A daemon may stay alive through detached support
+    /// tasks during an in-process restart, so relying on `Drop` alone can make
+    /// the replacement daemon observe a writer that no longer exists.
+    pub(super) fn release_writer(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        self.homes.release(workspace_id, session_id)
+    }
+
     pub fn session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         self.ensure_not_deleted(workspace_id, session_id)?;
         self.raw_session_dir(workspace_id, session_id)

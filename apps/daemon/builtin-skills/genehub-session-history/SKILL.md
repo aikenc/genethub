@@ -1,6 +1,6 @@
 ---
 name: genehub-session-history
-description: Inspect, retrieve, cite, or reconstruct GeneHub session history with the read-only genet CLI. Use for imported or forked conversations, missing historical details, source refs, and session analysis. The CLI does not call an LLM.
+description: 使用只读 genet CLI 检查、检索、引用或重建 GeneHub Session 历史。用于导入/分叉对话、缺失历史细节、来源引用和会话分析；该 CLI 不调用 LLM。
 ---
 
 # GeneHub session history

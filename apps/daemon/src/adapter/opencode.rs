@@ -85,6 +85,14 @@ impl AgentAdapter for OpenCodeAdapter {
         }
     }
 
+    fn model_catalog_is_authoritative(&self) -> bool {
+        // `opencode serve` loads an additional project-local `opencode.json`
+        // from `SessionConfig::cwd`. `catalog()` has no cwd and therefore only
+        // advertises the global config; it must not invalidate an explicit
+        // provider/model id that is owned by the project.
+        false
+    }
+
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
         let binary = find_executable(BINARY).ok_or_else(|| anyhow!("OpenCode is not installed"))?;
         let port = pick_port()?;
@@ -112,7 +120,7 @@ impl AgentAdapter for OpenCodeAdapter {
         // What the server says about itself is worth keeping for two reasons: it
         // is the only account of why a start failed, and a pipe nobody reads
         // eventually fills and stops the process that is writing into it.
-        let chatter = Chatter::default();
+        let chatter = Arc::new(Chatter::default());
         chatter.watch("opencode", child.stdout.take()).await;
         chatter.watch("opencode", child.stderr.take()).await;
 
@@ -155,6 +163,7 @@ impl AgentAdapter for OpenCodeAdapter {
             events,
             turn,
             child: Mutex::new(Some(child)),
+            chatter,
         }))
     }
 
@@ -465,6 +474,7 @@ struct OpenCodeSession {
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
     child: Mutex<Option<Child>>,
+    chatter: Arc<Chatter>,
 }
 
 #[async_trait]
@@ -500,6 +510,7 @@ impl AgentSession for OpenCodeSession {
         let events = self.events.clone();
         let turn_state = self.turn.clone();
         let completed = turn_id.clone();
+        let chatter = self.chatter.clone();
 
         // The call blocks for the whole turn. Its body is the finished message,
         // and it is the authority: the event stream is a separate connection
@@ -546,9 +557,11 @@ impl AgentSession for OpenCodeSession {
                         return;
                     }
                     state.id = None;
+                    let mut error = classify_http(status.as_u16(), &body);
+                    error.message.push_str(&chatter.tail());
                     SessionEvent::TurnFailed {
                         turn_id: completed,
-                        error: classify_http(status.as_u16(), &body),
+                        error,
                     }
                 }
                 Err(error) => {
