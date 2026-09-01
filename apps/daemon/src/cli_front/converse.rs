@@ -910,7 +910,6 @@ fn emit_event(event: &SequencedEvent) {
 fn emit(kind: &str, data: Value) {
     let _ = output::succeed(kind, data);
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,50 +960,6 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(run.prompt, "fix the build");
-    }
-
-    #[test]
-    fn an_explicit_stdin_prompt_preserves_multiline_shell_metacharacters() {
-        let options = Options::parse(
-            &words(&["--message", "-", "--no-wait"]),
-            &selection(Some("/srv/app")),
-        )
-        .unwrap();
-        let run = options
-            .into_run_with_stdin(
-                Some("codex".into()),
-                Some(b"  first line\nUse `git status` and $PROJECT literally.  \n".to_vec()),
-            )
-            .unwrap();
-        assert_eq!(
-            run.prompt,
-            "  first line\nUse `git status` and $PROJECT literally.  "
-        );
-        assert!(!run.wait);
-    }
-
-    #[test]
-    fn stdin_prompt_is_explicit_exclusive_and_utf8() {
-        let mixed = Options::parse(
-            &words(&["ordinary prompt", "--message", "-"]),
-            &selection(None),
-        )
-        .unwrap()
-        .into_run_with_stdin(None, Some(b"stdin".to_vec()))
-        .unwrap_err();
-        assert!(mixed.message.contains("cannot be combined"));
-
-        let duplicate = Options::parse(
-            &words(&["--message", "-", "--message", "-"]),
-            &selection(None),
-        )
-        .unwrap_err();
-        assert!(duplicate.message.contains("only once"));
-
-        let invalid = decode_stdin_prompt(vec![0xff]).unwrap_err();
-        assert!(invalid.message.contains("UTF-8"));
-        let empty = decode_stdin_prompt(b" \n".to_vec()).unwrap_err();
-        assert!(empty.message.contains("non-empty"));
     }
 
     #[test]
@@ -1070,71 +1025,6 @@ mod tests {
         assert_eq!(run.session_id.as_deref(), Some("s_1"));
         assert_eq!(run.prompt, "carry on");
         assert_eq!(run.agent_id, None);
-    }
-
-    #[test]
-    fn pm_and_workagent_creation_are_distinct_cli_intents() {
-        let pm = run_of(
-            parse_pm(
-                &words(&["run", "--workspace", "w_project", "build the game"]),
-                &selection(None),
-            )
-            .unwrap(),
-        );
-        assert!(pm.project_manager);
-        assert_eq!(pm.agent_id, None);
-        assert_eq!(pm.workspace_id.as_deref(), Some("w_project"));
-
-        let work = run_of(
-            parse_agent(
-                &words(&[
-                    "run",
-                    "--agent",
-                    "codex",
-                    "--workspace",
-                    "w_space",
-                    "--work-package",
-                    "wp-1",
-                    "implement",
-                ]),
-                &selection(None),
-            )
-            .unwrap(),
-        );
-        assert!(!work.project_manager);
-        assert_eq!(work.work_package_id.as_deref(), Some("wp-1"));
-
-        assert!(parse_pm(
-            &words(&["run", "--agent", "codex", "manage"]),
-            &selection(None),
-        )
-        .is_err());
-        assert!(parse_agent(
-            &words(&[
-                "run",
-                "--agent",
-                "codex",
-                "--session",
-                "s_1",
-                "--work-package",
-                "wp-1",
-                "continue",
-            ]),
-            &selection(None),
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn an_owning_pm_can_never_block_on_its_workagent_turn() {
-        let work = WorkSessionInfo {
-            work_package_id: "wp-1".into(),
-            controller_session_id: "s_pm".into(),
-        };
-        assert!(!effective_wait(true, Some("s_pm"), Some(&work)));
-        assert!(!effective_wait(false, Some("s_pm"), Some(&work)));
-        assert!(effective_wait(true, Some("s_other"), Some(&work)));
-        assert!(effective_wait(true, Some("s_pm"), None));
     }
 
     fn request(

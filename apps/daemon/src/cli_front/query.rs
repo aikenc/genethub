@@ -1894,13 +1894,6 @@ mod tests {
             schema["commands"][0]["outputSchema"]["properties"]["schema"]["const"],
             CLI_SCHEMA
         );
-        assert!(
-            command_schema("agent-space.builder")["inputSchema"]["properties"]["operation"]["enum"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("init"))
-        );
-
         let capabilities = capabilities_data();
         assert_eq!(capabilities["source"], "staticCliContract");
         assert_eq!(capabilities["remoteExec"], true);

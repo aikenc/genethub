@@ -51,6 +51,22 @@ pub enum ReviewVerdict {
     Fail,
 }
 
+/// Reviewer-owned assessment kept as structured evidence for PM triage.
+///
+/// The Reviewer reports technical impact and an approximate remediation
+/// request count.  The PM may use this record for scope/budget decisions but
+/// cannot edit it or turn a failing verdict into acceptance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFinding {
+    pub severity: String,
+    pub title: String,
+    pub acceptance_impact: String,
+    pub recommended_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_requests: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewEvidence {
@@ -59,6 +75,8 @@ pub struct ReviewEvidence {
     pub candidate_tree: String,
     pub verdict: Option<ReviewVerdict>,
     pub evidence: Vec<String>,
+    #[serde(default)]
+    pub findings: Vec<ReviewFinding>,
 }
 
 /// Deterministic evidence that an independently accepted candidate is now
@@ -312,6 +330,9 @@ pub fn transition(
                     || (existing.verdict.is_some()
                         && review.verdict.is_some()
                         && existing.verdict != review.verdict)
+                    || (!existing.findings.is_empty()
+                        && !review.findings.is_empty()
+                        && existing.findings != review.findings)
                 {
                     anyhow::bail!("idempotent review transition changed bound evidence");
                 }
@@ -319,6 +340,9 @@ pub fn transition(
                 let bound = package.review.as_mut().expect("checked review exists");
                 if bound.verdict.is_none() {
                     bound.verdict = review.verdict;
+                }
+                if bound.findings.is_empty() {
+                    bound.findings = review.findings.clone();
                 }
                 for evidence in &review.evidence {
                     if !bound.evidence.contains(evidence) {

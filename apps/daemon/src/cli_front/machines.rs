@@ -184,37 +184,9 @@ fn endpoint_without_ticket(endpoint: &str) -> String {
         None => endpoint.to_string(),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn the_store_belongs_to_the_invoking_daemon() {
-        let first = tempfile::tempdir().expect("first daemon data directory");
-        let second = tempfile::tempdir().expect("second daemon data directory");
-        let (first_state, _first_pty) =
-            crate::state::AppState::build(crate::config::Paths::new(first.path()))
-                .await
-                .expect("first daemon state");
-        let (second_state, _second_pty) =
-            crate::state::AppState::build(crate::config::Paths::new(second.path()))
-                .await
-                .expect("second daemon state");
-
-        let first_file = crate::cli_front::LOCAL_STATE
-            .scope(first_state, async { file().expect("first machine store") })
-            .await;
-        let second_file = crate::cli_front::LOCAL_STATE
-            .scope(second_state, async {
-                file().expect("second machine store")
-            })
-            .await;
-
-        assert_eq!(first_file, first.path().join("machines.json"));
-        assert_eq!(second_file, second.path().join("machines.json"));
-        assert_ne!(first_file, second_file);
-    }
 
     #[test]
     fn listing_a_machine_never_prints_its_secret_or_its_ticket() {

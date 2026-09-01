@@ -116,6 +116,30 @@ controlCase(
 );
 
 controlCase(
+  "specialty.cli.control.agent-space-builder-schema",
+  "Agent Space Builder is discoverable from the public CLI schema",
+  "genet schema agent-space.builder exposes the complete operation enum through the running product boundary",
+  ["Builder commands exist only in prose", "agent-space init is missing from public discovery", "schema and command routing drift"],
+  async (t) => {
+    await withCli(t, async (cli) => {
+      cli.json(["daemon", "start"]);
+      const body = cli.json(["schema", "agent-space.builder"]);
+      const data = body.data as Record<string, unknown> | undefined;
+      const command = data?.command as Record<string, unknown> | undefined;
+      const inputSchema = command?.inputSchema as Record<string, unknown> | undefined;
+      const properties = inputSchema?.properties as Record<string, unknown> | undefined;
+      const operation = properties?.operation as Record<string, unknown> | undefined;
+      const operations = operation?.enum as unknown[] | undefined;
+      t.assertions.assert(
+        JSON.stringify(operations) === JSON.stringify(["init", "check", "explain", "build", "verify", "clean"]),
+        `agent-space.builder operations drifted: ${JSON.stringify(operations)}`,
+      );
+    });
+  },
+  1_000,
+);
+
+controlCase(
   "specialty.cli.control.extra-argument-refused",
   "Lifecycle commands reject ignored trailing arguments",
   "daemon status with an extra token exits 2 and does not start or mutate daemon state",

@@ -16,6 +16,7 @@ export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
 export {
   awaitHumanDecision,
   humanDecisionResponseDeadline,
+  humanDecisionStillApplicable,
   type HumanDecisionRequest,
   type HumanDecisionResponse,
 } from "./interaction/human-decision.ts";

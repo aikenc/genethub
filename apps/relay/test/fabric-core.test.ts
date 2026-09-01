@@ -44,6 +44,7 @@ class TestConnection implements FabricEndpointConnection {
   readonly lateFrameBudgets = new Map<string, number>();
   readonly sent: FabricFrame[] = [];
   readonly closeCodes: number[] = [];
+  flowFailure: Error | null = null;
   closed = false;
   strikes = 0;
 
@@ -72,6 +73,7 @@ class TestConnection implements FabricEndpointConnection {
   }
 
   async sendFlow(frame: FabricFrame): Promise<void> {
+    if (this.flowFailure) throw this.flowFailure;
     this.sent.push(cloneFrame(frame));
   }
 
@@ -157,13 +159,17 @@ async function establish(
   routeHandle = `route:${ticket}`,
   expiresAt = NEVER,
   credit = CREDIT,
+  acceptCredit = credit,
 ): Promise<string> {
   authority.grant(ticket, target.context.endpointHandle, routeHandle, expiresAt);
   await core.handle(source, open(sourceStreamId, ticket, `hello:${ticket}`, credit));
   const incoming = last(target);
   assert.equal(incoming.kind, FabricKind.Incoming);
   assert.deepEqual(incoming.payload, Buffer.from(`hello:${ticket}`));
-  await core.handle(target, frame(FabricKind.Accept, incoming.streamId, credit, Buffer.from("accepted")));
+  await core.handle(
+    target,
+    frame(FabricKind.Accept, incoming.streamId, acceptCredit, Buffer.from("accepted")),
+  );
   const accepted = last(source);
   assert.equal(accepted.kind, FabricKind.Accept);
   assert.equal(accepted.streamId, sourceStreamId);
@@ -208,6 +214,48 @@ describe("Fabric endpoint-neutral routing", () => {
       source.sent.length,
       sourceFrames,
       "Relay must not return or forward application credit in transport flow",
+    );
+  });
+
+  it("keeps the source endpoint when a transport-flow peer disappears mid-drain", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { streamId: () => id(901) });
+    const source = new TestConnection("endpoint:flow-source", {
+      transportFlow: true,
+    });
+    const target = new TestConnection("endpoint:flow-target", {
+      transportFlow: true,
+    });
+    core.register(source);
+    core.register(target);
+    const targetStreamId = await establish(
+      core,
+      authority,
+      source,
+      target,
+      id(93),
+      "flow-drop",
+      "route:flow-drop",
+      NEVER,
+      CREDIT,
+      0n,
+    );
+
+    target.flowFailure = new Error("the target socket closed while draining");
+    await assert.doesNotReject(
+      core.handle(
+        source,
+        frame(FabricKind.Data, id(93), 1n, Buffer.from("late data")),
+      ),
+    );
+
+    assert.equal(core.current(source.context.endpointHandle), source);
+    assert.equal(source.closed, false);
+    assert.equal(source.streams.has(id(93)), false);
+    assert.equal(target.streams.has(targetStreamId), false);
+    assert.deepEqual(
+      last(source),
+      frame(FabricKind.Reset, id(93), BigInt(FabricReset.EndpointClosed)),
     );
   });
 

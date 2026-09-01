@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   humanDecisionResponseDeadline,
+  humanDecisionStillApplicable,
   listHumanDecisions,
   publishHumanDecisionRequest,
   readHumanDecisionResponse,
@@ -99,5 +100,32 @@ test("human response budget is carved from rather than added to the Run deadline
       postDecisionReserveMs: 3_000,
     }),
     undefined,
+  );
+});
+
+test("budget-only Run revisions do not stale an otherwise identical user decision", () => {
+  const requested = {
+    id: "run-1",
+    revision: 7,
+    nodeInstances: [{ id: "recover-2", nodeId: "recover", status: "active" }],
+    availableEdges: [
+      { id: "retry", from: "recover", to: "implement", chooseBy: "user", satisfied: true },
+    ],
+  };
+  assert.equal(
+    humanDecisionStillApplicable(requested, { ...requested, revision: 9 }, "retry"),
+    true,
+  );
+  assert.equal(
+    humanDecisionStillApplicable(
+      requested,
+      {
+        ...requested,
+        revision: 10,
+        nodeInstances: [{ id: "recover-3", nodeId: "recover", status: "active" }],
+      },
+      "retry",
+    ),
+    false,
   );
 });

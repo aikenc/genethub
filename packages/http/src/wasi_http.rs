@@ -33,10 +33,6 @@ use wasi::io::streams::{InputStream, StreamError};
 /// frames than this; the ceiling only matters on bulk downloads.
 const READ_CHUNK: u64 = 64 * 1024;
 
-/// A body may go quiet for a long time between SSE frames while a model
-/// thinks. Anything shorter turns a slow first token into a transport error.
-const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-
 /// Backoff bounds for the poll loop. The floor keeps first-token latency low;
 /// the ceiling keeps a long quiet download from burning host calls.
 const POLL_MIN: Duration = Duration::from_millis(1);
@@ -542,10 +538,17 @@ async fn send_once(
         .map_err(|()| Error::new(format!("invalid path {path_with_query:?}")))?;
 
     let options = RequestOptions::new();
-    let idle = idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT);
     let _ = options.set_connect_timeout(connect_timeout.map(nanos));
-    let _ = options.set_first_byte_timeout(Some(nanos(idle)));
-    let _ = options.set_between_bytes_timeout(Some(nanos(idle)));
+    // Match reqwest's native default: no request/read timeout unless the
+    // caller explicitly selected one. This matters for adapters such as
+    // OpenCode whose prompt POST intentionally returns only after a complete
+    // coding turn. The old implicit five-minute first-byte timeout cut off a
+    // healthy, still-producing WorkSession and reported it as
+    // ConnectionReadTimeout even though the owning Workflow Run had its own
+    // deterministic budget and interrupt path.
+    let response_timeout = idle_timeout.map(nanos);
+    let _ = options.set_first_byte_timeout(response_timeout);
+    let _ = options.set_between_bytes_timeout(response_timeout);
 
     // `body()` has to come out before `handle` takes the request.
     let outgoing_body = request

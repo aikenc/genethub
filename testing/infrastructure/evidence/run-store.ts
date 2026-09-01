@@ -11,6 +11,7 @@ export interface RunStore {
   writeResult(result: UnitResult): void;
   writeFailure(result: UnitResult, diagnostic: string): void;
   writeReport(result: UnitResult): void;
+  writeRetentionArtifacts(result: UnitResult): void;
   finalize(manifest: RunManifest, summary: string): void;
 }
 
@@ -23,7 +24,12 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
   return {
     dir,
     writeResult(result) {
-      const { diagnostic: _diagnostic, failureArtifacts: _failureArtifacts, ...publicResult } = result;
+      const {
+        diagnostic: _diagnostic,
+        failureArtifacts: _failureArtifacts,
+        retentionArtifacts: _retentionArtifacts,
+        ...publicResult
+      } = result;
       appendFileSync(path.join(dir, "results.ndjson"), `${JSON.stringify(publicResult)}\n`);
     },
     writeFailure(result, diagnostic) {
@@ -53,6 +59,26 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
       mkdirSync(folder, { recursive: true });
       const name = `${result.caseId.replace(/[^\w.-]+/g, "_")}.md`;
       writeFileSync(path.join(folder, name), redactText(result.message ?? ""));
+    },
+    writeRetentionArtifacts(result) {
+      if (!result.retentionArtifacts) return;
+      const staging = path.resolve(result.retentionArtifacts);
+      const internal = path.resolve(dir, ".internal");
+      if (staging === internal || !staging.startsWith(`${internal}${path.sep}`) || !existsSync(staging)) {
+        throw new Error("retained evidence staging path was outside this run");
+      }
+      const caseFolder = path.join(
+        dir,
+        "reports",
+        result.caseId.replace(/[^\w.-]+/g, "_"),
+        "evidence",
+      );
+      const unit = result.id.replace(/[^\w.-]+/g, "_");
+      const destination = path.join(caseFolder, unit);
+      rmSync(destination, { recursive: true, force: true });
+      mkdirSync(path.dirname(destination), { recursive: true });
+      cpSync(staging, destination, { recursive: true, force: true });
+      rmSync(staging, { recursive: true, force: true });
     },
     finalize(manifest, summary) {
       writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);

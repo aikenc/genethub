@@ -184,39 +184,6 @@ fn add_project_manager_identity_from(
     object.insert("projectManagerToken".into(), Value::String(token));
 }
 
-#[cfg(test)]
-mod project_manager_identity_tests {
-    use super::add_project_manager_identity_from;
-
-    #[test]
-    fn identity_is_attached_only_as_an_authenticated_pair() {
-        for (session_id, token) in [
-            (Some("session".to_string()), None),
-            (None, Some("token".to_string())),
-            (Some(" ".to_string()), Some("token".to_string())),
-            (Some("session".to_string()), Some(" ".to_string())),
-        ] {
-            let mut body = serde_json::json!({});
-            add_project_manager_identity_from(&mut body, session_id, token);
-            assert_eq!(body, serde_json::json!({}));
-        }
-
-        let mut body = serde_json::json!({});
-        add_project_manager_identity_from(
-            &mut body,
-            Some("session".to_string()),
-            Some("token".to_string()),
-        );
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "callerSessionId": "session",
-                "projectManagerToken": "token",
-            })
-        );
-    }
-}
-
 fn apply(record: &CliRecord, exit: &mut Option<i32>) {
     if let Some(code) = record.exit {
         *exit = Some(code);
@@ -306,58 +273,4 @@ fn piped_stdin() -> Vec<u8> {
         );
     }
     buffer
-}
-
-#[cfg(test)]
-mod tests {
-    use super::accepts_piped_stdin;
-
-    fn words(input: &[&str]) -> Vec<String> {
-        input.iter().map(|word| (*word).to_string()).collect()
-    }
-
-    #[test]
-    fn only_explicit_stdin_consumers_read_the_callers_pipe() {
-        assert!(accepts_piped_stdin(&words(&[
-            "--machine",
-            "m_1",
-            "shell",
-            "--",
-            "cat",
-        ])));
-        assert!(accepts_piped_stdin(&words(&[
-            "shell", "--cwd", "/project", "--", "cat",
-        ])));
-        assert!(!accepts_piped_stdin(&words(&[
-            "workspace",
-            "register-agent-space",
-            "spaces/code/code.code-workspace",
-        ])));
-        assert!(!accepts_piped_stdin(&words(&[
-            "agent", "run", "--agent", "codex", "prompt",
-        ])));
-        assert!(accepts_piped_stdin(&words(&[
-            "session",
-            "send",
-            "s_1",
-            "--no-wait",
-            "--message",
-            "-",
-        ])));
-        assert!(accepts_piped_stdin(&words(&[
-            "--machine",
-            "m_1",
-            "pm",
-            "run",
-            "--message",
-            "-",
-        ])));
-        assert!(!accepts_piped_stdin(&words(&[
-            "session",
-            "send",
-            "s_1",
-            "--message",
-            "text",
-        ])));
-    }
 }

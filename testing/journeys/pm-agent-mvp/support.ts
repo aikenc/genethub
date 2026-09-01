@@ -8,6 +8,7 @@ import {
   awaitHumanDecision,
   BlockedError,
   humanDecisionResponseDeadline,
+  humanDecisionStillApplicable,
   type CaseContext,
   type HumanDecisionRequest,
 } from "../../framework/public.ts";
@@ -187,16 +188,7 @@ export async function runRealPmDelivery(
           const currentRun = current?.workflowRuns.find(
             (item) => item.controllerSessionId === pm.id,
           );
-          const edgeStillEligible = currentRun?.availableEdges.some(
-            (edge) =>
-              edge.id === decision.edgeId && edge.chooseBy === "user" && edge.satisfied,
-          );
-          if (
-            !currentRun ||
-            currentRun.id !== workflowRun.id ||
-            currentRun.revision !== workflowRun.revision ||
-            !edgeStillEligible
-          ) {
+          if (!humanDecisionStillApplicable(workflowRun, currentRun, decision.edgeId)) {
             throw new Error(
               `human decision ${decision.requestId} became stale before transition`,
             );
@@ -483,10 +475,24 @@ export function assertNpmVerification(t: CaseContext, game: string): void {
 }
 
 export function assertEffectiveProjectScale(t: CaseContext, game: string): number {
-  const lines = effectiveSourceLines(game);
+  return assertEffectiveProjectScaleBetween(t, game, 35_000, 65_000, "project");
+}
+
+export function effectiveProjectSourceLines(root: string): number {
+  return effectiveSourceLines(root);
+}
+
+export function assertEffectiveProjectScaleBetween(
+  t: CaseContext,
+  root: string,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  const lines = effectiveSourceLines(root);
   t.assertions.assert(
-    lines >= 35_000 && lines <= 65_000,
-    `effective project-owned source is ${lines} lines, expected 35k-65k`,
+    lines >= minimum && lines <= maximum,
+    `${label} effective project-owned source is ${lines} lines, expected ${minimum}-${maximum}`,
   );
   return lines;
 }

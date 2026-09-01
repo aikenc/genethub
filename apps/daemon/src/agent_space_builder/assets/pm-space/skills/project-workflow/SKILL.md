@@ -20,7 +20,12 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
 1. `genet pm project workflow list` 查看项目 Workflow；
 2. 需求明确后立即用 `genet pm project workflow select --graph <id>` 固定本 Session 的图版本和
    `executionBudget`；内核从此计时，提示词无权延长。每次派工前读取 `remainingMs`、`maxWorkSessions`
-   与 `maxConcurrentWorkSessions`，预算到期或进入 `budgetExhausting/budgetExhausted` 后不得继续派工，
+   、`maxConcurrentWorkSessions` 与 `llmRequestsRemaining`。该预算只属于本 PM Session 的任务 Run，
+   不存在可被某个 Session 改写的项目级预算池；用户决策节点的等待时间由图状态触发暂停，不消耗执行
+   时钟。一个 adapter 报告的 LLM round 粗略计为一次请求，Coordinator 汇总 PM、Worker 与 Reviewer
+   已完成 TurnSummary 和运行中 TurnProgress；长回合已经发生的请求不会等到回合结束才计入预算，模型
+   不能自报、延迟或重置。时间或请求预算到期、或进入
+   `budgetExhausting/budgetExhausted` 后不得继续派工，
    也不得把预算耗尽报告成完成；派发保留会单调消耗总会话额度，provider/session 创建失败、清除绑定或
    重试都不会返还；
 3. 正常需求推进只用一次 `genet pm project workflow status` 读取本 Session 的 Run、WorkPackage、精简
@@ -38,10 +43,26 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
    `worktrees/<space>/<repository>`；PM 在该路径创建 worktree 后再推进 Ready，WorkSession 仍须使用
    返回的 Space。不得传旧的 `--space`/`--worktree` 参数；`--space-tag` 是能力而不是 Space 名；
 6. 只从 Coordinator 返回的合法边中推进。唯一确定边由 Coordinator 自动处理；语义分叉才由 PM 选择；
-7. 独立 Review 通过并把包推进到 `Accepted` 后，在活动 `integrate` 节点逐包执行
-   `genet pm project package integrate --id <package-id>`。这是 Coordinator 串行执行的受控本地 Git
-   操作：它复验候选 commit/tree、评审 verdict、干净 `main`、合并结果和祖先关系，并从持久证据推导
-   `baseline.integrated`。不要为机械合并创建 WorkPackage/WorkSession；冲突时记录节点声明的
+7. WorkPackage 进入 `Candidate` 后，由 PM 负责组建评审小队：对**原 WorkPackage id**在 Coordinator
+   给出的独立 Review Space 中启动一个 Reviewer WorkSession。不要新建“Review WorkPackage”，也不要等待
+   Coordinator 自己创建 Reviewer。Workflow 中 `review` 节点的 `actor: system` 只表示 Coordinator 负责
+   校验 Reviewer 结果、推导 `review.*` 事实和推进图，不表示 Coordinator 负责选择 Agent 或创建会话。
+   Supervisor 的 Candidate 事件会携带 `action=dispatch-independent-review`、`reviewSpace` 与
+   `reviewWorkspace`；PM 必须使用该 workspace 和原包 id 执行 `genet agent run ... --work-package <包 id>
+   --no-wait <评审合同>`。评审合同必须保持候选 worktree 只读：只用 Git 身份/diff 与候选自己的定向
+   测试、build 取证，不得 checkout/revert/reset、复制候选后反演基线、写入或清理候选文件。若评审命令
+   改动 tracked 文件或留下非忽略文件，Reviewer 必须返回 `review-fail`，不得自行清理后宣告通过。
+   并行 fanout 的 Reviewer 还必须拒绝候选代码或测试依赖“兄弟包尚未合入”才成立的偶然绿色断言，例如
+   把当前为空的 live registry、暂缺的导出或默认调用暂时返回 null 当成永久契约；包内语义使用
+   注入 fixture，共享 live 状态只断言在兄弟包合入前后都成立的条件不变量。但不得反向误用这条：若最终组合
+   门禁只因责任兄弟包尚未合入而暂时不可观测，不能据此把绑定切片判失败或要求它修改责任外路径；应用 fixture
+   或动态探针评审本包边界，完整合流门禁留到 merged baseline。review-fail 必须指向由绑定候选造成的验收缺陷
+   或明确的集成 seam，不能只报告“兄弟包不在”。这些判断属于 Reviewer，不得转交 PM 读代码补评。
+   独立 Reviewer 的结构化 `review-pass` 由 Coordinator 绑定到精确候选并自动进入 `Accepted`；随后
+   `actor: system` 的 `integrate` 节点串行完成受控本地 Git 集成，复验候选 commit/tree、Reviewer
+   独立性与 verdict、干净 `main`、合并结果和祖先关系，并从持久证据推导 `baseline.integrated`。PM
+   不执行评审、验收或 Git 合并。`review-fail` 进入 `review-triage`：PM 只依据验收影响与本 Run 剩余预算
+   选择有边界返工，或升级给用户作范围/预算决策；不能覆盖 Reviewer verdict。集成冲突会记录
    `integration.blocked` 并进入恢复路径；
 8. terminal 后确认 WorkSession 结束和 Space 已回收或隔离，再向用户报告交付。
 
@@ -54,7 +75,24 @@ phase，或仅因 Session id 不同就重新注册、重建、重录已有 Agent
 ```text
 genet pm project intent set --outcome <目标> --acceptance <标准> [--acceptance <标准> ...] [--constraint <约束> ...] [--out-of-scope <不做事项> ...]
 genet pm project workflow transition --edge <当前 PM 出边> --fact <该活动声明且已经完成的 output>
+genet pm project package put --id <稳定包 id> --title <用户可见职责> --outcome <可验证结果与证据> --repository <repositories 下直接子目录名> --branch <独立本地分支> --node <当前活动 workAgent 节点> [--space-tag <包级专业能力> ...]
+genet pm project package transition --id <包 id> --to ready
+genet agent run --agent <第三方 Agent id> --model <该 Agent 原生 model id> --workspace <Coordinator 选中 Space 的 workspace id> --work-package <包 id> --no-wait <完整工作合同>
 ```
+
+候选评审复用最后一条命令，但 workspace 必须是 Supervisor/Coordinator 返回的独立 Review Space，
+`--work-package` 仍是原 Candidate 包 id。该调用会原子完成 Candidate → Review 和 Review WorkSession 绑定；
+PM 不执行 `package transition --to review`，也不注入 `review.pass/review.fail`。如果 Candidate 事件显示
+`reviewTarget=unavailable`，先补建、修复或重新记录符合包级能力标签的 Review Space；不能只等 system 节点。
+
+`package put` 的必填字段就是 `id/title/outcome/repository/branch/node`；`--space-tag` 可重复但不是必填。
+不要用 `responsibility`、`goal`、旧的 `space/worktree` 字段，也不要用 `--help` 或失败调用来发现它们。
+若用户或结构化输入已经给出 Agent、原生 model id、包级能力和 workspace id，就把 Workflow 选择、Intent、
+PM 边和当前 fanout 的全部派工放进一次内置 `genehub` 批量工具调用；不要再次执行 `agent list`，也不要
+改用 shell。fanout 的命令必须严格分成三个连续阶段：先执行本节点**全部** `package put`，确认所有兄弟包
+仍为 Planned；再执行本节点**全部** `package transition --to ready`；最后执行本节点**全部**
+`agent run --no-wait`。禁止按单包交错成 `put A → ready A → run A → put B`，因为第一个 Ready 会封闭
+节点实例并拒绝后续兄弟包。批量命令仍逐条经过 CLI、鉴权、Coordinator 和租约门禁，不是绕过内核。
 
 内置 `feature` 图在需求已经明确时采用这条精确路径：
 
@@ -74,6 +112,12 @@ genet pm project workflow transition --edge planned --fact plan.ready
 补包。`maxItems` 是硬上限。所有兄弟包结算后，Coordinator 才从持久状态推导 candidate/blocked
 事实；PM 不能用 `--fact` 自述这些事实。返工保留旧包及评审证据，在新节点实例中使用新 WorkPackage id。
 
+评审失败后选择返工时，保留旧包和 Reviewer 证据，在新节点实例创建新的 WorkPackage id。若 finding 属于原切片，
+新包复用失败包的精确 `repository`、`branch` 与包级能力标签，Coordinator 只在同一 PM Session 内复用该分支
+lineage。若结构化 finding 明确指向另一已声明责任包或集成 seam，PM 不读代码重判 verdict，但要按已知责任边界
+把最小返工路由到拥有该边界的 `branch`/能力标签，不得强迫原切片修改责任外路径。禁止跨 Session 借用或把 Space
+修复当作返工手段。
+
 `Cancelled` 只表示 PM 在派发前撤回误建的 Planned 或尚未持租约的 Ready 包。Coordinator 保留原包和
 Team Slot 历史、释放其 fanout 名额，并在同一活动节点允许用新 id 补位；一旦本包或任一兄弟包取得租约、
 开始 WorkSession、形成候选或节点已经前进，就不得用取消规避证据，必须记录为 `Blocked` 并走恢复路径。
@@ -83,9 +127,24 @@ DCG 节点，也不触发 PM 逐提交复核。Supervisor 会在短窗口内合�
 一次项目投影、处理整批 candidate/blocked/failed 事项，不轮询仍在运行的会话。只有候选、真实阻塞、终止
 失败、连续两次无新 checkpoint 的截断，或用户/合同变化，才重新进入包级管理决策。
 
-十分钟内的内置 bugfix/migration 图各使用一个结果型 WorkPackage：bugfix 包在同一 WorkSession 中完成复现、
-根因证据、回归测试与修复；migration 包在同一 WorkSession 中完成来源调查、版本身份固定、受控切片修改与
-合同测试。中间只读调查不是可交付候选，不单独占用独立 Review；最终候选仍必须经过另一个 Review Space。
+拆包同时受结果完整性和 Run 请求预算约束。对于十分钟级、快速模型的交互 Run，初始规划应让单个 Worker
+结果包大致能在 12-18 次 LLM 请求、且不超过剩余主动时间一半时形成首个干净候选，并为独立 Reviewer、
+PM 处理 findings 与 Coordinator 集成保留请求和时间。该区间是依据同项目历史证据调整的估算，不是第二套
+包级硬预算：若某类包历史上持续超出，就按互不重叠的文件所有权和独立验收面拆成结果包；不要把
+engine、UI、build、persistence 等多个可独立验证子系统塞进一个包，也不要反向拆成单文件或 checkpoint 包。
+
+请求预算按整个任务 Run 的实际参与者标定，而不是给每个包再建一套可漂移预算。三至四路 fanout 的十分钟
+feature Run 需要覆盖 PM 编排、三至四个 Worker、对应的独立 Reviewer 和可能的一次有界 findings 处理；默认
+128 次请求是该拓扑的硬上限。四路并行只用于互不重叠、可独立形成候选的结果包，不得把一个耦合任务机械
+切成四份。Reviewer 合同应目标化并批量取证：通常用 6-12 次请求、最多三组只读合并
+命令完成候选身份/范围检查、定向测试与构建，不逐个通读确定性生成的同构模块。Reviewer 不通过
+checkout/revert/reset、候选复制或基线反演制造对照，不写入或清理候选；命令造成非干净 worktree 时必须
+失败关闭。Reviewer 仍必须独立运行验收命令并给出 verdict，不能因为节省请求而让 PM 代评或只信任
+Worker 自述。
+
+十分钟内的 bugfix 图允许最多三个相互独立的结果型 WorkPackage 并行完成复现、根因证据、回归测试与修复；
+migration 的切片也可以按图的 fanout 在多个 Space 并发。中间只读调查不是可交付候选，不单独占用独立
+Review；每个最终候选仍必须经过另一个 Review Space。
 
 使用活动节点指定的提示词。PM 只能在 Coordinator 返回的合法边中决策，不能代替用户完成用户决策。
 WorkAgent 目标只描述结果和证据合同，不固定 Agent runtime 或模型。

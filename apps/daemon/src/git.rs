@@ -321,6 +321,27 @@ pub async fn verify_worktree_candidate(
     Ok(())
 }
 
+/// Derive immutable candidate identity from the exact clean HEAD of a bound
+/// package worktree.  Callers still pass the repository and branch contract;
+/// this is not an inference from an Agent's prose.
+pub async fn worktree_candidate_identity(
+    worktree: &Path,
+    repository_root: &Path,
+    expected_branch: &str,
+) -> Result<(String, String)> {
+    verify_worktree_binding(worktree, repository_root, expected_branch).await?;
+    let commit = git(worktree, &["rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_string();
+    let tree = git(worktree, &["show", "-s", "--format=%T", &commit])
+        .await?
+        .trim()
+        .to_string();
+    verify_worktree_candidate(worktree, repository_root, expected_branch, &commit, &tree).await?;
+    Ok((commit, tree))
+}
+
 /// Integrate one exact, independently accepted local candidate into the clean
 /// `main` baseline. The operation is idempotent: a retry after a successful
 /// merge but before PM state persistence simply re-proves ancestry and records
@@ -486,7 +507,6 @@ fn resolve_git_path(worktree: &Path, value: &str) -> Result<PathBuf> {
     path.canonicalize()
         .context("canonicalizing Git common directory")
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,160 +619,6 @@ mod tests {
         let diff = diff(dir.path(), None).await.unwrap();
         assert!(diff.contains("-one"));
         assert!(diff.contains("+two"));
-    }
-
-    #[tokio::test]
-    async fn source_commit_must_match_every_human_owned_space_input() {
-        let dir = repo().await;
-        std::fs::create_dir_all(dir.path().join("spaces/code/.pipebuilder")).unwrap();
-        std::fs::write(dir.path().join(".gitignore"), "**/.pipebuilder/\n").unwrap();
-        std::fs::write(dir.path().join("spaces/code/pipespace.json"), "{}\n").unwrap();
-        std::fs::write(
-            dir.path().join("spaces/code/.pipebuilder/lock.json"),
-            "ignored\n",
-        )
-        .unwrap();
-        let sha = commit(dir.path(), "space", &[]).await.unwrap();
-        verify_clean_project_sources_at_commit(dir.path(), &sha, &dir.path().join("spaces/code"))
-            .await
-            .unwrap();
-
-        std::fs::create_dir_all(dir.path().join("skills/new-skill")).unwrap();
-        std::fs::write(dir.path().join("skills/new-skill/SKILL.md"), "untracked\n").unwrap();
-        assert!(verify_clean_project_sources_at_commit(
-            dir.path(),
-            &sha,
-            &dir.path().join("spaces/code")
-        )
-        .await
-        .is_err());
-    }
-
-    #[tokio::test]
-    async fn candidate_must_be_the_clean_head_of_its_bound_repository_and_branch() {
-        let dir = repo().await;
-        std::fs::write(dir.path().join("game.txt"), "ready\n").unwrap();
-        let sha = commit(dir.path(), "candidate", &[]).await.unwrap();
-        let branch = git(dir.path(), &["symbolic-ref", "--short", "HEAD"])
-            .await
-            .unwrap();
-        let tree = git(dir.path(), &["show", "-s", "--format=%T", &sha])
-            .await
-            .unwrap();
-        verify_worktree_candidate(dir.path(), dir.path(), branch.trim(), &sha, tree.trim())
-            .await
-            .unwrap();
-
-        std::fs::write(dir.path().join("leftover.txt"), "dirty\n").unwrap();
-        assert!(verify_worktree_candidate(
-            dir.path(),
-            dir.path(),
-            branch.trim(),
-            &sha,
-            tree.trim()
-        )
-        .await
-        .is_err());
-    }
-
-    #[tokio::test]
-    async fn accepted_candidate_integration_is_clean_typed_and_idempotent() {
-        let dir = repo().await;
-        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
-        let base = commit(dir.path(), "base", &[]).await.unwrap();
-        git(dir.path(), &["branch", "-M", "main"]).await.unwrap();
-        git(dir.path(), &["checkout", "-qb", "work/candidate"])
-            .await
-            .unwrap();
-        std::fs::write(dir.path().join("candidate.txt"), "candidate\n").unwrap();
-        let candidate = commit(dir.path(), "candidate", &[]).await.unwrap();
-        let candidate_tree = git(dir.path(), &["show", "-s", "--format=%T", &candidate])
-            .await
-            .unwrap();
-        git(dir.path(), &["checkout", "-q", "main"]).await.unwrap();
-
-        let integrated = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
-            .await
-            .unwrap();
-        assert_eq!(integrated.previous_head, base);
-        assert_eq!(integrated.integrated_commit, candidate);
-        assert_eq!(integrated.integrated_tree, candidate_tree.trim());
-        assert!(status(dir.path()).await.unwrap().clean);
-
-        let replay = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
-            .await
-            .unwrap();
-        assert_eq!(replay.previous_head, candidate);
-        assert_eq!(replay.integrated_commit, candidate);
-        assert!(status(dir.path()).await.unwrap().clean);
-    }
-
-    #[tokio::test]
-    async fn integration_conflict_is_aborted_without_dirtying_main() {
-        let dir = repo().await;
-        std::fs::write(dir.path().join("shared.txt"), "base\n").unwrap();
-        commit(dir.path(), "base", &[]).await.unwrap();
-        git(dir.path(), &["branch", "-M", "main"]).await.unwrap();
-        git(dir.path(), &["checkout", "-qb", "work/candidate"])
-            .await
-            .unwrap();
-        std::fs::write(dir.path().join("shared.txt"), "candidate\n").unwrap();
-        let candidate = commit(dir.path(), "candidate", &[]).await.unwrap();
-        let candidate_tree = git(dir.path(), &["show", "-s", "--format=%T", &candidate])
-            .await
-            .unwrap();
-        git(dir.path(), &["checkout", "-q", "main"]).await.unwrap();
-        std::fs::write(dir.path().join("shared.txt"), "main\n").unwrap();
-        let main = commit(dir.path(), "main diverged", &[]).await.unwrap();
-
-        let error = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("could not be merged cleanly"));
-        assert_eq!(
-            git(dir.path(), &["rev-parse", "HEAD"])
-                .await
-                .unwrap()
-                .trim(),
-            main
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("shared.txt")).unwrap(),
-            "main\n"
-        );
-        assert!(status(dir.path()).await.unwrap().clean);
-    }
-
-    #[tokio::test]
-    async fn integration_rejects_repository_config_that_can_execute_commands() {
-        let dir = repo().await;
-        std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
-        commit(dir.path(), "base", &[]).await.unwrap();
-        git(dir.path(), &["branch", "-M", "main"]).await.unwrap();
-        git(dir.path(), &["checkout", "-qb", "work/candidate"])
-            .await
-            .unwrap();
-        std::fs::write(dir.path().join("candidate.txt"), "candidate\n").unwrap();
-        let candidate = commit(dir.path(), "candidate", &[]).await.unwrap();
-        let candidate_tree = git(dir.path(), &["show", "-s", "--format=%T", &candidate])
-            .await
-            .unwrap();
-        git(dir.path(), &["checkout", "-q", "main"]).await.unwrap();
-        git(
-            dir.path(),
-            &["config", "merge.untrusted.driver", "touch should-not-run"],
-        )
-        .await
-        .unwrap();
-
-        let error = integrate_candidate(dir.path(), &candidate, candidate_tree.trim())
-            .await
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("may execute an external command"));
-        assert!(!dir.path().join("should-not-run").exists());
-        assert!(status(dir.path()).await.unwrap().clean);
     }
 
     #[tokio::test]

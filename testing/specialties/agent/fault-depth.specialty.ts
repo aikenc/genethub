@@ -140,6 +140,184 @@ agentCase(
 );
 
 agentCase(
+  "specialty.agent.qwen-empty-tool-id-tail-preserves-arguments",
+  "A Qwen empty tool-id tail frame cannot erase the real call",
+  "the public Agent session reassembles an id frame, an argument delta, and an empty-id tail into one successful write",
+  ["empty Qwen tail overwrites the call id", "tool arguments detach from their streamed call", "Qwen tool call becomes unknown"],
+  async (t) => {
+    await withAgent(t, async (opened) => {
+      opened.mock.script(
+        {
+          tool: {
+            name: "write",
+            arguments: { path: "qwen-tail.txt", content: "arguments survived" },
+          },
+          qwenEmptyToolIdTail: true,
+        },
+        { text: "The Qwen-shaped tool call completed." },
+      );
+      const sessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const events = await t.flows.main.attachEventLog(opened.client, sessionId);
+      await t.flows.main.sendPrompt(opened.client, sessionId, "Execute the streamed Qwen-shaped write call.");
+      await t.tools.waitUntil(() => existsSync(path.join(opened.workspaceRoot, "qwen-tail.txt")), 45_000);
+      t.assertions.fileEquals(opened.workspaceRoot, "qwen-tail.txt", "arguments survived");
+      await t.tools.waitUntil(() => terminal(events), 30_000);
+      t.assertions.assert(
+        events.some((item) => item.type === "turnCompleted"),
+        `Qwen-shaped tool turn did not complete: ${eventTrace(events)}`,
+      );
+    });
+  },
+);
+
+agentCase(
+  "specialty.agent.genehub-tool-preserves-argv-and-stops",
+  "The GeneHub control tool preserves argv and stops at the first failure",
+  "a real built-in Agent rejects an invalid batch before spawn, then reports literal argv and never executes the second CLI command after the first fails",
+  [
+    "GeneHub commands are parsed by a shell",
+    "a failed command does not stop its batch",
+    "an invalid batch reaches a child process",
+  ],
+  async (t) => {
+    await withAgent(t, async (opened) => {
+      opened.mock.script(
+        { tool: { name: "genehub", arguments: {} } },
+        { text: "The invalid batch was rejected." },
+        {
+          tool: {
+            name: "genehub",
+            arguments: {
+              commands: [
+                { argv: ["--definitely-invalid", "$HOME", "a b"] },
+                { argv: ["version", "unreached"] },
+              ],
+            },
+          },
+        },
+        { text: "The failing command stopped the batch." },
+        {
+          tool: {
+            name: "genehub",
+            arguments: {
+              commands: [
+                {
+                  argv: [
+                    "shell",
+                    "--cwd",
+                    opened.workspaceRoot,
+                    "--",
+                    "sh",
+                    "-c",
+                    "printf ran > invalid-batch-ran.txt",
+                  ],
+                },
+                { argv: [42] },
+              ],
+            },
+          },
+        },
+        { text: "The malformed trailing command prevented the whole batch." },
+      );
+
+      const invalidSession = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const invalidEvents = await t.flows.main.attachEventLog(opened.client, invalidSession);
+      await t.flows.main.sendPrompt(opened.client, invalidSession, "Run an invalid GeneHub batch.");
+      await t.tools.waitUntil(() => terminal(invalidEvents), 45_000);
+
+      const invalidOutput = await persistedGenehubOutput(opened, invalidSession);
+      t.assertions.assert(
+        invalidOutput.includes("'commands' is required"),
+        `invalid batch was not rejected before spawn: ${invalidOutput}`,
+      );
+
+      const argvSession = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const argvEvents = await t.flows.main.attachEventLog(opened.client, argvSession);
+      await t.flows.main.sendPrompt(opened.client, argvSession, "Run the exact argv batch.");
+      await t.tools.waitUntil(() => terminal(argvEvents), 45_000);
+
+      const output = await persistedGenehubOutput(opened, argvSession);
+      t.assertions.assert(output.includes("$HOME"), `literal dollar argument was lost: ${output}`);
+      t.assertions.assert(output.includes("a b"), `space-containing argument was lost: ${output}`);
+      t.assertions.assert(output.includes('"failedAt":0'), `first failure was not reported: ${output}`);
+      t.assertions.assert(!output.includes("unreached"), `second command ran after failure: ${output}`);
+
+      const preflightSession = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const preflightEvents = await t.flows.main.attachEventLog(opened.client, preflightSession);
+      await t.flows.main.sendPrompt(opened.client, preflightSession, "Reject the malformed trailing argv before execution.");
+      await t.tools.waitUntil(() => terminal(preflightEvents), 45_000);
+
+      const preflightOutput = await persistedGenehubOutput(opened, preflightSession);
+      t.assertions.assert(
+        preflightOutput.includes("commands[1].argv[0] must be a string"),
+        `malformed trailing argv was not reported: ${preflightOutput}`,
+      );
+      t.assertions.assert(
+        !existsSync(path.join(opened.workspaceRoot, "invalid-batch-ran.txt")),
+        "an earlier command ran before the whole batch passed validation",
+      );
+    });
+  },
+);
+
+async function persistedGenehubOutput(opened: Opened, sessionId: string): Promise<string> {
+  const rounds = await opened.client.call({
+    type: "session.rounds",
+    payload: { sessionId, throughRoundId: null, cursor: null, limit: 1 },
+  });
+  if (rounds?.type !== "sessionRounds") {
+    throw new Error(`session.rounds ${sessionId} returned ${rounds?.type}`);
+  }
+  const round = rounds.data.rounds.at(-1);
+  if (!round) throw new Error(`session.rounds ${sessionId} returned no round`);
+
+  const layer = await opened.client.call({
+    type: "round.trunk.list",
+    payload: { sessionId, roundId: round.roundId, cursor: null, limit: 32 },
+  });
+  if (layer?.type !== "roundLayer") {
+    throw new Error(`round.trunk.list ${sessionId}/${round.roundId} returned ${layer?.type}`);
+  }
+  for (const summary of [...layer.data.trunks].reverse()) {
+    const reply = await opened.client.call({
+      type: "round.trunk.get",
+      payload: { sessionId, roundId: round.roundId, trunkIndex: summary.index },
+    });
+    if (reply?.type !== "roundTrunk") {
+      throw new Error(`round.trunk.get ${sessionId}/${round.roundId}/${summary.index} returned ${reply?.type}`);
+    }
+    for (const batch of [...reply.data.batches].reverse()) {
+      for (const overview of [...batch.blobs].reverse()) {
+        if (overview.kind !== "toolCall" || !overview.blob) continue;
+        const blob = await opened.client.call({
+          type: "blob.get",
+          payload: { sessionId, blob: overview.blob },
+        });
+        if (blob?.type !== "blob") {
+          throw new Error(`blob.get ${sessionId}/${overview.blob.id} returned ${blob?.type}`);
+        }
+        const item = blob.data.value as {
+          type?: string;
+          name?: string;
+          status?: string;
+          detail?: { kind?: string; raw?: { output?: unknown } };
+        };
+        const output = item.detail?.kind === "unknown" ? item.detail.raw?.output : undefined;
+        if (
+          item.type === "toolCall" &&
+          item.name === "genehub" &&
+          item.status === "error" &&
+          typeof output === "string"
+        ) {
+          return output;
+        }
+      }
+    }
+  }
+  throw new Error(`persisted GeneHub error output missing for ${sessionId}`);
+}
+
+agentCase(
   "specialty.agent.disconnected-subscriber-does-not-cancel",
   "Disconnecting the observing client does not cancel agent work",
   "a delayed tool turn writes its file after the initiating client closes and a new client can read the session",

@@ -27,6 +27,11 @@ describe("ProjectPanel", () => {
     expect(screen.getByText("可分配 0/4 · 已占 1")).toBeInTheDocument();
     expect(screen.getByText("执行预算剩余 9:00")).toBeInTheDocument();
     expect(screen.getByText("并发会话 1/4 · 累计会话 2/16")).toBeInTheDocument();
+    expect(screen.getByText("LLM 请求 20/96 · 剩余 76 · 用户等待 0:05")).toBeInTheDocument();
+    expect(screen.getByText("独立 Reviewer findings")).toBeInTheDocument();
+    expect(screen.getByText("存档迁移丢失 v1 字段")).toBeInTheDocument();
+    expect(screen.getByText("预计 2 次请求")).toBeInTheDocument();
+    expect(screen.getByText(/PM 不复查代码/)).toBeInTheDocument();
     expect(screen.getByText(/合并冲突/)).toBeInTheDocument();
     expect(screen.getByText("实现战斗循环")).toBeInTheDocument();
     expect(screen.getByText("由 PM 根据证据选择")).toBeInTheDocument();
@@ -47,6 +52,24 @@ describe("ProjectPanel", () => {
         facts: [],
       },
     }));
+  });
+
+  it("shows that user decision waiting pauses the task execution clock", async () => {
+    const status = projectStatus();
+    const run = status.workflowRuns[0];
+    if (!run?.budget) throw new Error("fixture Run budget is required");
+    run.budget.userWaitStartedAtMs = 500_000;
+    const call = vi.fn(async (_request: { type: string }) => ({ type: "projectStatus", data: status }));
+
+    render(<ProjectPanel
+      client={{ call } as unknown as Client}
+      session={pmSession()}
+      workspaces={workspaces()}
+      onOpenSession={vi.fn()}
+      onOpenWorkspace={vi.fn()}
+    />);
+
+    expect(await screen.findByText("等待用户决定（执行计时已暂停）")).toBeInTheDocument();
   });
 });
 
@@ -76,6 +99,14 @@ function projectStatus(): PmProjectStatus {
       requiredSpaceTags: ["gameplay"],
       agentSpace: "implementation-1", repository: "game", branch: "work/combat", workflowRunId: "run-s_pm",
       nodeInstanceId: "implement-1", workSessionId: "s_work", blockReason: "等待资源", integrationError: "合并冲突",
+      reviewVerdict: "fail",
+      reviewFindings: [{
+        severity: "high",
+        title: "存档迁移丢失 v1 字段",
+        acceptanceImpact: "违反 v1/v2 兼容验收标准",
+        recommendedAction: "保留旧字段并增加回归测试",
+        estimatedRequests: 2,
+      }],
     }, {
       id: "other", title: "其他", outcome: "另一会话的工作", status: "accepted", dependencies: [],
       controllerSessionId: "s_other",
@@ -90,7 +121,7 @@ function projectStatus(): PmProjectStatus {
     }],
     workflowCatalog: { recommended: "feature", workflows: [{
       id: "feature", version: 1, entry: "intake",
-      executionBudget: { wallClockMs: 600_000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4 },
+      executionBudget: { wallClockMs: 600_000, maxWorkSessions: 16, maxConcurrentWorkSessions: 4, maxLlmRequests: 96 },
       nodes: [{ id: "intake", kind: "activity" }, { id: "implement", kind: "activity" }, { id: "diagnose", kind: "activity" }, { id: "delivered", kind: "terminal" }],
       edges: [
         { id: "retry", label: "采用修正方案重试", description: "保留验收目标并重新执行。", from: "diagnose", to: "implement", condition: "diagnosis.retryApproved", chooseBy: "user" },
@@ -106,11 +137,15 @@ function projectStatus(): PmProjectStatus {
         wallClockMs: 600_000,
         maxWorkSessions: 16,
         maxConcurrentWorkSessions: 4,
+        maxLlmRequests: 96,
         startedAtMs: 1,
         deadlineAtMs: 600_001,
         remainingMs: 540_000,
+        userWaitMs: 5_000,
         workSessionsStarted: 2,
         activeWorkSessions: 1,
+        llmRequestsObserved: 20,
+        llmRequestsRemaining: 76,
       },
       activeNodes: ["diagnose"], facts: [], revision: 3,
       intent: { revision: 1, outcome: "交付可玩的 H5 游戏", acceptance: ["可玩"], constraints: [], outOfScope: [] },

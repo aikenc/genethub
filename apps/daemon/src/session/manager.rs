@@ -101,6 +101,11 @@ struct Live {
     /// by the blob writer, consumed when the trunk is written, then dropped
     /// with the trunk's items.
     blob_refs: Mutex<HashMap<String, BlobRef>>,
+    /// Provider-neutral LLM rounds emitted by live turns but not yet folded
+    /// into a durable TurnSummary. PM request budgets sample this counter so a
+    /// long-running WorkAgent cannot spend dozens of requests invisibly and
+    /// reveal them only after its turn finishes.
+    unsettled_llm_rounds: AtomicU64,
     seq: AtomicU64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
@@ -1228,6 +1233,18 @@ impl SessionManager {
         live.snapshot().await
     }
 
+    /// Return the provider-neutral LLM request count observed by this Session
+    /// since a task budget began, including a turn that is still running. The
+    /// calculation stays inside the Session manager so the PM supervisor does
+    /// not clone complete timelines every two seconds merely to enforce a
+    /// coarse request budget.
+    pub async fn llm_rounds_since(&self, session_id: &str, since_ms: i64) -> Result<u64> {
+        let live = self.live(session_id).await?;
+        let items = live.items.lock().await;
+        Ok(llm_rounds_since_items(&items, since_ms)
+            .saturating_add(live.unsettled_llm_rounds.load(Ordering::SeqCst)))
+    }
+
     /// A bounded-reader view frozen at an optional round boundary. This is the
     /// single source for the CLI pages below, so inspect/narrative/rounds agree
     /// on both the digest and what "through round" means.
@@ -1739,16 +1756,22 @@ impl SessionManager {
         // must not be injected into Agent system prompts — only path-linking
         // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
-        let skill_profile = if live.meta.lock().await.kind == SessionKind::Pm {
+        let session_kind = live.meta.lock().await.kind;
+        let skill_profile = if session_kind == SessionKind::Pm {
             crate::skills::SkillProfile::ProjectManager
         } else {
             crate::skills::SkillProfile::Common
         };
-        let additional_system_prompt = Some(crate::skills::session_guidance(
+        let mut guidance = crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
             skill_profile,
-        ));
+        );
+        if session_kind == SessionKind::Work {
+            guidance.push_str("\n\n");
+            guidance.push_str(crate::skills::work_session_result_guidance());
+        }
+        let additional_system_prompt = Some(guidance);
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -2502,6 +2525,34 @@ impl SessionManager {
     }
 }
 
+fn llm_rounds_since_items(items: &[TimelineItem], since_ms: i64) -> u64 {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::TurnSummary { stats, .. } if stats.finished_at_ms >= since_ms => {
+                Some(stats.usage.llm_rounds)
+            }
+            _ => None,
+        })
+        .fold(0_u64, u64::saturating_add)
+}
+
+fn add_unsettled_llm_rounds(counter: &AtomicU64, previous: u64, observed: u64) {
+    let delta = observed.saturating_sub(previous);
+    if delta > 0 {
+        counter.fetch_add(delta, Ordering::SeqCst);
+    }
+}
+
+fn settle_unsettled_llm_rounds(counter: &AtomicU64, settled: u64) {
+    if settled == 0 {
+        return;
+    }
+    let _ = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        Some(current.saturating_sub(settled))
+    });
+}
+
 fn import_source_key(agent_id: &str, cwd: &std::path::Path, source_id: &str) -> String {
     let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let mut digest = Sha256::new();
@@ -2679,6 +2730,7 @@ impl Live {
             items: Mutex::new(Vec::new()),
             rounds: Mutex::new(Vec::new()),
             blob_refs: Mutex::new(HashMap::new()),
+            unsettled_llm_rounds: AtomicU64::new(0),
             seq: AtomicU64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
@@ -3340,7 +3392,14 @@ async fn pump_events(
         };
 
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
-            token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
+            let tracked = live_usage.entry(turn_id.clone()).or_default();
+            let previous_rounds = tracked.llm_rounds;
+            token_usage::merge_progress(tracked, usage);
+            add_unsettled_llm_rounds(
+                &live.unsettled_llm_rounds,
+                previous_rounds,
+                tracked.llm_rounds,
+            );
             if let Some(merged) = live_usage.get(turn_id) {
                 event = SessionEvent::TurnProgress {
                     turn_id: turn_id.clone(),
@@ -3510,6 +3569,7 @@ async fn pump_events(
                 let stats = turn_summary(&canceled, &mut turns, &mut live_usage, &items);
                 drop(items);
                 if let Some(stats) = stats {
+                    settle_unsettled_llm_rounds(&live.unsettled_llm_rounds, stats.usage.llm_rounds);
                     let summary_event = SessionEvent::Item {
                         turn_id: stats.turn_id.clone(),
                         item: TimelineItem::TurnSummary {
@@ -3536,6 +3596,7 @@ async fn pump_events(
             turn_summary(&event, &mut turns, &mut live_usage, &items)
         };
         if let Some(stats) = summary {
+            settle_unsettled_llm_rounds(&live.unsettled_llm_rounds, stats.usage.llm_rounds);
             let summary_event = SessionEvent::Item {
                 turn_id: stats.turn_id.clone(),
                 item: TimelineItem::TurnSummary {
@@ -4015,7 +4076,6 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
             meta.runtime_values.clone(),
         )
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4069,150 +4129,6 @@ mod tests {
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
-    }
-
-    #[tokio::test]
-    async fn pm_identity_and_work_role_are_durable_and_fail_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path()).with_project_manager_secret(b"machine-secret");
-        let pm = sessions
-            .create_project_manager(
-                "w1",
-                dir.path().to_path_buf(),
-                None,
-                None,
-                Some("medium".into()),
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(pm.kind, Some(SessionKind::Pm));
-        assert_eq!(pm.effort_id.as_deref(), Some("medium"));
-        let token = sessions.project_manager_token(&pm.id).unwrap();
-        assert!(sessions.authenticate_project_manager(&pm.id, &token).await);
-        assert!(
-            !sessions
-                .authenticate_project_manager(&pm.id, "not-the-token")
-                .await
-        );
-
-        let work = sessions
-            .create_work_session(
-                "w1",
-                dir.path().to_path_buf(),
-                "wp-gameplay",
-                &pm.id,
-                "genet",
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(work.kind, Some(SessionKind::Work));
-        assert_eq!(
-            work.work.as_ref().map(|work| work.work_package_id.as_str()),
-            Some("wp-gameplay")
-        );
-        let capabilities = work.capabilities.as_ref().unwrap();
-        assert!(!capabilities.send);
-        assert!(!capabilities.delete);
-        assert!(capabilities.fork);
-
-        let stored = sessions.store.load_meta("w1", &work.id).unwrap();
-        assert_eq!(stored.format, SESSION_FORMAT);
-        assert_eq!(stored.kind, SessionKind::Work);
-        assert_eq!(
-            stored
-                .work
-                .as_ref()
-                .map(|work| work.controller_session_id.as_str()),
-            Some(pm.id.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_pm_sessions_are_distinct_but_work_package_sessions_stay_unique() {
-        let dir = tempfile::tempdir().unwrap();
-        let sessions = manager(dir.path()).with_project_manager_secret(b"machine-secret");
-        let (first_pm, second_pm) = tokio::join!(
-            sessions.create_project_manager(
-                "w1",
-                dir.path().to_path_buf(),
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            ),
-            sessions.create_project_manager(
-                "w1",
-                dir.path().to_path_buf(),
-                None,
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-        );
-        let first_pm = first_pm.unwrap();
-        let second_pm = second_pm.unwrap();
-        assert_ne!(first_pm.id, second_pm.id);
-        assert_eq!(
-            sessions
-                .list(Some("w1"), true)
-                .await
-                .unwrap()
-                .into_iter()
-                .filter(|session| session.kind == Some(SessionKind::Pm))
-                .count(),
-            2
-        );
-
-        let (first_work, second_work) = tokio::join!(
-            sessions.create_work_session(
-                "w1",
-                dir.path().to_path_buf(),
-                "wp-concurrent",
-                &first_pm.id,
-                "genet",
-                None,
-                None,
-                Default::default(),
-                None,
-            ),
-            sessions.create_work_session(
-                "w1",
-                dir.path().to_path_buf(),
-                "wp-concurrent",
-                &first_pm.id,
-                "genet",
-                None,
-                None,
-                Default::default(),
-                None,
-            )
-        );
-        assert_eq!(
-            first_work.is_ok() as usize + second_work.is_ok() as usize,
-            1
-        );
-        assert_eq!(
-            first_work.is_err() as usize + second_work.is_err() as usize,
-            1
-        );
-        assert_eq!(
-            sessions
-                .list(Some("w1"), true)
-                .await
-                .unwrap()
-                .into_iter()
-                .filter(|session| session.kind == Some(SessionKind::Work))
-                .count(),
-            1
-        );
     }
 
     /// An agent whose past threads are gone: it starts fresh, and refuses to

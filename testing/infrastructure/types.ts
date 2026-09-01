@@ -98,6 +98,8 @@ export interface UnitResult {
   diagnostic?: string;
   /** Sanitized staging bundle captured before the isolated lease is destroyed. */
   failureArtifacts?: string;
+  /** Sanitized full evidence for a passing case that declares retention. */
+  retentionArtifacts?: string;
 }
 
 export interface RepoIdentity {

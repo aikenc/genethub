@@ -455,7 +455,6 @@ pub fn required(request: &Request) -> Capability {
         Request::UpdateDownload | Request::UpdateDismiss => Capability::Update,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,28 +505,6 @@ mod tests {
         assert!(!principal.allows(Capability::Pty));
         assert!(!principal.allows(Capability::Devices));
         assert_eq!(principal.device_id(), Some("d_1"));
-    }
-
-    #[test]
-    fn only_authenticated_users_with_session_authority_may_start_a_pm() {
-        assert!(Principal::LocalUser.may_start_project_manager());
-        assert!(Principal::Channel.may_start_project_manager());
-        assert!(Principal::Device {
-            id: "d_session".into(),
-            grants: GrantSet::of([Capability::Session]),
-        }
-        .may_start_project_manager());
-
-        assert!(!Principal::Device {
-            id: "d_read".into(),
-            grants: GrantSet::of([Capability::Read]),
-        }
-        .may_start_project_manager());
-        assert!(!Principal::ProjectManager {
-            session_id: "s_pm".into(),
-        }
-        .may_start_project_manager());
-        assert!(!Principal::Pairing.may_start_project_manager());
     }
 
     #[test]

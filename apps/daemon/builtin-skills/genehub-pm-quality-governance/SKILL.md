@@ -21,10 +21,11 @@ Read [references/evidence-gates.md](references/evidence-gates.md) when defining 
    internal commit.
 5. Keep the recorded Agent Space Builder identity current. Dispatch, candidate, review, and acceptance gates re-verify the lock; changing and re-recording an implementation Space blocks its candidate/review, and changing a review Space blocks reviews in progress. Reconcile the affected package instead of bypassing the refusal.
 6. Select checks by risk: behavior, regression, integration, security, performance, compatibility, license, and operability.
-7. Create an independent Review Agent Space when code or another material artifact is accepted. The reviewer receives read-only candidate facts and no completion pressure.
-8. Require a structured verdict with findings, evidence references, unresolved risks, and explicit pass/fail. A reviewer that edits the candidate cannot approve it.
+7. Create an independent Review Agent Space when code or another material artifact is accepted. The reviewer receives read-only candidate facts and no completion pressure. Its contract forbids checkout, revert, reset, candidate-copy baseline experiments, and any write or cleanup in the candidate worktree. If review commands change tracked files or leave non-ignored files, the verdict must fail closed instead of cleaning the worktree and approving it.
+8. Require a structured verdict with evidence references, unresolved risks, and explicit pass/fail. A passing Review WorkSession ends with the minimal exact marker `GENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}`. A failing review ends with `GENEHUB_WORK_RESULT {"status":"review-fail","summary":"acceptance defects remain","findings":[{"severity":"blocking|high|medium|low","title":"...","acceptanceImpact":"...","recommendedAction":"...","estimatedRequests":1}]}`. `findings` is an array of objects, never strings; every finding requires `recommendedAction` inside that object. Never replace the final marker with a first-line `review-pass`, a `RESULT:` block, or prose, and never put text after it. A reviewer that edits the candidate cannot approve it.
 9. Send failures back to the implementation WorkSession or a replacement with lineage. Re-run affected tests and commission a fresh review.
-10. After merging accepted slices, run the full merged baseline before branching or dispatching any downstream content, migration, or integration package. Per-slice passes do not prove the accepted baseline composes. If accepted slices conflict semantically, create a prerequisite seam-fix package and independently gate it instead of hiding the repair inside unrelated downstream scope.
+10. During each slice review, reject candidate code or tests whose truth depends on compatible sibling slices still being absent (for example an empty live registry, a missing export, or a default call returning null) unless that absence is itself a stable acceptance requirement. Slice semantics use injected fixtures; shared live state uses conditional invariants that remain true before and after sibling integration. Do not invert this rule: a final-composition gate that is unobservable only because its owning sibling has not been merged is not a defect in the bound slice. Review the slice-owned boundary with fixtures or a dynamic probe, and leave the full composed gate to the merged-baseline step. A failing finding must identify an acceptance defect attributable to the bound candidate or an explicit integration seam, not merely report an absent sibling. This is Reviewer work, not PM code inspection.
+11. After merging accepted slices, run the full merged baseline before branching or dispatching any downstream content, migration, or integration package. Per-slice passes do not prove the accepted baseline composes. If accepted slices conflict semantically, create a prerequisite seam-fix package in the Agent Space that owns that boundary and independently gate it instead of hiding the repair inside an unrelated failed slice.
 
 Use Demo/preview acceptance for experience claims. The user should be able to verify the delivered behavior without reading implementation details.
 
@@ -48,6 +49,16 @@ the review-only Agent Space leased until a verdict is recorded. Do not issue a
 separate `--to review` command merely to bind the returned session. The daemon
 rejects missing evidence, moving candidate identities, self-review, and
 acceptance without an explicit passing verdict.
+
+The Coordinator owns one bounded protocol-repair turn when a terminal Reviewer
+omits or malforms the managed result marker. The PM must not send a competing
+repair prompt, synthesize a verdict, start a replacement review, or relax the
+parser. If the Coordinator's repair still fails, the package becomes blocked
+and the PM surfaces the declared recovery decision instead of looping.
+
+Use only the protocol enum. An implementation result is `candidate-ready` or
+`blocked`; a review result is `review-pass`, `review-fail`, or `blocked`.
+Never put the domain labels `candidate` or `failed` in the marker status.
 
 Integration is a Coordinator-owned deterministic Git operation, not another
 WorkAgent package. It is available only at an active PM integration node and

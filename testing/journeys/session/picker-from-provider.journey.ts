@@ -6,7 +6,7 @@ defineJourney(
     title: "The picker is filled from what the provider says it has",
     oracle: "after settings.setProvider to the mock, genet catalog contains deepseek-v4-flash and no embedding model",
     catches: ["hardcoded picker", "embedding models offered as chat"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session", "parity", "provider-picker"],
     llm: { default: "mock" },
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,
@@ -22,9 +22,14 @@ defineJourney(
       const genet = reply?.type === "agents" ? reply.data.find((agent) => agent.id === "genet") : undefined;
       t.assertions.assert(Boolean(genet), "the built-in agent is always listed");
       const ids = (genet?.catalog.models ?? []).map((model) => model.id);
+      const labels = (genet?.catalog.models ?? []).map((model) => model.label);
       t.assertions.assert(
         ids.some((id) => id.includes("deepseek-v4-flash")),
         `picker models: ${ids.join(",")}`,
+      );
+      t.assertions.assert(
+        labels.includes("deepseek-v4-@deeps"),
+        `picker did not expose the bounded model@provider identity: ${labels.join(",")}`,
       );
       t.assertions.assert(
         !ids.some((id) => id.includes("embedding")),

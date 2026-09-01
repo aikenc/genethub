@@ -65,6 +65,9 @@ export function ProjectPanel({
   const exceptions = runPackages.filter(
     (item) => item.status === "blocked" || item.integrationError,
   );
+  const reviewerFindings = runPackages.flatMap((item) =>
+    (item.reviewFindings ?? []).map((finding) => ({ package: item, finding })),
+  );
   const intent = run?.intent ?? null;
 
   async function mutate(key: string, action: () => Promise<unknown>) {
@@ -155,8 +158,10 @@ export function ProjectPanel({
                 : "border-line bg-canvas/40 text-muted"}`}
             >
               <p className="font-medium text-fg">
-                {run.status === "budgetExhausted"
-                  ? "本轮 10 分钟执行预算已耗尽"
+                {run.budget.userWaitStartedAtMs != null
+                  ? "等待用户决定（执行计时已暂停）"
+                  : run.status === "budgetExhausted"
+                  ? "本轮执行预算已耗尽"
                   : run.status === "budgetExhausting"
                     ? "本轮预算已到期，正在停止所属工作会话"
                     : `执行预算剩余 ${formatDuration(run.budget.remainingMs)}`}
@@ -164,6 +169,11 @@ export function ProjectPanel({
               <p className="mt-1">
                 并发会话 {run.budget.activeWorkSessions}/{run.budget.maxConcurrentWorkSessions}
                 {" · "}累计会话 {run.budget.workSessionsStarted}/{run.budget.maxWorkSessions}
+              </p>
+              <p className="mt-1">
+                LLM 请求 {run.budget.llmRequestsObserved}/{run.budget.maxLlmRequests}
+                {" · "}剩余 {run.budget.llmRequestsRemaining}
+                {run.budget.userWaitMs > 0 ? ` · 用户等待 ${formatDuration(run.budget.userWaitMs)}` : ""}
               </p>
             </section>
           ) : null}
@@ -225,6 +235,29 @@ export function ProjectPanel({
                     <span className="ml-2 text-accent">{slot.status}</span>
                     <p className="mt-1 text-muted">{slot.workPackageId} · {slot.nodeInstanceId}</p>
                   </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {reviewerFindings.length ? (
+            <section>
+              <p className="mb-2 font-medium text-fg">独立 Reviewer findings</p>
+              <div className="space-y-2">
+                {reviewerFindings.map(({ package: item, finding }, index) => (
+                  <div key={`${item.id}:${index}`} className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-fg">{item.title}</span>
+                      <span className="text-amber-300">{finding.severity}</span>
+                      <span className="ml-auto text-faint">
+                        {finding.estimatedRequests == null ? "返工请求数待估" : `预计 ${finding.estimatedRequests} 次请求`}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-fg">{finding.title}</p>
+                    <p className="mt-1 text-muted">验收影响：{finding.acceptanceImpact}</p>
+                    <p className="mt-1 text-muted">Reviewer 建议：{finding.recommendedAction}</p>
+                    <p className="mt-1 text-faint">由 PM 结合目标与本 Run 剩余预算决定返工或升级；PM 不复查代码。</p>
+                  </div>
                 ))}
               </div>
             </section>

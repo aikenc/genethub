@@ -7,7 +7,7 @@ use crate::skills::{self, Skill};
 
 const CONTEXT_FILES: [&str; 2] = ["AGENTS.md", "GENEHUB.md"];
 
-const TOOL_SNIPPETS: [(&str, &str); 7] = [
+const TOOL_SNIPPETS: [(&str, &str); 8] = [
     ("read", "read a file, optionally a line range"),
     ("write", "create or overwrite a file"),
     ("edit", "apply targeted replacements to a file"),
@@ -15,6 +15,10 @@ const TOOL_SNIPPETS: [(&str, &str); 7] = [
     ("grep", "search file contents"),
     ("find", "find files by glob"),
     ("bash", "run a shell command"),
+    (
+        "genehub",
+        "batch exact GeneHub CLI argv without shell parsing",
+    ),
 ];
 
 pub fn build(cwd: &Path, skills: &[Skill], additional_system_prompts: &[String]) -> String {

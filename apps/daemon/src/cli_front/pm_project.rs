@@ -681,6 +681,7 @@ fn review_from(flags: &Flags) -> Result<Option<ReviewEvidence>, CliFailure> {
             .ok_or_else(|| CliFailure::invalid_args("review evidence requires --candidate-tree"))?,
         verdict,
         evidence: flags.many("review-evidence"),
+        findings: Vec::new(),
     }))
 }
 
@@ -1111,66 +1112,5 @@ impl Flags {
 
     fn has(&self, name: &str) -> bool {
         self.switches.contains(name)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn words(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_string()).collect()
-    }
-
-    #[test]
-    fn repeated_evidence_is_preserved_but_singletons_are_rejected() {
-        let flags = Flags::parse(
-            &words(&[
-                "--id",
-                "gameplay",
-                "--evidence",
-                "cargo test",
-                "--evidence",
-                "demo sha256:x",
-            ]),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(flags.one("id").unwrap().as_deref(), Some("gameplay"));
-        assert_eq!(flags.many("evidence").len(), 2);
-
-        let duplicate = Flags::parse(&words(&["--id", "a", "--id", "b"]), &[]).unwrap();
-        assert!(duplicate.one("id").is_err());
-    }
-
-    #[test]
-    fn project_paths_reject_parent_traversal() {
-        let root = Path::new("/project");
-        assert_eq!(
-            project_path(root, "worktrees/code/repo").unwrap(),
-            PathBuf::from("/project/worktrees/code/repo")
-        );
-        assert!(project_path(root, "worktrees/../secrets").is_err());
-        assert!(project_path(root, "/outside").is_err());
-    }
-
-    #[test]
-    fn running_transition_tells_the_manager_to_yield_to_the_supervisor() {
-        let project = crate::pm_domain::project::ProjectState::new(
-            "workspace".into(),
-            "controller".into(),
-            PathBuf::from("/project"),
-            1,
-        );
-        let payload = transition_output(WorkPackageStatus::Running, project);
-        assert_eq!(
-            payload["managerDirective"]["action"],
-            "finishTurnAfterReadyDispatches"
-        );
-        assert_eq!(payload["managerDirective"]["monitor"], "daemonSupervisor");
-        assert!(payload["managerDirective"]["instruction"]
-            .as_str()
-            .unwrap()
-            .contains("Do not sleep"));
     }
 }

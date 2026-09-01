@@ -554,6 +554,8 @@ export type PmIntentStatus = { revision: number, outcome: string, acceptance: Ar
  */
 export type PmProjectStatus = { workspaceId: string, controllerSessionId: string, phase: string, lifecycle: string, revision: number, intent?: PmIntentStatus, workPackages: Array<PmWorkPackageStatus>, agentSpaces: Array<PmAgentSpaceStatus>, workflowCatalog: PmWorkflowCatalogStatus, workflowRuns: Array<PmWorkflowRunStatus>, improvementCandidates: Array<PmImprovementCandidateStatus>, supervisor: PmSupervisorStatus, updatedAtMs: number, };
 
+export type PmReviewFindingStatus = { severity: string, title: string, acceptanceImpact: string, recommendedAction: string, estimatedRequests?: number, };
+
 export type PmSupervisorStatus = { mode: string, nextCheckAtMs?: number, wakePending: boolean, wakeNotBeforeMs?: number, wakeDispatchCount: number, wakeFailedCount: number, coalescedEventCount: number, };
 
 export type PmTeamSlotStatus = { id: string, nodeInstanceId: string, workPackageId: string, responsibility: string, workSessionId?: string, status: string, };
@@ -570,6 +572,11 @@ controllerSessionId: string, title: string, outcome: string, status: string, dep
  */
 requiredSpaceTags: Array<string>, agentSpace: string, repository: string, branch: string, workflowRunId?: string, nodeInstanceId?: string, workSessionId?: string, candidateCommit?: string, candidateTree?: string, reviewSessionId?: string, reviewVerdict?: string, 
 /**
+ * Immutable findings authored by the independent Reviewer. PM surfaces
+ * consume these for target/budget triage; they are not PM-authored facts.
+ */
+reviewFindings?: Array<PmReviewFindingStatus>, 
+/**
  * Coordinator-proven local main baseline that contains this exact
  * independently accepted candidate.
  */
@@ -577,7 +584,7 @@ integratedCommit?: string, integratedTree?: string, integrationError?: string, b
 
 export type PmWorkflowAvailableEdgeStatus = { id: string, label?: string, description?: string, from: string, to: string, condition: string, chooseBy?: string, satisfied: boolean, };
 
-export type PmWorkflowBudgetPolicyStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, };
+export type PmWorkflowBudgetPolicyStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, maxLlmRequests: number, };
 
 export type PmWorkflowCatalogStatus = { recommended: string, workflows: Array<PmWorkflowDefinitionStatus>, };
 
@@ -618,7 +625,12 @@ export type PmWorkflowNodeInstanceStatus = { id: string, nodeId: string, iterati
 
 export type PmWorkflowNodeStatus = { id: string, kind: string, actor?: string, objective?: string, };
 
-export type PmWorkflowRunBudgetStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, startedAtMs: number, deadlineAtMs: number, remainingMs: number, exhaustionStartedAtMs?: bigint, exhaustedAtMs?: bigint, workSessionsStarted: number, activeWorkSessions: number, };
+export type PmWorkflowRunBudgetStatus = { wallClockMs: number, maxWorkSessions: number, maxConcurrentWorkSessions: number, maxLlmRequests: number, startedAtMs: number, deadlineAtMs: number, remainingMs: number, 
+/**
+ * Execution time is frozen while the Workflow waits at an
+ * `actor: user` node.
+ */
+userWaitStartedAtMs?: number, userWaitMs: number, exhaustionStartedAtMs?: bigint, exhaustedAtMs?: bigint, workSessionsStarted: number, activeWorkSessions: number, llmRequestsObserved: number, llmRequestsRemaining: number, };
 
 export type PmWorkflowRunStatus = { id: string, controllerSessionId?: string, graphId?: string, graphVersion?: number, definition: PmWorkflowDefinitionStatus | null, status: string, outcome?: string, interpreterError?: string, budget?: PmWorkflowRunBudgetStatus, activeNodes: Array<string>, facts: Array<string>, nodeInstances: Array<PmWorkflowNodeInstanceStatus>, 
 /**

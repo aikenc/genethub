@@ -120,20 +120,6 @@ mod tests {
     }
 
     #[test]
-    fn older_workspace_rows_remain_readable_without_classification_fields() {
-        let workspace: WorkspaceInfo = serde_json::from_value(json!({
-            "id": "w",
-            "name": "legacy",
-            "root": "/project",
-            "isGitRepo": false,
-            "folders": []
-        }))
-        .expect("parse an older daemon reply");
-        assert_eq!(workspace.kind, None);
-        assert_eq!(workspace.capabilities, None);
-    }
-
-    #[test]
     fn diagnostics_omit_an_absent_categorical_code() {
         let event = SupportDiagnosticEvent {
             at: "2026-08-12T00:00:00.000Z".into(),

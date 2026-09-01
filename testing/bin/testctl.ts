@@ -232,6 +232,9 @@ async function main(): Promise<number> {
       if (result.status === "passed" && result.message && unit.meta.retention) {
         store.writeReport(result);
       }
+      if (result.status === "passed" && unit.meta.retention) {
+        store.writeRetentionArtifacts(result);
+      }
     };
 
     for (const units of [...sequenceGroups.values()].sort((left, right) => left[0]!.id.localeCompare(right[0]!.id))) {
@@ -409,14 +412,12 @@ async function main(): Promise<number> {
     );
     const artifacts = Object.fromEntries(
       filtered
-        .filter((item) => item.status !== "passed" && item.status !== "not-applicable")
+        .filter((item) => item.status !== "not-applicable")
         .map((item) => {
-          const evidence = path.join(
-            runDir,
-            "failures",
-            item.caseId.replace(/[^\w.-]+/g, "_"),
-            "evidence",
-          );
+          const caseName = item.caseId.replace(/[^\w.-]+/g, "_");
+          const evidence = item.status === "passed"
+            ? path.join(runDir, "reports", caseName, "evidence")
+            : path.join(runDir, "failures", caseName, "evidence");
           if (!existsSync(evidence)) return [item.caseId, []];
           const indexes: unknown[] = [];
           for (const unit of readdirSync(evidence, { withFileTypes: true })) {
@@ -544,4 +545,9 @@ async function main(): Promise<number> {
   return 2;
 }
 
-void main().then((code) => process.exit(code));
+void main().then((code) => {
+  // Let retained inspect/artifact output drain before Node exits. Calling
+  // process.exit here truncated large JSON responses at the pipe buffer size,
+  // hiding the very session evidence needed to diagnose failed journeys.
+  process.exitCode = code;
+});

@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 
@@ -102,8 +109,30 @@ for await (const line of input) {
     write({ jsonrpc: "2.0", id: frame.id, result: { sessionId } });
   } else if (frame.method === "session/prompt") {
     const cwd = sessions.get(frame.params.sessionId) ?? "unknown";
-    write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: frame.params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Fixture WorkAgent cwd=" + cwd } } } });
-    await new Promise((resolve) => setTimeout(resolve, 5000));
+    const prompt = JSON.stringify(frame.params.prompt ?? "");
+    let text = "Fixture WorkAgent cwd=" + cwd;
+    let delayMs = 5000;
+    if (prompt.includes("[GENEHUB_MANAGED_RESULT_REPAIR]")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"blocked","summary":"fixture refused a contradictory managed result"}';
+      delayMs = 250;
+    } else if (prompt.includes("GENEHUB_FIXTURE_CANDIDATE_READY")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"fixture candidate is ready"}';
+      delayMs = 250;
+    } else if (prompt.includes("GENEHUB_FIXTURE_DELAYED_REVIEW_PASS")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}';
+      delayMs = 5000;
+    } else if (prompt.includes("GENEHUB_FIXTURE_REVIEW_PASS_WITH_FINDINGS")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"review-pass","summary":"contradictory fixture verdict","findings":[{"severity":"high","title":"fixture contradiction","acceptanceImpact":"acceptance remains unsatisfied","recommendedAction":"reject the contradictory verdict","estimatedRequests":1}]}';
+      delayMs = 250;
+    } else if (prompt.includes("GENEHUB_FIXTURE_REVIEW_PASS")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}';
+      delayMs = 250;
+    } else if (prompt.includes("GENEHUB_FIXTURE_REVIEW_FAIL")) {
+      text += '\\nGENEHUB_WORK_RESULT {"status":"review-fail","summary":"fixture acceptance defect remains","findings":[{"severity":"low","title":"fixture finding","acceptanceImpact":"one bounded correction is required","recommendedAction":"reuse the exact candidate lineage","estimatedRequests":1}]}';
+      delayMs = 250;
+    }
+    write({ jsonrpc: "2.0", method: "session/update", params: { sessionId: frame.params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } } });
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
     write({ jsonrpc: "2.0", id: frame.id, result: { stopReason: "end_turn" } });
   } else if (frame.id !== undefined) {
     write({ jsonrpc: "2.0", id: frame.id, error: { code: -32601, message: "unsupported" } });
@@ -176,14 +205,97 @@ export function hostBuiltinLlm(): HostBuiltinLlm {
 
 /** Exact real-model contract for PM MVP qualification. No fallback is allowed. */
 export function aliyunQwen38Flash(): HostBuiltinLlm {
-  const apiKey = process.env.ALIYUN_TOKENPLAN_KEY?.trim();
-  if (!apiKey) throw new BlockedError("ALIYUN_TOKENPLAN_KEY is required for the Qwen 3.8 Flash journey");
+  const apiKey = hostAliyunTokenPlanKey();
+  if (!apiKey) {
+    throw new BlockedError(
+      "Qwen 3.8 Flash qualification requires the configured GeneHub/OpenCode Token Plan credential",
+    );
+  }
   return {
     apiKey,
     openaiBaseUrl: TOKEN_PLAN_OPENAI_BASE_URL,
     anthropicBaseUrl: TOKEN_PLAN_ANTHROPIC_BASE_URL,
     bareId: QWEN38_FLASH,
   };
+}
+
+/**
+ * Reuses the exact Token Plan credential already configured for this account
+ * when testctl was launched without an exported environment variable. The
+ * value is never logged and is copied only into the isolated test lease by the
+ * existing provider seed helpers.
+ */
+function hostAliyunTokenPlanKey(): string | undefined {
+  const environment = process.env.ALIYUN_TOKENPLAN_KEY?.trim();
+  if (environment) return environment;
+
+  for (const name of ["opencode.json", "opencode.jsonc"]) {
+    const configPath = path.join(hostHome(), ".config", "opencode", name);
+    if (!existsSync(configPath)) continue;
+    try {
+      const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+        provider?: Record<string, { options?: { apiKey?: unknown } }>;
+      };
+      const configured =
+        config.provider?.["bailian-token-plan-personal"]?.options?.apiKey;
+      if (typeof configured !== "string" || !configured.trim()) continue;
+      const reference = configured.trim().match(/^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/);
+      if (reference) {
+        const resolved = process.env[reference[1]!]?.trim();
+        if (resolved) return resolved;
+        continue;
+      }
+      return configured.trim();
+    } catch {
+      // A commented JSONC file cannot be safely interpreted as JSON. Keep
+      // looking for another canonical config instead of guessing at secrets.
+    }
+  }
+
+  const genehubEnvironment = path.join(
+    hostHome(),
+    ".config",
+    "genethub",
+    "tokenplan.env",
+  );
+  if (existsSync(genehubEnvironment)) {
+    try {
+      const metadata = statSync(genehubEnvironment);
+      if ((metadata.mode & 0o077) !== 0) {
+        throw new BlockedError(
+          "GeneHub Token Plan credential file must not be accessible by group or other users",
+        );
+      }
+      const configured = envFileValue(
+        readFileSync(genehubEnvironment, "utf8"),
+        "ALIYUN_TOKENPLAN_KEY",
+      );
+      if (configured) return configured;
+    } catch (error) {
+      if (error instanceof BlockedError) throw error;
+      throw new BlockedError("GeneHub Token Plan credential file is unreadable");
+    }
+  }
+  return undefined;
+}
+
+function envFileValue(contents: string, name: string): string | undefined {
+  for (const original of contents.split(/\r?\n/u)) {
+    const line = original.trim().replace(/^export\s+/u, "");
+    if (!line || line.startsWith("#")) continue;
+    const separator = line.indexOf("=");
+    if (separator < 1 || line.slice(0, separator).trim() !== name) continue;
+    let value = line.slice(separator + 1).trim();
+    if (
+      value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))
+    ) {
+      value = value.slice(1, -1);
+    }
+    return value.trim() || undefined;
+  }
+  return undefined;
 }
 
 /**

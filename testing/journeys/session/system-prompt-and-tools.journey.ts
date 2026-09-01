@@ -94,10 +94,53 @@ defineJourney(
         );
       }
       t.assertions.assert(!body.includes("must-not-leak"), "workspace .genethub/skills leaked into the product catalog");
+      t.assertions.assert(!body.includes("genehub-pm-project-control"), "PM-only Skills leaked into a normal session");
+      t.assertions.assert(!body.includes("project_manager_availability"), "PM-only availability policy leaked into a normal session");
       const cli = locateGenet(t.openRoot);
       t.assertions.assert(body.includes(`<genehub_cli>${cli}</genehub_cli>`), "the exact front-door CLI path is missing");
       for (const name of ["read", "write", "edit", "bash"]) {
         t.assertions.assert(body.includes(name), `${name} is missing from tool definitions`);
+      }
+      t.assertions.assert(
+        body.includes('"name":"genehub"'),
+        "the exact-argv GeneHub control tool is missing from the model tool definitions",
+      );
+
+      opened.mock.script({ text: "pm ok" });
+      const createdPm = await opened.client.call({
+        type: "pm.session.create",
+        payload: {
+          workspaceId: opened.workspaceId,
+          modelId: "deepseek/deepseek-v4-flash",
+          modeId: null,
+          effortId: "medium",
+          title: "Prompt profile probe",
+        },
+      });
+      t.assertions.assert(createdPm?.type === "session", `pm.session.create returned ${createdPm?.type}`);
+      if (createdPm?.type !== "session") return;
+      const pmEvents = await t.flows.main.attachEventLog(opened.client, createdPm.data.id);
+      await t.flows.main.sendPrompt(opened.client, createdPm.data.id, "inspect the PM system context");
+      await t.tools.waitUntil(() => pmEvents.some((item) => item.type === "turnCompleted"), 45_000);
+      const pmBody = JSON.stringify(opened.mock.requests.at(-1));
+      for (const name of [
+        "genehub-pm-project-control",
+        "genehub-pm-agent-space-orchestration",
+        "genehub-pm-quality-governance",
+      ]) {
+        const marker = `<name>${name}</name>`;
+        t.assertions.assert(
+          pmBody.split(marker).length - 1 === 1,
+          `${name} must appear exactly once in the PM product catalog`,
+        );
+      }
+      for (const policy of [
+        "project_manager_availability",
+        "must remain available for user guidance",
+        "Never execute sleep",
+        "daemon supervisor",
+      ]) {
+        t.assertions.assert(pmBody.includes(policy), `PM system context omitted ${policy}`);
       }
     } finally {
       opened.client.close();

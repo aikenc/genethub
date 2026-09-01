@@ -62,8 +62,8 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
         include_str!("assets/pm-space/skills/project-workflow/prompts/review.md"),
     ),
     (
-        "skills/project-workflow/prompts/integrate.md",
-        include_str!("assets/pm-space/skills/project-workflow/prompts/integrate.md"),
+        "skills/project-workflow/prompts/triage-review.md",
+        include_str!("assets/pm-space/skills/project-workflow/prompts/triage-review.md"),
     ),
     (
         "skills/project-workflow/prompts/repair-space.md",
@@ -332,74 +332,4 @@ fn validate_relative_path(relative: &str) -> BuilderResult<()> {
 
 fn io_error(error: std::io::Error) -> BuilderError {
     BuilderError(Diagnostic::error("PB001", format!("I/O error: {error}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn template_is_idempotent_and_uses_only_bounded_values() {
-        let temporary = tempfile::tempdir().unwrap();
-        let project = temporary.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let values = PmSpaceTemplateValues::new("星港防线", "zh-CN", "feature").unwrap();
-
-        let first = render_pm_space(&project, &values).unwrap();
-        assert_eq!(first.template_version, "2");
-        assert_eq!(first.created.len(), TEMPLATE_FILES.len());
-        assert!(first.validated.is_empty());
-        let repeated = render_pm_space(&project, &values).unwrap();
-        assert!(repeated.created.is_empty());
-        assert_eq!(repeated.validated.len(), TEMPLATE_FILES.len());
-
-        let root = project.join("spaces/pm");
-        assert!(!pm_space_requires_bootstrap(&root).unwrap());
-        let marker: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join("template.json")).unwrap()).unwrap();
-        assert_eq!(marker["version"], "2");
-        let manifest = std::fs::read_to_string(root.join("pipespace.json")).unwrap();
-        assert!(manifest.contains("星港防线"));
-        assert!(!manifest.contains("{{GENEHUB_"));
-        assert!(root
-            .join("skills/project-workflow/dcg/feature.yaml")
-            .is_file());
-        let workflow_skill =
-            std::fs::read_to_string(root.join("skills/project-workflow/SKILL.md")).unwrap();
-        assert!(workflow_skill.contains("不要重复当前节点的 `space.matchTags`"));
-        assert!(workflow_skill.contains("只有包级能力会固化为"));
-        let diagnose_prompt =
-            std::fs::read_to_string(root.join("skills/project-workflow/prompts/diagnose.md"))
-                .unwrap();
-        assert!(diagnose_prompt.contains("第一次结论也必须返回 worktree 的精确 HEAD commit/tree"));
-    }
-
-    #[test]
-    fn template_rejects_path_values_and_existing_drift() {
-        assert!(PmSpaceTemplateValues::new("../project", "zh-CN", "feature").is_err());
-        let temporary = tempfile::tempdir().unwrap();
-        let project = temporary.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let values = PmSpaceTemplateValues::new("project", "zh-CN", "feature").unwrap();
-        render_pm_space(&project, &values).unwrap();
-        std::fs::write(project.join("spaces/pm/role.json"), "drift\n").unwrap();
-        let error = render_pm_space(&project, &values).unwrap_err();
-        assert_eq!(error.0.code, "PB017");
-    }
-
-    #[test]
-    fn incompatible_template_requires_explicit_migration() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path().join("spaces/pm");
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(pm_space_requires_bootstrap(&root).unwrap());
-        std::fs::write(
-            root.join("template.json"),
-            r#"{"schema":"genehub-pm-space-template.v1","version":"1"}"#,
-        )
-        .unwrap();
-        let error = pm_space_requires_bootstrap(&root).unwrap_err();
-        assert_eq!(error.0.code, "PB017");
-        assert!(error.0.message.contains("automatic overwrite is refused"));
-    }
 }

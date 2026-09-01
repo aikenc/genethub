@@ -49,6 +49,7 @@ export {
   awaitHumanDecision,
   BlockedError,
   humanDecisionResponseDeadline,
+  humanDecisionStillApplicable,
   parseSummaryLanguage,
   renderRunSummary,
   UnstableError,

@@ -55,7 +55,7 @@ export interface FailureArtifactRecord {
 
 export interface FailureSessionRecord {
   sessionId: string;
-  role: "pm" | "worker" | "ordinary" | "unknown";
+  role: "pm" | "worker" | "reviewer" | "ordinary" | "unknown";
   agentId?: string;
   controllerSessionId?: string;
   workPackageId?: string;
@@ -74,6 +74,8 @@ export interface FailureArtifactIndex {
     workspaceRoot: "<lease-root>/workspace";
     projectState: "<lease-root>/data/pm-projects/<project-workspace-id>.json";
     sessions: "<workspace>/.genethub/sessions/<session-id>/";
+    pmSessions: "<lease-root>/workspace/spaces/pm/.genethub/sessions/<session-id>/";
+    agentSpaceSessions: "<lease-root>/workspace/spaces/<agent-space>/.genethub/sessions/<session-id>/";
   };
   limits: {
     perFileBytes: number;
@@ -336,7 +338,52 @@ function discoverSessionHomes(workspace: string): string[] {
   return out.sort();
 }
 
-function sessionRole(meta: Record<string, unknown>): FailureSessionRecord["role"] {
+function managedSessionRoles(lease: EnvironmentLease): Map<string, FailureSessionRecord["role"]> {
+  const roles = new Map<string, FailureSessionRecord["role"]>();
+  const stateRoot = path.join(lease.data, "pm-projects");
+  walkFiles(stateRoot, (file) => {
+    let state: Record<string, unknown>;
+    try {
+      state = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const runs = state.sessionDcgRuns;
+    if (runs && typeof runs === "object" && !Array.isArray(runs)) {
+      for (const sessionId of Object.keys(runs)) roles.set(sessionId, "pm");
+    }
+    const rawPackages = state.workPackages;
+    const packages = Array.isArray(rawPackages)
+      ? rawPackages
+      : rawPackages && typeof rawPackages === "object"
+        ? Object.values(rawPackages)
+        : [];
+    for (const raw of packages) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      if (typeof item.controllerSessionId === "string") {
+        roles.set(item.controllerSessionId, "pm");
+      }
+      if (typeof item.workSessionId === "string" && !roles.has(item.workSessionId)) {
+        roles.set(item.workSessionId, "worker");
+      }
+      const review = item.review;
+      if (review && typeof review === "object" && !Array.isArray(review)) {
+        const reviewSessionId = (review as Record<string, unknown>).sessionId;
+        if (typeof reviewSessionId === "string") roles.set(reviewSessionId, "reviewer");
+      }
+    }
+  }, { filter: (file) => path.extname(file).toLowerCase() === ".json" });
+  return roles;
+}
+
+function sessionRole(
+  meta: Record<string, unknown>,
+  sessionId: string,
+  managedRoles: Map<string, FailureSessionRecord["role"]>,
+): FailureSessionRecord["role"] {
+  const managed = managedRoles.get(sessionId);
+  if (managed) return managed;
   const kind = String(meta.kind ?? "").toLowerCase();
   if (kind === "pm" || kind.includes("projectmanager") || kind.includes("project_manager")) return "pm";
   if (kind.includes("work") || (meta.work && typeof meta.work === "object")) return "worker";
@@ -345,6 +392,7 @@ function sessionRole(meta: Record<string, unknown>): FailureSessionRecord["role"
 }
 
 function captureSessions(context: CaptureContext): void {
+  const managedRoles = managedSessionRoles(context.lease);
   for (const sessionsHome of discoverSessionHomes(context.lease.workspace)) {
     let sessionEntries;
     try {
@@ -367,9 +415,10 @@ function captureSessions(context: CaptureContext): void {
         // A partially-created session is still valuable evidence.
       }
       const work = meta.work && typeof meta.work === "object" ? meta.work as Record<string, unknown> : {};
+      const sessionId = String(meta.id ?? entry.name);
       context.sessions.push({
-        sessionId: String(meta.id ?? entry.name),
-        role: sessionRole(meta),
+        sessionId,
+        role: sessionRole(meta, sessionId, managedRoles),
         ...(typeof meta.agentId === "string" ? { agentId: meta.agentId } : {}),
         ...(typeof work.controllerSessionId === "string" ? { controllerSessionId: work.controllerSessionId } : {}),
         ...(typeof work.workPackageId === "string" ? { workPackageId: work.workPackageId } : {}),
@@ -384,11 +433,22 @@ function captureSessions(context: CaptureContext): void {
 }
 
 function captureLogs(context: CaptureContext): void {
-  const roots: Array<{ root: string; prefix: string; kind: FailureArtifactRecord["kind"] }> = [
+  const roots: Array<{
+    root: string;
+    prefix: string;
+    kind: FailureArtifactRecord["kind"];
+    filter?: (file: string) => boolean;
+  }> = [
     { root: context.lease.logs, prefix: "logs/lease", kind: "log" },
     { root: path.join(context.lease.data, "logs"), prefix: "logs/product", kind: "log" },
     { root: path.join(context.lease.home, ".local", "share", "opencode", "log"), prefix: "logs/opencode-data", kind: "runtime-log" },
     { root: path.join(context.lease.home, ".local", "state", "opencode"), prefix: "logs/opencode-state", kind: "runtime-log" },
+    {
+      root: path.join(context.lease.workspace, "spaces", "pm", ".genethub"),
+      prefix: "logs/pm-control",
+      kind: "log",
+      filter: (file) => path.extname(file).toLowerCase() === ".log",
+    },
   ];
   const seen = new Set<string>();
   for (const source of roots) {
@@ -404,7 +464,9 @@ function captureLogs(context: CaptureContext): void {
     walkFiles(source.root, (file, relative) => {
       captureFile(context, file, path.join(source.prefix, relative), source.kind);
     }, {
-      filter: (file) => TEXT_EXTENSIONS.has(path.extname(file).toLowerCase()) || /(?:log|stderr|stdout)/i.test(path.basename(file)),
+      filter: source.filter ?? ((file) =>
+        TEXT_EXTENSIONS.has(path.extname(file).toLowerCase()) ||
+        /(?:log|stderr|stdout)/i.test(path.basename(file))),
     });
   }
 }
@@ -564,6 +626,8 @@ export function collectFailureArtifacts(input: {
       workspaceRoot: "<lease-root>/workspace",
       projectState: "<lease-root>/data/pm-projects/<project-workspace-id>.json",
       sessions: "<workspace>/.genethub/sessions/<session-id>/",
+      pmSessions: "<lease-root>/workspace/spaces/pm/.genethub/sessions/<session-id>/",
+      agentSpaceSessions: "<lease-root>/workspace/spaces/<agent-space>/.genethub/sessions/<session-id>/",
     },
     limits: {
       perFileBytes: PER_FILE_LIMIT,

@@ -323,6 +323,11 @@ pub struct PmWorkPackageStatus {
     pub review_session_id: Option<String>,
     #[ts(optional)]
     pub review_verdict: Option<String>,
+    /// Immutable findings authored by the independent Reviewer. PM surfaces
+    /// consume these for target/budget triage; they are not PM-authored facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_findings: Option<Vec<PmReviewFindingStatus>>,
     /// Coordinator-proven local main baseline that contains this exact
     /// independently accepted candidate.
     #[ts(optional)]
@@ -333,6 +338,18 @@ pub struct PmWorkPackageStatus {
     pub integration_error: Option<String>,
     #[ts(optional)]
     pub block_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PmReviewFindingStatus {
+    pub severity: String,
+    pub title: String,
+    pub acceptance_impact: String,
+    pub recommended_action: String,
+    #[ts(optional)]
+    pub estimated_requests: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -363,6 +380,7 @@ pub struct PmWorkflowBudgetPolicyStatus {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
+    pub max_llm_requests: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -438,18 +456,28 @@ pub struct PmWorkflowRunBudgetStatus {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
+    pub max_llm_requests: u32,
     #[ts(type = "number")]
     pub started_at_ms: i64,
     #[ts(type = "number")]
     pub deadline_at_ms: i64,
     #[ts(type = "number")]
     pub remaining_ms: i64,
+    /// Execution time is frozen while the Workflow waits at an
+    /// `actor: user` node.
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub user_wait_started_at_ms: Option<i64>,
+    #[ts(type = "number")]
+    pub user_wait_ms: u64,
     #[ts(optional)]
     pub exhaustion_started_at_ms: Option<i64>,
     #[ts(optional)]
     pub exhausted_at_ms: Option<i64>,
     pub work_sessions_started: u32,
     pub active_work_sessions: u32,
+    pub llm_requests_observed: u32,
+    pub llm_requests_remaining: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

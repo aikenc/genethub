@@ -59,8 +59,10 @@ test("failure artifacts retain PM and worker session stores without leaking cred
 
     const pm = path.join(lease.workspace, "project", "spaces", "pm", ".genethub", "sessions", "s_pm");
     const worker = path.join(lease.workspace, "project", "spaces", "implementation", ".genethub", "sessions", "s_work");
+    const reviewer = path.join(lease.workspace, "project", "spaces", "review", ".genethub", "sessions", "s_review");
     mkdirSync(path.join(pm, "rounds", "r-000"), { recursive: true });
     mkdirSync(path.join(worker, "rounds", "r-000"), { recursive: true });
+    mkdirSync(path.join(reviewer, "rounds", "r-000"), { recursive: true });
     // SessionKind uses camelCase serialization and the real PM wire value is
     // exactly `pm`; keep this fixture aligned with the daemon store.
     writeFileSync(path.join(pm, "meta.json"), `${JSON.stringify({ id: "s_pm", kind: "pm", agentId: "builtin" })}\n`);
@@ -75,11 +77,33 @@ test("failure artifacts retain PM and worker session stores without leaking cred
       })}\n`,
     );
     writeFileSync(path.join(worker, "rounds", "r-000", "t-0000.jsonl"), `${JSON.stringify({ event: "tool", authorization: secret })}\n`);
+    writeFileSync(
+      path.join(reviewer, "meta.json"),
+      `${JSON.stringify({
+        id: "s_review",
+        kind: "work",
+        agentId: "opencode",
+        work: { controllerSessionId: "s_pm", workPackageId: "wp_1" },
+      })}\n`,
+    );
+    writeFileSync(path.join(reviewer, "rounds", "r-000", "t-0000.jsonl"), "{\"event\":\"review\"}\n");
+    const pmControl = path.join(lease.workspace, "spaces", "pm", ".genethub");
+    mkdirSync(pmControl, { recursive: true });
+    writeFileSync(path.join(pmControl, "topology-bootstrap.log"), "topology ready\n");
 
     mkdirSync(path.join(lease.data, "pm-projects"), { recursive: true });
     writeFileSync(
       path.join(lease.data, "pm-projects", "w_project.json"),
-      `${JSON.stringify({ projectWorkspaceId: "w_project", sessionDcgRuns: { s_pm: { status: "running" } } })}\n`,
+      `${JSON.stringify({
+        projectWorkspaceId: "w_project",
+        sessionDcgRuns: { s_pm: { status: "running" } },
+        workPackages: [{
+          id: "wp_1",
+          controllerSessionId: "s_pm",
+          workSessionId: "s_work",
+          review: { sessionId: "s_review", verdict: "pass" },
+        }],
+      })}\n`,
     );
 
     const bundle = collectFailureArtifacts({
@@ -97,12 +121,17 @@ test("failure artifacts retain PM and worker session stores without leaking cred
       },
     });
     const index = JSON.parse(readFileSync(path.join(bundle, "artifact-index.json"), "utf8")) as FailureArtifactIndex;
-    assert.equal(index.sessions.length, 2);
-    assert.deepEqual(index.sessions.map((session) => session.role).sort(), ["pm", "worker"]);
+    assert.equal(index.sessions.length, 3);
+    assert.deepEqual(index.sessions.map((session) => session.role).sort(), ["pm", "reviewer", "worker"]);
     assert(index.sessions.every((session) => session.sourcePath.startsWith("<lease-root>/workspace/")));
     assert(index.files.some((file) => file.kind === "project-state"));
     assert(index.files.some((file) => file.sourcePath.endsWith("/logs/daemon.log")));
+    assert(index.files.some((file) => file.artifactPath === "logs/pm-control/topology-bootstrap.log"));
     assert(index.files.some((file) => file.sourcePath === "<test-worker>/stdout"));
+    assert.equal(
+      index.storageMap.agentSpaceSessions,
+      "<lease-root>/workspace/spaces/<agent-space>/.genethub/sessions/<session-id>/",
+    );
     for (const file of allTextFiles(bundle)) {
       const contents = readFileSync(file, "utf8");
       assert(!contents.includes(secret), `${path.relative(bundle, file)} leaked a credential`);
@@ -142,6 +171,42 @@ test("run store consumes only sanitized bundles inside its own internal director
     assert.equal(readFileSync(failure, "utf8"), "{}\n");
     assert(!readFileSync(path.join(store.dir, "results.ndjson"), "utf8").includes("failureArtifacts"));
     assert(!readFileSync(path.join(store.dir, "failures", unit.caseId, "diagnostic.md"), "utf8").includes("never-persist-this"));
+  } finally {
+    rmSync(space, { recursive: true, force: true });
+  }
+});
+
+test("run store preserves retained passing evidence outside its internal staging directory", () => {
+  const space = mkdtempSync(path.join(tmpdir(), "genehub-run-retention-test-"));
+  try {
+    const store = createRunStore(space, "retained-artifacts");
+    const staging = path.join(store.dir, ".internal", "failure-evidence", "passing-bundle");
+    mkdirSync(staging, { recursive: true });
+    writeFileSync(path.join(staging, "artifact-index.json"), "{\"schema\":\"retained\"}\n");
+    const result: UnitResult = {
+      id: unit.id,
+      caseId: unit.caseId,
+      variant: unit.variant,
+      status: "passed",
+      startedAt: new Date(0).toISOString(),
+      endedAt: new Date(1).toISOString(),
+      durationMs: 1,
+      message: "qualified",
+      retentionArtifacts: staging,
+    };
+    store.writeResult(result);
+    store.writeReport(result);
+    store.writeRetentionArtifacts(result);
+    const retained = path.join(
+      store.dir,
+      "reports",
+      unit.caseId,
+      "evidence",
+      "journey.failure-bundle_default",
+      "artifact-index.json",
+    );
+    assert.equal(readFileSync(retained, "utf8"), "{\"schema\":\"retained\"}\n");
+    assert(!readFileSync(path.join(store.dir, "results.ndjson"), "utf8").includes("retentionArtifacts"));
   } finally {
     rmSync(space, { recursive: true, force: true });
   }

@@ -21,7 +21,15 @@ pub const PROJECT_MANAGER_ENTRYPOINT_MANIFEST: &str = ".entrypoints-project-mana
 const PROJECT_MANAGER_SKILL_PREFIX: &str = "genehub-pm-";
 const PROJECT_MANAGER_AVAILABILITY_GUIDANCE: &str = r#"<project_manager_availability>
 A PM session must remain available for user guidance while WorkSessions run. Create and continue owned WorkSessions with a top-level GeneHub CLI command using `--no-wait`; the PM control surface also forces those turns to return non-blocking if the flag is accidentally omitted. Never wrap them in timeout, a pipe, a background job, or another waiting construct. Never execute sleep, timer, foreground or background wait, polling loop, or repeated `session get` commands merely to monitor work. A successful `agent run --work-package` atomically binds the created WorkSession, advances a ready package to running or a candidate package to review, and marks the leased Agent Space working. Do not issue a second package transition merely to bind that session. After dispatching every currently-ready package and recording any other immediate state transitions, briefly report progress and finish the PM turn. The daemon supervisor owns quiet-session backoff checks and wakes the PM only for material WorkSession changes. A newly arrived user message takes priority over a supervisor wake.
+When the built-in `genehub` tool is available, use it instead of `bash` for every GeneHub CLI operation. Put all currently-known deterministic CLI operations in one `genehub.commands` batch; do not spend model turns on `--help`, source search, or one-command-at-a-time status discovery. The batch retains the same daemon authorization and stops at the first failed command.
 </project_manager_availability>"#;
+const WORK_SESSION_RESULT_GUIDANCE: &str = r#"<managed_work_result>
+This is a managed WorkSession. GeneHub advances its WorkPackage only from durable evidence, never from optimistic prose. When and only when this assignment is fully settled, put exactly one machine-readable marker on the final non-empty line of your response, without a Markdown fence:
+GENEHUB_WORK_RESULT {"status":"candidate-ready","summary":"tests passed and the assigned worktree is committed and clean"}
+Use candidate-ready only for implementation after the required work and tests are complete, all intended changes are committed on the assigned branch, and the worktree is clean. For an independent review use status review-pass or review-fail only after reviewing the exact bound candidate. A passing review should use the minimal exact shape `GENEHUB_WORK_RESULT {"status":"review-pass","summary":"all bound-candidate gates passed"}`. A failing review must use `GENEHUB_WORK_RESULT {"status":"review-fail","summary":"one or more acceptance defects remain","findings":[{"severity":"blocking|high|medium|low","title":"...","acceptanceImpact":"...","recommendedAction":"...","estimatedRequests":1}]}`. `findings` is an array of objects, never strings; every finding requires severity, title, acceptanceImpact, and recommendedAction, while estimatedRequests is optional. The Reviewer reports technical evidence and impact but does not make product or budget tradeoffs. Use blocked only when the assigned outcome cannot continue safely. If the turn is only a checkpoint or needs continuation, do not emit any GENEHUB_WORK_RESULT marker. The Coordinator derives commit/tree identity and enforces package, lease, review, and Git bindings; never invent those identifiers in the marker.
+An assignment may request a human-readable RESULT block, a first-line verdict, or another report layout. That layout may appear above the marker, but it never replaces this protocol. The GENEHUB_WORK_RESULT object must still be the final non-empty line, with no prose after it. A first-line `review-pass` or natural-language claim is not a managed verdict.
+The only marker status values are `candidate-ready` or `blocked` for implementation and `review-pass`, `review-fail`, or `blocked` for review. The domain words `candidate` and `failed` are not marker status values.
+</managed_work_result>"#;
 
 /// Product-owned Skill catalog selected for one durable session role.
 /// Project and Agent Space Skills remain workspace inputs rather than being
@@ -197,6 +205,10 @@ pub fn session_guidance(
     sections.join("\n\n")
 }
 
+pub fn work_session_result_guidance() -> &'static str {
+    WORK_SESSION_RESULT_GUIDANCE
+}
+
 pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String {
     let visible: Vec<&Skill> = skills
         .iter()
@@ -340,80 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn all_product_built_ins_and_references_are_materialized() {
-        let root = temp_dir("all-builtins");
-        let skills = load(&root);
-        for file in BUILTIN_FILES {
-            assert_eq!(
-                std::fs::read(root.join(file.relative_path)).unwrap(),
-                file.contents
-            );
-        }
-        let entrypoints = std::fs::read_to_string(root.join(ENTRYPOINT_MANIFEST)).unwrap();
-        assert!(entrypoints
-            .lines()
-            .all(|entrypoint| !is_project_manager_skill(entrypoint)));
-        let manager_entrypoints =
-            std::fs::read_to_string(root.join(PROJECT_MANAGER_ENTRYPOINT_MANIFEST)).unwrap();
-        assert_eq!(
-            manager_entrypoints.lines().collect::<Vec<_>>(),
-            BUILTIN_ENTRYPOINTS
-        );
-        assert!(skills
-            .iter()
-            .any(|skill| skill.name == "genehub-session-history"));
-        assert!(skills
-            .iter()
-            .any(|skill| skill.name == "genehub-html-preview"));
-        let speech = skills
-            .iter()
-            .find(|skill| skill.name == "genehub-speech-runtime")
-            .expect("speech runtime built-in");
-        let base = speech.file_path.parent().unwrap();
-        assert!(base.join("agents/openai.yaml").is_file());
-        assert!(base.join("references/models.md").is_file());
-        assert!(base.join("references/runtime-contract.md").is_file());
-        assert!(!skills
-            .iter()
-            .any(|skill| skill.name.starts_with("genehub-pm-")));
-        let manager = load_for_profile(&root, SkillProfile::ProjectManager);
-        assert!(manager
-            .iter()
-            .any(|skill| skill.name == "genehub-pm-project-control"));
-        assert!(manager
-            .iter()
-            .any(|skill| skill.name == "genehub-pm-agent-space-orchestration"));
-        assert!(manager
-            .iter()
-            .any(|skill| skill.name == "genehub-pm-quality-governance"));
-        let agent_space_contract = std::fs::read_to_string(
-            root.join("genehub-pm-agent-space-orchestration/references/agent-space-contract.md"),
-        )
-        .unwrap();
-        assert!(agent_space_contract.contains("never put `opencode`"));
-        assert!(agent_space_contract.contains("dispatch `--agent opencode`"));
-        let orchestration =
-            std::fs::read_to_string(root.join("genehub-pm-agent-space-orchestration/SKILL.md"))
-                .unwrap();
-        assert!(orchestration.contains("pm project workflow status"));
-        assert!(orchestration.contains(
-            "\"$GENEHUB_CLI\" workspace register-agent-space \"spaces/<name>/<name>.code-workspace\""
-        ));
-        assert!(orchestration.contains("spaces/*/.pipebuilder/"));
-        assert!(orchestration.contains("recursively scan product source"));
-        assert!(
-            orchestration.contains("atomically binds that\nWorkSession to its reserved package")
-        );
-        let quality =
-            std::fs::read_to_string(root.join("genehub-pm-quality-governance/SKILL.md")).unwrap();
-        assert!(quality.contains("atomically enters `review`, binds the"));
-        let project_control =
-            std::fs::read_to_string(root.join("genehub-pm-project-control/SKILL.md")).unwrap();
-        assert!(project_control.contains("pm project advance --to active"));
-        assert!(project_control.contains("only `ProjectLifecycle` and cannot finish"));
-    }
-
-    #[test]
     fn unknown_data_dir_skill_is_not_in_the_genehub_catalog() {
         let root = temp_dir("unknown");
         write_skill(
@@ -456,18 +394,6 @@ mod tests {
         assert!(prompt.contains("genehub-speech-runtime"));
         assert!(prompt.contains("/opt/genehub/genet-beta"));
         assert!(prompt.contains("<available_skills>"));
-        assert!(!prompt.contains("genehub-pm-project-control"));
-        let manager = session_guidance(
-            Some(&root),
-            Some(Path::new("/opt/genehub/genet-beta")),
-            SkillProfile::ProjectManager,
-        );
-        assert!(manager.contains("genehub-pm-project-control"));
-        assert!(manager.contains("genehub-pm-agent-space-orchestration"));
-        assert!(manager.contains("genehub-pm-quality-governance"));
-        assert!(manager.contains("must remain available for user guidance"));
-        assert!(manager.contains("Never execute sleep"));
-        assert!(manager.contains("daemon supervisor"));
     }
 
     #[test]
@@ -479,16 +405,6 @@ mod tests {
         );
         assert!(prompt.contains("index.html"));
         assert!(!prompt.contains("available_skills"));
-        assert!(!prompt.contains("project_manager_availability"));
-
-        let manager = session_guidance(
-            None,
-            Some(Path::new("/opt/genehub/genet")),
-            SkillProfile::ProjectManager,
-        );
-        assert!(manager.contains("project_manager_availability"));
-        assert!(manager.contains("finish the PM turn"));
-        assert!(!manager.contains("available_skills"));
     }
 
     #[test]

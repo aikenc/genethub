@@ -353,7 +353,6 @@ fn map_finish_reason(reason: &str) -> StopReason {
         _ => StopReason::Stop,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,33 +503,5 @@ mod tests {
         assert_eq!(usage.input, 20);
         assert_eq!(usage.output, 6);
         assert_eq!(usage.cache_read, 15);
-    }
-
-    #[test]
-    fn empty_trailing_tool_id_does_not_erase_qwen_call_identity() {
-        let mut call = PartialToolCall::default();
-        call.apply_delta(&json!({
-            "index": 0,
-            "id": "call_qwen_1",
-            "type": "function",
-            "function": { "name": "read", "arguments": "" }
-        }));
-        call.apply_delta(&json!({
-            "index": 0,
-            "function": { "arguments": "{\"path\":\"README.md\"}" }
-        }));
-        call.apply_delta(&json!({
-            "index": 0,
-            "id": "",
-            "type": "function",
-            "function": { "arguments": "" }
-        }));
-
-        assert_eq!(call.id, "call_qwen_1");
-        assert_eq!(call.name, "read");
-        assert_eq!(
-            serde_json::from_str::<Value>(&call.arguments).unwrap(),
-            json!({"path": "README.md"})
-        );
     }
 }

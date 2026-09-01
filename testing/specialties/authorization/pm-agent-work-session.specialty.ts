@@ -34,6 +34,7 @@ defineSpecialty(
       "a committed Provider Skill change can be re-recorded against a stale Builder lock",
       "a failed supervisor wake retries on every two-second sampler tick",
       "forking a WorkSession preserves its privileged role",
+      "a PM mistakes the system-owned review evidence node for automatic Reviewer WorkSession dispatch",
     ],
     tags: ["core", "authorization", "pm-agent-mvp", "pm-agent-work-session"],
     llm: { default: "mock" },
@@ -99,6 +100,7 @@ defineSpecialty(
       mkdirSync(`${t.env.workspace}/repositories/game`, { recursive: true });
       mkdirSync(`${t.env.workspace}/worktrees/implementation`, { recursive: true });
       mkdirSync(`${t.env.workspace}/spaces/implementation`, { recursive: true });
+      mkdirSync(`${t.env.workspace}/spaces/review`, { recursive: true });
       mkdirSync(`${t.env.workspace}/skills/project-contract`, { recursive: true });
       writeFileSync(
         `${t.env.workspace}/.gitignore`,
@@ -130,6 +132,14 @@ defineSpecialty(
         `${t.env.workspace}/spaces/implementation/implementation.code-workspace`,
         '{"folders":[{"name":"implementation","path":"."},{"name":"game","path":"../../worktrees/implementation/game"}]}\n',
       );
+      writeFileSync(
+        `${t.env.workspace}/spaces/review/pipespace.json`,
+        '{"schema":"pipespace.v1","name":"review","agents":["codex"],"skills":["project-contract"],"tags":[],"skillProviders":[{"type":"folder","path":"../../skills"}]}\n',
+      );
+      writeFileSync(
+        `${t.env.workspace}/spaces/review/review.code-workspace`,
+        '{"folders":[{"name":"review","path":"."},{"name":"game","path":"../../worktrees/implementation/game"}]}\n',
+      );
       execFileSync("git", ["init", "-q", "-b", "main"], { cwd: t.env.workspace });
       execFileSync("git", ["config", "user.name", "GeneHub PM Fixture"], { cwd: t.env.workspace });
       execFileSync("git", ["config", "user.email", "pm-fixture@genehub.invalid"], { cwd: t.env.workspace });
@@ -144,7 +154,7 @@ defineSpecialty(
         ["worktree", "add", "-q", "-b", "work/gameplay", `${t.env.workspace}/worktrees/implementation/game`, "main"],
         { cwd: `${t.env.workspace}/repositories/game` },
       );
-      execFileSync("git", ["add", ".gitignore", "spaces/pm", "spaces/implementation", "skills/project-contract"], {
+      execFileSync("git", ["add", ".gitignore", "spaces/pm", "spaces/implementation", "spaces/review", "skills/project-contract"], {
         cwd: t.env.workspace,
       });
       execFileSync("git", ["commit", "-qm", "Initialize PM project topology"], { cwd: t.env.workspace });
@@ -158,6 +168,10 @@ defineSpecialty(
         '"$GENEHUB_CLI" agent-space build implementation --dry-run --require-no-post-commands',
         '"$GENEHUB_CLI" agent-space build implementation --require-no-post-commands',
         '"$GENEHUB_CLI" agent-space verify implementation',
+        '"$GENEHUB_CLI" agent-space check review',
+        '"$GENEHUB_CLI" agent-space build review --dry-run --require-no-post-commands',
+        '"$GENEHUB_CLI" agent-space build review --require-no-post-commands',
+        '"$GENEHUB_CLI" agent-space verify review',
         '"$GENEHUB_CLI" pm project advance --to topology-verified',
       ].join(" && ");
       opened.mock.script(
@@ -191,11 +205,14 @@ defineSpecialty(
           tool: {
             name: "bash",
             arguments: {
-              command: '"$GENEHUB_CLI" workspace register-agent-space spaces/implementation/implementation.code-workspace',
+              command: [
+                '"$GENEHUB_CLI" workspace register-agent-space spaces/implementation/implementation.code-workspace',
+                '"$GENEHUB_CLI" workspace register-agent-space spaces/review/review.code-workspace',
+              ].join(" && "),
             },
           },
         },
-        { text: "The implementation Agent Space is registered." },
+        { text: "The implementation and review Agent Spaces are registered." },
       );
       const terminalsBeforeRegistration = terminalCount(pmEvents);
       const completionsBeforeRegistration = completedCount(pmEvents);
@@ -217,8 +234,15 @@ defineSpecialty(
               (workspace) => workspace.kind === "agentSpace" && workspace.name === "implementation",
             )
           : undefined;
+      const reviewSpace =
+        listedWorkspaces?.type === "workspaces"
+          ? listedWorkspaces.data.find(
+              (workspace) => workspace.kind === "agentSpace" && workspace.name === "review",
+            )
+          : undefined;
       t.assertions.assert(agentSpace !== undefined, "the PM CLI did not register an Agent Space");
-      if (!agentSpace) return;
+      t.assertions.assert(reviewSpace !== undefined, "the PM CLI did not register a review Agent Space");
+      if (!agentSpace || !reviewSpace) return;
       t.assertions.assert(
         agentSpace.capabilities?.createSession === true &&
           agentSpace.capabilities.rename === false &&
@@ -258,6 +282,7 @@ defineSpecialty(
       }).trim();
       const activateCommand = [
         `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${sourceCommit} --tag gameplay`,
+        `"$GENEHUB_CLI" pm project space record --name review --purpose "Independently review gameplay candidates" --path spaces/review --workspace ${reviewSpace.id} --commit ${sourceCommit} --role review --tag gameplay`,
         '"$GENEHUB_CLI" pm project advance --to workspaces-registered',
         '"$GENEHUB_CLI" pm project advance --to active',
         '"$GENEHUB_CLI" pm project workflow select --graph feature',
@@ -319,6 +344,13 @@ defineSpecialty(
               (run) => run.controllerSessionId === pm.id,
             )
           : undefined;
+      const featureDefinition =
+        publicProject?.type === "projectStatus"
+          ? publicProject.data.workflowCatalog.workflows.find((workflow) => workflow.id === "feature")
+          : undefined;
+      const reviewNode = featureDefinition?.nodes.find((node) => node.id === "review");
+      const integrationNode = featureDefinition?.nodes.find((node) => node.id === "integrate");
+      const reviewTriageNode = featureDefinition?.nodes.find((node) => node.id === "review-triage");
       t.assertions.assert(
           publicProject?.type === "projectStatus" &&
           publicProject.data.phase === "active" &&
@@ -329,8 +361,14 @@ defineSpecialty(
           projectedRun.budget.remainingMs > 0 &&
           projectedRun.budget.maxWorkSessions === 16 &&
           projectedRun.budget.maxConcurrentWorkSessions === 4 &&
+          projectedRun.budget.maxLlmRequests === 128 &&
+          projectedRun.budget.llmRequestsObserved + projectedRun.budget.llmRequestsRemaining ===
+            projectedRun.budget.maxLlmRequests &&
           projectedRun.budget.workSessionsStarted === 0 &&
           projectedRun.budget.activeWorkSessions === 0 &&
+          reviewNode?.actor === "system" &&
+          integrationNode?.actor === "system" &&
+          reviewTriageNode?.actor === "pm" &&
           projectedRun.resourceCapacities.some(
               (capacity) =>
                 capacity.nodeId === "implement" &&
@@ -488,7 +526,9 @@ defineSpecialty(
             arguments: {
               command: [
                 '"$GENEHUB_CLI" agent-space verify implementation',
+                '"$GENEHUB_CLI" agent-space verify review',
                 `"$GENEHUB_CLI" pm project space record --name implementation --purpose "Implement gameplay in an isolated worktree" --path spaces/implementation --workspace ${agentSpace.id} --commit ${restoredSourceCommit} --tag gameplay --tag webgl2`,
+                `"$GENEHUB_CLI" pm project space record --name review --purpose "Independently review gameplay candidates" --path spaces/review --workspace ${reviewSpace.id} --commit ${restoredSourceCommit} --role review --tag gameplay`,
               ].join(" && "),
             },
           },
@@ -812,6 +852,8 @@ defineSpecialty(
           waitingAfterBackoff?.type === "projectStatus" &&
           waitingAfterBackoff.data.lifecycle === "active" &&
           run?.supervisor.mode === "waitingUser" &&
+          typeof run.budget?.userWaitStartedAtMs === "number" &&
+          (run.budget?.remainingMs ?? 0) > 0 &&
           run?.activeNodes.includes("recover") === true &&
           run.availableEdges.some((edge) => edge.id === "cancel" && edge.chooseBy === "user" && edge.satisfied)
         );
@@ -861,8 +903,13 @@ defineSpecialty(
         humanDecision?.type === "projectStatus" &&
           humanDecision.data.lifecycle === "active" &&
           humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.status === "cancelled" &&
+          (humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.budget?.userWaitMs ?? 0) > 0 &&
+          humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.budget?.userWaitStartedAtMs == null &&
           humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === pm.id)?.supervisor.mode ===
             "terminal" &&
+          humanDecision.data.workflowRuns
+            .find((item) => item.controllerSessionId === pm.id)
+            ?.teamSlots.find((slot) => slot.workPackageId === "wp-gameplay")?.workSessionId == null &&
           humanDecision.data.workflowRuns.find((item) => item.controllerSessionId === duplicatePmId)?.status ===
             "discussion" &&
           humanDecision.data.workPackages.find((item) => item.id === "wp-gameplay")?.status === "cancelled",
@@ -954,6 +1001,320 @@ defineSpecialty(
         ordinary?.type === "session" && ordinary.data.kind === "normal",
         "the user could not open an ordinary conversation in the Agent Space",
       );
+
+      // Revision one establishes this Run's contract. It is not a newer
+      // contract and therefore must not invalidate final packages that are
+      // already bound but have never started. Exercise the exact recovery
+      // order observed in the real Qwen journey through the public CLI after
+      // the main supervisor/reload scenario has reached its terminal state.
+      const siblingPreIntentCommand = [
+        '"$GENEHUB_CLI" pm project workflow select --graph bugfix',
+        '"$GENEHUB_CLI" pm project package put --id sibling-preintent --title "Pre-intent package" --outcome "Remain dispatchable under the first persisted Intent" --space-tag gameplay --repository game --branch work/gameplay --node fix',
+        '"$GENEHUB_CLI" pm project intent set --outcome "Deliver the pre-intent package" --acceptance "Revision one preserves the final unstarted package" --affects sibling-preintent',
+        '"$GENEHUB_CLI" pm project workflow status > pm-sibling-preintent-status.json',
+      ].join(" && ");
+      opened.mock.script(
+        { tool: { name: "bash", arguments: { command: siblingPreIntentCommand } } },
+        { text: "Revision one preserved the final pre-dispatch package." },
+      );
+      await t.flows.main.sendPrompt(
+        opened.client,
+        duplicatePmId,
+        "Bind a final bugfix package, establish revision one, and prove it remains dispatchable.",
+      );
+      let siblingPreIntentSnapshot: Awaited<ReturnType<typeof opened.client.call>> | undefined;
+      await t.tools.waitUntil(
+        async () => {
+          siblingPreIntentSnapshot = await opened.client.call({
+            type: "session.get",
+            payload: { sessionId: duplicatePmId },
+          });
+          return siblingPreIntentSnapshot?.type === "snapshot" &&
+            siblingPreIntentSnapshot.data.summary.status === "idle" &&
+            siblingPreIntentSnapshot.data.items.filter((item) => item.type === "turnSummary").length >= 2;
+        },
+        30_000,
+      );
+      const siblingPreIntentStatusPath = `${t.env.workspace}/spaces/pm/pm-sibling-preintent-status.json`;
+      const siblingPreIntentStatus = existsSync(siblingPreIntentStatusPath)
+        ? JSON.parse(readFileSync(siblingPreIntentStatusPath, "utf8")) as {
+            data?: {
+              run?: { intent?: { revision?: number } };
+              workPackages?: Array<{ id?: string; status?: string; blockReason?: string | null }>;
+            };
+          }
+        : undefined;
+      const siblingPreIntentPackage = siblingPreIntentStatus?.data?.workPackages?.find(
+        (item) => item.id === "sibling-preintent",
+      );
+      t.assertions.assert(
+        siblingPreIntentSnapshot?.type === "snapshot" &&
+          siblingPreIntentStatus?.data?.run?.intent?.revision === 1 &&
+          siblingPreIntentPackage?.status === "planned" &&
+          !siblingPreIntentPackage.blockReason,
+        `revision one invalidated a final pre-dispatch package: snapshot=${JSON.stringify(siblingPreIntentSnapshot)} status=${JSON.stringify(siblingPreIntentStatus)}`,
+      );
+
+      // Exercise the failed-review retry path through the real daemon, CLI,
+      // ACP adapter and supervisor. The immutable failed package keeps its
+      // evidence, while a new package in the same PM Session and exact Git
+      // lineage may reuse the now-idle implementation Space.
+      const implementationWorktree = `${t.env.workspace}/worktrees/implementation/game`;
+      writeFileSync(
+        `${implementationWorktree}/fixture-candidate.txt`,
+        "candidate that requires one bounded review correction\n",
+      );
+      execFileSync("git", ["add", "fixture-candidate.txt"], { cwd: implementationWorktree });
+      execFileSync("git", ["commit", "-qm", "Create failed-review fixture candidate"], {
+        cwd: implementationWorktree,
+      });
+
+      const createFailedCandidate = [
+        '"$GENEHUB_CLI" pm project package transition --id sibling-preintent --to cancelled',
+        '"$GENEHUB_CLI" pm project package put --id failed-review-original --title "Failed review original" --outcome "Preserve a failed independent review" --space-tag gameplay --repository game --branch work/gameplay --node fix',
+        '"$GENEHUB_CLI" pm project package transition --id failed-review-original --to ready',
+        `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${agentSpace.id} --work-package failed-review-original --no-wait "GENEHUB_FIXTURE_CANDIDATE_READY"`,
+      ].join(" && ");
+      const dispatchFailedReview =
+        `"$GENEHUB_CLI" agent run --agent ${workAgentId} --workspace ${reviewSpace.id} --work-package failed-review-original --no-wait "GENEHUB_FIXTURE_REVIEW_FAIL"`;
+      const bindReworkPackage = [
+        '"$GENEHUB_CLI" pm project workflow transition --edge review-rework --fact review.rework.ready',
+        '"$GENEHUB_CLI" pm project package put --id failed-review-retry --title "Failed review retry" --outcome "Apply the bounded reviewer correction" --space-tag gameplay --repository game --branch work/gameplay --node fix',
+      ].join(" && ");
+      opened.mock.script(
+        { tool: { name: "bash", arguments: { command: createFailedCandidate } } },
+        { text: "The implementation fixture is dispatched; the supervisor owns candidate observation." },
+        { tool: { name: "bash", arguments: { command: dispatchFailedReview } } },
+        { text: "The independent review fixture is dispatched." },
+        { tool: { name: "bash", arguments: { command: bindReworkPackage } } },
+        { text: "The bounded rework package preserves and reuses the exact failed lineage." },
+      );
+      await t.flows.main.sendPrompt(
+        opened.client,
+        duplicatePmId,
+        "Exercise one independent review failure and bind its exact-lineage rework package.",
+      );
+
+      let reworkStatus: Awaited<ReturnType<typeof opened.client.call>> | undefined;
+      await t.tools.waitUntil(async () => {
+        reworkStatus = await opened.client.call({
+          type: "pm.project.status",
+          payload: { workspaceId: opened.workspaceId },
+        });
+        return reworkStatus?.type === "projectStatus" &&
+          reworkStatus.data.workPackages.some(
+            (item) => item.id === "failed-review-retry" && item.status === "planned",
+          );
+      }, 60_000);
+      const reviewDispatchWake = await opened.client.call({
+        type: "session.get",
+        payload: { sessionId: duplicatePmId },
+      });
+      const reviewDispatchPrompt =
+        reviewDispatchWake?.type === "snapshot"
+          ? reviewDispatchWake.data.items.find(
+              (item) =>
+                item.type === "userMessage" &&
+                item.text.includes("action=dispatch-independent-review") &&
+                item.text.includes(`reviewWorkspace=${reviewSpace.id}`) &&
+                item.text.includes("system` means the Coordinator validates"),
+            )
+          : undefined;
+      t.assertions.assert(
+        reviewDispatchPrompt !== undefined,
+        `the public supervisor event did not give the PM an unambiguous independent-review dispatch target: ${JSON.stringify(reviewDispatchWake)}`,
+      );
+      const reworkRun =
+        reworkStatus?.type === "projectStatus"
+          ? reworkStatus.data.workflowRuns.find(
+              (item) => item.controllerSessionId === duplicatePmId,
+            )
+          : undefined;
+      const failedOriginal =
+        reworkStatus?.type === "projectStatus"
+          ? reworkStatus.data.workPackages.find((item) => item.id === "failed-review-original")
+          : undefined;
+      const retryPackage =
+        reworkStatus?.type === "projectStatus"
+          ? reworkStatus.data.workPackages.find((item) => item.id === "failed-review-retry")
+          : undefined;
+      t.assertions.assert(
+        reworkStatus?.type === "projectStatus" &&
+          failedOriginal?.status === "cancelled" &&
+          failedOriginal.reviewVerdict === "fail" &&
+          Boolean(failedOriginal.workSessionId) &&
+          Boolean(failedOriginal.reviewSessionId) &&
+          failedOriginal.workSessionId !== failedOriginal.reviewSessionId &&
+          retryPackage?.status === "planned" &&
+          retryPackage.agentSpace === "implementation" &&
+          retryPackage.repository === failedOriginal.repository &&
+          retryPackage.branch === failedOriginal.branch &&
+          reworkRun?.activeNodes.includes("fix") === true &&
+          reworkRun.nodeInstances.some(
+            (instance) => instance.nodeId === "fix" && instance.iteration === 2,
+          ) &&
+          reworkRun.teamSlots.find(
+            (slot) => slot.workPackageId === "failed-review-original",
+          )?.status === "cancelled" &&
+          reworkRun.teamSlots.find(
+            (slot) => slot.workPackageId === "failed-review-original",
+          )?.workSessionId == null,
+        `failed-review rework did not preserve exact evidence and lineage: ${JSON.stringify(reworkStatus)}`,
+      );
+
+      // The project projection can expose the newly bound rework package a
+      // few milliseconds before the supervisor-owned PM turn that created it
+      // has written its terminal event. Do not race a second user instruction
+      // into that still-running public Session.
+      await t.tools.waitUntil(async () => {
+        const snapshot = await opened.client.call({
+          type: "session.get",
+          payload: { sessionId: duplicatePmId },
+        });
+        return (
+          snapshot?.type === "snapshot" &&
+          snapshot.data.summary.status === "idle" &&
+          snapshot.data.items.filter((item) => item.type === "turnSummary")
+            .length >= 5
+        );
+      }, 30_000);
+
+      // Reproduce the real Qwen failure where a candidate became dirty after
+      // independent acceptance but before deterministic integration. The
+      // fault is injected through the real filesystem while the daemon is
+      // processing the public Reviewer result; the oracle is only the public
+      // PM project projection. A pre-integration verification failure must be
+      // durable evidence and must move the Run out of integrate instead of
+      // being retried every supervisor sample.
+      const integrationCandidatePath =
+        implementationWorktree + "/integration-candidate.txt";
+      writeFileSync(
+        integrationCandidatePath,
+        "accepted candidate for integration fault coverage\n",
+      );
+      execFileSync("git", ["add", "integration-candidate.txt"], {
+        cwd: implementationWorktree,
+      });
+      execFileSync("git", ["commit", "-qm", "Create integration fault fixture candidate"], {
+        cwd: implementationWorktree,
+      });
+      const createIntegrationCandidate = [
+        '"$GENEHUB_CLI" pm project package transition --id failed-review-retry --to cancelled',
+        '"$GENEHUB_CLI" pm project package put --id integration-dirty --title "Dirty integration candidate" --outcome "Persist final candidate verification failure" --space-tag gameplay --repository game --branch work/gameplay --node fix',
+        '"$GENEHUB_CLI" pm project package transition --id integration-dirty --to ready',
+        '"$GENEHUB_CLI" agent run --agent ' +
+          workAgentId +
+          " --workspace " +
+          agentSpace.id +
+          ' --work-package integration-dirty --no-wait "GENEHUB_FIXTURE_CANDIDATE_READY"',
+      ].join(" && ");
+      opened.mock.script(
+        { tool: { name: "bash", arguments: { command: createIntegrationCandidate } } },
+        { text: "The integration fault fixture implementation is dispatched." },
+      );
+      await t.flows.main.sendPrompt(
+        opened.client,
+        duplicatePmId,
+        "Create one independently reviewable candidate for integration fault coverage.",
+      );
+      let integrationCandidateStatus:
+        | Awaited<ReturnType<typeof opened.client.call>>
+        | undefined;
+      await t.tools.waitUntil(async () => {
+        integrationCandidateStatus = await opened.client.call({
+          type: "pm.project.status",
+          payload: { workspaceId: opened.workspaceId },
+        });
+        return (
+          integrationCandidateStatus?.type === "projectStatus" &&
+          integrationCandidateStatus.data.workPackages.some(
+            (item) => item.id === "integration-dirty" && item.status === "candidate",
+          )
+        );
+      }, 45_000);
+
+      const dirtyArtifact =
+        implementationWorktree + "/reviewer-side-effect.tmp";
+      try {
+        const dispatchPassingReview =
+          '"$GENEHUB_CLI" agent run --agent ' +
+          workAgentId +
+          " --workspace " +
+          reviewSpace.id +
+          ' --work-package integration-dirty --no-wait "GENEHUB_FIXTURE_DELAYED_REVIEW_PASS"';
+        opened.mock.script(
+          { tool: { name: "bash", arguments: { command: dispatchPassingReview } } },
+          { text: "The independent passing Reviewer is dispatched." },
+        );
+        await t.flows.main.sendPrompt(
+          opened.client,
+          duplicatePmId,
+          "Dispatch the independent Reviewer for the integration fault fixture.",
+        );
+        await t.tools.waitUntil(async () => {
+          const sessions = await opened.client.call({
+            type: "session.list",
+            payload: { workspaceId: reviewSpace.id, includeArchived: true },
+          });
+          return (
+            sessions?.type === "sessions" &&
+            sessions.data.some(
+              (session) =>
+                session.kind === "work" &&
+                session.work?.workPackageId === "integration-dirty",
+            )
+          );
+        }, 10_000);
+        writeFileSync(
+          dirtyArtifact,
+          "simulated post-review-authorization filesystem side effect\n",
+        );
+
+        let failedIntegration:
+          | Awaited<ReturnType<typeof opened.client.call>>
+          | undefined;
+        await t.tools.waitUntil(async () => {
+          failedIntegration = await opened.client.call({
+            type: "pm.project.status",
+            payload: { workspaceId: opened.workspaceId },
+          });
+          const packageStatus =
+            failedIntegration?.type === "projectStatus"
+              ? failedIntegration.data.workPackages.find(
+                  (item) => item.id === "integration-dirty",
+                )
+              : undefined;
+          return Boolean(packageStatus?.integrationError);
+        }, 45_000);
+        const failedPackage =
+          failedIntegration?.type === "projectStatus"
+            ? failedIntegration.data.workPackages.find(
+                (item) => item.id === "integration-dirty",
+              )
+            : undefined;
+        const failedRun =
+          failedIntegration?.type === "projectStatus"
+            ? failedIntegration.data.workflowRuns.find(
+                (item) => item.controllerSessionId === duplicatePmId,
+              )
+            : undefined;
+        t.assertions.assert(
+          existsSync(dirtyArtifact) &&
+            failedPackage?.status === "accepted" &&
+            failedPackage.integrationError?.includes(
+              "candidate worktree is not clean",
+            ) === true &&
+            failedRun?.activeNodes.includes("prepare-recovery") === true &&
+            !failedRun.activeNodes.includes("integrate"),
+          "pre-integration verification failure was not durable workflow evidence: " +
+            "dirtyArtifact=" +
+            existsSync(dirtyArtifact) +
+            " status=" +
+            JSON.stringify(failedIntegration),
+        );
+      } finally {
+        rmSync(dirtyArtifact, { force: true });
+      }
     } finally {
       opened.client.close();
       opened.daemon.stop();

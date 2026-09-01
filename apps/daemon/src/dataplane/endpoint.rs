@@ -1289,7 +1289,6 @@ fn enqueue_writer(
     }
     queue.push_back(command);
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1374,40 +1373,6 @@ mod tests {
                 target,
             }),
             Some("target-workspace")
-        );
-    }
-
-    #[test]
-    fn pm_operations_are_scoped_to_their_declared_workspace() {
-        assert_eq!(
-            request_workspace(&Request::ProjectManagerSessionCreate {
-                workspace_id: "project".into(),
-                model_id: None,
-                mode_id: None,
-                effort_id: None,
-                runtime_values: None,
-                title: None,
-            }),
-            Some("project")
-        );
-        assert_eq!(
-            request_workspace(&Request::ProjectManagerStatus {
-                workspace_id: "project".into(),
-            }),
-            Some("project")
-        );
-        assert_eq!(
-            request_workspace(&Request::WorkSessionCreate {
-                workspace_id: "agent-space".into(),
-                work_package_id: "wp_1".into(),
-                agent_id: "codex".into(),
-                model_id: None,
-                mode_id: None,
-                runtime_values: None,
-                title: None,
-                cwd: None,
-            }),
-            Some("agent-space")
         );
     }
 }

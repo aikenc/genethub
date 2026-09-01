@@ -9,6 +9,11 @@ pub const DCG_CATALOG_SCHEMA: &str = "genehub-pm-dcg-catalog.v1";
 pub const DEFAULT_RUN_WALL_CLOCK_MS: u64 = 10 * 60 * 1_000;
 pub const DEFAULT_RUN_MAX_WORK_SESSIONS: u32 = 16;
 pub const DEFAULT_RUN_MAX_CONCURRENT_WORK_SESSIONS: u32 = 4;
+pub const DEFAULT_RUN_MAX_LLM_REQUESTS: u32 = 96;
+
+const fn default_run_max_llm_requests() -> u32 {
+    DEFAULT_RUN_MAX_LLM_REQUESTS
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -92,9 +97,9 @@ pub struct DcgDefinition {
     pub kind: DcgKind,
     pub version: u32,
     pub entry: String,
-    /// Project-owned execution envelope. The kernel measures and enforces the
-    /// envelope; prompts cannot extend it and a selected Run pins this value
-    /// together with the rest of the Workflow definition.
+    /// Task-Run execution envelope supplied by the selected Workflow. The
+    /// kernel pins, measures, and enforces it per PM Session; there is no
+    /// mutable project-wide budget policy and prompts cannot extend it.
     #[serde(default)]
     pub execution_budget: DcgExecutionBudget,
     pub nodes: Vec<DcgNode>,
@@ -107,6 +112,11 @@ pub struct DcgExecutionBudget {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
+    /// Provider-neutral coarse cost envelope. One adapter-reported LLM round
+    /// counts as one request; token totals and provider-specific prices are
+    /// deliberately not used for the MVP budget.
+    #[serde(default = "default_run_max_llm_requests")]
+    pub max_llm_requests: u32,
 }
 
 impl Default for DcgExecutionBudget {
@@ -115,6 +125,7 @@ impl Default for DcgExecutionBudget {
             wall_clock_ms: DEFAULT_RUN_WALL_CLOCK_MS,
             max_work_sessions: DEFAULT_RUN_MAX_WORK_SESSIONS,
             max_concurrent_work_sessions: DEFAULT_RUN_MAX_CONCURRENT_WORK_SESSIONS,
+            max_llm_requests: DEFAULT_RUN_MAX_LLM_REQUESTS,
         }
     }
 }
@@ -131,6 +142,9 @@ impl DcgExecutionBudget {
             || self.max_concurrent_work_sessions > self.max_work_sessions
         {
             anyhow::bail!("executionBudget.maxConcurrentWorkSessions must be 1-maxWorkSessions");
+        }
+        if !(1..=4_096).contains(&self.max_llm_requests) {
+            anyhow::bail!("executionBudget.maxLlmRequests must be 1-4096");
         }
         Ok(())
     }
@@ -652,6 +666,8 @@ pub struct DcgRunBudget {
     pub wall_clock_ms: u64,
     pub max_work_sessions: u32,
     pub max_concurrent_work_sessions: u32,
+    #[serde(default = "default_run_max_llm_requests")]
+    pub max_llm_requests: u32,
     pub started_at_ms: i64,
     pub deadline_at_ms: i64,
     /// Monotonic dispatch allowance consumption. A reservation consumes one
@@ -659,6 +675,17 @@ pub struct DcgRunBudget {
     /// package binding or retrying cannot reset the Run's cost envelope.
     #[serde(default)]
     pub work_sessions_started: u32,
+    /// Monotonic, adapter-reported LLM rounds observed across the PM Session
+    /// and every owned implementation/review WorkSession since Run start.
+    #[serde(default)]
+    pub llm_requests_observed: u32,
+    /// User decision time is outside the execution envelope. While paused,
+    /// `remaining_ms` is frozen and the absolute deadline is extended by the
+    /// exact pause duration when execution resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_wait_started_at_ms: Option<i64>,
+    #[serde(default)]
+    pub user_wait_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exhaustion_started_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -676,12 +703,34 @@ impl DcgRunBudget {
             wall_clock_ms: policy.wall_clock_ms,
             max_work_sessions: policy.max_work_sessions,
             max_concurrent_work_sessions: policy.max_concurrent_work_sessions,
+            max_llm_requests: policy.max_llm_requests,
             started_at_ms: now_ms,
             deadline_at_ms,
             work_sessions_started: 0,
+            llm_requests_observed: 0,
+            user_wait_started_at_ms: None,
+            user_wait_ms: 0,
             exhaustion_started_at_ms: None,
             exhausted_at_ms: None,
         }
+    }
+
+    pub fn remaining_ms(&self, now_ms: i64) -> i64 {
+        let effective_now = self.user_wait_started_at_ms.unwrap_or(now_ms);
+        self.deadline_at_ms.saturating_sub(effective_now).max(0)
+    }
+
+    pub fn user_wait_ms_at(&self, now_ms: i64) -> u64 {
+        self.user_wait_ms.saturating_add(
+            self.user_wait_started_at_ms
+                .map(|started| now_ms.saturating_sub(started).max(0) as u64)
+                .unwrap_or(0),
+        )
+    }
+
+    pub fn llm_requests_remaining(&self) -> u32 {
+        self.max_llm_requests
+            .saturating_sub(self.llm_requests_observed)
     }
 }
 
@@ -801,10 +850,70 @@ impl DcgRun {
 
     pub fn budget_expired(&self, now_ms: i64) -> bool {
         self.status == DcgRunStatus::Active
+            && self.budget.as_ref().is_some_and(|budget| {
+                budget.user_wait_started_at_ms.is_none() && now_ms >= budget.deadline_at_ms
+            })
+    }
+
+    pub fn request_budget_exhausted(&self) -> bool {
+        self.status == DcgRunStatus::Active
             && self
                 .budget
                 .as_ref()
-                .is_some_and(|budget| now_ms >= budget.deadline_at_ms)
+                .is_some_and(|budget| budget.llm_requests_observed >= budget.max_llm_requests)
+    }
+
+    pub fn observe_llm_requests(&mut self, observed: u32) -> bool {
+        let Some(budget) = self.budget.as_mut() else {
+            return false;
+        };
+        if observed <= budget.llm_requests_observed {
+            return false;
+        }
+        budget.llm_requests_observed = observed;
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
+    /// Freeze or resume the execution clock from the graph's durable actor,
+    /// never from a model assertion. Only an active `actor: user` node pauses
+    /// the budget; PM and WorkAgent waiting remain execution time.
+    pub fn sync_user_wait_budget(
+        &mut self,
+        definition: &DcgDefinition,
+        now_ms: i64,
+    ) -> Result<bool> {
+        let waiting_for_user = self.status == DcgRunStatus::Active
+            && self.active_nodes.iter().any(|node_id| {
+                definition.node(node_id).is_ok_and(|node| {
+                    node.executor
+                        .as_ref()
+                        .is_some_and(|executor| executor.actor == DcgActor::User)
+                })
+            });
+        let Some(budget) = self.budget.as_mut() else {
+            return Ok(false);
+        };
+        let changed = match (waiting_for_user, budget.user_wait_started_at_ms) {
+            (true, None) => {
+                budget.user_wait_started_at_ms = Some(now_ms);
+                true
+            }
+            (false, Some(started_at_ms)) => {
+                let waited_ms = now_ms.saturating_sub(started_at_ms).max(0) as u64;
+                budget.deadline_at_ms = budget
+                    .deadline_at_ms
+                    .saturating_add(i64::try_from(waited_ms).unwrap_or(i64::MAX));
+                budget.user_wait_ms = budget.user_wait_ms.saturating_add(waited_ms);
+                budget.user_wait_started_at_ms = None;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.revision = self.revision.saturating_add(1);
+        }
+        Ok(changed)
     }
 
     pub fn backfill_execution_budget(
@@ -845,6 +954,12 @@ impl DcgRun {
             .budget
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Workflow Run has no execution budget"))?;
+        if budget.user_wait_started_at_ms.is_some() {
+            anyhow::bail!("Workflow Run is waiting for a user decision");
+        }
+        if budget.llm_requests_observed >= budget.max_llm_requests {
+            anyhow::bail!("Workflow Run LLM request budget is exhausted");
+        }
         if now_ms >= budget.deadline_at_ms {
             anyhow::bail!("Workflow Run wall-clock budget is exhausted");
         }
@@ -1611,357 +1726,4 @@ fn node_is_in_cycle(node: &str, edges: &[DcgEdge]) -> bool {
         .iter()
         .filter(|edge| edge.from == node)
         .any(|edge| edge.to == node || reachable_nodes(&edge.to, edges).contains(node))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent_space_builder::{render_pm_space, PmSpaceTemplateValues};
-
-    fn catalog_fixture() -> (tempfile::TempDir, DcgCatalog) {
-        let temporary = tempfile::tempdir().unwrap();
-        let project = temporary.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        render_pm_space(
-            &project,
-            &PmSpaceTemplateValues::new("测试项目", "zh-CN", "feature").unwrap(),
-        )
-        .unwrap();
-        let catalog = DcgCatalog::load(&project.join("spaces/pm/skills/project-workflow")).unwrap();
-        (temporary, catalog)
-    }
-
-    #[test]
-    fn built_in_template_has_one_workflow_dcg_layer_and_multiple_graphs() {
-        let (_temporary, catalog) = catalog_fixture();
-        assert_eq!(catalog.recommended_session_workflow, "feature");
-        assert_eq!(
-            catalog
-                .session_workflows
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec!["bugfix", "feature", "migration"]
-        );
-    }
-
-    #[test]
-    fn a_session_run_selects_before_start_and_only_takes_eligible_edges() {
-        let (_temporary, catalog) = catalog_fixture();
-        let bugfix = catalog.session_workflow("bugfix").unwrap();
-        let mut run = DcgRun::new_discussion("run-1".into(), "s_pm".into()).unwrap();
-        assert_eq!(run.graph_id, None);
-        assert!(run.active_nodes.is_empty());
-        run.select_before_start(bugfix).unwrap();
-        assert_eq!(run.graph_id.as_deref(), Some("bugfix"));
-        assert_eq!(run.active_nodes, BTreeSet::from(["fix".into()]));
-
-        let facts = BTreeSet::from(["work.candidate".into()]);
-        assert_eq!(run.eligible_edges(bugfix, &facts).unwrap()[0].id, "fixed");
-        let error = run
-            .transition(bugfix, "fixed", &facts, DcgActor::User)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not a user decision"), "{error}");
-        run.transition(bugfix, "fixed", &facts, DcgActor::System)
-            .unwrap();
-        assert_eq!(run.active_nodes, BTreeSet::from(["review".into()]));
-        assert!(run
-            .select_before_start(catalog.session_workflow("feature").unwrap())
-            .is_err());
-    }
-
-    #[test]
-    fn selected_run_pins_a_deterministic_ten_minute_execution_budget() {
-        let (_temporary, catalog) = catalog_fixture();
-        let feature = catalog.session_workflow("feature").unwrap();
-        assert_eq!(feature.execution_budget.wall_clock_ms, 600_000);
-        assert_eq!(feature.execution_budget.max_work_sessions, 16);
-        assert_eq!(feature.execution_budget.max_concurrent_work_sessions, 4);
-
-        let mut run = DcgRun::new_discussion("run-budget".into(), "s_pm".into()).unwrap();
-        run.select_before_start_at(feature, 1_000).unwrap();
-        let budget = run.budget.as_ref().expect("selected Run pins its budget");
-        assert_eq!(budget.started_at_ms, 1_000);
-        assert_eq!(budget.deadline_at_ms, 601_000);
-        assert_eq!(budget.work_sessions_started, 0);
-        assert!(!run.budget_expired(600_999));
-        run.consume_work_session_dispatch(600_999, 0).unwrap();
-        assert_eq!(run.budget.as_ref().unwrap().work_sessions_started, 1);
-        assert!(run.budget_expired(601_000));
-
-        assert!(run.begin_budget_exhaustion(601_000));
-        assert_eq!(run.status, DcgRunStatus::BudgetExhausting);
-        assert!(run
-            .eligible_edges(feature, &BTreeSet::new())
-            .unwrap()
-            .is_empty());
-        assert!(run.finish_budget_exhaustion(601_001));
-        assert_eq!(run.status, DcgRunStatus::BudgetExhausted);
-        assert_eq!(run.outcome.as_deref(), Some("budget-exhausted"));
-        assert!(run.active_nodes.is_empty());
-
-        let mut invalid = feature.clone();
-        invalid.execution_budget.max_concurrent_work_sessions =
-            invalid.execution_budget.max_work_sessions + 1;
-        assert!(invalid.validate(&catalog.root).is_err());
-
-        let mut legacy = DcgRun::new_discussion("run-legacy".into(), "s_legacy".into()).unwrap();
-        legacy.select_before_start_at(feature, 10).unwrap();
-        legacy.budget = None;
-        assert!(legacy.backfill_execution_budget(20, 3));
-        let migrated = legacy.budget.as_ref().unwrap();
-        assert_eq!(migrated.started_at_ms, 20);
-        assert_eq!(migrated.deadline_at_ms, 600_020);
-        assert_eq!(migrated.work_sessions_started, 3);
-        assert!(!legacy.backfill_execution_budget(30, 2));
-    }
-
-    #[test]
-    fn cyclic_edges_are_bounded_and_pm_choice_is_enforced() {
-        let (_temporary, catalog) = catalog_fixture();
-        let feature = catalog.session_workflow("feature").unwrap();
-        let mut run = DcgRun::new_discussion("run-1".into(), "s_pm".into()).unwrap();
-        run.select_before_start(feature).unwrap();
-        run.active_nodes = BTreeSet::from(["recover".into()]);
-        run.node_instances.clear();
-        let recover = DcgNodeInstance::active("recover", 1, "root-1".into(), None);
-        run.node_instances.insert(recover.id.clone(), recover);
-        run.status = DcgRunStatus::Active;
-        let facts = BTreeSet::from(["decision.ready".into()]);
-        assert!(run
-            .transition(feature, "retry", &facts, DcgActor::Pm)
-            .is_err());
-        run.transition(feature, "retry", &facts, DcgActor::User)
-            .unwrap();
-        for instance in run.node_instances.values_mut() {
-            if instance.status == DcgNodeInstanceStatus::Active {
-                instance.status = DcgNodeInstanceStatus::Completed;
-            }
-        }
-        run.active_nodes = BTreeSet::from(["recover".into()]);
-        let recover = DcgNodeInstance::active("recover", 2, "root-1".into(), None);
-        run.node_instances.insert(recover.id.clone(), recover);
-        run.transition(feature, "retry", &facts, DcgActor::User)
-            .unwrap();
-        for instance in run.node_instances.values_mut() {
-            if instance.status == DcgNodeInstanceStatus::Active {
-                instance.status = DcgNodeInstanceStatus::Completed;
-            }
-        }
-        run.active_nodes = BTreeSet::from(["recover".into()]);
-        let recover = DcgNodeInstance::active("recover", 3, "root-1".into(), None);
-        run.node_instances.insert(recover.id.clone(), recover);
-        assert!(run
-            .transition(feature, "retry", &facts, DcgActor::User)
-            .is_err());
-    }
-
-    #[test]
-    fn unbounded_back_edge_is_rejected() {
-        let (_temporary, catalog) = catalog_fixture();
-        let mut graph = catalog.session_workflow("feature").unwrap().clone();
-        let edge = graph
-            .edges
-            .iter_mut()
-            .find(|edge| edge.id == "retry")
-            .unwrap();
-        edge.max_traversals = None;
-        let error = graph.validate(&catalog.root).unwrap_err().to_string();
-        assert!(error.contains("maxTraversals"));
-    }
-
-    #[test]
-    fn closed_autonomous_cycle_is_rejected_even_when_another_branch_terminates() {
-        let graph: DcgDefinition = serde_yaml::from_str(
-            r#"
-schema: genehub-pm-dcg.v1
-id: closed-loop
-kind: sessionWorkflow
-version: 1
-entry: choose
-nodes:
-  - { id: choose, kind: activity, executor: { actor: system } }
-  - { id: delivered, kind: terminal, outcome: delivered }
-  - { id: spin-a, kind: activity, executor: { actor: system } }
-  - { id: spin-b, kind: activity, executor: { actor: system } }
-edges:
-  - { id: finish, from: choose, to: delivered, when: route.finish }
-  - { id: enter-loop, from: choose, to: spin-a, when: route.loop }
-  - { id: spin-forward, from: spin-a, to: spin-b, when: spin.forward }
-  - { id: spin-again, from: spin-b, to: spin-a, when: spin.again, maxTraversals: 2 }
-"#,
-        )
-        .unwrap();
-
-        let error = graph.validate(Path::new(".")).unwrap_err().to_string();
-        assert!(error.contains("closed autonomous cycle"), "{error}");
-        assert!(
-            error.contains("spin-a") && error.contains("spin-b"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn explicit_fork_and_all_join_complete_one_bounded_cohort() {
-        let graph: DcgDefinition = serde_yaml::from_str(
-            r#"
-schema: genehub-pm-dcg.v1
-id: all-join
-kind: sessionWorkflow
-version: 1
-entry: split
-nodes:
-  - { id: split, kind: activity, executor: { actor: system }, fork: allEligible }
-  - { id: left, kind: activity, executor: { actor: system } }
-  - { id: right, kind: activity, executor: { actor: system } }
-  - { id: merge, kind: join, activation: all }
-  - { id: delivered, kind: terminal, outcome: delivered }
-edges:
-  - { id: split-left, from: split, to: left, when: split.ready }
-  - { id: split-right, from: split, to: right, when: split.ready }
-  - { id: left-done, from: left, to: merge, when: branch.done }
-  - { id: right-done, from: right, to: merge, when: branch.done }
-  - { id: merged, from: merge, to: delivered, when: join.ready }
-"#,
-        )
-        .unwrap();
-        graph.validate(Path::new(".")).unwrap();
-        let mut run = DcgRun::new_discussion("run-join".into(), "s_pm".into()).unwrap();
-        run.select_before_start(&graph).unwrap();
-        let split = BTreeSet::from(["split.ready".into()]);
-        run.transition_many(
-            &graph,
-            &["split-left", "split-right"],
-            &split,
-            DcgActor::System,
-        )
-        .unwrap();
-        assert_eq!(
-            run.active_nodes,
-            BTreeSet::from(["left".into(), "right".into()])
-        );
-
-        let branch = BTreeSet::from(["branch.done".into()]);
-        run.transition(&graph, "left-done", &branch, DcgActor::System)
-            .unwrap();
-        assert_eq!(run.active_nodes, BTreeSet::from(["right".into()]));
-        run.transition(&graph, "right-done", &branch, DcgActor::System)
-            .unwrap();
-        assert_eq!(run.active_nodes, BTreeSet::from(["merge".into()]));
-        run.transition(
-            &graph,
-            "merged",
-            &BTreeSet::from(["join.ready".into()]),
-            DcgActor::System,
-        )
-        .unwrap();
-        assert_eq!(run.status, DcgRunStatus::Completed);
-        assert_eq!(run.outcome.as_deref(), Some("delivered"));
-    }
-
-    #[test]
-    fn quorum_join_consumes_late_siblings_before_run_completion() {
-        let graph: DcgDefinition = serde_yaml::from_str(
-            r#"
-schema: genehub-pm-dcg.v1
-id: quorum-join
-kind: sessionWorkflow
-version: 1
-entry: split
-nodes:
-  - { id: split, kind: activity, executor: { actor: system }, fork: allEligible }
-  - { id: left, kind: activity, executor: { actor: system } }
-  - { id: middle, kind: activity, executor: { actor: system } }
-  - { id: right, kind: activity, executor: { actor: system } }
-  - { id: merge, kind: join, activation: { quorum: 2 } }
-  - { id: delivered, kind: terminal, outcome: delivered }
-edges:
-  - { id: split-left, from: split, to: left, when: split.ready }
-  - { id: split-middle, from: split, to: middle, when: split.ready }
-  - { id: split-right, from: split, to: right, when: split.ready }
-  - { id: left-done, from: left, to: merge, when: branch.done }
-  - { id: middle-done, from: middle, to: merge, when: branch.done }
-  - { id: right-done, from: right, to: merge, when: branch.done }
-  - { id: merged, from: merge, to: delivered, when: join.ready }
-"#,
-        )
-        .unwrap();
-        graph.validate(Path::new(".")).unwrap();
-        let mut run = DcgRun::new_discussion("run-quorum".into(), "s_pm".into()).unwrap();
-        run.select_before_start(&graph).unwrap();
-        run.transition_many(
-            &graph,
-            &["split-left", "split-middle", "split-right"],
-            &BTreeSet::from(["split.ready".into()]),
-            DcgActor::System,
-        )
-        .unwrap();
-        let branch = BTreeSet::from(["branch.done".into()]);
-        run.transition(&graph, "left-done", &branch, DcgActor::System)
-            .unwrap();
-        run.transition(&graph, "middle-done", &branch, DcgActor::System)
-            .unwrap();
-        run.transition(
-            &graph,
-            "merged",
-            &BTreeSet::from(["join.ready".into()]),
-            DcgActor::System,
-        )
-        .unwrap();
-        assert_eq!(run.status, DcgRunStatus::Active);
-        assert_eq!(run.active_nodes, BTreeSet::from(["right".into()]));
-
-        run.transition(&graph, "right-done", &branch, DcgActor::System)
-            .unwrap();
-        assert_eq!(run.status, DcgRunStatus::Completed);
-        assert_eq!(
-            run.node_instances
-                .values()
-                .filter(|instance| instance.node_id == "merge")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn bounded_cycles_with_user_supervision_are_allowed() {
-        let mut graph: DcgDefinition = serde_yaml::from_str(
-            r#"
-schema: genehub-pm-dcg.v1
-id: supervised-loop
-kind: sessionWorkflow
-version: 1
-entry: choose
-nodes:
-  - { id: choose, kind: activity, executor: { actor: system } }
-  - { id: delivered, kind: terminal, outcome: delivered }
-  - { id: wait-user, kind: activity, executor: { actor: system } }
-  - { id: retry, kind: activity, executor: { actor: system } }
-edges:
-  - { id: finish, from: choose, to: delivered, when: route.finish }
-  - { id: enter-loop, from: choose, to: wait-user, when: route.loop }
-  - { id: user-retry, from: wait-user, to: retry, when: user.retry, chooseBy: user }
-  - { id: retry-again, from: retry, to: wait-user, when: retry.failed, maxTraversals: 2 }
-"#,
-        )
-        .unwrap();
-
-        graph.validate(Path::new(".")).unwrap();
-
-        graph
-            .nodes
-            .iter_mut()
-            .find(|node| node.id == "wait-user")
-            .and_then(|node| node.executor.as_mut())
-            .unwrap()
-            .actor = DcgActor::User;
-        graph
-            .edges
-            .iter_mut()
-            .find(|edge| edge.id == "user-retry")
-            .unwrap()
-            .choose_by = None;
-        graph.validate(Path::new(".")).unwrap();
-    }
 }

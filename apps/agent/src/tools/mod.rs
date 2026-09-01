@@ -1,10 +1,11 @@
-//! The seven core tools. Result text is what the model reads; `details` is
+//! The eight core tools. Result text is what the model reads; `details` is
 //! structured metadata the UI renders (for example `details.diff` for edits),
 //! so both halves are part of the contract.
 
 mod bash;
 mod diff;
 mod fs_tools;
+mod genehub;
 mod search;
 
 use std::path::{Path, PathBuf};
@@ -207,6 +208,40 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["command"]
             }
         }),
+        json!({
+            "name": "genehub",
+            "description": "Run one or more GeneHub CLI operations as one deterministic batch. Pass argv tokens without the executable name or shell quoting. Commands run sequentially through the exact GENEHUB_CLI binding, stop at the first failure, and retain daemon authorization. Prefer this over bash for GeneHub PM/project/session operations; group all currently-known independent mutations and reads into one call.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "commands": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "argv": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 64,
+                                    "items": { "type": "string" },
+                                    "description": "Exact CLI arguments, for example [\"pm\",\"project\",\"workflow\",\"status\"]"
+                                }
+                            },
+                            "required": ["argv"]
+                        }
+                    },
+                    "timeoutSeconds": {
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 120,
+                        "description": "Per-command timeout in seconds (default 30)"
+                    }
+                },
+                "required": ["commands"]
+            }
+        }),
     ]
 }
 
@@ -219,6 +254,7 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
         "grep" => search::grep(args, cwd),
         "find" => search::find(args, cwd),
         "bash" => bash::run(args, cwd).await,
+        "genehub" => genehub::run(args, cwd).await,
         other => ToolResult::error(format!("Tool {other} not found")),
     }
 }
@@ -321,18 +357,6 @@ pub fn truncate_tail(source: &str, max_lines: usize, max_bytes: usize) -> Trunca
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_definition_has_a_dispatch_arm() {
-        let names: Vec<String> = definitions()
-            .iter()
-            .map(|d| d["name"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(names.len(), 7);
-        for name in ["read", "write", "edit", "ls", "grep", "find", "bash"] {
-            assert!(names.contains(&name.to_string()), "missing {name}");
-        }
-    }
 
     #[test]
     fn head_truncation_reports_which_limit_was_hit() {

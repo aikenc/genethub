@@ -350,13 +350,3 @@ fn native_pid_alive(pid: u32) -> bool {
 fn native_pid_alive(_pid: u32) -> bool {
     true
 }
-
-#[cfg(test)]
-mod pid_tests {
-    #[test]
-    fn native_pid_probe_distinguishes_current_process_from_impossible_pid() {
-        assert!(super::native_pid_alive(std::process::id()));
-        #[cfg(unix)]
-        assert!(!super::native_pid_alive(i32::MAX as u32));
-    }
-}

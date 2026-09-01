@@ -4,6 +4,7 @@ export interface ScriptedTurn {
   text?: string;
   tool?: { name: string; arguments: Record<string, unknown> };
   tools?: Array<{ name: string; arguments: Record<string, unknown> }>;
+  qwenEmptyToolIdTail?: boolean;
   status?: number;
   delayMs?: number;
   hang?: boolean;
@@ -41,14 +42,41 @@ function openaiChat(turn: ScriptedTurn): string[] {
   };
   const tools = turn.tools ?? (turn.tool ? [turn.tool] : []);
   if (tools.length > 0) {
-    send({
-      tool_calls: tools.map((tool, index) => ({
-        index,
-        id: `call_${index + 1}`,
-        type: "function",
-        function: { name: tool.name, arguments: JSON.stringify(tool.arguments) },
-      })),
-    });
+    if (turn.qwenEmptyToolIdTail) {
+      for (const [index, tool] of tools.entries()) {
+        send({
+          tool_calls: [{
+            index,
+            id: `call_${index + 1}`,
+            type: "function",
+            function: { name: tool.name, arguments: "" },
+          }],
+        });
+        send({
+          tool_calls: [{
+            index,
+            function: { arguments: JSON.stringify(tool.arguments) },
+          }],
+        });
+        send({
+          tool_calls: [{
+            index,
+            id: "",
+            type: "function",
+            function: { arguments: "" },
+          }],
+        });
+      }
+    } else {
+      send({
+        tool_calls: tools.map((tool, index) => ({
+          index,
+          id: `call_${index + 1}`,
+          type: "function",
+          function: { name: tool.name, arguments: JSON.stringify(tool.arguments) },
+        })),
+      });
+    }
     send({}, "tool_calls");
   } else {
     const text = turn.text ?? "ok";

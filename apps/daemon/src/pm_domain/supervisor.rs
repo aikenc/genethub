@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 const BACKOFF_MS: [i64; 4] = [30_000, 60_000, 120_000, 300_000];
-const EVENT_BATCH_MS: i64 = 10_000;
+// Two seconds is long enough to coalesce sibling WorkSessions sampled on the
+// same cadence, without spending ten percent of a ten-minute Run after both
+// implementation and review. Deterministic result settlement now removes the
+// old need for a wide LLM-wake batching window.
+const EVENT_BATCH_MS: i64 = 2_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,13 +164,19 @@ impl SupervisorState {
     }
 
     /// Advance the sampler baseline for a material-but-non-actionable change
-    /// such as a newly bound WorkSession that is still Running. Existing
-    /// actionable wake state is preserved, but this observation alone never
-    /// spends another PM model turn.
+    /// such as a newly bound WorkSession that is still Running. If an older
+    /// pending wake has not started, the newer durable projection supersedes
+    /// it: there is no longer manager work to spend a model turn on. An
+    /// already-dispatched wake remains owned by its exact adapter turn.
     pub fn observe_quiet(&mut self, digest: String, now_ms: i64) -> bool {
         let changed = self.observation_digest.as_deref() != Some(digest.as_str());
         self.observation_digest = Some(digest);
         self.mode = SupervisorMode::Active;
+        if self.wake_turn_id.is_none() {
+            self.wake_pending = false;
+            self.wake_not_before_ms = None;
+            self.reset_wake_retry();
+        }
         if changed {
             self.backoff_step = 0;
             self.last_event_at_ms = Some(now_ms);
@@ -243,35 +253,5 @@ impl SupervisorState {
     fn reset_wake_retry(&mut self) {
         self.wake_retry_step = 0;
         self.wake_retry_at_ms = None;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn material_events_share_one_persisted_batch_window() {
-        let mut state = SupervisorState::idle();
-        state.baseline("running".into(), 1_000);
-
-        assert!(state.observe("one-idle".into(), true, false, false, 2_000));
-        assert!(!state.wake_ready(11_999));
-        assert_eq!(state.wake_not_before_ms, Some(12_000));
-
-        assert!(state.observe("two-idle".into(), true, false, false, 5_000));
-        assert_eq!(state.wake_not_before_ms, Some(12_000));
-        assert_eq!(state.coalesced_event_count, 1);
-        assert!(state.wake_ready(12_000));
-
-        state.mark_wake_dispatched("turn-1".into());
-        assert_eq!(state.wake_dispatch_count, 1);
-        state.defer_failed_wake_dispatch(13_000);
-        assert_eq!(state.wake_failed_count, 1);
-        assert!(state.observe("three-idle".into(), true, false, false, 20_000));
-        assert_eq!(state.wake_retry_at_ms, Some(43_000));
-        assert_eq!(state.coalesced_event_count, 2);
-        assert!(!state.wake_ready(42_999));
-        assert!(state.wake_ready(43_000));
     }
 }

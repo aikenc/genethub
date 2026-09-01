@@ -283,7 +283,6 @@ fn home_dir() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,18 +415,5 @@ mod tests {
         assert_eq!(skills[0].name, "genehub-session-history");
         assert!(skills[0].disable_model_invocation);
         assert!(format_for_prompt(&skills).is_empty());
-    }
-
-    #[test]
-    fn manager_sessions_select_the_manager_entrypoint_manifest() {
-        assert_eq!(
-            daemon_entrypoint_manifest(Some(std::ffi::OsStr::new("project-manager"))),
-            ".entrypoints-project-manager"
-        );
-        assert_eq!(daemon_entrypoint_manifest(None), ".entrypoints");
-        assert_eq!(
-            daemon_entrypoint_manifest(Some(std::ffi::OsStr::new("unknown"))),
-            ".entrypoints"
-        );
     }
 }

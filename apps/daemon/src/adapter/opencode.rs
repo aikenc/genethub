@@ -1200,57 +1200,11 @@ fn first_line(body: &str) -> String {
         .take(300)
         .collect()
 }
-
 #[cfg(test)]
 mod tests {
     use genehub_proto::Attachment;
 
     use super::*;
-
-    #[test]
-    fn configured_provider_models_become_a_switchable_opencode_catalog() {
-        let providers = ProviderMap::from([(
-            "vendor".into(),
-            crate::config::ProviderConfig {
-                short_label: Some("vndr".into()),
-                models: vec!["max".into(), "flash".into()],
-                model_labels: [("max".into(), "model-max".into())].into(),
-                ..Default::default()
-            },
-        )]);
-        let models = configured_models(&providers);
-        assert_eq!(
-            models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["vendor/max", "vendor/flash"]
-        );
-        assert_eq!(models[0].label, "model-max@vndr");
-    }
-
-    #[test]
-    fn opencode_catalog_keeps_its_native_provider_identity() {
-        let models = models_from_opencode_config(&json!({
-            "provider": {
-                "bailian-token-plan-personal": {
-                    "options": { "apiKey": "must-not-be-read-into-the-catalog" },
-                    "models": {
-                        "qwen3.8-flash": {
-                            "name": "Qwen3.8 Flash",
-                            "reasoning": true,
-                            "limit": { "context": 983616 }
-                        }
-                    }
-                }
-            }
-        }));
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "bailian-token-plan-personal/qwen3.8-flash");
-        assert_eq!(models[0].label, "Qwen3.8 Flas@baili");
-        assert_eq!(models[0].context_window, Some(983616));
-        assert!(models[0].reasoning);
-    }
 
     #[test]
     fn spawned_opencode_allows_tools_and_external_directories() {

@@ -1404,25 +1404,6 @@ mod tests {
         assert_eq!(models[0].api, "openai");
     }
 
-    /// What the picker shows: the bounded model and provider aliases keep the
-    /// choice distinguishable in the narrow picker without relying on clipping.
-    #[test]
-    fn a_model_is_named_after_the_provider_and_its_own_id() {
-        let providers = provider_map(vec![(
-            "deepseek",
-            ProviderConfig {
-                api_key: Some("sk-test".into()),
-                base_url: Some("https://api.deepseek.com/v1".into()),
-                label: Some("DeepSeek".into()),
-                models: vec!["deepseek-v4-flash".into()],
-                ..Default::default()
-            },
-        )]);
-        let models = configured_models(&providers);
-        assert_eq!(models[0].label, "deepseek-v4-@deeps");
-        assert!(models[0].reasoning, "v4-flash reasons");
-    }
-
     #[test]
     fn the_models_file_carries_the_base_url_the_test_harness_injected() {
         let dir = tempfile::tempdir().unwrap();

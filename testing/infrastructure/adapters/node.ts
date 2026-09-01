@@ -213,6 +213,23 @@ async function runNodeUnitInLease(
     const result = JSON.parse(raw) as UnitResult;
     if (result.status !== "passed" && result.status !== "not-applicable") {
       attachFailureEvidence(result);
+    } else if (result.status === "passed" && unit.meta.retention) {
+      const stagingRoot = extraEnv.TESTCTL_FAILURE_STAGING_DIR;
+      if (stagingRoot) {
+        try {
+          result.retentionArtifacts = collectFailureArtifacts({
+            lease,
+            unit,
+            stagingRoot,
+            effectiveEnv,
+            runnerOutput,
+          });
+        } catch (error) {
+          result.status = "failed";
+          result.message = `retained evidence collection failed: ${error instanceof Error ? error.message : String(error)}`;
+          attachFailureEvidence(result);
+        }
+      }
     }
     return result;
   } catch (error) {

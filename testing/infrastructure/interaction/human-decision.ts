@@ -46,6 +46,13 @@ export interface HumanDecisionRequest {
       reviewSessionId?: string;
       blockReason?: string;
       reviewVerdict?: string;
+      reviewFindings?: Array<{
+        severity: string;
+        title: string;
+        acceptanceImpact: string;
+        recommendedAction: string;
+        estimatedRequests?: number;
+      }>;
     }>;
     quarantinedSpaces: Array<{ name: string; purpose: string; resourceState: string }>;
   };
@@ -62,6 +69,23 @@ export interface HumanDecisionResponse {
 export interface HumanDecisionRecord {
   request: HumanDecisionRequest;
   response?: HumanDecisionResponse;
+}
+
+export interface HumanDecisionRunState {
+  id: string;
+  revision: number;
+  nodeInstances: Array<{
+    id: string;
+    nodeId: string;
+    status: string;
+  }>;
+  availableEdges: Array<{
+    id: string;
+    from: string;
+    to: string;
+    chooseBy?: string;
+    satisfied: boolean;
+  }>;
 }
 
 function validateRequestId(value: string): void {
@@ -151,6 +175,41 @@ export function humanDecisionResponseDeadline(input: {
     input.runDeadlineMs - input.postDecisionReserveMs,
   );
   return deadline > input.nowMs ? deadline : undefined;
+}
+
+/**
+ * A Run revision also changes for orthogonal observations such as request
+ * budget accounting. A pending operator choice is stale only when its exact
+ * user edge or the source node instance that offered it has changed.
+ */
+export function humanDecisionStillApplicable(
+  requested: HumanDecisionRunState,
+  current: HumanDecisionRunState | undefined,
+  edgeId: string,
+): boolean {
+  if (!current || current.id !== requested.id) return false;
+  const offered = requested.availableEdges.find(
+    (edge) => edge.id === edgeId && edge.chooseBy === "user" && edge.satisfied,
+  );
+  const eligible = current.availableEdges.find(
+    (edge) => edge.id === edgeId && edge.chooseBy === "user" && edge.satisfied,
+  );
+  if (!offered || !eligible || offered.from !== eligible.from || offered.to !== eligible.to) {
+    return false;
+  }
+  const requestedSources = requested.nodeInstances
+    .filter((instance) => instance.nodeId === offered.from && instance.status === "active")
+    .map((instance) => instance.id)
+    .sort();
+  const currentSources = current.nodeInstances
+    .filter((instance) => instance.nodeId === eligible.from && instance.status === "active")
+    .map((instance) => instance.id)
+    .sort();
+  return (
+    requestedSources.length > 0 &&
+    requestedSources.length === currentSources.length &&
+    requestedSources.every((id, index) => id === currentSources[index])
+  );
 }
 
 function validateResponse(response: HumanDecisionResponse, requestId: string): void {

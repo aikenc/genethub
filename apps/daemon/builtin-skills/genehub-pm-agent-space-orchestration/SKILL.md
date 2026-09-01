@@ -45,6 +45,12 @@ that value, either build and record the missing specialized Spaces first or
 reduce the current cohort. Never probe capacity by repeatedly issuing failing
 `package put` commands, and never treat `maxItems` as guaranteed capacity.
 
+For a multi-package fanout, allocate the whole cohort before starting any
+member: issue every sibling `package put` first, then every Ready transition,
+then every non-blocking `agent run`. Never interleave those phases per package.
+The first Ready transition intentionally seals the node instance so that a
+late sibling cannot silently change the evidence cohort.
+
 Also read the Run's immutable execution budget before dispatch. The
 Coordinator enforces both total and concurrently active WorkSession counts.
 Each dispatch reservation consumes one total slot even if provider/session
@@ -141,7 +147,12 @@ Builder does not create Git repositories, branches, worktrees, or commits. Use o
 
 ## Select and drive a WorkAgent
 
-Read `agent list`; choose a ready third-party Coding Agent and an allowed efficiency-tier model for this package. If none is ready, preserve the package and guide installation/login, refresh the catalog, then resume it.
+When the current structured contract does not already pin a ready third-party
+Agent, its native model id, and the selected AgentSpace workspace id, read
+`agent list` once and choose an allowed efficiency-tier model. When all three
+are already supplied, use them directly and do not spend another model round
+rediscovering the catalog. If none is ready, preserve the package and guide
+installation/login, refresh the catalog, then resume it.
 
 Create the managed session only through the public CLI:
 
@@ -185,9 +196,56 @@ recovery details: do not wake or continue it merely because a checkpoint
 appeared. A normal implementation session should return only when it has one
 of these package-level outcomes:
 
-- `candidate`: clean HEAD/tree plus the requested gate and artifact evidence;
-- `blocked`: a concrete external/contract decision it cannot safely make;
-- `failed`: a terminal runtime/tool failure with the last recoverable commit.
+- `candidate-ready`: clean HEAD/tree plus the requested gate and artifact evidence;
+- `blocked`: a concrete external/contract decision or terminal runtime/tool
+  failure it cannot safely continue, with the last recoverable commit.
+
+Every managed implementation and review contract must preserve GeneHub's
+machine result protocol: the WorkAgent may put requested human-readable
+evidence above it, but its final non-empty response line must be exactly one
+`GENEHUB_WORK_RESULT` JSON object. Do not ask for a competing first-line
+verdict or a custom `RESULT:` block as the only completion signal. The
+Coordinator intentionally ignores prose-only completion claims. In the JSON
+protocol, implementation uses exactly `candidate-ready` or `blocked`; review
+uses exactly `review-pass`, `review-fail`, or `blocked`. The domain words
+`candidate` and `failed` are not protocol status values.
+
+Treat the Run's remaining execution budget as a delivery schedule, not as time
+the implementation Agent may consume by itself. Keep an explicit reserve for
+an independent Reviewer and Coordinator integration. For an interactive Run
+of fifteen minutes or less, normally require the first clean candidate by
+roughly sixty percent of the remaining active time and reserve at least ninety
+seconds for review/integration; tighten or split the package when that is not
+credible. Put the concrete candidate cutoff in the WorkAgent contract.
+
+Use the Run's provider-neutral LLM-round count as the coarse request budget.
+The Coordinator counts both completed turns and rounds already emitted by a
+currently running PM, Worker, or Reviewer, so one long turn cannot hide its
+request spend until completion. For a ten-minute fast-model Run, start with
+result packages expected to reach a clean candidate in roughly 12-18 requests
+and no more than half of the remaining active time, then adjust that estimate
+from persisted project profiles. Split along disjoint ownership and
+independently testable subsystems (for example engine versus H5 shell, or rules
+versus persistence), while keeping generated scale content cohesive. This is
+a planning heuristic under the task-level Run budget, not a new package or
+project budget and not permission to split work into file-sized checkpoints.
+
+Make that contract execution-first. Permit one bounded discovery batch, then
+require implementation, focused tests, the full gate, and a commit. Tell the
+WorkAgent not to spend the turn producing an exhaustive design essay or
+re-reading the repository. When the acceptance scale is intentionally reached
+through deterministic scaffolding (for example thousands of registry-backed
+content modules), the first mutation after discovery must be the generator and
+the Agent must run it before hand-authoring supporting modules. Generated
+source still has to be reachable, substantive, tested, and reviewed; the
+generator is a throughput mechanism, not permission for filler.
+
+Prefer one uniform generated-module interface and data-driven variation over
+category-specific export-name metaprogramming. Require the generator's first
+run to compile/import its outputs and traverse the production registry before
+the Agent expands architecture or adds polish. This keeps a bounded delivery
+contract recoverable: fix the first failing gate, then test, build, and commit,
+instead of repeatedly redesigning or self-rewriting the generator.
 
 If the runtime turn cap ends a non-terminal attempt, resume the same
 WorkSession with its original whole-package contract and latest Git facts. Do

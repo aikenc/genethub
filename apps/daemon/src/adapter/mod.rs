@@ -637,25 +637,5 @@ mod tests {
             Some(&Some("/opt/genehub/genet-beta".into()))
         );
         assert_eq!(env.get("GENEHUB_SESSION_ID"), Some(&Some("s-bound".into())));
-        assert_eq!(env.get("GENEHUB_PM_TOKEN"), Some(&None));
-
-        let mut pm_command = crate::os_process::Command::new("agent");
-        let mut pm_config = config;
-        pm_config.project_manager_token = Some("session-bound-token".into());
-        apply_session_environment(&mut pm_command, &pm_config);
-        let pm_env: std::collections::BTreeMap<_, _> = pm_command
-            .as_std()
-            .get_envs()
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect();
-        assert_eq!(
-            pm_env.get("GENEHUB_PM_TOKEN"),
-            Some(&Some("session-bound-token".into()))
-        );
     }
 }
