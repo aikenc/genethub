@@ -446,6 +446,9 @@ export function TimelineView({
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
             const layerReady = Boolean(round && roundLayers[round.roundId]);
+            const liveTurn =
+              index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
+            const processItems = processItemsOf(turn);
             const narrative = turnNarrativeItems(
               turn,
               hasRound,
@@ -455,8 +458,6 @@ export function TimelineView({
             // A turn still in flight is not selectable: its items are still
             // being written, and a capsule built from them would go stale
             // before it was ever reviewed.
-            const liveTurn =
-              index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
             const turnSelectable = selectableByTurn[index] ?? [];
             const renderItem = (item: TimelineItem) => {
               if (!selection || !selectableSet.has(item.id)) {
@@ -533,8 +534,14 @@ export function TimelineView({
                     key={startedRound.roundId}
                     round={startedRound}
                     finalSummaryText={roundFinalText}
+                    processItems={processItems}
+                    live={liveTurn}
                   />
                 ))}
+                {startedRounds.length === 0 &&
+                shouldOccupyProcessCard(turn, liveTurn, layerReady) ? (
+                  <ProvisionalProcess items={processItems} live={liveTurn} />
+                ) : null}
                 {finalAssistant ? renderItem(finalAssistant) : null}
                 {startedRounds.map((startedRound) => (
                   <TurnBodyGallery
@@ -1013,10 +1020,93 @@ function formatTokenEstimate(tokens: number): string {
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
 }
 
+function isProcessItem(
+  item: TimelineItem,
+): item is Extract<TimelineItem, { type: "reasoning" | "toolCall" }> {
+  return item.type === "reasoning" || item.type === "toolCall";
+}
+
+function isRequestTurn(turn: TurnBlock): boolean {
+  return turn.items.some((item) => item.type === "userMessage");
+}
+
+function processItemsOf(
+  turn: TurnBlock,
+): Extract<TimelineItem, { type: "reasoning" | "toolCall" }>[] {
+  return turn.items.filter(isProcessItem);
+}
+
 /**
- * What a turn paints as its narrative flow. When the round layer is ready,
- * process items (reasoning/tool calls) live in the round's cards and all but
- * the final assistant message collapse into it.
+ * A user request occupies a process card as soon as the turn exists. The
+ * daemon's trunk grouping may arrive later; until then the same chrome holds
+ * the event-stream items so they never paint as a flat narrative first.
+ */
+function shouldOccupyProcessCard(
+  turn: TurnBlock,
+  liveTurn: boolean,
+  layerReady: boolean,
+): boolean {
+  if (layerReady || !isRequestTurn(turn)) return false;
+  return liveTurn || processItemsOf(turn).length > 0;
+}
+
+function processRowOverview(
+  item: Extract<TimelineItem, { type: "reasoning" | "toolCall" }>,
+): string {
+  if (item.type === "reasoning") {
+    return (
+      item.text
+        .replace(/\r\n/gu, "\n")
+        .split("\n")
+        .find((line) => line.trim())
+        ?.trim() || "思考"
+    );
+  }
+  switch (item.detail.kind) {
+    case "overview":
+      return item.detail.overview || item.name;
+    case "shell":
+      return item.detail.command || item.name;
+    case "read":
+    case "edit":
+    case "write":
+      return item.detail.path || item.name;
+    case "search":
+      return item.detail.query || item.name;
+    case "fetch":
+      return item.detail.url || item.name;
+    case "plan":
+      return "计划";
+    case "subAgent":
+      return item.detail.agent || item.name;
+    case "unknown":
+      return item.name;
+  }
+}
+
+function processBlobsFromItems(items: TimelineItem[]): BlobOverview[] {
+  return items.filter(isProcessItem).map((item) => ({
+    itemId: item.id,
+    kind: item.type === "reasoning" ? "reasoning" : "toolCall",
+    overview: processRowOverview(item),
+  }));
+}
+
+function provisionalProcessTitle(items: TimelineItem[], live: boolean): string {
+  const firstReasoning = items.find((item) => item.type === "reasoning");
+  if (firstReasoning?.type === "reasoning") {
+    const line = processRowOverview(firstReasoning);
+    return splitMonologue(line).first || line;
+  }
+  const firstTool = items.find((item) => item.type === "toolCall");
+  if (firstTool?.type === "toolCall") return processRowOverview(firstTool);
+  return live ? "进行中" : "工作过程";
+}
+
+/**
+ * What a turn paints as its narrative flow. Process items live in the process
+ * card (provisional or daemon-grouped). When the official layer is ready, all
+ * but the final assistant message collapse into it as well.
  */
 function turnNarrativeItems(
   turn: TurnBlock,
@@ -1024,14 +1114,19 @@ function turnNarrativeItems(
   layerReady: boolean,
   absorbedCompactions: ReadonlySet<string> = new Set(),
 ): TimelineItem[] {
-  if (!layerReady) return turn.items;
-  return turn.items.filter(
-    (item) =>
-      item.type !== "reasoning" &&
-      item.type !== "toolCall" &&
-      (!hasRound || item.type !== "assistantMessage") &&
-      (item.type !== "compaction" || !absorbedCompactions.has(item.id)),
-  );
+  if (layerReady) {
+    return turn.items.filter(
+      (item) =>
+        item.type !== "reasoning" &&
+        item.type !== "toolCall" &&
+        (!hasRound || item.type !== "assistantMessage") &&
+        (item.type !== "compaction" || !absorbedCompactions.has(item.id)),
+    );
+  }
+  if (isRequestTurn(turn)) {
+    return turn.items.filter((item) => !isProcessItem(item));
+  }
+  return turn.items;
 }
 
 function turnBlocks(items: TimelineItem[]): TurnBlock[] {
@@ -1174,12 +1269,59 @@ function TurnBodyGallery({
   );
 }
 
+function ProvisionalProcess({
+  items,
+  live,
+}: {
+  items: TimelineItem[];
+  live: boolean;
+}) {
+  const blobs = processBlobsFromItems(items);
+  const title = provisionalProcessTitle(items, live);
+  const { open, toggle } = useCardOpen(live);
+  return (
+    <div className="space-y-2" data-testid="round-progress">
+      <div
+        className="overflow-hidden rounded-lg border border-line bg-bg"
+        data-testid="round-trunk"
+      >
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left"
+          aria-expanded={open}
+          onClick={toggle}
+        >
+          <span className="shrink-0" aria-hidden="true">
+            🧭
+          </span>
+          <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={title}>
+            {title}
+          </span>
+          <span className="shrink-0 text-xs text-muted">{blobs.length} 项</span>
+          <span className="shrink-0 text-xs text-accent" aria-hidden="true">
+            {open ? "▴" : "▾"}
+          </span>
+        </button>
+        {open ? (
+          <div className="space-y-2 px-2 pb-2">
+            <LiveTail blobs={blobs} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function RoundProgress({
   round,
   finalSummaryText,
+  processItems = [],
+  live = false,
 }: {
   round: RoundSummary;
   finalSummaryText?: string;
+  processItems?: TimelineItem[];
+  live?: boolean;
 }) {
   const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
   const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
@@ -1191,7 +1333,16 @@ function RoundProgress({
     if (!layer) void loadRound(round.roundId);
   }, [layer, loadRound, round.roundId]);
 
-  if (!layer) return null;
+  if (!layer) {
+    const occupy = live || round.outcome === "running" || processItems.length > 0;
+    if (!occupy) return null;
+    return (
+      <ProvisionalProcess
+        items={processItems}
+        live={live || round.outcome === "running"}
+      />
+    );
+  }
 
   const trunks = layer.trunks.filter((trunk) => {
     if (

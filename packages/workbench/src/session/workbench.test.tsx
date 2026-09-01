@@ -186,6 +186,99 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("正在写下一答")).toBeInTheDocument();
   });
 
+  it("occupies a process card as soon as a live request exists, before any tool arrives", () => {
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对权限", attachments: [] },
+    });
+    state = { ...state, activeTurn: "t1", activeTurnStartedAtMs: 1 };
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("进行中");
+    expect(screen.getByTestId("live-tail")).toHaveTextContent("进行中");
+    expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+  });
+
+  it("keeps streaming tools inside that process card until the round layer arrives", () => {
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对权限", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "reasoning", id: "think1", text: "先核对权限链路" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "running",
+        detail: { kind: "read", path: "role.json", content: "", truncated: false },
+        images: [],
+      },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a1", text: "正在写" },
+    });
+    state = { ...state, activeTurn: "t1", activeTurnStartedAtMs: 1 };
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByText("核对权限")).toBeInTheDocument();
+    expect(screen.getByTestId("assistant-message")).toHaveTextContent("正在写");
+    expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("先核对权限链路");
+    expect(screen.getByTestId("live-tail")).toHaveTextContent("先核对权限链路");
+    expect(screen.getByTestId("live-tail")).toHaveTextContent("role.json");
+  });
+
+  it("keeps the same process chrome when a named round still has no layer", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 0,
+    };
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对权限", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "running",
+        detail: { kind: "read", path: "role.json", content: "", truncated: false },
+        images: [],
+      },
+    });
+    state = showRounds(state, { rounds: [round], roundLayers: {} });
+
+    render(<TimelineView state={state} />);
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.getByTestId("round-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("role.json");
+  });
+
   /**
    * The bubble is the answer to "did it send?", and it has to be there before
    * the daemon can answer that. The named wait behind it is the answer to the
@@ -2354,7 +2447,8 @@ describe("a whole turn as the timeline sees it", () => {
 
     render(<TimelineView state={state} />);
     expect(screen.getByText("写个文件")).toBeInTheDocument();
-    expect(screen.getByTestId("tool-call")).toHaveTextContent("hello.txt");
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("hello.txt");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("2 分钟前");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("耗时 5s");
