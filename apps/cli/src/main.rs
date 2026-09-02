@@ -24,6 +24,7 @@ const FORWARDED: &[&str] = &[
     "agent",
     "shell",
     "speech",
+    "workflow",
     "process",
     "machine",
     "device",
@@ -184,6 +185,13 @@ pub fn usage() -> i32 {
   genet speech runtime register --command <absolute-path> [--arg <value>...]
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
+  genet workflow init              initialize .genethub/workflow in this project
+  genet workflow inspect           validate and list project workflows
+  genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
+                                    route through the project workflow catalog
+  genet workflow get --run <id>    read one durable workflow run
+  genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
+                                    submit exact node evidence from its managed session
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

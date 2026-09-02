@@ -29,9 +29,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImageThumb, ImportContinuation,
-    PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
-    SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
-    UnsupportedFormat,
+    ManagedSessionInfo, PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk,
+    RoundTrunkSummary, SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary,
+    TimelineItem, UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,7 +94,9 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     is correctness-breaking rather than merely metadata it can ignore.
 /// 6 — imported origin and continuation mode. An older build would allow a
 ///     read-only imported transcript to send into a blank Agent context.
-pub const SESSION_FORMAT: u32 = 6;
+/// 7 — managed parent and human-interaction policy. An older build would let a
+///     human write into a Workflow-owned child Session.
+pub const SESSION_FORMAT: u32 = 7;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -176,6 +178,14 @@ pub struct SessionMeta {
     /// where inherited history came from and how it reached this Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
+    /// Optional Workflow ownership on an otherwise ordinary Session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedSessionInfo>,
+    /// Project-versioned role/node contract captured when the managed Session
+    /// is created. Private to the daemon because it is execution context, not
+    /// a second user-authored message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_system_prompt: Option<String>,
     /// Provider source identity stays private to the daemon. It is also the
     /// durable duplicate key, while the public summary exposes only the Agent
     /// and whether native continuation survived.
@@ -239,6 +249,8 @@ impl SessionMeta {
             persist: None,
             pending_permission: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         }
     }
@@ -254,6 +266,7 @@ impl SessionMeta {
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
             agent_id: self.agent_id.clone(),
+            managed: self.managed.clone(),
             title: self.title.clone(),
             status,
             model_id: self.model_id.clone(),
@@ -1653,6 +1666,8 @@ mod project_home_tests {
             persist: None,
             pending_permission: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         }
     }

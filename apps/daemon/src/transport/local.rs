@@ -241,6 +241,10 @@ struct CliBody {
     argv: Vec<String>,
     cwd: String,
     stdin: Option<String>,
+    #[serde(default, rename = "callerSessionId")]
+    caller_session_id: Option<String>,
+    #[serde(default, rename = "controllerToken")]
+    controller_token: Option<String>,
 }
 
 const MAX_CLI_STDIN_BYTES: usize = 1024 * 1024;
@@ -280,6 +284,30 @@ async fn cli(
         return (StatusCode::UNAUTHORIZED, "invalid cli proof").into_response();
     }
 
+    let principal = match (
+        body.caller_session_id.as_deref(),
+        body.controller_token.as_deref(),
+    ) {
+        (None, None) => crate::authz::Principal::LocalUser,
+        (Some(session_id), Some(token))
+            if context
+                .state
+                .sessions
+                .authenticate_controller(session_id, token)
+                .await =>
+        {
+            crate::authz::Principal::SessionController {
+                session_id: session_id.to_string(),
+            }
+        }
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "invalid session-controller CLI identity",
+            )
+                .into_response()
+        }
+    };
     let stdin = match decode_cli_stdin(body.stdin.as_deref()) {
         Ok(stdin) => stdin,
         Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
@@ -289,6 +317,7 @@ async fn cli(
     let state = context.state.clone();
     tokio::spawn(crate::cli_front::invoke(
         state,
+        principal,
         crate::cli_front::Invocation {
             argv: body.argv,
             cwd,
@@ -296,12 +325,7 @@ async fn cli(
         },
         tx,
     ));
-
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
-        let record = rx.recv().await?;
-        let line = format!("{}\n", cli_record_json(&record));
-        Some((Ok::<_, std::io::Error>(bytes::Bytes::from(line)), rx))
-    });
+    let stream = cli_record_stream(rx);
     (
         StatusCode::OK,
         [(
@@ -311,6 +335,23 @@ async fn cli(
         axum::body::Body::from_stream(stream),
     )
         .into_response()
+}
+
+fn cli_record_stream(
+    rx: mpsc::UnboundedReceiver<crate::cli_front::CliRecord>,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
+    futures_util::stream::unfold((rx, false), |(mut rx, finished)| async move {
+        if finished {
+            return None;
+        }
+        let record = rx.recv().await?;
+        let finished = matches!(record, crate::cli_front::CliRecord::Exit { .. });
+        let line = format!("{}\n", cli_record_json(&record));
+        Some((
+            Ok::<_, std::io::Error>(bytes::Bytes::from(line)),
+            (rx, finished),
+        ))
+    })
 }
 
 fn decode_cli_stdin(encoded: Option<&str>) -> Result<Vec<u8>, &'static str> {
@@ -512,6 +553,23 @@ pub type SharedListener = Arc<Listener>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cli_exit_finishes_stream_even_while_a_sender_is_still_held() {
+        use futures_util::StreamExt;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let held_sender = tx.clone();
+        tx.send(crate::cli_front::CliRecord::Exit { code: 0 })
+            .unwrap();
+        let stream = cli_record_stream(rx);
+        futures_util::pin_mut!(stream);
+
+        let record = stream.next().await.unwrap().unwrap();
+        assert_eq!(record, bytes::Bytes::from_static(b"{\"exit\":0}\n"));
+        assert!(stream.next().await.is_none());
+        drop(held_sender);
+    }
 
     // Only the tests mint here: in the product these URLs are minted by the
     // native front door and handed to this listener, never the other way round.

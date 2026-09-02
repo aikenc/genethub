@@ -81,6 +81,35 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
+    /// Reads and validates the project-owned source under
+    /// `.genethub/workflow/`. This is a pure projection; it starts no Agent.
+    #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
+    WorkflowInspect { workspace_id: String },
+    /// Starts one project-defined Workflow. The durable parent Session comes
+    /// from the authenticated session-bound CLI identity, never this payload.
+    #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
+    WorkflowDispatch {
+        workspace_id: String,
+        workflow_id: String,
+        task_id: String,
+        prompt: String,
+    },
+    #[serde(rename = "workflow.get", rename_all = "camelCase")]
+    WorkflowGet {
+        workspace_id: String,
+        run_id: String,
+    },
+    /// Supplies explicit evidence for the node owned by this managed Session.
+    /// `expectedRevision` is a project-run CAS, not a best-effort hint.
+    #[serde(rename = "workflow.complete", rename_all = "camelCase")]
+    WorkflowComplete {
+        workspace_id: String,
+        run_id: String,
+        node_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        evidence: std::collections::BTreeMap<String, String>,
+    },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
         #[serde(default)]
@@ -699,6 +728,8 @@ pub enum Reply {
     Blobs(Vec<BlobPayload>),
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
+    WorkflowProject(WorkflowProjectStatus),
+    WorkflowRun(WorkflowRunStatus),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),

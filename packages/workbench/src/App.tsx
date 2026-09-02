@@ -208,6 +208,8 @@ export function App({
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
+  const managedReadOnly = session?.managed?.userInteraction === "readOnly";
+  const sessionReadOnly = importedReadOnly || managedReadOnly;
   const composing = Boolean(workbench.activeSessionId || draft);
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
@@ -888,6 +890,11 @@ export function App({
               ) : null}
             </div>
           ) : null}
+          {session?.managed ? (
+            <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
+              Workflow 受管会话 · {session.managed.role} · 人类只读
+            </div>
+          ) : null}
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
@@ -924,7 +931,16 @@ export function App({
                         </div>
                       )}
                     </div>
-                    {workbench.timeline.pendingPermission ? (
+                    {workbench.timeline.pendingPermission && managedReadOnly ? (
+                      <div className="z-20 shrink-0 px-4">
+                        <div
+                          role="status"
+                          className="mx-auto max-w-chat rounded-xl border border-line bg-raised px-3 py-2 text-xs text-muted"
+                        >
+                          Worker 正在等待根会话处理权限请求；这个受管子会话对人类只读。
+                        </div>
+                      </div>
+                    ) : workbench.timeline.pendingPermission ? (
                       <div className="z-20 shrink-0 px-4">
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
@@ -938,9 +954,11 @@ export function App({
                     ) : null}
                     <Composer
                       phase={phase}
-                      disabled={importedReadOnly}
+                      disabled={sessionReadOnly}
                       disabledReason={
-                        importedReadOnly
+                        managedReadOnly
+                          ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
+                          : importedReadOnly
                           ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
                           : undefined
                       }

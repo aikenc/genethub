@@ -50,6 +50,7 @@ pub mod state;
 pub mod transport;
 pub mod updates;
 pub mod version;
+pub mod workflow;
 pub mod workspace;
 
 use anyhow::Result;

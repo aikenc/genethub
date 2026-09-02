@@ -11,17 +11,19 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use genehub_proto::{
     Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
-    HistoryCoverage, ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer,
-    RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
+    HistoryCoverage, ImportContinuation, ItemDelta, ManagedSessionInfo, PermissionOptionKind,
+    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability,
+    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
     SessionArtifactFile, SessionArtifactUpload, SessionContext, SessionEvent,
     SessionImportCandidate, SessionImportListing, SessionImportSource, SessionInspection,
     SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot,
     SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator, TurnErrorCode,
     TurnOutcome, TurnStats, Usage,
 };
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
@@ -237,6 +239,10 @@ pub struct SessionManager {
     /// Exact channel front door supplied by the launcher. This is a runtime
     /// binding, never inferred from a product or channel name.
     front_door_cli: Option<PathBuf>,
+    /// Ephemeral daemon secret for session-bound controller proofs. Reopened
+    /// Agent processes receive a fresh proof, so it never becomes project
+    /// source or durable user data.
+    controller_secret: String,
 }
 
 impl SessionManager {
@@ -260,6 +266,7 @@ impl SessionManager {
             import_candidates: Mutex::new(HashMap::new()),
             skills_dir: None,
             front_door_cli: None,
+            controller_secret: uuid::Uuid::new_v4().simple().to_string(),
         }
     }
 
@@ -312,6 +319,8 @@ impl SessionManager {
             persist: None,
             pending_permission: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         };
         self.store.save_meta(&meta)?;
@@ -321,6 +330,78 @@ impl SessionManager {
             Arc::new(Live::new(meta, self.store.clone())),
         );
         Ok(summary)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_managed(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        managed: ManagedSessionInfo,
+        managed_system_prompt: String,
+    ) -> Result<SessionSummary> {
+        self.registry.require(agent_id)?;
+        let now = now_ms();
+        let meta = SessionMeta {
+            effort_id: None,
+            runtime_values,
+            id: format!("s_{}", uuid::Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
+            agent_id: agent_id.to_string(),
+            title,
+            title_locked: false,
+            cwd,
+            model_id,
+            mode_id,
+            created_at_ms: now,
+            updated_at_ms: now,
+            archived: false,
+            persist: None,
+            pending_permission: None,
+            lineage: None,
+            managed: Some(managed),
+            managed_system_prompt: Some(managed_system_prompt),
+            imported: None,
+        };
+        self.store.save_meta(&meta)?;
+        let summary = meta.summary(SessionStatus::Idle);
+        self.sessions.write().await.insert(
+            meta.id.clone(),
+            Arc::new(Live::new(meta, self.store.clone())),
+        );
+        Ok(summary)
+    }
+
+    /// Authenticates a local Agent CLI as exactly one durable Session. The
+    /// proof becomes invalid when the Session no longer exists or is unreadable.
+    pub async fn authenticate_controller(&self, session_id: &str, token: &str) -> bool {
+        if self.summary(session_id).await.is_err() {
+            return false;
+        }
+        let Ok(presented) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token) else {
+            return false;
+        };
+        let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(self.controller_secret.as_bytes())
+        else {
+            return false;
+        };
+        mac.update(b"genehub.session-controller.v1\0");
+        mac.update(session_id.as_bytes());
+        mac.verify_slice(&presented).is_ok()
+    }
+
+    fn controller_token(&self, session_id: &str) -> String {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.controller_secret.as_bytes())
+            .expect("HMAC accepts every secret length");
+        mac.update(b"genehub.session-controller.v1\0");
+        mac.update(session_id.as_bytes());
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     }
 
     pub async fn fork(
@@ -491,6 +572,8 @@ impl SessionManager {
                 method,
                 context,
             }),
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         };
         let write = || -> Result<()> {
@@ -688,6 +771,8 @@ impl SessionManager {
                 method: ForkMethod::ReconstructedContext,
                 context: Some(built.stats),
             }),
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         };
         let write = || -> Result<()> {
@@ -885,6 +970,8 @@ impl SessionManager {
             persist: history.persist,
             pending_permission: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: Some(ImportedSessionMeta {
                 source_key: candidate.source_key,
                 agent_id: candidate.agent_id,
@@ -1579,10 +1666,19 @@ impl SessionManager {
         // must not be injected into Agent system prompts — only path-linking
         // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
-        let additional_system_prompt = Some(crate::skills::session_guidance(
+        let mut additional_system_prompt = crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
-        ));
+        );
+        let meta = live.meta.lock().await.clone();
+        if let Some(managed) = meta.managed_system_prompt.as_deref() {
+            additional_system_prompt.push_str("\n\n");
+            additional_system_prompt.push_str(managed);
+        } else if let Some(root) = crate::workflow::root_session_guidance(&meta.cwd) {
+            additional_system_prompt.push_str("\n\n");
+            additional_system_prompt.push_str(&root);
+        }
+        let additional_system_prompt = Some(additional_system_prompt);
         {
             let mut status = live.status.lock().await;
             if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
@@ -1843,6 +1939,7 @@ impl SessionManager {
             additional_system_prompt: additional_system_prompt.clone(),
             skills_dir: self.skills_dir.clone(),
             front_door_cli: self.front_door_cli.clone(),
+            controller_token: Some(self.controller_token(&meta.id)),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
             resume,
@@ -3946,6 +4043,8 @@ mod tests {
             persist: None,
             pending_permission: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         }
     }
@@ -3973,6 +4072,25 @@ mod tests {
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
+    }
+
+    #[tokio::test]
+    async fn controller_proof_is_bound_to_one_existing_session_and_one_daemon_lifetime() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        let token = sessions.controller_token("s1");
+        assert!(sessions.authenticate_controller("s1", &token).await);
+        assert!(!sessions.authenticate_controller("missing", &token).await);
+        assert!(!sessions.authenticate_controller("s1", "not-a-proof").await);
+
+        let restarted = manager(workspace.path());
+        assert!(restarted.summary("s1").await.is_ok());
+        assert!(
+            !restarted.authenticate_controller("s1", &token).await,
+            "controller proof must not become durable project authority"
+        );
     }
 
     /// An agent whose past threads are gone: it starts fresh, and refuses to

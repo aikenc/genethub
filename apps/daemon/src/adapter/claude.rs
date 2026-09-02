@@ -2702,6 +2702,7 @@ mod tests {
                 additional_system_prompt: None,
                 skills_dir: None,
                 front_door_cli: None,
+                controller_token: None,
                 session_id: "s1".into(),
                 cwd: dir.path().to_path_buf(),
                 model_id: None,

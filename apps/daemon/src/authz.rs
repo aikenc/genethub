@@ -183,6 +183,10 @@ pub enum Principal {
     /// caller can already read files as this account and start processes as it,
     /// so withholding a capability here would protect nothing.
     LocalUser,
+    /// A loopback CLI invocation carrying a daemon-verified proof minted for
+    /// one durable ordinary Session. It may inspect project state and drive
+    /// only Workflow children whose parent is that exact Session.
+    SessionController { session_id: String },
     /// A paired device, holding exactly what it was granted.
     Device { id: String, grants: GrantSet },
     /// An end-to-end authenticated hosted channel that never identified as a
@@ -228,6 +232,10 @@ impl Principal {
     pub fn allows(&self, capability: Capability) -> bool {
         match self {
             Principal::LocalUser | Principal::Channel => true,
+            Principal::SessionController { .. } => matches!(
+                capability,
+                Capability::Handshake | Capability::Read | Capability::Session
+            ),
             Principal::Device { grants, .. } => grants.allows(capability),
             Principal::Pairing => capability == Capability::Handshake,
         }
@@ -236,6 +244,13 @@ impl Principal {
     pub fn device_id(&self) -> Option<&str> {
         match self {
             Principal::Device { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn session_controller_id(&self) -> Option<&str> {
+        match self {
+            Principal::SessionController { session_id } => Some(session_id),
             _ => None,
         }
     }
@@ -318,6 +333,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionNarrative { .. }
         | Request::SessionRounds { .. }
         | Request::SessionContext { .. }
+        | Request::WorkflowInspect { .. }
+        | Request::WorkflowGet { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
         | Request::RoundTrunkGet { .. }
@@ -348,6 +365,8 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::WorkflowDispatch { .. }
+        | Request::WorkflowComplete { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }

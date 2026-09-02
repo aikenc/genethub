@@ -818,6 +818,7 @@ function SessionRow({
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
   const unsupported = session.unsupported;
+  const managedReadOnly = session.managed?.userInteraction === "readOnly";
 
   if (editing) {
     return (
@@ -851,6 +852,11 @@ function SessionRow({
       >
         <SessionStateIcon session={session} />
         <span className="min-w-0 flex-1 truncate">{title(session)}</span>
+        {session.managed ? (
+          <span className="shrink-0 rounded bg-accent/10 px-1 py-0.5 text-[9px] text-accent">
+            受管 · {session.managed.role}
+          </span>
+        ) : null}
         {unsupported ? (
           <span className="shrink-0 text-[10px] text-faint">需升级</span>
         ) : project ? (
@@ -874,6 +880,7 @@ function SessionRow({
       {menu === "shut" ? null : (
         <Menu
           confirming={menu === "confirming"}
+          readOnly={managedReadOnly}
           onRename={() => {
             setMenu("shut");
             setEditing(true);
@@ -907,6 +914,7 @@ function SessionRow({
  */
 function Menu({
   confirming,
+  readOnly,
   onRename,
   onOpenProcesses,
   onAskDelete,
@@ -914,6 +922,7 @@ function Menu({
   onDismiss,
 }: {
   confirming: boolean;
+  readOnly: boolean;
   onRename(): void;
   onOpenProcesses(): void;
   onAskDelete(): void;
@@ -932,7 +941,7 @@ function Menu({
         role="menu"
         className="absolute right-0 top-full z-50 mt-1 w-40 overflow-hidden rounded-xl border border-line-strong bg-surface py-1 shadow-[0_8px_30px_rgb(0_0_0_/0.35)]"
       >
-        {confirming ? (
+        {confirming && !readOnly ? (
           <>
             <p className="px-3 py-1.5 text-[11px] leading-snug text-muted">
               删掉之后没有回收站，对话和 agent 那边的记录都会消失。
@@ -956,14 +965,16 @@ function Menu({
           </>
         ) : (
           <>
-            <button
-              type="button"
-              role="menuitem"
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={onRename}
-            >
-              重命名
-            </button>
+            {!readOnly ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={onRename}
+              >
+                重命名
+              </button>
+            ) : null}
             <button
               type="button"
               role="menuitem"
@@ -972,14 +983,16 @@ function Menu({
             >
               后台进程
             </button>
-            <button
-              type="button"
-              role="menuitem"
-              className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
-              onClick={onAskDelete}
-            >
-              删除
-            </button>
+            {!readOnly ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
+                onClick={onAskDelete}
+              >
+                删除
+              </button>
+            ) : null}
           </>
         )}
       </div>

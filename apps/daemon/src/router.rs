@@ -72,7 +72,11 @@ fn failed(error: anyhow::Error) -> Handled {
         || message.contains("artifact upload incomplete")
     {
         ErrorCode::BadRequest
-    } else if message.contains("artifact upload conflict") {
+    } else if message.contains("artifact upload conflict")
+        || message.contains("revision 冲突")
+        || message.contains("已由 Workflow Run")
+        || message.contains("正在被另一个请求修改")
+    {
         ErrorCode::Conflict
     } else if message.contains("no such artifact upload") {
         ErrorCode::NotFound
@@ -88,7 +92,12 @@ fn failed(error: anyhow::Error) -> Handled {
         ErrorCode::Forbidden
     } else if message.contains("already running") {
         ErrorCode::Conflict
-    } else if message.contains("no such") || message.contains("does not exist") {
+    } else if message.contains("no such")
+        || message.contains("does not exist")
+        || message.contains("Workflow 不存在")
+        || message.contains("Workflow Run 不存在")
+        || message.contains("项目尚未初始化 Workflow")
+    {
         ErrorCode::NotFound
     } else if message.contains("workspace file")
         || message.contains("workspace folder")
@@ -115,6 +124,31 @@ fn failed(error: anyhow::Error) -> Handled {
     }
 }
 
+async fn start_workflow_sessions(
+    state: &Shared,
+    workspace_id: &str,
+    run_id: &str,
+    sessions: Vec<(genehub_proto::SessionSummary, String)>,
+) -> anyhow::Result<()> {
+    let providers = state.providers().await;
+    for (session, message) in sessions {
+        if let Err(error) = state
+            .sessions
+            .send(&session.id, message, Vec::new(), &providers, None, None)
+            .await
+        {
+            let launch = anyhow::anyhow!("启动 Workflow 子会话 {}：{error:#}", session.id);
+            return match crate::workflow::abort_launch(state, workspace_id, run_id).await {
+                Ok(()) => Err(launch),
+                Err(cleanup) => Err(anyhow::anyhow!(
+                    "{launch:#}；终止 Workflow Run 时又失败：{cleanup:#}"
+                )),
+            };
+        }
+    }
+    Ok(())
+}
+
 /// Handles one request on behalf of `caller`.
 ///
 /// The caller is passed in rather than re-derived here because the gate above
@@ -128,6 +162,16 @@ pub async fn handle(
     caller: &crate::authz::Principal,
     request: Request,
 ) -> Handled {
+    let needed = crate::authz::required(&request);
+    if !caller.allows(needed) {
+        return Handled::err(
+            ErrorCode::Unauthorized,
+            format!("caller lacks the {} capability", needed.as_str()),
+        );
+    }
+    if let Err(message) = authorize_session_request(state, caller, &request).await {
+        return Handled::err(ErrorCode::Forbidden, message);
+    }
     let operation = diagnostic_operation(&request);
     let handled = dispatch(state, transport, caller, request).await;
     if let Some(operation) = operation {
@@ -138,6 +182,67 @@ pub async fn handle(
         state.diagnostics.record("rpc", operation, outcome, code);
     }
     handled
+}
+
+/// Keeps a Workflow-managed child human-read-only without inventing a second
+/// Session runtime. Fork remains a human operation and deliberately does not
+/// appear here: the fork is an ordinary Session with no managed binding.
+async fn authorize_session_request(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    request: &Request,
+) -> Result<(), String> {
+    if caller.session_controller_id().is_some()
+        && matches!(
+            request,
+            Request::SessionCreate { .. }
+                | Request::SessionForkImport { .. }
+                | Request::SessionImport { .. }
+        )
+    {
+        return Err(
+            "受会话绑定的 Agent 不能创建普通会话；请通过项目 Workflow 委托受管子会话".into(),
+        );
+    }
+
+    let target = match request {
+        Request::SessionSend { session_id, .. }
+        | Request::SessionArtifactBegin { session_id, .. }
+        | Request::SessionArtifactChunk { session_id, .. }
+        | Request::SessionArtifactFinish { session_id, .. }
+        | Request::SessionArtifactAbort { session_id, .. }
+        | Request::SessionInterrupt { session_id }
+        | Request::SessionClose { session_id }
+        | Request::SessionArchive { session_id, .. }
+        | Request::SessionRename { session_id, .. }
+        | Request::SessionDelete { session_id }
+        | Request::SessionSetModel { session_id, .. }
+        | Request::SessionSetMode { session_id, .. }
+        | Request::SessionSetEffort { session_id, .. }
+        | Request::SessionSetRuntimeAxis { session_id, .. }
+        | Request::SessionRespondPermission { session_id, .. }
+        | Request::ProcessKill { session_id, .. }
+        | Request::ProcessKillAll { session_id } => Some(session_id.as_str()),
+        _ => None,
+    };
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let summary = state
+        .sessions
+        .summary(target)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    match (caller.session_controller_id(), summary.managed) {
+        (Some(controller), Some(managed)) if managed.parent_session_id == controller => Ok(()),
+        (Some(_), _) => Err("受会话绑定的 Agent 只能控制由自己委托的受管子会话".into()),
+        (None, Some(managed))
+            if managed.user_interaction == genehub_proto::SessionUserInteraction::ReadOnly =>
+        {
+            Err("这是 Workflow 管理的只读子会话；可查看或 fork，但不能直接改写".into())
+        }
+        (None, _) => Ok(()),
+    }
 }
 
 async fn dispatch(
@@ -200,6 +305,109 @@ async fn dispatch(
         Request::AgentRefresh => {
             let providers = state.providers().await;
             Handled::ok(Reply::Agents(state.registry.refresh(&providers).await))
+        }
+
+        Request::WorkflowInspect { workspace_id } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::inspect(&workspace.root) {
+                Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkflowDispatch {
+            workspace_id,
+            workflow_id,
+            task_id,
+            prompt,
+        } => {
+            let Some(parent_session_id) = caller.session_controller_id() else {
+                return Handled::err(
+                    ErrorCode::Unauthorized,
+                    "workflow.dispatch 只能由当前根会话中的 Agent 发起",
+                );
+            };
+            let transition = match crate::workflow::dispatch(
+                state,
+                &workspace_id,
+                parent_session_id,
+                &workflow_id,
+                &task_id,
+                &prompt,
+            )
+            .await
+            {
+                Ok(transition) => transition,
+                Err(error) => return failed(error),
+            };
+            if let Err(error) = start_workflow_sessions(
+                state,
+                &workspace_id,
+                &transition.status.id,
+                transition.sessions,
+            )
+            .await
+            {
+                return failed(error);
+            }
+            Handled::ok(Reply::WorkflowRun(transition.status))
+        }
+
+        Request::WorkflowGet {
+            workspace_id,
+            run_id,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::get(&workspace.root, &run_id) {
+                Ok(status) => Handled::ok(Reply::WorkflowRun(status)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkflowComplete {
+            workspace_id,
+            run_id,
+            node_id,
+            expected_revision,
+            evidence,
+        } => {
+            let Some(caller_session_id) = caller.session_controller_id() else {
+                return Handled::err(
+                    ErrorCode::Unauthorized,
+                    "workflow.complete 只能由该节点的受管子会话发起",
+                );
+            };
+            let transition = match crate::workflow::complete(
+                state,
+                &workspace_id,
+                caller_session_id,
+                &run_id,
+                &node_id,
+                expected_revision,
+                evidence,
+            )
+            .await
+            {
+                Ok(transition) => transition,
+                Err(error) => return failed(error),
+            };
+            if let Err(error) = start_workflow_sessions(
+                state,
+                &workspace_id,
+                &transition.status.id,
+                transition.sessions,
+            )
+            .await
+            {
+                return failed(error);
+            }
+            Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
         Request::SessionCreate {
@@ -1333,6 +1541,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
     match request {
         Request::AgentRefresh => Some("agent.refresh"),
         Request::SessionCreate { .. } => Some("session.create"),
+        Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
+        Request::WorkflowComplete { .. } => Some("workflow.complete"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
         Request::SessionArtifactChunk { .. } => Some("session.artifact.chunk"),

@@ -486,6 +486,12 @@ pub struct SessionSummary {
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
+    /// Present only when a project Workflow created this otherwise ordinary
+    /// Session. There is no parallel WorkSession runtime: timeline, storage,
+    /// recovery, fork and Workspace membership remain the normal ones.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub managed: Option<ManagedSessionInfo>,
     /// Absent until the session has been named — by the user, or by the daemon
     /// from the first thing they said. Clients supply their own placeholder;
     /// the daemon has no business picking a word in the user's language.
@@ -522,6 +528,93 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<SessionImportOrigin>,
+}
+
+/// Durable parent/role binding for a Workflow-managed ordinary Session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ManagedSessionInfo {
+    pub parent_session_id: String,
+    pub workflow_run_id: String,
+    pub workflow_id: String,
+    pub node_id: String,
+    /// Project-defined label such as `worker`, `reviewer` or a domain role.
+    /// The kernel never derives behavior from this value.
+    pub role: String,
+    pub user_interaction: SessionUserInteraction,
+}
+
+/// Whether human-facing clients may mutate a managed Session directly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum SessionUserInteraction {
+    Normal,
+    #[default]
+    ReadOnly,
+}
+
+/// Project-owned Workflow catalog projected by the daemon after validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowProjectStatus {
+    pub schema: String,
+    pub root: String,
+    pub default_workflow: String,
+    pub workflows: Vec<WorkflowCatalogEntryStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowCatalogEntryStatus {
+    pub id: String,
+    pub path: String,
+    pub digest: String,
+    #[serde(default)]
+    pub match_kind: Option<String>,
+    #[serde(default)]
+    pub match_complexity: Option<String>,
+}
+
+/// Durable status of one project Workflow run. Node meaning comes entirely
+/// from the pinned project definition; the daemon reports only generic graph
+/// and evidence facts here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowRunStatus {
+    pub id: String,
+    pub workspace_id: String,
+    pub parent_session_id: String,
+    pub workflow_id: String,
+    pub bundle_digest: String,
+    pub task_id: String,
+    pub status: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub active_nodes: Vec<String>,
+    pub nodes: Vec<WorkflowNodeRunStatus>,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowNodeRunStatus {
+    pub id: String,
+    pub uses: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub evidence: std::collections::BTreeMap<String, String>,
 }
 
 /// A session written by a newer build than this one.

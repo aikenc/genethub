@@ -460,6 +460,53 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
     Ok(report(&session.id, outcome))
 }
 
+/// Waits for a Workflow-created ordinary Session whose first turn may already
+/// have started. Replay is inspected for a terminal event before the live pump
+/// begins, so a very fast Worker cannot finish in the subscribe gap.
+pub(crate) async fn wait_for_existing(
+    rpc: &Rpc,
+    session_id: &str,
+    timeout: Option<u64>,
+) -> Result<i32, CliFailure> {
+    rpc.watch_events().await.map_err(query::rpc_error)?;
+    let Reply::Subscribed {
+        snapshot,
+        replayed,
+        reset: _,
+    } = rpc
+        .call(Request::Subscribe {
+            session_id: session_id.to_string(),
+            since_seq: Some(0),
+            expand_last_round: false,
+        })
+        .await
+        .map_err(query::rpc_error)?
+    else {
+        return Err(CliFailure::protocol(
+            "the daemon answered subscribe with something other than a subscription",
+        ));
+    };
+    opened(&snapshot.summary, &snapshot, false);
+    let mut seq = snapshot.seq;
+    for event in replayed {
+        seq = seq.max(event.seq);
+        emit_event(&event);
+        let outcome = match event.event {
+            SessionEvent::TurnCompleted { turn_id, .. } => Some(Outcome::Completed { turn_id }),
+            SessionEvent::TurnFailed { turn_id, error } => Some(Outcome::Failed { turn_id, error }),
+            SessionEvent::TurnCanceled { turn_id } => Some(Outcome::Canceled { turn_id }),
+            _ => None,
+        };
+        if let Some(outcome) = outcome {
+            return Ok(report(session_id, outcome));
+        }
+    }
+    Ok(report(
+        session_id,
+        pump(rpc, session_id, false, timeout, seq).await,
+    ))
+}
+
 fn opened(session: &SessionSummary, snapshot: &SessionSnapshot, attached: bool) {
     emit(
         if attached {

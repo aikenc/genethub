@@ -22,6 +22,7 @@ mod shell;
 mod speech;
 pub mod target;
 mod update;
+mod workflow;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use crate::authz::Principal;
 use crate::state::Shared;
 
 // Frozen for scripts and agents, and shared with the native front door: a verb
@@ -40,13 +42,13 @@ tokio::task_local! {
     static LOCAL_STATE: Shared;
     static CALLER_CWD: PathBuf;
     static CALLER_STDIN: Vec<u8>;
+    static CALLER_PRINCIPAL: Principal;
     static CLI_IO: CliIo;
 }
 
 #[derive(Clone)]
 struct CliIo {
-    stdout: mpsc::UnboundedSender<String>,
-    stderr: mpsc::UnboundedSender<String>,
+    sink: mpsc::UnboundedSender<CliRecord>,
 }
 
 pub struct Invocation {
@@ -67,39 +69,31 @@ pub enum CliRecord {
 ///
 /// Records are pushed on `sink` as the verb prints, so a long `agent run`
 /// reaches the native CLI while it is still happening.
-pub async fn invoke(state: Shared, invocation: Invocation, sink: mpsc::UnboundedSender<CliRecord>) {
-    let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel();
-    let (stderr_tx, mut stderr_rx) = mpsc::unbounded_channel();
-    let io = CliIo {
-        stdout: stdout_tx,
-        stderr: stderr_tx,
-    };
-    let sink_out = sink.clone();
-    let sink_err = sink.clone();
-    let pump_out = tokio::spawn(async move {
-        while let Some(line) = stdout_rx.recv().await {
-            let _ = sink_out.send(CliRecord::Stdout { line });
-        }
-    });
-    let pump_err = tokio::spawn(async move {
-        while let Some(text) = stderr_rx.recv().await {
-            let _ = sink_err.send(CliRecord::Stderr { text });
-        }
-    });
-    let code = tokio::spawn(LOCAL_STATE.scope(
-        state,
-        CALLER_CWD.scope(
-            invocation.cwd,
-            CALLER_STDIN.scope(
-                invocation.stdin,
-                CLI_IO.scope(io, dispatch(invocation.argv)),
+pub async fn invoke(
+    state: Shared,
+    principal: Principal,
+    invocation: Invocation,
+    sink: mpsc::UnboundedSender<CliRecord>,
+) {
+    // This is one ordered NDJSON stream. An earlier two-pump design waited
+    // for task-local senders to be destroyed before emitting Exit; under the
+    // Wasm host that made an Agent's CLI process hang after dispatch returned.
+    let io = CliIo { sink: sink.clone() };
+    let code = tokio::spawn(CALLER_PRINCIPAL.scope(
+        principal,
+        LOCAL_STATE.scope(
+            state,
+            CALLER_CWD.scope(
+                invocation.cwd,
+                CALLER_STDIN.scope(
+                    invocation.stdin,
+                    CLI_IO.scope(io, dispatch(invocation.argv)),
+                ),
             ),
         ),
     ))
     .await
     .unwrap_or(EXIT_FAILED);
-    let _ = pump_out.await;
-    let _ = pump_err.await;
     let _ = sink.send(CliRecord::Exit { code });
 }
 
@@ -119,11 +113,17 @@ pub(crate) fn caller_stdin() -> Vec<u8> {
     CALLER_STDIN.try_with(Clone::clone).unwrap_or_default()
 }
 
+pub(crate) fn caller_principal() -> Principal {
+    CALLER_PRINCIPAL
+        .try_with(Clone::clone)
+        .unwrap_or(Principal::LocalUser)
+}
+
 pub fn emit_stdout(line: impl AsRef<str>) {
     let line = line.as_ref().to_string();
     if CLI_IO
         .try_with(|io| {
-            let _ = io.stdout.send(line.clone());
+            let _ = io.sink.send(CliRecord::Stdout { line: line.clone() });
         })
         .is_err()
     {
@@ -135,7 +135,7 @@ pub fn emit_stderr(text: impl AsRef<str>) {
     let text = text.as_ref().to_string();
     if CLI_IO
         .try_with(|io| {
-            let _ = io.stderr.send(text.clone());
+            let _ = io.sink.send(CliRecord::Stderr { text: text.clone() });
         })
         .is_err()
     {
@@ -191,6 +191,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("agent") => Box::pin(converse::agent(&args[1..], &selection)).await,
         Some("shell") => Box::pin(shell::shell(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
+        Some("workflow") => Box::pin(workflow::workflow(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,
         Some("machine") => Box::pin(machine::machine(&args[1..])).await,
         Some("device") => Box::pin(machine::device(&args[1..], &selection)).await,
