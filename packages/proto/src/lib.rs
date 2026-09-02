@@ -41,6 +41,7 @@ mod tests {
         round_trip(TimelineItem::AssistantMessage {
             id: "i1".into(),
             text: "hi".into(),
+            received_at_ms: None,
         });
         round_trip(TimelineItem::ToolCall {
             id: "i2".into(),
@@ -155,6 +156,7 @@ mod tests {
             items: vec![TimelineItem::AssistantMessage {
                 id: "a1".into(),
                 text: "done".into(),
+                received_at_ms: None,
             }],
             blob_appendix: vec![],
             coverage: HistoryCoverage {
@@ -198,13 +200,15 @@ mod tests {
         let mut message = TimelineItem::AssistantMessage {
             id: "i".into(),
             text: "a".into(),
+            received_at_ms: None,
         };
         assert!(message.append_text("b"));
         assert_eq!(
             message,
             TimelineItem::AssistantMessage {
                 id: "i".into(),
-                text: "ab".into()
+                text: "ab".into(),
+                received_at_ms: None,
             }
         );
 

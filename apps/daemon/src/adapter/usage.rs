@@ -539,6 +539,7 @@ mod tests {
                 TimelineItem::AssistantMessage {
                     id: "a".into(),
                     text: "abcdefgh".into(),
+                    received_at_ms: None,
                 },
                 TimelineItem::ToolCall {
                     id: "c1".into(),
@@ -554,6 +555,7 @@ mod tests {
                 TimelineItem::Compaction {
                     id: "k1".into(),
                     reason: "auto".into(),
+                    received_at_ms: None,
                 },
             ],
         );

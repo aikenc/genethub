@@ -189,9 +189,10 @@ pub fn condense_event(event: &SessionEvent) -> SessionEvent {
 /// The overview of one timeline item.
 pub fn condense_item(item: &TimelineItem) -> TimelineItem {
     match item {
-        TimelineItem::Reasoning { id, text } => TimelineItem::Reasoning {
+        TimelineItem::Reasoning { id, text, .. } => TimelineItem::Reasoning {
             id: id.clone(),
             text: shorten(text, REASONING_CHARS),
+            received_at_ms: item.received_at_ms(),
         },
         TimelineItem::ToolCall {
             id,
@@ -300,11 +301,36 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
         }
     };
     let fallback = fallback_name.unwrap_or_default();
+    let heading = header(&provided, &input, fallback);
     ToolCallDetail::Overview {
         tool_kind: kind,
-        overview: header(&provided, &input, fallback),
+        // A call whose name, input and summary are all empty or generic (ACP
+        // agents may send no title at all) still gets a tell-apart label.
+        overview: if heading.is_empty() {
+            kind_label(kind).to_string()
+        } else {
+            heading
+        },
         input: one_line(&input, TOOL_LINE_CHARS),
         output: output_excerpt(&output),
+    }
+}
+
+/// Last-resort overview for a tool call that carries no words of its own.
+/// Mirrors the workbench's kind labels so a bare blob line still says what
+/// happened.
+fn kind_label(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Shell => "执行命令",
+        ToolKind::Read => "读取文件",
+        ToolKind::Write => "写入文件",
+        ToolKind::Edit => "编辑文件",
+        ToolKind::Search => "搜索",
+        ToolKind::Fetch => "访问网络",
+        ToolKind::Plan => "计划",
+        ToolKind::SubAgent => "子 Agent",
+        ToolKind::Mcp => "外部工具",
+        ToolKind::Other => "工具",
     }
 }
 
@@ -400,6 +426,7 @@ mod tests {
         let item = TimelineItem::Reasoning {
             id: "r".into(),
             text: "Let me think about this problem carefully and consider every option".into(),
+            received_at_ms: None,
         };
         match condense_item(&item) {
             TimelineItem::Reasoning { text, .. } => {
@@ -527,6 +554,7 @@ mod tests {
             items: vec![TimelineItem::AssistantMessage {
                 id: "s".into(),
                 text: "nested work".into(),
+                received_at_ms: None,
             }],
         };
         assert_eq!(
@@ -602,7 +630,9 @@ mod tests {
                 output,
                 ..
             } => {
-                assert_eq!(overview, "");
+                // No path and a generic name: the kind label stands in, and
+                // the file contents stay out of the overview.
+                assert_eq!(overview, "读取文件");
                 assert_eq!(input, "");
                 assert!(output.starts_with("---"));
             }
@@ -631,7 +661,9 @@ mod tests {
                 output,
                 ..
             } => {
-                assert_eq!(overview, "");
+                // Raw JSON never leaks into the overview; a fully generic
+                // call falls back to the plain kind label.
+                assert_eq!(overview, "工具");
                 assert_eq!(input, "");
                 assert_eq!(output, "");
             }

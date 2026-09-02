@@ -80,21 +80,35 @@ struct CachedImportCandidate {
 /// turn's high-water mark — the adapter counts from zero every turn — and
 /// `round_base` folds in every earlier turn of the round, so the value handed
 /// to the trunk builder stays cumulative across permission resumes.
+///
+/// Turn boundaries are explicit: a progress event whose `turn_id` differs
+/// from the current one opens a new turn and folds the previous mark into the
+/// base. A progress event from an already-finished turn (a late frame still
+/// sitting in the channel) is ignored, so it cannot double-fold the base.
 #[derive(Default)]
 struct LlmRounds {
     round_base: u32,
     turn: u32,
+    turn_id: Option<String>,
+    finished_turns: Vec<String>,
 }
 
 impl LlmRounds {
-    /// Records the current turn's merged counter. A drop means a new adapter
-    /// turn of the same round started counting from zero, so the previous
-    /// turn's mark moves into the round base first.
-    fn observe(&mut self, turn_rounds: u32) {
-        if turn_rounds < self.turn {
+    /// Records the current turn's merged counter.
+    fn observe(&mut self, turn_id: &str, turn_rounds: u32) {
+        if self.turn_id.as_deref() == Some(turn_id) {
+            self.turn = turn_rounds;
+            return;
+        }
+        if self.finished_turns.iter().any(|id| id == turn_id) {
+            return;
+        }
+        if let Some(previous) = self.turn_id.take() {
             self.round_base = self.round_base.saturating_add(self.turn);
+            self.finished_turns.push(previous);
         }
         self.turn = turn_rounds;
+        self.turn_id = Some(turn_id.to_string());
     }
 
     fn cumulative(&self) -> u32 {
@@ -193,6 +207,9 @@ struct ActiveRound {
     /// Total time this round spent waiting on a human, across every pause —
     /// not counted as the agent's own working time.
     blocked_ms: i64,
+    /// Every completed waiting interval, so trunk/batch durations can exclude
+    /// the time the round spent waiting on a human instead of working.
+    blocked_intervals: Vec<(i64, i64)>,
     /// `None` while the round is still open (running or blocked on a human).
     outcome: Option<RoundOutcome>,
     /// This round's still-open trunk — a bounded slice of its tool-call-
@@ -201,15 +218,13 @@ struct ActiveRound {
     /// long enough that "every item carries an overview" alone re-blows the
     /// byte budget the round layer itself exists to avoid.
     current_trunk: TrunkBuilder,
-    /// The cumulative LLM round count each recorded item was seen at, so the
-    /// open trunk's rebuild can attribute the same rounds the builder did.
-    trunk_llm_rounds: HashMap<String, u32>,
-    /// The cumulative round counter as of the item just before the open
-    /// trunk's first item — the base the open trunk's rebuild subtracts from.
-    /// Zero for the round's first trunk. Updated only after a closed trunk has
-    /// been written, because the write itself rebuilds the *closing* trunk
-    /// and must still see the old base.
-    open_trunk_base_rounds: u32,
+    /// The LLM round delta attributed to each recorded item, so the open
+    /// trunk's rebuild reports the same rounds the builder counted while
+    /// streaming. Deltas are absolute: a rebuild needs no base counter.
+    round_deltas: HashMap<String, u32>,
+    /// The cumulative round counter as of the last recorded trunk item — the
+    /// next item's delta is measured from here.
+    last_attributed_rounds: u32,
     /// Trunks already closed, in order. Becomes `RoundRecord::trunk_summaries`
     /// once the round settles (`close_current_trunk` folds in whatever was
     /// still open, so nothing since the last boundary is lost).
@@ -248,7 +263,7 @@ impl ActiveRound {
     fn record_trunk_item(
         &mut self,
         item: &TimelineItem,
-        llm_rounds: u32,
+        cumulative_rounds: u32,
     ) -> Option<rounds::ClosedTrunk> {
         let trunk_item = match item {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
@@ -257,10 +272,14 @@ impl ActiveRound {
             TimelineItem::Compaction { reason, .. } => TrunkItem::Compaction(reason.as_str()),
             _ => return None,
         };
-        self.trunk_llm_rounds
-            .insert(item.id().to_string(), llm_rounds);
+        // The rounds this item answers for are the counter's movement since
+        // the previous recorded item; adapters emit progress before the item
+        // that opens a round, so that item carries the round.
+        let delta = cumulative_rounds.saturating_sub(self.last_attributed_rounds);
+        self.last_attributed_rounds = cumulative_rounds;
+        self.round_deltas.insert(item.id().to_string(), delta);
         self.current_trunk
-            .push(item.id(), trunk_item, rounds::item_timing(item), llm_rounds)
+            .push(item.id(), trunk_item, rounds::item_timing(item), delta)
     }
 
     /// Closes whatever trunk is still being built, if any, so a round that
@@ -2470,6 +2489,7 @@ fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize, 
             TimelineItem::Compaction {
                 id: format!("import-{}", uuid::Uuid::new_v4().simple()),
                 reason: format!("导入历史过长，较早的 {omitted} 项未放入当前可见窗口"),
+                received_at_ms: None,
             },
         );
     }
@@ -2502,6 +2522,7 @@ fn truncate_import_item(mut item: TimelineItem, max_bytes: usize) -> TimelineIte
         TimelineItem::Compaction {
             id,
             reason: "单条历史记录过长，导入时已省略".into(),
+            received_at_ms: None,
         }
     }
 }
@@ -2631,19 +2652,13 @@ impl Live {
             }
         }
         let llm_rounds = self.llm_rounds.lock().await.cumulative();
-        let (closed, next_base) = {
+        let closed = {
             let mut active = self.active_round.lock().await;
             match active.as_mut() {
                 Some(round) if round.outcome.is_none() => {
-                    // The counter value this item's delta was measured from.
-                    // When the item closes a trunk it also opens the next one,
-                    // whose rebuild base is exactly this pre-push value.
-                    let base = round.current_trunk.last_llm_rounds();
-                    let closed = round.record_trunk_item(item, llm_rounds);
-                    let next_base = closed.is_some().then_some(base);
-                    (closed, next_base)
+                    round.record_trunk_item(item, llm_rounds)
                 }
-                _ => (None, None),
+                _ => None,
             }
         };
         if closed.is_some() {
@@ -2651,14 +2666,6 @@ impl Live {
             // new one. Keep the trigger out of the old trunk's persisted id
             // set, then retain it after that set has been drained.
             self.finish_trunk().await;
-            // Only now may the base move: `finish_trunk` rebuilt the closing
-            // trunk from the old base, and the item that triggered the close
-            // becomes the first item of the trunk that starts at `next_base`.
-            if let Some(base) = next_base {
-                if let Some(round) = self.active_round.lock().await.as_mut() {
-                    round.open_trunk_base_rounds = base;
-                }
-            }
         }
         self.open_trunk_items
             .lock()
@@ -2681,14 +2688,15 @@ impl Live {
                 .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
                 .collect::<Vec<_>>()
         };
-        let (llm_rounds, base_rounds) = {
+        let (round_deltas, blocked_intervals) = {
             let active = self.active_round.lock().await;
             let round = active.as_ref()?;
-            (round.trunk_llm_rounds.clone(), round.open_trunk_base_rounds)
+            (round.round_deltas.clone(), round.blocked_intervals.clone())
         };
-        let mut trunk = rounds::trunks_from_items_with_rounds(&items, &llm_rounds, base_rounds)
+        let mut trunk = rounds::trunks_from_items_with_rounds(&items, &round_deltas)
             .into_iter()
             .next()?;
+        rounds::exclude_blocked(&mut trunk, &blocked_intervals);
         trunk.summary.index = index;
         let refs = self.blob_refs.lock().await;
         for batch in &mut trunk.batches {
@@ -2814,10 +2822,11 @@ impl Live {
             started_at_ms: now_ms(),
             blocked_since_ms: None,
             blocked_ms: 0,
+            blocked_intervals: Vec::new(),
             outcome: None,
             current_trunk: TrunkBuilder::default(),
-            trunk_llm_rounds: HashMap::new(),
-            open_trunk_base_rounds: 0,
+            round_deltas: HashMap::new(),
+            last_attributed_rounds: 0,
             closed_trunks: Vec::new(),
         };
         // Recorded before the agent runs, so a daemon that dies mid-request
@@ -2875,7 +2884,9 @@ impl Live {
         if let Some(round) = active.as_mut() {
             if round.outcome.is_none() {
                 if let Some(since) = round.blocked_since_ms.take() {
-                    round.blocked_ms += (now_ms() - since).max(0);
+                    let now = now_ms();
+                    round.blocked_ms += (now - since).max(0);
+                    round.blocked_intervals.push((since, now));
                 }
                 if !round.adapter_turn_ids.iter().any(|id| id == turn_id) {
                     round.adapter_turn_ids.push(turn_id.to_string());
@@ -2909,7 +2920,9 @@ impl Live {
                 return None;
             }
             if let Some(since) = round.blocked_since_ms.take() {
-                round.blocked_ms += (now_ms() - since).max(0);
+                let now = now_ms();
+                round.blocked_ms += (now - since).max(0);
+                round.blocked_intervals.push((since, now));
             }
             round.outcome = Some(outcome);
             round.close_current_trunk_pending().is_some()
@@ -3118,6 +3131,7 @@ fn flush_reasoning_blobs(
         let value = serde_json::to_value(TimelineItem::Reasoning {
             id: id.clone(),
             text,
+            received_at_ms: None,
         });
         if let Ok(value) = value {
             let _ = sender.send(BlobWrite::Put { item_id: id, value });
@@ -3252,7 +3266,7 @@ async fn pump_events(
                 live.llm_rounds
                     .lock()
                     .await
-                    .observe(merged.llm_rounds as u32);
+                    .observe(turn_id, merged.llm_rounds as u32);
                 event = SessionEvent::TurnProgress {
                     turn_id: turn_id.clone(),
                     usage: merged.clone(),
@@ -3353,7 +3367,7 @@ async fn pump_events(
 
         let updates_reasoning = match &event {
             SessionEvent::Item {
-                item: TimelineItem::Reasoning { id, text },
+                item: TimelineItem::Reasoning { id, text, received_at_ms: None },
                 ..
             } => {
                 raw_thinking.insert(id.clone(), text.clone());
@@ -3456,12 +3470,13 @@ async fn pump_events(
                     item: TimelineItem::Reasoning {
                         id: item_id,
                         text: sentence,
+                        received_at_ms: None,
                     },
                 }
             }
             event => {
                 if let SessionEvent::Item {
-                    item: TimelineItem::Reasoning { id, text },
+                    item: TimelineItem::Reasoning { id, text, received_at_ms: None },
                     ..
                 } = &event
                 {
@@ -3539,7 +3554,12 @@ async fn pump_events(
                     .find(|existing| existing.id() == item.id())
                     .cloned()
             };
+            // Merge before both apply and publish so the store, the trunk
+            // builder and every live subscriber see the completed card rather
+            // than a bare status update blanking it.
+            item.merge_tool_update(previous.as_ref());
             item.inherit_and_stamp_tool_times(previous.as_ref(), now_ms());
+            item.inherit_and_stamp_received_at(previous.as_ref(), now_ms());
         }
 
         apply(&live, &event).await;
@@ -3719,12 +3739,15 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             match items.iter_mut().find(|existing| existing.id() == item.id()) {
                 Some(existing) => {
                     let mut next = item.clone();
+                    next.merge_tool_update(Some(existing));
                     next.inherit_and_stamp_tool_times(Some(existing), now_ms());
+                    next.inherit_and_stamp_received_at(Some(existing), now_ms());
                     *existing = next;
                 }
                 None => {
                     let mut next = item.clone();
                     next.inherit_and_stamp_tool_times(None, now_ms());
+                    next.inherit_and_stamp_received_at(None, now_ms());
                     items.push(next);
                 }
             }
@@ -4059,6 +4082,7 @@ mod tests {
         TimelineItem::AssistantMessage {
             id: id.into(),
             text: text.into(),
+            received_at_ms: None,
         }
     }
 
@@ -4392,6 +4416,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "assistant-1".into(),
                 text: "The health check path is stale".into(),
+                received_at_ms: None,
             },
             TimelineItem::TurnSummary {
                 id: "summary-1".into(),
@@ -5158,6 +5183,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "assistant-live".into(),
                 text: "I can investigate errors".into(),
+                received_at_ms: None,
             },
         ];
         *source_live.status.lock().await = SessionStatus::Waiting;
@@ -5252,6 +5278,7 @@ mod tests {
             .map(|index| TimelineItem::AssistantMessage {
                 id: format!("i-{index}"),
                 text: "reply".into(),
+                received_at_ms: None,
             })
             .collect();
         let (bounded, omitted, altered) = bound_imported_items(items);
@@ -5266,6 +5293,7 @@ mod tests {
         let huge = vec![TimelineItem::AssistantMessage {
             id: "huge".into(),
             text: "四".repeat(IMPORT_VISIBLE_BYTES),
+            received_at_ms: None,
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge);
         assert_eq!((omitted, altered), (0, 1));
@@ -5718,7 +5746,84 @@ mod tests {
 
         let items = live.items.lock().await;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0], item("a", "final"));
+        match &items[0] {
+            TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms,
+            } => {
+                assert_eq!(id, "a");
+                assert_eq!(text, "final");
+                assert!(received_at_ms.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bare_tool_update_inherits_the_card_it_replaces() {
+        // ACP shape: the initial event carries title/kind, the completion
+        // update only carries status and rawOutput. The update must not blank
+        // the card the initial event filled in.
+        let (live, _store_dir) = live_session(meta());
+        apply(
+            &live,
+            &SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "call-1".into(),
+                    name: "Read File".into(),
+                    status: ToolStatus::Running,
+                    detail: ToolCallDetail::Read {
+                        path: "src/main.rs".into(),
+                        content: String::new(),
+                        truncated: false,
+                    },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+            },
+        )
+        .await;
+        apply(
+            &live,
+            &SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "call-1".into(),
+                    name: String::new(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Overview {
+                        tool_kind: genehub_proto::ToolKind::Other,
+                        overview: String::new(),
+                        input: String::new(),
+                        output: "fn main() {}".into(),
+                    },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+            },
+        )
+        .await;
+
+        let items = live.items.lock().await;
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            TimelineItem::ToolCall { name, detail, .. } => {
+                assert_eq!(name, "Read File");
+                assert_eq!(
+                    detail,
+                    &ToolCallDetail::Read {
+                        path: "src/main.rs".into(),
+                        content: "fn main() {}".into(),
+                        truncated: false,
+                    }
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -5745,7 +5850,19 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(live.items.lock().await[0], item("a", "hello"));
+        let items = live.items.lock().await;
+        match &items[0] {
+            TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms,
+            } => {
+                assert_eq!(id, "a");
+                assert_eq!(text, "hello");
+                assert!(received_at_ms.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -6344,6 +6461,7 @@ mod tests {
                 item: TimelineItem::Reasoning {
                     id: "r".into(),
                     text: String::new(),
+                    received_at_ms: None,
                 },
             },
         ];
@@ -6693,17 +6811,20 @@ mod tests {
     #[test]
     fn llm_rounds_fold_each_adapter_turn_into_the_round_base() {
         let mut rounds = LlmRounds::default();
-        rounds.observe(1);
-        rounds.observe(3);
+        rounds.observe("t1", 1);
+        rounds.observe("t1", 3);
         assert_eq!(rounds.cumulative(), 3);
         // A new adapter turn of the same round restarts its counter at zero.
-        rounds.observe(1);
+        rounds.observe("t2", 1);
         assert_eq!(rounds.cumulative(), 4);
-        rounds.observe(2);
+        rounds.observe("t2", 2);
+        assert_eq!(rounds.cumulative(), 5);
+        // A late frame from the finished turn cannot fold the base twice.
+        rounds.observe("t1", 9);
         assert_eq!(rounds.cumulative(), 5);
         // A fresh round starts from zero.
         rounds.clear();
-        rounds.observe(1);
+        rounds.observe("t3", 1);
         assert_eq!(rounds.cumulative(), 1);
     }
 

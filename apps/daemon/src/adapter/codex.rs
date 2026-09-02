@@ -547,6 +547,7 @@ impl AgentAdapter for CodexAdapter {
                                 items.push(TimelineItem::AssistantMessage {
                                     id,
                                     text: text.to_string(),
+                                    received_at_ms: None,
                                 });
                             }
                         }
@@ -1918,6 +1919,7 @@ async fn translate(
                     item: TimelineItem::Compaction {
                         id: format!("compaction-{}", uuid::Uuid::new_v4().simple()),
                         reason: "Codex pruned its own history to make room.".into(),
+                        received_at_ms: None,
                     },
                 });
             }
@@ -2077,8 +2079,8 @@ fn stream(
     state.open.insert(item_id.to_string());
     let id = item_id.to_string();
     let item = match kind {
-        Kind::Assistant => TimelineItem::AssistantMessage { id, text: delta },
-        Kind::Reasoning => TimelineItem::Reasoning { id, text: delta },
+        Kind::Assistant => TimelineItem::AssistantMessage { id, text: delta, received_at_ms: None },
+        Kind::Reasoning => TimelineItem::Reasoning { id, text: delta, received_at_ms: None },
     };
     let _ = events.send(SessionEvent::Item { turn_id, item });
 }
@@ -2130,21 +2132,25 @@ fn item_frame(
         // not be mistaken for a new one and replace the whole text with itself.
         "agentMessage" => {
             state.open.insert(id.clone());
-            emit(TimelineItem::AssistantMessage {
-                id,
-                text: text_of("text"),
-            });
             if settled {
                 state.usage.llm_rounds += 1;
                 usage::record_round_start(&mut state.usage);
+                // Progress before the item, so the message that completes a
+                // round is itself attributed to it.
                 usage::emit_progress(events, &turn_id, &state.usage);
             }
+            emit(TimelineItem::AssistantMessage {
+                id,
+                text: text_of("text"),
+                received_at_ms: None,
+            });
         }
         "reasoning" => {
             state.open.insert(id.clone());
             emit(TimelineItem::Reasoning {
                 id,
                 text: reasoning_text(item),
+                received_at_ms: None,
             });
         }
         "commandExecution" => emit(TimelineItem::ToolCall {
@@ -2316,6 +2322,7 @@ fn item_frame(
                 emit(TimelineItem::Compaction {
                     id,
                     reason: "Codex pruned its own history to make room.".into(),
+                    received_at_ms: None,
                 });
             }
         }
@@ -2899,7 +2906,7 @@ mod tests {
             seen.try_recv().expect("the root answer started"),
             SessionEvent::Item {
                 ref turn_id,
-                item: TimelineItem::AssistantMessage { ref id, ref text },
+                item: TimelineItem::AssistantMessage { ref id, ref text, received_at_ms: None },
             } if turn_id == "t1" && id == "root-final" && text.is_empty()
         ));
         assert!(matches!(
@@ -2914,7 +2921,7 @@ mod tests {
             seen.try_recv().expect("the root answer completed"),
             SessionEvent::Item {
                 ref turn_id,
-                item: TimelineItem::AssistantMessage { ref id, ref text },
+                item: TimelineItem::AssistantMessage { ref id, ref text, received_at_ms: None },
             } if turn_id == "t1" && id == "root-final" && text == "Done."
         ));
         loop {
@@ -3308,7 +3315,7 @@ mod tests {
 
         match seen.try_recv().expect("an item") {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text },
+                item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
                 ..
             } => {
                 assert_eq!(id, "item-1");

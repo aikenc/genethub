@@ -29,7 +29,7 @@ export function ToolCallView({
         <span className="shrink-0 text-base" role="img" aria-label={kindLabel(toolKind(detail))}>
           {kindEmoji(toolKind(detail))}
         </span>
-        <span className="shrink-0 font-mono text-fg">{name}</span>
+        <span className="shrink-0 font-mono text-fg">{name || kindLabel(toolKind(detail))}</span>
         <span className="min-w-0 flex-1 truncate text-muted">{summary}</span>
         <button
           type="button"

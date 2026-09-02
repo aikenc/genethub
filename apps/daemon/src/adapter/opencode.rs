@@ -261,7 +261,7 @@ impl AgentAdapter for OpenCodeAdapter {
                         text,
                         attachments: Vec::new(),
                     }),
-                    Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text }),
+                    Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text, received_at_ms: None }),
                     _ => {}
                 }
             }
@@ -876,9 +876,9 @@ fn emit_part(
                 usage::record_visible_output(&mut state.usage, &text);
             }
             if part_type == "reasoning" {
-                TimelineItem::Reasoning { id: item_id, text }
+                TimelineItem::Reasoning { id: item_id, text, received_at_ms: None }
             } else {
-                TimelineItem::AssistantMessage { id: item_id, text }
+                TimelineItem::AssistantMessage { id: item_id, text, received_at_ms: None }
             }
         }
         "compaction" => {
@@ -896,6 +896,7 @@ fn emit_part(
             TimelineItem::Compaction {
                 id: item_id,
                 reason: format!("OpenCode compressed its context ({trigger})."),
+                received_at_ms: None,
             }
         }
         "tool" => {
@@ -1301,7 +1302,7 @@ mod tests {
             .iter()
             .map(|event| match event {
                 SessionEvent::Item {
-                    item: TimelineItem::AssistantMessage { id, text },
+                    item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
                     ..
                 } => (id.clone(), text.clone()),
                 other => panic!("unexpected {other:?}"),

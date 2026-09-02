@@ -1257,11 +1257,16 @@ export type SupportDiagnostics = { version: number, capturedAt: string, daemonVe
  * `id` is assigned by the daemon, not the agent, so that deltas can address an
  * item regardless of whether the underlying agent has a concept of message ids.
  */
-export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, } | { "type": "reasoning", id: string, text: string, } | { "type": "toolCall", id: string, name: string, status: ToolStatus, detail: ToolCallDetail, 
+export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, 
+/**
+ * When the daemon first saw this item. Drives batch/trunk timing for
+ * items that carry no tool timestamps of their own.
+ */
+receivedAtMs?: number, } | { "type": "reasoning", id: string, text: string, receivedAtMs?: number, } | { "type": "toolCall", id: string, name: string, status: ToolStatus, detail: ToolCallDetail, 
 /**
  * Images this call's result carried, in shed form (see `ToolImage`).
  */
-images: Array<ToolImage>, startedAtMs?: number, finishedAtMs?: number, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
+images: Array<ToolImage>, startedAtMs?: number, finishedAtMs?: number, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, receivedAtMs?: number, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
 
 export type TodoEntry = { text: string, status: TodoStatus, };
 

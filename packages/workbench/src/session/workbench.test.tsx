@@ -1094,6 +1094,54 @@ describe("what the user sees in a session", () => {
     expect(within(trunk).queryByTestId("summary-metrics")).not.toBeInTheDocument();
   });
 
+  it("shows live rounds and elapsed time on the in-progress card", () => {
+    const now = Date.now();
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对配置", attachments: [] },
+    });
+    state = apply(state, { type: "turnStarted", turnId: "t1", startedAtMs: now - 65_000 });
+    state = apply(state, {
+      type: "turnProgress",
+      turnId: "t1",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        llmRounds: 3,
+        toolOutputTokens: 0,
+        compactionCount: 0,
+        outputRateEstimated: false,
+        costUsd: undefined,
+      },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "ok",
+        detail: { kind: "read", path: "role.json", content: "x", truncated: false },
+        images: [],
+        startedAtMs: now - 90_000,
+        finishedAtMs: now - 80_000,
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    const card = screen.getByTestId("round-trunk");
+    const metrics = within(card).getByTestId("summary-metrics");
+    expect(metrics).toHaveTextContent("3 轮");
+    expect(metrics).toHaveTextContent("1 分钟前");
+    expect(metrics).toHaveTextContent("工具 10s");
+    expect(card).not.toHaveTextContent("1 项");
+  });
+
   it("calls only the live tail progress and completed trunks process", () => {
     const round = {
       roundId: "r1",

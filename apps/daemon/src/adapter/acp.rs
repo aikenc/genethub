@@ -512,6 +512,7 @@ fn acp_history_items(updates: &[Value]) -> Vec<TimelineItem> {
             TimelineItem::AssistantMessage {
                 id,
                 text: text.to_string(),
+                received_at_ms: None,
             }
         });
     }
@@ -2006,6 +2007,9 @@ fn translate_update(
                 usage::record_first_token(&mut state.usage);
                 usage::record_visible_output(&mut state.usage, &delta);
             }
+            // Progress goes out before the item so the item that opens a round
+            // is already attributed to it when the trunk builder sees it.
+            usage::emit_progress(events, &turn_id, &state.usage);
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id: turn_id.clone(),
@@ -2018,11 +2022,10 @@ fn translate_update(
                     state.reasoning_item = None;
                     emit(SessionEvent::Item {
                         turn_id: turn_id.clone(),
-                        item: TimelineItem::AssistantMessage { id, text: delta },
+                        item: TimelineItem::AssistantMessage { id, text: delta, received_at_ms: None },
                     });
                 }
             }
-            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "agent_thought_chunk" => {
             let delta = text_of(update);
@@ -2034,6 +2037,8 @@ fn translate_update(
                 usage::record_first_token(&mut state.usage);
                 usage::record_visible_output(&mut state.usage, &delta);
             }
+            // Same ordering as agent_message_chunk: progress before the item.
+            usage::emit_progress(events, &turn_id, &state.usage);
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id: turn_id.clone(),
@@ -2046,11 +2051,10 @@ fn translate_update(
                     state.text_item = None;
                     emit(SessionEvent::Item {
                         turn_id: turn_id.clone(),
-                        item: TimelineItem::Reasoning { id, text: delta },
+                        item: TimelineItem::Reasoning { id, text: delta, received_at_ms: None },
                     });
                 }
             }
-            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "tool_call" | "tool_call_update" => {
             // Any tool activity ends the current text run, so the next chunk
@@ -2066,10 +2070,13 @@ fn translate_update(
                 Some("failed") => ToolStatus::Error,
                 _ => ToolStatus::Pending,
             };
+            // No "tool" placeholder here: updates often omit the title, and a
+            // placeholder would win over the real name when the daemon merges
+            // the update into the item it replaces. Empty means "inherit".
             let name = update
                 .get("title")
                 .and_then(Value::as_str)
-                .unwrap_or("tool")
+                .unwrap_or("")
                 .to_string();
             emit(SessionEvent::Item {
                 turn_id,
@@ -2180,6 +2187,13 @@ fn is_catalog_noise_title(title: &str) -> bool {
 /// `read`-kind call's first location is the source path; everything else is
 /// treated as produced bytes.
 fn images_from_update(update: &Value, name: &str) -> Vec<ToolImage> {
+    // Alt text is internal accessibility text; a kind word beats an empty
+    // string when the update omitted the title.
+    let name = if name.is_empty() {
+        update.get("kind").and_then(Value::as_str).unwrap_or("tool")
+    } else {
+        name
+    };
     let read_path = (update.get("kind").and_then(Value::as_str) == Some("read"))
         .then(|| {
             update
