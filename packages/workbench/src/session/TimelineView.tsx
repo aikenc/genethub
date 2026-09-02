@@ -1519,7 +1519,7 @@ function SummaryMetrics({
     <span className="flex shrink-0 flex-col items-end leading-tight" data-testid="summary-metrics">
       {top.length > 0 ? <span className="text-xs text-muted">{top.join(" · ")}</span> : null}
       {bottom.length > 0 ? (
-        <span className="text-[11px] text-faint">{bottom.join(" · ")}</span>
+        <span className="text-[10px] text-faint">{bottom.join(" · ")}</span>
       ) : null}
     </span>
   );
