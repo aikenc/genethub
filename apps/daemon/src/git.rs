@@ -83,6 +83,56 @@ pub async fn status(root: &Path) -> Result<GitStatus> {
     })
 }
 
+pub(crate) async fn resolve_ref(root: &Path, reference: &str) -> Result<String> {
+    Ok(git(root, &["rev-parse", reference])
+        .await?
+        .trim()
+        .to_string())
+}
+
+pub(crate) async fn current_ref(root: &Path) -> Result<String> {
+    let reference = git(root, &["symbolic-ref", "-q", "HEAD"]).await?;
+    let reference = reference.trim();
+    if reference.is_empty() {
+        anyhow::bail!("当前仓库处于 detached HEAD，不能取得独占目标 ref 租约");
+    }
+    Ok(reference.to_string())
+}
+
+pub(crate) async fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
+    let mut child = Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("running git merge-base")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("capturing git merge-base stderr")?;
+    let (stderr, status) = tokio::time::timeout(GIT_TIMEOUT, async move {
+        tokio::try_join!(
+            read_bounded(stderr, MAX_STDERR_BYTES, "git merge-base error output"),
+            async { child.wait().await.context("waiting for git merge-base") },
+        )
+    })
+    .await
+    .map_err(|_| anyhow!("git merge-base timed out"))??;
+    if status.success() {
+        return Ok(true);
+    }
+    if status.code() == Some(1) {
+        return Ok(false);
+    }
+    Err(anyhow!(
+        "git merge-base failed: {}",
+        String::from_utf8_lossy(&stderr).trim()
+    ))
+}
+
 /// Parses `--porcelain=v1 -z`.
 ///
 /// NUL separation rather than newlines because filenames may contain newlines,
