@@ -266,11 +266,25 @@ export function applySequenced(state: TimelineState, event: SequencedEvent): Tim
   return { ...apply(state, event.event), seq: event.seq };
 }
 
+function earlierMs(left?: number, right?: number): number | undefined {
+  if (left == null) return right;
+  if (right == null) return left;
+  return Math.min(left, right);
+}
+
 function upsert(items: TimelineItem[], item: TimelineItem): TimelineItem[] {
   const index = items.findIndex((existing) => existing.id === item.id);
   if (index === -1) return [...items, item];
+  const existing = items[index]!;
   const next = items.slice();
-  next[index] = item;
+  next[index] =
+    item.type === "toolCall" && existing.type === "toolCall"
+      ? {
+          ...item,
+          startedAtMs: earlierMs(item.startedAtMs, existing.startedAtMs),
+          finishedAtMs: earlierMs(item.finishedAtMs, existing.finishedAtMs),
+        }
+      : item;
   return next;
 }
 
@@ -299,6 +313,7 @@ function withDelta(item: TimelineItem, delta: ItemDeltaOf): TimelineItem {
   }
 
   if (item.type !== "toolCall") return item;
+  const terminal = delta.status === "ok" || delta.status === "error" || delta.status === "canceled";
   return {
     ...item,
     status: delta.status,
@@ -308,6 +323,8 @@ function withDelta(item: TimelineItem, delta: ItemDeltaOf): TimelineItem {
     // Tool-result images arrive with the settling delta; an empty list means
     // "nothing new", never "clear".
     images: delta.images.length > 0 ? delta.images : item.images,
+    finishedAtMs:
+      item.finishedAtMs ?? (terminal && item.startedAtMs != null ? Date.now() : item.finishedAtMs),
   };
 }
 

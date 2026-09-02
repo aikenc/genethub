@@ -52,6 +52,8 @@ mod tests {
                 exit_code: Some(0),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         });
         round_trip(TimelineItem::ToolCall {
             id: "i3".into(),
@@ -61,6 +63,8 @@ mod tests {
                 raw: json!({"anything": [1, 2, 3]}),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         });
     }
 

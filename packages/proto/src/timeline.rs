@@ -196,6 +196,12 @@ pub enum TimelineItem {
         /// Images this call's result carried, in shed form (see `ToolImage`).
         #[serde(default)]
         images: Vec<ToolImage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        started_at_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        finished_at_ms: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     Todo { id: String, items: Vec<TodoEntry> },
@@ -237,5 +243,122 @@ impl TimelineItem {
             }
             _ => false,
         }
+    }
+
+    pub fn is_terminal_tool(status: ToolStatus) -> bool {
+        matches!(
+            status,
+            ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled
+        )
+    }
+
+    /// First sighting records start; a terminal status records finish. Never
+    /// overwrites a time the adapter or an earlier stamp already set.
+    pub fn stamp_tool_times(&mut self, now: i64) {
+        let TimelineItem::ToolCall {
+            status,
+            started_at_ms,
+            finished_at_ms,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if started_at_ms.is_none() {
+            *started_at_ms = Some(now);
+        }
+        if Self::is_terminal_tool(*status) && finished_at_ms.is_none() {
+            let start = started_at_ms.unwrap_or(now);
+            *finished_at_ms = Some(now.max(start));
+        }
+    }
+
+    pub fn preserve_tool_times(&mut self, previous: &TimelineItem) {
+        let TimelineItem::ToolCall {
+            started_at_ms: prev_start,
+            finished_at_ms: prev_end,
+            ..
+        } = previous
+        else {
+            return;
+        };
+        let TimelineItem::ToolCall {
+            started_at_ms,
+            finished_at_ms,
+            ..
+        } = self
+        else {
+            return;
+        };
+        *started_at_ms = earlier_ms(*started_at_ms, *prev_start);
+        *finished_at_ms = earlier_ms(*finished_at_ms, *prev_end);
+    }
+
+    /// Carry times from the in-memory item, then stamp any still-missing
+    /// start/finish. A completed replacement must inherit the first sighting
+    /// before `now` is written, or live elapsed collapses to zero.
+    pub fn inherit_and_stamp_tool_times(&mut self, previous: Option<&TimelineItem>, now: i64) {
+        if let Some(previous) = previous {
+            self.preserve_tool_times(previous);
+        }
+        self.stamp_tool_times(now);
+    }
+}
+
+fn earlier_ms(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool(status: ToolStatus, started: Option<i64>, finished: Option<i64>) -> TimelineItem {
+        TimelineItem::ToolCall {
+            id: "t".into(),
+            name: "shell".into(),
+            status,
+            detail: ToolCallDetail::Overview {
+                tool_kind: ToolKind::Shell,
+                overview: "cargo check".into(),
+                input: "cargo check".into(),
+                output: String::new(),
+            },
+            images: vec![],
+            started_at_ms: started,
+            finished_at_ms: finished,
+        }
+    }
+
+    fn times(item: &TimelineItem) -> (Option<i64>, Option<i64>) {
+        match item {
+            TimelineItem::ToolCall {
+                started_at_ms,
+                finished_at_ms,
+                ..
+            } => (*started_at_ms, *finished_at_ms),
+            _ => panic!("expected tool"),
+        }
+    }
+
+    #[test]
+    fn a_terminal_replacement_keeps_the_first_start() {
+        let running = tool(ToolStatus::Running, Some(1_000), None);
+        let mut done = tool(ToolStatus::Ok, None, None);
+        done.inherit_and_stamp_tool_times(Some(&running), 21_000);
+        assert_eq!(times(&done), (Some(1_000), Some(21_000)));
+    }
+
+    #[test]
+    fn a_restamped_terminal_item_does_not_win_over_the_first_start() {
+        let running = tool(ToolStatus::Running, Some(1_000), None);
+        let mut done = tool(ToolStatus::Ok, Some(21_000), Some(21_000));
+        done.inherit_and_stamp_tool_times(Some(&running), 21_000);
+        assert_eq!(times(&done), (Some(1_000), Some(21_000)));
     }
 }

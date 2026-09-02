@@ -1609,6 +1609,8 @@ fn collect_sub_tool_calls(frame: &Value, parent: &str, state: &mut TurnState) {
             name,
             status: ToolStatus::Running,
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         });
     }
 }
@@ -1650,6 +1652,8 @@ fn settle_sub_tool_results(frame: &Value, parent: &str, state: &mut TurnState) {
             name,
             status,
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         };
     }
 }
@@ -1676,6 +1680,8 @@ fn emit_sub_agent(
             name: name.clone(),
             status: ToolStatus::Running,
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         },
     });
 }
@@ -1797,6 +1803,8 @@ fn translate_assistant_snapshot(
                 name,
                 status: ToolStatus::Running,
                 images: vec![],
+                started_at_ms: None,
+                finished_at_ms: None,
             },
         });
     }
@@ -1868,6 +1876,8 @@ fn translate_user_frame(
                         name,
                         status,
                         images,
+                        started_at_ms: None,
+                        finished_at_ms: None,
                     },
                 });
             }

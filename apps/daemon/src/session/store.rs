@@ -309,6 +309,14 @@ enum TrunkRow {
         /// Rows written before this field existed read as `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         marker: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        llm_rounds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_duration_ms: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Blob {
@@ -321,6 +329,14 @@ enum TrunkRow {
         thumb: Option<ImageThumb>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_kind: Option<genehub_proto::ToolKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<genehub_proto::ToolStatus>,
     },
 }
 
@@ -1202,6 +1218,10 @@ impl Store {
                     text: batch.summary.text.clone(),
                     monologue: batch.monologue.clone(),
                     marker: batch.summary.marker.clone(),
+                    llm_rounds: batch.summary.llm_rounds,
+                    started_at_ms: batch.summary.started_at_ms,
+                    duration_ms: batch.summary.duration_ms,
+                    tool_duration_ms: batch.summary.tool_duration_ms,
                 })?
             )?;
             for blob in &batch.blobs {
@@ -1215,6 +1235,10 @@ impl Store {
                         blob: blob.blob.clone(),
                         thumb: blob.thumb.clone(),
                         path: blob.path.clone(),
+                        started_at_ms: blob.started_at_ms,
+                        duration_ms: blob.duration_ms,
+                        tool_kind: blob.tool_kind,
+                        status: blob.status,
                     })?
                 )?;
             }
@@ -1313,6 +1337,10 @@ impl Store {
                     text,
                     monologue,
                     marker,
+                    llm_rounds,
+                    started_at_ms,
+                    duration_ms,
+                    tool_duration_ms,
                 }) => batches.push(RoundBatch {
                     summary: RoundBatchSummary {
                         index,
@@ -1320,6 +1348,10 @@ impl Store {
                         blob_count,
                         text,
                         marker,
+                        llm_rounds,
+                        started_at_ms,
+                        duration_ms,
+                        tool_duration_ms,
                     },
                     monologue,
                     blobs: Vec::new(),
@@ -1331,6 +1363,10 @@ impl Store {
                     blob,
                     thumb,
                     path,
+                    started_at_ms,
+                    duration_ms,
+                    tool_kind,
+                    status,
                 }) => {
                     // A blob row before any batch row means a truncated write.
                     // Attaching it to a synthetic batch keeps the content
@@ -1343,6 +1379,10 @@ impl Store {
                                 blob_count: 0,
                                 text: String::new(),
                                 marker: None,
+                                llm_rounds: None,
+                                started_at_ms: None,
+                                duration_ms: None,
+                                tool_duration_ms: None,
                             },
                             monologue: None,
                             blobs: Vec::new(),
@@ -1359,6 +1399,10 @@ impl Store {
                             blob,
                             thumb,
                             path,
+                            started_at_ms,
+                            duration_ms,
+                            tool_kind,
+                            status,
                         });
                 }
                 Err(error) => {

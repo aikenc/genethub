@@ -2164,6 +2164,8 @@ fn item_frame(
                     .map(|code| code as i32),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         "fileChange" => emit(TimelineItem::ToolCall {
             id,
@@ -2171,6 +2173,8 @@ fn item_frame(
             status: tool_status(item, settled),
             detail: edit_detail(item),
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         "mcpToolCall" => {
             let tool = text_of("tool");
@@ -2187,6 +2191,8 @@ fn item_frame(
                 status: tool_status(item, settled),
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
                 images,
+                started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         // The agent opened a local image. Only the path crosses the wire — the
@@ -2211,6 +2217,8 @@ fn item_frame(
                     thumb: None,
                     path: Some(path),
                 }],
+                started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         // Native image generation. The picture crosses the wire as raw base64
@@ -2242,6 +2250,8 @@ fn item_frame(
                     }],
                     None => vec![],
                 },
+                started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         "webSearch" => emit(TimelineItem::ToolCall {
@@ -2254,6 +2264,8 @@ fn item_frame(
                 matches: Vec::new(),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         // A sub-agent this turn dispatched. The card says who was asked and
         // what for; its own steps arrive on a thread of their own, which is not
@@ -2269,6 +2281,8 @@ fn item_frame(
                 items: Vec::new(),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         "subAgentActivity" => {
             let path = text_of("agentPath");
@@ -2289,6 +2303,8 @@ fn item_frame(
                 },
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
                 images: vec![],
+                started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         "contextCompaction" => {
@@ -2320,6 +2336,8 @@ fn item_frame(
             status: tool_status(item, settled),
             detail: ToolCallDetail::Unknown { raw: item.clone() },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
     }
 }
@@ -2352,14 +2370,62 @@ fn reasoning_text(item: &Value) -> String {
 /// A command as this CLI reports it: one string, or the argv it will run.
 fn command_text(command: Option<&Value>) -> String {
     match command {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
+        Some(Value::String(text)) => unwrap_shell_command(text),
+        Some(Value::Array(parts)) => {
+            let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+            if parts.len() >= 3 && is_shell_bin(parts[0]) && is_shell_flag(parts[1]) {
+                return parts[2..].join(" ");
+            }
+            unwrap_shell_command(&parts.join(" "))
+        }
         _ => String::new(),
     }
+}
+
+fn is_shell_bin(name: &str) -> bool {
+    matches!(
+        name.rsplit('/').next().unwrap_or(name),
+        "bash" | "sh" | "dash" | "zsh"
+    )
+}
+
+fn is_shell_flag(flag: &str) -> bool {
+    matches!(flag, "-c" | "-lc" | "-cl")
+}
+
+fn unwrap_shell_command(command: &str) -> String {
+    let trimmed = command.trim();
+    let mut rest = trimmed;
+    for prefix in [
+        "/bin/bash -lc ",
+        "/bin/bash -c ",
+        "/usr/bin/bash -lc ",
+        "/usr/bin/bash -c ",
+        "bash -lc ",
+        "bash -c ",
+        "/bin/sh -lc ",
+        "/bin/sh -c ",
+        "sh -lc ",
+        "sh -c ",
+    ] {
+        if let Some(inner) = trimmed.strip_prefix(prefix) {
+            rest = inner;
+            break;
+        }
+    }
+    unquote_once(rest)
+}
+
+fn unquote_once(text: &str) -> String {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return text[1..text.len() - 1].to_string();
+    }
+    text.to_string()
 }
 
 /// The edit a `fileChange` item describes.
@@ -3130,7 +3196,8 @@ mod tests {
         assert!(matches!(
             seen.try_recv().expect("the root collaboration summary"),
             SessionEvent::Item {
-                item: TimelineItem::ToolCall { ref name, .. },
+                item: TimelineItem::ToolCall { ref name, ..
+        },
                 ..
             } if name == "Main agent"
         ));
@@ -3669,5 +3736,18 @@ mod tests {
         assert!(images[0].path.is_none());
         assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
         assert!(mcp_result_images(&json!({"result": {"content": []}}), "t").is_empty());
+    }
+
+    #[test]
+    fn command_text_unwraps_a_bash_lc_wrapper() {
+        assert_eq!(
+            command_text(Some(&json!("/bin/bash -lc \"sed -n '1,20p' README.md\""))),
+            "sed -n '1,20p' README.md"
+        );
+        assert_eq!(
+            command_text(Some(&json!(["/bin/bash", "-lc", "git status"]))),
+            "git status"
+        );
+        assert_eq!(command_text(Some(&json!("ls -la"))), "ls -la");
     }
 }

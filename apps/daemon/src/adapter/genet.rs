@@ -595,6 +595,8 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     status: ToolStatus::Pending,
                     detail: detail_from_call(name, &arguments),
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -640,6 +642,8 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     status,
                     detail: detail_from_result(&name, &arguments, result, is_error),
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }

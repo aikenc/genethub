@@ -1,11 +1,13 @@
 import type {
   BlobOverview,
   RoundBatch,
+  RoundBatchSummary,
   RoundSummary,
   RoundTrunk,
   RoundTrunkSummary,
   SessionSummary,
   TimelineItem,
+  ToolCallDetail,
   TurnStats,
   Usage,
 } from "@genehub/proto";
@@ -56,7 +58,7 @@ import {
 import { buildSelectionCopy } from "./selectionCopy";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
-import { ToolCallView } from "./ToolCall";
+import { kindEmoji, kindLabel, ToolCallView } from "./ToolCall";
 import { useSessionArtifact } from "./useSessionArtifact";
 
 /**
@@ -1064,32 +1066,60 @@ function processRowOverview(
   }
   switch (item.detail.kind) {
     case "overview":
-      return item.detail.overview || item.name;
+      return item.detail.overview;
     case "shell":
-      return item.detail.command || item.name;
+      return item.detail.command;
     case "read":
     case "edit":
     case "write":
-      return item.detail.path || item.name;
+      return item.detail.path;
     case "search":
-      return item.detail.query || item.name;
+      return item.detail.query;
     case "fetch":
-      return item.detail.url || item.name;
+      return item.detail.url;
     case "plan":
       return "计划";
     case "subAgent":
-      return item.detail.agent || item.name;
+      return item.detail.agent;
     case "unknown":
-      return item.name;
+      return "";
   }
 }
 
 function processBlobsFromItems(items: TimelineItem[]): BlobOverview[] {
-  return items.filter(isProcessItem).map((item) => ({
-    itemId: item.id,
-    kind: item.type === "reasoning" ? "reasoning" : "toolCall",
-    overview: processRowOverview(item),
-  }));
+  return items.filter(isProcessItem).map((item) => {
+    if (item.type === "reasoning") {
+      return { itemId: item.id, kind: "reasoning" as const, overview: processRowOverview(item) };
+    }
+    const startedAtMs = item.startedAtMs;
+    const finishedAtMs = item.finishedAtMs;
+    const durationMs =
+      startedAtMs != null && finishedAtMs != null && finishedAtMs >= startedAtMs
+        ? finishedAtMs - startedAtMs
+        : undefined;
+    return {
+      itemId: item.id,
+      kind: "toolCall" as const,
+      overview: processRowOverview(item),
+      startedAtMs,
+      durationMs,
+      toolKind: item.detail.kind === "overview" ? item.detail.toolKind : toolKindFromDetail(item.detail),
+      status: item.status,
+    };
+  });
+}
+
+function toolKindFromDetail(detail: ToolCallDetail) {
+  switch (detail.kind) {
+    case "overview":
+      return detail.toolKind;
+    case "subAgent":
+      return "subAgent" as const;
+    case "unknown":
+      return "other" as const;
+    default:
+      return detail.kind;
+  }
 }
 
 function provisionalProcessTitle(items: TimelineItem[], live: boolean): string {
@@ -1384,6 +1414,46 @@ function RoundProgress({
   );
 }
 
+/**
+ * Right-side two-line metrics for a trunk/batch header: LLM rounds and
+ * wall-clock span on top, relative start time and summed tool time below in
+ * smaller type. Rows persisted before these fields existed keep the old blob
+ * count rather than showing zeros.
+ */
+function SummaryMetrics({
+  summary,
+  live = false,
+}: {
+  summary: RoundTrunkSummary | RoundBatchSummary;
+  live?: boolean;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!live || summary.startedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [live, summary.startedAtMs]);
+  if (summary.llmRounds == null && summary.startedAtMs == null) {
+    return <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>;
+  }
+  const top: string[] = [];
+  if (summary.llmRounds != null) top.push(`${summary.llmRounds} 轮`);
+  if (summary.durationMs != null) top.push(formatDuration(summary.durationMs));
+  const bottom: string[] = [];
+  if (summary.startedAtMs != null) bottom.push(relativeTime(summary.startedAtMs, now));
+  if (summary.toolDurationMs != null && summary.toolDurationMs > 0) {
+    bottom.push(`工具 ${formatToolDuration(summary.toolDurationMs)}`);
+  }
+  return (
+    <span className="flex shrink-0 flex-col items-end leading-tight" data-testid="summary-metrics">
+      {top.length > 0 ? <span className="text-xs text-muted">{top.join(" · ")}</span> : null}
+      {bottom.length > 0 ? (
+        <span className="text-[11px] text-faint">{bottom.join(" · ")}</span>
+      ) : null}
+    </span>
+  );
+}
+
 function TrunkCard({
   round,
   summary,
@@ -1432,7 +1502,7 @@ function TrunkCard({
         <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={trunkTitle}>
           {trunkTitle}
         </span>
-        <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
+        <SummaryMetrics summary={summary} live={live && active} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1514,7 +1584,7 @@ function BatchCard({
         >
           {monologue.first || batch.summary.text}
         </span>
-        <span className="shrink-0 text-xs text-muted">{batch.summary.blobCount} 项</span>
+        <SummaryMetrics summary={batch.summary} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1572,15 +1642,8 @@ function LiveTail({ blobs }: { blobs: BlobOverview[] }) {
         <p className="px-2 py-1.5 text-xs text-muted">进行中</p>
       ) : (
         tail.map((blob) => (
-          <div
-            key={blob.itemId}
-            className="flex items-center gap-2 px-2 py-1.5 text-xs"
-            data-testid="live-blob-row"
-          >
-            <span className="text-muted">
-              {blob.kind === "reasoning" ? "思考" : blob.kind === "image" ? "图片" : "工具"}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+          <div key={blob.itemId} className="px-2 py-1.5 text-xs">
+            <BlobLine blob={blob} testId="live-blob-row" />
           </div>
         ))
       )}
@@ -1642,6 +1705,56 @@ function progressTitle(title: string): string {
   return splitMonologue(normalized).first || normalized.replace(/(?:\.{3}|…)+$/u, "").trim();
 }
 
+function blobKindMark(blob: BlobOverview): string {
+  if (blob.kind === "reasoning") return "💭";
+  if (blob.kind === "image") return "🖼";
+  return kindEmoji(blob.toolKind ?? "other");
+}
+
+function blobKindLabel(blob: BlobOverview): string {
+  if (blob.kind === "reasoning") return "思考";
+  if (blob.kind === "image") return "图片";
+  return kindLabel(blob.toolKind ?? "other");
+}
+
+function formatToolDuration(ms: number): string {
+  if (ms < 100) return "<0.1s";
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  return formatDuration(ms);
+}
+
+function BlobTiming({ blob, now }: { blob: BlobOverview; now: number }) {
+  if (blob.kind !== "toolCall" || blob.startedAtMs == null) return null;
+  const running =
+    blob.status === "pending" || blob.status === "running" || blob.durationMs == null;
+  const duration = blob.durationMs ?? Math.max(0, now - blob.startedAtMs);
+  return (
+    <span className="shrink-0 text-muted" data-testid="blob-timing">
+      {running ? "进行中" : relativeTime(blob.startedAtMs, now)} · {formatToolDuration(duration)}
+    </span>
+  );
+}
+
+function BlobLine({ blob, testId }: { blob: BlobOverview; testId?: string }) {
+  const live =
+    blob.kind === "toolCall" && blob.startedAtMs != null && blob.durationMs == null;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (blob.startedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), live ? 1_000 : 60_000);
+    return () => window.clearInterval(timer);
+  }, [blob.startedAtMs, live]);
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2" data-testid={testId}>
+      <span className="shrink-0" role="img" aria-label={blobKindLabel(blob)}>
+        {blobKindMark(blob)}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+      <BlobTiming blob={blob} now={now} />
+    </span>
+  );
+}
+
 function BlobRow({ blob }: { blob: BlobOverview }) {
   const payload = useWorkbench((state) =>
     blob.blob ? state.timeline.blobs[blob.blob.id] : undefined,
@@ -1661,11 +1774,8 @@ function BlobRow({ blob }: { blob: BlobOverview }) {
           if (next && blob.blob && !payload) void loadBlob(blob.blob);
         }}
       >
-        <span className="text-muted">
-          {blob.kind === "reasoning" ? "思考" : blob.kind === "image" ? "图片" : "工具"}
-        </span>
-        <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
-        {blob.blob ? <span className="text-accent">{open ? "收起" : "详情"}</span> : null}
+        <BlobLine blob={blob} />
+        {blob.blob ? <span className="shrink-0 text-accent">{open ? "收起" : "详情"}</span> : null}
       </button>
       {open ? (
         <div className="max-h-96 overflow-auto border-t border-line p-2 text-xs">

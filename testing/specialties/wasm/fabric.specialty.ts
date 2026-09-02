@@ -77,7 +77,7 @@ defineSpecialty(
   fabricMeta(
     "specialty.wasm.fabric.guest-opens-its-own-uplink",
     "The guest opens the Fabric uplink itself and reports online only once the relay accepted it",
-    "the relay side receives GET /fabric/v2?ticket=<slot> as a WebSocket upgrade from the daemon, and device.list then reports remote.online true",
+    "the relay side receives GET /fabric/v2?ticket=<slot>&flow=transport-v1 as a WebSocket upgrade from the daemon, and device.list then reports remote.online true",
     [
       "fabric is a stub in the guest and is_online is hard-coded false",
       "the guest cannot open an outbound socket at all",
@@ -119,7 +119,7 @@ defineSpecialty(
         const upgrade = upgrades[0];
         if (!upgrade) throw new Error("the daemon never reached the relay");
         t.assertions.assert(
-          /^\/fabric\/v2\?ticket=[^&]+$/.test(upgrade.url),
+          /^\/fabric\/v2\?ticket=[^&]+&flow=transport-v1$/.test(upgrade.url),
           `the daemon asked for ${upgrade.url}, which is not one bounded Fabric admission`,
         );
         t.assertions.assert(

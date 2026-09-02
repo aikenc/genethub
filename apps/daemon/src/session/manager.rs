@@ -76,6 +76,36 @@ struct CachedImportCandidate {
     expires_at_ms: i64,
 }
 
+/// LLM request round counter for one round. `turn` is the current adapter
+/// turn's high-water mark — the adapter counts from zero every turn — and
+/// `round_base` folds in every earlier turn of the round, so the value handed
+/// to the trunk builder stays cumulative across permission resumes.
+#[derive(Default)]
+struct LlmRounds {
+    round_base: u32,
+    turn: u32,
+}
+
+impl LlmRounds {
+    /// Records the current turn's merged counter. A drop means a new adapter
+    /// turn of the same round started counting from zero, so the previous
+    /// turn's mark moves into the round base first.
+    fn observe(&mut self, turn_rounds: u32) {
+        if turn_rounds < self.turn {
+            self.round_base = self.round_base.saturating_add(self.turn);
+        }
+        self.turn = turn_rounds;
+    }
+
+    fn cumulative(&self) -> u32 {
+        self.round_base.saturating_add(self.turn)
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// One live session.
 struct Live {
     /// Where this session's own directory is. Held here so the trunk writer
@@ -116,6 +146,12 @@ struct Live {
     /// boundary during tool-heavy work
     /// however many adapter turns the round spans.
     open_trunk_items: Mutex<Vec<String>>,
+    /// LLM request round counter feeding trunk pagination, mirrored from the
+    /// pump's `TurnProgress` merge. The adapter's counter is cumulative within
+    /// one turn only, but a round spans several turns (permission resumes,
+    /// client-declared continuations), so each finished turn's high-water mark
+    /// is folded into a round base the moment the counter is seen resetting.
+    llm_rounds: Mutex<LlmRounds>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Daemon-owned round bookkeeping — one user request, possibly several
     /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
@@ -165,6 +201,15 @@ struct ActiveRound {
     /// long enough that "every item carries an overview" alone re-blows the
     /// byte budget the round layer itself exists to avoid.
     current_trunk: TrunkBuilder,
+    /// The cumulative LLM round count each recorded item was seen at, so the
+    /// open trunk's rebuild can attribute the same rounds the builder did.
+    trunk_llm_rounds: HashMap<String, u32>,
+    /// The cumulative round counter as of the item just before the open
+    /// trunk's first item — the base the open trunk's rebuild subtracts from.
+    /// Zero for the round's first trunk. Updated only after a closed trunk has
+    /// been written, because the write itself rebuilds the *closing* trunk
+    /// and must still see the old base.
+    open_trunk_base_rounds: u32,
     /// Trunks already closed, in order. Becomes `RoundRecord::trunk_summaries`
     /// once the round settles (`close_current_trunk` folds in whatever was
     /// still open, so nothing since the last boundary is lost).
@@ -200,7 +245,11 @@ impl ActiveRound {
     /// plans, turn summaries, … never affect trunk boundaries. Returns a
     /// just-closed trunk unresolved: its overview needs a live look at the
     /// item store, which only `Live` has (`resolve_monologue_text`).
-    fn record_trunk_item(&mut self, item: &TimelineItem) -> Option<rounds::ClosedTrunk> {
+    fn record_trunk_item(
+        &mut self,
+        item: &TimelineItem,
+        llm_rounds: u32,
+    ) -> Option<rounds::ClosedTrunk> {
         let trunk_item = match item {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
             TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
@@ -208,7 +257,10 @@ impl ActiveRound {
             TimelineItem::Compaction { reason, .. } => TrunkItem::Compaction(reason.as_str()),
             _ => return None,
         };
-        self.current_trunk.push(item.id(), trunk_item)
+        self.trunk_llm_rounds
+            .insert(item.id().to_string(), llm_rounds);
+        self.current_trunk
+            .push(item.id(), trunk_item, rounds::item_timing(item), llm_rounds)
     }
 
     /// Closes whatever trunk is still being built, if any, so a round that
@@ -2513,6 +2565,7 @@ impl Live {
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
             open_trunk_items: Mutex::new(Vec::new()),
+            llm_rounds: Mutex::new(LlmRounds::default()),
             pump: Mutex::new(None),
             active_round: Mutex::new(None),
         }
@@ -2577,11 +2630,20 @@ impl Live {
                 return;
             }
         }
-        let closed = {
+        let llm_rounds = self.llm_rounds.lock().await.cumulative();
+        let (closed, next_base) = {
             let mut active = self.active_round.lock().await;
             match active.as_mut() {
-                Some(round) if round.outcome.is_none() => round.record_trunk_item(item),
-                _ => None,
+                Some(round) if round.outcome.is_none() => {
+                    // The counter value this item's delta was measured from.
+                    // When the item closes a trunk it also opens the next one,
+                    // whose rebuild base is exactly this pre-push value.
+                    let base = round.current_trunk.last_llm_rounds();
+                    let closed = round.record_trunk_item(item, llm_rounds);
+                    let next_base = closed.is_some().then_some(base);
+                    (closed, next_base)
+                }
+                _ => (None, None),
             }
         };
         if closed.is_some() {
@@ -2589,6 +2651,14 @@ impl Live {
             // new one. Keep the trigger out of the old trunk's persisted id
             // set, then retain it after that set has been drained.
             self.finish_trunk().await;
+            // Only now may the base move: `finish_trunk` rebuilt the closing
+            // trunk from the old base, and the item that triggered the close
+            // becomes the first item of the trunk that starts at `next_base`.
+            if let Some(base) = next_base {
+                if let Some(round) = self.active_round.lock().await.as_mut() {
+                    round.open_trunk_base_rounds = base;
+                }
+            }
         }
         self.open_trunk_items
             .lock()
@@ -2611,7 +2681,14 @@ impl Live {
                 .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
                 .collect::<Vec<_>>()
         };
-        let mut trunk = rounds::trunks_from_items(&items).into_iter().next()?;
+        let (llm_rounds, base_rounds) = {
+            let active = self.active_round.lock().await;
+            let round = active.as_ref()?;
+            (round.trunk_llm_rounds.clone(), round.open_trunk_base_rounds)
+        };
+        let mut trunk = rounds::trunks_from_items_with_rounds(&items, &llm_rounds, base_rounds)
+            .into_iter()
+            .next()?;
         trunk.summary.index = index;
         let refs = self.blob_refs.lock().await;
         for batch in &mut trunk.batches {
@@ -2721,6 +2798,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.llm_rounds.lock().await.clear();
 
         let superseded = self
             .active_round
@@ -2738,6 +2816,8 @@ impl Live {
             blocked_ms: 0,
             outcome: None,
             current_trunk: TrunkBuilder::default(),
+            trunk_llm_rounds: HashMap::new(),
+            open_trunk_base_rounds: 0,
             closed_trunks: Vec::new(),
         };
         // Recorded before the agent runs, so a daemon that dies mid-request
@@ -2839,6 +2919,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.llm_rounds.lock().await.clear();
         self.active_round.lock().await.clone()
     }
 
@@ -3168,6 +3249,10 @@ async fn pump_events(
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
             token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
             if let Some(merged) = live_usage.get(turn_id) {
+                live.llm_rounds
+                    .lock()
+                    .await
+                    .observe(merged.llm_rounds as u32);
                 event = SessionEvent::TurnProgress {
                     turn_id: turn_id.clone(),
                     usage: merged.clone(),
@@ -3344,7 +3429,7 @@ async fn pump_events(
             flush_blob_writer(&blob_sender).await;
         }
 
-        let event = match event {
+        let mut event = match event {
             SessionEvent::ItemDelta {
                 turn_id,
                 item_id,
@@ -3445,6 +3530,17 @@ async fn pump_events(
             SessionEvent::TitleChanged { title } => agent_title_would_apply(&live, title).await,
             _ => true,
         };
+
+        if let SessionEvent::Item { item, .. } = &mut event {
+            let previous = {
+                let items = live.items.lock().await;
+                items
+                    .iter()
+                    .find(|existing| existing.id() == item.id())
+                    .cloned()
+            };
+            item.inherit_and_stamp_tool_times(previous.as_ref(), now_ms());
+        }
 
         apply(&live, &event).await;
 
@@ -3621,8 +3717,16 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::Item { item, .. } => {
             let mut items = live.items.lock().await;
             match items.iter_mut().find(|existing| existing.id() == item.id()) {
-                Some(existing) => *existing = item.clone(),
-                None => items.push(item.clone()),
+                Some(existing) => {
+                    let mut next = item.clone();
+                    next.inherit_and_stamp_tool_times(Some(existing), now_ms());
+                    *existing = next;
+                }
+                None => {
+                    let mut next = item.clone();
+                    next.inherit_and_stamp_tool_times(None, now_ms());
+                    items.push(next);
+                }
             }
             // Dropped explicitly, not just left to fall out of scope at the
             // end of this match arm: `record_round_item` can re-lock
@@ -3666,6 +3770,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                             *current_images = images.clone();
                         }
                     }
+                    item.stamp_tool_times(now_ms());
                 }
             }
         }
@@ -4355,6 +4460,8 @@ mod tests {
                     }),
                     path: Some("assets/logo.png".into()),
                 }],
+                started_at_ms: None,
+                finished_at_ms: None,
             },
         );
         *live.items.lock().await = items;
@@ -5172,6 +5279,8 @@ mod tests {
                 raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge_tool);
         assert_eq!((omitted, altered), (0, 1));
@@ -5671,6 +5780,8 @@ mod tests {
                         exit_code: None,
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             },
         )
@@ -6328,6 +6439,8 @@ mod tests {
                         exit_code: Some(0),
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             },
             SessionEvent::TurnCompleted {
@@ -6575,6 +6688,23 @@ mod tests {
             Some(RoundOutcome::Completed),
             "the first outcome wins"
         );
+    }
+
+    #[test]
+    fn llm_rounds_fold_each_adapter_turn_into_the_round_base() {
+        let mut rounds = LlmRounds::default();
+        rounds.observe(1);
+        rounds.observe(3);
+        assert_eq!(rounds.cumulative(), 3);
+        // A new adapter turn of the same round restarts its counter at zero.
+        rounds.observe(1);
+        assert_eq!(rounds.cumulative(), 4);
+        rounds.observe(2);
+        assert_eq!(rounds.cumulative(), 5);
+        // A fresh round starts from zero.
+        rounds.clear();
+        rounds.observe(1);
+        assert_eq!(rounds.cumulative(), 1);
     }
 
     #[tokio::test]
@@ -6887,6 +7017,8 @@ mod tests {
                 exit_code: Some(0),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }
     }
 
@@ -7005,12 +7137,21 @@ mod tests {
             .unwrap();
         for i in 0..132u32 {
             events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn_id.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
                 .send(SessionEvent::Item {
                     turn_id: turn_id.clone(),
                     item: tool_call(&format!("t{i}"), "grep"),
                 })
                 .unwrap();
-            if i % 64 == 63 {
+            if i % 16 == 15 {
                 tokio::task::yield_now().await;
             }
         }
@@ -7028,10 +7169,13 @@ mod tests {
             let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
                 return false;
             };
-            chat.rounds
+            let done = chat
+                .rounds
                 .first()
                 .is_some_and(|round| round.trunk_count == 2)
                 && trunks.len() == 2
+                && trunks[1].blob_count == 4;
+            done
         })
         .await;
 
@@ -7043,10 +7187,186 @@ mod tests {
             2,
             "132 tool calls split after the threshold-crossing batch: {trunks:?}"
         );
+        assert_eq!(
+            trunks[0].batches.len(),
+            2,
+            "trunks: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            trunks[0].llm_rounds,
+            Some(128),
+            "trunks: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
         assert_eq!(trunks[0].blob_count, 128);
-        assert_eq!(trunks[0].batches.len(), 2);
         assert_eq!(trunks[1].blob_count, 4);
         assert_eq!(trunks[1].batches.len(), 1);
+        assert_eq!(trunks[1].llm_rounds, Some(4));
+    }
+
+    /// A permission resume (or any client-declared continuation) starts a new
+    /// adapter turn whose `llmRounds` counts from zero again. The trunk
+    /// builder must still see a round-cumulative counter, or everything after
+    /// the resume stops counting until the new turn passes the old high-water
+    /// mark.
+    #[tokio::test]
+    async fn llm_rounds_stay_cumulative_when_a_continued_turn_restarts_the_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn1 = sessions
+            .send("s1", "start".into(), vec![], &providers, None, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn1.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for i in 0..3u32 {
+            events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn1.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn1.clone(),
+                    item: tool_call(&format!("a{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        // A permission interrupt cancels the adapter turn but leaves the
+        // round open for the resume.
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: turn1.clone(),
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .expect("the interrupted round is left dangling")
+            .round_id
+            .clone();
+        let turn2 = sessions
+            .send(
+                "s1",
+                "approved, keep going".into(),
+                vec![],
+                &providers,
+                None,
+                Some(round_id),
+            )
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn2.clone(),
+                started_at_ms: 2,
+            })
+            .unwrap();
+        // The resumed adapter turn counts its own LLM rounds from 1 again.
+        for i in 0..2u32 {
+            events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn2.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn2.clone(),
+                    item: tool_call(&format!("b{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn2.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+
+        eventually("persisted the continued round's trunk", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 1)
+        })
+        .await;
+
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(trunks.len(), 1, "trunks: {trunks:?}");
+        assert_eq!(trunks[0].blob_count, 5);
+        assert_eq!(
+            trunks[0].llm_rounds,
+            Some(5),
+            "the resumed turn's two rounds add to the interrupted turn's three: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -7083,6 +7403,8 @@ mod tests {
                         truncated: false,
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             })
             .unwrap();
@@ -7183,6 +7505,10 @@ mod tests {
                             blob_count: 100,
                             title: format!("阶段 {index}"),
                             batches: vec![],
+                            llm_rounds: None,
+                            started_at_ms: None,
+                            duration_ms: None,
+                            tool_duration_ms: None,
                         },
                         batches: vec![],
                     },
@@ -7247,6 +7573,10 @@ mod tests {
                             blob_count: 0,
                             title: format!("阶段 {index}"),
                             batches: vec![],
+                            llm_rounds: None,
+                            started_at_ms: None,
+                            duration_ms: None,
+                            tool_duration_ms: None,
                         },
                         batches: vec![],
                     },

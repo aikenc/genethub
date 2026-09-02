@@ -65,7 +65,25 @@ thumb?: ImageThumb,
  * never duplicated into the blob layer. Absent for agent-produced images
  * (those carry `blob` instead) and for paths outside the workspace.
  */
-path?: string, };
+path?: string, 
+/**
+ * When the tool first appeared. Absent on rows written before timing
+ * existed — the client hides the clock rather than inventing one.
+ */
+startedAtMs?: number, 
+/**
+ * Wall time from start to a terminal status. Absent while running, and
+ * on rows that never recorded a finish.
+ */
+durationMs?: number, 
+/**
+ * Tool rows only. Drives the same kind icon the expanded card uses.
+ */
+toolKind?: ToolKind, 
+/**
+ * Tool rows only. Lets a live row say it is still running.
+ */
+status?: ToolStatus, };
 
 export type BlobPayload = { id: string, value: JsonValue, };
 
@@ -747,7 +765,24 @@ export type RoundBatchSummary = { index: number, firstItemId: string, blobCount:
  * the context was squeezed. Rows written before this field existed read
  * as `None` and their markers stay in the flat narrative stream.
  */
-marker?: string, };
+marker?: string, 
+/**
+ * LLM request rounds that ran inside this batch. `None` for rows written
+ * before the field existed; clients hide the metric rather than show 0.
+ */
+llmRounds?: number, 
+/**
+ * Wall-clock start of the first item in this batch.
+ */
+startedAtMs?: number, 
+/**
+ * Wall-clock span from the first item's start to the last item's finish.
+ */
+durationMs?: number, 
+/**
+ * Sum of every tool call's own duration inside this batch.
+ */
+toolDurationMs?: number, };
 
 /**
  * A page of visible trunks in one round. `nextCursor` asks for the preceding
@@ -768,7 +803,24 @@ export type RoundTrunk = { summary: RoundTrunkSummary, batches: Array<RoundBatch
  * A visible, bounded section of a round. Trunks are carried by the round
  * protocol layer; they are not a fourth storage/addressing layer.
  */
-export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, };
+export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, 
+/**
+ * LLM request rounds that ran inside this trunk. `None` for rows written
+ * before the field existed; clients hide the metric rather than show 0.
+ */
+llmRounds?: number, 
+/**
+ * Wall-clock start of the first item in this trunk.
+ */
+startedAtMs?: number, 
+/**
+ * Wall-clock span from the first item's start to the last item's finish.
+ */
+durationMs?: number, 
+/**
+ * Sum of every tool call's own duration inside this trunk.
+ */
+toolDurationMs?: number, };
 
 /**
  * Non-trickle RTC signaling carried inside an already E2EE Exchange.
@@ -1209,7 +1261,7 @@ export type TimelineItem = { "type": "userMessage", id: string, text: string, at
 /**
  * Images this call's result carried, in shed form (see `ToolImage`).
  */
-images: Array<ToolImage>, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
+images: Array<ToolImage>, startedAtMs?: number, finishedAtMs?: number, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
 
 export type TodoEntry = { text: string, status: TodoStatus, };
 

@@ -164,8 +164,8 @@ const LABEL: Record<ToolKind, string> = {
   other: "工具",
 };
 
-const kindEmoji = (kind: ToolKind) => EMOJI[kind];
-const kindLabel = (kind: ToolKind) => LABEL[kind];
+export const kindEmoji = (kind: ToolKind) => EMOJI[kind];
+export const kindLabel = (kind: ToolKind) => LABEL[kind];
 
 function clip(text: string, max: number): string {
   const characters = [...text];

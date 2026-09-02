@@ -90,15 +90,12 @@ fn output_excerpt(text: &str) -> String {
     kept.join("\n")
 }
 
-fn header(provided: &str, input: &str, output: &str, fallback: &str) -> String {
+fn header(provided: &str, input: &str, fallback: &str) -> String {
     let input = one_line(input, TOOL_LINE_CHARS);
-    let provided = one_line(provided, OVERVIEW_CHARS);
+    let provided = one_line(&useful_label(provided), OVERVIEW_CHARS);
+    let fallback = useful_label(fallback);
     if provided.is_empty() {
-        let direct = first_nonempty(&[&input, output, fallback])
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        return clip(&direct, SUMMARY_CHARS);
+        return clip(first_nonempty(&[&input, &fallback]), SUMMARY_CHARS);
     }
     if input.is_empty() || input == provided {
         return provided;
@@ -110,6 +107,50 @@ fn header(provided: &str, input: &str, output: &str, fallback: &str) -> String {
         return provided;
     }
     format!("{provided}{separator}{}", clip(&input, remaining))
+}
+
+/// A label worth putting on a row. Generic tool verbs and punctuation-only
+/// titles are not — the icon already says "a tool".
+pub fn useful_label(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() || is_generic_tool_name(text) {
+        return String::new();
+    }
+    if text
+        .chars()
+        .all(|ch| !ch.is_alphanumeric() && ch != '_' && ch != '-' && ch != '.' && ch != '/')
+    {
+        return String::new();
+    }
+    text.to_string()
+}
+
+fn is_generic_tool_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "tool"
+            | "read"
+            | "read file"
+            | "write"
+            | "write file"
+            | "edit"
+            | "edit file"
+            | "find"
+            | "grep"
+            | "glob"
+            | "search"
+            | "bash"
+            | "shell"
+            | "execute"
+            | "exec"
+            | "ls"
+            | "list"
+            | "fetch"
+            | "web fetch"
+            | "websearch"
+            | "web search"
+            | "unknown"
+    )
 }
 
 /// The overview of an event, when the event carries detail worth shedding.
@@ -158,12 +199,16 @@ pub fn condense_item(item: &TimelineItem) -> TimelineItem {
             status,
             detail,
             images,
+            started_at_ms,
+            finished_at_ms,
         } => TimelineItem::ToolCall {
             id: id.clone(),
             name: shorten(name, OVERVIEW_CHARS),
             status: *status,
             detail: condense_detail(detail, Some(name)),
             images: images.clone(),
+            started_at_ms: *started_at_ms,
+            finished_at_ms: *finished_at_ms,
         },
         other => other.clone(),
     }
@@ -246,11 +291,10 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
             let input = raw_field(raw, &["input", "arguments"]);
             let output = raw_field(raw, &["output", "result"]);
             let provided = raw_field(raw, &["overview", "summary", "description", "title"]);
-            let encoded = serde_json::to_string(raw).unwrap_or_default();
             (
                 kind_from_name(fallback_name.unwrap_or_default()),
                 provided,
-                first_nonempty(&[&input, &encoded]).to_string(),
+                input,
                 output,
             )
         }
@@ -258,7 +302,7 @@ fn condense_detail(detail: &ToolCallDetail, fallback_name: Option<&str>) -> Tool
     let fallback = fallback_name.unwrap_or_default();
     ToolCallDetail::Overview {
         tool_kind: kind,
-        overview: header(&provided, &input, &output, fallback),
+        overview: header(&provided, &input, fallback),
         input: one_line(&input, TOOL_LINE_CHARS),
         output: output_excerpt(&output),
     }
@@ -378,6 +422,8 @@ mod tests {
                 exit_code: Some(3),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         };
         match condense_item(&item) {
             TimelineItem::ToolCall { detail, .. } => {
@@ -460,7 +506,7 @@ mod tests {
     fn an_explicit_overview_uses_48_characters_then_fills_the_64_character_header() {
         let provided = "概".repeat(60);
         let input = "入".repeat(60);
-        let title = header(&provided, &input, "", "fallback");
+        let title = header(&provided, &input, "fallback");
         assert_eq!(title.chars().count(), SUMMARY_CHARS);
         assert!(title.starts_with(&format!("{}… · ", "概".repeat(OVERVIEW_CHARS - 1))));
         assert!(title.ends_with('…'));
@@ -468,7 +514,7 @@ mod tests {
 
     #[test]
     fn missing_overview_uses_the_input_directly() {
-        let title = header("", &"入".repeat(80), "", "fallback");
+        let title = header("", &"入".repeat(80), "fallback");
         assert_eq!(title.chars().count(), SUMMARY_CHARS);
         assert!(!title.contains(" · "));
     }
@@ -538,5 +584,58 @@ mod tests {
             },
         };
         assert_eq!(condense_event(&text), text);
+    }
+
+    #[test]
+    fn a_read_without_a_path_does_not_use_file_contents_as_the_overview() {
+        match condense_detail(
+            &ToolCallDetail::Read {
+                path: String::new(),
+                content: "---\nname: genethub-worktree-router\n".into(),
+                truncated: false,
+            },
+            Some("Read File"),
+        ) {
+            ToolCallDetail::Overview {
+                overview,
+                input,
+                output,
+                ..
+            } => {
+                assert_eq!(overview, "");
+                assert_eq!(input, "");
+                assert!(output.starts_with("---"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_generic_tool_name_is_not_an_overview() {
+        assert_eq!(header("", "", "tool"), "");
+        assert_eq!(header("", "", "Read File"), "");
+        assert_eq!(header("", "src/main.rs", "Read File"), "src/main.rs");
+    }
+
+    #[test]
+    fn unknown_raw_json_is_not_the_overview() {
+        match condense_detail(
+            &ToolCallDetail::Unknown {
+                raw: serde_json::json!({"rawOutput": {"totalFiles": 4}}),
+            },
+            Some("tool"),
+        ) {
+            ToolCallDetail::Overview {
+                overview,
+                input,
+                output,
+                ..
+            } => {
+                assert_eq!(overview, "");
+                assert_eq!(input, "");
+                assert_eq!(output, "");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

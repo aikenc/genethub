@@ -330,6 +330,41 @@ describe("the session timeline", () => {
     expect(state.items.map((item) => item.id)).toEqual(["a1"]);
     expect(state.seq).toBe(5);
   });
+
+  it("keeps the first tool start when a completed replacement restamps now", () => {
+    const started = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "bash",
+        status: "running",
+        detail: { kind: "shell", command: "cargo check", output: "", exitCode: undefined },
+        images: [],
+        startedAtMs: 1_000,
+      },
+    });
+    const done = apply(started, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "bash",
+        status: "ok",
+        detail: { kind: "shell", command: "cargo check", output: "ok", exitCode: 0 },
+        images: [],
+        startedAtMs: 21_000,
+        finishedAtMs: 21_000,
+      },
+    });
+    const item = done.items[0]!;
+    expect(item.type).toBe("toolCall");
+    if (item.type !== "toolCall") return;
+    expect(item.startedAtMs).toBe(1_000);
+    expect(item.finishedAtMs).toBe(21_000);
+  });
 });
 
 describe("the scroll that should tuck the composer", () => {

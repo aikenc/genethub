@@ -921,6 +921,8 @@ fn emit_part(
                 name: name.clone(),
                 status,
                 detail: detail_from_part(&name, part),
+                started_at_ms: None,
+                finished_at_ms: None,
             }
         }
         _ => return,

@@ -18,8 +18,8 @@ use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
-    Usage,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError,
+    TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -2079,6 +2079,8 @@ fn translate_update(
                     name,
                     status,
                     detail: detail_from_update(update),
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -2228,15 +2230,74 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("other");
-    let path = update
+    let title = update.get("title").and_then(Value::as_str).unwrap_or("");
+    let path = acp_path(update);
+    let command = acp_raw_str(update, &["command", "cmd"]);
+    let query = acp_raw_str(update, &["pattern", "query"]);
+    let content = acp_content(update);
+
+    match kind {
+        "execute" => ToolCallDetail::Shell {
+            command: first_filled(&[&command, title]),
+            output: content,
+            exit_code: None,
+        },
+        "read" => ToolCallDetail::Read {
+            path,
+            content,
+            truncated: false,
+        },
+        "edit" => ToolCallDetail::Edit {
+            path,
+            diff: content,
+        },
+        "search" => ToolCallDetail::Search {
+            query: first_filled(&[&query, title]),
+            matches: Vec::new(),
+        },
+        "fetch" => ToolCallDetail::Fetch {
+            url: first_filled(&[&query, title, &path]),
+            summary: content,
+        },
+        _ => ToolCallDetail::Overview {
+            tool_kind: acp_tool_kind(kind),
+            overview: title.to_string(),
+            input: first_filled(&[&path, &command, &query]),
+            output: content,
+        },
+    }
+}
+
+fn acp_path(update: &Value) -> String {
+    if let Some(path) = update
         .get("locations")
         .and_then(Value::as_array)
         .and_then(|locations| locations.first())
         .and_then(|location| location.get("path"))
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let content = update
+        .filter(|path| !path.is_empty())
+    {
+        return path.to_string();
+    }
+    acp_raw_str(update, &["path", "file_path", "filePath"])
+}
+
+fn acp_raw_str(update: &Value, keys: &[&str]) -> String {
+    let Some(raw) = update.get("rawInput") else {
+        return String::new();
+    };
+    for key in keys {
+        if let Some(value) = raw.get(*key).and_then(Value::as_str) {
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn acp_content(update: &Value) -> String {
+    let from_blocks = update
         .get("content")
         .and_then(Value::as_array)
         .map(|blocks| {
@@ -2253,66 +2314,41 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
                 .join("\n")
         })
         .unwrap_or_default();
-    let content = if content.is_empty() {
-        update
-            .get("rawOutput")
-            .and_then(|value| value.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    } else {
-        content
-    };
-
-    match kind {
-        "execute" => ToolCallDetail::Shell {
-            command: update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            output: content,
-            exit_code: None,
-        },
-        "read" => ToolCallDetail::Read {
-            path,
-            content,
-            truncated: false,
-        },
-        "edit" => ToolCallDetail::Edit {
-            path,
-            diff: content,
-        },
-        "search" => ToolCallDetail::Search {
-            query: update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            matches: Vec::new(),
-        },
-        "fetch" => ToolCallDetail::Fetch {
-            url: update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            summary: content,
-        },
-        _ if !content.is_empty() => ToolCallDetail::Read {
-            path,
-            content,
-            truncated: false,
-        },
-        _ => ToolCallDetail::Unknown {
-            raw: update.clone(),
-        },
+    if !from_blocks.is_empty() {
+        return from_blocks;
     }
+    update
+        .get("rawOutput")
+        .and_then(|value| value.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn acp_tool_kind(kind: &str) -> ToolKind {
+    match kind {
+        "execute" => ToolKind::Shell,
+        "read" => ToolKind::Read,
+        "edit" => ToolKind::Edit,
+        "search" => ToolKind::Search,
+        "fetch" => ToolKind::Fetch,
+        "switch_mode" | "plan" => ToolKind::Plan,
+        _ => ToolKind::Other,
+    }
+}
+
+fn first_filled(values: &[&str]) -> String {
+    values
+        .iter()
+        .copied()
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use genehub_proto::Attachment;
+    use genehub_proto::{Attachment, ToolKind};
 
     use super::*;
 
@@ -2550,13 +2586,21 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_tool_kind_still_renders_through_unknown() {
+    fn an_unrecognised_tool_kind_keeps_a_compact_overview() {
         let detail = detail_from_update(&json!({"kind": "quantum", "title": "?"}));
-        assert!(matches!(detail, ToolCallDetail::Unknown { .. }));
+        assert_eq!(
+            detail,
+            ToolCallDetail::Overview {
+                tool_kind: ToolKind::Other,
+                overview: "?".into(),
+                input: String::new(),
+                output: String::new(),
+            }
+        );
     }
 
     #[test]
-    fn cursor_raw_output_becomes_readable_tool_content() {
+    fn cursor_raw_output_stays_in_output_not_the_overview() {
         let detail = detail_from_update(&json!({
             "sessionUpdate": "tool_call_update",
             "status": "completed",
@@ -2565,9 +2609,28 @@ mod tests {
         }));
         assert_eq!(
             detail,
+            ToolCallDetail::Overview {
+                tool_kind: ToolKind::Other,
+                overview: String::new(),
+                input: String::new(),
+                output: "skill text".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn cursor_read_uses_location_or_raw_input_path() {
+        let detail = detail_from_update(&json!({
+            "kind": "read",
+            "title": "Read File",
+            "rawInput": {"path": "packages/proto/src/domain.rs"},
+            "rawOutput": {"content": "---\nname: ignored-body"}
+        }));
+        assert_eq!(
+            detail,
             ToolCallDetail::Read {
-                path: String::new(),
-                content: "skill text".into(),
+                path: "packages/proto/src/domain.rs".into(),
+                content: "---\nname: ignored-body".into(),
                 truncated: false
             }
         );
