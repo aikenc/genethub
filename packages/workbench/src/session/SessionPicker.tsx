@@ -42,6 +42,7 @@ export function SessionListItem({
         <span className="block truncate text-[10px] text-faint">
           {agent ? resolveAgentPresentation(agent).label : session.agentId} ·{" "}
           {formatClock(session.updatedAtMs)}
+          {session.managed ? ` · 受管 ${session.managed.role}` : ""}
         </span>
       </span>
       {workspace ? <WorkspaceAffordance workspace={workspace} /> : null}

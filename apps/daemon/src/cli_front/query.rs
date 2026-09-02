@@ -1589,6 +1589,8 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Blobs(_) => "blobs",
         Reply::SessionArtifactUpload(_) => "session artifact upload",
         Reply::SessionArtifact(_) => "session artifact",
+        Reply::WorkflowProject(_) => "workflow project",
+        Reply::WorkflowRun(_) => "workflow run",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
@@ -1907,6 +1909,7 @@ mod tests {
             lineage: None,
             imported: None,
             last_activity_at_ms: None,
+            managed: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

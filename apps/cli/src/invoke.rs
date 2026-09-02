@@ -38,10 +38,26 @@ struct CliRecord {
 }
 
 pub async fn forward(argv: Vec<String>) -> i32 {
-    match stream(argv, piped_stdin(), caller_cwd()).await {
+    // Only `genet shell` owns stdin (`docs/cli-thin-forwarder.md` §3).
+    // Agent tool runners commonly give every subprocess a long-lived pipe;
+    // reading that pipe for control verbs makes an otherwise completed
+    // `workflow`, `session`, or `workspace` command wait forever for EOF.
+    let stdin = if accepts_stdin(&argv) {
+        piped_stdin()
+    } else {
+        Vec::new()
+    };
+    match stream(argv, stdin, caller_cwd()).await {
         Ok(code) => code,
         Err(message) => crate::fail_envelope(CliFailure::daemon_unavailable(message)),
     }
+}
+
+fn accepts_stdin(argv: &[String]) -> bool {
+    genet_frontdoor::selectors::split(argv)
+        .ok()
+        .and_then(|(_, rest)| rest.first().cloned())
+        .is_some_and(|command| command == "shell")
 }
 
 /// `genet status` asks the daemon for a hub summary without knowing Hub types.
@@ -56,13 +72,15 @@ pub async fn hub_status() -> Option<Value> {
 async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
     let (url, _) = admission()?;
     let cwd = caller_cwd();
+    let mut body = serde_json::json!({
+        "argv": argv,
+        "cwd": cwd,
+    });
+    add_session_controller_identity(&mut body);
     let response = Client::new()
         .post(&url)
         .timeout(Duration::from_secs(15))
-        .json(&serde_json::json!({
-            "argv": argv,
-            "cwd": cwd,
-        }))
+        .json(&body)
         .send()
         .await
         .map_err(|error| format!("the local daemon did not accept /cli: {error}"))?;
@@ -98,6 +116,7 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         use base64::Engine;
         body["stdin"] = serde_json::json!(base64::engine::general_purpose::STANDARD.encode(stdin));
     }
+    add_session_controller_identity(&mut body);
     let response = Client::builder()
         .build()
         .map_err(|error| format!("build http client: {error}"))?
@@ -135,6 +154,9 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
             let record: CliRecord = serde_json::from_str(&line)
                 .map_err(|error| format!("decode /cli record: {error}"))?;
             apply(&record, &mut exit);
+            if let Some(code) = exit {
+                return Ok(code);
+            }
         }
     }
     if !leftover.trim().is_empty() {
@@ -143,6 +165,35 @@ async fn stream(argv: Vec<String>, stdin: Vec<u8>, cwd: String) -> Result<i32, S
         apply(&record, &mut exit);
     }
     exit.ok_or_else(|| "the daemon closed /cli without an exit record".to_string())
+}
+
+/// Carries an Agent's own durable Session identity back to the daemon. Both
+/// fields must be present: ordinary terminals do not gain a session identity
+/// merely by setting one suggestive environment variable.
+fn add_session_controller_identity(body: &mut Value) {
+    add_session_controller_identity_from(
+        body,
+        std::env::var("GENEHUB_SESSION_ID").ok(),
+        std::env::var("GENEHUB_CONTROLLER_TOKEN").ok(),
+    );
+}
+
+fn add_session_controller_identity_from(
+    body: &mut Value,
+    session_id: Option<String>,
+    token: Option<String>,
+) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let Some((session_id, token)) = session_id
+        .zip(token)
+        .filter(|(session_id, token)| !session_id.trim().is_empty() && !token.trim().is_empty())
+    else {
+        return;
+    };
+    object.insert("callerSessionId".into(), Value::String(session_id));
+    object.insert("controllerToken".into(), Value::String(token));
 }
 
 fn apply(record: &CliRecord, exit: &mut Option<i32>) {
@@ -223,4 +274,50 @@ fn piped_stdin() -> Vec<u8> {
         );
     }
     buffer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_controller_identity_requires_both_non_empty_fields() {
+        for (session, token) in [
+            (Some("s1".into()), None),
+            (None, Some("proof".into())),
+            (Some("".into()), Some("proof".into())),
+            (Some("s1".into()), Some("".into())),
+        ] {
+            let mut body = serde_json::json!({"argv": ["workflow", "inspect"]});
+            add_session_controller_identity_from(&mut body, session, token);
+            assert!(body.get("callerSessionId").is_none());
+            assert!(body.get("controllerToken").is_none());
+        }
+
+        let mut body = serde_json::json!({"argv": ["workflow", "inspect"]});
+        add_session_controller_identity_from(&mut body, Some("s1".into()), Some("proof".into()));
+        assert_eq!(body["callerSessionId"], "s1");
+        assert_eq!(body["controllerToken"], "proof");
+    }
+
+    #[test]
+    fn only_the_canonical_shell_verb_reads_standard_input() {
+        let argv = |items: &[&str]| {
+            items
+                .iter()
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        assert!(accepts_stdin(&argv(&["shell", "--", "cat"])));
+        assert!(accepts_stdin(&argv(&[
+            "--machine",
+            "m_test",
+            "shell",
+            "--",
+            "cat",
+        ])));
+        assert!(!accepts_stdin(&argv(&["workflow", "init"])));
+        assert!(!accepts_stdin(&argv(&["session", "list"])));
+    }
 }

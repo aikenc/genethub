@@ -533,12 +533,24 @@ export class FabricCore {
       }
       leg.lastDataSeq = frame.value;
       const peer = this.peerOf(leg);
-      await peer.connection.sendFlow({
-        kind: frame.kind,
-        streamId: peer.localStreamId,
-        value: frame.value,
-        payload: frame.payload,
-      });
+      try {
+        await peer.connection.sendFlow({
+          kind: frame.kind,
+          streamId: peer.localStreamId,
+          value: frame.value,
+          payload: frame.payload,
+        });
+      } catch {
+        // The peer socket can disappear after this DATA was accepted but
+        // before its TCP leg drains. That ends one routed stream, not the
+        // still-valid endpoint that sent it. Let the Forwarder reap the peer
+        // socket while the source receives a stream-local reset.
+        this.closeBinding(
+          leg.binding,
+          FabricReset.EndpointClosed,
+          peer.connection,
+        );
+      }
       return;
     }
     if (
