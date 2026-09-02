@@ -231,7 +231,8 @@ defineSpecialty(
 
       const requestText = JSON.stringify(opened.mock.requests);
       t.assertions.assert(
-        requestText.includes("你仍是当前目录的普通对话 Agent") &&
+        requestText.includes("你在当前项目的普通主会话中工作") &&
+          requestText.includes("PM 不是独立的 Space 或 Session 类型") &&
           requestText.includes("你是当前项目直达流程中的实现 Worker"),
         "root or Worker Workflow contract was not delivered in Chinese",
       );

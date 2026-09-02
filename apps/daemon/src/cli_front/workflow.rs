@@ -724,6 +724,7 @@ mod tests {
         let run = WorkflowRunStatus {
             id: "wr_test".into(),
             workspace_id: "ws_test".into(),
+            executor_workspace_id: None,
             parent_session_id: "s_root".into(),
             workflow_id: "fanout".into(),
             bundle_digest: "digest".into(),

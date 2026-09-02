@@ -421,6 +421,7 @@ pub fn required(request: &Request) -> Capability {
         // reading one.
         Request::WorkspaceOpen { .. }
         | Request::WorkspaceCreate { .. }
+        | Request::WorkspaceConfigurePipeSpace { .. }
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet

@@ -112,6 +112,19 @@ pub enum Request {
         expected_revision: u64,
         evidence: std::collections::BTreeMap<String, String>,
     },
+    /// Registers or updates an already-open, PipeBuilder-verified PipeSpace as
+    /// a project entry or one of its WorkerSpaces. This never creates files.
+    #[serde(rename = "workspace.configurePipeSpace", rename_all = "camelCase")]
+    WorkspaceConfigurePipeSpace {
+        workspace_id: String,
+        #[serde(default)]
+        parent_workspace_id: Option<String>,
+        #[serde(default)]
+        pm: bool,
+        #[serde(default)]
+        worker_role: Option<String>,
+        lifecycle: String,
+    },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
         #[serde(default)]

@@ -156,6 +156,8 @@ struct Bundle {
 struct RunRecord {
     id: String,
     workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executor_workspace_id: Option<String>,
     parent_session_id: String,
     workflow_id: String,
     bundle_digest: String,
@@ -198,8 +200,8 @@ pub struct Transition {
     pub sessions: Vec<(SessionSummary, String)>,
 }
 
-/// Chinese root-controller contract for any ordinary Agent. It is a thin
-/// capability guide, not a PM personality and not a new Session kind.
+/// Chinese project-controller contract for an ordinary main Session. PM is a
+/// responsibility marker on a non-worker PipeSpace, never a Session kind.
 pub fn root_session_guidance(cwd: &Path) -> Option<String> {
     let source = find_source_root(cwd);
     let location = source
@@ -208,13 +210,15 @@ pub fn root_session_guidance(cwd: &Path) -> Option<String> {
         .unwrap_or_else(|| format!("{SOURCE_DIR}/（尚未初始化）"));
     Some(format!(
         "<genehub_workflow_controller>\n\
-你仍是当前目录的普通对话 Agent，不是独立的 PM 产品入口。先理解用户目标，再按两个互不替代的维度判断：\
+你在当前项目的普通主会话中工作；若所在非 Worker PipeSpace 标记了 PM，你代表用户承担项目管理职责，\
+但 PM 不是独立的 Space 或 Session 类型。先理解用户目标，再按两个互不替代的维度判断：\
 业务问题或工作流改进；简单任务或复杂任务。项目流程源位于 `{location}`。\n\
 需要查看项目可用流程时，使用环境变量 `GENEHUB_CLI` 指向的绝对命令运行 `workflow inspect`；\
 只有用户明确要建立项目方法且目录尚未初始化时才运行 `workflow init`。简单任务优先选择项目的直达流程；\
 派发时用 `--kind` 和 `--complexity` 明确给出两个维度，让项目 catalog 选择流程；\
-不得自行补上项目图中没有声明的 PM、评审、分支、合并或用户批准节点。\n\
-通过 `workflow dispatch` 创建的子会话仍是普通 Workspace/Session，只是带父子关系与用户只读策略。\n\
+不得自行补上项目图中没有声明的评审、分支、合并或用户批准节点。新模型中的 Run 应绑定项目已有的\
+Workflow Executor WorkerSpace，不为每次 Run 新建 Executor；Coder、Reviewer、Tester 的能力来自对应子\
+PipeSpace，受管 Session 只是这些 Space 内的一次执行。\n\
 </genehub_workflow_controller>"
     ))
 }
@@ -332,11 +336,20 @@ pub async fn dispatch(
         .find(|entry| entry.id == workflow_id)
         .ok_or_else(|| anyhow!("Workflow 不存在：{workflow_id}"))?;
     let bundle = load_bundle_from(&source, entry)?;
+    // New PipeSpace projects bind every Run to an existing reusable Executor.
+    // Legacy directory projects remain readable during migration, but never
+    // manufacture a fake Executor record.
+    let executor_workspace_id = state
+        .workspaces
+        .reusable_worker(root_workspace_id, "workflow-executor")
+        .await?
+        .map(|workspace| workspace.id);
     let now = now_ms();
     let run_id = format!("wr_{}", uuid::Uuid::new_v4().simple());
     let mut run = RunRecord {
         id: run_id.clone(),
         workspace_id: root_workspace_id.to_string(),
+        executor_workspace_id,
         parent_session_id: parent_session_id.to_string(),
         workflow_id: workflow_id.to_string(),
         bundle_digest: bundle.digest,
@@ -1238,6 +1251,7 @@ fn run_status(run: &RunRecord) -> WorkflowRunStatus {
     WorkflowRunStatus {
         id: run.id.clone(),
         workspace_id: run.workspace_id.clone(),
+        executor_workspace_id: run.executor_workspace_id.clone(),
         parent_session_id: run.parent_session_id.clone(),
         workflow_id: run.workflow_id.clone(),
         bundle_digest: run.bundle_digest.clone(),
@@ -1491,6 +1505,7 @@ mod tests {
         let mut run = RunRecord {
             id: "wr_test".into(),
             workspace_id: "w_test".into(),
+            executor_workspace_id: None,
             parent_session_id: "s_root".into(),
             workflow_id: definition.id.clone(),
             bundle_digest: "sha256:test".into(),

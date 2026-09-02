@@ -628,6 +628,37 @@ questions?: Array<InteractionQuestion>, };
 
 export type PermissionRequestKind = "permission" | "question" | "planApproval";
 
+/**
+ * A PipeSpace's durable project relationship. This is separate from its
+ * filesystem folders: the workspace file describes execution topology while
+ * this record describes project ownership and responsibility.
+ */
+export type PipeSpaceInfo = { 
+/**
+ * A worker has a parent project PipeSpace. Absence means this is a
+ * non-worker PipeSpace and therefore eligible to be a project entry.
+ */
+parentWorkspaceId?: string, 
+/**
+ * Project-manager responsibility is a marker, never a workspace kind.
+ */
+pm: boolean, 
+/**
+ * Required for workers (for example workflow-executor, coder or tester)
+ * and absent for non-worker project spaces.
+ */
+workerRole?: string, 
+/**
+ * persistent, pooled or ephemeral. Executors normally use persistent or
+ * pooled so a Workflow Run can reuse the Space.
+ */
+lifecycle: string, 
+/**
+ * SHA-256 identity of the PipeBuilder ownership lock verified when the
+ * relationship was registered.
+ */
+builderLockDigest: string, };
+
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 
 export type ProtocolError = { code: ErrorCode, message: string, };
@@ -705,7 +736,7 @@ expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId:
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "workspace.configurePipeSpace", "payload": { workspaceId: string, parentWorkspaceId: string | null, pm: boolean, workerRole: string | null, lifecycle: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -1533,7 +1564,12 @@ export type WorkflowProjectStatus = { schema: string, root: string, defaultWorkf
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { id: string, workspaceId: string, parentSessionId: string, workflowId: string, bundleDigest: string, taskId: string, status: string, revision: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
+export type WorkflowRunStatus = { id: string, workspaceId: string, 
+/**
+ * Existing reusable Workflow Executor WorkerSpace selected for this Run.
+ * Absent only for directory projects created before the PipeSpace model.
+ */
+executorWorkspaceId?: string, parentSessionId: string, workflowId: string, bundleDigest: string, taskId: string, status: string, revision: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 
@@ -1558,4 +1594,4 @@ export type WorkspaceInfo = { id: string, name: string,
 /**
  * The first folder and Agent working directory.
  */
-root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspaceFile?: string, };
+root: string, isGitRepo: boolean, folders: Array<WorkspaceFolderInfo>, workspaceFile?: string, pipeSpace?: PipeSpaceInfo, };

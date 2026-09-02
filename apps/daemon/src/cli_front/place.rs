@@ -158,6 +158,7 @@ mod tests {
                 })
                 .collect(),
             workspace_file: None,
+            pipe_space: None,
         }
     }
 
