@@ -168,6 +168,33 @@ pub struct WorkspaceFolderInfo {
     pub root_handle: String,
 }
 
+/// A PipeSpace's durable project relationship. This is separate from its
+/// filesystem folders: the workspace file describes execution topology while
+/// this record describes project ownership and responsibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PipeSpaceInfo {
+    /// A worker has a parent project PipeSpace. Absence means this is a
+    /// non-worker PipeSpace and therefore eligible to be a project entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_workspace_id: Option<String>,
+    /// Project-manager responsibility is a marker, never a workspace kind.
+    pub pm: bool,
+    /// Required for workers (for example workflow-executor, coder or tester)
+    /// and absent for non-worker project spaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub worker_role: Option<String>,
+    /// persistent, pooled or ephemeral. Executors normally use persistent or
+    /// pooled so a Workflow Run can reuse the Space.
+    pub lifecycle: String,
+    /// SHA-256 identity of the PipeBuilder ownership lock verified when the
+    /// relationship was registered.
+    pub builder_lock_digest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -181,6 +208,9 @@ pub struct WorkspaceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workspace_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pipe_space: Option<PipeSpaceInfo>,
 }
 
 /// How a child session obtained the context that precedes its first new turn.
@@ -601,6 +631,11 @@ pub struct WorkflowCatalogEntryStatus {
 pub struct WorkflowRunStatus {
     pub id: String,
     pub workspace_id: String,
+    /// Existing reusable Workflow Executor WorkerSpace selected for this Run.
+    /// Absent only for directory projects created before the PipeSpace model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_workspace_id: Option<String>,
     pub parent_session_id: String,
     pub workflow_id: String,
     pub bundle_digest: String,

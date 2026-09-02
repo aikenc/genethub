@@ -1148,6 +1148,21 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
                 .await;
             }
         }
+        if let Request::WorkspaceConfigurePipeSpace {
+            parent_workspace_id: Some(parent),
+            ..
+        } = &request
+        {
+            if parent != scope {
+                return send_error(
+                    stream,
+                    403,
+                    ErrorCode::Forbidden,
+                    "the routed capability does not cover the parent workspace",
+                )
+                .await;
+            }
+        }
     }
 
     if let (
@@ -1426,6 +1441,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::PtyOpen { workspace_id, .. }
         | Request::SpeechContextPreview { workspace_id, .. }
         | Request::SpeechFeedbackRecord { workspace_id, .. }
+        | Request::WorkspaceConfigurePipeSpace { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         _ => None,

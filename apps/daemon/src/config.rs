@@ -44,6 +44,11 @@ pub struct Config {
     #[serde(default)]
     pub workspace_roots: Vec<WorkspaceRootEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
+    /// PipeSpace project/worker relationships keyed by workspace id. Kept
+    /// outside WorkspaceEntry so ordinary folder registrations remain a
+    /// neutral, backwards-compatible filesystem fact.
+    #[serde(default)]
+    pub pipe_spaces: Vec<PipeSpaceEntry>,
     /// Identifies one lifetime of the local workspace catalogue.
     ///
     /// This is deliberately unrelated to the machine identity and to any Hub
@@ -73,6 +78,7 @@ impl Default for Config {
             speech: SpeechConfig::default(),
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),
+            pipe_spaces: Vec::new(),
             workspace_catalog_generation: String::new(),
             workspace_catalog_revision: 0,
             replay_window: 2048,
@@ -208,6 +214,19 @@ pub struct WorkspaceEntry {
     /// change from producing a different Hub snapshot at the same revision.
     #[serde(default)]
     pub is_git_repo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipeSpaceEntry {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_workspace_id: Option<String>,
+    pub pm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_role: Option<String>,
+    pub lifecycle: String,
+    pub builder_lock_digest: String,
 }
 
 impl Config {
@@ -661,6 +680,19 @@ mod tests {
         assert_eq!(config.port, 0);
         assert!(!config.lan_enabled);
         assert!(!config.speech.stub_enabled);
+    }
+
+    #[test]
+    fn config_before_pipespace_relationships_loads_with_an_empty_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("pipeSpaces");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+
+        assert!(loaded.pipe_spaces.is_empty());
     }
 
     #[test]

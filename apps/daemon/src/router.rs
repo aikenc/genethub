@@ -1263,6 +1263,27 @@ async fn dispatch(
             }
         }
 
+        Request::WorkspaceConfigurePipeSpace {
+            workspace_id,
+            parent_workspace_id,
+            pm,
+            worker_role,
+            lifecycle,
+        } => match state
+            .workspaces
+            .configure_pipe_space(
+                &workspace_id,
+                parent_workspace_id,
+                pm,
+                worker_role,
+                lifecycle,
+            )
+            .await
+        {
+            Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+            Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+        },
+
         Request::WorkspaceRename { workspace_id, name } => {
             match state.workspaces.rename(&workspace_id, &name).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
@@ -1615,6 +1636,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::DeviceRemoteDetach => Some("device.remoteDetach"),
         Request::WorkspaceOpen { .. } => Some("workspace.open"),
         Request::WorkspaceCreate { .. } => Some("workspace.create"),
+        Request::WorkspaceConfigurePipeSpace { .. } => Some("workspace.configurePipeSpace"),
         Request::WorkspaceRename { .. } => Some("workspace.rename"),
         Request::WorkspaceRemove { .. } => Some("workspace.remove"),
         Request::DirectoryList { .. } => Some("directory.list"),
