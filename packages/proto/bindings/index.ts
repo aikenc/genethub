@@ -734,7 +734,7 @@ expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId:
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "workspace.configurePipeSpace", "payload": { workspaceId: string, parentWorkspaceId: string | null, pm: boolean, workerRole: string | null, lifecycle: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "workspace.configurePipeSpace", "payload": { workspaceId: string, parentWorkspaceId: string | null, pm: boolean, workerRole: string | null, lifecycle: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -1548,6 +1548,8 @@ avgOutputRateTps?: number,
  */
 outputRateEstimated: boolean, costUsd?: number, };
 
+export type WorkflowActivationStatus = { revision: number, digest: string, previousDigest?: string, activatedAtMs: number, };
+
 export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: string, matchKind: string | null, matchComplexity: string | null, };
 
 export type WorkflowNodeRunStatus = { id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
@@ -1555,7 +1557,36 @@ export type WorkflowNodeRunStatus = { id: string, uses: string, status: string, 
 /**
  * Project-owned Workflow catalog projected by the daemon after validation.
  */
-export type WorkflowProjectStatus = { schema: string, root: string, defaultWorkflow: string, workflows: Array<WorkflowCatalogEntryStatus>, };
+export type WorkflowProjectStatus = { schema: string, root: string, defaultWorkflow: string, workflows: Array<WorkflowCatalogEntryStatus>, 
+/**
+ * Digest of the project source as it exists now, whether or not it has
+ * been promoted for execution.
+ */
+candidateDigest?: string, 
+/**
+ * Compilation error for the current source while a previously activated
+ * Candidate remains runnable. Absent when the source compiles.
+ */
+candidateError?: string, 
+/**
+ * Candidate used for new Runs. Absent only for a V1 directory project
+ * that has not entered the activation lifecycle yet.
+ */
+activeDigest?: string, activationRevision: number, 
+/**
+ * True when project source has changed since the active Candidate.
+ */
+sourceChanged: boolean, 
+/**
+ * Provenance of the deterministic genesis pack, when the active
+ * Candidate was created by one.
+ */
+bootstrapPackDigest?: string, 
+/**
+ * Ordered immutable activation history. Reusing an already-active digest
+ * is a no-op and therefore does not append an entry.
+ */
+activationHistory: Array<WorkflowActivationStatus>, };
 
 /**
  * Durable status of one project Workflow run. Node meaning comes entirely
@@ -1567,7 +1598,21 @@ export type WorkflowRunStatus = { id: string, workspaceId: string,
  * Existing reusable Workflow Executor WorkerSpace selected for this Run.
  * Absent only for directory projects created before the PipeSpace model.
  */
-executorWorkspaceId?: string, parentSessionId: string, workflowId: string, bundleDigest: string, taskId: string, status: string, revision: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
+executorWorkspaceId?: string, parentSessionId: string, workflowId: string, 
+/**
+ * Project-wide immutable DCG Candidate captured when this Run started.
+ */
+dcgDigest: string, 
+/**
+ * Activation revision captured with `dcgDigest`. Absent only for the
+ * V1 compatibility path that executes unactivated source.
+ */
+activationRevision?: number, bundleDigest: string, taskId: string, status: string, revision: number, 
+/**
+ * Semantic Workflow Executor turns consumed by this Run. Deterministic
+ * simple graphs remain zero.
+ */
+executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

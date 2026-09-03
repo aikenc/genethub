@@ -245,6 +245,31 @@ async fn authorize_session_request(
     }
 }
 
+async fn authorize_project_workflow_mutation(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    workspace_id: &str,
+) -> Result<(), String> {
+    match caller {
+        crate::authz::Principal::LocalUser => Ok(()),
+        crate::authz::Principal::SessionController { session_id } => {
+            let summary = state
+                .sessions
+                .summary(session_id)
+                .await
+                .map_err(|error| format!("无法确认入口会话：{error:#}"))?;
+            if summary.managed.is_some() {
+                return Err("受管子会话不能初始化或激活项目 DCG；请回到项目主会话操作".into());
+            }
+            if summary.workspace_id != workspace_id {
+                return Err("入口会话不属于请求的项目 Workspace".into());
+            }
+            Ok(())
+        }
+        _ => Err("只有本机用户或项目普通主会话可以修改 DCG 生命周期".into()),
+    }
+}
+
 async fn dispatch(
     state: &Shared,
     transport: TransportKind,
@@ -317,11 +342,91 @@ async fn dispatch(
         }
 
         Request::WorkflowInspect { workspace_id } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
+            let workspace = match state.workspaces.project_entry(&workspace_id).await {
                 Ok(workspace) => workspace,
+                Err(error) => {
+                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+                }
+            };
+            let runtime = match crate::workflow::RuntimeStore::new(
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
+            ) {
+                Ok(runtime) => runtime,
                 Err(error) => return failed(error),
             };
-            match crate::workflow::inspect(&workspace.root) {
+            match crate::workflow::inspect(&workspace.root, &runtime) {
+                Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkflowInitialize {
+            workspace_id,
+            agent_id,
+            model_id,
+        } => {
+            if let Err(message) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            let workspace = match state.workspaces.project_entry(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+                }
+            };
+            let runtime = match crate::workflow::RuntimeStore::new(
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::initialize_and_activate(
+                &workspace.root,
+                &runtime,
+                &agent_id,
+                model_id.as_deref(),
+            ) {
+                Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::WorkflowActivate {
+            workspace_id,
+            candidate_digest,
+            expected_revision,
+        } => {
+            if let Err(message) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            let workspace = match state.workspaces.project_entry(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+                }
+            };
+            let runtime = match crate::workflow::RuntimeStore::new(
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::activate_project(
+                &workspace.root,
+                &runtime,
+                candidate_digest.as_deref(),
+                expected_revision,
+            ) {
                 Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
                 Err(error) => failed(error),
             }
@@ -373,7 +478,15 @@ async fn dispatch(
                 Ok(workspace) => workspace,
                 Err(error) => return failed(error),
             };
-            match crate::workflow::get(&workspace.root, &run_id) {
+            let runtime = match crate::workflow::RuntimeStore::new(
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::get(&runtime, &run_id) {
                 Ok(status) => Handled::ok(Reply::WorkflowRun(status)),
                 Err(error) => failed(error),
             }
@@ -1608,6 +1721,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
     match request {
         Request::AgentRefresh => Some("agent.refresh"),
         Request::SessionCreate { .. } => Some("session.create"),
+        Request::WorkflowInitialize { .. } => Some("workflow.initialize"),
+        Request::WorkflowActivate { .. } => Some("workflow.activate"),
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
         Request::SessionSend { .. } => Some("session.send"),

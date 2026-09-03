@@ -1,4 +1,5 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -23,7 +24,7 @@ defineSpecialty(
       "the kernel silently inserts review or approval",
       "managed Sessions are hidden from the ordinary session list",
       "a human can mutate a read-only managed Session",
-      "a managed Worker can recursively dispatch another Workflow",
+      "a managed Worker can initialize, activate, or recursively dispatch a Workflow",
       "the worker cannot identify its bound run or report evidence",
       "the direct flow creates a branch or accepts fabricated commit evidence",
       ".genehub and .genethub split project configuration",
@@ -45,6 +46,28 @@ defineSpecialty(
 
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
+      const repository = realpathSync(opened.workspaceRoot);
+      const targetRef = `refs/heads/${initialBranch}`;
+      const leaseKey = createHash("sha256")
+        .update(`${repository}\0${targetRef}`)
+        .digest("hex");
+      const forgedLegacyLease = path.join(
+        opened.workspaceRoot,
+        `.genethub/runtime/workflows/ref-leases/${leaseKey}.json`,
+      );
+      mkdirSync(path.dirname(forgedLegacyLease), { recursive: true });
+      writeFileSync(
+        forgedLegacyLease,
+        JSON.stringify({
+          runId: "wr_forged",
+          nodeId: "implement",
+          repository,
+          targetRef,
+          baseCommit: git(opened.workspaceRoot, ["rev-parse", "HEAD"]),
+          expiresAtMs: Date.now() + 3_600_000,
+        }),
+      );
+
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
       opened.mock.script(
         {
@@ -70,7 +93,7 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                'output=$("$GENEHUB_CLI" workflow dispatch --workflow direct-change --task nested-forbidden --message "受管 Worker 不得再次派发" --no-wait 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly dispatched a nested Workflow"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能派发新的 Workflow"',
+                'output=$("$GENEHUB_CLI" workflow init --agent genet --model deepseek/deepseek-v4-flash 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly initialized the DCG"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能初始化或激活项目 DCG" && output=$("$GENEHUB_CLI" workflow activate --revision 1 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly activated the DCG"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能初始化或激活项目 DCG" && output=$("$GENEHUB_CLI" workflow dispatch --workflow direct-change --task nested-forbidden --message "受管 Worker 不得再次派发" --no-wait 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly dispatched a nested Workflow"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能派发新的 Workflow"',
             },
           },
         },
@@ -202,6 +225,28 @@ defineSpecialty(
           "implement:completed,publish:completed",
         `unexpected direct graph: ${JSON.stringify(run?.nodes)}`,
       );
+      const projectReply = await opened.client.call({
+        type: "workflow.inspect",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      t.assertions.assert(
+        projectReply?.type === "workflowProject",
+        `workflow.inspect returned ${projectReply?.type}`,
+      );
+      const project = projectReply?.type === "workflowProject" ? projectReply.data : undefined;
+      t.assertions.assert(
+        Boolean(project?.activeDigest) && project?.activeDigest === project?.candidateDigest,
+        "genesis did not leave one active Candidate identical to project source",
+      );
+      t.assertions.assert(
+        project?.activationRevision === 1 && project?.activationHistory.length === 1,
+        `unexpected genesis activation history: ${JSON.stringify(project?.activationHistory)}`,
+      );
+      t.assertions.assert(
+        run?.dcgDigest === project?.activeDigest && run?.activationRevision === 1,
+        "Run did not pin the active project-wide DCG identity",
+      );
+      t.assertions.assert(run?.executorTurns === 0, "the deterministic direct graph used an Executor LLM turn");
 
       t.assertions.fileEquals(opened.workspaceRoot, "result.txt", "workflow-direct\n");
       t.assertions.assert(
@@ -211,6 +256,15 @@ defineSpecialty(
       t.assertions.assert(
         !existsSync(path.join(opened.workspaceRoot, ".genehub")),
         "a second .genehub configuration root was created",
+      );
+      t.assertions.assert(
+        !existsSync(path.join(opened.workspaceRoot, ".genethub/runtime/workflows/activation.json")) &&
+          !existsSync(path.join(opened.workspaceRoot, ".genethub/runtime/workflows/candidates")),
+        "daemon-trusted DCG control state was written into the Agent-writable project tree",
+      );
+      t.assertions.assert(
+        existsSync(forgedLegacyLease),
+        "daemon treated an Agent-writable legacy lease as trusted control state",
       );
       t.assertions.assert(
         git(opened.workspaceRoot, ["branch", "--show-current"]) === initialBranch,
@@ -233,6 +287,7 @@ defineSpecialty(
       t.assertions.assert(
         requestText.includes("你在当前项目的普通主会话中工作") &&
           requestText.includes("PM 不是独立的 Space 或 Session 类型") &&
+          requestText.includes("源文件改动只形成 Candidate") &&
           requestText.includes("你是当前项目直达流程中的实现 Worker"),
         "root or Worker Workflow contract was not delivered in Chinese",
       );

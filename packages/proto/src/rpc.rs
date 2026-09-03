@@ -84,9 +84,31 @@ pub enum Request {
         cwd: Option<String>,
     },
     /// Reads and validates the project-owned source under
-    /// `.genethub/workflow/`. This is a pure projection; it starts no Agent.
+    /// `.genethub/workflow/`. The target must be a non-worker project entry;
+    /// its optional PM marker is irrelevant. This is a pure projection and
+    /// starts no Agent.
     #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
     WorkflowInspect { workspace_id: String },
+    /// Applies the deterministic genesis pack and activates its first
+    /// Candidate. Only a local user or an ordinary main Session in this
+    /// project may request the mutation.
+    #[serde(rename = "workflow.initialize", rename_all = "camelCase")]
+    WorkflowInitialize {
+        workspace_id: String,
+        agent_id: String,
+        #[serde(default)]
+        model_id: Option<String>,
+    },
+    /// Promotes the current source Candidate or rolls back to a persisted one.
+    /// `expectedRevision` is the activation CAS and is never optional.
+    #[serde(rename = "workflow.activate", rename_all = "camelCase")]
+    WorkflowActivate {
+        workspace_id: String,
+        #[serde(default)]
+        candidate_digest: Option<String>,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
     /// Starts one project-defined Workflow. The durable parent Session comes
     /// from the authenticated session-bound CLI identity, never this payload.
     #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]

@@ -343,6 +343,34 @@ impl Workspaces {
         hydrate_entry(entry, &self.config.read().await.workspace_roots)
     }
 
+    /// Resolves a Workspace that may own a project DCG.
+    ///
+    /// Unregistered folders remain accepted for V1 migration. Once a
+    /// PipeSpace relationship exists, only the non-worker side of the project
+    /// tree is an entry: `pm` is deliberately irrelevant to this decision.
+    /// Registered PipeSpaces are reverified here so a drifted Builder
+    /// projection cannot mutate or execute the project's control graph.
+    pub async fn project_entry(&self, id: &str) -> Result<WorkspaceEntry> {
+        let entries = self.entries.read().await;
+        let entry = entries
+            .get(id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        let config = self.config.read().await;
+        if let Some(space) = config
+            .pipe_spaces
+            .iter()
+            .find(|space| space.workspace_id == id)
+        {
+            if space.parent_workspace_id.is_some() || space.worker_role.is_some() {
+                anyhow::bail!("WorkerSpace 不能作为项目 DCG 入口；请回到父项目 PipeSpace");
+            }
+            verify_pipe_space(&entry)?;
+        }
+        hydrate_entry(entry, &config.workspace_roots)
+    }
+
     /// Registers project responsibility for an already-open PipeSpace. The
     /// relationship is accepted only while the frozen PipeBuilder-owned
     /// projection still matches its lock.
@@ -1344,6 +1372,7 @@ mod tests {
         assert_eq!(first.id, second.id, "the same folder is one workspace");
         assert_eq!(first.name, "project");
         assert_eq!(spaces.list().await.len(), 1);
+        assert_eq!(spaces.project_entry(&first.id).await.unwrap().id, first.id);
     }
 
     #[tokio::test]
@@ -2155,6 +2184,15 @@ mod tests {
             second.id, executor.id,
             "a later Run reuses the same Executor Space"
         );
+        assert_eq!(
+            spaces.project_entry(&project.id).await.unwrap().id,
+            project.id,
+            "a registered non-worker project owns its DCG"
+        );
+        let error = spaces.project_entry(&executor.id).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("WorkerSpace 不能作为项目 DCG 入口"));
     }
 
     #[tokio::test]
@@ -2177,6 +2215,11 @@ mod tests {
             .configure_pipe_space(&project.id, None, false, None, "persistent".into())
             .await
             .unwrap();
+        assert_eq!(
+            spaces.project_entry(&project.id).await.unwrap().id,
+            project.id,
+            "the pm marker is not required to own the project DCG"
+        );
         let error = spaces
             .configure_pipe_space(
                 &executor.id,
