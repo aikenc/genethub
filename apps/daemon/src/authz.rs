@@ -375,6 +375,8 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::WorkflowInitialize { .. }
+        | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }
         | Request::WorkflowComplete { .. }
         | Request::SessionSend { .. }

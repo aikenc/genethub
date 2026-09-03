@@ -607,6 +607,47 @@ pub struct WorkflowProjectStatus {
     pub root: String,
     pub default_workflow: String,
     pub workflows: Vec<WorkflowCatalogEntryStatus>,
+    /// Digest of the project source as it exists now, whether or not it has
+    /// been promoted for execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub candidate_digest: Option<String>,
+    /// Compilation error for the current source while a previously activated
+    /// Candidate remains runnable. Absent when the source compiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub candidate_error: Option<String>,
+    /// Candidate used for new Runs. Absent only for a V1 directory project
+    /// that has not entered the activation lifecycle yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_digest: Option<String>,
+    #[ts(type = "number")]
+    pub activation_revision: u64,
+    /// True when project source has changed since the active Candidate.
+    pub source_changed: bool,
+    /// Provenance of the deterministic genesis pack, when the active
+    /// Candidate was created by one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bootstrap_pack_digest: Option<String>,
+    /// Ordered immutable activation history. Reusing an already-active digest
+    /// is a no-op and therefore does not append an entry.
+    pub activation_history: Vec<WorkflowActivationStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowActivationStatus {
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_digest: Option<String>,
+    #[ts(type = "number")]
+    pub activated_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -638,11 +679,22 @@ pub struct WorkflowRunStatus {
     pub executor_workspace_id: Option<String>,
     pub parent_session_id: String,
     pub workflow_id: String,
+    /// Project-wide immutable DCG Candidate captured when this Run started.
+    pub dcg_digest: String,
+    /// Activation revision captured with `dcgDigest`. Absent only for the
+    /// V1 compatibility path that executes unactivated source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub activation_revision: Option<u64>,
     pub bundle_digest: String,
     pub task_id: String,
     pub status: String,
     #[ts(type = "number")]
     pub revision: u64,
+    /// Semantic Workflow Executor turns consumed by this Run. Deterministic
+    /// simple graphs remain zero.
+    pub executor_turns: u32,
     pub active_nodes: Vec<String>,
     pub nodes: Vec<WorkflowNodeRunStatus>,
     #[ts(type = "number")]

@@ -15,10 +15,13 @@ function git(root: string, args: string[]): string {
 defineSpecialty(
   {
     id: "specialty.workflow.activation-failure-rolls-back",
-    title: "A failed project role activation leaves no managed Session or ref lease",
+    title: "DCG activation and rollback preserve the last runnable project method",
     oracle:
-      "after a project-owned role names an unavailable Agent, public workflow dispatch fails cleanly and the same target branch can be dispatched successfully as soon as the role is corrected",
+      "project source remains only a Candidate until an ordinary root Session activates it with CAS; a broken active Candidate fails without leaks, and rollback to the immutable prior digest makes the same target branch runnable again",
     catches: [
+      "editing live source silently hot-switches new Runs",
+      "activation accepts a stale revision",
+      "rollback recompiles broken live source instead of loading immutable history",
       "failed activation leaves a hidden managed Session",
       "failed activation leaves a target-ref lease until TTL expiry",
       "a failed Run is exposed as a successful dispatch",
@@ -54,12 +57,96 @@ defineSpecialty(
       git(opened.workspaceRoot, ["add", ".genethub"]);
       git(opened.workspaceRoot, ["commit", "-m", "initialize workflow"]);
 
+      const genesisReply = await opened.client.call({
+        type: "workflow.inspect",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      t.assertions.assert(genesisReply?.type === "workflowProject", "genesis inspect failed");
+      const genesis = genesisReply?.type === "workflowProject" ? genesisReply.data : undefined;
+      const initialDigest = genesis?.activeDigest;
+      t.assertions.assert(
+        Boolean(initialDigest) && genesis?.candidateDigest === initialDigest,
+        "genesis did not activate the compiled Candidate",
+      );
+      t.assertions.assert(
+        genesis?.activationRevision === 1 && genesis.activationHistory.length === 1,
+        `unexpected genesis activation: ${JSON.stringify(genesis)}`,
+      );
+
       const rolePath = path.join(opened.workspaceRoot, ".genethub/workflow/roles/worker.yaml");
       const validRole = readFileSync(rolePath, "utf8");
       t.assertions.assert(validRole.includes("agentId: genet"), "fixture role does not use genet");
       writeFileSync(rolePath, validRole.replace("agentId: genet", "agentId: unavailable-agent"));
       git(opened.workspaceRoot, ["add", rolePath]);
       git(opened.workspaceRoot, ["commit", "-m", "configure unavailable worker"]);
+
+      const candidateReply = await opened.client.call({
+        type: "workflow.inspect",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      t.assertions.assert(candidateReply?.type === "workflowProject", "Candidate inspect failed");
+      const candidate = candidateReply?.type === "workflowProject" ? candidateReply.data : undefined;
+      const unavailableDigest = candidate?.candidateDigest;
+      t.assertions.assert(
+        Boolean(unavailableDigest) && unavailableDigest !== initialDigest,
+        "source edit did not produce a distinct immutable Candidate",
+      );
+      t.assertions.assert(
+        candidate?.activeDigest === initialDigest &&
+          candidate?.activationRevision === 1 &&
+          candidate?.sourceChanged,
+        "editing project source hot-switched or rewrote the active DCG",
+      );
+
+      opened.mock.script(
+        {
+          tool: {
+            name: "bash",
+            arguments: { command: '"$GENEHUB_CLI" workflow activate --revision 1' },
+          },
+        },
+        { text: "候选 DCG 已按 revision 1 晋级。" },
+      );
+      const activationRoot = await t.flows.main.createBuiltinSession(
+        opened.client,
+        opened.workspaceId,
+      );
+      const activationEvents = await t.flows.main.attachEventLog(opened.client, activationRoot);
+      await t.flows.main.sendPrompt(opened.client, activationRoot, "请激活当前 DCG 候选。");
+      await t.tools.waitUntil(
+        () =>
+          activationEvents.some((event) => event.type === "turnCompleted") ||
+          activationEvents.some((event) => event.type === "turnFailed"),
+        30_000,
+      );
+      t.assertions.assert(
+        activationEvents.some((event) => event.type === "turnCompleted") &&
+          !activationEvents.some((event) => event.type === "turnFailed"),
+        "ordinary root Session could not activate the current Candidate",
+      );
+      const activatedReply = await opened.client.call({
+        type: "workflow.inspect",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      const activated = activatedReply?.type === "workflowProject" ? activatedReply.data : undefined;
+      t.assertions.assert(
+        activated?.activeDigest === unavailableDigest &&
+          activated?.activationRevision === 2 &&
+          activated?.activationHistory.length === 2 &&
+          !activated?.sourceChanged,
+        `Candidate activation did not advance exactly once: ${JSON.stringify(activated)}`,
+      );
+
+      const staleActivation = spawnSync(
+        opened.daemon.genet,
+        ["workflow", "activate", "--candidate", initialDigest ?? "missing", "--revision", "1"],
+        { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" },
+      );
+      t.assertions.assert(staleActivation.status !== 0, "stale activation revision was accepted");
+      t.assertions.assert(
+        `${staleActivation.stderr}\n${staleActivation.stdout}`.includes("revision 冲突"),
+        "stale activation did not return an explicit CAS conflict",
+      );
 
       opened.mock.script(
         {
@@ -101,9 +188,49 @@ defineSpecialty(
         "failed activation left a managed Session",
       );
 
-      writeFileSync(rolePath, validRole);
-      git(opened.workspaceRoot, ["add", rolePath]);
-      git(opened.workspaceRoot, ["commit", "-m", "restore available worker"]);
+      opened.mock.script(
+        {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: `"$GENEHUB_CLI" workflow activate --candidate ${initialDigest} --revision 2`,
+            },
+          },
+        },
+        { text: "已经回滚到上一个可运行的 DCG Candidate。" },
+      );
+      const rollbackRoot = await t.flows.main.createBuiltinSession(
+        opened.client,
+        opened.workspaceId,
+      );
+      const rollbackEvents = await t.flows.main.attachEventLog(opened.client, rollbackRoot);
+      await t.flows.main.sendPrompt(opened.client, rollbackRoot, "请回滚到上一个可运行的 DCG。");
+      await t.tools.waitUntil(
+        () =>
+          rollbackEvents.some((event) => event.type === "turnCompleted") ||
+          rollbackEvents.some((event) => event.type === "turnFailed"),
+        30_000,
+      );
+      t.assertions.assert(
+        rollbackEvents.some((event) => event.type === "turnCompleted") &&
+          !rollbackEvents.some((event) => event.type === "turnFailed"),
+        "ordinary root Session could not roll back to an immutable Candidate",
+      );
+      const rolledBackReply = await opened.client.call({
+        type: "workflow.inspect",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      const rolledBack =
+        rolledBackReply?.type === "workflowProject" ? rolledBackReply.data : undefined;
+      t.assertions.assert(
+        rolledBack?.activeDigest === initialDigest &&
+          rolledBack?.candidateDigest === unavailableDigest &&
+          rolledBack?.activationRevision === 3 &&
+          rolledBack?.activationHistory.length === 3 &&
+          rolledBack?.sourceChanged,
+        `rollback did not restore immutable history: ${JSON.stringify(rolledBack)}`,
+      );
+
       opened.mock.script(
         {
           tool: {
@@ -125,11 +252,11 @@ defineSpecialty(
           },
         },
         { text: "恢复后的 Worker 已提交并上报证据。" },
-        { text: "配置修正后，任务已通过同一项目流程完成。" },
+        { text: "回滚后，任务已通过恢复的项目流程完成。" },
       );
       const recoveredRoot = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
       const recoveredEvents = await t.flows.main.attachEventLog(opened.client, recoveredRoot);
-      await t.flows.main.sendPrompt(opened.client, recoveredRoot, "配置已经修正，请重新派发任务。");
+      await t.flows.main.sendPrompt(opened.client, recoveredRoot, "DCG 已回滚，请重新派发任务。");
       await t.tools.waitUntil(
         () =>
           recoveredEvents.some((event) => event.type === "turnCompleted") ||
@@ -154,17 +281,49 @@ defineSpecialty(
             )
           : undefined;
       t.assertions.assert(Boolean(recoveredWorker), "corrected dispatch did not create its Worker");
+      const recoveredRunReply = await opened.client.call({
+        type: "workflow.get",
+        payload: {
+          workspaceId: opened.workspaceId,
+          runId: recoveredWorker?.managed?.workflowRunId ?? "missing",
+        },
+      });
+      const recoveredRun =
+        recoveredRunReply?.type === "workflowRun" ? recoveredRunReply.data : undefined;
+      t.assertions.assert(
+        recoveredRun?.status === "completed" &&
+          recoveredRun.dcgDigest === initialDigest &&
+          recoveredRun.activationRevision === 3 &&
+          recoveredRun.executorTurns === 0,
+        `recovered Run did not pin the rolled-back DCG: ${JSON.stringify(recoveredRun)}`,
+      );
       t.assertions.fileEquals(opened.workspaceRoot, "recovered.txt", "recovered\n");
       t.assertions.assert(
         git(opened.workspaceRoot, ["branch", "--show-current"]) === initialBranch,
         "recovered dispatch changed branches",
+      );
+
+      writeFileSync(rolePath, validRole);
+      git(opened.workspaceRoot, ["add", rolePath]);
+      git(opened.workspaceRoot, ["commit", "-m", "restore project source"]);
+      const restoredReply = await opened.client.call({
+        type: "workflow.inspect",
+        payload: { workspaceId: opened.workspaceId },
+      });
+      const restored = restoredReply?.type === "workflowProject" ? restoredReply.data : undefined;
+      t.assertions.assert(
+        restored?.candidateDigest === initialDigest &&
+          restored?.activeDigest === initialDigest &&
+          restored?.activationRevision === 3 &&
+          !restored?.sourceChanged,
+        `restoring source changed activation history: ${JSON.stringify(restored)}`,
       );
       t.assertions.assert(
         git(opened.workspaceRoot, ["status", "--porcelain"]) === "",
         "activation recovery left the project dirty",
       );
       t.note(
-        `failedRoot=${failedRoot} recoveredRoot=${recoveredRoot} worker=${recoveredWorker?.id} branch=${initialBranch}`,
+        `activationRoot=${activationRoot} failedRoot=${failedRoot} rollbackRoot=${rollbackRoot} recoveredRoot=${recoveredRoot} worker=${recoveredWorker?.id} revision=3 branch=${initialBranch}`,
       );
     } finally {
       opened.client.close();

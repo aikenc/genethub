@@ -15,8 +15,14 @@ use super::{converse, query, EXIT_FAILED, EXIT_OK};
 #[derive(Debug)]
 enum Command {
     Init {
+        workspace_id: Option<String>,
         agent_id: String,
         model_id: Option<String>,
+    },
+    Activate {
+        workspace_id: Option<String>,
+        candidate_digest: Option<String>,
+        revision: Option<u64>,
     },
     Inspect {
         workspace_id: Option<String>,
@@ -54,27 +60,6 @@ pub async fn workflow(args: &[String], selection: &Selection) -> i32 {
         Ok(command) => command,
         Err(error) => return output::fail(error),
     };
-    if let Command::Init { agent_id, model_id } = command {
-        if let Err(error) = authorize_init().await {
-            return output::fail(error);
-        }
-        let root = super::caller_cwd();
-        return match crate::workflow::initialize_project(&root, &agent_id, model_id.as_deref()) {
-            Ok(source) => {
-                output::succeed(
-                    "workflow.initialized",
-                    json!({"root": source, "agentId": agent_id, "modelId": model_id}),
-                );
-                EXIT_OK
-            }
-            Err(error) => output::fail(CliFailure::business(
-                "workflowInitFailed",
-                format!("{error:#}"),
-                None,
-            )),
-        };
-    }
-
     let rpc = match query::connect_selected(selection).await {
         Ok(rpc) => rpc,
         Err(error) => return output::fail(error),
@@ -85,40 +70,58 @@ pub async fn workflow(args: &[String], selection: &Selection) -> i32 {
     }
 }
 
-async fn authorize_init() -> Result<(), CliFailure> {
-    match super::caller_principal() {
-        crate::authz::Principal::LocalUser => Ok(()),
-        crate::authz::Principal::SessionController { session_id } => {
-            let state = super::local_state().map_err(|message| {
-                CliFailure::business("workflowInitUnavailable", message, None)
-            })?;
-            let summary = state.sessions.summary(&session_id).await.map_err(|error| {
-                CliFailure::business(
-                    "workflowInitUnauthorized",
-                    format!("无法确认入口会话：{error:#}"),
-                    None,
-                )
-            })?;
-            if summary.managed.is_some() {
-                return Err(CliFailure::business(
-                    "workflowInitUnauthorized",
-                    "受管子会话不能初始化或改写项目 Workflow；请回到根会话操作",
-                    None,
-                ));
-            }
-            Ok(())
-        }
-        _ => Err(CliFailure::business(
-            "workflowInitUnauthorized",
-            "只有本机用户或根普通会话可以初始化项目 Workflow",
-            None,
-        )),
-    }
-}
-
 async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
     match command {
-        Command::Init { .. } => unreachable!("handled before connecting"),
+        Command::Init {
+            workspace_id,
+            agent_id,
+            model_id,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowProject(project) = rpc
+                .call(Request::WorkflowInitialize {
+                    workspace_id,
+                    agent_id,
+                    model_id,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.initialize with the wrong reply",
+                ));
+            };
+            output::succeed(
+                "workflow.initialized",
+                serde_json::to_value(project).unwrap(),
+            );
+            Ok(EXIT_OK)
+        }
+        Command::Activate {
+            workspace_id,
+            candidate_digest,
+            revision,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let expected_revision = revision.ok_or_else(|| {
+                CliFailure::invalid_args("workflow activate 需要 --revision <current>")
+            })?;
+            let Reply::WorkflowProject(project) = rpc
+                .call(Request::WorkflowActivate {
+                    workspace_id,
+                    candidate_digest,
+                    expected_revision,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.activate with the wrong reply",
+                ));
+            };
+            output::succeed("workflow.activated", serde_json::to_value(project).unwrap());
+            Ok(EXIT_OK)
+        }
         Command::Inspect { workspace_id } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::WorkflowProject(project) = rpc
@@ -490,11 +493,17 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
     let mut values = Values::parse(&args[1..])?;
     match verb {
         "init" => Ok(Command::Init {
+            workspace_id: values.workspace.take(),
             agent_id: values.agent.take().unwrap_or_else(|| "opencode".into()),
             model_id: values
                 .model
                 .take()
                 .or_else(|| Some("bailian-token-plan-personal/qwen3.8-flash".into())),
+        }),
+        "activate" => Ok(Command::Activate {
+            workspace_id: values.workspace.take(),
+            candidate_digest: values.candidate.take(),
+            revision: values.revision,
         }),
         "inspect" => Ok(Command::Inspect {
             workspace_id: values.workspace.take(),
@@ -532,7 +541,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             evidence: values.evidence,
         }),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|dispatch|get|complete ...",
+            "usage: genet workflow init|inspect|activate|dispatch|get|complete ...",
         )),
     }
 }
@@ -546,6 +555,7 @@ struct Values {
     workflow: Option<String>,
     kind: Option<String>,
     complexity: Option<String>,
+    candidate: Option<String>,
     task: Option<String>,
     run: Option<String>,
     node: Option<String>,
@@ -575,6 +585,7 @@ impl Values {
                 "--workflow" => values.workflow = Some(next(&mut index)?),
                 "--kind" => values.kind = Some(next(&mut index)?),
                 "--complexity" => values.complexity = Some(next(&mut index)?),
+                "--candidate" => values.candidate = Some(next(&mut index)?),
                 "--task" => values.task = Some(next(&mut index)?),
                 "--run" => values.run = Some(next(&mut index)?),
                 "--node" => values.node = Some(next(&mut index)?),
@@ -709,14 +720,43 @@ mod tests {
     #[test]
     fn initializer_defaults_to_opencode_qwen() {
         let command = parse(&["init".into()]).unwrap();
-        let Command::Init { agent_id, model_id } = command else {
+        let Command::Init {
+            workspace_id,
+            agent_id,
+            model_id,
+        } = command
+        else {
             panic!("wrong command")
         };
+        assert_eq!(workspace_id, None);
         assert_eq!(agent_id, "opencode");
         assert_eq!(
             model_id.as_deref(),
             Some("bailian-token-plan-personal/qwen3.8-flash")
         );
+    }
+
+    #[test]
+    fn activation_requires_an_explicit_revision_and_accepts_rollback_identity() {
+        let command = parse(&[
+            "activate".into(),
+            "--candidate".into(),
+            "sha256:abc".into(),
+            "--revision".into(),
+            "7".into(),
+        ])
+        .unwrap();
+        let Command::Activate {
+            workspace_id,
+            candidate_digest,
+            revision,
+        } = command
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(workspace_id, None);
+        assert_eq!(candidate_digest.as_deref(), Some("sha256:abc"));
+        assert_eq!(revision, Some(7));
     }
 
     #[test]
@@ -727,10 +767,13 @@ mod tests {
             executor_workspace_id: None,
             parent_session_id: "s_root".into(),
             workflow_id: "fanout".into(),
+            dcg_digest: "sha256:dcg".into(),
+            activation_revision: Some(1),
             bundle_digest: "digest".into(),
             task_id: "task".into(),
             status: "running".into(),
             revision: 1,
+            executor_turns: 0,
             active_nodes: vec!["one".into(), "two".into()],
             nodes: vec![
                 genehub_proto::WorkflowNodeRunStatus {
@@ -759,7 +802,9 @@ mod tests {
     fn project_catalog_routes_the_two_typed_classification_axes() {
         let root = tempfile::tempdir().unwrap();
         crate::workflow::initialize_project(root.path(), "genet", Some("qwen3.8-flash")).unwrap();
-        let project = crate::workflow::inspect(root.path()).unwrap();
+        let runtime =
+            crate::workflow::RuntimeStore::new(root.path(), "workspace", root.path()).unwrap();
+        let project = crate::workflow::inspect(root.path(), &runtime).unwrap();
 
         assert_eq!(
             select_workflow(
