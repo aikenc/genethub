@@ -199,6 +199,17 @@ struct Live {
 /// `workspaceStart` need the workspace-observation step (§8 step 5) to mean
 /// anything, and adding fields nobody populates yet would be exactly the
 /// "看起来完整却是假的" mistake the proposal itself warns against (rule D).
+/// Who is ending a round, and therefore whether the turn id has to match.
+#[derive(Clone, Copy, Debug)]
+enum Settling<'a> {
+    /// A terminal event from the agent. It must name the turn still running.
+    Turn(&'a str),
+    /// The kernel ending the round from its own side — an escalation past a
+    /// deaf agent, a channel that closed, an approval the user declined. There
+    /// is no turn id to match against because no turn reported anything.
+    Kernel,
+}
+
 #[derive(Debug, Clone)]
 struct ActiveRound {
     round_id: String,
@@ -1218,7 +1229,9 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
         Ok(SessionInspection {
-            summary: view.meta.summary_with_activity(status, live.activity_of(status)),
+            summary: view
+                .meta
+                .summary_with_activity(status, live.activity_of(status)),
             source: view.source,
             narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
             round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
@@ -2320,7 +2333,10 @@ impl SessionManager {
         } else {
             // Denied or canceled: no more agent work is coming for this
             // request, so the round it belonged to is done, not dangling.
-            if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+            if let Some(round) = live
+                .settle_round(Settling::Kernel, RoundOutcome::Canceled)
+                .await
+            {
                 persist_round(&live, round).await;
             }
         }
@@ -2683,20 +2699,32 @@ impl Live {
 
     /// Assigns a sequence number, retains for replay, and fans out.
     async fn publish(&self, event: SessionEvent) -> SequencedEvent {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         // Every kind of event counts, deltas included: the question this
         // answers is "is anything still coming out of it", not "has it made
         // progress", which nobody outside the agent can judge.
         self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
+        let session_id = self.meta.lock().await.id.clone();
+
+        // Numbering, retaining and fanning out are one step, not three.
+        //
+        // Several tasks publish to the same session at once — the event pump, a
+        // stop that escalated, the call that started the turn — and a sequence
+        // number taken outside this lock is a promise about ordering that
+        // nothing then keeps. Two publishers could take 5 and 6 and reach the
+        // replay buffer in the other order, leaving a client that asked to be
+        // caught up with the events in an order that never happened; the same
+        // inversion on the broadcast reaches live subscribers directly.
+        //
+        // Holding one lock across all three costs nothing here: there is no
+        // await inside it that leaves this process.
+        let mut replay = self.replay.lock().await;
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let sequenced = SequencedEvent {
             seq,
-            session_id: self.meta.lock().await.id.clone(),
+            session_id,
             event,
         };
-        {
-            let mut replay = self.replay.lock().await;
-            replay.push_back(sequenced.clone());
-        }
+        replay.push_back(sequenced.clone());
         // A send error only means nobody is listening, which is normal when a
         // task runs with every client disconnected.
         let _ = self.events.send(sequenced.clone());
@@ -2736,9 +2764,7 @@ impl Live {
         let closed = {
             let mut active = self.active_round.lock().await;
             match active.as_mut() {
-                Some(round) if round.outcome.is_none() => {
-                    round.record_trunk_item(item, llm_rounds)
-                }
+                Some(round) if round.outcome.is_none() => round.record_trunk_item(item, llm_rounds),
                 _ => None,
             }
         };
@@ -3002,12 +3028,37 @@ impl Live {
     /// (`session/rounds.rs`). `None` when there was nothing open to settle —
     /// this is also how a caller like the channel-closed fallback tells
     /// "there was a dangling round to clean up" from "there was nothing to do".
-    async fn settle_round(&self, outcome: RoundOutcome) -> Option<ActiveRound> {
+    /// Ends the open round, if the thing ending it is entitled to.
+    ///
+    /// A round folds several adapter turns, and only the last of them is the
+    /// one still running. A terminal naming an earlier turn is a straggler from
+    /// work that has already been superseded, and acting on it would end the
+    /// turn the user is watching on the strength of one they cancelled.
+    ///
+    /// The check belongs here rather than in each adapter because two of the
+    /// four cannot make it: claude's `result` frame carries no turn id at all,
+    /// so the adapter stamps whichever turn is current when the frame arrives,
+    /// and genet's `agent_end` does the same. Whatever they stamp, the kernel
+    /// knows which turn it is actually waiting on.
+    async fn settle_round(&self, by: Settling<'_>, outcome: RoundOutcome) -> Option<ActiveRound> {
         let has_open_trunk = {
             let mut active = self.active_round.lock().await;
             let round = active.as_mut()?;
             if round.outcome.is_some() {
                 return None;
+            }
+            if let Settling::Turn(turn_id) = by {
+                let running = round.adapter_turn_ids.last().map(String::as_str);
+                if running != Some(turn_id) {
+                    tracing::warn!(
+                        event = "session_stale_terminal_ignored",
+                        round = %round.round_id,
+                        running = running.unwrap_or("<none>"),
+                        named = %turn_id,
+                        "a terminal named a turn this round is no longer running"
+                    );
+                    return None;
+                }
             }
             if let Some(since) = round.blocked_since_ms.take() {
                 let now = now_ms();
@@ -3257,7 +3308,10 @@ fn stop_if_still_running(
         // The pump would eventually see the event channel close and clean up,
         // but only if the process lets go of its own stdout. Settling here
         // means the conversation stops saying it is working either way.
-        if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+        if let Some(round) = live
+            .settle_round(Settling::Kernel, RoundOutcome::Canceled)
+            .await
+        {
             persist_round(&live, round).await;
         }
         flush_turn(&live, &store).await;
@@ -3424,6 +3478,11 @@ async fn pump_events(
     loop {
         let mut event = match receiver.recv().await {
             Ok(event) => event,
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
+                tracing::warn!("dropped {missed} agent events: the pump fell behind");
+                continue;
+            }
             Err(broadcast::error::RecvError::Closed) => {
                 diagnostics.record("agent", "event-stream", "error", Some("closed"));
                 flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
@@ -3435,11 +3494,6 @@ async fn pump_events(
                 // produced never reaches disk.
                 channel_closed = true;
                 break;
-            }
-            Err(broadcast::error::RecvError::Lagged(missed)) => {
-                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
-                tracing::warn!("dropped {missed} agent events: the pump fell behind");
-                continue;
             }
         };
 
@@ -3550,7 +3604,12 @@ async fn pump_events(
 
         let updates_reasoning = match &event {
             SessionEvent::Item {
-                item: TimelineItem::Reasoning { id, text, received_at_ms: None },
+                item:
+                    TimelineItem::Reasoning {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 raw_thinking.insert(id.clone(), text.clone());
@@ -3659,7 +3718,12 @@ async fn pump_events(
             }
             event => {
                 if let SessionEvent::Item {
-                    item: TimelineItem::Reasoning { id, text, received_at_ms: None },
+                    item:
+                        TimelineItem::Reasoning {
+                            id,
+                            text,
+                            received_at_ms: None,
+                        },
                     ..
                 } = &event
                 {
@@ -3759,13 +3823,19 @@ async fn pump_events(
         // interrupt, which leaves the round dangling on purpose until the
         // next `send` decides whether to continue or supersede it (§3.2).
         match &event {
-            SessionEvent::TurnCompleted { .. } => {
-                if let Some(round) = live.settle_round(RoundOutcome::Completed).await {
+            SessionEvent::TurnCompleted { turn_id, .. } => {
+                if let Some(round) = live
+                    .settle_round(Settling::Turn(turn_id), RoundOutcome::Completed)
+                    .await
+                {
                     persist_round(&live, round).await;
                 }
             }
-            SessionEvent::TurnFailed { .. } => {
-                if let Some(round) = live.settle_round(RoundOutcome::Failed).await {
+            SessionEvent::TurnFailed { turn_id, .. } => {
+                if let Some(round) = live
+                    .settle_round(Settling::Turn(turn_id), RoundOutcome::Failed)
+                    .await
+                {
                     persist_round(&live, round).await;
                 }
             }
@@ -4077,7 +4147,10 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
 /// shutdown`) aborts the pump task outright rather than letting `recv` see
 /// `Closed`, and a round that already settled has nothing left to clean up.
 async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
-    let Some(round) = live.settle_round(RoundOutcome::Failed).await else {
+    let Some(round) = live
+        .settle_round(Settling::Kernel, RoundOutcome::Failed)
+        .await
+    else {
         return;
     };
     persist_round(live, round).await;
@@ -6955,7 +7028,10 @@ mod tests {
             .unwrap()
             .round_id
             .clone();
-        assert!(live.settle_round(RoundOutcome::Completed).await.is_some());
+        assert!(live
+            .settle_round(Settling::Kernel, RoundOutcome::Completed)
+            .await
+            .is_some());
 
         // A stale continuesRound for a round that already finished on its own
         // must not reopen it, and must not be reported as "cut short" —
@@ -6968,18 +7044,98 @@ mod tests {
         assert!(current.outcome.is_none());
     }
 
+    /// Sequence numbers are a promise about order, so something has to keep it.
+    ///
+    /// Several tasks publish to one session at once: the event pump, a stop
+    /// that escalated past a deaf agent, the call that started the turn. When
+    /// the number was taken outside the lock that orders the replay buffer, two
+    /// of them could take 5 and 6 and arrive in the other order — and a client
+    /// asking to be caught up would be handed the session's history in an order
+    /// that never happened.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_publishers_leave_the_replay_in_sequence() {
+        let (live, _store_dir) = live_session(meta());
+
+        let mut publishers = Vec::new();
+        for n in 0..256 {
+            let live = live.clone();
+            publishers.push(tokio::spawn(async move {
+                live.publish(SessionEvent::TurnProgress {
+                    turn_id: format!("t{n}"),
+                    usage: Usage::default(),
+                })
+                .await;
+            }));
+        }
+        for publisher in publishers {
+            publisher.await.expect("a publisher panicked");
+        }
+
+        let replay = live.replay.lock().await;
+        let seqs: Vec<u64> = replay.iter().map(|event| event.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            seqs, sorted,
+            "the replay buffer holds the session's own history out of order"
+        );
+        assert_eq!(seqs.len(), 256, "an event went missing");
+    }
+
+    /// The straggler.
+    ///
+    /// A round folds several adapter turns, so "a terminal arrived" and "the
+    /// turn this round is running has ended" are different facts. Nothing in
+    /// the kernel used to tell them apart, and two adapters cannot: claude's
+    /// `result` frame carries no turn id, so it stamps whichever turn is
+    /// current when the frame arrives. Acting on a straggler ends the turn the
+    /// user is watching because of one they already cancelled.
+    #[tokio::test]
+    async fn a_terminal_from_a_superseded_turn_does_not_end_the_one_running() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        live.continue_round("t1").await;
+
+        assert!(
+            live.settle_round(Settling::Turn("t0"), RoundOutcome::Completed)
+                .await
+                .is_none(),
+            "a terminal naming the superseded turn settled the round"
+        );
+        assert!(
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .expect("the round is still there")
+                .outcome
+                .is_none(),
+            "the round was closed by a turn it is no longer running"
+        );
+
+        // And the turn that is running still ends it, or the fence would be a
+        // freeze of its own.
+        let settled = live
+            .settle_round(Settling::Turn("t1"), RoundOutcome::Completed)
+            .await
+            .expect("the running turn must still be able to end its round");
+        assert_eq!(settled.outcome, Some(RoundOutcome::Completed));
+    }
+
     #[tokio::test]
     async fn settle_round_is_idempotent() {
         let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
 
         let settled = live
-            .settle_round(RoundOutcome::Completed)
+            .settle_round(Settling::Kernel, RoundOutcome::Completed)
             .await
             .expect("the round was open");
         assert_eq!(settled.user_item_id.as_deref(), Some("u0"));
         assert!(
-            live.settle_round(RoundOutcome::Failed).await.is_none(),
+            live.settle_round(Settling::Kernel, RoundOutcome::Failed)
+                .await
+                .is_none(),
             "a round cannot be settled twice"
         );
 
@@ -7033,7 +7189,8 @@ mod tests {
 
         live.round_blocked().await;
         tokio::time::sleep(Duration::from_millis(20)).await;
-        live.settle_round(RoundOutcome::Canceled).await;
+        live.settle_round(Settling::Kernel, RoundOutcome::Canceled)
+            .await;
         let round = live.active_round.lock().await.clone().unwrap();
         assert!(
             round.blocked_ms >= 30,
