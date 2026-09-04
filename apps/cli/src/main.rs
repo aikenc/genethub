@@ -20,6 +20,7 @@ const FORWARDED: &[&str] = &[
     "context",
     "capabilities",
     "workspace",
+    "space",
     "session",
     "agent",
     "shell",
@@ -198,6 +199,16 @@ pub fn usage() -> i32 {
   genet workflow get --run <id>    read one durable workflow run
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
+  genet space inspect              which responsibilities this AgentSpace carries
+  genet space children             the direct Workers this Executor may dispatch to
+  genet space component set --component <pm|executor|worker|reviewer> [--role <r>]
+                              [--disabled] [--revision <n>]
+                                    mount or reconfigure one responsibility
+  genet space component remove --component <id> [--revision <n>]
+                                    unmount one responsibility
+  genet space parent set (--parent <id> | --detach) [--revision <n>]
+                                    move this AgentSpace in the ownership tree
+  genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

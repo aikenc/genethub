@@ -352,6 +352,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::BlobGet { .. }
         | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
+        | Request::AgentSpaceChildren { .. }
         | Request::DirectoryList { .. }
         | Request::FileTree { .. }
         | Request::LogTail { .. }
@@ -423,7 +424,7 @@ pub fn required(request: &Request) -> Capability {
         // reading one.
         Request::WorkspaceOpen { .. }
         | Request::WorkspaceCreate { .. }
-        | Request::WorkspaceConfigurePipeSpace { .. }
+        | Request::AgentSpaceConfigure { .. }
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet

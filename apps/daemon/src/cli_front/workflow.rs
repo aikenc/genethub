@@ -464,7 +464,13 @@ async fn read_run(
     Ok(run)
 }
 
-async fn resolve_workspace(rpc: &Rpc, explicit: Option<String>) -> Result<String, CliFailure> {
+/// Resolves which project a verb acts on: an explicit id must be open, and
+/// otherwise the caller's working directory decides. Shared with `genet
+/// space` so both surfaces answer "which project am I in" identically.
+pub(super) async fn resolve_workspace(
+    rpc: &Rpc,
+    explicit: Option<String>,
+) -> Result<String, CliFailure> {
     if let Some(workspace_id) = explicit {
         let known = query::list_workspaces(rpc).await?;
         if known.iter().any(|workspace| workspace.id == workspace_id) {

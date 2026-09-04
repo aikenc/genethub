@@ -20,6 +20,7 @@ mod client;
 #[allow(dead_code)]
 mod rpc_wire;
 mod shell;
+mod space;
 mod speech;
 pub mod target;
 mod update;
@@ -194,6 +195,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         Some("client") => Box::pin(client::run(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
         Some("workflow") => Box::pin(workflow::workflow(&args[1..], &selection)).await,
+        Some("space") => Box::pin(space::space(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,
         Some("machine") => Box::pin(machine::machine(&args[1..])).await,
         Some("device") => Box::pin(machine::device(&args[1..], &selection)).await,

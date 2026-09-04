@@ -4,6 +4,7 @@
 //! real daemon in-process instead of asserting against a mock of one.
 
 pub mod adapter;
+pub mod agent_space;
 pub mod authz;
 pub(crate) mod blocking;
 pub mod channel_auth;

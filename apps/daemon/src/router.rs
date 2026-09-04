@@ -270,6 +270,50 @@ async fn authorize_project_workflow_mutation(
     }
 }
 
+/// Refuses to move an AgentSpace while a Run still depends on it.
+///
+/// A Run pins its execution carrier when it starts, so a reparent in flight
+/// would leave that Run bound to a Space in another project's scope. The
+/// check lives here rather than in `workspace` because it is the one place
+/// that holds both the registry and the Workflow runtime root; the registry
+/// itself deliberately knows nothing about Runs.
+async fn guard_agent_space_reparent(
+    state: &Shared,
+    workspace_id: &str,
+    operation: &genehub_proto::AgentSpaceOperation,
+) -> anyhow::Result<()> {
+    if !matches!(
+        operation,
+        genehub_proto::AgentSpaceOperation::SetParent { .. }
+    ) {
+        return Ok(());
+    }
+    let space = state.workspaces.agent_space(workspace_id).await?;
+    let Some(parent_id) = space.parent_workspace_id.as_deref() else {
+        // A Space that is not attached yet cannot be a pinned carrier.
+        return Ok(());
+    };
+    let project = state.workspaces.project_root(parent_id).await?;
+    // Being unable to read the project is not evidence that nothing depends on
+    // this Space. Refuse and say so, rather than letting an unreadable project
+    // silently mean "idle".
+    let busy = match state.workspaces.get(&project).await {
+        Ok(project_entry) => crate::workflow::carrier_has_active_run(
+            &state.paths.root,
+            &project,
+            &project_entry.root,
+            workspace_id,
+        )?,
+        Err(error) => anyhow::bail!(
+            "无法确认该 AgentSpace 是否仍在执行 Workflow Run，先恢复项目 {project}：{error:#}"
+        ),
+    };
+    if busy {
+        anyhow::bail!("该 AgentSpace 仍是进行中 Workflow Run 的执行载体，无法改变归属");
+    }
+    Ok(())
+}
+
 async fn dispatch(
     state: &Shared,
     transport: TransportKind,
@@ -1376,26 +1420,30 @@ async fn dispatch(
             }
         }
 
-        Request::WorkspaceConfigurePipeSpace {
+        Request::AgentSpaceConfigure {
             workspace_id,
-            parent_workspace_id,
-            pm,
-            worker_role,
-            lifecycle,
-        } => match state
-            .workspaces
-            .configure_pipe_space(
-                &workspace_id,
-                parent_workspace_id,
-                pm,
-                worker_role,
-                lifecycle,
-            )
-            .await
-        {
-            Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
-            Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-        },
+            expected_revision,
+            operation,
+        } => {
+            if let Err(error) = guard_agent_space_reparent(state, &workspace_id, &operation).await {
+                return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+            }
+            match state
+                .workspaces
+                .configure_agent_space(&workspace_id, expected_revision, &operation)
+                .await
+            {
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }
+
+        Request::AgentSpaceChildren { workspace_id } => {
+            match state.workspaces.schedulable_children(&workspace_id).await {
+                Ok(children) => Handled::ok(Reply::Workspaces(children)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }
 
         Request::WorkspaceRename { workspace_id, name } => {
             match state.workspaces.rename(&workspace_id, &name).await {
@@ -1751,7 +1799,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::DeviceRemoteDetach => Some("device.remoteDetach"),
         Request::WorkspaceOpen { .. } => Some("workspace.open"),
         Request::WorkspaceCreate { .. } => Some("workspace.create"),
-        Request::WorkspaceConfigurePipeSpace { .. } => Some("workspace.configurePipeSpace"),
+        Request::AgentSpaceConfigure { .. } => Some("agentSpace.configure"),
         Request::WorkspaceRename { .. } => Some("workspace.rename"),
         Request::WorkspaceRemove { .. } => Some("workspace.remove"),
         Request::DirectoryList { .. } => Some("directory.list"),
