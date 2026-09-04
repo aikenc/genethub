@@ -245,6 +245,30 @@ name: string, description?: string,
 argumentHint?: string, };
 
 /**
+ * One responsibility live in one Session, with the storage it may write.
+ *
+ * A Session is the running instance of its AgentSpace, so this list is
+ * derived from the Space's current composition rather than fixed when the
+ * Session was created: mounting a component reaches the conversations already
+ * open on that Space. The two directories are both durable and differ only in
+ * lifetime — the Space scope outlives every Session, the Session scope is
+ * reclaimed with the conversation.
+ */
+export type ComponentInstanceInfo = { 
+/**
+ * `pm`, `executor`, `worker` or `reviewer`.
+ */
+componentId: string, role?: string, 
+/**
+ * Storage shared by every Session of this Space.
+ */
+spaceDir: string, 
+/**
+ * Storage private to this Session.
+ */
+sessionDir: string, };
+
+/**
  * What the operating system is holding a process to, told to whoever asked
  * for the process.
  *
@@ -771,7 +795,7 @@ export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { 
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -787,7 +811,7 @@ expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId:
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */

@@ -2,7 +2,13 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
-import { BlockedError } from "../../infrastructure/public.ts";
+import {
+  BlockedError,
+  DAEMON_COMPONENT,
+  GENET,
+  HOST,
+  runtimeArtifactCandidates,
+} from "../../infrastructure/public.ts";
 
 function locateOnPath(name: string): string | undefined {
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
@@ -18,12 +24,8 @@ export function locateGenet(openRoot: string): string {
   if (override) return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   const suffix = process.platform === "win32" ? ".exe" : "";
   const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
-  for (const profile of ["iterate", "debug", "release"] as const) {
-    for (const name of names) {
-      const candidate = path.resolve(openRoot, "target", profile, `${name}${suffix}`);
-      if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
-    }
-  }
+  const fromTree = firstExistingFile(runtimeArtifactCandidates(openRoot, GENET));
+  if (fromTree) return fromTree;
   for (const name of names) {
     const fromPath = locateOnPath(`${name}${suffix}`);
     if (fromPath) return fromPath;
@@ -84,12 +86,7 @@ export function tryLocateHost(openRoot: string): string | undefined {
   if (override) {
     return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   }
-  const suffix = process.platform === "win32" ? ".exe" : "";
-  return firstExistingFile([
-    path.resolve(openRoot, "target", "iterate", `genehub-host-local${suffix}`),
-    path.resolve(openRoot, "target", "debug", `genehub-host-local${suffix}`),
-    path.resolve(openRoot, "target", "release", `genehub-host-local${suffix}`),
-  ]);
+  return firstExistingFile(runtimeArtifactCandidates(openRoot, HOST));
 }
 
 export function tryLocateDaemonComponent(openRoot: string): string | undefined {
@@ -98,11 +95,7 @@ export function tryLocateDaemonComponent(openRoot: string): string | undefined {
   if (override) {
     return existsSync(override) && statSync(override).isFile() ? path.resolve(override) : override;
   }
-  return firstExistingFile([
-    path.resolve(openRoot, "target", "wasm32-wasip2", "iterate", "genehub_guest.wasm"),
-    path.resolve(openRoot, "target", "wasm32-wasip2", "debug", "genehub_guest.wasm"),
-    path.resolve(openRoot, "target", "wasm32-wasip2", "release", "genehub_guest.wasm"),
-  ]);
+  return firstExistingFile(runtimeArtifactCandidates(openRoot, DAEMON_COMPONENT));
 }
 
 export function tryLocateAgentComponent(openRoot: string): string | undefined {

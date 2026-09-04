@@ -277,6 +277,32 @@ async fn authorize_project_workflow_mutation(
 /// check lives here rather than in `workspace` because it is the one place
 /// that holds both the registry and the Workflow runtime root; the registry
 /// itself deliberately knows nothing about Runs.
+/// The responsibilities live in one Session.
+///
+/// Read from the Space's current composition rather than from anything stored
+/// on the Session: a Session *is* the instance of its AgentSpace, so mounting
+/// a component reaches the conversations already open on it. Nothing here can
+/// change composition — that stays an operation on the Space.
+async fn session_components(
+    state: &Shared,
+    session_id: &str,
+) -> anyhow::Result<Vec<genehub_proto::ComponentInstanceInfo>> {
+    let (workspace_id, space_home, session_dir) =
+        state.sessions.component_scope(session_id).await?;
+    let space = state.workspaces.agent_space(&workspace_id).await?;
+    let instances =
+        crate::session::components::resolve(&space_home, &session_dir, &space.components)?;
+    Ok(instances
+        .into_iter()
+        .map(|instance| genehub_proto::ComponentInstanceInfo {
+            component_id: instance.component_id,
+            role: instance.role,
+            space_dir: instance.space_dir.display().to_string(),
+            session_dir: instance.session_dir.display().to_string(),
+        })
+        .collect())
+}
+
 async fn guard_agent_space_reparent(
     state: &Shared,
     workspace_id: &str,
@@ -646,6 +672,13 @@ async fn dispatch(
             Ok(snapshot) => Handled::ok(Reply::Snapshot(snapshot)),
             Err(error) => failed(error),
         },
+
+        Request::SessionComponents { session_id } => {
+            match session_components(state, &session_id).await {
+                Ok(instances) => Handled::ok(Reply::SessionComponents(instances)),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionInspect {
             session_id,

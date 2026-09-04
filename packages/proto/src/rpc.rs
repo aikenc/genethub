@@ -163,6 +163,10 @@ pub enum Request {
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
     SessionGet { session_id: String },
+    /// Which responsibilities are live in this Session, and where each may
+    /// write. Read-only: composition is changed on the Space, not here.
+    #[serde(rename = "session.components", rename_all = "camelCase")]
+    SessionComponents { session_id: String },
     #[serde(rename = "session.inspect", rename_all = "camelCase")]
     SessionInspect {
         session_id: String,
@@ -770,6 +774,7 @@ pub enum Reply {
     Session(SessionSummary),
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
+    SessionComponents(Vec<ComponentInstanceInfo>),
     SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
     SessionInspection(SessionInspection),

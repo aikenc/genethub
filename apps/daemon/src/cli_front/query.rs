@@ -127,6 +127,9 @@ enum Query {
     SessionGet {
         session_id: String,
     },
+    SessionComponents {
+        session_id: String,
+    },
     SessionInspect {
         session_id: String,
         through_round_id: Option<String>,
@@ -283,6 +286,14 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             }),
             _ => Err(CliFailure::invalid_args(
                 "session get needs exactly one session id",
+            )),
+        },
+        "components" => match &args[1..] {
+            [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionComponents {
+                session_id: session_id.clone(),
+            }),
+            _ => Err(CliFailure::invalid_args(
+                "session components needs exactly one session id",
             )),
         },
         "inspect" => {
@@ -516,6 +527,20 @@ async fn execute(
                 .map_err(rpc_error)?,
             )?;
             Ok(("session.get", json!({"session": snapshot})))
+        }
+        Query::SessionComponents { session_id } => {
+            let rpc = connect_selected(selection).await?;
+            let instances = component_instances(
+                rpc.call(Request::SessionComponents {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok((
+                "session.components",
+                json!({"sessionId": session_id, "components": instances}),
+            ))
         }
         Query::SessionInspect {
             session_id,
@@ -1494,6 +1519,15 @@ fn snapshot(reply: Reply) -> Result<SessionSnapshot, CliFailure> {
     }
 }
 
+fn component_instances(
+    reply: Reply,
+) -> Result<Vec<genehub_proto::ComponentInstanceInfo>, CliFailure> {
+    match reply {
+        Reply::SessionComponents(instances) => Ok(instances),
+        other => Err(unexpected_reply("session components", &other)),
+    }
+}
+
 fn inspection(reply: Reply) -> Result<SessionInspection, CliFailure> {
     match reply {
         Reply::SessionInspection(value) => Ok(value),
@@ -1576,6 +1610,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Session(_) => "session",
         Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
+        Reply::SessionComponents(_) => "session components",
         Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
         Reply::SessionInspection(_) => "session inspection",

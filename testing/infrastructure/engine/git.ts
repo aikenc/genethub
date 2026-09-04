@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type { ArtifactIdentity, RepoIdentity } from "../types.ts";
+import { GENET, locateRuntimeArtifact } from "./artifacts.ts";
 
 function git(cwd: string, args: string[]): string {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -39,23 +40,11 @@ export function repoIdentity(repo: string): RepoIdentity {
 }
 
 export function artifactIdentity(openRoot: string): ArtifactIdentity {
-  const override = process.env.GENET_E2E_DAEMON?.trim();
-  if (override) {
-    const result = spawnSync("sha256sum", [override], { encoding: "utf8" });
-    return { path: override, hash: result.status === 0 ? result.stdout.split(/\s+/)[0]! : null, kind: "override" };
-  }
-  const suffix = process.platform === "win32" ? ".exe" : "";
-  const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
-  for (const profile of ["iterate", "debug", "release"] as const) {
-    for (const name of names) {
-      const candidate = path.join(openRoot, "target", profile, `${name}${suffix}`);
-      if (!existsSync(candidate)) continue;
-      const digest = spawnSync("sha256sum", [candidate], { encoding: "utf8" });
-      const hash = (digest.stdout ?? "").split(/\s+/)[0] || null;
-      return { path: candidate, hash, kind: name };
-    }
-  }
-  return { path: null, hash: null, kind: "missing" };
+  const artifact = locateRuntimeArtifact(openRoot, GENET);
+  if (!artifact.path) return { path: null, hash: null, kind: "missing" };
+  const digest = spawnSync("sha256sum", [artifact.path], { encoding: "utf8" });
+  const hash = (digest.stdout ?? "").split(/\s+/)[0] || null;
+  return { path: artifact.path, hash, kind: path.basename(artifact.path) };
 }
 
 export function runsIgnored(spaceRoot: string): boolean {

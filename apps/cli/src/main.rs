@@ -209,6 +209,7 @@ pub fn usage() -> i32 {
   genet space parent set (--parent <id> | --detach) [--revision <n>]
                                     move this AgentSpace in the ownership tree
   genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
+  genet session components <id>     which responsibilities are live in this session
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

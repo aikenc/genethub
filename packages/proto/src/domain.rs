@@ -190,6 +190,29 @@ pub struct AgentComponentInfo {
     pub role: Option<String>,
 }
 
+/// One responsibility live in one Session, with the storage it may write.
+///
+/// A Session is the running instance of its AgentSpace, so this list is
+/// derived from the Space's current composition rather than fixed when the
+/// Session was created: mounting a component reaches the conversations already
+/// open on that Space. The two directories are both durable and differ only in
+/// lifetime — the Space scope outlives every Session, the Session scope is
+/// reclaimed with the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ComponentInstanceInfo {
+    /// `pm`, `executor`, `worker` or `reviewer`.
+    pub component_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub role: Option<String>,
+    /// Storage shared by every Session of this Space.
+    pub space_dir: String,
+    /// Storage private to this Session.
+    pub session_dir: String,
+}
+
 /// An AgentSpace's durable project relationship and mounted components.
 ///
 /// This is separate from its filesystem folders: the workspace file describes
