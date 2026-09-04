@@ -1154,6 +1154,13 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
                     parent_workspace_id: Some(parent),
                 },
             ..
+        }
+        | Request::AgentSpaceChangePlan {
+            operation:
+                genehub_proto::AgentSpaceOperation::SetParent {
+                    parent_workspace_id: Some(parent),
+                },
+            ..
         } = &request
         {
             if parent != scope {
@@ -1444,6 +1451,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::PtyOpen { workspace_id, .. }
         | Request::SpeechContextPreview { workspace_id, .. }
         | Request::SpeechFeedbackRecord { workspace_id, .. }
+        | Request::AgentSpaceChangePlan { workspace_id, .. }
         | Request::AgentSpaceConfigure { workspace_id, .. }
         | Request::AgentSpaceBuilder { workspace_id, .. }
         | Request::ProjectBootstrap { workspace_id, .. }

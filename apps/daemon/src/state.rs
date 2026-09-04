@@ -31,6 +31,7 @@ pub struct AppState {
     pub speech: Arc<crate::speech::SpeechBroker>,
     pub sessions: SessionManager,
     pub workspaces: Workspaces,
+    pub project_control: crate::project_control::Broker,
     pub terminals: Arc<Terminals>,
     /// What each session's agent has left running.
     pub processes: Arc<crate::processes::Processes>,
@@ -137,13 +138,15 @@ impl AppState {
                 "GENEHUB_CLI is unavailable or not absolute; Agent sessions will not guess a channel command"
             );
         }
+        let project_control = crate::project_control::Broker::new(&paths.root);
         let sessions = SessionManager::new_with_diagnostics(
             store,
             registry.clone(),
             config.replay_window,
             diagnostics.clone(),
         )
-        .with_builtin_skills(skills_dir, front_door_cli);
+        .with_builtin_skills(skills_dir, front_door_cli)
+        .with_project_control(project_control.clone());
 
         let config = Arc::new(RwLock::new(config));
         let workspaces = Workspaces::new(config.clone(), paths.config_file(), homes);
@@ -171,6 +174,7 @@ impl AppState {
             speech: Arc::new(crate::speech::SpeechBroker::new()),
             sessions,
             workspaces,
+            project_control,
             terminals,
             processes,
             diagnostics,

@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { resolveAgentPresentation } from "../presentation/catalog/resolve";
 import { SessionStatusIcon } from "../shell/SessionStatusIcon";
+import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { formatClock } from "./selectionCopy";
 
@@ -16,6 +17,7 @@ export function SessionListItem({
   session,
   agent,
   workspace,
+  workspaceLabel,
   selected,
   onSelect,
 }: {
@@ -23,6 +25,7 @@ export function SessionListItem({
   agent?: AgentInfo;
   /** Resolved from the session's own machine; absent only when it is gone. */
   workspace?: WorkspaceInfo;
+  workspaceLabel?: string;
   selected: boolean;
   onSelect(): void;
 }) {
@@ -45,7 +48,7 @@ export function SessionListItem({
           {session.managed ? ` · 受管 ${session.managed.role}` : ""}
         </span>
       </span>
-      {workspace ? <WorkspaceAffordance workspace={workspace} /> : null}
+      {workspace ? <WorkspaceAffordance workspace={workspace} label={workspaceLabel} /> : null}
     </button>
   );
 }
@@ -78,6 +81,7 @@ export function SessionPicker({
   excludeId?: string;
 }) {
   const [query, setQuery] = useState("");
+  const workspaceTree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
 
   const listed = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -115,6 +119,7 @@ export function SessionPicker({
               session={session}
               agent={agents.find((entry) => entry.id === session.agentId)}
               workspace={workspaces.find((entry) => entry.id === session.workspaceId)}
+              workspaceLabel={workspaceTree.breadcrumbById[session.workspaceId]}
               selected={session.id === selectedId}
               onSelect={() => onSelect(session.id)}
             />

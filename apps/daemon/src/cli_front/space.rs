@@ -10,7 +10,7 @@ use genehub_proto::{AgentSpaceBuilderOperation, AgentSpaceOperation, Reply, Requ
 use serde_json::json;
 
 use super::output::{self, CliFailure};
-use super::rpc::Rpc;
+use super::rpc::{Rpc, RpcError};
 use super::target::Selection;
 use super::workflow::resolve_workspace;
 use super::{query, EXIT_OK};
@@ -27,6 +27,9 @@ enum Command {
         workspace_id: Option<String>,
         revision: Option<u64>,
         operation: AgentSpaceOperation,
+        plan: bool,
+        plan_digest: Option<String>,
+        action_id: Option<String>,
     },
     Builder {
         workspace_id: Option<String>,
@@ -39,6 +42,9 @@ enum Command {
         apply: bool,
         agent_id: Option<String>,
         model_id: Option<String>,
+        plan_digest: Option<String>,
+        action_id: Option<String>,
+        expected_revision: Option<u64>,
     },
     BootstrapList,
 }
@@ -115,6 +121,9 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             workspace_id,
             revision,
             operation,
+            plan,
+            plan_digest,
+            action_id,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let expected_revision = match revision {
@@ -125,26 +134,48 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 // `--revision` explicitly.
                 None => current_revision(rpc, &workspace_id).await?,
             };
-            let Reply::Workspace(space) = rpc
-                .call(Request::AgentSpaceConfigure {
-                    workspace_id,
-                    expected_revision,
-                    operation,
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered agentSpace.configure with the wrong reply",
-                ));
-            };
-            output::succeed(
-                "space.configured",
-                json!({
-                    "workspaceId": space.id,
-                    "agentSpace": space.agent_space,
-                }),
-            );
+            if plan {
+                let Reply::AgentSpaceChangePlan(report) = rpc
+                    .call(Request::AgentSpaceChangePlan {
+                        workspace_id,
+                        expected_revision,
+                        operation,
+                    })
+                    .await
+                    .map_err(query::rpc_error)?
+                else {
+                    return Err(CliFailure::protocol(
+                        "the daemon answered agentSpace.changePlan with the wrong reply",
+                    ));
+                };
+                output::succeed(
+                    "space.change-plan",
+                    serde_json::to_value(report).expect("AgentSpace plans serialize"),
+                );
+            } else {
+                let Reply::Workspace(space) = rpc
+                    .call(Request::AgentSpaceConfigure {
+                        workspace_id,
+                        expected_revision,
+                        operation,
+                        plan_digest,
+                        action_id,
+                    })
+                    .await
+                    .map_err(query::rpc_error)?
+                else {
+                    return Err(CliFailure::protocol(
+                        "the daemon answered agentSpace.configure with the wrong reply",
+                    ));
+                };
+                output::succeed(
+                    "space.configured",
+                    json!({
+                        "workspaceId": space.id,
+                        "agentSpace": space.agent_space,
+                    }),
+                );
+            }
             Ok(EXIT_OK)
         }
         Command::Builder {
@@ -156,6 +187,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             let Reply::AgentSpaceBuilder(report) = rpc
                 .call(Request::AgentSpaceBuilder {
                     workspace_id,
+                    target_workspace_id: None,
                     space_name,
                     operation,
                 })
@@ -178,8 +210,12 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             apply,
             agent_id,
             model_id,
+            plan_digest,
+            action_id,
+            expected_revision,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let failure_plan_digest = plan_digest.clone();
             let Reply::BootstrapPack(report) = rpc
                 .call(Request::ProjectBootstrap {
                     workspace_id,
@@ -187,9 +223,12 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                     apply,
                     agent_id,
                     model_id,
+                    plan_digest,
+                    action_id,
+                    expected_revision,
                 })
                 .await
-                .map_err(query::rpc_error)?
+                .map_err(|error| bootstrap_rpc_error(error, failure_plan_digest.as_deref()))?
             else {
                 return Err(CliFailure::protocol(
                     "the daemon answered project.bootstrap with the wrong reply",
@@ -214,6 +253,153 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("space.bootstrap.list", json!({"packs": packs}));
             Ok(EXIT_OK)
         }
+    }
+}
+
+fn bootstrap_rpc_error(error: RpcError, plan_digest: Option<&str>) -> CliFailure {
+    let failure = query::rpc_error(error);
+    let message = failure.message.clone();
+    let known = [
+        "rollbackIncomplete",
+        "builderVerifyFailed",
+        "activationFailed",
+        "revisionConflict",
+        "approvalRejected",
+        "approvalStale",
+        "approvalConsumed",
+        "approvalRequired",
+        "actionInProgress",
+        "wrongProjectRoot",
+        "ancestorGitBoundary",
+        "nonEmptyNonGit",
+        "dirtyGit",
+        "gitIdentityUnavailable",
+        "packConflict",
+        "bootstrapFailed",
+    ];
+    let code = known
+        .into_iter()
+        .find(|candidate| {
+            message.starts_with(&format!("{candidate}:"))
+                || message.contains(&format!("{candidate}:"))
+        })
+        .unwrap_or(failure.code);
+    let (stage, changed, rolled_back, retryable, recovery) = match code {
+        "approvalRejected" => (
+            "approval",
+            false,
+            true,
+            false,
+            "No changes were made. Ask again only if the user requests takeover.",
+        ),
+        "approvalRequired" | "approvalStale" | "approvalConsumed" => (
+            "approval",
+            false,
+            true,
+            false,
+            "Create a fresh read-only plan and ask the user to approve that exact plan.",
+        ),
+        "actionInProgress" => (
+            "approval",
+            false,
+            true,
+            true,
+            "Wait for the same action id to finish, then inspect its receipt.",
+        ),
+        "wrongProjectRoot" | "ancestorGitBoundary" => (
+            "gitPreflight",
+            false,
+            true,
+            false,
+            "Open the intended project root as its own Workspace and plan again.",
+        ),
+        "nonEmptyNonGit" => (
+            "gitPreflight",
+            false,
+            true,
+            false,
+            "Use an empty folder, or initialize and commit this folder before takeover.",
+        ),
+        "dirtyGit" => (
+            "gitPreflight",
+            false,
+            true,
+            false,
+            "Commit or clean the listed project changes, then create a new plan.",
+        ),
+        "gitIdentityUnavailable" => (
+            "gitCommit",
+            false,
+            true,
+            false,
+            "Configure user.name and user.email, or use the product identity shown by a new plan.",
+        ),
+        "packConflict" => (
+            "packPreflight",
+            false,
+            true,
+            false,
+            "Inspect the existing PM runtime and migrate or archive it before takeover.",
+        ),
+        "builderVerifyFailed" => (
+            "builderVerify",
+            true,
+            true,
+            false,
+            "Fix the reported AgentSpaceBuilder source or ownership conflict and plan again.",
+        ),
+        "revisionConflict" => (
+            "registryCommit",
+            false,
+            true,
+            false,
+            "Refresh the AgentSpace tree and create a new plan from the current revision.",
+        ),
+        "activationFailed" => (
+            "workflowActivation",
+            true,
+            true,
+            false,
+            "Fix the Pack workflow source or evaluation failure and plan again.",
+        ),
+        "rollbackIncomplete" => (
+            "rollback",
+            true,
+            false,
+            false,
+            "Do not start a Run. Inspect the transaction report and repair the listed residual objects.",
+        ),
+        "bootstrapFailed" => (
+            "apply",
+            true,
+            true,
+            true,
+            "The transaction was rolled back. Resolve the reported cause and retry the same action or plan again.",
+        ),
+        _ => (
+            "request",
+            false,
+            true,
+            failure.retryable,
+            "Inspect the error and create a new plan after its cause is resolved.",
+        ),
+    };
+    CliFailure {
+        code,
+        message,
+        retryable,
+        details: Some(json!({
+            "schema": "genehub.bootstrap-failure.v1",
+            "stage": stage,
+            "code": code,
+            "changed": changed,
+            "rolledBack": rolled_back,
+            "retryable": retryable,
+            "planDigest": plan_digest,
+            "conflictObjects": [],
+            "recoveryAction": recovery,
+        })),
+        exit: failure.exit,
     }
 }
 
@@ -248,12 +434,16 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
         }
         ("component", "set") => {
             let mut values = Values::parse(rest(2))?;
+            values.validate_change_mode()?;
             let component_id = values.component.take().ok_or_else(|| {
                 CliFailure::invalid_args("space component set 需要 --component <pm|executor|worker|reviewer>")
             })?;
             Ok(Command::Configure {
                 workspace_id: values.workspace.take(),
                 revision: values.revision,
+                plan: values.plan,
+                plan_digest: values.plan_digest.take(),
+                action_id: values.action_id.take(),
                 operation: AgentSpaceOperation::SetComponent {
                     component_id,
                     enabled: !values.disabled,
@@ -263,17 +453,22 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
         }
         ("component", "remove") => {
             let mut values = Values::parse(rest(2))?;
+            values.validate_change_mode()?;
             let component_id = values.component.take().ok_or_else(|| {
                 CliFailure::invalid_args("space component remove 需要 --component <id>")
             })?;
             Ok(Command::Configure {
                 workspace_id: values.workspace.take(),
                 revision: values.revision,
+                plan: values.plan,
+                plan_digest: values.plan_digest.take(),
+                action_id: values.action_id.take(),
                 operation: AgentSpaceOperation::RemoveComponent { component_id },
             })
         }
         ("parent", "set") => {
             let mut values = Values::parse(rest(2))?;
+            values.validate_change_mode()?;
             if values.parent.is_some() && values.detach {
                 return Err(CliFailure::invalid_args(
                     "space parent set 不能同时使用 --parent 与 --detach",
@@ -287,6 +482,9 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             Ok(Command::Configure {
                 workspace_id: values.workspace.take(),
                 revision: values.revision,
+                plan: values.plan,
+                plan_digest: values.plan_digest.take(),
+                action_id: values.action_id.take(),
                 operation: AgentSpaceOperation::SetParent {
                     parent_workspace_id: values.parent.take(),
                 },
@@ -294,6 +492,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
         }
         ("lifecycle", "set") => {
             let mut values = Values::parse(rest(2))?;
+            values.validate_change_mode()?;
             let lifecycle = values.lifecycle.take().ok_or_else(|| {
                 CliFailure::invalid_args(
                     "space lifecycle set 需要 --lifecycle <persistent|pooled|ephemeral>",
@@ -302,6 +501,9 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             Ok(Command::Configure {
                 workspace_id: values.workspace.take(),
                 revision: values.revision,
+                plan: values.plan,
+                plan_digest: values.plan_digest.take(),
+                action_id: values.action_id.take(),
                 operation: AgentSpaceOperation::SetLifecycle { lifecycle },
             })
         }
@@ -350,12 +552,34 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             let pack_id = values.pack.take().ok_or_else(|| {
                 CliFailure::invalid_args("space bootstrap 需要 --pack <id>")
             })?;
+            let apply = action == "apply";
+            if apply
+                && (values.plan_digest.is_none()
+                    || values.action_id.is_none()
+                    || values.expected_revision.is_none())
+            {
+                return Err(CliFailure::invalid_args(
+                    "space bootstrap apply 需要把 plan 返回的 --plan-digest、--action-id 与 --expected-revision 原样带回",
+                ));
+            }
+            if !apply
+                && (values.plan_digest.is_some()
+                    || values.action_id.is_some()
+                    || values.expected_revision.is_some())
+            {
+                return Err(CliFailure::invalid_args(
+                    "space bootstrap plan 不接受 apply 专用的 --plan-digest、--action-id 或 --expected-revision",
+                ));
+            }
             Ok(Command::Bootstrap {
                 workspace_id: values.workspace.take(),
                 pack_id,
-                apply: action == "apply",
+                apply,
                 agent_id: values.agent.take(),
                 model_id: values.model.take(),
+                plan_digest: values.plan_digest.take(),
+                action_id: values.action_id.take(),
+                expected_revision: values.expected_revision,
             })
         }
         _ => Err(CliFailure::invalid_args(
@@ -375,6 +599,10 @@ struct Values {
     pack: Option<String>,
     agent: Option<String>,
     model: Option<String>,
+    plan_digest: Option<String>,
+    action_id: Option<String>,
+    expected_revision: Option<u64>,
+    plan: bool,
     revision: Option<u64>,
     disabled: bool,
     detach: bool,
@@ -383,6 +611,20 @@ struct Values {
 }
 
 impl Values {
+    fn validate_change_mode(&self) -> Result<(), CliFailure> {
+        if self.plan && (self.plan_digest.is_some() || self.action_id.is_some()) {
+            return Err(CliFailure::invalid_args(
+                "--plan 不接受 --plan-digest 或 --action-id",
+            ));
+        }
+        if self.plan_digest.is_some() != self.action_id.is_some() {
+            return Err(CliFailure::invalid_args(
+                "AgentSpace apply 必须同时提供 --plan-digest 与 --action-id",
+            ));
+        }
+        Ok(())
+    }
+
     fn parse(args: &[String]) -> Result<Self, CliFailure> {
         let mut values = Self::default();
         let mut index = 0;
@@ -405,6 +647,15 @@ impl Values {
                 "--pack" => values.pack = Some(next(&mut index)?),
                 "--agent" => values.agent = Some(next(&mut index)?),
                 "--model" => values.model = Some(next(&mut index)?),
+                "--plan-digest" => values.plan_digest = Some(next(&mut index)?),
+                "--action-id" => values.action_id = Some(next(&mut index)?),
+                "--expected-revision" => {
+                    let value = next(&mut index)?;
+                    values.expected_revision = Some(value.parse().map_err(|_| {
+                        CliFailure::invalid_args("--expected-revision 需要非负整数")
+                    })?);
+                }
+                "--plan" => values.plan = true,
                 "--revision" => {
                     let value = next(&mut index)?;
                     values.revision = Some(
@@ -629,6 +880,9 @@ mod tests {
             apply,
             agent_id,
             model_id,
+            plan_digest,
+            action_id,
+            expected_revision,
             ..
         } = parse(&[
             "bootstrap".into(),
@@ -639,6 +893,12 @@ mod tests {
             "codex".into(),
             "--model".into(),
             "gpt-5".into(),
+            "--plan-digest".into(),
+            "sha256:plan".into(),
+            "--action-id".into(),
+            "bootstrap-1".into(),
+            "--expected-revision".into(),
+            "4".into(),
         ])
         .unwrap()
         else {
@@ -647,11 +907,23 @@ mod tests {
         assert!(apply);
         assert_eq!(agent_id.as_deref(), Some("codex"));
         assert_eq!(model_id.as_deref(), Some("gpt-5"));
+        assert_eq!(plan_digest.as_deref(), Some("sha256:plan"));
+        assert_eq!(action_id.as_deref(), Some("bootstrap-1"));
+        assert_eq!(expected_revision, Some(4));
 
         assert!(parse(&["bootstrap".into(), "apply".into()])
             .unwrap_err()
             .message
             .contains("--pack"));
+        assert!(parse(&[
+            "bootstrap".into(),
+            "apply".into(),
+            "--pack".into(),
+            "game-delivery-v1".into(),
+        ])
+        .unwrap_err()
+        .message
+        .contains("--plan-digest"));
     }
 
     #[test]
@@ -667,5 +939,41 @@ mod tests {
             "game-delivery-v1".into(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn bootstrap_failures_expose_a_stable_machine_readable_recovery_contract() {
+        let failure = bootstrap_rpc_error(
+            RpcError::Remote(genehub_proto::ProtocolError {
+                code: genehub_proto::ErrorCode::BadRequest,
+                message: "dirtyGit: commit or clean README.md".into(),
+            }),
+            Some("sha256:plan"),
+        );
+        assert_eq!(failure.code, "dirtyGit");
+        assert!(!failure.retryable);
+        let details = failure.details.unwrap();
+        assert_eq!(details["stage"], "gitPreflight");
+        assert_eq!(details["changed"], false);
+        assert_eq!(details["rolledBack"], true);
+        assert_eq!(details["planDigest"], "sha256:plan");
+        assert!(details["recoveryAction"]
+            .as_str()
+            .unwrap()
+            .contains("Commit or clean"));
+    }
+
+    #[test]
+    fn rollback_incomplete_is_never_reported_as_safely_retriable() {
+        let failure = bootstrap_rpc_error(
+            RpcError::Remote(genehub_proto::ProtocolError {
+                code: genehub_proto::ErrorCode::BadRequest,
+                message: "rollbackIncomplete: registry remained changed".into(),
+            }),
+            Some("sha256:plan"),
+        );
+        assert_eq!(failure.code, "rollbackIncomplete");
+        assert_eq!(failure.details.as_ref().unwrap()["rolledBack"], false);
+        assert!(!failure.retryable);
     }
 }

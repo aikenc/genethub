@@ -1,10 +1,11 @@
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { Endpoint, Host } from "../host";
 import { OpenProject } from "../workspace/OpenProject";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { buildAgentSpaceTree, type AgentSpaceTreeNode } from "../workspace/agent-space-tree";
 import { pickPromptSuggestions } from "./prompt-suggestions";
 import { useWorkbench } from "./store";
 
@@ -55,11 +56,36 @@ export function NewSessionPanel({
   // finger that had just tapped it, and everything below it moved.
   const [anchorId] = useState(() => draft?.workspaceId ?? null);
 
-  if (!draft) return null;
-  const ordered = recentFirst(workspaces, sessions, anchorId);
+  const ordered = useMemo(
+    () => recentFirst(workspaces, sessions, anchorId),
+    [workspaces, sessions, anchorId],
+  );
+  const tree = useMemo(() => buildAgentSpaceTree(ordered), [ordered]);
+  const rows = useMemo(() => {
+    const flattened: Array<{ workspace: WorkspaceInfo; depth: number; breadcrumb: string }> = [];
+    const visit = (node: AgentSpaceTreeNode, depth: number) => {
+      flattened.push({ workspace: node.workspace, depth, breadcrumb: node.breadcrumb });
+      node.children.forEach((child) => visit(child, depth + 1));
+    };
+    tree.roots.forEach((node) => visit(node, 0));
+    tree.anomalies.forEach((node) => visit(node, 0));
+    return flattened;
+  }, [tree]);
   const visible = showAllWorkspaces
-    ? ordered
-    : ordered.slice(0, NEW_SESSION_WORKSPACE_PREVIEW_LIMIT);
+    ? rows
+    : rows.slice(0, NEW_SESSION_WORKSPACE_PREVIEW_LIMIT);
+  const selected = workspaces.find((workspace) => workspace.id === draft?.workspaceId);
+  const guidance = selected?.agentSpace?.guidance ?? [];
+
+  useEffect(() => {
+    setSuggestions(
+      guidance.length > 0
+        ? pickPromptSuggestions(4, Math.random, guidance)
+        : pickPromptSuggestions(),
+    );
+  }, [draft?.workspaceId, guidance.join("\u0000")]);
+
+  if (!draft) return null;
 
   return (
     <div className="mx-auto h-full min-w-0 max-w-chat overflow-y-auto px-3 py-4">
@@ -76,18 +102,19 @@ export function NewSessionPanel({
           ) : null}
         </div>
         <ul className="mt-1 grid grid-cols-2 gap-x-1">
-          {visible.map((workspace) => {
+          {visible.map(({ workspace, depth, breadcrumb }) => {
             const chosen = workspace.id === draft.workspaceId;
             return (
               <li key={workspace.id} className="min-w-0">
                 <button
                   type="button"
                   aria-current={chosen}
-                  title={workspace.root}
+                  title={`${breadcrumb}\n${workspace.root}`}
                   onClick={() => newSession(workspace.id, null)}
                   className={`flex h-8 w-full min-w-0 items-center gap-1.5 rounded-lg px-2 text-left text-sm ${
                     chosen ? "bg-accent/10 text-fg" : "text-muted hover:bg-raised hover:text-fg"
                   }`}
+                  style={{ paddingLeft: `${0.5 + Math.min(depth, 5) * 0.75}rem` }}
                 >
                   <WorkspaceIcon workspace={workspace} />
                   <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
@@ -96,14 +123,14 @@ export function NewSessionPanel({
             );
           })}
         </ul>
-        {ordered.length > visible.length || showAllWorkspaces ? (
+        {rows.length > visible.length || showAllWorkspaces ? (
           <button
             type="button"
             aria-expanded={showAllWorkspaces}
             className="mt-0.5 h-7 rounded px-2 text-xs text-accent hover:bg-raised"
             onClick={() => setShowAllWorkspaces((shown) => !shown)}
           >
-            {showAllWorkspaces ? "收起" : `更多 ${ordered.length - visible.length}`}
+            {showAllWorkspaces ? "收起" : `更多 ${rows.length - visible.length}`}
           </button>
         ) : null}
       </section>
@@ -120,7 +147,13 @@ export function NewSessionPanel({
             type="button"
             aria-label="换一批建议"
             title="换一批"
-            onClick={() => setSuggestions(pickPromptSuggestions())}
+            onClick={() =>
+              setSuggestions(
+                guidance.length > 0
+                  ? pickPromptSuggestions(4, Math.random, guidance)
+                  : pickPromptSuggestions(),
+              )
+            }
             className="flex h-6 w-6 items-center justify-center rounded-full text-faint hover:bg-raised hover:text-fg"
           >
             <RefreshCw className="h-3.5 w-3.5" aria-hidden />

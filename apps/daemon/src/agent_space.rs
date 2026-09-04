@@ -330,6 +330,15 @@ pub fn describe(entry: &AgentSpaceEntry) -> AgentSpaceInfo {
                 role: component.role.clone(),
             })
             .collect(),
+        guidance: entry.guidance.clone(),
+        bootstrap_pack: entry.bootstrap_pack.as_ref().map(|pack| {
+            genehub_proto::AgentSpacePackIdentity {
+                id: pack.id.clone(),
+                version: pack.version,
+                digest: pack.digest.clone(),
+            }
+        }),
+        health: None,
     }
 }
 
@@ -363,6 +372,8 @@ mod tests {
             lifecycle: "persistent".into(),
             builder_lock_digest: "sha256:lock".into(),
             components: Vec::new(),
+            guidance: Vec::new(),
+            bootstrap_pack: None,
         }
     }
 

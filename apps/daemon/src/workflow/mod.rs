@@ -529,25 +529,43 @@ pub struct Transition {
     pub sessions: Vec<(SessionSummary, String)>,
 }
 
-/// Chinese project-controller contract for an ordinary main Session. PM is a
-/// responsibility marker on a non-worker PipeSpace, never a Session kind.
+/// Factual project-owned workflow pointers for an ordinary Session.
+///
+/// PM method, Pack choice, budgeting and review policy belong to Skills and
+/// DCG assets. This prompt deliberately carries no business instructions.
 pub fn root_session_guidance(cwd: &Path) -> Option<String> {
-    let source = find_source_root(cwd);
-    let location = source
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| format!("{SOURCE_DIR}/（尚未初始化）"));
+    let source = find_source_root(cwd)?;
+    let project_root = source.parent()?.parent()?;
+    let receipt_dir = project_root.join(".genethub/bootstrap-packs");
+    let mut entry_skills = std::fs::read_dir(&receipt_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .filter_map(|receipt| {
+            receipt
+                .get("entrySkill")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    entry_skills.sort();
+    entry_skills.dedup();
+    let entry_skills = entry_skills
+        .iter()
+        .map(|path| format!("`{}`", project_root.join(path).display()))
+        .collect::<Vec<_>>()
+        .join(", ");
     Some(format!(
-        "<genehub_workflow_controller>\n\
-当前项目的流程源位于 `{location}`。daemon 只提供类型化机械动作，不定义项目管理方法。使用环境变量\
-`GENEHUB_CLI` 指向的绝对命令调用这些动作。需要组建团队或安装项目方法时，先运行\
-`$GENEHUB_CLI space bootstrap list`，按返回的 description 选择 Pack，再依次执行\
-`$GENEHUB_CLI space bootstrap plan --pack <id>` 与\
-`$GENEHUB_CLI space bootstrap apply --pack <id>`；不要猜 Pack id，也不要把 Pack id 当位置参数。apply 返回\
-`entrySkill`，立即读取该项目文件，并由它决定如何理解目标、选择 DCG、分配预算和汇报结果。若没有匹配的 Pack，\
-再明确说明并考虑 `workflow init`。`workflow inspect` 只投影项目状态；源文件修改只形成 Candidate，不会热切换\
-活动 DCG。只有用户明确要求晋级或回滚时才可按当前 revision 执行 `workflow activate`。\n\
-</genehub_workflow_controller>"
+        "<genehub_workflow_facts>\n项目 Workflow 源位于 `{}`。{}daemon 只提供类型化机械动作；项目方法、团队取舍与业务流程以项目 Skill 和 DCG 文件为准。\n</genehub_workflow_facts>",
+        source.display(),
+        if entry_skills.is_empty() {
+            String::new()
+        } else {
+            format!("已安装 Bootstrap Pack 的入口 Skill：{entry_skills}。")
+        }
     ))
 }
 
@@ -2618,23 +2636,56 @@ fn run_path(runtime: &RuntimeStore, run_id: &str, create_parent: bool) -> Result
 /// Runs have no index, so this scans the project's Run directory. The scan is
 /// capped: a directory past the cap cannot be proven safe, and reporting a
 /// dependency is the conservative answer.
-pub(crate) fn carrier_has_active_run(
+#[cfg(test)]
+fn carrier_has_active_run(
     data_root: &Path,
     project_workspace_id: &str,
     project_root: &Path,
     carrier_workspace_id: &str,
 ) -> Result<bool> {
+    Ok(
+        active_run_records(data_root, project_workspace_id, project_root)?
+            .into_iter()
+            .any(|run| run.executor_workspace_id.as_deref() == Some(carrier_workspace_id)),
+    )
+}
+
+/// Stable ids of every non-terminal Run in one project.
+///
+/// AgentSpace mutations use this as a conservative safety boundary: changing
+/// an attached role while the graph can still schedule another node would
+/// reinterpret the pinned Run through a different team. A Run owns any live
+/// write lease, so this check covers leases without trusting project files.
+pub(crate) fn project_active_run_ids(
+    data_root: &Path,
+    project_workspace_id: &str,
+    project_root: &Path,
+) -> Result<Vec<String>> {
+    let mut ids = active_run_records(data_root, project_workspace_id, project_root)?
+        .into_iter()
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
+fn active_run_records(
+    data_root: &Path,
+    project_workspace_id: &str,
+    project_root: &Path,
+) -> Result<Vec<RunRecord>> {
     const MAX_SCANNED_RUNS: usize = 4_096;
     let runtime = RuntimeStore::new(data_root, project_workspace_id, project_root)?;
     let directory = runtime.directory(Path::new("runs"), false)?;
     let listing = match fs::read_dir(&directory) {
         Ok(listing) => listing,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("读取 Workflow Run 目录：{}", directory.display()))
         }
     };
+    let mut active = Vec::new();
     for (scanned, item) in listing.enumerate() {
         if scanned >= MAX_SCANNED_RUNS {
             bail!("Workflow Run 目录超过 {MAX_SCANNED_RUNS} 条，无法证明该 AgentSpace 空闲");
@@ -2647,13 +2698,11 @@ pub(crate) fn carrier_has_active_run(
             continue;
         };
         let run = load_run(&runtime, run_id)?;
-        if run.status == "running"
-            && run.executor_workspace_id.as_deref() == Some(carrier_workspace_id)
-        {
-            return Ok(true);
+        if run.status == "running" {
+            active.push(run);
         }
     }
-    Ok(false)
+    Ok(active)
 }
 
 fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {

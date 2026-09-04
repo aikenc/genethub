@@ -1,4 +1,7 @@
 import type {
+  AgentSpaceBuilderOperation,
+  AgentSpaceBuilderReport,
+  AgentSpaceOperation,
   AgentInfo,
   Attachment,
   BackgroundProcess,
@@ -297,6 +300,8 @@ interface WorkbenchState {
   download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
+  /** Refreshes AgentSpace composition, Parent tree, Pack and health facts. */
+  refreshWorkspaces(): Promise<void>;
   /** Refreshes daemon-owned session status for the sidebar. */
   refreshSessions(): Promise<void>;
   openWorkspace(root: string): Promise<void>;
@@ -305,6 +310,18 @@ interface WorkbenchState {
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
   /** Hides a workspace registration without deleting files or conversations. */
   removeWorkspace(workspaceId: string): Promise<void>;
+  /** Applies one Human-authored AgentSpace change under the displayed CAS revision. */
+  configureAgentSpace(
+    workspaceId: string,
+    expectedRevision: number,
+    operation: AgentSpaceOperation,
+  ): Promise<void>;
+  /** Checks or verifies one existing Space through the daemon-owned builder. */
+  inspectAgentSpaceBuild(
+    projectWorkspaceId: string,
+    targetWorkspaceId: string,
+    operation: AgentSpaceBuilderOperation,
+  ): Promise<AgentSpaceBuilderReport | null>;
   loadTree(path?: string): Promise<void>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
@@ -745,6 +762,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await loadSessions(client, set).catch(unattended(client, get, set));
   },
 
+  async refreshWorkspaces() {
+    const client = get().client;
+    if (!client) return;
+    await loadWorkspaces(client, set).catch(unattended(client, get, set));
+  },
+
   async openWorkspace(root) {
     const client = require_(get().client);
     const reply = await client.call({ type: "workspace.open", payload: { root } });
@@ -776,9 +799,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }),
     );
     if (reply?.type !== "workspace") return;
-    set((state) => ({
-      workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
-    }));
+    await get().refreshWorkspaces();
   },
 
   async removeWorkspace(workspaceId) {
@@ -833,6 +854,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (removedWasActive && nextWorkspaceId) {
       get().newSession(nextWorkspaceId, null, { addressScope: "workspace" });
     }
+  },
+
+  async configureAgentSpace(workspaceId, expectedRevision, operation) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "agentSpace.configure",
+        payload: { workspaceId, expectedRevision, operation },
+      }),
+    );
+    if (reply?.type !== "workspace") return;
+    await get().refreshWorkspaces();
+  },
+
+  async inspectAgentSpaceBuild(projectWorkspaceId, targetWorkspaceId, operation) {
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "agentSpace.builder",
+        payload: {
+          workspaceId: projectWorkspaceId,
+          targetWorkspaceId,
+          spaceName: "existing",
+          operation,
+        },
+      }),
+    );
+    return reply?.type === "agentSpaceBuilder" ? reply.data : null;
   },
 
   newSession(workspaceId, agentId, options) {
@@ -967,6 +1014,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         if (endsATurn(event.event.type) && get().agents.some((agent) => !canStartAgent(agent))) {
           void get().refreshAgents();
         }
+        if (endsATurn(event.event.type)) void get().refreshWorkspaces();
         set((state) => {
           const timeline = applySequenced(
             state.sessionTimelines[sessionId] ?? emptyTimeline(),
@@ -2002,6 +2050,13 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
     const known = workspaces.data.some((entry) => entry.id === last?.workspaceId);
     set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
   }
+}
+
+async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {
+  const reply = await client.call({ type: "workspace.list" });
+  const workspaces = reply?.type === "workspaces" ? reply.data : [];
+  if (reply?.type === "workspaces") set({ workspaces });
+  return workspaces;
 }
 
 /**

@@ -8,6 +8,7 @@ import {
   resolveAgentPresentation,
 } from "../presentation/catalog/resolve";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { buildAgentSpaceTree, flattenAgentSpaceTree } from "../workspace/agent-space-tree";
 
 export interface MachineOption {
   /** Daemon identity. Unlike routeId, this is stable across connection paths. */
@@ -210,6 +211,8 @@ export function WorkspaceList({
   loading?: boolean;
   onSelect(workspaceId: string): void;
 }) {
+  const tree = buildAgentSpaceTree(workspaces);
+  const ordered = flattenAgentSpaceTree(tree);
   return (
     <fieldset disabled={disabled}>
       <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标工作区</legend>
@@ -221,7 +224,7 @@ export function WorkspaceList({
           aria-label="目标工作区"
           className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
         >
-          {workspaces.map((workspace) => {
+          {ordered.map((workspace) => {
             const selected = workspace.id === selectedWorkspaceId;
             return (
               <button
@@ -239,7 +242,9 @@ export function WorkspaceList({
               >
                 <WorkspaceIcon workspace={workspace} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-fg">{workspace.name}</span>
+                  <span className="block truncate text-fg">
+                    {tree.breadcrumbById[workspace.id] ?? workspace.name}
+                  </span>
                   <span className="block truncate text-[10px] text-faint">{workspace.root}</span>
                 </span>
               </button>

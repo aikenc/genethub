@@ -1,4 +1,8 @@
-import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
+import type {
+  AgentSpaceBuilderOperation,
+  SessionSummary,
+  WorkspaceInfo,
+} from "@genehub/proto";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { Endpoint, Host, Target } from "../host";
@@ -8,6 +12,11 @@ import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import {
+  buildAgentSpaceTree,
+  isDescendant,
+  type AgentSpaceTreeNode,
+} from "../workspace/agent-space-tree";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
 
@@ -441,35 +450,46 @@ function Projects({
   onRenameWorkspace(workspaceId: string, name: string): void;
   onRemoveWorkspace(workspaceId: string): Promise<void>;
 } & RowActions) {
-  return (
-    <ul aria-label="工作区">
-      {workspaces.map((workspace) => {
-        const mine = sessions
-          .filter((session) => session.workspaceId === workspace.id)
-          .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-        const running = mine.filter((session) =>
-          ["running", "waiting"].includes(session.status),
-        ).length;
-        const shut = collapsed.includes(workspace.id);
-        const showAll = expanded.includes(workspace.id);
-        const visible = showAll ? mine : mine.slice(0, PROJECT_SESSION_PREVIEW_LIMIT);
-        const rename = (name: string) => {
-          if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
-        };
-        return (
-          <WorkspaceRow
-            key={workspace.id}
-            workspace={workspace}
-            running={running}
-            shut={shut}
-            active={workspace.id === activeWorkspaceId}
-            deviceName={deviceName}
-            onToggle={() => onToggle(workspace.id)}
-            onPick={() => onPickWorkspace(workspace.id)}
-            onRename={rename}
-            onRemove={() => onRemoveWorkspace(workspace.id)}
-          >
-            {shut ? null : mine.length > 0 ? (
+  const tree = buildAgentSpaceTree(workspaces);
+  const renderNode = (node: AgentSpaceTreeNode, depth: number, anomaly = false): ReactNode => {
+    const workspace = node.workspace;
+    const mine = sessions
+      .filter((session) => session.workspaceId === workspace.id)
+      .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
+    const running = mine.filter((session) =>
+      ["running", "waiting"].includes(session.status),
+    ).length;
+    const shut = collapsed.includes(workspace.id);
+    const showAll = expanded.includes(workspace.id);
+    const visible = showAll ? mine : mine.slice(0, PROJECT_SESSION_PREVIEW_LIMIT);
+    const rename = (name: string) => {
+      if (name !== workspace.name) onRenameWorkspace(workspace.id, name);
+    };
+    return (
+      <WorkspaceRow
+        key={workspace.id}
+        workspace={workspace}
+        workspaces={workspaces}
+        breadcrumb={node.breadcrumb}
+        projectWorkspaceId={tree.projectRootById[workspace.id] ?? workspace.id}
+        relationAnomaly={anomaly}
+        running={running}
+        shut={shut}
+        active={workspace.id === activeWorkspaceId}
+        deviceName={deviceName}
+        onToggle={() => onToggle(workspace.id)}
+        onPick={() => onPickWorkspace(workspace.id)}
+        onRename={rename}
+        onRemove={() => onRemoveWorkspace(workspace.id)}
+      >
+        {shut ? null : (
+          <>
+            {node.children.length > 0 ? (
+              <ul className={`${depth === 0 ? "ml-3" : "ml-2"} border-l border-line pl-1`}>
+                {node.children.map((child) => renderNode(child, depth + 1))}
+              </ul>
+            ) : null}
+            {mine.length > 0 ? (
               <ul className="ml-3 border-l border-line pl-1">
                 {visible.map((session) => (
                   <SessionRow
@@ -494,18 +514,35 @@ function Projects({
                   </li>
                 ) : null}
               </ul>
-            ) : (
+            ) : node.children.length === 0 ? (
               <p className="ml-4 py-1 pl-2 text-[11px] text-faint">还没有会话</p>
-            )}
-          </WorkspaceRow>
-        );
-      })}
+            ) : null}
+          </>
+        )}
+      </WorkspaceRow>
+    );
+  };
+  return (
+    <ul aria-label="工作区">
+      {tree.roots.map((node) => renderNode(node, 0))}
+      {tree.anomalies.length > 0 ? (
+        <li className="mt-2">
+          <p className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-danger">
+            关系异常
+          </p>
+          <ul>{tree.anomalies.map((node) => renderNode(node, 0, true))}</ul>
+        </li>
+      ) : null}
     </ul>
   );
 }
 
 function WorkspaceRow({
   workspace,
+  workspaces,
+  breadcrumb,
+  projectWorkspaceId,
+  relationAnomaly,
   running,
   shut,
   active,
@@ -517,6 +554,10 @@ function WorkspaceRow({
   children,
 }: {
   workspace: WorkspaceInfo;
+  workspaces: WorkspaceInfo[];
+  breadcrumb: string;
+  projectWorkspaceId: string;
+  relationAnomaly: boolean;
   running: number;
   shut: boolean;
   active: boolean;
@@ -532,6 +573,45 @@ function WorkspaceRow({
   const [details, setDetails] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
+  const [spaceBusy, setSpaceBusy] = useState(false);
+  const [componentId, setComponentId] = useState("worker");
+  const [workerRole, setWorkerRole] = useState("tester");
+  const [parentId, setParentId] = useState(workspace.agentSpace?.parentWorkspaceId ?? "");
+  const [lifecycle, setLifecycle] = useState(workspace.agentSpace?.lifecycle ?? "persistent");
+  const [builderSummary, setBuilderSummary] = useState<string | null>(null);
+  const configureAgentSpace = useWorkbench((state) => state.configureAgentSpace);
+  const inspectAgentSpaceBuild = useWorkbench((state) => state.inspectAgentSpaceBuild);
+  const revision = workspace.agentSpace?.revision ?? 0;
+  useEffect(() => {
+    setParentId(workspace.agentSpace?.parentWorkspaceId ?? "");
+    setLifecycle(workspace.agentSpace?.lifecycle ?? "persistent");
+  }, [workspace.id, revision]);
+  const mutate = async (operation: Parameters<typeof configureAgentSpace>[2]) => {
+    setSpaceBusy(true);
+    try {
+      await configureAgentSpace(workspace.id, revision, operation);
+    } finally {
+      setSpaceBusy(false);
+    }
+  };
+  const inspectBuild = async (operation: AgentSpaceBuilderOperation) => {
+    setSpaceBusy(true);
+    try {
+      const report = await inspectAgentSpaceBuild(
+        projectWorkspaceId,
+        workspace.id,
+        operation,
+      );
+      setBuilderSummary(report ? `${report.status} · ${report.command}` : null);
+    } finally {
+      setSpaceBusy(false);
+    }
+  };
+  const parentChoices = workspaces.filter(
+    (candidate) =>
+      candidate.id !== workspace.id &&
+      !isDescendant(workspaces, candidate.id, workspace.id),
+  );
   return (
     <li className="group relative mb-1">
       {editing ? (
@@ -560,12 +640,27 @@ function WorkspaceRow({
           <button
             type="button"
             className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left font-medium hover:text-fg md:py-1"
-            title={workspace.root}
+            title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
             <WorkspaceIcon workspace={workspace} />
             <span className="min-w-0 truncate">{workspace.name}</span>
           </button>
+          {workspace.agentSpace ? (
+            <span
+              className={`max-w-[5.5rem] truncate rounded px-1 text-[9px] ${
+                workspace.agentSpace.health?.status === "unhealthy"
+                  ? "bg-danger/10 text-danger"
+                  : "bg-accent/10 text-accent"
+              }`}
+              title={componentSummary(workspace)}
+            >
+              {componentSummary(workspace)}
+            </span>
+          ) : null}
+          {relationAnomaly ? (
+            <span className="text-[9px] text-danger" title="Parent 关系异常">!</span>
+          ) : null}
           {running > 0 ? (
             <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
               <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden />
@@ -662,6 +757,216 @@ function WorkspaceRow({
             />
           ))}
           <Detail label="所属设备" value={deviceName} />
+          <div className="mt-3 border-t border-line pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium text-fg">AgentSpace</span>
+              <span className="text-[10px] text-faint">revision {revision}</span>
+            </div>
+            {workspace.agentSpace ? (
+              <>
+                <Detail label="位置" value={breadcrumb} />
+                <Detail
+                  label="健康"
+                  value={workspace.agentSpace.health?.status ?? "unknown"}
+                />
+                {workspace.agentSpace.health?.reasons.map((reason) => (
+                  <p key={reason} className="py-0.5 text-[10px] text-danger">{reason}</p>
+                ))}
+                <Detail label="生命周期" value={workspace.agentSpace.lifecycle} />
+                <Detail
+                  label="Builder"
+                  value={workspace.agentSpace.builderLockDigest || "未验证"}
+                />
+                {workspace.agentSpace.bootstrapPack ? (
+                  <Detail
+                    label="Pack"
+                    value={`${workspace.agentSpace.bootstrapPack.id} v${workspace.agentSpace.bootstrapPack.version}`}
+                  />
+                ) : null}
+                <div className="mt-2 space-y-1" aria-label="Component 列表">
+                  {workspace.agentSpace.components.map((component) => (
+                    <div
+                      key={component.componentId}
+                      className="flex items-center gap-1 rounded border border-line px-2 py-1"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-fg">
+                        {component.componentId}
+                        {component.role ? `:${component.role}` : ""}
+                        {` · v${component.schemaVersion}`}
+                        {!component.enabled ? " · 已停用" : ""}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={spaceBusy}
+                        className="rounded px-1 text-[10px] text-accent hover:bg-raised disabled:opacity-40"
+                        onClick={() =>
+                          void mutate({
+                            kind: "setComponent",
+                            componentId: component.componentId,
+                            enabled: !component.enabled,
+                            role: component.role ?? null,
+                          })
+                        }
+                      >
+                        {component.enabled ? "停用" : "启用"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={spaceBusy}
+                        className="rounded px-1 text-[10px] text-danger hover:bg-raised disabled:opacity-40"
+                        onClick={() =>
+                          void mutate({
+                            kind: "removeComponent",
+                            componentId: component.componentId,
+                          })
+                        }
+                      >
+                        移除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="mt-1 leading-relaxed text-muted">
+                尚未注册为 AgentSpace。添加 Component 时内核会先验证当前目录的 AgentSpaceBuilder 投影。
+              </p>
+            )}
+
+            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-1">
+              <select
+                aria-label="要添加的 Component"
+                value={componentId}
+                onChange={(event) => setComponentId(event.target.value)}
+                className="min-w-0 rounded border border-line bg-raised px-2 py-1 text-fg"
+              >
+                <option value="pm">PM</option>
+                <option value="executor">Executor</option>
+                <option value="worker">Worker</option>
+                <option value="reviewer">Reviewer</option>
+              </select>
+              {componentId === "worker" ? (
+                <input
+                  aria-label="Worker role"
+                  value={workerRole}
+                  onChange={(event) => setWorkerRole(event.target.value)}
+                  placeholder="role，例如 tester"
+                  className="min-w-0 rounded border border-line bg-raised px-2 py-1 text-fg"
+                />
+              ) : (
+                <span />
+              )}
+            </div>
+            <button
+              type="button"
+              disabled={spaceBusy || (componentId === "worker" && !workerRole.trim())}
+              className="mt-1 w-full rounded bg-accent px-2 py-1 text-white disabled:opacity-40"
+              onClick={() =>
+                void mutate({
+                  kind: "setComponent",
+                  componentId,
+                  enabled: true,
+                  role: componentId === "worker" ? workerRole.trim() : null,
+                })
+              }
+            >
+              添加或更新 Component
+            </button>
+
+            <div className="mt-3 flex gap-1">
+              <select
+                aria-label="Parent AgentSpace"
+                value={parentId}
+                onChange={(event) => setParentId(event.target.value)}
+                className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
+              >
+                <option value="">无 Parent（项目根）</option>
+                {parentChoices.map((candidate) => (
+                  <option key={candidate.id} value={candidate.id}>{candidate.name}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={spaceBusy || !workspace.agentSpace}
+                className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                onClick={() =>
+                  void mutate({
+                    kind: "setParent",
+                    parentWorkspaceId: parentId || null,
+                  })
+                }
+              >
+                保存 Parent
+              </button>
+            </div>
+
+            <div className="mt-2 flex gap-1">
+              <select
+                aria-label="AgentSpace 生命周期"
+                value={lifecycle}
+                onChange={(event) => setLifecycle(event.target.value)}
+                className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
+              >
+                <option value="persistent">persistent</option>
+                <option value="pooled">pooled</option>
+                <option value="ephemeral">ephemeral</option>
+              </select>
+              <button
+                type="button"
+                disabled={spaceBusy || !workspace.agentSpace}
+                className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                onClick={() => void mutate({ kind: "setLifecycle", lifecycle })}
+              >
+                保存生命周期
+              </button>
+            </div>
+
+            <div className="mt-2 grid grid-cols-2 gap-1">
+              {!workspace.agentSpace ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={spaceBusy}
+                    className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                    onClick={() => void inspectBuild({ kind: "init" })}
+                  >
+                    Builder 初始化
+                  </button>
+                  <button
+                    type="button"
+                    disabled={spaceBusy}
+                    className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                    onClick={() =>
+                      void inspectBuild({
+                        kind: "build",
+                        dryRun: false,
+                        requireNoPostCommands: true,
+                      })
+                    }
+                  >
+                    Builder Build
+                  </button>
+                </>
+              ) : null}
+              <button
+                type="button"
+                disabled={spaceBusy}
+                className="flex-1 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                onClick={() => void inspectBuild({ kind: "check" })}
+              >
+                Builder Check
+              </button>
+              <button
+                type="button"
+                disabled={spaceBusy}
+                className="flex-1 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                onClick={() => void inspectBuild({ kind: "verify" })}
+              >
+                Builder Verify
+              </button>
+            </div>
+            {builderSummary ? <p className="mt-1 text-[10px] text-muted">{builderSummary}</p> : null}
+          </div>
         </div>
       ) : null}
       {removing ? (
@@ -708,6 +1013,17 @@ function Detail({ label, value }: { label: string; value: string }) {
       <span className="break-all text-fg">{value}</span>
     </div>
   );
+}
+
+function componentSummary(workspace: WorkspaceInfo): string {
+  const components = workspace.agentSpace?.components
+    .filter((component) => component.enabled)
+    .map((component) =>
+      component.componentId === "worker" && component.role
+        ? component.role
+        : component.componentId,
+    ) ?? [];
+  return components.length > 0 ? components.join(" · ") : "AgentSpace";
 }
 
 /**
