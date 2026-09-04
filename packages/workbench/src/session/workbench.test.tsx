@@ -19,6 +19,7 @@ import {
   COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT,
   Composer,
+  quietFor,
   resolveComposerPhase,
   resizeComposerTextarea,
 } from "./Composer";
@@ -2182,6 +2183,25 @@ describe("the controls offered to the user", () => {
     expect(screen.queryByLabelText("发送中")).not.toBeInTheDocument();
     await userEvent.click(screen.getByLabelText("停止"));
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  /**
+   * "又卡住了" was filed against a turn that had been running for six minutes
+   * and forty-nine seconds and finished normally. Nothing was wrong with it —
+   * the person waiting simply had no way to tell that from a wedged one, and
+   * the daemon cannot tell them, because it does not know either.
+   */
+  it("says how long a running turn has been quiet, once that is worth saying", () => {
+    const now = 1_000_000;
+    // An ordinary pause to think says nothing at all.
+    expect(quietFor(now - 5_000, now)).toBeNull();
+    expect(quietFor(now - 59_000, now)).toBeNull();
+    expect(quietFor(now - 61_000, now)).toBe("已静默 1 分 1 秒");
+    expect(quietFor(now - 409_000, now)).toBe("已静默 6 分 49 秒");
+    expect(quietFor(now - 120_000, now)).toBe("已静默 2 分");
+    // An idle session has no running turn, so there is nothing to be quiet.
+    expect(quietFor(null, now)).toBeNull();
+    expect(quietFor(undefined, now)).toBeNull();
   });
 
   it("keeps the send control busy after the echo and when switching onto a running tab", () => {

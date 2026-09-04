@@ -41,6 +41,8 @@ export interface ControlledAgentSession {
   waitForTerminal(timeoutMs?: number): Promise<{ type?: string; raw: unknown }>;
   /** The daemon's own answer, not the client's mirror of it. */
   daemonStatus(): Promise<string>;
+  /** The running turn's last sign of life, as the daemon reports it. */
+  daemonLastActivityMs(): Promise<number | null>;
   dispose(): Promise<void>;
 }
 
@@ -107,6 +109,15 @@ export async function openControlledAgentSession(input: {
         });
         if (reply?.type !== "snapshot") throw new Error(`session.get returned ${reply?.type}`);
         return String(reply.data.summary.status);
+      },
+      async daemonLastActivityMs() {
+        const reply = await opened.client.call({
+          type: "session.get",
+          payload: { sessionId },
+        });
+        if (reply?.type !== "snapshot") throw new Error(`session.get returned ${reply?.type}`);
+        const at = reply.data.summary.lastActivityAtMs;
+        return typeof at === "number" ? at : null;
       },
       async dispose() {
         opened.client.close();

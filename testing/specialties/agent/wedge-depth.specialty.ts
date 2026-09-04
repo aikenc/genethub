@@ -175,21 +175,43 @@ wedgeCase(
 wedgeCase(
   "long-silence-is-not-death",
   "A long quiet turn is allowed to finish",
-  "an agent that says nothing for 15s and then answers produces turnCompleted, never turnFailed",
+  "an agent that says nothing for 15s has its silence reported and is left running, then answers with turnCompleted",
   [
     "silence treated as death",
     "a healthy long-running turn killed by an inactivity timer",
+    "a silence nobody can see, so slow and wedged look the same",
+    "an age reported for a session that has already finished",
   ],
   { profile: "normal", id: "wedge-slow", chunks: 1, delayMs: 15_000 },
   async (t, session) => {
     await t.flows.main.sendPrompt(session.client, session.sessionId, "think for a while");
+
+    // Mid-silence, the daemon has to be able to say how long it has been quiet
+    // — and to be still running while it says so. Both halves matter: an age
+    // that is never reported leaves the user guessing, which is the "又卡住了"
+    // report, and a turn ended on account of its age is the freeze's cure being
+    // worse than the freeze.
+    await t.tools.waitUntil(async () => {
+      const at = await session.daemonLastActivityMs();
+      return at !== null && Date.now() - at > 5_000;
+    }, 20_000);
+    const quietFor = Date.now() - ((await session.daemonLastActivityMs()) ?? Date.now());
+    t.assertions.assert(
+      (await session.daemonStatus()) === "running",
+      `a turn quiet for ${quietFor}ms was not left alone`,
+    );
+    t.note(`reported quiet for ${quietFor}ms while still running`);
+
     const terminal = await session.waitForTerminal(40_000);
     t.assertions.assert(
       terminal.type === "turnCompleted",
       `a slow but healthy turn must complete, not ${terminal.type}`,
     );
+    // And once it is over there is nothing to be quiet about: an age on a
+    // finished session reads as a problem where there is none.
+    await t.tools.waitUntil(async () => (await session.daemonLastActivityMs()) === null, 10_000);
   },
-  45_000,
+  60_000,
 );
 
 wedgeCase(

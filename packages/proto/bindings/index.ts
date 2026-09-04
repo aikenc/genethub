@@ -1005,7 +1005,20 @@ lineage?: SessionLineage,
 /**
  * Present only for a conversation imported from an Agent's native store.
  */
-imported?: SessionImportOrigin, };
+imported?: SessionImportOrigin, 
+/**
+ * When this session last produced anything, while a turn is running.
+ *
+ * A turn that has gone quiet is not a turn that has died, and the daemon
+ * has no way to tell the two apart: agents think, and some of them think
+ * for a long time. Nothing here is a deadline — no one is killed for
+ * crossing it. It exists because the person waiting is the only one who
+ * can tell whether nine minutes of silence is normal for what they asked,
+ * and they cannot judge what they cannot see.
+ *
+ * Absent unless a turn is running.
+ */
+lastActivityAtMs?: number, };
 
 /**
  * The machine-level settings a client may see and change.

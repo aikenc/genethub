@@ -522,6 +522,19 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<SessionImportOrigin>,
+    /// When this session last produced anything, while a turn is running.
+    ///
+    /// A turn that has gone quiet is not a turn that has died, and the daemon
+    /// has no way to tell the two apart: agents think, and some of them think
+    /// for a long time. Nothing here is a deadline — no one is killed for
+    /// crossing it. It exists because the person waiting is the only one who
+    /// can tell whether nine minutes of silence is normal for what they asked,
+    /// and they cannot judge what they cannot see.
+    ///
+    /// Absent unless a turn is running.
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_ms: Option<i64>,
 }
 
 /// A session written by a newer build than this one.
