@@ -32,8 +32,8 @@ use super::images;
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, agent_title_fits_current, normalize_session_title, now_ms, title_from, ContextSeedState,
-    ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
+    self, agent_title_fits_current, normalize_session_title, now_ms, title_from, ChatLog,
+    ContextSeedState, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -167,6 +167,9 @@ struct Live {
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
+    /// When the turn in progress last had its narrative written out, which
+    /// paces that write rather than doing it per streamed token.
+    open_turn_written_ms: AtomicI64,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
     /// when that trunk is written out, so this stays bounded by a soft batch
     /// boundary during tool-heavy work
@@ -1046,7 +1049,8 @@ impl SessionManager {
                 meta.format
             ));
         }
-        let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        let mut chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        self.recover_interrupted_turn(&meta, &mut chat).await;
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
         *live.rounds.lock().await = chat.rounds;
@@ -1055,6 +1059,42 @@ impl SessionManager {
             .await
             .insert(session_id.to_string(), live.clone());
         Ok(live)
+    }
+
+    /// Moves the narrative of a turn that never finished into the log.
+    ///
+    /// Reached when the previous process died with an answer in flight. The
+    /// items are promoted rather than merely displayed, so the log is the one
+    /// durable home again and the next start does not have to know any of this
+    /// happened. Anything already in the log wins: a crash between the append
+    /// and the removal below would otherwise show the answer twice.
+    async fn recover_interrupted_turn(&self, meta: &SessionMeta, chat: &mut ChatLog) {
+        let recovered = self.store.load_open_turn(&meta.workspace_id, &meta.id);
+        if recovered.is_empty() {
+            return;
+        }
+        let fresh: Vec<TimelineItem> = recovered
+            .into_iter()
+            .filter(|item| !chat.items.iter().any(|kept| kept.id() == item.id()))
+            .collect();
+        if !fresh.is_empty() {
+            if let Err(error) = self
+                .store
+                .append_chat_items(&meta.workspace_id, &meta.id, &fresh)
+            {
+                // Left in place to be tried again next time rather than
+                // dropped: an unwritable session directory is a reason to keep
+                // the only copy, not to discard it.
+                tracing::warn!(
+                    "could not recover the interrupted turn of {}: {error}",
+                    meta.id
+                );
+                chat.items.extend(fresh);
+                return;
+            }
+            chat.items.extend(fresh);
+        }
+        self.store.clear_open_turn(&meta.workspace_id, &meta.id);
     }
 
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
@@ -2661,6 +2701,7 @@ impl Live {
             additional_system_prompt: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
+            open_turn_written_ms: AtomicI64::new(0),
             open_trunk_items: Mutex::new(Vec::new()),
             llm_rounds: Mutex::new(LlmRounds::default()),
             pump: Mutex::new(None),
@@ -2852,6 +2893,66 @@ impl Live {
             .lock()
             .await
             .retain(|item| !(store::is_work_item(item) && ids.iter().any(|id| id == item.id())));
+    }
+
+    /// What this turn has said so far, in the order it was said.
+    ///
+    /// The prompt is left out because it was written when it arrived, and work
+    /// items because they belong to the round's trunk. Shared by the write
+    /// that happens while the turn runs and the one that ends it, so the two
+    /// cannot disagree about what a turn's narrative is.
+    async fn turn_narrative(&self, ids: &[String]) -> Vec<TimelineItem> {
+        let items = self.items.lock().await;
+        ids.iter()
+            .filter_map(|id| items.iter().find(|item| item.id() == id))
+            .filter(|item| !matches!(item, TimelineItem::UserMessage { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Writes the turn in progress, at most once a second.
+    ///
+    /// Called from the event pump as an answer streams in. The rate limit is
+    /// the whole design: writing per token would rewrite the file thousands of
+    /// times for one reply, and writing only at the end — which is what used
+    /// to happen — costs the reader the entire answer if this process dies
+    /// while producing it.
+    async fn persist_open_turn_if_due(&self) {
+        /// Long enough that a fast stream does not turn into a write loop,
+        /// short enough that what it can cost is a sentence.
+        const AT_MOST_EVERY_MS: i64 = 1_000;
+
+        let now = now_ms();
+        let last = self.open_turn_written_ms.load(Ordering::SeqCst);
+        if now - last < AT_MOST_EVERY_MS {
+            return;
+        }
+        // Emptiness is settled before the slot is claimed, not after. A turn
+        // whose only item so far is the prompt has nothing to write, and
+        // stamping the clock for it would delay the first real write by the
+        // full interval — which is exactly the moment worth not losing.
+        let ids: Vec<String> = self.turn_items.lock().await.clone();
+        let narrative = self.turn_narrative(&ids).await;
+        if narrative.is_empty() {
+            return;
+        }
+        // Two pump-adjacent callers arriving together would otherwise both
+        // write the same content; whoever loses the exchange lets the other
+        // one do it.
+        if self
+            .open_turn_written_ms
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .write_open_turn(&meta.workspace_id, &meta.id, &narrative)
+        {
+            tracing::warn!("could not persist the open turn of {}: {error}", meta.id);
+        }
     }
 
     /// Rewrites the open trunk so a crash cannot cost more than the turn in
@@ -3081,6 +3182,19 @@ impl Live {
         if let Some(pump) = self.pump.lock().await.take() {
             pump.abort();
         }
+        // Whatever this turn already put on screen was, to the person who read
+        // it, said — and quitting is not a reason to take it back. Nothing
+        // else on this path would write it: `flush_turn` otherwise only runs
+        // from a terminal event, and a turn interrupted by the daemon closing
+        // never gets one. The pump is stopped first so the timeline being
+        // written is not still moving.
+        if let Some(round) = self
+            .settle_round(Settling::Kernel, RoundOutcome::Canceled)
+            .await
+        {
+            persist_round(self, round).await;
+        }
+        flush_turn(self, &self.store).await;
         // Taken in its own statement on purpose. Edition 2021 keeps the guard a
         // scrutinee produces alive for the whole `if let`, so writing this as
         // `if let Some(agent) = self.agent.lock().await.take()` would hold the
@@ -4016,6 +4130,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             }
             drop(turn_items);
             live.record_round_item(item).await;
+            live.persist_open_turn_if_due().await;
         }
         SessionEvent::ItemDelta { item_id, delta, .. } => {
             let mut items = live.items.lock().await;
@@ -4049,6 +4164,10 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                     item.stamp_tool_times(now_ms());
                 }
             }
+            // Released before the write, which locks `items` itself to read
+            // the narrative back: `tokio::sync::Mutex` is not reentrant.
+            drop(items);
+            live.persist_open_turn_if_due().await;
         }
         SessionEvent::PermissionRequested { request } => {
             *live.pending_permissions.lock().await = vec![request.clone()];
@@ -4171,7 +4290,7 @@ async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
 /// Failure is logged, not propagated: a missing record degrades a later
 /// cross-session query to "this round is invisible to it", not data loss —
 /// the round's narrative and trunks already reached disk.
-async fn persist_round(live: &Arc<Live>, round: ActiveRound) {
+async fn persist_round(live: &Live, round: ActiveRound) {
     if round.outcome.is_none() {
         // Should not happen: every caller only reaches here after setting an
         // outcome. Guarded anyway rather than unwrapped, because a ledger
@@ -4183,20 +4302,12 @@ async fn persist_round(live: &Arc<Live>, round: ActiveRound) {
 
 /// Writes what this turn produced, once, when the turn ends: narrative to the
 /// chat layer, work to the open trunk.
-async fn flush_turn(live: &Arc<Live>, store: &Store) {
+async fn flush_turn(live: &Live, store: &Store) {
     let ids: Vec<String> = std::mem::take(&mut *live.turn_items.lock().await);
     if ids.is_empty() {
         return;
     }
-    let items = live.items.lock().await;
-    let settled: Vec<TimelineItem> = ids
-        .iter()
-        .filter_map(|id| items.iter().find(|item| item.id() == id))
-        // The prompt was already written when it arrived.
-        .filter(|item| !matches!(item, TimelineItem::UserMessage { .. }))
-        .cloned()
-        .collect();
-    drop(items);
+    let settled = live.turn_narrative(&ids).await;
 
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
@@ -4205,6 +4316,11 @@ async fn flush_turn(live: &Arc<Live>, store: &Store) {
     live.persist_open_trunk().await;
     if let Err(error) = store.append_chat_items(&workspace_id, &session_id, &settled) {
         tracing::error!("could not persist the timeline for {session_id}: {error}");
+    } else {
+        // The log owns these now. Leaving the copy behind would have the next
+        // start recover items that are already there.
+        store.clear_open_turn(&workspace_id, &session_id);
+        live.open_turn_written_ms.store(0, Ordering::SeqCst);
     }
     let mut meta = live.meta.lock().await;
     meta.updated_at_ms = now_ms();
