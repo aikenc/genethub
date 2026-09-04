@@ -1,0 +1,42 @@
+{
+  "schema": "genehub.bootstrap-pack.v1",
+  "id": "game-delivery-v1",
+  "version": 1,
+  "description": "PM-managed small-game delivery with an Executor, Coder, Reviewer, and WorkflowManager.",
+  "entrySkill": ".pipebuilder/skills/project-manager/SKILL.md",
+  "rootComponents": [
+    {"componentId": "pm"}
+  ],
+  "spaces": [
+    {
+      "name": "executor",
+      "parent": "$project",
+      "lifecycle": "pooled",
+      "components": [{"componentId": "executor"}]
+    },
+    {
+      "name": "coder",
+      "parent": "executor",
+      "lifecycle": "pooled",
+      "components": [{"componentId": "worker", "role": "coder"}]
+    },
+    {
+      "name": "reviewer",
+      "parent": "executor",
+      "lifecycle": "pooled",
+      "components": [
+        {"componentId": "worker", "role": "reviewer"},
+        {"componentId": "reviewer"}
+      ]
+    },
+    {
+      "name": "workflow-manager",
+      "parent": "executor",
+      "lifecycle": "persistent",
+      "components": [
+        {"componentId": "worker", "role": "workflow-manager"},
+        {"componentId": "executor"}
+      ]
+    }
+  ]
+}

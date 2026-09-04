@@ -14,8 +14,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::{
-    ManagedSessionInfo, SessionSummary, SessionUserInteraction, WorkflowActivationStatus,
-    WorkflowCatalogEntryStatus, WorkflowNodeRunStatus, WorkflowProjectStatus, WorkflowRunStatus,
+    ExecutorFlowStatus, FlowMessageStatus, ManagedSessionInfo, SessionSummary,
+    SessionUserInteraction, WorkflowActivationStatus, WorkflowCatalogEntryStatus,
+    WorkflowNodeRunStatus, WorkflowProjectStatus, WorkflowRunStatus,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -34,6 +35,10 @@ const MAX_CANDIDATE_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ACTIVATION_HISTORY: usize = 4_096;
 const MAX_ACTIVATION_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+const RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
+const FLOW_MESSAGE_SCHEMA: &str = "genehub.flow-message.v1";
+const FLOW_MANIFEST_SCHEMA: &str = "genehub.executor-flow.v1";
+const MAX_FLOW_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LEASE_RECORD_BYTES: u64 = 64 * 1024;
 const DEFAULT_LEASE_SECONDS: u64 = 60 * 60;
 const MAX_LEASE_SECONDS: u64 = 24 * 60 * 60;
@@ -136,6 +141,8 @@ struct CompletionDefinition {
 struct EvidenceRequirement {
     key: String,
     verify: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +220,7 @@ struct DcgActivationEvent {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeStore {
     root: PathBuf,
+    project_root: PathBuf,
 }
 
 static LOCAL_WORKFLOW_LOCKS: LazyLock<Mutex<BTreeSet<PathBuf>>> =
@@ -344,12 +352,38 @@ impl RuntimeStore {
         let data_root = data_root
             .canonicalize()
             .with_context(|| format!("读取 daemon data 目录：{}", data_root.display()))?;
-        let _project_root = project_root
+        let project_root = project_root
             .canonicalize()
             .with_context(|| format!("读取项目根目录：{}", project_root.display()))?;
         Ok(Self {
             root: data_root.join("workflow-runtime").join(workspace_id),
+            project_root,
         })
+    }
+
+    fn project_file(&self, relative: &str) -> Result<PathBuf> {
+        let relative = Path::new(relative);
+        if relative.as_os_str().is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            bail!("Workflow Run snapshot 必须是普通项目相对路径");
+        }
+        let mut current = self.project_root.clone();
+        for component in relative.components() {
+            let Component::Normal(component) = component else {
+                unreachable!("validated above")
+            };
+            current.push(component);
+            match crate::config::sensitive_metadata(&current) {
+                Ok(metadata) => crate::config::reject_link_or_reparse(&current, &metadata)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(current)
     }
 
     fn directory(&self, relative: &Path, create: bool) -> Result<PathBuf> {
@@ -402,6 +436,8 @@ struct RunRecord {
     workspace_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     executor_workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executor_session_id: Option<String>,
     parent_session_id: String,
     workflow_id: String,
     #[serde(default)]
@@ -419,8 +455,51 @@ struct RunRecord {
     roles: BTreeMap<String, RoleSnapshot>,
     nodes: BTreeMap<String, NodeRecord>,
     leases: BTreeMap<String, LeaseRecord>,
+    #[serde(default)]
+    flow_messages: Vec<FlowMessage>,
     created_at_ms: i64,
     updated_at_ms: i64,
+    /// Daemon-created path, relative to the project root, where an Executor
+    /// Session owns this Run's authoritative snapshot. It is absent from the
+    /// snapshot itself; the private run index is only a recoverable locator.
+    #[serde(skip)]
+    snapshot_relative: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunIndex {
+    schema: String,
+    run_id: String,
+    snapshot_relative: String,
+    status: String,
+    revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executor_workspace_id: Option<String>,
+    executor_session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FlowMessage {
+    schema: String,
+    message_id: String,
+    kind: String,
+    project_workspace_id: String,
+    executor_session_id: String,
+    run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    sender_session_id: String,
+    recipient_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    causation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_revision: Option<u64>,
+    payload: serde_json::Value,
+    created_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -460,17 +539,12 @@ pub fn root_session_guidance(cwd: &Path) -> Option<String> {
         .unwrap_or_else(|| format!("{SOURCE_DIR}/（尚未初始化）"));
     Some(format!(
         "<genehub_workflow_controller>\n\
-你在当前项目的普通主会话中工作；若所在非 Worker PipeSpace 标记了 PM，你代表用户承担项目管理职责，\
-但 PM 不是独立的 Space 或 Session 类型。先理解用户目标，再按两个互不替代的维度判断：\
-业务问题或工作流改进；简单任务或复杂任务。项目流程源位于 `{location}`。\n\
-需要查看项目可用流程时，使用环境变量 `GENEHUB_CLI` 指向的绝对命令运行 `workflow inspect`；\
-只有用户明确要建立项目方法且目录尚未初始化时才运行 `workflow init`。源文件改动只形成 Candidate，不会热切换\
-活动 DCG；只有用户明确要求晋级或回滚时，才依据 inspect 返回的当前 revision 运行 `workflow activate`，不得静默\
-替用户改变项目方法。简单任务优先选择项目的直达流程；\
-派发时用 `--kind` 和 `--complexity` 明确给出两个维度，让项目 catalog 选择流程；\
-不得自行补上项目图中没有声明的评审、分支、合并或用户批准节点。新模型中的 Run 应绑定项目已有的\
-Workflow Executor WorkerSpace，不为每次 Run 新建 Executor；Coder、Reviewer、Tester 的能力来自对应子\
-PipeSpace，受管 Session 只是这些 Space 内的一次执行。\n\
+当前项目的流程源位于 `{location}`。daemon 只提供类型化机械动作，不定义项目管理方法。使用环境变量\
+`GENEHUB_CLI` 指向的绝对命令调用这些动作。需要组建团队或安装项目方法时，先运行 `space bootstrap list`，\
+按返回的 description 选择 Pack，再依次执行 `space bootstrap plan` 与 `apply`；不要猜 Pack id。apply 返回\
+`entrySkill`，立即读取该项目文件，并由它决定如何理解目标、选择 DCG、分配预算和汇报结果。若没有匹配的 Pack，\
+再明确说明并考虑 `workflow init`。`workflow inspect` 只投影项目状态；源文件修改只形成 Candidate，不会热切换\
+活动 DCG。只有用户明确要求晋级或回滚时才可按当前 revision 执行 `workflow activate`。\n\
 </genehub_workflow_controller>"
     ))
 }
@@ -565,6 +639,17 @@ pub(crate) fn initialize_and_activate(
     activate_project_inner(root, runtime, None, None, Some(bootstrap_digest), true)
 }
 
+/// Activates project Workflow source installed by a versioned Bootstrap Pack.
+/// The pack owns business files; this function only runs the same compile,
+/// persistence, and genesis activation gate as the legacy initializer.
+pub(crate) fn activate_bootstrap_source(
+    root: &Path,
+    runtime: &RuntimeStore,
+    bootstrap_digest: String,
+) -> Result<WorkflowProjectStatus> {
+    activate_project_inner(root, runtime, None, None, Some(bootstrap_digest), true)
+}
+
 pub(crate) fn inspect(root: &Path, runtime: &RuntimeStore) -> Result<WorkflowProjectStatus> {
     let root = root
         .canonicalize()
@@ -655,6 +740,50 @@ pub(crate) fn activate_project(
     )
 }
 
+async fn executor_snapshot_relative(
+    state: &Shared,
+    project_root: &Path,
+    executor_session: &SessionSummary,
+    run_id: &str,
+) -> Result<String> {
+    let (workspace_id, space_home, session_dir) =
+        state.sessions.component_scope(&executor_session.id).await?;
+    if workspace_id != executor_session.workspace_id {
+        bail!("Executor Session changed AgentSpace while binding its Run");
+    }
+    let space = state.workspaces.agent_space(&workspace_id).await?;
+    if !space.components.iter().any(|component| {
+        component.component_id == crate::agent_space::COMPONENT_EXECUTOR && component.enabled
+    }) {
+        bail!("Workflow Run requires an enabled Executor Component Instance");
+    }
+    let (_, instance_dir) = crate::session::components::instance_dirs(
+        &space_home,
+        &session_dir,
+        crate::agent_space::COMPONENT_EXECUTOR,
+    )?;
+    let snapshots = instance_dir.join("snapshots");
+    match crate::config::sensitive_metadata(&snapshots) {
+        Ok(metadata) => {
+            crate::config::reject_link_or_reparse(&snapshots, &metadata)?;
+            if !metadata.is_dir() {
+                bail!("Executor snapshots path is not a directory");
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            crate::config::ensure_real_directory(&snapshots)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    crate::config::restrict_dir_to_owner(&snapshots)?;
+    let snapshot = snapshots.join(format!("run-{run_id}.json"));
+    let project_root = project_root.canonicalize()?;
+    let relative = snapshot
+        .strip_prefix(&project_root)
+        .map_err(|_| anyhow!("Executor Session storage escaped the project root"))?;
+    Ok(relative.display().to_string())
+}
+
 pub async fn dispatch(
     state: &Shared,
     root_workspace_id: &str,
@@ -677,11 +806,13 @@ pub async fn dispatch(
     // registered project reuses the one direct child that mounts the executor
     // component across Runs; legacy directory projects intentionally keep the
     // V1 in-place path.
-    let executor_workspace_id = state
+    let executor_workspace = state
         .workspaces
         .reusable_component_space(root_workspace_id, crate::agent_space::COMPONENT_EXECUTOR)
-        .await?
-        .map(|workspace| workspace.id);
+        .await?;
+    let executor_workspace_id = executor_workspace
+        .as_ref()
+        .map(|workspace| workspace.id.clone());
     let (candidate, activation_revision) = dispatch_candidate(&workspace.root, &runtime)?;
     let entry = candidate
         .catalog
@@ -696,10 +827,40 @@ pub async fn dispatch(
         .ok_or_else(|| anyhow!("活动 DCG Candidate 缺少 Workflow：{}", entry.id))?;
     let now = now_ms();
     let run_id = format!("wr_{}", uuid::Uuid::new_v4().simple());
+    let executor_session = match executor_workspace.as_ref() {
+        Some(executor) => Some(
+            state
+                .sessions
+                .create(
+                    &executor.id,
+                    workspace.root.canonicalize()?,
+                    &parent.agent_id,
+                    parent.model_id.clone(),
+                    parent.mode_id.clone(),
+                    parent.runtime_values.clone().unwrap_or_default(),
+                    Some(format!("{task_id} · executor")),
+                )
+                .await?,
+        ),
+        None => None,
+    };
+    let snapshot_relative = match executor_session.as_ref() {
+        Some(session) => {
+            match executor_snapshot_relative(state, &workspace.root, session, &run_id).await {
+                Ok(relative) => Some(relative),
+                Err(error) => {
+                    let _ = state.sessions.delete(&session.id).await;
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
     let mut run = RunRecord {
         id: run_id.clone(),
         workspace_id: root_workspace_id.to_string(),
         executor_workspace_id,
+        executor_session_id: executor_session.as_ref().map(|session| session.id.clone()),
         parent_session_id: parent_session_id.to_string(),
         workflow_id: workflow_id.to_string(),
         dcg_digest: candidate.digest,
@@ -714,8 +875,10 @@ pub async fn dispatch(
         roles: bundle.roles,
         nodes: BTreeMap::new(),
         leases: BTreeMap::new(),
+        flow_messages: Vec::new(),
         created_at_ms: now,
         updated_at_ms: now,
+        snapshot_relative,
     };
     for node in &run.definition.nodes {
         run.nodes.insert(
@@ -729,20 +892,33 @@ pub async fn dispatch(
         );
     }
     let entry = run.definition.entry.clone();
-    let sessions = activate(state, &workspace.root, &runtime, &mut run, vec![entry]).await?;
+    let sessions = match activate(state, &workspace.root, &runtime, &mut run, vec![entry]).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            if let Some(executor) = &executor_session {
+                let _ = state.sessions.delete(&executor.id).await;
+            }
+            return Err(error);
+        }
+    };
     settle_if_terminal(&mut run);
     run.revision = 1;
     run.updated_at_ms = now_ms();
+    record_flow_start(&mut run, &sessions)?;
     if let Err(error) = save_run(&runtime, &run) {
         let leases = run.leases.values().cloned().collect::<Vec<_>>();
-        return Err(with_activation_cleanup(
+        let error = with_activation_cleanup(
             state,
             &runtime,
             &sessions,
             &leases,
             error.context("持久化新 Workflow Run"),
         )
-        .await);
+        .await;
+        if let Some(executor) = &executor_session {
+            let _ = state.sessions.delete(&executor.id).await;
+        }
+        return Err(error);
     }
     if run.status == "completed" {
         release_leases(&runtime, &run).await?;
@@ -773,6 +949,7 @@ pub async fn abort_launch(state: &Shared, root_workspace_id: &str, run_id: &str)
         .values()
         .filter_map(|node| node.session_id.clone())
         .collect::<Vec<_>>();
+    let executor_session_id = run.executor_session_id.clone();
     for node in run.nodes.values_mut() {
         match node.status.as_str() {
             "running" => node.status = "failed".into(),
@@ -794,6 +971,11 @@ pub async fn abort_launch(state: &Shared, root_workspace_id: &str, run_id: &str)
             cleanup_errors.push(format!("删除受管 Session {session_id}：{error:#}"));
         }
     }
+    if let Some(session_id) = executor_session_id {
+        if let Err(error) = state.sessions.delete(&session_id).await {
+            cleanup_errors.push(format!("删除 Executor Session {session_id}：{error:#}"));
+        }
+    }
     if !cleanup_errors.is_empty() {
         bail!(cleanup_errors.join("；"));
     }
@@ -803,6 +985,110 @@ pub async fn abort_launch(state: &Shared, root_workspace_id: &str, run_id: &str)
 pub(crate) fn get(runtime: &RuntimeStore, run_id: &str) -> Result<WorkflowRunStatus> {
     validate_id(run_id, "runId")?;
     Ok(run_status(&load_run(runtime, run_id)?))
+}
+
+pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<WorkflowRunStatus>> {
+    let limit = usize::try_from(limit.clamp(1, 256)).unwrap_or(256);
+    let directory = runtime.directory(Path::new("runs"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("读取 Workflow Run history"),
+    };
+    let mut runs = Vec::new();
+    for (scanned, item) in listing.enumerate() {
+        if scanned >= 4_096 {
+            bail!("Workflow Run history exceeds the bounded project index");
+        }
+        let path = item?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        runs.push(load_run(runtime, run_id)?);
+    }
+    runs.sort_by(|left, right| {
+        right
+            .created_at_ms
+            .cmp(&left.created_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    runs.truncate(limit);
+    Ok(runs.iter().map(run_status).collect())
+}
+
+pub async fn executor_flow(
+    state: &Shared,
+    executor_session_id: &str,
+) -> Result<ExecutorFlowStatus> {
+    validate_id(executor_session_id, "Executor Session id")?;
+    let summary = state.sessions.summary(executor_session_id).await?;
+    let (workspace_id, space_home, session_dir) =
+        state.sessions.component_scope(executor_session_id).await?;
+    if summary.workspace_id != workspace_id {
+        bail!("Executor Session changed AgentSpace while reading its flow");
+    }
+    let space = state.workspaces.agent_space(&workspace_id).await?;
+    if !space.components.iter().any(|component| {
+        component.component_id == crate::agent_space::COMPONENT_EXECUTOR && component.enabled
+    }) {
+        bail!("Session does not have an enabled Executor Component Instance");
+    }
+    let (_, instance_dir) = crate::session::components::instance_dirs(
+        &space_home,
+        &session_dir,
+        crate::agent_space::COMPONENT_EXECUTOR,
+    )?;
+    let snapshots = instance_dir.join("snapshots");
+    let metadata = crate::config::sensitive_metadata(&snapshots)
+        .context("Executor Session has not started a Workflow Run")?;
+    crate::config::reject_link_or_reparse(&snapshots, &metadata)?;
+    if !metadata.is_dir() {
+        bail!("Executor snapshots path is not a directory");
+    }
+    let mut snapshot_files = Vec::new();
+    for item in fs::read_dir(&snapshots)? {
+        if snapshot_files.len() >= 16 {
+            bail!("Executor Session contains too many Run snapshots");
+        }
+        let path = item?.path();
+        let metadata = crate::config::sensitive_metadata(&path)?;
+        crate::config::reject_link_or_reparse(&path, &metadata)?;
+        if metadata.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        {
+            snapshot_files.push(path);
+        }
+    }
+    if snapshot_files.len() != 1 {
+        bail!(
+            "Executor Session must own exactly one Run snapshot; found {}",
+            snapshot_files.len()
+        );
+    }
+    let snapshot = snapshot_files.pop().expect("exactly one snapshot");
+    let metadata = crate::config::sensitive_metadata(&snapshot)?;
+    ensure_record_size(
+        "Executor Session Run snapshot",
+        metadata.len(),
+        MAX_RUN_RECORD_BYTES,
+    )?;
+    let run: RunRecord = serde_json::from_slice(&fs::read(&snapshot)?)
+        .with_context(|| format!("读取 Executor Run snapshot：{}", snapshot.display()))?;
+    if run.executor_session_id.as_deref() != Some(executor_session_id)
+        || run.executor_workspace_id.as_deref() != Some(workspace_id.as_str())
+    {
+        bail!("Executor Run snapshot identity does not match its Session");
+    }
+    let messages = run.flow_messages.iter().map(flow_message_status).collect();
+    Ok(ExecutorFlowStatus {
+        schema: "genehub.executor-flow.status.v1".into(),
+        executor_session_id: executor_session_id.into(),
+        run: run_status(&run),
+        messages,
+    })
 }
 
 pub async fn complete(
@@ -857,6 +1143,13 @@ pub async fn complete(
     settle_if_terminal(&mut run);
     run.revision = run.revision.saturating_add(1);
     run.updated_at_ms = now_ms();
+    record_flow_completion(
+        &mut run,
+        node_id,
+        caller_session_id,
+        expected_revision,
+        &sessions,
+    )?;
     if let Err(error) = save_run(&runtime, &run) {
         let leases = run
             .leases
@@ -955,6 +1248,8 @@ async fn activate(
                     let (workspace_id, cwd) = execution_workspace(
                         state,
                         &run.workspace_id,
+                        run.executor_workspace_id.as_deref(),
+                        role_id,
                         project_root,
                         node.inputs.workspace.as_deref(),
                     )
@@ -964,7 +1259,10 @@ async fn activate(
                         run.leases.insert(node.id.clone(), lease);
                     }
                     let managed = ManagedSessionInfo {
-                        parent_session_id: run.parent_session_id.clone(),
+                        parent_session_id: run
+                            .executor_session_id
+                            .clone()
+                            .unwrap_or_else(|| run.parent_session_id.clone()),
                         workflow_run_id: run.id.clone(),
                         workflow_id: run.workflow_id.clone(),
                         node_id: node.id.clone(),
@@ -1028,24 +1326,47 @@ async fn activate(
 async fn execution_workspace(
     state: &Shared,
     root_workspace_id: &str,
+    executor_workspace_id: Option<&str>,
+    role_id: &str,
     project_root: &Path,
     configured: Option<&str>,
 ) -> Result<(String, PathBuf)> {
     let configured = configured.unwrap_or(".").trim();
-    if configured.is_empty() || configured == "." {
-        return Ok((
-            root_workspace_id.to_string(),
-            project_root
-                .canonicalize()
-                .with_context(|| format!("读取项目根目录：{}", project_root.display()))?,
-        ));
+    let path = if configured.is_empty() || configured == "." {
+        project_root
+            .canonicalize()
+            .with_context(|| format!("读取项目根目录：{}", project_root.display()))?
+    } else {
+        let path = existing_relative_within(project_root, configured, "角色 Workspace")?;
+        if !path.is_dir() {
+            bail!("角色 Workspace 不是目录：{}", path.display());
+        }
+        path
+    };
+    let Some(executor_workspace_id) = executor_workspace_id else {
+        if configured.is_empty() || configured == "." {
+            return Ok((root_workspace_id.to_string(), path));
+        }
+        let workspace = state.workspaces.open(&path, None).await?;
+        return Ok((workspace.id, path));
+    };
+    let worker = state
+        .workspaces
+        .worker_space_for_role(executor_workspace_id, role_id)
+        .await?;
+    let visible = worker.folders.iter().any(|folder| {
+        folder
+            .root
+            .canonicalize()
+            .is_ok_and(|root| path.starts_with(root))
+    });
+    if !visible {
+        bail!(
+            "Worker AgentSpace for role {role_id} cannot reach task cwd {}",
+            path.display()
+        );
     }
-    let path = existing_relative_within(project_root, configured, "角色 Workspace")?;
-    if !path.is_dir() {
-        bail!("角色 Workspace 不是目录：{}", path.display());
-    }
-    let workspace = state.workspaces.open(&path, None).await?;
-    Ok((workspace.id, path))
+    Ok((worker.id, path))
 }
 
 fn managed_prompt(run: &RunRecord, node: &NodeDefinition, role: &RoleSnapshot) -> String {
@@ -1120,6 +1441,20 @@ async fn verify_evidence(
             "value.nonEmpty" => {
                 if value.is_empty() {
                     bail!("证据 {} 不能为空", requirement.key);
+                }
+            }
+            "value.equals" => {
+                let expected = requirement
+                    .expected
+                    .as_deref()
+                    .expect("value.equals was validated with an expected value");
+                if value != expected {
+                    bail!(
+                        "证据 {} 必须等于 {:?}，收到 {:?}",
+                        requirement.key,
+                        expected,
+                        value
+                    );
                 }
             }
             "git.commitOnTarget" => {
@@ -1251,9 +1586,9 @@ fn load_lease_if_present(path: &Path) -> Result<Option<LeaseRecord>> {
     ))
 }
 
-fn load_project_files(
-    source: &Path,
-) -> Result<(ProjectDefinition, CatalogDefinition, Vec<(String, Vec<u8>)>)> {
+type LoadedProjectFiles = (ProjectDefinition, CatalogDefinition, Vec<(String, Vec<u8>)>);
+
+fn load_project_files(source: &Path) -> Result<LoadedProjectFiles> {
     let project_path = existing_relative_within(source, PROJECT_FILE, "项目 Workflow 配置")?;
     let catalog_path = existing_relative_within(source, CATALOG_FILE, "Workflow catalog")?;
     let project_bytes = read_source(&project_path)?;
@@ -1846,9 +2181,28 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
             }
             if !matches!(
                 requirement.verify.as_str(),
-                "value.nonEmpty" | "git.commitOnTarget"
+                "value.nonEmpty" | "value.equals" | "git.commitOnTarget"
             ) {
                 bail!("未注册的 evidence verifier：{}", requirement.verify);
+            }
+            match (requirement.verify.as_str(), requirement.expected.as_deref()) {
+                ("value.equals", Some(expected))
+                    if !expected.is_empty() && expected.trim() == expected => {}
+                ("value.equals", _) => {
+                    bail!(
+                        "节点 {} 的 value.equals 证据 {} 必须声明非空 expected",
+                        node.id,
+                        requirement.key
+                    );
+                }
+                (_, Some(_)) => {
+                    bail!(
+                        "节点 {} 的证据 {} 只有 value.equals 可以声明 expected",
+                        node.id,
+                        requirement.key
+                    );
+                }
+                (_, None) => {}
             }
             if requirement.verify == "git.commitOnTarget" && node.inputs.write_lease.is_none() {
                 bail!(
@@ -2011,7 +2365,7 @@ fn read_source(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("读取 Workflow 源：{}", path.display()))
 }
 
-fn ensure_source_visible(home: &Path) -> Result<()> {
+pub(crate) fn ensure_source_visible(home: &Path) -> Result<()> {
     ensure_source_visible_with(home, |_| Ok(()))
 }
 
@@ -2261,9 +2615,40 @@ pub(crate) fn carrier_has_active_run(
 }
 
 fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
-    let path = run_path(runtime, &run.id, true)?;
     let body = encode_private_record("Workflow Run", run, MAX_RUN_RECORD_BYTES)?;
-    crate::config::save_private(&path, &body)
+    let Some(snapshot_relative) = run.snapshot_relative.as_deref() else {
+        let path = run_path(runtime, &run.id, true)?;
+        return crate::config::save_private(&path, &body);
+    };
+    let executor_session_id = run
+        .executor_session_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("an Executor-owned Run has no Executor Session"))?;
+    let snapshot = runtime.project_file(snapshot_relative)?;
+    crate::config::save_private(&snapshot, &body)?;
+    let index = RunIndex {
+        schema: RUN_INDEX_SCHEMA.into(),
+        run_id: run.id.clone(),
+        snapshot_relative: snapshot_relative.to_string(),
+        status: run.status.clone(),
+        revision: run.revision,
+        executor_workspace_id: run.executor_workspace_id.clone(),
+        executor_session_id: executor_session_id.to_string(),
+    };
+    let index = encode_private_record("Workflow Run index", &index, MAX_RUN_RECORD_BYTES)?;
+    crate::config::save_private(&run_path(runtime, &run.id, true)?, &index)?;
+    // The immutable Run snapshot above is authoritative. These files are
+    // component-local projections for delivery, recovery and observability;
+    // a projection failure must not turn a committed state transition into a
+    // caller-visible failure. The next load/read can regenerate them.
+    if let Err(error) = sync_flow_projection(runtime, run) {
+        tracing::warn!(
+            run_id = %run.id,
+            %error,
+            "could not refresh Executor flow projection"
+        );
+    }
+    Ok(())
 }
 
 fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
@@ -2275,8 +2660,260 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
         bail!("Workflow Run 不是普通文件：{}", path.display());
     }
     ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
-    serde_json::from_slice(&fs::read(&path)?)
-        .with_context(|| format!("读取 Workflow Run：{}", path.display()))
+    let bytes = fs::read(&path)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(RUN_INDEX_SCHEMA) {
+        let mut run: RunRecord = serde_json::from_value(value)
+            .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
+        run.snapshot_relative = None;
+        return Ok(run);
+    }
+    let index: RunIndex = serde_json::from_value(value)
+        .with_context(|| format!("读取 Workflow Run index：{}", path.display()))?;
+    if index.run_id != run_id {
+        bail!("Workflow Run index identity mismatch");
+    }
+    let snapshot = runtime.project_file(&index.snapshot_relative)?;
+    let metadata = crate::config::sensitive_metadata(&snapshot)
+        .with_context(|| format!("Executor Session Run snapshot 不存在：{run_id}"))?;
+    crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
+    if !metadata.is_file() {
+        bail!("Executor Session Run snapshot 不是普通文件");
+    }
+    ensure_record_size(
+        "Executor Session Run snapshot",
+        metadata.len(),
+        MAX_RUN_RECORD_BYTES,
+    )?;
+    let mut run: RunRecord = serde_json::from_slice(&fs::read(&snapshot)?)
+        .with_context(|| format!("读取 Executor Session Run snapshot：{}", snapshot.display()))?;
+    if run.id != index.run_id
+        || run.status != index.status
+        || run.revision != index.revision
+        || run.executor_workspace_id != index.executor_workspace_id
+        || run.executor_session_id.as_deref() != Some(index.executor_session_id.as_str())
+    {
+        bail!("Workflow Run index does not match its Executor Session snapshot");
+    }
+    run.snapshot_relative = Some(index.snapshot_relative);
+    Ok(run)
+}
+
+fn flow_root(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
+    let Some(snapshot) = run.snapshot_relative.as_deref() else {
+        return Ok(None);
+    };
+    let snapshots = Path::new(snapshot)
+        .parent()
+        .ok_or_else(|| anyhow!("Executor Run snapshot has no snapshots directory"))?;
+    let root = snapshots
+        .parent()
+        .ok_or_else(|| anyhow!("Executor Run snapshot has no Component directory"))?;
+    let relative = root
+        .to_str()
+        .ok_or_else(|| anyhow!("Executor flow path is not UTF-8"))?;
+    Ok(Some(runtime.project_file(relative)?))
+}
+
+fn flow_message_id(run_id: &str, kind: &str, node_id: Option<&str>, revision: u64) -> String {
+    let source = format!(
+        "{run_id}\0{kind}\0{}\0{revision}",
+        node_id.unwrap_or_default()
+    );
+    format!("fm_{}", &hex_digest(source.as_bytes())[..32])
+}
+
+fn push_flow_message(run: &mut RunRecord, message: FlowMessage) {
+    if run
+        .flow_messages
+        .iter()
+        .all(|existing| existing.message_id != message.message_id)
+    {
+        run.flow_messages.push(message);
+    }
+}
+
+fn flow_message(
+    run: &RunRecord,
+    kind: &str,
+    node_id: Option<&str>,
+    sender_session_id: &str,
+    recipient_session_id: &str,
+    expected_revision: Option<u64>,
+    payload: serde_json::Value,
+) -> Result<FlowMessage> {
+    Ok(FlowMessage {
+        schema: FLOW_MESSAGE_SCHEMA.into(),
+        message_id: flow_message_id(
+            &run.id,
+            kind,
+            node_id,
+            expected_revision.unwrap_or(run.revision),
+        ),
+        kind: kind.into(),
+        project_workspace_id: run.workspace_id.clone(),
+        executor_session_id: run
+            .executor_session_id
+            .clone()
+            .ok_or_else(|| anyhow!("Executor flow message has no Executor Session"))?,
+        run_id: run.id.clone(),
+        node_id: node_id.map(str::to_string),
+        attempt: node_id.map(|_| 1),
+        sender_session_id: sender_session_id.into(),
+        recipient_session_id: recipient_session_id.into(),
+        causation_id: None,
+        expected_revision,
+        payload,
+        created_at_ms: now_ms(),
+    })
+}
+
+fn flow_manifest(run: &RunRecord) -> serde_json::Value {
+    serde_json::json!({
+        "schema": FLOW_MANIFEST_SCHEMA,
+        "projectWorkspaceId": run.workspace_id,
+        "pmSessionId": run.parent_session_id,
+        "executorWorkspaceId": run.executor_workspace_id,
+        "executorSessionId": run.executor_session_id,
+        "runId": run.id,
+        "workflowId": run.workflow_id,
+        "dcgDigest": run.dcg_digest,
+        "activationRevision": run.activation_revision,
+        "createdAtMs": run.created_at_ms,
+    })
+}
+
+fn encode_flow_log<'a>(
+    label: &str,
+    messages: impl Iterator<Item = &'a FlowMessage>,
+) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    for message in messages {
+        serde_json::to_writer(&mut body, message)?;
+        body.push(b'\n');
+        ensure_record_size(
+            label,
+            u64::try_from(body.len()).unwrap_or(u64::MAX),
+            MAX_FLOW_LOG_BYTES,
+        )?;
+    }
+    Ok(body)
+}
+
+fn sync_flow_projection(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
+    let Some(root) = flow_root(runtime, run)? else {
+        return Ok(());
+    };
+    let executor_session_id = run
+        .executor_session_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("Executor flow projection has no Executor Session"))?;
+    let manifest = serde_json::to_vec_pretty(&flow_manifest(run))?;
+    let journal = encode_flow_log("Executor flow journal", run.flow_messages.iter())?;
+    let inbox = encode_flow_log(
+        "Executor flow inbox",
+        run.flow_messages
+            .iter()
+            .filter(|message| message.recipient_session_id == executor_session_id),
+    )?;
+    let outbox = encode_flow_log(
+        "Executor flow outbox",
+        run.flow_messages
+            .iter()
+            .filter(|message| message.sender_session_id == executor_session_id),
+    )?;
+    crate::config::save_private(&root.join("manifest.json"), &manifest)?;
+    crate::config::save_private(&root.join("inbox.jsonl"), &inbox)?;
+    crate::config::save_private(&root.join("outbox.jsonl"), &outbox)?;
+    crate::config::save_private(&root.join("journal.jsonl"), &journal)
+}
+
+fn record_flow_start(run: &mut RunRecord, sessions: &[(SessionSummary, String)]) -> Result<()> {
+    let Some(executor_session_id) = run.executor_session_id.clone() else {
+        return Ok(());
+    };
+    let requested = flow_message(
+        run,
+        "run.requested",
+        None,
+        &run.parent_session_id,
+        &executor_session_id,
+        Some(0),
+        serde_json::json!({
+            "taskId": run.task_id,
+            "workflowId": run.workflow_id,
+            "prompt": run.task_prompt,
+        }),
+    )?;
+    push_flow_message(run, requested);
+    record_assigned_messages(run, sessions)
+}
+
+fn record_assigned_messages(
+    run: &mut RunRecord,
+    sessions: &[(SessionSummary, String)],
+) -> Result<()> {
+    let Some(executor_session_id) = run.executor_session_id.clone() else {
+        return Ok(());
+    };
+    for (session, _) in sessions {
+        let managed = session
+            .managed
+            .as_ref()
+            .ok_or_else(|| anyhow!("Workflow launched an unbound Worker Session"))?;
+        let assigned = flow_message(
+            run,
+            "node.assigned",
+            Some(&managed.node_id),
+            &executor_session_id,
+            &session.id,
+            Some(run.revision),
+            serde_json::json!({
+                "role": managed.role,
+                "workerWorkspaceId": session.workspace_id,
+                "workerSessionId": session.id,
+            }),
+        )?;
+        push_flow_message(run, assigned);
+    }
+    Ok(())
+}
+
+fn record_flow_completion(
+    run: &mut RunRecord,
+    node_id: &str,
+    worker_session_id: &str,
+    expected_revision: u64,
+    sessions: &[(SessionSummary, String)],
+) -> Result<()> {
+    let Some(executor_session_id) = run.executor_session_id.clone() else {
+        return Ok(());
+    };
+    let completed = flow_message(
+        run,
+        "node.completed",
+        Some(node_id),
+        worker_session_id,
+        &executor_session_id,
+        Some(expected_revision),
+        serde_json::json!({"accepted": true}),
+    )?;
+    push_flow_message(run, completed);
+    record_assigned_messages(run, sessions)?;
+    if run.status == "completed" {
+        let completed = flow_message(
+            run,
+            "run.completed",
+            None,
+            &executor_session_id,
+            &run.parent_session_id,
+            Some(run.revision),
+            serde_json::json!({"status": run.status}),
+        )?;
+        push_flow_message(run, completed);
+    }
+    Ok(())
 }
 
 fn lock_run(runtime: &RuntimeStore, run_id: &str) -> Result<ExclusiveFileLock> {
@@ -2291,6 +2928,7 @@ fn run_status(run: &RunRecord) -> WorkflowRunStatus {
         id: run.id.clone(),
         workspace_id: run.workspace_id.clone(),
         executor_workspace_id: run.executor_workspace_id.clone(),
+        executor_session_id: run.executor_session_id.clone(),
         parent_session_id: run.parent_session_id.clone(),
         workflow_id: run.workflow_id.clone(),
         dcg_digest: if run.dcg_digest.is_empty() {
@@ -2323,6 +2961,24 @@ fn run_status(run: &RunRecord) -> WorkflowRunStatus {
             .collect(),
         created_at_ms: run.created_at_ms,
         updated_at_ms: run.updated_at_ms,
+    }
+}
+
+fn flow_message_status(message: &FlowMessage) -> FlowMessageStatus {
+    FlowMessageStatus {
+        message_id: message.message_id.clone(),
+        kind: message.kind.clone(),
+        project_workspace_id: message.project_workspace_id.clone(),
+        executor_session_id: message.executor_session_id.clone(),
+        run_id: message.run_id.clone(),
+        node_id: message.node_id.clone(),
+        attempt: message.attempt,
+        sender_session_id: message.sender_session_id.clone(),
+        recipient_session_id: message.recipient_session_id.clone(),
+        causation_id: message.causation_id.clone(),
+        expected_revision: message.expected_revision,
+        payload: message.payload.clone(),
+        created_at_ms: message.created_at_ms,
     }
 }
 
@@ -3001,6 +3657,7 @@ mod tests {
                 all: vec![EvidenceRequirement {
                     key: "checks".into(),
                     verify: "value.nonEmpty".into(),
+                    expected: None,
                 }],
             },
         ))
@@ -3033,6 +3690,7 @@ mod tests {
             id: "wr_test".into(),
             workspace_id: "w_test".into(),
             executor_workspace_id: None,
+            executor_session_id: None,
             parent_session_id: "s_root".into(),
             workflow_id: definition.id.clone(),
             dcg_digest: "sha256:dcg".into(),
@@ -3055,8 +3713,10 @@ mod tests {
                 },
             )]),
             leases: BTreeMap::new(),
+            flow_messages: Vec::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
+            snapshot_relative: None,
         };
 
         settle_if_terminal(&mut run);
@@ -3072,6 +3732,7 @@ mod tests {
             id: format!("wr_{status}"),
             workspace_id: "w_project".into(),
             executor_workspace_id: executor.map(str::to_string),
+            executor_session_id: None,
             parent_session_id: "s_root".into(),
             workflow_id: "direct".into(),
             dcg_digest: "sha256:dcg".into(),
@@ -3092,8 +3753,10 @@ mod tests {
             roles: BTreeMap::new(),
             nodes: BTreeMap::new(),
             leases: BTreeMap::new(),
+            flow_messages: Vec::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
+            snapshot_relative: None,
         };
         let busy = |space: &str| {
             carrier_has_active_run(data.path(), "w_project", project.path(), space).unwrap()

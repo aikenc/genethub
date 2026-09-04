@@ -285,11 +285,12 @@ defineSpecialty(
 
       const requestText = JSON.stringify(opened.mock.requests);
       t.assertions.assert(
-        requestText.includes("你在当前项目的普通主会话中工作") &&
-          requestText.includes("PM 不是独立的 Space 或 Session 类型") &&
-          requestText.includes("源文件改动只形成 Candidate") &&
+        requestText.includes("daemon 只提供类型化机械动作") &&
+          requestText.includes("space bootstrap list") &&
+          requestText.includes("entrySkill") &&
+          requestText.includes("源文件修改只形成 Candidate") &&
           requestText.includes("你是当前项目直达流程中的实现 Worker"),
-        "root or Worker Workflow contract was not delivered in Chinese",
+        "generic Pack discovery or Worker Workflow contract was not delivered in Chinese",
       );
       t.note(
         `root=${rootSessionId} worker=${managed?.id} run=${runId} branch=${initialBranch} commits=3`,

@@ -197,6 +197,8 @@ pub fn usage() -> i32 {
   genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
                                     route through the project workflow catalog
   genet workflow get --run <id>    read one durable workflow run
+  genet workflow history [--limit <n>]
+                                    list recent Runs for Workflow analysis
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
   genet space inspect              which responsibilities this AgentSpace carries
@@ -209,7 +211,13 @@ pub fn usage() -> i32 {
   genet space parent set (--parent <id> | --detach) [--revision <n>]
                                     move this AgentSpace in the ownership tree
   genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
+  genet space builder init|check|explain|build|verify|clean --name <agent-space>
+                                    run the daemon-owned AgentSpaceBuilder inside this project
+  genet space bootstrap list       discover versioned project team/workflow packs
+  genet space bootstrap plan|apply --pack <id> [--agent <id>] [--model <id>]
+                                    install a versioned project team and workflow pack
   genet session components <id>     which responsibilities are live in this session
+  genet session flow <id>           read an Executor Session's structured DCG timeline
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

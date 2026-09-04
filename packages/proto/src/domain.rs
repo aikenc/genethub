@@ -290,6 +290,107 @@ pub struct WorkspaceInfo {
     pub pipe_space: Option<PipeSpaceInfo>,
 }
 
+/// One deterministic AgentSpaceBuilder operation.
+///
+/// The daemon owns filesystem safety and reproducibility; project Skills use
+/// this closed protocol rather than invoking a mutable external builder from
+/// an Agent shell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentSpaceBuilderOperation {
+    Init,
+    Check,
+    Explain,
+    #[serde(rename_all = "camelCase")]
+    Build {
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        require_no_post_commands: bool,
+    },
+    Verify,
+    Clean,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSpaceBuilderDiagnostic {
+    pub level: String,
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub semantic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub action: Option<String>,
+}
+
+/// Structured AgentSpaceBuilder result returned by the production RPC/CLI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSpaceBuilderReport {
+    pub schema: String,
+    pub builder_version: String,
+    pub command: String,
+    pub status: String,
+    pub pipespace_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pipespace: Option<String>,
+    pub diagnostics: Vec<AgentSpaceBuilderDiagnostic>,
+    #[ts(type = "unknown")]
+    pub summary: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub details: Option<serde_json::Value>,
+}
+
+/// Result of planning or applying one versioned project Bootstrap Pack.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BootstrapPackReport {
+    pub schema: String,
+    pub status: String,
+    pub pack_id: String,
+    pub pack_version: u32,
+    pub pack_digest: String,
+    pub project_workspace_id: String,
+    /// Project-relative Skill the initiating Agent reads immediately after
+    /// apply. This keeps bootstrap discovery generic while the Pack owns the
+    /// actual PM method.
+    pub entry_skill: String,
+    /// Relative project paths owned by this pack, in stable order.
+    pub files: Vec<String>,
+    /// The four configured AgentSpaces after apply; empty for a pure plan.
+    pub spaces: Vec<WorkspaceInfo>,
+    /// Whether applying the same pack again would be a no-op.
+    pub current: bool,
+}
+
+/// One immutable Bootstrap Pack embedded in this product build. The list is
+/// discovery only; choosing a pack remains a PM/Skill decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BootstrapPackInfo {
+    pub id: String,
+    pub version: u32,
+    pub description: String,
+    pub digest: String,
+    /// Project-relative method entry point installed by this Pack.
+    pub entry_skill: String,
+}
+
 /// How a child session obtained the context that precedes its first new turn.
 ///
 /// Native checkpoints preserve the Agent's own thread. Reconstructed context
@@ -754,6 +855,11 @@ pub struct WorkflowRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub executor_workspace_id: Option<String>,
+    /// Persistent, non-LLM control instance that owns this Run's DCG state
+    /// and structured flow timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_session_id: Option<String>,
     pub parent_session_id: String,
     pub workflow_id: String,
     /// Project-wide immutable DCG Candidate captured when this Run started.
@@ -778,6 +884,51 @@ pub struct WorkflowRunStatus {
     pub created_at_ms: i64,
     #[ts(type = "number")]
     pub updated_at_ms: i64,
+}
+
+/// One structured, replayable control-plane message owned by an Executor
+/// Session. Ordinary chat remains in the Session timeline and is not mixed
+/// into this protocol record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct FlowMessageStatus {
+    pub message_id: String,
+    pub kind: String,
+    pub project_workspace_id: String,
+    pub executor_session_id: String,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attempt: Option<u32>,
+    pub sender_session_id: String,
+    pub recipient_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub causation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub expected_revision: Option<u64>,
+    #[ts(type = "unknown")]
+    pub payload: serde_json::Value,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+}
+
+/// The current DCG state and independent flow timeline of one Executor
+/// Session. A Session currently owns one Run; the envelope leaves that
+/// identity explicit rather than relying on a directory name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ExecutorFlowStatus {
+    pub schema: String,
+    pub executor_session_id: String,
+    pub run: WorkflowRunStatus,
+    pub messages: Vec<FlowMessageStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

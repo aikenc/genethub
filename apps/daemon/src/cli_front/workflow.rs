@@ -41,6 +41,10 @@ enum Command {
         workspace_id: Option<String>,
         run_id: Option<String>,
     },
+    History {
+        workspace_id: Option<String>,
+        limit: Option<u32>,
+    },
     Complete {
         workspace_id: Option<String>,
         run_id: Option<String>,
@@ -213,6 +217,29 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.get", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
+        Command::History {
+            workspace_id,
+            limit,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRuns(runs) = rpc
+                .call(Request::WorkflowHistory {
+                    workspace_id: workspace_id.clone(),
+                    limit,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.history with the wrong reply",
+                ));
+            };
+            output::succeed(
+                "workflow.history",
+                json!({"workspaceId": workspace_id, "runs": runs}),
+            );
+            Ok(EXIT_OK)
+        }
         Command::Complete {
             workspace_id,
             run_id,
@@ -298,8 +325,19 @@ async fn binding_for_missing(needed: bool) -> Result<Option<ManagedBinding>, Cli
             None,
         )
     })?;
+    let workspace_id = state
+        .workspaces
+        .project_root(&summary.workspace_id)
+        .await
+        .map_err(|error| {
+            CliFailure::business(
+                "workflowBindingUnavailable",
+                format!("无法解析当前会话的项目 AgentSpace：{error:#}"),
+                None,
+            )
+        })?;
     Ok(summary.managed.map(|managed| ManagedBinding {
-        workspace_id: summary.workspace_id,
+        workspace_id,
         run_id: managed.workflow_run_id,
         node_id: managed.node_id,
     }))
@@ -478,6 +516,33 @@ pub(super) async fn resolve_workspace(
         }
         return Err(CliFailure::target_not_found("workspace", &workspace_id));
     }
+    // A Session's AgentSpace identity is stronger than cwd containment. A
+    // Coder/Reviewer Space normally mounts the project root as an additional
+    // folder, so cwd alone can match several siblings and accidentally choose
+    // a child as the DCG entry. Walk the caller's ownership tree instead.
+    if let crate::authz::Principal::SessionController { session_id } = super::caller_principal() {
+        let state = super::local_state()
+            .map_err(|message| CliFailure::business("workflowBindingUnavailable", message, None))?;
+        let summary = state.sessions.summary(&session_id).await.map_err(|error| {
+            CliFailure::business(
+                "workflowBindingUnavailable",
+                format!("无法读取当前会话：{error:#}"),
+                None,
+            )
+        })?;
+        let project_id = state
+            .workspaces
+            .project_root(&summary.workspace_id)
+            .await
+            .map_err(|error| {
+                CliFailure::business(
+                    "workflowBindingUnavailable",
+                    format!("无法解析当前会话的项目 AgentSpace：{error:#}"),
+                    None,
+                )
+            })?;
+        return Ok(project_id);
+    }
     let cwd = super::caller_cwd();
     let known = query::list_workspaces(rpc).await?;
     super::place::deepest_containing(&known, &cwd, true)
@@ -539,6 +604,10 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
         }),
+        "history" => Ok(Command::History {
+            workspace_id: values.workspace.take(),
+            limit: values.limit,
+        }),
         "complete" => Ok(Command::Complete {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -547,7 +616,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             evidence: values.evidence,
         }),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|activate|dispatch|get|complete ...",
+            "usage: genet workflow init|inspect|activate|dispatch|get|history|complete ...",
         )),
     }
 }
@@ -567,6 +636,7 @@ struct Values {
     node: Option<String>,
     revision: Option<u64>,
     timeout: Option<u64>,
+    limit: Option<u32>,
     wait: Option<bool>,
     evidence: BTreeMap<String, String>,
 }
@@ -611,6 +681,17 @@ impl Values {
                             .parse()
                             .map_err(|_| CliFailure::invalid_args("--timeout 需要非负整数秒"))?,
                     );
+                }
+                "--limit" => {
+                    let value = next(&mut index)?;
+                    values.limit = Some(
+                        value
+                            .parse::<u32>()
+                            .map_err(|_| CliFailure::invalid_args("--limit 需要正整数"))?,
+                    );
+                    if values.limit == Some(0) {
+                        return Err(CliFailure::invalid_args("--limit 需要正整数"));
+                    }
                 }
                 "--wait" => values.wait = Some(true),
                 "--no-wait" => values.wait = Some(false),
@@ -771,6 +852,7 @@ mod tests {
             id: "wr_test".into(),
             workspace_id: "ws_test".into(),
             executor_workspace_id: None,
+            executor_session_id: None,
             parent_session_id: "s_root".into(),
             workflow_id: "fanout".into(),
             dcg_digest: "sha256:dcg".into(),
