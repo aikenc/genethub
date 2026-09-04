@@ -147,7 +147,12 @@ struct Live {
     seq: AtomicU64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
-    agent: Mutex<Option<Box<dyn AgentSession>>>,
+    /// Shared rather than owned so a caller can take a handle to the agent and
+    /// let go of the lock before awaiting it. Everything that reaches an agent
+    /// crosses a process boundary, and holding this across one of those awaits
+    /// is what turns "the agent stopped answering" into "the session stopped
+    /// answering": stop, close, and every read of the session queue behind it.
+    agent: Mutex<Option<Arc<dyn AgentSession>>>,
     /// Deployment-aware context supplied by the authenticated UI. It is kept
     /// for an in-process Agent restart but not persisted: the next browser send
     /// recomposes domain/channel/workspace from its actual address.
@@ -1778,9 +1783,9 @@ impl SessionManager {
             }
         }
 
-        let agent = live.agent.lock().await;
-        let agent = agent
-            .as_ref()
+        let agent = live
+            .agent()
+            .await
             .ok_or_else(|| anyhow!("the session has no running agent"))?;
         let turn_id = agent
             .send(PromptInput {
@@ -1982,7 +1987,7 @@ impl SessionManager {
             let session_id = live.meta.lock().await.id.clone();
             self.processes.watch(&session_id, pid).await;
         }
-        *live.agent.lock().await = Some(session);
+        *live.agent.lock().await = Some(Arc::from(session));
 
         if let Some(previous) = live.pump.lock().await.take() {
             if !previous.is_finished() {
@@ -2011,12 +2016,29 @@ impl SessionManager {
             agent = %agent_id,
             "forwarding a user interrupt to the active agent"
         );
-        let agent = live.agent.lock().await;
-        let result = match agent.as_ref() {
-            Some(agent) => agent.interrupt().await,
+        let result = match live.agent().await {
+            Some(agent) => match tokio::time::timeout(INTERRUPT_ASK, agent.interrupt()).await {
+                Ok(result) => result,
+                // The ask itself did not get through — the agent is not reading
+                // any more. Abandoning a half-written cancel would matter if
+                // anything else were going to be said down this pipe, and the
+                // escalation below is there precisely because nothing is.
+                Err(_) => Err(anyhow!("the agent did not accept the interrupt in time")),
+            },
             // Nothing running is not a failure: the user pressed stop late.
             None => Ok(()),
         };
+        // Asking is not stopping. An agent is free to ignore a cancel, and one
+        // that does leaves the user with a conversation that says it is still
+        // working and a stop button that has already been pressed — so the ask
+        // gets a deadline, and missing it ends the agent instead.
+        let stopping = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .map(|round| round.round_id.clone());
+        stop_if_still_running(&live, self.store.clone(), session_id.to_string(), stopping);
         match &result {
             Ok(()) => tracing::info!(
                 event = "session_interrupt_forwarded",
@@ -2066,7 +2088,7 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_model(model_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2098,7 +2120,7 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_effort(effort_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2146,7 +2168,7 @@ impl SessionManager {
             value_id,
             axis.values.iter().map(|value| value.id.as_str()),
         )?;
-        if let Some(agent) = live.agent.lock().await.as_ref() {
+        if let Some(agent) = live.agent().await {
             agent.set_runtime_axis(axis_id, value_id).await?;
         }
         {
@@ -2177,7 +2199,7 @@ impl SessionManager {
                 "answer or cancel the pending Agent interaction before changing mode"
             ));
         }
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_mode(mode_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2234,18 +2256,16 @@ impl SessionManager {
                 .await
                 .context("resuming the stopped Agent session")?;
             *live.status.lock().await = SessionStatus::Running;
-            let sent = {
-                let agent = live.agent.lock().await;
-                let agent = agent
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
-                agent
-                    .send(PromptInput {
-                        text: continuation.prompt,
-                        attachments: Vec::new(),
-                    })
-                    .await
-            };
+            let agent = live
+                .agent()
+                .await
+                .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
+            let sent = agent
+                .send(PromptInput {
+                    text: continuation.prompt,
+                    attachments: Vec::new(),
+                })
+                .await;
             match sent {
                 Ok(turn_id) => {
                     // This is the daemon deciding to resume, not the client
@@ -2895,6 +2915,15 @@ impl Live {
         }
     }
 
+    /// A handle to the running agent, if there is one, with the lock released
+    /// before the caller does anything with it.
+    ///
+    /// The awaits that follow all end at a process the daemon does not
+    /// control, so none of them may be made while holding this.
+    async fn agent(&self) -> Option<Arc<dyn AgentSession>> {
+        self.agent.lock().await.clone()
+    }
+
     /// Marks the open round as waiting on a human. A no-op if it is already
     /// marked — two permission requests in a row must not double-count the
     /// gap between the first answer and the second question.
@@ -3084,6 +3113,74 @@ fn question_answer(
         lines.push(format!("- {}: {}", question.prompt, values.join(", ")));
     }
     Ok((!lines.is_empty()).then(|| lines.join("\n")))
+}
+
+/// How long the agent has to accept a cancel before the ask is abandoned.
+///
+/// Generous, because a healthy agent answers this in microseconds and the only
+/// thing a longer wait buys is a longer freeze.
+const INTERRUPT_ASK: Duration = Duration::from_secs(3);
+
+/// How long a cancelled turn has to end before the agent is stopped outright.
+const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+/// Ends an agent that was asked to stop and did not.
+///
+/// Runs on its own task so that pressing stop stays instant: the answer the
+/// user is waiting for is "your request was taken", and the enforcement that
+/// follows is the daemon's problem, not theirs.
+fn stop_if_still_running(
+    live: &Arc<Live>,
+    store: Store,
+    session_id: String,
+    stopping: Option<String>,
+) {
+    let live = live.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(INTERRUPT_GRACE).await;
+        if *live.status.lock().await != SessionStatus::Running {
+            return;
+        }
+        // Pressing stop and immediately typing again is ordinary, and five
+        // seconds is long enough for it. Without this the next message is what
+        // gets killed, which is worse than the freeze this is here to end.
+        let open = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .map(|round| round.round_id.clone());
+        if open != stopping {
+            return;
+        }
+        tracing::warn!(
+            event = "session_interrupt_escalated",
+            session = %session_id,
+            grace_ms = INTERRUPT_GRACE.as_millis() as u64,
+            "an agent ignored a cancel and is being stopped"
+        );
+        // Taking it first is what makes this safe to race: whoever else was
+        // about to reach for the agent finds nothing rather than a process
+        // being killed underneath them.
+        let agent = live.agent.lock().await.take();
+        if let Some(agent) = agent {
+            if let Err(error) = agent.close().await {
+                tracing::warn!(error = %error, "could not stop an agent that ignored a cancel");
+            }
+        }
+        // The pump would eventually see the event channel close and clean up,
+        // but only if the process lets go of its own stdout. Settling here
+        // means the conversation stops saying it is working either way.
+        if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+            persist_round(&live, round).await;
+        }
+        flush_turn(&live, &store).await;
+        *live.status.lock().await = SessionStatus::Idle;
+        live.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Idle,
+        })
+        .await;
+    });
 }
 
 async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
@@ -6097,7 +6194,7 @@ mod tests {
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (events, _) = broadcast::channel(1);
-        *live.agent.lock().await = Some(Box::new(StoppingSession {
+        *live.agent.lock().await = Some(Arc::new(StoppingSession {
             events,
             interrupted: interrupted.clone(),
             closed: closed.clone(),
@@ -6948,7 +7045,7 @@ mod tests {
         // send more than 64 events and are not overflow tests.
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
-        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
             turn_ids.clone(),
         )));
@@ -7052,7 +7149,7 @@ mod tests {
         let (sessions, events, _) = wired(dir.path()).await;
         let providers = ProviderMap::new();
         let live = sessions.live("s1").await.unwrap();
-        *live.agent.lock().await = Some(Box::new(FakeSession::refusing(events.clone())));
+        *live.agent.lock().await = Some(Arc::new(FakeSession::refusing(events.clone())));
         let mut seen = live.events.subscribe();
 
         sessions
@@ -7830,7 +7927,7 @@ mod tests {
         // fake stands in for whatever `ensure_started_in_mode` would really
         // start on approval, sharing the turn-id counter so the ids stay
         // distinct across the "restart".
-        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
             turn_ids.clone(),
         )));

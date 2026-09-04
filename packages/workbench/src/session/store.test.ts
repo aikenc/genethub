@@ -2002,3 +2002,59 @@ describe("batchGet version-skew fallback", () => {
     expect(useWorkbench.getState().notice).toContain("connection lost");
   });
 });
+
+/**
+ * A reconnect that could not be filled in is the one moment the event stream
+ * cannot be trusted: the daemon says so by answering with a snapshot and
+ * `reset`, and the events it could not replay are exactly the ones that would
+ * have moved the status. Every freeze report we have looks like this from the
+ * outside — the turn is over on the daemon, and the client still shows a
+ * running session with a composer that will not send.
+ */
+describe("a reconnect the daemon could not fill in", () => {
+  function resyncingClient(summary: SessionSummary) {
+    let resync: ((snapshot: unknown, events: SequencedEvent[], reset: boolean) => void) | null =
+      null;
+    const client = {
+      subscribe: async (
+        _sessionId: string,
+        handlers: {
+          onEvent: (event: SequencedEvent) => void;
+          onResync: (snapshot: unknown, events: SequencedEvent[], reset: boolean) => void;
+        },
+      ) => {
+        resync = handlers.onResync;
+        return {
+          snapshot: { seq: 7, items: [], pendingPermission: undefined, summary },
+          replayed: [],
+          reset: false,
+        };
+      },
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    return {
+      client,
+      reconnect: (nextSummary: SessionSummary) =>
+        resync?.(
+          { seq: 9, items: [], pendingPermission: undefined, summary: nextSummary },
+          [],
+          true,
+        ),
+    };
+  }
+
+  it("takes the status from the snapshot rather than from events that never came", async () => {
+    const running: SessionSummary = { ...SESSION, status: "running" };
+    const { client, reconnect } = resyncingClient(running);
+    useWorkbench.setState({ client, sessions: [running] });
+
+    await useWorkbench.getState().selectSession("s1");
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("running");
+
+    // The turn ended while the connection was down, so `turnCompleted` is
+    // among the events that were dropped.
+    reconnect({ ...SESSION, status: "idle" });
+
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
+  });
+});

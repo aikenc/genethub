@@ -966,6 +966,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot, previous.pending, previous)
           : previous;
+        // The snapshot is the daemon's own answer, and it arrives precisely
+        // when the events that would have carried the status were the ones
+        // dropped. Replaying only what survived leaves a finished turn showing
+        // as still running, with a composer that will not take the next
+        // message — the shape of every freeze report we have.
+        adoptSnapshotStatus(sessionId, resnapshot as SessionSnapshot, set);
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
           applySessionStatus(sessionId, event.event, set);
@@ -987,6 +993,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
     markSessionRead(typedSnapshot.summary);
+    adoptSnapshotStatus(sessionId, typedSnapshot, set);
     const timeline = replayed.reduce(applySequenced, base);
     set((state) => ({
       subscribedSessionIds: state.subscribedSessionIds.includes(sessionId)
@@ -2252,6 +2259,22 @@ function applyTitle(sessionId: string, title: string, set: Setter): void {
 }
 
 /** Mirrors live daemon status into the session list without waiting for a poll. */
+/** Takes the status straight from a snapshot the daemon just answered with.
+ *
+ * Events are how the status normally moves, and they are enough right up to
+ * the moment some of them do not arrive. A snapshot has no such gap in it, so
+ * whenever one is in hand it wins over whatever the event stream left behind.
+ */
+function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
+  const status = snapshot?.summary?.status;
+  if (!status) return;
+  set((state) => ({
+    sessions: state.sessions.map((session) =>
+      session.id === sessionId && session.status !== status ? { ...session, status } : session,
+    ),
+  }));
+}
+
 function applySessionStatus(
   sessionId: string,
   event: import("@genehub/proto").SessionEvent,
