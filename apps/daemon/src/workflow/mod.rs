@@ -540,8 +540,10 @@ pub fn root_session_guidance(cwd: &Path) -> Option<String> {
     Some(format!(
         "<genehub_workflow_controller>\n\
 当前项目的流程源位于 `{location}`。daemon 只提供类型化机械动作，不定义项目管理方法。使用环境变量\
-`GENEHUB_CLI` 指向的绝对命令调用这些动作。需要组建团队或安装项目方法时，先运行 `space bootstrap list`，\
-按返回的 description 选择 Pack，再依次执行 `space bootstrap plan` 与 `apply`；不要猜 Pack id。apply 返回\
+`GENEHUB_CLI` 指向的绝对命令调用这些动作。需要组建团队或安装项目方法时，先运行\
+`$GENEHUB_CLI space bootstrap list`，按返回的 description 选择 Pack，再依次执行\
+`$GENEHUB_CLI space bootstrap plan --pack <id>` 与\
+`$GENEHUB_CLI space bootstrap apply --pack <id>`；不要猜 Pack id，也不要把 Pack id 当位置参数。apply 返回\
 `entrySkill`，立即读取该项目文件，并由它决定如何理解目标、选择 DCG、分配预算和汇报结果。若没有匹配的 Pack，\
 再明确说明并考虑 `workflow init`。`workflow inspect` 只投影项目状态；源文件修改只形成 Candidate，不会热切换\
 活动 DCG。只有用户明确要求晋级或回滚时才可按当前 revision 执行 `workflow activate`。\n\
@@ -1245,7 +1247,7 @@ async fn activate(
                         .get(role_id)
                         .cloned()
                         .ok_or_else(|| anyhow!("角色不存在：{role_id}"))?;
-                    let (workspace_id, cwd) = execution_workspace(
+                    let execution = execution_workspace(
                         state,
                         &run.workspace_id,
                         run.executor_workspace_id.as_deref(),
@@ -1255,7 +1257,9 @@ async fn activate(
                     )
                     .await?;
                     if let Some(policy) = &node.inputs.write_lease {
-                        let lease = acquire_lease(runtime, &cwd, &run.id, &node.id, policy).await?;
+                        let lease =
+                            acquire_lease(runtime, &execution.task_cwd, &run.id, &node.id, policy)
+                                .await?;
                         run.leases.insert(node.id.clone(), lease);
                     }
                     let managed = ManagedSessionInfo {
@@ -1269,12 +1273,12 @@ async fn activate(
                         role: role.id.clone(),
                         user_interaction: role.user_interaction,
                     };
-                    let system_prompt = managed_prompt(run, &node, &role);
+                    let system_prompt = managed_prompt(run, &node, &role, &execution.task_cwd);
                     let summary = state
                         .sessions
                         .create_managed(
-                            &workspace_id,
-                            cwd,
+                            &execution.workspace_id,
+                            execution.session_cwd,
                             &role.agent_id,
                             role.model_id.clone(),
                             role.mode_id.clone(),
@@ -1323,6 +1327,16 @@ async fn activate(
     Ok(sessions)
 }
 
+struct ExecutionWorkspace {
+    workspace_id: String,
+    /// Agent process cwd. For an attached Worker this is the Worker
+    /// AgentSpace root, so its own Components, Skills and hooks take effect.
+    session_cwd: PathBuf,
+    /// Repository/directory on which the Workflow node operates. Leases and
+    /// evidence are deliberately scoped here rather than to `session_cwd`.
+    task_cwd: PathBuf,
+}
+
 async fn execution_workspace(
     state: &Shared,
     root_workspace_id: &str,
@@ -1330,7 +1344,7 @@ async fn execution_workspace(
     role_id: &str,
     project_root: &Path,
     configured: Option<&str>,
-) -> Result<(String, PathBuf)> {
+) -> Result<ExecutionWorkspace> {
     let configured = configured.unwrap_or(".").trim();
     let path = if configured.is_empty() || configured == "." {
         project_root
@@ -1345,10 +1359,18 @@ async fn execution_workspace(
     };
     let Some(executor_workspace_id) = executor_workspace_id else {
         if configured.is_empty() || configured == "." {
-            return Ok((root_workspace_id.to_string(), path));
+            return Ok(ExecutionWorkspace {
+                workspace_id: root_workspace_id.to_string(),
+                session_cwd: path.clone(),
+                task_cwd: path,
+            });
         }
         let workspace = state.workspaces.open(&path, None).await?;
-        return Ok((workspace.id, path));
+        return Ok(ExecutionWorkspace {
+            workspace_id: workspace.id,
+            session_cwd: path.clone(),
+            task_cwd: path,
+        });
     };
     let worker = state
         .workspaces
@@ -1366,10 +1388,25 @@ async fn execution_workspace(
             path.display()
         );
     }
-    Ok((worker.id, path))
+    let session_cwd = worker
+        .root
+        .canonicalize()
+        .with_context(|| format!("读取 Worker AgentSpace 根目录：{}", worker.root.display()))?;
+    Ok(ExecutionWorkspace {
+        workspace_id: worker.id,
+        session_cwd,
+        task_cwd: path,
+    })
 }
 
-fn managed_prompt(run: &RunRecord, node: &NodeDefinition, role: &RoleSnapshot) -> String {
+fn managed_prompt(
+    run: &RunRecord,
+    node: &NodeDefinition,
+    role: &RoleSnapshot,
+    task_cwd: &Path,
+) -> String {
+    let task_cwd = serde_json::to_string(&task_cwd.display().to_string())
+        .expect("filesystem path is representable as a JSON string");
     let evidence = node
         .completion
         .all
@@ -1381,8 +1418,12 @@ fn managed_prompt(run: &RunRecord, node: &NodeDefinition, role: &RoleSnapshot) -
         "{}\n\n<genehub_managed_session>\n\
 你正在普通 Session 中执行项目 Workflow `{}` 的节点 `{}`，角色标签为 `{}`。本会话由根会话委托，\
 对用户界面只读；不要把技术执行转回根会话。节点完成标准来自项目配置，需要证据：{}。\n\
+当前 cwd 是本角色的 AgentSpace 根目录；任务工作目录（JSON 字符串）是 {}。在任务工作目录中完成代码、测试和 Git 操作，\
+但只遵守本角色 AgentSpace 中的职责、Skill 与 Hook，不要代行项目 PM 或其他角色。\n\
 完成后先运行 `\"$GENEHUB_CLI\" workflow get` 读取本受管会话绑定的最新 revision，\
 再运行 `\"$GENEHUB_CLI\" workflow complete --revision <revision> --evidence <key=value>`，为每个要求的 key 各传一次。\
+`verify` 名称只描述 daemon 如何校验，不是 value 的前缀：例如提交证据使用 `--evidence commit=<40位提交哈希>`，\
+普通检查使用 `--evidence checks=<实际检查摘要>`。\
 只上报真实证据；缺少证据时继续执行或明确失败。\n\
 </genehub_managed_session>",
         role.prompt_text,
@@ -1390,6 +1431,7 @@ fn managed_prompt(run: &RunRecord, node: &NodeDefinition, role: &RoleSnapshot) -
         node.id,
         role.id,
         if evidence.is_empty() { "无额外证据" } else { &evidence },
+        task_cwd,
     )
 }
 

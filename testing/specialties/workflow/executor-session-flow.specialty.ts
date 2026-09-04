@@ -23,6 +23,7 @@ defineSpecialty(
       "bootstrap leaves the project dirty so the first Coder cannot obtain its write lease",
       "the PM remains the direct parent of Worker Sessions",
       "role labels do not resolve to the Coder and Reviewer AgentSpaces",
+      "Worker Sessions bind to their role but start in the project root and load the PM Skill",
       "Executor state remains only in daemon-private runtime",
       "mechanical DCG transitions consume Executor LLM turns",
       "FlowMessages are chat text or omit the Coder-to-Reviewer transition",
@@ -73,13 +74,18 @@ defineSpecialty(
             },
           },
         },
-        { tool: { name: "write", arguments: { path: "index.html", content: gameHtml } } },
+        {
+          tool: {
+            name: "write",
+            arguments: { path: path.join(projectRoot, "index.html"), content: gameHtml },
+          },
+        },
         {
           tool: {
             name: "bash",
             arguments: {
               command:
-                'git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke" && sleep 2',
+                `cd ${JSON.stringify(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke" && sleep 2`,
             },
           },
         },
@@ -88,7 +94,7 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                'test -s index.html && grep -q "<canvas" index.html && grep -q "ArrowLeft" index.html && rejected=$("$GENEHUB_CLI" workflow complete --evidence review=rejected --evidence checks="canvas-input-smoke" 2>&1); status=$?; test "$status" -ne 0 && printf "%s" "$rejected" | grep -q "必须等于" && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks="canvas-input-smoke"',
+                `cd ${JSON.stringify(projectRoot)} && test -s index.html && grep -q "<canvas" index.html && grep -q "ArrowLeft" index.html && rejected=$("$GENEHUB_CLI" workflow complete --evidence review=rejected --evidence checks="canvas-input-smoke" 2>&1); status=$?; test "$status" -ne 0 && printf "%s" "$rejected" | grep -q "必须等于" && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks="canvas-input-smoke"`,
             },
           },
         },
@@ -165,6 +171,33 @@ defineSpecialty(
       t.assertions.assert(
         reviewer?.workspaceId === reviewerSpace?.id,
         "Reviewer did not run in Reviewer AgentSpace",
+      );
+      const sessionMeta = (spaceRoot: string, sessionId: string) =>
+        JSON.parse(
+          readFileSync(
+            path.join(spaceRoot, ".genethub", "sessions", sessionId, "meta.json"),
+            "utf8",
+          ),
+        ) as { cwd?: string; managedSystemPrompt?: string };
+      const coderMeta = sessionMeta(coderSpace?.root ?? "missing", coder?.id ?? "missing");
+      const reviewerMeta = sessionMeta(
+        reviewerSpace?.root ?? "missing",
+        reviewer?.id ?? "missing",
+      );
+      t.assertions.assert(
+        path.resolve(coderMeta.cwd ?? "missing") === path.resolve(coderSpace?.root ?? "missing"),
+        "Coder Session cwd is not the Coder AgentSpace root",
+      );
+      t.assertions.assert(
+        path.resolve(reviewerMeta.cwd ?? "missing") ===
+          path.resolve(reviewerSpace?.root ?? "missing"),
+        "Reviewer Session cwd is not the Reviewer AgentSpace root",
+      );
+      t.assertions.assert(
+        coderMeta.managedSystemPrompt?.includes(
+          `任务工作目录（JSON 字符串）是 ${JSON.stringify(projectRoot)}`,
+        ) === true,
+        "Coder Session did not receive the distinct project task cwd",
       );
       t.assertions.assert(
         run?.executorWorkspaceId === executorSpace?.id,

@@ -540,6 +540,37 @@ mod tests {
         assert!(rendered
             .iter()
             .any(|file| file.relative.ends_with("game-project.yaml")));
+        let pm_skill = rendered
+            .iter()
+            .find(|file| file.relative == ".pipebuilder/skills/project-manager/SKILL.md")
+            .expect("PM skill");
+        let pm_skill = std::str::from_utf8(&pm_skill.body).expect("UTF-8 PM skill");
+        assert!(pm_skill.contains("--no-wait"));
+        assert!(pm_skill.contains("<genehub_flow_message kind=\"run.completed\">"));
+        assert!(pm_skill.contains("start a parallel implementation"));
+        assert!(pm_skill.contains("Never call `session flow` on a Coder or Reviewer Session"));
+        let manager_skill = rendered
+            .iter()
+            .find(|file| {
+                file.relative == "spaces/workflow-manager/skills/workflow-manager/SKILL.md"
+            })
+            .expect("WorkflowManager skill");
+        let manager_skill =
+            std::str::from_utf8(&manager_skill.body).expect("UTF-8 WorkflowManager skill");
+        assert!(manager_skill.contains("space children --workspace"));
+        assert!(manager_skill.contains("does not create a Worker AgentSpace"));
+        assert!(manager_skill.contains("instead of inventing an unattached"));
+        let evaluator = rendered
+            .iter()
+            .find(|file| {
+                file.relative
+                    .ends_with("workflow-manager/scripts/evaluate.mjs")
+            })
+            .expect("WorkflowManager evaluator");
+        let evaluator = std::str::from_utf8(&evaluator.body).expect("UTF-8 evaluator");
+        assert!(evaluator.contains("ls-files"));
+        assert!(evaluator.contains("Candidate roles have no enabled direct Worker"));
+        assert!(evaluator.contains("candidate.rolesHaveAttachedWorkers"));
         assert!(rendered
             .iter()
             .all(|file| !file.body.windows(2).any(|window| window == b"{{")));

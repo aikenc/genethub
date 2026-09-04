@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -70,17 +70,51 @@ if (project.candidateDigest === project.activeDigest) {
 // not the repository. Walk from `<project>/.genethub/workflow` to the Git
 // project before asking Git for project-relative changed paths.
 const projectRoot = path.resolve(project.root, "..", "..");
-const changedResult = spawnSync("git", ["diff", "--name-only"], {
+const changedResult = spawnSync("git", ["diff", "--name-only", "HEAD"], {
   cwd: projectRoot,
   encoding: "utf8",
 });
 if (changedResult.status !== 0) throw new Error(changedResult.stderr || "git diff failed");
-const changedFiles = changedResult.stdout.split("\n").filter(Boolean);
+const untrackedResult = spawnSync("git", ["ls-files", "--others", "--exclude-standard"], {
+  cwd: projectRoot,
+  encoding: "utf8",
+});
+if (untrackedResult.status !== 0) {
+  throw new Error(untrackedResult.stderr || "git untracked-file scan failed");
+}
+const changedFiles = [...new Set(
+  `${changedResult.stdout}\n${untrackedResult.stdout}`.split("\n").filter(Boolean),
+)].sort();
 if (
   changedFiles.length === 0 ||
   changedFiles.some((file) => !file.startsWith(".genethub/workflow/"))
 ) {
   throw new Error(`evaluation changes must be limited to project Workflow assets: ${changedFiles.join(",")}`);
+}
+
+const workflowFiles = readdirSync(path.join(project.root, "workflows"), { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith(".yaml"))
+  .map((entry) => path.join(project.root, "workflows", entry.name));
+const candidateRoles = [...new Set(workflowFiles.flatMap((file) => {
+  const source = readFileSync(file, "utf8");
+  return [...source.matchAll(/^\s+role:\s*([A-Za-z0-9._-]+)\s*$/gm)].map((match) => match[1]);
+}))].sort();
+if (candidateRoles.length === 0) throw new Error("Candidate references no agent.session roles");
+const executorWorkspaceIds = [...new Set(completed.map((run) => run.executorWorkspaceId).filter(Boolean))];
+if (executorWorkspaceIds.length === 0) throw new Error("completed Runs expose no Executor AgentSpace");
+for (const executorWorkspaceId of executorWorkspaceIds) {
+  const children = genet(["space", "children", "--workspace", executorWorkspaceId]).children ?? [];
+  const availableRoles = new Set(children.flatMap((child) =>
+    (child.agentSpace?.components ?? [])
+      .filter((component) => component.componentId === "worker" && component.enabled && component.role)
+      .map((component) => component.role)
+  ));
+  const unavailable = candidateRoles.filter((role) => !availableRoles.has(role));
+  if (unavailable.length > 0) {
+    throw new Error(
+      `Candidate roles have no enabled direct Worker on Executor ${executorWorkspaceId}: ${unavailable.join(",")}`,
+    );
+  }
 }
 
 const report = {
@@ -91,6 +125,7 @@ const report = {
   activationRevision: project.activationRevision,
   analyzedRuns: completed.map((run) => run.id),
   analyzedMessages: messages,
+  candidateWorkerRoles: candidateRoles,
   nodeDurations,
   finding: {
     code: "longest-node",
@@ -109,6 +144,7 @@ const report = {
     "completedRuns.haveStructuredTimeline",
     "completedRuns.haveMeasuredNodeDurations",
     "changes.workflowAssetsOnly",
+    "candidate.rolesHaveAttachedWorkers",
   ],
   createdAt: new Date().toISOString(),
 };

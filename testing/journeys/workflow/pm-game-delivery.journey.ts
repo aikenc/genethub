@@ -223,6 +223,7 @@ function installPack(fixture: ProjectFixture): WorkspaceInfo[] {
 function scriptDelivery(
   mock: JourneyMock,
   input: {
+    projectRoot: string;
     bootstrap: boolean;
     workflow: "project" | "feature";
     task: string;
@@ -233,13 +234,14 @@ function scriptDelivery(
   },
 ): void {
   const turns: Parameters<JourneyMock["script"]> = [];
+  const projectRoot = shellArg(input.projectRoot);
   if (input.bootstrap) {
     turns.push({
       tool: {
         name: "bash",
         arguments: {
           command:
-            '"$GENEHUB_CLI" space bootstrap list && "$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1 && "$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 && git add . && git commit -m "bootstrap game delivery team"',
+            `cd ${projectRoot} && "$GENEHUB_CLI" space bootstrap list && "$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1 && "$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 && git add . && git commit -m "bootstrap game delivery team"`,
         },
       },
     });
@@ -255,12 +257,17 @@ function scriptDelivery(
         },
       },
     },
-    { tool: { name: "write", arguments: { path: "index.html", content: input.html } } },
+    {
+      tool: {
+        name: "write",
+        arguments: { path: path.join(input.projectRoot, "index.html"), content: input.html },
+      },
+    },
     {
       tool: {
         name: "bash",
         arguments: {
-          command: `git add index.html && git commit -m ${shellArg(
+          command: `cd ${projectRoot} && git add index.html && git commit -m ${shellArg(
             input.commitMessage,
           )} && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=${shellArg(
             "html5-static-game-smoke",
@@ -272,7 +279,7 @@ function scriptDelivery(
       tool: {
         name: "bash",
         arguments: {
-          command: `test -s index.html && ${input.markers
+          command: `cd ${projectRoot} && test -s index.html && ${input.markers
             .map((marker) => `grep -q ${shellArg(marker)} index.html`)
             .join(" && ")} && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks=${shellArg(
             "playability-and-regression-smoke",
@@ -497,6 +504,7 @@ defineJourney(
     const fixture = await createProject(t, "stardust-garden");
     try {
       scriptDelivery(fixture.opened.mock, {
+        projectRoot: fixture.projectRoot,
         bootstrap: true,
         workflow: "project",
         task: "stardust-garden",
@@ -563,6 +571,7 @@ defineJourney(
         return `${name}:${space.id}:${space.agentSpace?.revision}`;
       });
       scriptDelivery(fixture.opened.mock, {
+        projectRoot: fixture.projectRoot,
         bootstrap: false,
         workflow: "feature",
         task: "weather-expedition",
@@ -638,6 +647,7 @@ defineJourney(
     try {
       installPack(fixture);
       scriptDelivery(fixture.opened.mock, {
+        projectRoot: fixture.projectRoot,
         bootstrap: false,
         workflow: "feature",
         task: "evidence-baseline",
@@ -718,8 +728,11 @@ defineJourney(
           tool: {
             name: "bash",
             arguments: {
-              command:
-                'git -C ../.. add .genethub/workflow/prompts/coder.md && git -C ../.. commit -m "improve game delivery workflow"',
+              command: `git -C ${shellArg(
+                fixture.projectRoot,
+              )} add .genethub/workflow/prompts/coder.md && git -C ${shellArg(
+                fixture.projectRoot,
+              )} commit -m "improve game delivery workflow"`,
             },
           },
         },
