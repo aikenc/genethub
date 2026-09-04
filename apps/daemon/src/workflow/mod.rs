@@ -674,11 +674,12 @@ pub async fn dispatch(
     let workspace = state.workspaces.project_entry(root_workspace_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, root_workspace_id, &workspace.root)?;
     // Resolve the durable execution carrier before compiling source. A
-    // registered project reuses its one Executor WorkerSpace across Runs;
-    // legacy directory projects intentionally keep the V1 in-place path.
+    // registered project reuses the one direct child that mounts the executor
+    // component across Runs; legacy directory projects intentionally keep the
+    // V1 in-place path.
     let executor_workspace_id = state
         .workspaces
-        .reusable_worker(root_workspace_id, "workflow-executor")
+        .reusable_component_space(root_workspace_id, crate::agent_space::COMPONENT_EXECUTOR)
         .await?
         .map(|workspace| workspace.id);
     let (candidate, activation_revision) = dispatch_candidate(&workspace.root, &runtime)?;
@@ -2210,6 +2211,55 @@ fn run_path(runtime: &RuntimeStore, run_id: &str, create_parent: bool) -> Result
         .join(format!("{run_id}.json")))
 }
 
+/// Whether a Run in this project still depends on `carrier_workspace_id` as
+/// its execution carrier.
+///
+/// Asked before an AgentSpace is moved in the ownership tree. A Run pinned
+/// its carrier when it started, so reparenting that Space mid-flight would
+/// leave the Run pointing at a Space that now belongs to a different project
+/// and scope — the change is refused instead of silently reinterpreted.
+///
+/// Runs have no index, so this scans the project's Run directory. The scan is
+/// capped: a directory past the cap cannot be proven safe, and reporting a
+/// dependency is the conservative answer.
+pub(crate) fn carrier_has_active_run(
+    data_root: &Path,
+    project_workspace_id: &str,
+    project_root: &Path,
+    carrier_workspace_id: &str,
+) -> Result<bool> {
+    const MAX_SCANNED_RUNS: usize = 4_096;
+    let runtime = RuntimeStore::new(data_root, project_workspace_id, project_root)?;
+    let directory = runtime.directory(Path::new("runs"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取 Workflow Run 目录：{}", directory.display()))
+        }
+    };
+    for (scanned, item) in listing.enumerate() {
+        if scanned >= MAX_SCANNED_RUNS {
+            bail!("Workflow Run 目录超过 {MAX_SCANNED_RUNS} 条，无法证明该 AgentSpace 空闲");
+        }
+        let path = item?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let run = load_run(&runtime, run_id)?;
+        if run.status == "running"
+            && run.executor_workspace_id.as_deref() == Some(carrier_workspace_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
     let path = run_path(runtime, &run.id, true)?;
     let body = encode_private_record("Workflow Run", run, MAX_RUN_RECORD_BYTES)?;
@@ -3011,6 +3061,59 @@ mod tests {
 
         settle_if_terminal(&mut run);
         assert_eq!(run.status, "completed");
+    }
+
+    #[test]
+    fn a_carrier_is_only_reported_busy_while_its_run_is_still_running() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let carrier = |status: &str, executor: Option<&str>| RunRecord {
+            id: format!("wr_{status}"),
+            workspace_id: "w_project".into(),
+            executor_workspace_id: executor.map(str::to_string),
+            parent_session_id: "s_root".into(),
+            workflow_id: "direct".into(),
+            dcg_digest: "sha256:dcg".into(),
+            activation_revision: Some(1),
+            bundle_digest: "sha256:test".into(),
+            task_id: "task".into(),
+            task_prompt: "work".into(),
+            status: status.into(),
+            revision: 0,
+            executor_turns: 0,
+            definition: WorkflowDefinition {
+                schema: DEFINITION_SCHEMA.into(),
+                id: "direct".into(),
+                version: 1,
+                entry: "work".into(),
+                nodes: Vec::new(),
+            },
+            roles: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            leases: BTreeMap::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        let busy = |space: &str| {
+            carrier_has_active_run(data.path(), "w_project", project.path(), space).unwrap()
+        };
+
+        assert!(
+            !busy("w_executor"),
+            "a project that has never dispatched pins nothing"
+        );
+        save_run(&runtime, &carrier("completed", Some("w_executor"))).unwrap();
+        assert!(
+            !busy("w_executor"),
+            "a settled Run must not keep its carrier pinned forever"
+        );
+        save_run(&runtime, &carrier("running", Some("w_executor"))).unwrap();
+        assert!(busy("w_executor"));
+        assert!(
+            !busy("w_other"),
+            "one busy carrier must not freeze the whole tree"
+        );
     }
 
     #[test]

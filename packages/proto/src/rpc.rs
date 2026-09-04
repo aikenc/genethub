@@ -134,19 +134,26 @@ pub enum Request {
         expected_revision: u64,
         evidence: std::collections::BTreeMap<String, String>,
     },
-    /// Registers or updates an already-open, PipeBuilder-verified PipeSpace as
-    /// a project entry or one of its WorkerSpaces. This never creates files.
-    #[serde(rename = "workspace.configurePipeSpace", rename_all = "camelCase")]
-    WorkspaceConfigurePipeSpace {
+    /// Mounts, configures or removes one responsibility on an already-open,
+    /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
+    ///
+    /// This never creates files and never provisions a Space. Exactly one
+    /// operation is applied per call, under `expectedRevision`; a Space that
+    /// was never registered starts at revision `0`.
+    #[serde(rename = "agentSpace.configure", rename_all = "camelCase")]
+    AgentSpaceConfigure {
         workspace_id: String,
-        #[serde(default)]
-        parent_workspace_id: Option<String>,
-        #[serde(default)]
-        pm: bool,
-        #[serde(default)]
-        worker_role: Option<String>,
-        lifecycle: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        operation: AgentSpaceOperation,
     },
+    /// The direct child Spaces this one may dispatch to.
+    ///
+    /// Refused unless the Space mounts an enabled `executor`, and never
+    /// reaches past a child that is itself an Executor: that subtree is the
+    /// child's own scheduling boundary.
+    #[serde(rename = "agentSpace.children", rename_all = "camelCase")]
+    AgentSpaceChildren { workspace_id: String },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
         #[serde(default)]
@@ -798,6 +805,39 @@ pub enum Reply {
     Processes(Vec<BackgroundProcess>),
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+/// One change to an AgentSpace's registration.
+///
+/// Kept as a closed set rather than a patch document so every mutation has a
+/// reviewable contract: the daemon can state exactly which invariants each
+/// operation must re-check instead of diffing arbitrary fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentSpaceOperation {
+    /// Mounts a component, or reconfigures one that is already mounted.
+    /// Registers the Space itself when it is still at revision `0`.
+    #[serde(rename_all = "camelCase")]
+    SetComponent {
+        component_id: String,
+        enabled: bool,
+        #[serde(default)]
+        role: Option<String>,
+    },
+    /// Unmounts a component. Its session-scope history stays on disk; only
+    /// the registration goes away.
+    #[serde(rename_all = "camelCase")]
+    RemoveComponent { component_id: String },
+    /// Moves the Space in the ownership tree, or detaches it into a project
+    /// root when the parent is absent.
+    #[serde(rename_all = "camelCase")]
+    SetParent {
+        #[serde(default)]
+        parent_workspace_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetLifecycle { lifecycle: String },
 }
 
 /// One file the browser intends to place in a session artifact bundle.

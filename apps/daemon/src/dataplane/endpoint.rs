@@ -981,8 +981,11 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
                 .await;
             }
         }
-        if let Request::WorkspaceConfigurePipeSpace {
-            parent_workspace_id: Some(parent),
+        if let Request::AgentSpaceConfigure {
+            operation:
+                genehub_proto::AgentSpaceOperation::SetParent {
+                    parent_workspace_id: Some(parent),
+                },
             ..
         } = &request
         {
@@ -1270,7 +1273,8 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::PtyOpen { workspace_id, .. }
         | Request::SpeechContextPreview { workspace_id, .. }
         | Request::SpeechFeedbackRecord { workspace_id, .. }
-        | Request::WorkspaceConfigurePipeSpace { workspace_id, .. }
+        | Request::AgentSpaceConfigure { workspace_id, .. }
+        | Request::AgentSpaceChildren { workspace_id }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         _ => None,

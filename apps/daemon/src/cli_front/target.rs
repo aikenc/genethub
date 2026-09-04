@@ -39,6 +39,7 @@ pub const RESERVED: [&str; 17] = [
     "context",
     "capabilities",
     "workspace",
+    "space",
     "session",
     "agent",
     "machine",

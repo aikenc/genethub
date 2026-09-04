@@ -168,30 +168,77 @@ pub struct WorkspaceFolderInfo {
     pub root_handle: String,
 }
 
-/// A PipeSpace's durable project relationship. This is separate from its
-/// filesystem folders: the workspace file describes execution topology while
-/// this record describes project ownership and responsibility.
+/// One composable responsibility mounted on an AgentSpace.
+///
+/// A component is not a label: the identifier selects a versioned contract,
+/// and effective authority is still the intersection of the authenticated
+/// caller, the project scope and the task. Nothing here grants anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
-pub struct PipeSpaceInfo {
-    /// A worker has a parent project PipeSpace. Absence means this is a
-    /// non-worker PipeSpace and therefore eligible to be a project entry.
+pub struct AgentComponentInfo {
+    /// `pm`, `executor`, `worker` or `reviewer`.
+    pub component_id: String,
+    pub schema_version: u32,
+    /// Disabled components keep their configuration and their session-scope
+    /// history, but do not take part in scheduling or message delivery.
+    pub enabled: bool,
+    /// Worker specialization such as `coder` or `tester`. Only `worker`
+    /// carries one; `pm`, `executor` and `reviewer` never do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub role: Option<String>,
+}
+
+/// An AgentSpace's durable project relationship and mounted components.
+///
+/// This is separate from its filesystem folders: the workspace file describes
+/// execution topology while this record describes where the Space sits in the
+/// ownership tree and which responsibilities it carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSpaceInfo {
+    /// The single parent in the acyclic ownership tree. Absence means this
+    /// Space is a project root and therefore eligible to be a project entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent_workspace_id: Option<String>,
-    /// Project-manager responsibility is a marker, never a workspace kind.
-    pub pm: bool,
-    /// Required for workers (for example workflow-executor, coder or tester)
-    /// and absent for non-worker project spaces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub worker_role: Option<String>,
+    /// CAS token covering the parent, the component set and the lifecycle.
+    /// A Space that was never registered reports `0`.
+    #[ts(type = "number")]
+    pub revision: u64,
     /// persistent, pooled or ephemeral. Executors normally use persistent or
     /// pooled so a Workflow Run can reuse the Space.
     pub lifecycle: String,
     /// SHA-256 identity of the PipeBuilder ownership lock verified when the
-    /// relationship was registered.
+    /// relationship was last registered.
+    pub builder_lock_digest: String,
+    /// Sorted by `componentId`, so the projection is stable between reads.
+    pub components: Vec<AgentComponentInfo>,
+}
+
+/// Read-only compatibility projection of [`AgentSpaceInfo`] in the terms the
+/// mutually exclusive `pm` / `workerRole` model used.
+///
+/// Derived on every read and never stored: the component set is the only
+/// truth. A Space with several responsibilities cannot be described here
+/// without loss, which is exactly why this shape is no longer the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PipeSpaceInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent_workspace_id: Option<String>,
+    /// True when the `pm` component is mounted and enabled.
+    pub pm: bool,
+    /// `workflow-executor` for an enabled `executor`, otherwise the enabled
+    /// `worker` role. Absent when neither is mounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub worker_role: Option<String>,
+    pub lifecycle: String,
     pub builder_lock_digest: String,
 }
 
@@ -208,6 +255,13 @@ pub struct WorkspaceInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub workspace_file: Option<String>,
+    /// The registered component set and tree position. Absent for an ordinary
+    /// folder that has never been registered as an AgentSpace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_space: Option<AgentSpaceInfo>,
+    /// Derived from `agentSpace` for clients written against the older
+    /// exclusive-role shape. Never a second source of truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pipe_space: Option<PipeSpaceInfo>,
