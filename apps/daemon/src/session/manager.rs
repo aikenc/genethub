@@ -2969,7 +2969,14 @@ impl Live {
         if let Some(pump) = self.pump.lock().await.take() {
             pump.abort();
         }
-        if let Some(agent) = self.agent.lock().await.take() {
+        // Taken in its own statement on purpose. Edition 2021 keeps the guard a
+        // scrutinee produces alive for the whole `if let`, so writing this as
+        // `if let Some(agent) = self.agent.lock().await.take()` would hold the
+        // session's agent lock across the close — which reaches a third-party
+        // process and can take as long as that process likes. Everything else
+        // that wants this session queues behind it.
+        let agent = self.agent.lock().await.take();
+        if let Some(agent) = agent {
             let _ = agent.close().await;
         }
         *self.status.lock().await = SessionStatus::Closed;

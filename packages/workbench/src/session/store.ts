@@ -217,6 +217,17 @@ interface WorkbenchState {
   sessionTimelines: Record<string, TimelineState>;
   /** Sessions whose live event stream we intentionally keep while their tab is open. */
   subscribedSessionIds: string[];
+  /**
+   * Which client the subscriptions above were made on.
+   *
+   * Switching machines builds a new client and throws the old one away, but
+   * this bookkeeping is global to the store. Without an owner, a session opened
+   * before the switch still counts as subscribed afterwards, and selecting it
+   * takes the warm path — no subscribe, no snapshot, and the transcript stays at
+   * whatever it last said, which for a turn that has since finished is Stop
+   * forever.
+   */
+  subscriptionOwner: Client | null;
   /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
   tabLimit: number;
   notice: string | null;
@@ -629,6 +640,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   timeline: emptyTimeline(),
   sessionTimelines: {},
   subscribedSessionIds: [],
+  subscriptionOwner: null,
   tabLimit: 16,
   notice: null,
   restoreDraft: null,
@@ -653,7 +665,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async attach(client) {
     reconnectNotice = null;
     connectionLossNotice = null;
-    set({ client, notice: null });
+    // Subscriptions belong to the client that made them. This one has never
+    // subscribed to anything, and saying otherwise is how a session opened
+    // before a machine switch ends up with no live stream at all.
+    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null });
     client.onStateChange((connection) => {
       set({ connection });
       // A connection that was refused knows why — wrong credential, revoked
@@ -906,7 +921,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           ];
       const limited = limitTabs(opened, tabId, state.tabLimit, state.sessions);
       evicted = limited.evicted;
-      warm = state.subscribedSessionIds.includes(sessionId);
+      // Only warm on the client that actually holds the subscription. A machine
+      // switch replaces the client, and a subscription on a client that is gone
+      // delivers nothing.
+      const mine = state.subscriptionOwner === client ? state.subscribedSessionIds : [];
+      warm = mine.includes(sessionId);
       return {
         activeSessionId: sessionId,
         draft: null,
@@ -920,9 +939,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         timeline: state.sessionTimelines[sessionId] ?? emptyTimeline(),
         tabs: limited.tabs,
         sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
-        subscribedSessionIds: state.subscribedSessionIds.filter(
-          (id) => !tabSessionIds(limited.evicted).includes(id),
-        ),
+        subscribedSessionIds: mine.filter((id) => !tabSessionIds(limited.evicted).includes(id)),
         activeTabId: tabId,
       };
     });
@@ -965,7 +982,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const previous = timelineOf(get(), sessionId);
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot, previous.pending, previous)
-          : previous;
+          : // Even a gap the daemon can fill carries its own answer for the
+            // status, and that answer outranks ours. It has to: a status change
+            // that published no event and took no sequence number leaves the
+            // daemon saying "you are current" while its snapshot says the turn
+            // is over, and replaying the nothing it sent keeps the composer on
+            // Stop for a turn that ended.
+            withSnapshotStatus(previous, resnapshot as SessionSnapshot);
         // The snapshot is the daemon's own answer, and it arrives precisely
         // when the events that would have carried the status were the ones
         // dropped. Replaying only what survived leaves a finished turn showing
@@ -995,13 +1018,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     markSessionRead(typedSnapshot.summary);
     adoptSnapshotStatus(sessionId, typedSnapshot, set);
     const timeline = replayed.reduce(applySequenced, base);
-    set((state) => ({
-      subscribedSessionIds: state.subscribedSessionIds.includes(sessionId)
-        ? state.subscribedSessionIds
-        : [...state.subscribedSessionIds, sessionId],
-      sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
-      ...(state.activeSessionId === sessionId ? { timeline } : {}),
-    }));
+    set((state) => {
+      // Whose subscriptions these are. A client that has been replaced takes its
+      // subscriptions with it, so the list restarts from this one.
+      const mine = state.subscriptionOwner === client ? state.subscribedSessionIds : [];
+      return {
+        subscriptionOwner: client,
+        subscribedSessionIds: mine.includes(sessionId) ? mine : [...mine, sessionId],
+        sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+        ...(state.activeSessionId === sessionId ? { timeline } : {}),
+      };
+    });
   },
 
   async loadRound(roundId) {
@@ -2265,6 +2292,24 @@ function applyTitle(sessionId: string, title: string, set: Setter): void {
  * the moment some of them do not arrive. A snapshot has no such gap in it, so
  * whenever one is in hand it wins over whatever the event stream left behind.
  */
+/**
+ * The transcript, with the daemon's own word for the status.
+ *
+ * Only the status: a gap the daemon says it can fill is answered by replaying
+ * the events it sends, and rebuilding the whole transcript from the snapshot
+ * would throw away process cards and expanded rounds that nothing asked to
+ * lose. The status is the one field that has no event behind it — that is
+ * exactly why it goes stale.
+ */
+function withSnapshotStatus(previous: TimelineState, snapshot: SessionSnapshot): TimelineState {
+  const status = snapshot?.summary?.status;
+  if (!status) return previous;
+  // An approval still waiting outranks it, the same way it does when a snapshot
+  // is applied whole: there is a card on screen the user has to answer.
+  const waiting = (snapshot.pendingPermissions?.length ?? 0) > 0;
+  return { ...previous, status: waiting ? "waiting" : status };
+}
+
 function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
   const status = snapshot?.summary?.status;
   if (!status) return;

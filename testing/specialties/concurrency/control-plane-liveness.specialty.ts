@@ -203,8 +203,11 @@ livenessCase(
   "against an agent that ignores the cancel and SIGTERM, session.close returns within 15s and the agent process is gone",
   [
     "termination stops at a signal the agent can catch",
-    "kill_tree ends in an unbounded child.wait()",
     "agent process leaks after the session is closed",
+    // Not "kill_tree waits for the reap without a deadline". A process killed on
+    // Linux is reaped immediately, so nothing here reaches that wait; claiming
+    // it would be claiming a guard this case does not provide. Blocking a reap
+    // needs a process stuck in the kernel, which no profile can arrange.
   ],
   { profile: "ignore-sigterm", id: "liveness-sigterm" },
   async (t, session) => {

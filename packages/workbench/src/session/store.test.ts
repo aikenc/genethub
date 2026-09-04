@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Client } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { setLandingIntent } from "../location/landing";
+import { resolveComposerPhase } from "./Composer";
 import { defaultAgent, useWorkbench } from "./store";
 import { emptyTimeline } from "./timeline";
 
@@ -2012,9 +2013,29 @@ describe("batchGet version-skew fallback", () => {
  * running session with a composer that will not send.
  */
 describe("a reconnect the daemon could not fill in", () => {
-  function resyncingClient(summary: SessionSummary) {
+  /**
+   * What the composer would put on screen, computed the way `App` computes it.
+   *
+   * Asserting the store field a fix happens to write is how the last attempt at
+   * this passed while the reported symptom stayed: the session list was already
+   * correct — the sidebar repolls it every two seconds — and the thing that will
+   * not let the user send is the timeline. Only this answers "can they type
+   * again", so only this is worth asserting.
+   */
+  function composerPhase(sessionId: string) {
+    const state = useWorkbench.getState();
+    return resolveComposerPhase({
+      pending: state.timeline.pending,
+      timelineStatus: state.timeline.status,
+      activeTurn: state.timeline.activeTurn,
+      sessionStatus: state.sessions.find((session) => session.id === sessionId)?.status,
+    });
+  }
+
+  function subscribingClient(summary: SessionSummary) {
     let resync: ((snapshot: unknown, events: SequencedEvent[], reset: boolean) => void) | null =
       null;
+    let subscribes = 0;
     const client = {
       subscribe: async (
         _sessionId: string,
@@ -2023,6 +2044,7 @@ describe("a reconnect the daemon could not fill in", () => {
           onResync: (snapshot: unknown, events: SequencedEvent[], reset: boolean) => void;
         },
       ) => {
+        subscribes += 1;
         resync = handlers.onResync;
         return {
           snapshot: { seq: 7, items: [], pendingPermission: undefined, summary },
@@ -2034,27 +2056,65 @@ describe("a reconnect the daemon could not fill in", () => {
     } as unknown as Client;
     return {
       client,
-      reconnect: (nextSummary: SessionSummary) =>
+      subscribes: () => subscribes,
+      /**
+       * A gap the daemon believes it has nothing to fill.
+       *
+       * `reset: false` with no events is not a corner case: a status change that
+       * publishes no event and takes no sequence number — which is what closing
+       * a channel does today — leaves the daemon answering "you are current"
+       * while its own snapshot says the turn is over.
+       */
+      resyncSayingNothingWasMissed: (nextSummary: SessionSummary) =>
         resync?.(
-          { seq: 9, items: [], pendingPermission: undefined, summary: nextSummary },
+          { seq: 7, items: [], pendingPermission: undefined, summary: nextSummary },
           [],
-          true,
+          false,
         ),
     };
   }
 
-  it("takes the status from the snapshot rather than from events that never came", async () => {
+  it("takes the status from a snapshot the daemon thinks changes nothing", async () => {
     const running: SessionSummary = { ...SESSION, status: "running" };
-    const { client, reconnect } = resyncingClient(running);
+    const { client, resyncSayingNothingWasMissed } = subscribingClient(running);
     useWorkbench.setState({ client, sessions: [running] });
 
     await useWorkbench.getState().selectSession("s1");
-    expect(useWorkbench.getState().sessions[0]?.status).toBe("running");
+    expect(composerPhase("s1")).toBe("running");
 
-    // The turn ended while the connection was down, so `turnCompleted` is
-    // among the events that were dropped.
-    reconnect({ ...SESSION, status: "idle" });
+    // The turn ended while the connection was down, so `turnCompleted` is among
+    // the events that were dropped.
+    resyncSayingNothingWasMissed({ ...SESSION, status: "idle" });
 
-    expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
+    expect(composerPhase("s1")).toBe("idle");
+  });
+
+  /**
+   * Switching machines builds a whole new client (`App` tears the old one down
+   * and dials the new target), and the subscription bookkeeping is global to the
+   * store. A session opened before the switch is therefore still listed as
+   * subscribed — on a client that no longer exists — so selecting it again takes
+   * the warm path and never subscribes, and the transcript it shows is whatever
+   * was on screen before.
+   *
+   * This is the shape of fb_PT1yf1Q-UB9p: the pack has six hundred `session.list`
+   * calls and not one `subscribe` in the ten minutes around the switch, with the
+   * daemon reporting the session idle the whole time.
+   */
+  it("subscribes again after a machine switch replaces the client", async () => {
+    const running: SessionSummary = { ...SESSION, status: "running" };
+    const before = subscribingClient(running);
+    useWorkbench.setState({ client: before.client, sessions: [running] });
+    await useWorkbench.getState().selectSession("s1");
+    expect(before.subscribes()).toBe(1);
+    expect(composerPhase("s1")).toBe("running");
+
+    // The user switches machines. Everything the old client knew goes with it.
+    const after = subscribingClient({ ...SESSION, status: "idle" });
+    useWorkbench.setState({ client: after.client, sessions: [{ ...SESSION, status: "idle" }] });
+    await useWorkbench.getState().selectSession("s1");
+
+    expect(after.subscribes()).toBe(1);
+    expect(composerPhase("s1")).toBe("idle");
   });
 });

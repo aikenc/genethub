@@ -417,8 +417,23 @@ pub async fn kill_tree(child: &mut crate::os_process::Child) {
             .await;
     }
     let _ = child.start_kill();
-    let _ = child.wait().await;
+    // Reaping is a courtesy, not a precondition. A process that is killed is
+    // normally gone by the time this asks, but one blocked in the kernel — an
+    // unresponsive mount, a device that stopped answering — is not, and SIGKILL
+    // does not reach it until it comes back. Waiting for that without a deadline
+    // makes the recovery path itself the thing that hangs, and the caller is
+    // usually a user who already pressed stop once.
+    if tokio::time::timeout(REAP_BUDGET, child.wait()).await.is_err() {
+        tracing::warn!(
+            pid = child.id(),
+            budget_ms = REAP_BUDGET.as_millis() as u64,
+            "a killed agent has not been reaped yet; leaving it to the OS"
+        );
+    }
 }
+
+/// How long a killed agent gets to be reaped before the caller moves on.
+const REAP_BUDGET: Duration = Duration::from_secs(5);
 
 /// Finds an executable on `PATH`, honouring `PATHEXT` on Windows.
 pub fn find_executable(name: &str) -> Option<PathBuf> {

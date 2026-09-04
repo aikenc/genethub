@@ -1040,6 +1040,25 @@ fn archived_thread(message: &str, thread_id: &str) -> bool {
     lower.contains("archived") && message.contains(thread_id)
 }
 
+/// The turn this CLI says it is actually running, taken from its refusal.
+///
+/// Codex can move to a new upstream turn inside one GeneHub turn, and it
+/// refuses a cancel aimed at the old one — but the refusal names the current
+/// one, which is the only authoritative answer available at that moment. A
+/// notification could tell us the same thing, except the one that would is
+/// deliberately ignored once a turn is bound, so that a stale start cannot
+/// hijack it.
+///
+/// Wording, as seen in the field:
+/// `expected active turn id <old> but found <new>`
+fn active_turn_named_in(message: &str) -> Option<String> {
+    let found = message.split("but found ").nth(1)?;
+    let id = found
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == '"')
+        .find(|part| !part.is_empty())?;
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 #[async_trait]
 impl AgentSession for CodexSession {
     fn events(&self) -> broadcast::Receiver<SessionEvent> {
@@ -1131,9 +1150,36 @@ impl AgentSession for CodexSession {
             // failure: the user pressed stop early, or late.
             return Ok(());
         };
+        let refused = match self
+            .call(
+                "turn/interrupt",
+                json!({ "threadId": thread, "turnId": codex_turn }),
+            )
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        // Being told the cancel named the wrong turn is not a failure to report
+        // to the user — it is the CLI handing over the right one. Reporting it
+        // instead is what left people pressing stop against a turn that had
+        // already been replaced, with nothing to show for it but an internal
+        // error.
+        let Some(actual) = active_turn_named_in(&refused.to_string()) else {
+            return Err(refused);
+        };
+        tracing::warn!(
+            stale = %codex_turn,
+            actual = %actual,
+            "codex rotated the upstream turn; cancelling the one it is running"
+        );
+        // Adopted, not just used once: everything else that is filtered by turn
+        // — completion, usage — is about this turn now, and leaving the old id
+        // bound would drop the end of the very turn being cancelled.
+        self.turn.lock().await.codex_turn = Some(actual.clone());
         self.call(
             "turn/interrupt",
-            json!({ "threadId": thread, "turnId": codex_turn }),
+            json!({ "threadId": thread, "turnId": actual }),
         )
         .await?;
         Ok(())
@@ -3635,6 +3681,27 @@ mod tests {
                 value: json!({ "threadId": "thread_abc" }),
             })),
             Some("thread_abc".into())
+        );
+    }
+
+    #[test]
+    fn a_rotated_turn_is_recognised_from_the_refusal() {
+        // Verbatim from fb_VllHtElqFlpW, where two stops in a row failed this
+        // way and the conversation could not be stopped at all.
+        assert_eq!(
+            active_turn_named_in(
+                "turn/interrupt failed: expected active turn id \
+                 01a04cf4-1611-77c3-ac28-639c98eeb45d but found \
+                 79567dec-d147-4761-8cf2-be6401c889bd"
+            )
+            .as_deref(),
+            Some("79567dec-d147-4761-8cf2-be6401c889bd")
+        );
+        // A refusal for any other reason must be reported, not retried against
+        // a turn id invented out of its wording.
+        assert_eq!(
+            active_turn_named_in("turn/interrupt failed: no active turn"),
+            None
         );
     }
 
