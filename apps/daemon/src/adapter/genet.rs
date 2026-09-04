@@ -542,7 +542,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     .to_string();
                 emit(SessionEvent::Item {
                     turn_id,
-                    item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
+                    item: TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 });
             }
         }
@@ -684,7 +688,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 .to_string();
             emit(SessionEvent::Item {
                 turn_id,
-                item: TimelineItem::Compaction { id, reason, received_at_ms: None },
+                item: TimelineItem::Compaction {
+                    id,
+                    reason,
+                    received_at_ms: None,
+                },
             });
         }
 
@@ -1129,7 +1137,12 @@ mod tests {
         assert!(matches!(events[0], SessionEvent::TurnStarted { .. }));
         let item_id = match &events[1] {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert!(text.is_empty(), "the opening item starts empty");
@@ -1143,7 +1156,12 @@ mod tests {
         ));
         match &events[4] {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert_eq!(id, &item_id, "the final item reuses the streaming id");

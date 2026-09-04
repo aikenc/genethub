@@ -261,7 +261,11 @@ impl AgentAdapter for OpenCodeAdapter {
                         text,
                         attachments: Vec::new(),
                     }),
-                    Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text, received_at_ms: None }),
+                    Some("assistant") => items.push(TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    }),
                     _ => {}
                 }
             }
@@ -876,9 +880,17 @@ fn emit_part(
                 usage::record_visible_output(&mut state.usage, &text);
             }
             if part_type == "reasoning" {
-                TimelineItem::Reasoning { id: item_id, text, received_at_ms: None }
+                TimelineItem::Reasoning {
+                    id: item_id,
+                    text,
+                    received_at_ms: None,
+                }
             } else {
-                TimelineItem::AssistantMessage { id: item_id, text, received_at_ms: None }
+                TimelineItem::AssistantMessage {
+                    id: item_id,
+                    text,
+                    received_at_ms: None,
+                }
             }
         }
         "compaction" => {
@@ -1302,7 +1314,12 @@ mod tests {
             .iter()
             .map(|event| match event {
                 SessionEvent::Item {
-                    item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
+                    item:
+                        TimelineItem::AssistantMessage {
+                            id,
+                            text,
+                            received_at_ms: None,
+                        },
                     ..
                 } => (id.clone(), text.clone()),
                 other => panic!("unexpected {other:?}"),

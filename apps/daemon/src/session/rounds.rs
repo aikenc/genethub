@@ -550,9 +550,8 @@ pub fn summarize_trunks(
     let texts: HashMap<String, String> = items
         .iter()
         .filter_map(|item| match item {
-            TimelineItem::AssistantMessage { id, text, .. } | TimelineItem::Reasoning { id, text, .. } => {
-                Some((id.clone(), text.clone()))
-            }
+            TimelineItem::AssistantMessage { id, text, .. }
+            | TimelineItem::Reasoning { id, text, .. } => Some((id.clone(), text.clone())),
             _ => None,
         })
         .collect();

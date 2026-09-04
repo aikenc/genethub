@@ -423,7 +423,10 @@ pub async fn kill_tree(child: &mut crate::os_process::Child) {
     // does not reach it until it comes back. Waiting for that without a deadline
     // makes the recovery path itself the thing that hangs, and the caller is
     // usually a user who already pressed stop once.
-    if tokio::time::timeout(REAP_BUDGET, child.wait()).await.is_err() {
+    if tokio::time::timeout(REAP_BUDGET, child.wait())
+        .await
+        .is_err()
+    {
         tracing::warn!(
             pid = child.id(),
             budget_ms = REAP_BUDGET.as_millis() as u64,

@@ -952,7 +952,11 @@ async fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> 
                     attachments: Vec::new(),
                 });
             }
-            Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text, received_at_ms: None }),
+            Some("assistant") => items.push(TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms: None,
+            }),
             _ => {}
         }
     }
@@ -1478,7 +1482,11 @@ fn translate_system_frame(
                 .to_string();
             let _ = events.send(SessionEvent::Item {
                 turn_id,
-                item: TimelineItem::Compaction { id, reason, received_at_ms: None },
+                item: TimelineItem::Compaction {
+                    id,
+                    reason,
+                    received_at_ms: None,
+                },
             });
         }
         _ => {}
@@ -1569,9 +1577,17 @@ fn translate_stream_event(
                 return;
             };
             let item = if kind == BlockKind::Thinking {
-                TimelineItem::Reasoning { id, text, received_at_ms: None }
+                TimelineItem::Reasoning {
+                    id,
+                    text,
+                    received_at_ms: None,
+                }
             } else {
-                TimelineItem::AssistantMessage { id, text, received_at_ms: None }
+                TimelineItem::AssistantMessage {
+                    id,
+                    text,
+                    received_at_ms: None,
+                }
             };
             emit(SessionEvent::Item { turn_id, item });
         }

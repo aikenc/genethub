@@ -2125,8 +2125,16 @@ fn stream(
     state.open.insert(item_id.to_string());
     let id = item_id.to_string();
     let item = match kind {
-        Kind::Assistant => TimelineItem::AssistantMessage { id, text: delta, received_at_ms: None },
-        Kind::Reasoning => TimelineItem::Reasoning { id, text: delta, received_at_ms: None },
+        Kind::Assistant => TimelineItem::AssistantMessage {
+            id,
+            text: delta,
+            received_at_ms: None,
+        },
+        Kind::Reasoning => TimelineItem::Reasoning {
+            id,
+            text: delta,
+            received_at_ms: None,
+        },
     };
     let _ = events.send(SessionEvent::Item { turn_id, item });
 }
@@ -2948,15 +2956,26 @@ mod tests {
         )
         .await;
 
+        // Token accounting reports as it goes, so a `TurnProgress` can land
+        // between any two of these. This case is about what a child thread may
+        // and may not do to the root turn; the cadence of usage reporting is
+        // another case's business, and asserting it here only means this one
+        // fails the next time that cadence changes.
+        let mut next = || loop {
+            match seen.try_recv().expect("the root turn to keep answering") {
+                SessionEvent::TurnProgress { .. } => continue,
+                event => return event,
+            }
+        };
         assert!(matches!(
-            seen.try_recv().expect("the root answer started"),
+            next(),
             SessionEvent::Item {
                 ref turn_id,
                 item: TimelineItem::AssistantMessage { ref id, ref text, received_at_ms: None },
             } if turn_id == "t1" && id == "root-final" && text.is_empty()
         ));
         assert!(matches!(
-            seen.try_recv().expect("the root answer delta"),
+            next(),
             SessionEvent::ItemDelta {
                 turn_id,
                 item_id,
@@ -2964,16 +2983,16 @@ mod tests {
             } if turn_id == "t1" && item_id == "root-final" && delta == "Done."
         ));
         assert!(matches!(
-            seen.try_recv().expect("the root answer completed"),
+            next(),
             SessionEvent::Item {
                 ref turn_id,
                 item: TimelineItem::AssistantMessage { ref id, ref text, received_at_ms: None },
             } if turn_id == "t1" && id == "root-final" && text == "Done."
         ));
-        loop {
-            match seen.try_recv().expect("progress or completion") {
-                SessionEvent::TurnProgress { .. } => continue,
-                other => {
+        {
+            {
+                let other = next();
+                {
                     assert!(matches!(
                         other,
                         SessionEvent::TurnCompleted {
@@ -2987,7 +3006,6 @@ mod tests {
                             && usage.output_tokens == 13
                             && fork_checkpoint.as_deref() == Some("root-turn")
                     ));
-                    break;
                 }
             }
         }
@@ -3361,7 +3379,12 @@ mod tests {
 
         match seen.try_recv().expect("an item") {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text, received_at_ms: None },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert_eq!(id, "item-1");

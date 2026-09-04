@@ -2082,7 +2082,11 @@ fn translate_update(
                     state.reasoning_item = None;
                     emit(SessionEvent::Item {
                         turn_id: turn_id.clone(),
-                        item: TimelineItem::AssistantMessage { id, text: delta, received_at_ms: None },
+                        item: TimelineItem::AssistantMessage {
+                            id,
+                            text: delta,
+                            received_at_ms: None,
+                        },
                     });
                 }
             }
@@ -2111,7 +2115,11 @@ fn translate_update(
                     state.text_item = None;
                     emit(SessionEvent::Item {
                         turn_id: turn_id.clone(),
-                        item: TimelineItem::Reasoning { id, text: delta, received_at_ms: None },
+                        item: TimelineItem::Reasoning {
+                            id,
+                            text: delta,
+                            received_at_ms: None,
+                        },
                     });
                 }
             }
