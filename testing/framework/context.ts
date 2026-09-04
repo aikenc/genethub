@@ -3,7 +3,7 @@ import { createLease, releaseLease, type CaseMeta, type EnvironmentLease } from 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
 import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
-import { leftoverProcesses, reconnectAfterStop } from "./flows/branches/index.ts";
+import { leftoverProcesses, openControlledAgentSession, processAlive, reconnectAfterStop, timeControlCall } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
 export interface CaseContext {
@@ -51,6 +51,9 @@ export interface CaseContext {
     branches: {
       reconnectAfterStop: typeof reconnectAfterStop;
       leftoverProcesses: typeof leftoverProcesses;
+      openControlledAgentSession: typeof openControlledAgentSession;
+      timeControlCall: typeof timeControlCall;
+      processAlive: typeof processAlive;
     };
   };
   data: typeof data;
@@ -121,7 +124,13 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         shellExit,
         shellTimedOut,
       },
-      branches: { reconnectAfterStop, leftoverProcesses },
+      branches: {
+        reconnectAfterStop,
+        leftoverProcesses,
+        openControlledAgentSession,
+        timeControlCall,
+        processAlive,
+      },
     },
     data,
     assertions,

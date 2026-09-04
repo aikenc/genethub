@@ -1,0 +1,218 @@
+// A round that never ends is the freeze users report, and every way it
+// happens starts outside the product: an agent CLI that exits without a
+// terminal frame, dies behind a grandchild that still holds the pipe, or
+// says far more than the channel between us can carry.
+//
+// The agent under these cases is a real external process registered through
+// `agents.custom`, the same door a user opens for Goose or any other ACP CLI.
+// Nothing inside the daemon is stubbed: what varies is only what a CLI is
+// free to do to a turn already in flight.
+
+import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
+
+type ControlledAgent = Awaited<
+  ReturnType<CaseContext["flows"]["branches"]["openControlledAgentSession"]>
+>;
+type AgentOptions = Parameters<
+  CaseContext["flows"]["branches"]["openControlledAgentSession"]
+>[0]["agent"];
+
+function wedgeCase(
+  id: string,
+  title: string,
+  oracle: string,
+  catches: string[],
+  agent: AgentOptions,
+  run: (t: CaseContext, session: ControlledAgent) => Promise<void>,
+  durationMs = 25_000,
+): void {
+  defineSpecialty(
+    {
+      id: `specialty.agent.wedge.${id}`,
+      title,
+      oracle,
+      catches,
+      tags: ["core", "agent", "wedge-depth", "fault-injection"],
+      llm: { default: "none" },
+      expectedDurationMs: durationMs,
+      timeoutMs: durationMs * 4,
+      resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
+      surfaces: ["daemon", "agent-adapter", "workbench-client"],
+      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
+    },
+    async (t) => {
+      const session = await t.flows.branches.openControlledAgentSession({
+        openRoot: t.openRoot,
+        lease: t.env,
+        agent,
+      });
+      try {
+        await run(t, session);
+      } finally {
+        await session.dispose();
+      }
+    },
+  );
+}
+
+/** The fault has to have actually fired. Without this, a case that passes
+ * because the agent never got the prompt would read as a product success. */
+function assertPromptReached(t: CaseContext, session: ControlledAgent): void {
+  const journal = session.journal();
+  t.assertions.assert(
+    journal.some((entry) => entry.event === "prompt"),
+    `the controlled agent never received a prompt: ${JSON.stringify(journal)}`,
+  );
+}
+
+wedgeCase(
+  "control-normal-round-ends",
+  "A well-behaved ACP agent ends its round",
+  "an agents.custom ACP CLI that answers session/prompt produces turnCompleted and leaves the session sendable",
+  ["controlled-agent harness does not speak ACP", "custom agent registration regressed"],
+  { profile: "normal", id: "wedge-normal", chunks: 3 },
+  async (t, session) => {
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "hello");
+    const terminal = await session.waitForTerminal(20_000);
+    t.assertions.assert(
+      terminal.type === "turnCompleted",
+      `expected turnCompleted, got ${terminal.type}`,
+    );
+    const status = await session.daemonStatus();
+    t.assertions.assert(status === "idle", `session did not return to idle: ${status}`);
+    t.note(`control: ${session.events.map((event) => event.type).join(",")}`);
+  },
+);
+
+wedgeCase(
+  "exit-without-terminal",
+  "An agent that exits mid-turn still ends the round",
+  "after the agent process is gone, the session emits a terminal round event within 15s and reports a non-running status",
+  [
+    "ACP read loop leaves the pending session/prompt sender alive at EOF",
+    "no synthesized TurnFailed when an agent dies mid-turn",
+    "session pinned to running with no live process",
+  ],
+  { profile: "exit-without-terminal", id: "wedge-exit" },
+  async (t, session) => {
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "please crash");
+    await t.tools.waitUntil(
+      () => session.journal().some((entry) => entry.event === "exit"),
+      10_000,
+    );
+    assertPromptReached(t, session);
+
+    const terminal = await session.waitForTerminal(15_000);
+    t.assertions.assert(
+      terminal.type === "turnFailed",
+      `a dead agent must fail the round, not ${terminal.type}`,
+    );
+    const status = await session.daemonStatus();
+    t.assertions.assert(status !== "running", `session still running after the agent died: ${status}`);
+  },
+);
+
+wedgeCase(
+  "grandchild-holds-stdout",
+  "A round ends even when no EOF ever arrives",
+  "the agent exits leaving a grandchild holding stdout; the round still reaches a terminal event within 15s and the grandchild is gone after session.close",
+  [
+    "termination detection depends on stdout EOF",
+    "shim-shaped agents (npm/.cmd wrappers) never close the pipe",
+    "grandchild survives session close",
+  ],
+  { profile: "grandchild-holds-stdout", id: "wedge-grandchild" },
+  async (t, session) => {
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "please crash quietly");
+    await t.tools
+      .waitUntil(() => session.journal().some((entry) => entry.event === "orphan-spawned"), 10_000)
+      .catch(() => {
+        throw new Error(
+          `the agent never reported a grandchild: ${session
+            .journal()
+            .map((entry) => `${entry.pid}:${entry.event}`)
+            .join(" ")}`,
+        );
+      });
+    const orphanPid = Number(
+      session.journal().find((entry) => entry.event === "orphan-spawned")?.orphanPid ?? 0,
+    );
+    t.assertions.assert(orphanPid > 0, "the controlled agent did not report a grandchild pid");
+
+    try {
+      const terminal = await session.waitForTerminal(15_000);
+      t.assertions.assert(
+        terminal.type === "turnFailed",
+        `a dead agent must fail the round, not ${terminal.type}`,
+      );
+      const status = await session.daemonStatus();
+      t.assertions.assert(status !== "running", `session still running: ${status}`);
+
+      await session.client.call({ type: "session.close", payload: { sessionId: session.sessionId } });
+      await t.tools
+        .waitUntil(() => !t.flows.branches.processAlive(orphanPid), 10_000)
+        .catch(() => {
+          throw new Error(`grandchild ${orphanPid} outlived session.close`);
+        });
+    } finally {
+      // The grandchild is deliberately outside the daemon's direct child set;
+      // leaking it into the next case would be this file's own bug.
+      if (t.flows.branches.processAlive(orphanPid)) {
+        try {
+          process.kill(orphanPid, "SIGKILL");
+        } catch {
+          // Already reaped between the check and the signal.
+        }
+      }
+    }
+  },
+);
+
+wedgeCase(
+  "long-silence-is-not-death",
+  "A long quiet turn is allowed to finish",
+  "an agent that says nothing for 15s and then answers produces turnCompleted, never turnFailed",
+  [
+    "silence treated as death",
+    "a healthy long-running turn killed by an inactivity timer",
+  ],
+  { profile: "normal", id: "wedge-slow", chunks: 1, delayMs: 15_000 },
+  async (t, session) => {
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "think for a while");
+    const terminal = await session.waitForTerminal(40_000);
+    t.assertions.assert(
+      terminal.type === "turnCompleted",
+      `a slow but healthy turn must complete, not ${terminal.type}`,
+    );
+  },
+  45_000,
+);
+
+wedgeCase(
+  "terminal-survives-an-event-flood",
+  "A terminal event survives an event flood",
+  "a turn that emits 4000 events still delivers turnCompleted and settles the session to idle",
+  [
+    "terminal events share a lossy broadcast with streaming deltas",
+    "a lagged subscriber loses the only settlement signal",
+  ],
+  { profile: "flood-events", id: "wedge-flood", floods: 4000 },
+  async (t, session) => {
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "say a lot");
+    // The daemon settling is the first half: if its own answer is still
+    // `running`, no amount of client repair could recover the session.
+    await t.tools.waitUntil(async () => (await session.daemonStatus()) === "idle", 60_000);
+    // The second half is that a client which handles a declared gap the way
+    // the product's own store does — by applying the replay it is handed —
+    // ends up holding the terminal event too.
+    const terminal = await session.waitForTerminal(45_000);
+    t.assertions.assert(
+      terminal.type === "turnCompleted",
+      `the flood swallowed the terminal event: got ${terminal.type}`,
+    );
+    t.note(`resyncs=${session.resyncs()} events=${session.events.length}`);
+  },
+  // Thousands of events through a real transport is slow work, and the case
+  // shares a machine with every other environment in the run.
+  120_000,
+);
