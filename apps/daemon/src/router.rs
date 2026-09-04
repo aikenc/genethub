@@ -149,6 +149,75 @@ async fn start_workflow_sessions(
     Ok(())
 }
 
+/// Delivers the terminal Executor event back to the ordinary PM Session.
+///
+/// `workflow dispatch --no-wait` is the normal Agent-facing path: a shell
+/// command should not have to stay attached for the whole Coder/Reviewer
+/// run. The Executor already records `run.completed` in its durable outbox;
+/// this folded notification is the semantic wake-up that lets the PM turn
+/// that terminal fact into a user-facing report. A PM that is still running
+/// is deliberately left alone because it may be attached to the synchronous
+/// `--wait` path and SessionManager must never interleave two turns.
+async fn notify_workflow_parent_if_completed(
+    state: &Shared,
+    run: &genehub_proto::WorkflowRunStatus,
+) {
+    let Some(message) = workflow_parent_completion_message(run) else {
+        return;
+    };
+    let parent = match state.sessions.summary(&run.parent_session_id).await {
+        Ok(parent) => parent,
+        Err(error) => {
+            tracing::warn!(
+                run = %run.id,
+                parent = %run.parent_session_id,
+                %error,
+                "could not find the PM Session for a terminal Workflow event"
+            );
+            return;
+        }
+    };
+    if parent.managed.is_some() || parent.status != genehub_proto::SessionStatus::Idle {
+        return;
+    }
+    let providers = state.providers().await;
+    if let Err(error) = state
+        .sessions
+        .send(
+            &run.parent_session_id,
+            message,
+            Vec::new(),
+            &providers,
+            None,
+            None,
+        )
+        .await
+    {
+        // The Run is already durably terminal. Notification failure must not
+        // roll it back or make the completing Worker report a false failure.
+        tracing::warn!(
+            run = %run.id,
+            parent = %run.parent_session_id,
+            %error,
+            "could not wake the PM Session for a terminal Workflow event"
+        );
+    }
+}
+
+fn workflow_parent_completion_message(run: &genehub_proto::WorkflowRunStatus) -> Option<String> {
+    if run.status != "completed" {
+        return None;
+    }
+    let payload = serde_json::to_string(run).expect("WorkflowRunStatus is serializable");
+    Some(format!(
+        "<genehub_flow_message kind=\"run.completed\" source=\"daemon\">\n\
+这是 Executor 发给 PM 的已认证终态流程消息，不是新的用户任务。Workflow Run 的固定事实如下：\n\
+{payload}\n\
+不要重新 bootstrap、dispatch、实现或评审。按项目 PM Skill 汇总这次 Run 的 Coder 提交、Reviewer 结论、检查、入口文件和总耗时，并向用户交付最终结果。\n\
+</genehub_flow_message>"
+    ))
+}
+
 /// Handles one request on behalf of `caller`.
 ///
 /// The caller is passed in rather than re-derived here because the gate above
@@ -537,6 +606,7 @@ async fn dispatch(
             {
                 return failed(error);
             }
+            notify_workflow_parent_if_completed(state, &transition.status).await;
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
@@ -621,6 +691,7 @@ async fn dispatch(
             {
                 return failed(error);
             }
+            notify_workflow_parent_if_completed(state, &transition.status).await;
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
 
@@ -2029,6 +2100,45 @@ pub type SharedState = Arc<crate::state::AppState>;
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn workflow_run(status: &str) -> genehub_proto::WorkflowRunStatus {
+        genehub_proto::WorkflowRunStatus {
+            id: "wr_terminal".into(),
+            workspace_id: "w_project".into(),
+            executor_workspace_id: Some("w_executor".into()),
+            executor_session_id: Some("s_executor".into()),
+            parent_session_id: "s_pm".into(),
+            workflow_id: "game-project".into(),
+            dcg_digest: "sha256:dcg".into(),
+            activation_revision: Some(7),
+            bundle_digest: "sha256:bundle".into(),
+            task_id: "task_game".into(),
+            status: status.into(),
+            revision: 3,
+            executor_turns: 0,
+            active_nodes: Vec::new(),
+            nodes: Vec::new(),
+            created_at_ms: 10,
+            updated_at_ms: 20,
+        }
+    }
+
+    #[test]
+    fn only_a_completed_run_becomes_an_authenticated_pm_flow_message() {
+        assert!(workflow_parent_completion_message(&workflow_run("running")).is_none());
+        assert!(workflow_parent_completion_message(&workflow_run("failed")).is_none());
+
+        let message = workflow_parent_completion_message(&workflow_run("completed"))
+            .expect("completed Run should wake its PM");
+        assert!(
+            message.starts_with("<genehub_flow_message kind=\"run.completed\" source=\"daemon\">")
+        );
+        assert!(message.contains("\"id\":\"wr_terminal\""));
+        assert!(message.contains("\"parentSessionId\":\"s_pm\""));
+        assert!(message.contains("\"status\":\"completed\""));
+        assert!(message.contains("不要重新 bootstrap、dispatch、实现或评审"));
+        assert!(message.ends_with("</genehub_flow_message>"));
+    }
 
     #[test]
     fn loopback_and_lan_addresses_are_distinguished() {
