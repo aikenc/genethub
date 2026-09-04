@@ -1678,8 +1678,13 @@ impl SessionManager {
             status: SessionStatus::Running,
         })
         .await;
-        let started = self
-            .start_turn(
+        // The claim above needs an owner. Announcing a running turn and then
+        // handing over without a deadline is what leaves a session saying it is
+        // working with nothing behind it: no round, no agent turn, and every
+        // later prompt refused as a conflict with a turn that never began.
+        let started = match tokio::time::timeout(
+            HANDOVER_BUDGET,
+            self.start_turn(
                 &live,
                 session_id,
                 text,
@@ -1687,8 +1692,16 @@ impl SessionManager {
                 providers,
                 additional_system_prompt,
                 continues_round,
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(started) => started,
+            Err(_) => Err(anyhow!(
+                "the agent did not take this message within {}s",
+                HANDOVER_BUDGET.as_secs()
+            )),
+        };
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
             // refuse every later prompt. Withdrawn on the wire as well, or every
@@ -1901,7 +1914,18 @@ impl SessionManager {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _starting = gate.lock().await;
+        // Bounded, because this gate is the one place where one conversation can
+        // stop another. Everything inside it has its own deadline; waiting for
+        // it did not, so a single CLI that never finishes its first run took
+        // every other session of that kind down with it — the caller sits here,
+        // having already announced a running turn, with no round behind it and
+        // no way to withdraw. That is the shape of the "状态坏了？" report.
+        let Ok(_starting) = tokio::time::timeout(START_GATE_BUDGET, gate.lock()).await else {
+            anyhow::bail!(
+                "another {} session is still starting up; try again in a moment",
+                meta.agent_id
+            );
+        };
         // Whoever held the gate may have been starting this very session.
         if live.agent.lock().await.is_some() {
             return Ok(());
@@ -2990,6 +3014,24 @@ impl Live {
 /// machine, not to whoever asked it to start. See `ensure_started`.
 static STARTING: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How long a session waits for another session's first start of the same kind.
+///
+/// Bounded, and inside the handover budget below: whoever is waiting here has
+/// already told every client that a turn is running, and being told "another
+/// one is still starting, try again" is a better answer than silence.
+const START_GATE_BUDGET: Duration = Duration::from_secs(40);
+
+/// How long the whole handover gets before the claim behind it is withdrawn.
+///
+/// Under the sixty seconds a client waits for any request, deliberately. A
+/// handover that takes longer than the caller is prepared to wait is the freeze
+/// itself: the client gives up and reports a timeout, the daemon carries on
+/// holding a running status with no round behind it, and every prompt in
+/// between is refused as a conflict with a turn that never began. Whatever goes
+/// wrong in here, the answer and the withdrawal have to arrive while someone is
+/// still listening.
+const HANDOVER_BUDGET: Duration = Duration::from_secs(55);
 
 struct Continuation {
     elevated: bool,

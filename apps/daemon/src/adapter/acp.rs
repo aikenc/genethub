@@ -35,7 +35,13 @@ use super::{
 const EVENT_CAPACITY: usize = 1024;
 const PROTOCOL_VERSION: i64 = 1;
 /// How long a throwaway handshake may take. Cursor's first answer can be slow.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
+///
+/// Two of these can happen in one send — a resume that fails is retried on a
+/// fresh thread — and the whole handover has to come back inside the sixty
+/// seconds a client waits, or the user gets a timeout while the session goes on
+/// claiming a turn that never started. That budget, not the patience of a slow
+/// CLI, is what sets this: twice this plus the work around it has to fit.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `cursor-agent --list-models` is a file/network read, not a session.
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Asking whether this install is logged in. Short: it reads a file.

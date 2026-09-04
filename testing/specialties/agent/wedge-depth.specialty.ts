@@ -231,3 +231,96 @@ wedgeCase(
   180_000,
   2,
 );
+
+/**
+ * What the daemon said, or the fact that it said nothing.
+ *
+ * The case timeout would also catch a hang, but not tell anyone which call
+ * hung, and here that is the whole question: a refusal is a perfectly good
+ * answer to a prompt the agent cannot take, and silence is the defect.
+ */
+async function definiteAnswer(
+  answer: Promise<unknown>,
+  budgetMs: number,
+  what: string,
+): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const silence = new Promise<string>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`the daemon never answered ${what} within ${budgetMs}ms`)),
+      budgetMs,
+    );
+  });
+  try {
+    return await Promise.race([
+      answer.then(() => "accepted").catch((error: unknown) => `refused: ${String(error)}`),
+      silence,
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The freeze that never gets as far as a turn.
+//
+// A prompt to an agent that has not started yet announces a running session
+// before it has anything running: the status is set and published, and only
+// then does the daemon go and start the CLI and hand the message over. If that
+// handover does not come back, the session stays that way — running, with no
+// round and no narrative behind it — and every later prompt is refused as a
+// conflict with a turn that never began. That is fb_R7fAQhyHcVIK: a send that
+// timed out after sixty seconds, an immediate retry refused as a conflict, and
+// a session the daemon still called running with zero rounds and zero items.
+//
+// The oracle is about the user's way out, not about any one step being fast:
+// a handover that fails must leave a session that can be prompted again.
+wedgeCase(
+  "a-startup-that-hangs-does-not-claim-the-session-forever",
+  "A session survives an agent that never finishes starting",
+  "a prompt to an agent whose handshake never completes ends in a definite failure, leaves the session idle, and does not refuse the next prompt as a conflict",
+  [
+    "a running status is published before there is anything running",
+    "a handover with no deadline leaves the claim behind it standing",
+    "a turn that never began refuses every prompt after it",
+  ],
+  { profile: "never-finishes-starting", id: "wedge-slow-start" },
+  async (t, session) => {
+    // A definite answer either way. Which one does not matter here — a refusal
+    // is a fine outcome, a silence is not.
+    const first = await definiteAnswer(
+      t.flows.main.sendPrompt(session.client, session.sessionId, "hello"),
+      120_000,
+      "the first prompt",
+    );
+    t.note(`first send: ${first}`);
+
+    // Nothing is running, so nothing may say it is. This is the field the
+    // sidebar shows and the one the composer ends up believing.
+    let status = await session.daemonStatus();
+    await t.tools
+      .waitUntil(async () => {
+        status = await session.daemonStatus();
+        return status === "idle";
+      }, 30_000)
+      .catch(() => {
+        throw new Error(
+          `the handover ended in "${first}" and the session still says ${status}, with nothing behind it`,
+        );
+      });
+
+    // And the way out has to still be there. A session that answers every
+    // retry with "a turn is already running" is the freeze, whatever the
+    // status field says.
+    const second = await definiteAnswer(
+      t.flows.main.sendPrompt(session.client, session.sessionId, "hello again"),
+      120_000,
+      "the second prompt",
+    );
+    t.note(`second send: ${second}`);
+    t.assertions.assert(
+      !/already running/i.test(second),
+      `the retry was refused as a conflict with a turn that never began: ${second}`,
+    );
+  },
+  150_000,
+);

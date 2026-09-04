@@ -203,6 +203,15 @@ async function onFrame(frame) {
 
   switch (method) {
     case "initialize": {
+      // A CLI that comes up, takes the connection, and then never finishes
+      // introducing itself. This is the shape of a first run that goes wrong —
+      // fetching something that never arrives, waiting on a lock nobody
+      // releases — and it is the one phase where the daemon has already told
+      // every client a turn is running before it has anything to run.
+      if (args.profile === "never-finishes-starting") {
+        journal("withholding-initialize", { id: id ?? null });
+        return;
+      }
       // No `authMethods`: the daemon would otherwise spend a round trip on an
       // `authenticate` that has nothing to do with what these cases measure.
       respond(id, {

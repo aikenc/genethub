@@ -23,7 +23,9 @@ export type ControlledAgentProfile =
   /** Stops draining stdin after the handshake, so a large prompt blocks. */
   | "stdin-never-drains"
   /** Emits far more events in one turn than a client can consume. */
-  | "flood-events";
+  | "flood-events"
+  /** Takes the connection and never finishes the handshake: startup hangs. */
+  | "never-finishes-starting";
 
 export interface ControlledAgentOptions {
   profile: ControlledAgentProfile;
