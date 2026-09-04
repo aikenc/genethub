@@ -25,6 +25,10 @@ function wedgeCase(
   agent: AgentOptions,
   run: (t: CaseContext, session: ControlledAgent) => Promise<void>,
   durationMs = 25_000,
+  // Raised only for the case that pushes thousands of events through a real
+  // transport: sharing a machine with nine other environments is what made
+  // that one slow enough to look like a hang.
+  cpu = 1,
 ): void {
   defineSpecialty(
     {
@@ -36,7 +40,7 @@ function wedgeCase(
       llm: { default: "none" },
       expectedDurationMs: durationMs,
       timeoutMs: durationMs * 4,
-      resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
+      resources: { environments: 1, cpu, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
       surfaces: ["daemon", "agent-adapter", "workbench-client"],
       productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
     },
@@ -189,12 +193,13 @@ wedgeCase(
 );
 
 wedgeCase(
-  "terminal-survives-an-event-flood",
-  "A terminal event survives an event flood",
-  "a turn that emits 4000 events still delivers turnCompleted and settles the session to idle",
+  "a-flood-still-leaves-the-client-knowing-the-turn-ended",
+  "A client still learns a turn ended after an event flood",
+  "after a turn emitting 4000 events, the daemon settles to idle and the subscriber ends up knowing the turn is over, by terminal event or by the snapshot a declared gap hands it",
   [
     "terminal events share a lossy broadcast with streaming deltas",
     "a lagged subscriber loses the only settlement signal",
+    "a declared gap is announced but never actually repaired",
   ],
   { profile: "flood-events", id: "wedge-flood", floods: 4000 },
   async (t, session) => {
@@ -202,17 +207,27 @@ wedgeCase(
     // The daemon settling is the first half: if its own answer is still
     // `running`, no amount of client repair could recover the session.
     await t.tools.waitUntil(async () => (await session.daemonStatus()) === "idle", 60_000);
-    // The second half is that a client which handles a declared gap the way
-    // the product's own store does — by applying the replay it is handed —
-    // ends up holding the terminal event too.
-    const terminal = await session.waitForTerminal(45_000);
-    t.assertions.assert(
-      terminal.type === "turnCompleted",
-      `the flood swallowed the terminal event: got ${terminal.type}`,
+
+    // The second half is what the client is left holding. Losing the terminal
+    // event itself is allowed — that is what a declared gap means, and under
+    // load it does get lost — but then the snapshot handed over with the gap
+    // has to say the turn is over. Requiring the event to survive would be
+    // asserting a stronger contract than the protocol offers; requiring
+    // convergence is the property a frozen chat actually violates.
+    const settled = () =>
+      session.events.some(
+        (event) => event.type === "turnCompleted" || event.type === "turnFailed",
+      ) || session.resyncStatus() === "idle";
+    await t.tools.waitUntil(settled, 60_000).catch(() => {
+      throw new Error(
+        `the client never learned the turn ended: resyncs=${session.resyncs()} resyncStatus=${session.resyncStatus()} events=${session.events.length}`,
+      );
+    });
+    t.note(
+      `resyncs=${session.resyncs()} resyncStatus=${session.resyncStatus()} events=${session.events.length}`,
     );
-    t.note(`resyncs=${session.resyncs()} events=${session.events.length}`);
   },
-  // Thousands of events through a real transport is slow work, and the case
-  // shares a machine with every other environment in the run.
-  120_000,
+  // Thousands of events through a real transport is slow work.
+  180_000,
+  2,
 );

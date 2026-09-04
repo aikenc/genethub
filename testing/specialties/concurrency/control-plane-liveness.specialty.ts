@@ -213,7 +213,12 @@ livenessCase(
       () => session.journal().some((entry) => entry.event === "went-silent"),
       10_000,
     );
-    const agentPid = Number(session.journal().find((entry) => entry.event === "start")?.pid ?? 0);
+    // The process that took the prompt. The probe the daemon started to read
+    // the agent's catalog is already gone, so watching that one exit would
+    // pass without close having done anything.
+    const agentPid = Number(
+      session.journal().find((entry) => entry.event === "went-silent")?.pid ?? 0,
+    );
     t.assertions.assert(agentPid > 0, "the controlled agent never reported its pid");
 
     try {
@@ -236,4 +241,51 @@ livenessCase(
       }
     }
   },
+);
+
+livenessCase(
+  "a-new-message-survives-the-previous-stop",
+  "Sending again right after stop is not killed by the stop",
+  "after stop is answered and a new prompt is sent within the grace window, the session is still running and its agent alive 8s later",
+  [
+    "the enforcement behind stop outlives the turn it was aimed at",
+    "typing again too quickly kills the message you just sent",
+  ],
+  // Answers a cancel, never answers a prompt: stop lands cleanly, and the
+  // turn after it is still open when the grace window for the first one
+  // expires.
+  { profile: "accept-then-silent", id: "liveness-restop" },
+  async (t, session) => {
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "think about it");
+    await t.tools.waitUntil(
+      () => session.journal().some((entry) => entry.event === "went-silent"),
+      10_000,
+    );
+    // The process that took the prompt, not the one the daemon started to ask
+    // the agent what it offers: that probe is gone by now, and asking whether
+    // it is alive would answer "no" no matter what this case does.
+    const agentPid = Number(
+      session.journal().find((entry) => entry.event === "went-silent")?.pid ?? 0,
+    );
+    t.assertions.assert(agentPid > 0, "the controlled agent never reported its pid");
+
+    await session.client.call({
+      type: "session.interrupt",
+      payload: { sessionId: session.sessionId },
+    });
+    await t.tools.waitUntil(async () => (await session.daemonStatus()) !== "running", 15_000);
+
+    // The impatient retype, well inside the window the stop armed.
+    await t.flows.main.sendPrompt(session.client, session.sessionId, "actually, this instead");
+    await t.tools.waitUntil(async () => (await session.daemonStatus()) === "running", 15_000);
+
+    await new Promise((resolve) => setTimeout(resolve, 8_000));
+    const status = await session.daemonStatus();
+    t.note(`status after the grace window: ${status}`);
+    t.assertions.assert(
+      status === "running" && t.flows.branches.processAlive(agentPid),
+      `the second message was killed by the first stop: status ${status}, agent alive ${t.flows.branches.processAlive(agentPid)}`,
+    );
+  },
+  45_000,
 );
