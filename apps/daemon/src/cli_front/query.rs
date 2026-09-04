@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 46] = [
+const COMMAND_NAMES: [&str; 48] = [
     "schema",
     "context",
     "capabilities",
@@ -28,6 +28,8 @@ const COMMAND_NAMES: [&str; 46] = [
     "workspace.show",
     "session.list",
     "session.get",
+    "session.components",
+    "session.flow",
     "session.inspect",
     "session.narrative",
     "session.rounds",
@@ -128,6 +130,9 @@ enum Query {
         session_id: String,
     },
     SessionComponents {
+        session_id: String,
+    },
+    SessionFlow {
         session_id: String,
     },
     SessionInspect {
@@ -294,6 +299,14 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             }),
             _ => Err(CliFailure::invalid_args(
                 "session components needs exactly one session id",
+            )),
+        },
+        "flow" => match &args[1..] {
+            [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionFlow {
+                session_id: session_id.clone(),
+            }),
+            _ => Err(CliFailure::invalid_args(
+                "session flow needs exactly one Executor Session id",
             )),
         },
         "inspect" => {
@@ -541,6 +554,21 @@ async fn execute(
                 "session.components",
                 json!({"sessionId": session_id, "components": instances}),
             ))
+        }
+        Query::SessionFlow { session_id } => {
+            let rpc = connect_selected(selection).await?;
+            let Reply::SessionFlow(flow) = rpc
+                .call(Request::SessionFlow {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered session.flow with the wrong reply",
+                ));
+            };
+            Ok(("session.flow", json!({"flow": flow})))
         }
         Query::SessionInspect {
             session_id,
@@ -1072,6 +1100,8 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
+        "session.components" => session_schema("genet session components <id>", json!({})),
+        "session.flow" => session_schema("genet session flow <id>", json!({})),
         "shell" => (
             "genet shell [--workspace <id> | --cwd <dir>] [--machine <id>] [--env NAME=VALUE]... \
              [--timeout <s>] [--max-output <bytes>] -- <command> [args...]",
@@ -1611,6 +1641,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
         Reply::SessionComponents(_) => "session components",
+        Reply::SessionFlow(_) => "session flow",
         Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
         Reply::SessionInspection(_) => "session inspection",
@@ -1626,6 +1657,10 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionArtifact(_) => "session artifact",
         Reply::WorkflowProject(_) => "workflow project",
         Reply::WorkflowRun(_) => "workflow run",
+        Reply::WorkflowRuns(_) => "workflow runs",
+        Reply::AgentSpaceBuilder(_) => "agent space builder",
+        Reply::BootstrapPack(_) => "bootstrap pack",
+        Reply::BootstrapPacks(_) => "bootstrap packs",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",

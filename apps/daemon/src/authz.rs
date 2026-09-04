@@ -345,6 +345,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionContext { .. }
         | Request::WorkflowInspect { .. }
         | Request::WorkflowGet { .. }
+        | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
         | Request::RoundTrunkGet { .. }
@@ -353,7 +354,9 @@ pub fn required(request: &Request) -> Capability {
         | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
         | Request::AgentSpaceChildren { .. }
+        | Request::BootstrapPackList
         | Request::SessionComponents { .. }
+        | Request::SessionFlow { .. }
         | Request::DirectoryList { .. }
         | Request::FileTree { .. }
         | Request::LogTail { .. }
@@ -377,6 +380,8 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::AgentSpaceBuilder { .. }
+        | Request::ProjectBootstrap { .. }
         | Request::WorkflowInitialize { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }

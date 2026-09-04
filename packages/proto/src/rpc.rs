@@ -123,6 +123,14 @@ pub enum Request {
         workspace_id: String,
         run_id: String,
     },
+    /// Lists recent Runs for project-side Workflow analysis. This is a
+    /// read-only projection; detailed structured messages remain Session-owned.
+    #[serde(rename = "workflow.history", rename_all = "camelCase")]
+    WorkflowHistory {
+        workspace_id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
     /// Supplies explicit evidence for the node owned by this managed Session.
     /// `expectedRevision` is a project-run CAS, not a best-effort hint.
     #[serde(rename = "workflow.complete", rename_all = "camelCase")]
@@ -147,6 +155,30 @@ pub enum Request {
         expected_revision: u64,
         operation: AgentSpaceOperation,
     },
+    /// Runs one deterministic AgentSpaceBuilder operation inside the
+    /// authenticated project's `spaces/` boundary. The operation never
+    /// chooses a role or team shape; those decisions come from a Bootstrap
+    /// Pack or the caller's project Skill.
+    #[serde(rename = "agentSpace.builder", rename_all = "camelCase")]
+    AgentSpaceBuilder {
+        workspace_id: String,
+        space_name: String,
+        operation: AgentSpaceBuilderOperation,
+    },
+    /// Plans or applies a versioned project-owned team/DCG asset bundle.
+    #[serde(rename = "project.bootstrap", rename_all = "camelCase")]
+    ProjectBootstrap {
+        workspace_id: String,
+        pack_id: String,
+        apply: bool,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        model_id: Option<String>,
+    },
+    /// Lists the versioned Bootstrap Packs available in this daemon build.
+    #[serde(rename = "project.bootstrap.list")]
+    BootstrapPackList,
     /// The direct child Spaces this one may dispatch to.
     ///
     /// Refused unless the Space mounts an enabled `executor`, and never
@@ -167,6 +199,9 @@ pub enum Request {
     /// write. Read-only: composition is changed on the Space, not here.
     #[serde(rename = "session.components", rename_all = "camelCase")]
     SessionComponents { session_id: String },
+    /// Reads the structured DCG timeline owned by an Executor Session.
+    #[serde(rename = "session.flow", rename_all = "camelCase")]
+    SessionFlow { session_id: String },
     #[serde(rename = "session.inspect", rename_all = "camelCase")]
     SessionInspect {
         session_id: String,
@@ -775,6 +810,7 @@ pub enum Reply {
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
     SessionComponents(Vec<ComponentInstanceInfo>),
+    SessionFlow(ExecutorFlowStatus),
     SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
     SessionInspection(SessionInspection),
@@ -790,6 +826,10 @@ pub enum Reply {
     SessionArtifact(SessionArtifactBundle),
     WorkflowProject(WorkflowProjectStatus),
     WorkflowRun(WorkflowRunStatus),
+    WorkflowRuns(Vec<WorkflowRunStatus>),
+    AgentSpaceBuilder(AgentSpaceBuilderReport),
+    BootstrapPack(BootstrapPackReport),
+    BootstrapPacks(Vec<BootstrapPackInfo>),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),

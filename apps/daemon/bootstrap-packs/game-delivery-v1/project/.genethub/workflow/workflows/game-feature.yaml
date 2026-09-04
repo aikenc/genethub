@@ -1,0 +1,35 @@
+schema: genehub.workflow.definition.v1
+id: game-feature
+version: 1
+entry: implement
+nodes:
+  - id: implement
+    uses: agent.session
+    with:
+      role: coder
+      writeLease:
+        targetRef: current
+        ttlSeconds: 900
+    completion:
+      all:
+        - key: commit
+          verify: git.commitOnTarget
+        - key: checks
+          verify: value.nonEmpty
+    on:
+      completed: [review]
+  - id: review
+    uses: agent.session
+    with:
+      role: reviewer
+    completion:
+      all:
+        - key: review
+          verify: value.equals
+          expected: approved
+        - key: checks
+          verify: value.nonEmpty
+    on:
+      completed: [publish]
+  - id: publish
+    uses: result.publish

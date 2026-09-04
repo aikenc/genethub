@@ -1,38 +1,29 @@
-import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import { defineSpecialty } from "../../framework/public.ts";
 
-function digest(file: string): string {
-  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
-}
-
 /**
- * Materializes a PipeBuilder-owned projection the daemon will accept as an
- * AgentSpace. Kept local to this case: it is the only consumer, and growing
- * the Framework before a second one exists would be speculative.
+ * Writes a PipeBuilder v1 source contract. The test then asks the product
+ * AgentSpaceBuilder to materialize and own the projection.
  */
-function writeAgentSpaceRoot(root: string, name: string): string {
-  mkdirSync(path.join(root, ".pipebuilder"), { recursive: true });
+function writeAgentSpaceSource(root: string, name: string): string {
+  mkdirSync(root, { recursive: true });
   const manifest = path.join(root, "pipespace.json");
   const workspace = path.join(root, `${name}.code-workspace`);
-  writeFileSync(manifest, JSON.stringify({ schema: "pipespace.v1", name }));
-  writeFileSync(workspace, JSON.stringify({ folders: [{ path: "." }] }));
   writeFileSync(
-    path.join(root, ".pipebuilder/lock.json"),
+    manifest,
     JSON.stringify({
-      schema: "pipebuilder-lock.v1",
-      pipespace: {
-        name,
-        manifestDigest: digest(manifest),
-        workspace: path.basename(workspace),
-        workspaceDigest: digest(workspace),
-      },
-      artifacts: [],
+      schema: "pipespace.v1",
+      name,
+      agents: ["codex"],
+      skills: [],
+      tags: [],
+      skillProviders: [],
     }),
   );
+  writeFileSync(workspace, JSON.stringify({ folders: [{ path: "." }] }));
   return root;
 }
 
@@ -91,18 +82,30 @@ defineSpecialty(
       const registration = (result: CliResult): Record<string, unknown> =>
         (data(result).agentSpace ?? {}) as Record<string, unknown>;
 
-      const roots = {
-        project: writeAgentSpaceRoot(path.join(opened.workspaceRoot, "project"), "project"),
-        coder: writeAgentSpaceRoot(path.join(opened.workspaceRoot, "coder"), "coder"),
-        subteam: writeAgentSpaceRoot(path.join(opened.workspaceRoot, "subteam"), "subteam"),
-        helper: writeAgentSpaceRoot(path.join(opened.workspaceRoot, "helper"), "helper"),
-      };
-      const ids: Record<keyof typeof roots, string> = {} as Record<keyof typeof roots, string>;
-      for (const [key, root] of Object.entries(roots) as Array<[keyof typeof roots, string]>) {
-        const reply = await opened.client.call({ type: "workspace.open", payload: { root } });
-        t.assertions.assert(reply?.type === "workspace", `workspace.open failed for ${key}`);
-        ids[key] = reply?.type === "workspace" ? reply.data.id : "";
-      }
+      type SpaceKey = "project" | "coder" | "subteam" | "helper";
+      const ids: Record<SpaceKey, string> = { project: "", coder: "", subteam: "", helper: "" };
+      const projectRoot = writeAgentSpaceSource(
+        path.join(opened.workspaceRoot, "spaces", "project"),
+        "project",
+      );
+      const projectBuild = space([
+        "builder",
+        "build",
+        "--workspace",
+        opened.workspaceId,
+        "--name",
+        "project",
+      ]);
+      t.assertions.assert(
+        projectBuild.status === 0,
+        `AgentSpaceBuilder build failed for project: ${projectBuild.text}`,
+      );
+      const projectReply = await opened.client.call({
+        type: "workspace.open",
+        payload: { root: projectRoot },
+      });
+      t.assertions.assert(projectReply?.type === "workspace", "workspace.open failed for project");
+      ids.project = projectReply?.type === "workspace" ? projectReply.data.id : "";
 
       // One Space, two responsibilities. The exclusive model this replaced
       // could not express it at all.
@@ -164,6 +167,28 @@ defineSpecialty(
           projectComponents.join(",") === "executor,pm",
         `the refused change was not a no-op: ${afterStale.text}`,
       );
+
+      const childRoots: Record<Exclude<SpaceKey, "project">, string> = {
+        coder: writeAgentSpaceSource(path.join(projectRoot, "spaces", "coder"), "coder"),
+        subteam: writeAgentSpaceSource(path.join(projectRoot, "spaces", "subteam"), "subteam"),
+        helper: writeAgentSpaceSource(path.join(projectRoot, "spaces", "helper"), "helper"),
+      };
+      for (const [key, root] of Object.entries(childRoots) as Array<
+        [Exclude<SpaceKey, "project">, string]
+      >) {
+        const built = space([
+          "builder",
+          "build",
+          "--workspace",
+          ids.project,
+          "--name",
+          key,
+        ]);
+        t.assertions.assert(built.status === 0, `AgentSpaceBuilder build failed for ${key}: ${built.text}`);
+        const reply = await opened.client.call({ type: "workspace.open", payload: { root } });
+        t.assertions.assert(reply?.type === "workspace", `workspace.open failed for ${key}`);
+        ids[key] = reply?.type === "workspace" ? reply.data.id : "";
+      }
 
       const attach = (child: string, parent: string) =>
         space(["parent", "set", "--workspace", child, "--parent", parent]);

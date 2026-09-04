@@ -184,8 +184,8 @@ async fn dispatch(args: Vec<String>) -> i32 {
         }
         Some("session") => match args.get(1).map(String::as_str) {
             Some(
-                "list" | "get" | "components" | "inspect" | "narrative" | "rounds" | "trunks"
-                | "trunk" | "blob" | "context",
+                "list" | "get" | "components" | "flow" | "inspect" | "narrative" | "rounds"
+                | "trunks" | "trunk" | "blob" | "context",
             )
             | None => Box::pin(query::run(&args, &selection)).await,
             Some(_) => Box::pin(converse::session(&args[1..], &selection)).await,

@@ -562,6 +562,28 @@ async fn dispatch(
             }
         }
 
+        Request::WorkflowHistory {
+            workspace_id,
+            limit,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let runtime = match crate::workflow::RuntimeStore::new(
+                &state.paths.root,
+                &workspace_id,
+                &workspace.root,
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::history(&runtime, limit.unwrap_or(50)) {
+                Ok(runs) => Handled::ok(Reply::WorkflowRuns(runs)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::WorkflowComplete {
             workspace_id,
             run_id,
@@ -676,6 +698,13 @@ async fn dispatch(
         Request::SessionComponents { session_id } => {
             match session_components(state, &session_id).await {
                 Ok(instances) => Handled::ok(Reply::SessionComponents(instances)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionFlow { session_id } => {
+            match crate::workflow::executor_flow(state, &session_id).await {
+                Ok(flow) => Handled::ok(Reply::SessionFlow(flow)),
                 Err(error) => failed(error),
             }
         }
@@ -1471,6 +1500,112 @@ async fn dispatch(
             }
         }
 
+        Request::AgentSpaceBuilder {
+            workspace_id,
+            space_name,
+            operation,
+        } => {
+            if let Err(message) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            if !crate::agent_space_builder::valid_space_name(&space_name) {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "AgentSpace name must be lowercase kebab-case",
+                );
+            }
+            let project = match state.workspaces.project_entry(&workspace_id).await {
+                Ok(project) => project,
+                Err(error) => {
+                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+                }
+            };
+            let space_root = project.root.join("spaces").join(&space_name);
+            let (command, require_no_post_commands) = match operation {
+                genehub_proto::AgentSpaceBuilderOperation::Init => {
+                    (crate::agent_space_builder::Command::Init, true)
+                }
+                genehub_proto::AgentSpaceBuilderOperation::Check => {
+                    (crate::agent_space_builder::Command::Check, true)
+                }
+                genehub_proto::AgentSpaceBuilderOperation::Explain => {
+                    (crate::agent_space_builder::Command::Explain, true)
+                }
+                genehub_proto::AgentSpaceBuilderOperation::Build {
+                    dry_run,
+                    require_no_post_commands,
+                } => (
+                    crate::agent_space_builder::Command::Build { dry_run },
+                    require_no_post_commands,
+                ),
+                genehub_proto::AgentSpaceBuilderOperation::Verify => {
+                    (crate::agent_space_builder::Command::Verify, true)
+                }
+                genehub_proto::AgentSpaceBuilderOperation::Clean => {
+                    (crate::agent_space_builder::Command::Clean, true)
+                }
+            };
+            match crate::agent_space_builder::run(
+                &project.root,
+                &space_root,
+                command,
+                require_no_post_commands,
+            ) {
+                Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report.into())),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error}")),
+            }
+        }
+
+        Request::ProjectBootstrap {
+            workspace_id,
+            pack_id,
+            apply,
+            agent_id,
+            model_id,
+        } => {
+            if let Err(message) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            let caller_session = match caller.session_controller_id() {
+                Some(session_id) => state.sessions.summary(session_id).await.ok(),
+                None => None,
+            };
+            let agent_id = agent_id
+                .or_else(|| {
+                    caller_session
+                        .as_ref()
+                        .map(|session| session.agent_id.clone())
+                })
+                .unwrap_or_else(|| "opencode".into());
+            let model_id = model_id.or_else(|| {
+                caller_session
+                    .as_ref()
+                    .and_then(|session| session.model_id.clone())
+            });
+            match crate::bootstrap_pack::execute(
+                state,
+                &workspace_id,
+                &pack_id,
+                apply,
+                &agent_id,
+                model_id.as_deref(),
+            )
+            .await
+            {
+                Ok(report) => Handled::ok(Reply::BootstrapPack(report)),
+                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            }
+        }
+
+        Request::BootstrapPackList => match crate::bootstrap_pack::list() {
+            Ok(packs) => Handled::ok(Reply::BootstrapPacks(packs)),
+            Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+        },
+
         Request::AgentSpaceChildren { workspace_id } => {
             match state.workspaces.schedulable_children(&workspace_id).await {
                 Ok(children) => Handled::ok(Reply::Workspaces(children)),
@@ -1806,6 +1941,8 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowActivate { .. } => Some("workflow.activate"),
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
+        Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
+        Request::ProjectBootstrap { .. } => Some("project.bootstrap"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
         Request::SessionArtifactChunk { .. } => Some("session.artifact.chunk"),

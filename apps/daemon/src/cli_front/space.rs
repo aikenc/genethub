@@ -6,7 +6,7 @@
 //! component or grow a subteam belongs in the project's own Skill assets, not
 //! in this parser.
 
-use genehub_proto::{AgentSpaceOperation, Reply, Request};
+use genehub_proto::{AgentSpaceBuilderOperation, AgentSpaceOperation, Reply, Request};
 use serde_json::json;
 
 use super::output::{self, CliFailure};
@@ -28,6 +28,19 @@ enum Command {
         revision: Option<u64>,
         operation: AgentSpaceOperation,
     },
+    Builder {
+        workspace_id: Option<String>,
+        space_name: String,
+        operation: AgentSpaceBuilderOperation,
+    },
+    Bootstrap {
+        workspace_id: Option<String>,
+        pack_id: String,
+        apply: bool,
+        agent_id: Option<String>,
+        model_id: Option<String>,
+    },
+    BootstrapList,
 }
 
 pub async fn space(args: &[String], selection: &Selection) -> i32 {
@@ -134,6 +147,73 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             );
             Ok(EXIT_OK)
         }
+        Command::Builder {
+            workspace_id,
+            space_name,
+            operation,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::AgentSpaceBuilder(report) = rpc
+                .call(Request::AgentSpaceBuilder {
+                    workspace_id,
+                    space_name,
+                    operation,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered agentSpace.builder with the wrong reply",
+                ));
+            };
+            output::succeed(
+                "space.builder",
+                serde_json::to_value(report).expect("Builder reports serialize"),
+            );
+            Ok(EXIT_OK)
+        }
+        Command::Bootstrap {
+            workspace_id,
+            pack_id,
+            apply,
+            agent_id,
+            model_id,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::BootstrapPack(report) = rpc
+                .call(Request::ProjectBootstrap {
+                    workspace_id,
+                    pack_id,
+                    apply,
+                    agent_id,
+                    model_id,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered project.bootstrap with the wrong reply",
+                ));
+            };
+            output::succeed(
+                "space.bootstrap",
+                serde_json::to_value(report).expect("Bootstrap reports serialize"),
+            );
+            Ok(EXIT_OK)
+        }
+        Command::BootstrapList => {
+            let Reply::BootstrapPacks(packs) = rpc
+                .call(Request::BootstrapPackList)
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered project.bootstrap.list with the wrong reply",
+                ));
+            };
+            output::succeed("space.bootstrap.list", json!({"packs": packs}));
+            Ok(EXIT_OK)
+        }
     }
 }
 
@@ -225,8 +305,61 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 operation: AgentSpaceOperation::SetLifecycle { lifecycle },
             })
         }
+        ("builder", action) => {
+            let mut values = Values::parse(rest(2))?;
+            let space_name = values.name.take().ok_or_else(|| {
+                CliFailure::invalid_args("space builder 需要 --name <agent-space>")
+            })?;
+            let operation = match action {
+                "init" => AgentSpaceBuilderOperation::Init,
+                "check" => AgentSpaceBuilderOperation::Check,
+                "explain" => AgentSpaceBuilderOperation::Explain,
+                "build" => AgentSpaceBuilderOperation::Build {
+                    dry_run: values.dry_run,
+                    require_no_post_commands: values.require_no_post_commands,
+                },
+                "verify" => AgentSpaceBuilderOperation::Verify,
+                "clean" => AgentSpaceBuilderOperation::Clean,
+                _ => {
+                    return Err(CliFailure::invalid_args(
+                        "usage: genet space builder init|check|explain|build|verify|clean --name <agent-space>",
+                    ));
+                }
+            };
+            if action != "build" && (values.dry_run || values.require_no_post_commands) {
+                return Err(CliFailure::invalid_args(
+                    "--dry-run 与 --require-no-post-commands 只用于 space builder build",
+                ));
+            }
+            Ok(Command::Builder {
+                workspace_id: values.workspace.take(),
+                space_name,
+                operation,
+            })
+        }
+        ("bootstrap", "list") => {
+            if !rest(2).is_empty() {
+                return Err(CliFailure::invalid_args(
+                    "space bootstrap list 不接受额外参数",
+                ));
+            }
+            Ok(Command::BootstrapList)
+        }
+        ("bootstrap", action @ ("plan" | "apply")) => {
+            let mut values = Values::parse(rest(2))?;
+            let pack_id = values.pack.take().ok_or_else(|| {
+                CliFailure::invalid_args("space bootstrap 需要 --pack <id>")
+            })?;
+            Ok(Command::Bootstrap {
+                workspace_id: values.workspace.take(),
+                pack_id,
+                apply: action == "apply",
+                agent_id: values.agent.take(),
+                model_id: values.model.take(),
+            })
+        }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet space inspect|children|component set|component remove|parent set|lifecycle set ...",
+            "usage: genet space inspect|children|component set|component remove|parent set|lifecycle set|builder|bootstrap list|plan|apply ...",
         )),
     }
 }
@@ -238,9 +371,15 @@ struct Values {
     role: Option<String>,
     parent: Option<String>,
     lifecycle: Option<String>,
+    name: Option<String>,
+    pack: Option<String>,
+    agent: Option<String>,
+    model: Option<String>,
     revision: Option<u64>,
     disabled: bool,
     detach: bool,
+    dry_run: bool,
+    require_no_post_commands: bool,
 }
 
 impl Values {
@@ -262,6 +401,10 @@ impl Values {
                 "--role" => values.role = Some(next(&mut index)?),
                 "--parent" => values.parent = Some(next(&mut index)?),
                 "--lifecycle" => values.lifecycle = Some(next(&mut index)?),
+                "--name" => values.name = Some(next(&mut index)?),
+                "--pack" => values.pack = Some(next(&mut index)?),
+                "--agent" => values.agent = Some(next(&mut index)?),
+                "--model" => values.model = Some(next(&mut index)?),
                 "--revision" => {
                     let value = next(&mut index)?;
                     values.revision = Some(
@@ -272,6 +415,8 @@ impl Values {
                 }
                 "--disabled" => values.disabled = true,
                 "--detach" => values.detach = true,
+                "--dry-run" => values.dry_run = true,
+                "--require-no-post-commands" => values.require_no_post_commands = true,
                 other => {
                     return Err(CliFailure::invalid_args(format!("未知选项：{other}")));
                 }
@@ -419,5 +564,108 @@ mod tests {
                 lifecycle: "pooled".into(),
             }
         );
+    }
+
+    #[test]
+    fn builder_flags_are_scoped_to_the_build_operation() {
+        let Command::Builder {
+            space_name,
+            operation,
+            ..
+        } = parse(&[
+            "builder".into(),
+            "build".into(),
+            "--name".into(),
+            "coder".into(),
+            "--dry-run".into(),
+            "--require-no-post-commands".into(),
+        ])
+        .unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(space_name, "coder");
+        assert_eq!(
+            operation,
+            AgentSpaceBuilderOperation::Build {
+                dry_run: true,
+                require_no_post_commands: true,
+            }
+        );
+        assert!(parse(&[
+            "builder".into(),
+            "verify".into(),
+            "--name".into(),
+            "coder".into(),
+            "--dry-run".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn bootstrap_plan_and_apply_share_one_explicit_pack_contract() {
+        let Command::Bootstrap {
+            pack_id,
+            apply,
+            agent_id,
+            model_id,
+            ..
+        } = parse(&[
+            "bootstrap".into(),
+            "plan".into(),
+            "--pack".into(),
+            "game-delivery-v1".into(),
+        ])
+        .unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(pack_id, "game-delivery-v1");
+        assert!(!apply);
+        assert_eq!(agent_id, None);
+        assert_eq!(model_id, None);
+
+        let Command::Bootstrap {
+            apply,
+            agent_id,
+            model_id,
+            ..
+        } = parse(&[
+            "bootstrap".into(),
+            "apply".into(),
+            "--pack".into(),
+            "game-delivery-v1".into(),
+            "--agent".into(),
+            "codex".into(),
+            "--model".into(),
+            "gpt-5".into(),
+        ])
+        .unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert!(apply);
+        assert_eq!(agent_id.as_deref(), Some("codex"));
+        assert_eq!(model_id.as_deref(), Some("gpt-5"));
+
+        assert!(parse(&["bootstrap".into(), "apply".into()])
+            .unwrap_err()
+            .message
+            .contains("--pack"));
+    }
+
+    #[test]
+    fn bootstrap_pack_discovery_is_an_explicit_read() {
+        assert!(matches!(
+            parse(&["bootstrap".into(), "list".into()]).unwrap(),
+            Command::BootstrapList
+        ));
+        assert!(parse(&[
+            "bootstrap".into(),
+            "list".into(),
+            "--pack".into(),
+            "game-delivery-v1".into(),
+        ])
+        .is_err());
     }
 }

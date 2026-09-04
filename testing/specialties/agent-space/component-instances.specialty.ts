@@ -1,34 +1,26 @@
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import { defineSpecialty } from "../../framework/public.ts";
 
-function digest(file: string): string {
-  return `sha256:${createHash("sha256").update(readFileSync(file)).digest("hex")}`;
-}
-
-/** A PipeBuilder-owned projection the daemon will accept as an AgentSpace. */
-function writeAgentSpaceRoot(root: string, name: string): string {
-  mkdirSync(path.join(root, ".pipebuilder"), { recursive: true });
+/** Writes the source contract that the product AgentSpaceBuilder will own. */
+function writeAgentSpaceSource(root: string, name: string): string {
+  mkdirSync(root, { recursive: true });
   const manifest = path.join(root, "pipespace.json");
   const workspace = path.join(root, `${name}.code-workspace`);
-  writeFileSync(manifest, JSON.stringify({ schema: "pipespace.v1", name }));
-  writeFileSync(workspace, JSON.stringify({ folders: [{ path: "." }] }));
   writeFileSync(
-    path.join(root, ".pipebuilder/lock.json"),
+    manifest,
     JSON.stringify({
-      schema: "pipebuilder-lock.v1",
-      pipespace: {
-        name,
-        manifestDigest: digest(manifest),
-        workspace: path.basename(workspace),
-        workspaceDigest: digest(workspace),
-      },
-      artifacts: [],
+      schema: "pipespace.v1",
+      name,
+      agents: ["codex"],
+      skills: [],
+      tags: [],
+      skillProviders: [],
     }),
   );
+  writeFileSync(workspace, JSON.stringify({ folders: [{ path: "." }] }));
   return root;
 }
 
@@ -83,7 +75,17 @@ defineSpecialty(
         return { status: result.status ?? -1, text: `${result.stdout}\n${result.stderr}`, data };
       };
 
-      const root = writeAgentSpaceRoot(path.join(opened.workspaceRoot, "team"), "team");
+      const root = writeAgentSpaceSource(path.join(opened.workspaceRoot, "spaces", "team"), "team");
+      const built = genet([
+        "space",
+        "builder",
+        "build",
+        "--workspace",
+        opened.workspaceId,
+        "--name",
+        "team",
+      ]);
+      t.assertions.assert(built.status === 0, `AgentSpaceBuilder build failed: ${built.text}`);
       const openedSpace = await opened.client.call({
         type: "workspace.open",
         payload: { root },
