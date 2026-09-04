@@ -12,20 +12,22 @@ import { WorkspaceIcon } from "./WorkspaceIcon";
  */
 export function WorkspaceAffordance({
   workspace,
+  label = workspace.name,
   className = "max-w-[5.5rem]",
 }: {
   workspace: Pick<WorkspaceInfo, "name" | "workspaceFile">;
+  label?: string;
   className?: string;
 }) {
   return (
     <span
-      data-workspace-affordance={workspace.name}
-      title={workspace.name}
+      data-workspace-affordance={label}
+      title={label}
       aria-hidden
       className={`pointer-events-none flex min-w-0 shrink-0 items-center gap-0.5 text-[10px] text-faint ${className}`}
     >
       <WorkspaceIcon workspace={workspace} className="h-3 w-3" />
-      <span className="min-w-0 truncate">{workspace.name}</span>
+      <span className="min-w-0 truncate">{label}</span>
     </span>
   );
 }

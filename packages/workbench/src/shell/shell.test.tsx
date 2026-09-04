@@ -28,6 +28,24 @@ const workspace = (id: string, name: string): WorkspaceInfo => ({
   folders: [{ name, root: "/home/me/" + name, rootHandle: `r_${id}` }],
 });
 
+const agentWorkspace = (
+  id: string,
+  name: string,
+  parentWorkspaceId: string | undefined,
+  components: NonNullable<WorkspaceInfo["agentSpace"]>["components"],
+): WorkspaceInfo => ({
+  ...workspace(id, name),
+  agentSpace: {
+    parentWorkspaceId,
+    revision: 3,
+    lifecycle: "pooled",
+    builderLockDigest: `sha256:${id}`,
+    components,
+    guidance: [],
+    health: { status: "healthy", reasons: [] },
+  },
+});
+
 const session = (id: string, workspaceId: string, title: string, running = false): SessionSummary => ({
   id,
   workspaceId,
@@ -86,6 +104,8 @@ beforeEach(() => {
     renameSession: vi.fn(async () => {}),
     renameWorkspace: vi.fn(async () => {}),
     removeWorkspace: vi.fn(async () => {}),
+    configureAgentSpace: vi.fn(async () => {}),
+    inspectAgentSpaceBuild: vi.fn(async () => null),
     deleteSession: vi.fn(async () => {}),
   });
 });
@@ -212,6 +232,103 @@ describe("the left edge", () => {
     expect(details).toHaveTextContent("名称genethub");
     expect(details).toHaveTextContent("Agent 工作区路径/home/me/genethub");
     expect(details).toHaveTextContent("所属设备开发工作站");
+  });
+
+  it("renders AgentSpaces once in their Parent tree with component badges", () => {
+    useWorkbench.setState({
+      sessions: [],
+      activeSessionId: null,
+      workspaces: [
+        agentWorkspace("coder", "Coder", "executor", [
+          { componentId: "worker", schemaVersion: 1, enabled: true, role: "coder" },
+        ]),
+        agentWorkspace("project", "小游戏", undefined, [
+          { componentId: "pm", schemaVersion: 1, enabled: true },
+        ]),
+        agentWorkspace("executor", "Executor", "project", [
+          { componentId: "executor", schemaVersion: 1, enabled: true },
+        ]),
+      ],
+      activeWorkspaceId: "project",
+    });
+
+    const tree = sidebar();
+    expect(projectRows(tree)).toHaveLength(1);
+    const root = projectRows(tree)[0]!;
+    expect(within(root).getByText("小游戏")).toBeInTheDocument();
+    expect(within(root).getByText("Executor")).toBeInTheDocument();
+    const coder = within(root).getByText("Coder").closest("button");
+    expect(coder).toHaveAttribute("title", expect.stringContaining("小游戏 / Executor / Coder"));
+    expect(within(root).getByText("coder", { selector: "span" })).toBeInTheDocument();
+  });
+
+  it("manages Components, Parent and lifecycle from existing workspace details with CAS", async () => {
+    const configureAgentSpace = vi.fn(async () => {});
+    useWorkbench.setState({
+      sessions: [],
+      activeSessionId: null,
+      workspaces: [
+        agentWorkspace("project", "小游戏", undefined, [
+          { componentId: "pm", schemaVersion: 1, enabled: true },
+        ]),
+        agentWorkspace("coder", "Coder", "project", [
+          { componentId: "worker", schemaVersion: 1, enabled: true, role: "coder" },
+        ]),
+      ],
+      activeWorkspaceId: "coder",
+      configureAgentSpace,
+    });
+    sidebar();
+
+    await userEvent.click(screen.getByRole("button", { name: "Coder 的工作区操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "详情" }));
+    const details = screen.getByText("工作区详情").parentElement?.parentElement;
+    expect(details).toHaveTextContent("revision 3");
+    expect(details).toHaveTextContent("worker:coder");
+    await userEvent.click(within(details!).getByRole("button", { name: "停用" }));
+
+    expect(configureAgentSpace).toHaveBeenCalledWith("coder", 3, {
+      kind: "setComponent",
+      componentId: "worker",
+      enabled: false,
+      role: "coder",
+    });
+
+    await userEvent.selectOptions(
+      within(details!).getByLabelText("要添加的 Component"),
+      "reviewer",
+    );
+    await userEvent.click(
+      within(details!).getByRole("button", { name: "添加或更新 Component" }),
+    );
+    expect(configureAgentSpace).toHaveBeenCalledWith("coder", 3, {
+      kind: "setComponent",
+      componentId: "reviewer",
+      enabled: true,
+      role: null,
+    });
+
+    await userEvent.selectOptions(
+      within(details!).getByLabelText("Parent AgentSpace"),
+      "",
+    );
+    await userEvent.click(within(details!).getByRole("button", { name: "保存 Parent" }));
+    expect(configureAgentSpace).toHaveBeenCalledWith("coder", 3, {
+      kind: "setParent",
+      parentWorkspaceId: null,
+    });
+
+    await userEvent.selectOptions(
+      within(details!).getByLabelText("AgentSpace 生命周期"),
+      "persistent",
+    );
+    await userEvent.click(
+      within(details!).getByRole("button", { name: "保存生命周期" }),
+    );
+    expect(configureAgentSpace).toHaveBeenCalledWith("coder", 3, {
+      kind: "setLifecycle",
+      lifecycle: "persistent",
+    });
   });
 
   it("distinguishes folders from saved workspaces and removes only after confirmation", async () => {

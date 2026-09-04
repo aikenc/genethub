@@ -7,6 +7,15 @@ export interface ScriptedTurn {
   status?: number;
   delayMs?: number;
   hang?: boolean;
+  /**
+   * Resolve a response from the exact model request that triggered it.
+   *
+   * This is for protocols whose next tool arguments contain daemon-issued
+   * values from an earlier tool result (plan digests, revisions, opaque
+   * challenges). Baking those values into a fixture would bypass the product
+   * contract the journey is meant to exercise.
+   */
+  respond?: (request: unknown) => Omit<ScriptedTurn, "respond">;
 }
 
 export interface MockLlmHandle {
@@ -140,7 +149,21 @@ export async function startMockLlm(): Promise<MockLlmHandle> {
       body = {};
     }
     requests.push(redact(body));
-    const turn = queue.shift() ?? { text: "ok" };
+    const scripted = queue.shift() ?? { text: "ok" };
+    let turn: Omit<ScriptedTurn, "respond">;
+    try {
+      turn = scripted.respond ? scripted.respond(body) : scripted;
+    } catch (error) {
+      response.writeHead(500, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          error: {
+            message: error instanceof Error ? error.message : String(error),
+            type: "scripted_response_error",
+          },
+        }),
+      );
+      return;
+    }
     if (turn.hang) return;
     if (turn.delayMs) await new Promise((resolve) => setTimeout(resolve, turn.delayMs));
     if (turn.status && turn.status >= 400) {

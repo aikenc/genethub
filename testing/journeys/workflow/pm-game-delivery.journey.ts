@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -33,6 +33,25 @@ interface DeliveryResult {
   spaces: WorkspaceInfo[];
   implementationMs: number;
 }
+
+interface DeliveryScript {
+  workflow: "project" | "feature";
+  task: string;
+  userMarker: string;
+  message: string;
+  html: string;
+  commitMessage: string;
+  markers: string[];
+  bootstrap: boolean;
+}
+
+interface UserDeliveryTiming {
+  activeMs: number;
+  wallMs: number;
+  humanWaitMs: number;
+}
+
+type SessionEventLog = Awaited<ReturnType<CaseContext["flows"]["main"]["attachEventLog"]>>;
 
 const BASE_GAME_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -138,6 +157,28 @@ const FEATURE_GAME_HTML = `<!doctype html>
 </html>
 `;
 
+const PROJECT_DELIVERY: DeliveryScript = {
+  workflow: "project",
+  task: "stardust-garden",
+  userMarker: "可玩的星尘花园",
+  message: "完成一个可玩的星尘花园小游戏，保留十分钟主实现和十五分钟总交付预算",
+  html: BASE_GAME_HTML,
+  commitMessage: "build stardust garden",
+  markers: ["<canvas", "ArrowLeft", "requestAnimationFrame", "星种"],
+  bootstrap: true,
+};
+
+const FEATURE_DELIVERY: DeliveryScript = {
+  workflow: "feature",
+  task: "weather-expedition",
+  userMarker: "复杂的气象远征",
+  message: "在现有玩法上加入轮换天气、连击倍率、每日远征目标和本地最佳分数",
+  html: FEATURE_GAME_HTML,
+  commitMessage: "add weather expedition feature",
+  markers: ["weather-system", "combo-meter", "dailyChallenge", "localStorage"],
+  bootstrap: false,
+};
+
 function git(root: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
   if (result.status !== 0) {
@@ -153,16 +194,23 @@ function shellArg(value: string): string {
 async function createProject(
   t: CaseContext,
   name: string,
-  initialHtml?: string,
 ): Promise<ProjectFixture> {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  for (const [key, value] of [
+    ["user.name", "Journey User"],
+    ["user.email", "journey@example.com"],
+    ["commit.gpgsign", "false"],
+  ] as const) {
+    const configured = spawnSync("git", ["config", "--global", key, value], {
+      env: opened.daemon.env,
+      encoding: "utf8",
+    });
+    if (configured.status !== 0) {
+      throw new Error(`cannot configure the isolated developer identity: ${configured.stderr}`);
+    }
+  }
   const projectRoot = path.join(opened.workspaceRoot, name);
   mkdirSync(projectRoot, { recursive: true });
-  t.data.git.init(projectRoot);
-  writeFileSync(path.join(projectRoot, "README.md"), `# ${name}\n`);
-  if (initialHtml) writeFileSync(path.join(projectRoot, "index.html"), initialHtml);
-  git(projectRoot, ["add", "."]);
-  git(projectRoot, ["commit", "-m", "initial game baseline"]);
 
   const projectReply = await opened.client.call({
     type: "workspace.open",
@@ -174,124 +222,399 @@ async function createProject(
   return { opened, projectId, projectRoot };
 }
 
-function runGenet(
-  fixture: ProjectFixture,
-  args: string[],
-): { status: number; data: Record<string, unknown>; text: string } {
-  const result = spawnSync(fixture.opened.daemon.genet, args, {
-    cwd: fixture.projectRoot,
-    env: fixture.opened.daemon.env,
-    encoding: "utf8",
-  });
-  let data: Record<string, unknown> = {};
-  for (const line of result.stdout.split("\n")) {
-    if (!line.trim().startsWith("{")) continue;
+function fieldFromRequest(value: unknown, field: string): unknown {
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const found = fieldFromRequest(value[index], field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record[field] !== undefined) return record[field];
+    for (const child of Object.values(record).reverse()) {
+      const found = fieldFromRequest(child, field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const candidates = [value, ...value.split("\n")];
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) continue;
     try {
-      const envelope = JSON.parse(line) as { data?: Record<string, unknown> };
-      data = envelope.data ?? {};
+      const parsed = JSON.parse(trimmed) as unknown;
+      const found = fieldFromRequest(parsed, field);
+      if (found !== undefined) return found;
     } catch {
-      // Product diagnostics may surround the one JSON result.
+      // A tool result can contain prose around its JSON envelope.
     }
   }
-  return {
-    status: result.status ?? -1,
-    data,
-    text: `${result.stdout}\n${result.stderr}`,
-  };
+  const quoted = value.match(new RegExp(`"${field}"\\s*:\\s*"([^"]+)"`));
+  if (quoted) return quoted[1];
+  const numeric = value.match(new RegExp(`"${field}"\\s*:\\s*(\\d+)`));
+  return numeric ? Number(numeric[1]) : undefined;
 }
 
-function installPack(fixture: ProjectFixture): WorkspaceInfo[] {
-  const applied = runGenet(fixture, [
-    "space",
-    "bootstrap",
-    "apply",
-    "--workspace",
-    fixture.projectId,
-    "--pack",
-    PACK_ID,
-    "--agent",
-    "genet",
-    "--model",
-    "deepseek/deepseek-v4-flash",
-  ]);
-  if (applied.status !== 0) throw new Error(`Bootstrap Pack failed: ${applied.text}`);
-  git(fixture.projectRoot, ["add", "."]);
-  git(fixture.projectRoot, ["commit", "-m", "install game delivery team"]);
-  return (applied.data.spaces ?? []) as WorkspaceInfo[];
+function deliveryForRequest(request: unknown, deliveries: DeliveryScript[]): DeliveryScript | undefined {
+  const body = JSON.stringify(request);
+  return [...deliveries].reverse().find(
+    (delivery) => body.includes(delivery.task) || body.includes(delivery.userMarker),
+  );
 }
 
-function scriptDelivery(
+function scriptProductJourney(
   mock: JourneyMock,
-  input: {
-    projectRoot: string;
-    bootstrap: boolean;
-    workflow: "project" | "feature";
-    task: string;
-    message: string;
-    html: string;
-    commitMessage: string;
-    markers: string[];
-  },
+  projectRoot: string,
+  deliveries: DeliveryScript[],
+  managerPromptPath?: string,
 ): void {
-  const turns: Parameters<JourneyMock["script"]> = [];
-  const projectRoot = shellArg(input.projectRoot);
-  if (input.bootstrap) {
-    turns.push({
-      tool: {
-        name: "bash",
-        arguments: {
-          command:
-            `cd ${projectRoot} && "$GENEHUB_CLI" space bootstrap list && "$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1 && "$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 && git add . && git commit -m "bootstrap game delivery team"`,
+  const pmStages = new Map<string, number>();
+  const coderStages = new Map<string, number>();
+  const reviewerStages = new Map<string, number>();
+  let managerStage = 0;
+  const root = shellArg(projectRoot);
+
+  const respond = (request: unknown): Omit<Parameters<JourneyMock["script"]>[number], "respond"> => {
+    const body = JSON.stringify(request);
+    const delivery = deliveryForRequest(request, deliveries);
+
+    if (managerPromptPath && body.includes("分析 J1/J2")) {
+      const stage = managerStage++;
+      if (stage === 0) {
+        return {
+          tool: {
+            name: "bash",
+            arguments: { command: '"$GENEHUB_CLI" workflow history --limit 20' },
+          },
+        };
+      }
+      if (stage === 1) {
+        return {
+          tool: {
+            name: "edit",
+            arguments: {
+              path: managerPromptPath,
+              edits: [
+                {
+                  oldText: "完成后运行真实检查并提交到当前租约 ref。",
+                  newText:
+                    "完成后先运行与变更相关的静态检查和最小玩法回归，再提交到当前租约 ref。",
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (stage === 2) {
+        return {
+          tool: {
+            name: "bash",
+            arguments: { command: "node skills/workflow-manager/scripts/evaluate.mjs" },
+          },
+        };
+      }
+      if (stage === 3) {
+        return {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: `git -C ${root} add .genethub/workflow/prompts/coder.md && git -C ${root} commit -m "improve game delivery workflow"`,
+            },
+          },
+        };
+      }
+      return {
+        text: "已基于 J1/J2 的结构化 Run 和 Executor 流程记录形成并评估新 Candidate；它保持未激活，可由用户审阅后决定是否晋级。",
+      };
+    }
+
+    if (!delivery) {
+      return { text: `未识别测试请求：${body.slice(-800)}` };
+    }
+
+    if (body.includes("你是小游戏项目的 Coder")) {
+      const stage = coderStages.get(delivery.task) ?? 0;
+      coderStages.set(delivery.task, stage + 1);
+      if (stage === 0) {
+        return {
+          tool: {
+            name: "write",
+            arguments: { path: path.join(projectRoot, "index.html"), content: delivery.html },
+          },
+        };
+      }
+      if (stage === 1) {
+        return {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: `cd ${root} && git add index.html && git commit -m ${shellArg(
+                delivery.commitMessage,
+              )} && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=${shellArg(
+                "html5-static-game-smoke",
+              )}`,
+            },
+          },
+        };
+      }
+      return { text: "实现节点已完成并提交。" };
+    }
+
+    if (body.includes("你是小游戏项目的 Reviewer")) {
+      const stage = reviewerStages.get(delivery.task) ?? 0;
+      reviewerStages.set(delivery.task, stage + 1);
+      if (stage === 0) {
+        return {
+          tool: {
+            name: "bash",
+            arguments: {
+              command: `cd ${root} && sleep 2 && test -s index.html && ${delivery.markers
+                .map((marker) => `grep -q ${shellArg(marker)} index.html`)
+                .join(" && ")} && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks=${shellArg(
+                "playability-and-regression-smoke",
+              )}`,
+            },
+          },
+        };
+      }
+      return { text: "Reviewer 已完成独立验收。" };
+    }
+
+    const stage = pmStages.get(delivery.task) ?? 0;
+    pmStages.set(delivery.task, stage + 1);
+    if (delivery.bootstrap && stage === 0) {
+      return {
+        tool: {
+          name: "bash",
+          arguments: { command: '"$GENEHUB_CLI" space inspect' },
         },
+      };
+    }
+    if (delivery.bootstrap && stage === 1) {
+      return {
+        tool: {
+          name: "bash",
+          arguments: { command: '"$GENEHUB_CLI" space bootstrap list' },
+        },
+      };
+    }
+    if (delivery.bootstrap && stage === 2) {
+      return {
+        tool: {
+          name: "bash",
+          arguments: {
+            command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1',
+          },
+        },
+      };
+    }
+    if (delivery.bootstrap && stage === 3) {
+      const challengeId = fieldFromRequest(request, "challengeId");
+      if (typeof challengeId !== "string") {
+        throw new Error(`PM did not receive a daemon challenge: ${body.slice(-4000)}`);
+      }
+      return {
+        tool: {
+          name: "request_user_input",
+          arguments: {
+            questions: [
+              {
+                id: challengeId,
+                header: "项目接管",
+                question: "是否按此计划转换为 PM 驱动项目？",
+                options: [
+                  { label: "确认", description: "仅批准这一份计划执行一次。" },
+                  { label: "暂不", description: "保持目录不变。" },
+                ],
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (delivery.bootstrap && stage === 4) {
+      const planDigest = fieldFromRequest(request, "planDigest");
+      const expectedRevision = fieldFromRequest(request, "expectedRevision");
+      if (typeof planDigest !== "string" || typeof expectedRevision !== "number") {
+        throw new Error(`approved PM turn lost its fixed plan: ${body.slice(-5000)}`);
+      }
+      return {
+        tool: {
+          name: "bash",
+          arguments: {
+            command: `"$GENEHUB_CLI" space bootstrap apply --pack ${PACK_ID} --plan-digest ${shellArg(
+              planDigest,
+            )} --expected-revision ${expectedRevision} --action-id bootstrap-${delivery.task} && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --kind game --complexity project --task ${shellArg(
+              delivery.task,
+            )} --no-wait --message ${shellArg(delivery.message)}`,
+          },
+        },
+      };
+    }
+    if (!delivery.bootstrap && stage === 0) {
+      return {
+        tool: {
+          name: "bash",
+          arguments: {
+            command: `"$GENEHUB_CLI" space inspect && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --kind feature --complexity complex --task ${shellArg(
+              delivery.task,
+            )} --no-wait --message ${shellArg(delivery.message)}`,
+          },
+        },
+      };
+    }
+    if (stage === (delivery.bootstrap ? 5 : 1)) {
+      return { text: "Executor 已接收目标，Coder 与 Reviewer 将按项目 DCG 推进。" };
+    }
+    return { text: "目标已由 Executor 推进完成；Coder 提交和 Reviewer 验收均已记录。" };
+  };
+
+  mock.script(...Array.from({ length: 80 }, () => ({ respond })));
+}
+
+async function completedRun(
+  fixture: ProjectFixture,
+  taskId: string,
+): Promise<WorkflowRunStatus | undefined> {
+  const reply = await fixture.opened.client.call({
+    type: "workflow.history",
+    payload: { workspaceId: fixture.projectId, limit: 20 },
+  });
+  return reply?.type === "workflowRuns"
+    ? reply.data.find((candidate) => candidate.taskId === taskId && candidate.status === "completed")
+    : undefined;
+}
+
+async function runningRun(
+  fixture: ProjectFixture,
+  taskId: string,
+): Promise<WorkflowRunStatus | undefined> {
+  const reply = await fixture.opened.client.call({
+    type: "workflow.history",
+    payload: { workspaceId: fixture.projectId, limit: 20 },
+  });
+  return reply?.type === "workflowRuns"
+    ? reply.data.find((candidate) => candidate.taskId === taskId && candidate.status === "running")
+    : undefined;
+}
+
+async function assertActiveRunGuardsTeam(
+  t: CaseContext,
+  fixture: ProjectFixture,
+  taskId: string,
+): Promise<void> {
+  await t.tools.waitUntil(async () => Boolean(await runningRun(fixture, taskId)), 120_000);
+  const manager = teamByName(await listSpaces(fixture)).get("workflow-manager");
+  if (!manager?.agentSpace) throw new Error("active Run has no WorkflowManager AgentSpace");
+  let rejected = "";
+  try {
+    await fixture.opened.client.call({
+      type: "agentSpace.configure",
+      payload: {
+        workspaceId: manager.id,
+        expectedRevision: manager.agentSpace.revision,
+        operation: { kind: "setLifecycle", lifecycle: "pooled" },
       },
     });
+  } catch (error) {
+    rejected = String(error);
   }
-  turns.push(
-    {
-      tool: {
-        name: "bash",
-        arguments: {
-          command: `"$GENEHUB_CLI" workflow dispatch --kind ${
-            input.workflow === "project" ? "game --complexity project" : "feature --complexity complex"
-          } --task ${shellArg(input.task)} --message ${shellArg(input.message)} --wait --timeout 840`,
-        },
-      },
-    },
-    {
-      tool: {
-        name: "write",
-        arguments: { path: path.join(input.projectRoot, "index.html"), content: input.html },
-      },
-    },
-    {
-      tool: {
-        name: "bash",
-        arguments: {
-          command: `cd ${projectRoot} && git add index.html && git commit -m ${shellArg(
-            input.commitMessage,
-          )} && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=${shellArg(
-            "html5-static-game-smoke",
-          )} && sleep 2`,
-        },
-      },
-    },
-    {
-      tool: {
-        name: "bash",
-        arguments: {
-          command: `cd ${projectRoot} && test -s index.html && ${input.markers
-            .map((marker) => `grep -q ${shellArg(marker)} index.html`)
-            .join(" && ")} && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks=${shellArg(
-            "playability-and-regression-smoke",
-          )}`,
-        },
-      },
-    },
-    { text: "实现节点已完成并提交。" },
-    { text: "Reviewer 已完成独立验收。" },
-    { text: "目标已由 Executor 推进完成。" },
+  t.assertions.assert(
+    rejected.includes("activeRunConflict"),
+    `destructive tree change was not rejected by the active Run guard: ${rejected}`,
   );
-  mock.script(...turns);
+  const unchanged = teamByName(await listSpaces(fixture)).get("workflow-manager");
+  t.assertions.assert(
+    unchanged?.agentSpace?.lifecycle === "persistent" &&
+      unchanged.agentSpace.revision === manager.agentSpace.revision,
+    "a rejected active-Run mutation changed the WorkflowManager",
+  );
+}
+
+async function runPmDelivery(
+  t: CaseContext,
+  fixture: ProjectFixture,
+  sessionId: string,
+  prompt: string,
+  taskId: string,
+  expectApproval: boolean,
+  existingEvents?: SessionEventLog,
+  verifyActiveRunGuard = false,
+): Promise<UserDeliveryTiming> {
+  const events =
+    existingEvents ?? (await t.flows.main.attachEventLog(fixture.opened.client, sessionId));
+  const completedBefore = events.filter((event) => event.type === "turnCompleted").length;
+  const failedBefore = events.filter((event) => event.type === "turnFailed").length;
+  const startedAt = Date.now();
+  let humanWaitMs = 0;
+  await t.flows.main.sendPrompt(fixture.opened.client, sessionId, prompt);
+
+  if (expectApproval) {
+    await t.tools.waitUntil(
+      () =>
+        events.some((event) => {
+          const inner = t.flows.main.sessionEventOf(event);
+          const request = inner?.request as { kind?: string } | undefined;
+          return inner?.type === "permissionRequested" && request?.kind === "planApproval";
+        }) || events.some((event) => event.type === "turnFailed"),
+      120_000,
+    );
+    t.assertions.assert(!existsSync(path.join(fixture.projectRoot, ".git")), "planning created Git before approval");
+    t.assertions.assert(
+      !existsSync(path.join(fixture.projectRoot, "pipespace.json")) &&
+        !existsSync(path.join(fixture.projectRoot, "spaces")),
+      "planning materialized AgentSpaces before approval",
+    );
+    const asked = events.find((event) => {
+      const inner = t.flows.main.sessionEventOf(event);
+      const request = inner?.request as { kind?: string } | undefined;
+      return inner?.type === "permissionRequested" && request?.kind === "planApproval";
+    });
+    const request = asked ? t.flows.main.sessionEventOf(asked)?.request : undefined;
+    const requestId = (request as { id?: string } | undefined)?.id;
+    if (!requestId) {
+      throw new Error(
+        `PlanApproval has no request id: ${JSON.stringify(
+          events.slice(-16).map((event) => event.raw),
+        ).slice(-12000)}`,
+      );
+    }
+    const humanStartedAt = Date.now();
+    const reply = await fixture.opened.client.call({
+      type: "session.respondPermission",
+      payload: {
+        sessionId,
+        requestId,
+        outcome: { outcome: "selected", optionId: "approve-once" },
+      },
+    });
+    humanWaitMs += Date.now() - humanStartedAt;
+    t.assertions.assert(reply?.type === "ack", `Human approval failed: ${JSON.stringify(reply)}`);
+  }
+
+  if (verifyActiveRunGuard) {
+    await assertActiveRunGuardsTeam(t, fixture, taskId);
+  }
+
+  await t.tools.waitUntil(async () => Boolean(await completedRun(fixture, taskId)), FIFTEEN_MINUTES_MS);
+  await t.tools.waitUntil(
+    () => events.filter((event) => event.type === "turnCompleted").length >= completedBefore + 2,
+    120_000,
+  );
+  const wallMs = Date.now() - startedAt;
+  const activeMs = wallMs - humanWaitMs;
+  t.assertions.assert(
+    events.filter((event) => event.type === "turnFailed").length === failedBefore,
+    `PM journey failed: ${JSON.stringify(events.slice(-16).map((event) => event.raw)).slice(-12000)}`,
+  );
+  t.assertions.assert(
+    activeMs <= FIFTEEN_MINUTES_MS,
+    `user-visible journey took ${activeMs}ms active (${wallMs}ms wall, ${humanWaitMs}ms Human wait)`,
+  );
+  return { activeMs, wallMs, humanWaitMs };
 }
 
 async function runUserTurn(
@@ -315,10 +638,7 @@ async function runUserTurn(
       !events.some((event) => event.type === "turnFailed"),
     `user turn failed: ${JSON.stringify(events.slice(-12).map((event) => event.raw)).slice(-8000)}`,
   );
-  t.assertions.assert(
-    elapsedMs <= FIFTEEN_MINUTES_MS,
-    `user-visible journey took ${elapsedMs}ms, over the 15-minute gate`,
-  );
+  t.assertions.assert(elapsedMs <= FIFTEEN_MINUTES_MS, `user turn took ${elapsedMs}ms`);
   return elapsedMs;
 }
 
@@ -503,24 +823,19 @@ defineJourney(
   async (t) => {
     const fixture = await createProject(t, "stardust-garden");
     try {
-      scriptDelivery(fixture.opened.mock, {
-        projectRoot: fixture.projectRoot,
-        bootstrap: true,
-        workflow: "project",
-        task: "stardust-garden",
-        message: "完成一个可玩的星尘花园小游戏，保留十分钟主实现和十五分钟总交付预算",
-        html: BASE_GAME_HTML,
-        commitMessage: "build stardust garden",
-        markers: ["<canvas", "ArrowLeft", "requestAnimationFrame", "星种"],
-      });
+      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [PROJECT_DELIVERY]);
       const pmSessionId = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
-      const elapsedMs = await runUserTurn(
+      const timing = await runPmDelivery(
         t,
         fixture,
         pmSessionId,
         "请在十五分钟内搭好小游戏团队并交付一个可玩的星尘花园；主实现按十分钟控制。",
+        PROJECT_DELIVERY.task,
+        true,
+        undefined,
+        true,
       );
-      const delivery = await assertDelivery(t, fixture, "stardust-garden", elapsedMs);
+      const delivery = await assertDelivery(t, fixture, PROJECT_DELIVERY.task, timing.activeMs);
       const html = readFileSync(path.join(fixture.projectRoot, "index.html"), "utf8");
       for (const marker of ["<canvas", "ArrowLeft", "requestAnimationFrame", "score", "restart"]) {
         t.assertions.assert(html.includes(marker), `playable game omitted ${marker}`);
@@ -528,7 +843,7 @@ defineJourney(
       t.assertions.assert(!/https?:\/\//.test(html), "game depends on a remote asset instead of local preview files");
       t.assertions.assert(git(fixture.projectRoot, ["status", "--porcelain"]) === "", "project is dirty");
       t.note(
-        `journey=game-project elapsedMs=${elapsedMs} implementationMs=${delivery.implementationMs} pm=${pmSessionId} executor=${delivery.run.executorSessionId} run=${delivery.run.id} preview=${path.join(
+        `journey=game-project activeMs=${timing.activeMs} wallMs=${timing.wallMs} humanWaitMs=${timing.humanWaitMs} implementationMs=${delivery.implementationMs} pm=${pmSessionId} executor=${delivery.run.executorSessionId} run=${delivery.run.id} preview=${path.join(
           fixture.projectRoot,
           "index.html",
         )}`,
@@ -562,32 +877,44 @@ defineJourney(
     retention: true,
   },
   async (t) => {
-    const fixture = await createProject(t, "stardust-expedition", BASE_GAME_HTML);
+    const fixture = await createProject(t, "stardust-expedition");
     try {
-      installPack(fixture);
-      const before = assertTeam(t, fixture, await listSpaces(fixture));
+      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [
+        PROJECT_DELIVERY,
+        FEATURE_DELIVERY,
+      ]);
+      const pmSessionId = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
+      const pmEvents = await t.flows.main.attachEventLog(fixture.opened.client, pmSessionId);
+      const projectTiming = await runPmDelivery(
+        t,
+        fixture,
+        pmSessionId,
+        "请在十五分钟内搭好小游戏团队并交付一个可玩的星尘花园；主实现按十分钟控制。",
+        PROJECT_DELIVERY.task,
+        true,
+        pmEvents,
+      );
+      const projectDelivery = await assertDelivery(
+        t,
+        fixture,
+        PROJECT_DELIVERY.task,
+        projectTiming.activeMs,
+      );
+      const before = assertTeam(t, fixture, projectDelivery.spaces);
       const beforeIdentity = TEAM_NAMES.map((name) => {
         const space = before.get(name)!;
         return `${name}:${space.id}:${space.agentSpace?.revision}`;
       });
-      scriptDelivery(fixture.opened.mock, {
-        projectRoot: fixture.projectRoot,
-        bootstrap: false,
-        workflow: "feature",
-        task: "weather-expedition",
-        message: "在现有玩法上加入轮换天气、连击倍率、每日远征目标和本地最佳分数",
-        html: FEATURE_GAME_HTML,
-        commitMessage: "add weather expedition feature",
-        markers: ["weather-system", "combo-meter", "dailyChallenge", "localStorage"],
-      });
-      const pmSessionId = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
-      const elapsedMs = await runUserTurn(
+      const timing = await runPmDelivery(
         t,
         fixture,
         pmSessionId,
         "请在十五分钟内给现有小游戏增加一套复杂的气象远征：天气轮换、连击、每日目标和本地最佳分数；主实现按十分钟控制。",
+        FEATURE_DELIVERY.task,
+        false,
+        pmEvents,
       );
-      const delivery = await assertDelivery(t, fixture, "weather-expedition", elapsedMs);
+      const delivery = await assertDelivery(t, fixture, FEATURE_DELIVERY.task, timing.activeMs);
       const after = teamByName(delivery.spaces);
       const afterIdentity = TEAM_NAMES.map((name) => {
         const space = after.get(name)!;
@@ -611,7 +938,7 @@ defineJourney(
       }
       t.assertions.assert(git(fixture.projectRoot, ["status", "--porcelain"]) === "", "project is dirty");
       t.note(
-        `journey=game-feature elapsedMs=${elapsedMs} implementationMs=${delivery.implementationMs} pm=${pmSessionId} executorSpace=${delivery.run.executorWorkspaceId} executorSession=${delivery.run.executorSessionId} run=${delivery.run.id}`,
+        `journey=game-feature activeMs=${timing.activeMs} wallMs=${timing.wallMs} humanWaitMs=${timing.humanWaitMs} implementationMs=${delivery.implementationMs} pm=${pmSessionId} executorSpace=${delivery.run.executorWorkspaceId} executorSession=${delivery.run.executorSessionId} run=${delivery.run.id}`,
       );
     } finally {
       await dispose(fixture);
@@ -643,27 +970,53 @@ defineJourney(
     retention: true,
   },
   async (t) => {
-    const fixture = await createProject(t, "stardust-workflow-lab", BASE_GAME_HTML);
+    const fixture = await createProject(t, "stardust-workflow-lab");
     try {
-      installPack(fixture);
-      scriptDelivery(fixture.opened.mock, {
-        projectRoot: fixture.projectRoot,
-        bootstrap: false,
-        workflow: "feature",
-        task: "evidence-baseline",
-        message: "加入气象远征，作为后续 Workflow 分析的真实完成样本",
-        html: FEATURE_GAME_HTML,
-        commitMessage: "add evidence baseline feature",
-        markers: ["weather-system", "combo-meter", "dailyChallenge", "localStorage"],
-      });
+      const promptPath = path.join(
+        fixture.projectRoot,
+        ".genethub",
+        "workflow",
+        "prompts",
+        "coder.md",
+      );
+      scriptProductJourney(
+        fixture.opened.mock,
+        fixture.projectRoot,
+        [PROJECT_DELIVERY, FEATURE_DELIVERY],
+        promptPath,
+      );
       const pmSessionId = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
-      const baselineElapsedMs = await runUserTurn(
+      const pmEvents = await t.flows.main.attachEventLog(fixture.opened.client, pmSessionId);
+      const projectTiming = await runPmDelivery(
         t,
         fixture,
         pmSessionId,
-        "先完成气象远征 Feature，给 WorkflowManager 留下一条真实结构化执行记录。",
+        "请在十五分钟内搭好小游戏团队并交付一个可玩的星尘花园；主实现按十分钟控制。",
+        PROJECT_DELIVERY.task,
+        true,
+        pmEvents,
       );
-      const baseline = await assertDelivery(t, fixture, "evidence-baseline", baselineElapsedMs);
+      const projectDelivery = await assertDelivery(
+        t,
+        fixture,
+        PROJECT_DELIVERY.task,
+        projectTiming.activeMs,
+      );
+      const featureTiming = await runPmDelivery(
+        t,
+        fixture,
+        pmSessionId,
+        "请在十五分钟内给现有小游戏增加一套复杂的气象远征：天气轮换、连击、每日目标和本地最佳分数；主实现按十分钟控制。",
+        FEATURE_DELIVERY.task,
+        false,
+        pmEvents,
+      );
+      const baseline = await assertDelivery(
+        t,
+        fixture,
+        FEATURE_DELIVERY.task,
+        featureTiming.activeMs,
+      );
       const before = await inspectProject(fixture);
       const runCountBefore = (await fixture.opened.client.call({
         type: "workflow.history",
@@ -689,62 +1042,11 @@ defineJourney(
         "WorkflowManager Session did not auto-instantiate its Worker and Executor Components",
       );
 
-      const promptPath = path.join(
-        fixture.projectRoot,
-        ".genethub",
-        "workflow",
-        "prompts",
-        "coder.md",
-      );
-      fixture.opened.mock.script(
-        {
-          tool: {
-            name: "bash",
-            arguments: { command: '"$GENEHUB_CLI" workflow history --limit 20' },
-          },
-        },
-        {
-          tool: {
-            name: "edit",
-            arguments: {
-              path: promptPath,
-              edits: [
-                {
-                  oldText: "完成后运行真实检查并提交到当前租约 ref。",
-                  newText:
-                    "完成后先运行与变更相关的静态检查和最小玩法回归，再提交到当前租约 ref。",
-                },
-              ],
-            },
-          },
-        },
-        {
-          tool: {
-            name: "bash",
-            arguments: { command: "node skills/workflow-manager/scripts/evaluate.mjs" },
-          },
-        },
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command: `git -C ${shellArg(
-                fixture.projectRoot,
-              )} add .genethub/workflow/prompts/coder.md && git -C ${shellArg(
-                fixture.projectRoot,
-              )} commit -m "improve game delivery workflow"`,
-            },
-          },
-        },
-        {
-          text: "已基于结构化 Run 和 Executor 流程记录形成并评估新 Candidate；它保持未激活，可由用户审阅后决定是否晋级。",
-        },
-      );
       const elapsedMs = await runUserTurn(
         t,
         fixture,
         managerSessionId,
-        "请分析刚才的 Workflow 执行记录，改进下一次交付的检查质量；完成评估但不要激活，十五分钟内给我结果。",
+        "请分析 J1/J2 的 Workflow 执行记录，改进下一次交付的检查质量；完成评估但不要激活，十五分钟内给我结果。",
       );
 
       const after = await inspectProject(fixture);
@@ -801,9 +1103,10 @@ defineJourney(
         "evaluation report used a different activation revision",
       );
       t.assertions.assert(
-        report.analyzedRuns?.includes(baseline.run.id) &&
+        report.analyzedRuns?.includes(projectDelivery.run.id) &&
+          report.analyzedRuns?.includes(baseline.run.id) &&
           (report.analyzedMessages ?? 0) >= baseline.flow.messages.length,
-        "evaluation report is not based on the completed structured Run",
+        "evaluation report is not based on both completed structured Runs",
       );
       t.assertions.assert(
         report.nodeDurations?.some(
@@ -848,7 +1151,7 @@ defineJourney(
       t.assertions.assert(managedAfter === managedBefore, "WorkflowManager created extra managed Workers");
       t.assertions.assert(git(fixture.projectRoot, ["status", "--porcelain"]) === "", "project is dirty");
       t.note(
-        `journey=workflow-improvement elapsedMs=${elapsedMs} baselineImplementationMs=${baseline.implementationMs} manager=${managerSessionId} active=${after.activeDigest} candidate=${after.candidateDigest} analyzedRun=${baseline.run.id}`,
+        `journey=workflow-improvement elapsedMs=${elapsedMs} j1ImplementationMs=${projectDelivery.implementationMs} j2ImplementationMs=${baseline.implementationMs} manager=${managerSessionId} active=${after.activeDigest} candidate=${after.candidateDigest} analyzedRuns=${projectDelivery.run.id},${baseline.run.id}`,
       );
     } finally {
       await dispose(fixture);

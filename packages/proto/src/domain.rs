@@ -239,6 +239,39 @@ pub struct AgentSpaceInfo {
     pub builder_lock_digest: String,
     /// Sorted by `componentId`, so the projection is stable between reads.
     pub components: Vec<AgentComponentInfo>,
+    /// Pack-authored prompts for a new Session in this Space. The daemon only
+    /// transports these strings; it never decides what a PM, Executor, or
+    /// Worker should suggest to the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guidance: Vec<String>,
+    /// The Bootstrap Pack that last established this Space, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bootstrap_pack: Option<AgentSpacePackIdentity>,
+    /// Builder/tree facts checked by the daemon. Business health remains a DCG
+    /// concern; this field reports only structural reasons the UI can display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub health: Option<AgentSpaceHealth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSpacePackIdentity {
+    pub id: String,
+    pub version: u32,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSpaceHealth {
+    /// `healthy`, `unhealthy`, or `unknown`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
 }
 
 /// Read-only compatibility projection of [`AgentSpaceInfo`] in the terms the
@@ -375,6 +408,67 @@ pub struct BootstrapPackReport {
     pub spaces: Vec<WorkspaceInfo>,
     /// Whether applying the same pack again would be a no-op.
     pub current: bool,
+    /// Digest of the complete immutable mutation plan. Apply must echo it.
+    pub plan_digest: String,
+    /// AgentSpace CAS value observed while the plan was made.
+    #[ts(type = "number")]
+    pub expected_revision: u64,
+    /// Git/root facts included in `planDigest` and shown before approval.
+    pub git: BootstrapGitPlan,
+    /// Present only when a SessionController asked for a mutating plan. This
+    /// challenge has no authority; a Human response may turn it into one
+    /// daemon-private, single-use grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approval: Option<BootstrapApprovalChallenge>,
+    /// Exact bootstrap commit produced by a successful apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub bootstrap_commit: Option<String>,
+    /// True only after the initiating Session owns a project-scoped control
+    /// binding. A `pm` component alone never grants this authority.
+    #[serde(default)]
+    pub project_control_bound: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BootstrapGitPlan {
+    /// `create` for a new repository, `reuse` for a direct clean repository.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub head: Option<String>,
+    pub status_digest: String,
+    pub commit_identity: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BootstrapApprovalChallenge {
+    pub challenge_id: String,
+    pub title: String,
+    pub detail: String,
+    #[ts(type = "number")]
+    pub expires_at_ms: i64,
+}
+
+/// Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSpaceChangePlan {
+    pub schema: String,
+    pub workspace_id: String,
+    pub plan_digest: String,
+    #[ts(type = "number")]
+    pub expected_revision: u64,
+    pub operation: crate::rpc::AgentSpaceOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approval: Option<BootstrapApprovalChallenge>,
 }
 
 /// One immutable Bootstrap Pack embedded in this product build. The list is
@@ -389,6 +483,9 @@ pub struct BootstrapPackInfo {
     pub digest: String,
     /// Project-relative method entry point installed by this Pack.
     pub entry_skill: String,
+    /// Stable, product-neutral intent categories advertised by the Pack.
+    #[serde(default)]
+    pub intent_matches: Vec<String>,
 }
 
 /// How a child session obtained the context that precedes its first new turn.

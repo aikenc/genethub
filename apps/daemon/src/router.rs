@@ -339,6 +339,69 @@ async fn authorize_project_workflow_mutation(
     }
 }
 
+fn agent_space_requires_project_control(space: &crate::config::AgentSpaceEntry) -> bool {
+    crate::agent_space::has_enabled_component(space, crate::agent_space::COMPONENT_PM)
+        || space.bootstrap_pack.is_some()
+}
+
+async fn authorize_agent_space_change(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    workspace_id: &str,
+) -> Result<(), String> {
+    match caller {
+        crate::authz::Principal::LocalUser => Ok(()),
+        crate::authz::Principal::SessionController { session_id } => {
+            let summary = state
+                .sessions
+                .summary(session_id)
+                .await
+                .map_err(|error| format!("无法确认入口会话：{error:#}"))?;
+            if summary.managed.is_some() {
+                return Err("受管 Worker Session 不能改组 AgentSpace 树".into());
+            }
+            let project_id = state
+                .workspaces
+                .project_root(workspace_id)
+                .await
+                .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
+            if summary.workspace_id == workspace_id
+                || state.project_control.is_bound(&project_id, session_id)
+            {
+                Ok(())
+            } else {
+                Err("当前 Session 既不属于目标 Space，也没有该项目的控制绑定".into())
+            }
+        }
+        _ => Err("只有认证用户或获得项目控制绑定的普通 Session 可以改组 AgentSpace".into()),
+    }
+}
+
+async fn agent_space_change_facts(
+    state: &Shared,
+    workspace_id: &str,
+    expected_revision: u64,
+    operation: &genehub_proto::AgentSpaceOperation,
+) -> anyhow::Result<(crate::config::AgentSpaceEntry, String, String)> {
+    let workspace = state.workspaces.get(workspace_id).await?;
+    let current = state.workspaces.agent_space(workspace_id).await?;
+    if current.revision != expected_revision {
+        anyhow::bail!(
+            "revisionConflict: AgentSpace {workspace_id} is at revision {}, not {expected_revision}",
+            current.revision
+        );
+    }
+    let canonical_root = workspace.root.canonicalize()?.display().to_string();
+    let digest = crate::project_control::agent_space_plan_digest(
+        workspace_id,
+        &canonical_root,
+        expected_revision,
+        &current.builder_lock_digest,
+        operation,
+    )?;
+    Ok((current, canonical_root, digest))
+}
+
 /// Refuses to move an AgentSpace while a Run still depends on it.
 ///
 /// A Run pins its execution carrier when it starts, so a reparent in flight
@@ -372,39 +435,109 @@ async fn session_components(
         .collect())
 }
 
-async fn guard_agent_space_reparent(
+async fn guard_agent_space_mutation(
     state: &Shared,
     workspace_id: &str,
     operation: &genehub_proto::AgentSpaceOperation,
 ) -> anyhow::Result<()> {
-    if !matches!(
-        operation,
-        genehub_proto::AgentSpaceOperation::SetParent { .. }
-    ) {
+    let current = state.workspaces.agent_space(workspace_id).await?;
+    let proposed = crate::agent_space::apply(&current, operation)?;
+    if proposed == current {
         return Ok(());
     }
-    let space = state.workspaces.agent_space(workspace_id).await?;
-    let Some(parent_id) = space.parent_workspace_id.as_deref() else {
-        // A Space that is not attached yet cannot be a pinned carrier.
-        return Ok(());
+
+    let destructive = match operation {
+        genehub_proto::AgentSpaceOperation::SetComponent {
+            component_id,
+            enabled,
+            role,
+        } => current
+            .components
+            .iter()
+            .find(|component| component.component_id == *component_id)
+            .is_some_and(|component| {
+                (component.enabled && !enabled) || component.role.as_deref() != role.as_deref()
+            }),
+        genehub_proto::AgentSpaceOperation::RemoveComponent { .. }
+        | genehub_proto::AgentSpaceOperation::SetParent { .. }
+        | genehub_proto::AgentSpaceOperation::SetLifecycle { .. } => true,
     };
-    let project = state.workspaces.project_root(parent_id).await?;
-    // Being unable to read the project is not evidence that nothing depends on
-    // this Space. Refuse and say so, rather than letting an unreadable project
-    // silently mean "idle".
-    let busy = match state.workspaces.get(&project).await {
-        Ok(project_entry) => crate::workflow::carrier_has_active_run(
+    if !destructive {
+        return Ok(());
+    }
+
+    let sessions = state.sessions.list(Some(workspace_id), true).await?;
+    let active_sessions = sessions
+        .into_iter()
+        .filter(|session| {
+            matches!(
+                session.status,
+                genehub_proto::SessionStatus::Running | genehub_proto::SessionStatus::Waiting
+            )
+        })
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    if !active_sessions.is_empty() {
+        anyhow::bail!(
+            "activeSessionConflict: stop these running or waiting Sessions before changing AgentSpace {workspace_id}: {}",
+            active_sessions.join(", ")
+        );
+    }
+
+    let project = state.workspaces.project_root(workspace_id).await?;
+    let active_runs = match state.workspaces.get(&project).await {
+        Ok(project_entry) => crate::workflow::project_active_run_ids(
             &state.paths.root,
             &project,
             &project_entry.root,
-            workspace_id,
         )?,
         Err(error) => anyhow::bail!(
-            "无法确认该 AgentSpace 是否仍在执行 Workflow Run，先恢复项目 {project}：{error:#}"
+            "activeRunUnknown: 无法确认 AgentSpace 是否仍被 Workflow 使用；先恢复项目 {project}：{error:#}"
         ),
     };
-    if busy {
-        anyhow::bail!("该 AgentSpace 仍是进行中 Workflow Run 的执行载体，无法改变归属");
+    if !active_runs.is_empty() {
+        anyhow::bail!(
+            "activeRunConflict: finish or cancel these Workflow Runs before changing the team: {}",
+            active_runs.join(", ")
+        );
+    }
+
+    let removes_executor = match operation {
+        genehub_proto::AgentSpaceOperation::RemoveComponent { component_id } => {
+            component_id == crate::agent_space::COMPONENT_EXECUTOR
+        }
+        genehub_proto::AgentSpaceOperation::SetComponent {
+            component_id,
+            enabled,
+            ..
+        } => component_id == crate::agent_space::COMPONENT_EXECUTOR && !enabled,
+        _ => false,
+    };
+    let moves_subtree = matches!(
+        operation,
+        genehub_proto::AgentSpaceOperation::SetParent { .. }
+    );
+    if removes_executor || moves_subtree {
+        let children = state
+            .workspaces
+            .list()
+            .await
+            .into_iter()
+            .filter(|workspace| {
+                workspace
+                    .agent_space
+                    .as_ref()
+                    .and_then(|space| space.parent_workspace_id.as_deref())
+                    == Some(workspace_id)
+            })
+            .map(|workspace| workspace.id)
+            .collect::<Vec<_>>();
+        if !children.is_empty() {
+            anyhow::bail!(
+                "childSpaceConflict: detach or reparent these direct child AgentSpaces first: {}",
+                children.join(", ")
+            );
+        }
     }
     Ok(())
 }
@@ -583,6 +716,27 @@ async fn dispatch(
                     "workflow.dispatch 只能由当前根会话中的 Agent 发起",
                 );
             };
+            let project_space = match state.workspaces.agent_space(&workspace_id).await {
+                Ok(space) => space,
+                Err(error) => return failed(error),
+            };
+            // A PM takeover introduces durable project control, so its Runs
+            // must be started by the Session that owns that binding. Keep the
+            // V2-A `workflow init` compatibility path for an ordinary,
+            // unregistered project: it has neither a PM component nor a Pack
+            // receipt and `workflow::dispatch` still proves that the caller is
+            // the project's non-managed root Session.
+            let requires_project_control = agent_space_requires_project_control(&project_space);
+            if requires_project_control
+                && !state
+                    .project_control
+                    .is_bound(&workspace_id, parent_session_id)
+            {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "当前 Session 没有这个项目的 ProjectControlBinding；请先完成 PM 接管",
+                );
+            }
             let transition = match crate::workflow::dispatch(
                 state,
                 &workspace_id,
@@ -744,7 +898,26 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Ok(summary) => {
+                    if let Ok(space) = state.workspaces.agent_space(&workspace_id).await {
+                        if crate::agent_space::has_enabled_component(
+                            &space,
+                            crate::agent_space::COMPONENT_PM,
+                        ) {
+                            if let Some(pack) = space.bootstrap_pack.as_ref() {
+                                if let Err(error) = state.project_control.bind(
+                                    &workspace_id,
+                                    &summary.id,
+                                    &pack.id,
+                                    &pack.digest,
+                                ) {
+                                    return failed(error);
+                                }
+                            }
+                        }
+                    }
+                    Handled::ok(Reply::Session(summary))
+                }
                 Err(error) => failed(error),
             }
         }
@@ -1091,10 +1264,13 @@ async fn dispatch(
             }
         }
 
-        Request::SessionClose { session_id } => match state.sessions.close(&session_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        Request::SessionClose { session_id } => {
+            state.project_control.revoke_session(&session_id).await;
+            match state.sessions.close(&session_id).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionArchive {
             session_id,
@@ -1111,10 +1287,39 @@ async fn dispatch(
             }
         }
 
-        Request::SessionDelete { session_id } => match state.sessions.delete(&session_id).await {
-            Ok(()) => Handled::ok(Reply::Ack),
-            Err(error) => failed(error),
-        },
+        Request::SessionDelete { session_id } => {
+            state.project_control.revoke_session(&session_id).await;
+            let summary = match state.sessions.summary(&session_id).await {
+                Ok(summary) => summary,
+                Err(error) => return failed(error),
+            };
+            let binding_snapshot = match state
+                .project_control
+                .remove_binding_for_session(&summary.workspace_id, &session_id)
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => return failed(error),
+            };
+            match state.sessions.delete(&session_id).await {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => {
+                    if let Some(snapshot) = binding_snapshot.as_deref() {
+                        if let Err(restore) = state
+                            .project_control
+                            .restore_binding_snapshot(&summary.workspace_id, Some(snapshot))
+                        {
+                            return Handled::err(
+                                ErrorCode::Internal,
+                                format!(
+                                    "sessionDeleteRollbackIncomplete: {error:#}; restoring project control binding failed: {restore:#}"
+                                ),
+                            );
+                        }
+                    }
+                    failed(error)
+                }
+            }
+        }
 
         Request::SessionSetModel {
             session_id,
@@ -1182,6 +1387,40 @@ async fn dispatch(
             request_id,
             outcome,
         } => {
+            let kind = match state
+                .sessions
+                .pending_permission_kind(&session_id, &request_id)
+                .await
+            {
+                Ok(kind) => kind,
+                Err(error) => return failed(error),
+            };
+            if kind == Some(genehub_proto::PermissionRequestKind::PlanApproval) {
+                if matches!(caller, crate::authz::Principal::SessionController { .. }) {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "Agent/CLI 不能替用户响应项目接管确认",
+                    );
+                }
+                if !state
+                    .project_control
+                    .is_plan_request(&session_id, &request_id)
+                    .await
+                {
+                    return Handled::err(
+                        ErrorCode::Conflict,
+                        "approvalStale: 该接管计划已过期，请让 Agent 重新生成 plan",
+                    );
+                }
+                if let Err(error) = state
+                    .project_control
+                    .record_human_response(&session_id, &request_id, &outcome)
+                    .await
+                {
+                    return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                }
+            }
+            let plan_approval = kind == Some(genehub_proto::PermissionRequestKind::PlanApproval);
             let providers = state.providers().await;
             match state
                 .sessions
@@ -1189,7 +1428,15 @@ async fn dispatch(
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),
-                Err(error) => failed(error),
+                Err(error) => {
+                    // Approval becomes useful only if the stopped Session was
+                    // actually resumed. A failed continuation must not leave a
+                    // grant behind for a later CLI turn to consume.
+                    if plan_approval {
+                        state.project_control.revoke_session(&session_id).await;
+                    }
+                    failed(error)
+                }
             }
         }
 
@@ -1553,29 +1800,236 @@ async fn dispatch(
             }
         }
 
-        Request::AgentSpaceConfigure {
+        Request::AgentSpaceChangePlan {
             workspace_id,
             expected_revision,
             operation,
         } => {
-            if let Err(error) = guard_agent_space_reparent(state, &workspace_id, &operation).await {
+            if let Err(message) = authorize_agent_space_change(state, caller, &workspace_id).await {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            let (current, canonical_root, plan_digest) =
+                match agent_space_change_facts(state, &workspace_id, expected_revision, &operation)
+                    .await
+                {
+                    Ok(facts) => facts,
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                    }
+                };
+            let approval = if let Some(session_id) = caller.session_controller_id() {
+                let detail = serde_json::to_string_pretty(&operation)
+                    .unwrap_or_else(|_| format!("{operation:?}"));
+                Some(
+                    state
+                        .project_control
+                        .issue(crate::project_control::ChallengeSpec {
+                            controller_session_id: session_id.into(),
+                            workspace_id: workspace_id.clone(),
+                            canonical_root,
+                            action: "agentSpace.configure".into(),
+                            pack_id: "agent-space-control".into(),
+                            pack_digest: plan_digest.clone(),
+                            plan_digest: plan_digest.clone(),
+                            expected_revision,
+                            git_head: None,
+                            status_digest: current.builder_lock_digest,
+                            title: "应用这次 AgentSpace 变更？".into(),
+                            detail: format!(
+                                "只对 Workspace {workspace_id} 执行一次 revision {expected_revision} CAS：\n{detail}\nplan: {plan_digest}"
+                            ),
+                        })
+                        .await,
+                )
+            } else {
+                None
+            };
+            Handled::ok(Reply::AgentSpaceChangePlan(
+                genehub_proto::AgentSpaceChangePlan {
+                    schema: "genehub.agent-space-change-plan.v1".into(),
+                    workspace_id,
+                    plan_digest,
+                    expected_revision,
+                    operation,
+                    approval,
+                },
+            ))
+        }
+
+        Request::AgentSpaceConfigure {
+            workspace_id,
+            expected_revision,
+            operation,
+            plan_digest,
+            action_id,
+        } => {
+            if let Err(message) = authorize_agent_space_change(state, caller, &workspace_id).await {
+                return Handled::err(ErrorCode::Forbidden, message);
+            }
+            if let (Some(session_id), Some(plan_digest), Some(action_id)) = (
+                caller.session_controller_id(),
+                plan_digest.as_deref(),
+                action_id.as_deref(),
+            ) {
+                match state
+                    .project_control
+                    .completed_action::<genehub_proto::WorkspaceInfo>(
+                        &workspace_id,
+                        session_id,
+                        "agentSpace.configure",
+                        plan_digest,
+                        action_id,
+                    ) {
+                    Ok(Some(workspace)) => return Handled::ok(Reply::Workspace(workspace)),
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                    }
+                }
+            }
+            let mut reserved = None;
+            let _mutation = if let Some(session_id) = caller.session_controller_id() {
+                let mutation = state.project_control.mutation_lock().await;
+                let (current, canonical_root, current_plan) = match agent_space_change_facts(
+                    state,
+                    &workspace_id,
+                    expected_revision,
+                    &operation,
+                )
+                .await
+                {
+                    Ok(facts) => facts,
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                    }
+                };
+                let Some(plan_digest) = plan_digest.as_deref() else {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "approvalRequired: Agent 修改 Component 或 Parent 前必须先使用 --plan 并由用户确认",
+                    );
+                };
+                let Some(action_id) = action_id.as_deref() else {
+                    return Handled::err(ErrorCode::BadRequest, "apply requires --action-id");
+                };
+                if current_plan != plan_digest {
+                    return Handled::err(
+                        ErrorCode::Conflict,
+                        "approvalStale: AgentSpace facts changed; create and approve a new plan",
+                    );
+                }
+                let challenge = match state
+                    .project_control
+                    .reserve(
+                        session_id,
+                        &workspace_id,
+                        &canonical_root,
+                        "agentSpace.configure",
+                        "agent-space-control",
+                        plan_digest,
+                        plan_digest,
+                        expected_revision,
+                        None,
+                        &current.builder_lock_digest,
+                        action_id,
+                    )
+                    .await
+                {
+                    Ok(challenge) => challenge,
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+                    }
+                };
+                reserved = Some((challenge, action_id.to_string()));
+                Some(mutation)
+            } else {
+                None
+            };
+            if let Err(error) = guard_agent_space_mutation(state, &workspace_id, &operation).await {
+                if let Some((challenge, action_id)) = &reserved {
+                    state
+                        .project_control
+                        .release_failed(challenge, action_id)
+                        .await;
+                }
                 return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
             }
+            let config_snapshot = reserved
+                .as_ref()
+                .map(|_| state.workspaces.config_snapshot());
+            let config_snapshot = match config_snapshot {
+                Some(snapshot) => Some(snapshot.await),
+                None => None,
+            };
             match state
                 .workspaces
                 .configure_agent_space(&workspace_id, expected_revision, &operation)
                 .await
             {
-                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
-                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                Ok(workspace) => {
+                    if let Some((challenge, action_id)) = &reserved {
+                        let session_id = caller
+                            .session_controller_id()
+                            .expect("reserved changes have a Session controller");
+                        let plan_digest = plan_digest
+                            .as_deref()
+                            .expect("reserved changes have a plan digest");
+                        if let Err(error) = state.project_control.record_completed_action(
+                            &workspace_id,
+                            session_id,
+                            "agentSpace.configure",
+                            plan_digest,
+                            action_id,
+                            &workspace,
+                        ) {
+                            let rollback = match config_snapshot {
+                                Some(snapshot) => state
+                                    .workspaces
+                                    .restore_config_snapshot(snapshot)
+                                    .await
+                                    .map_err(|rollback| format!("; rollback failed: {rollback:#}")),
+                                None => Ok(()),
+                            };
+                            state
+                                .project_control
+                                .release_failed(challenge, action_id)
+                                .await;
+                            return Handled::err(
+                                ErrorCode::Internal,
+                                format!(
+                                    "mutationReceiptFailed: {error:#}{}",
+                                    rollback.err().unwrap_or_default()
+                                ),
+                            );
+                        }
+                        state.project_control.complete(challenge, action_id).await;
+                    }
+                    Handled::ok(Reply::Workspace(workspace))
+                }
+                Err(error) => {
+                    if let Some((challenge, action_id)) = &reserved {
+                        state
+                            .project_control
+                            .release_failed(challenge, action_id)
+                            .await;
+                    }
+                    Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
+                }
             }
         }
 
         Request::AgentSpaceBuilder {
             workspace_id,
+            target_workspace_id,
             space_name,
             operation,
         } => {
+            if caller.session_controller_id().is_some() {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "AgentSpaceBuilder 写操作由 Bootstrap transaction 或用户界面调用，Agent 不能直接执行",
+                );
+            }
             if let Err(message) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
             {
@@ -1593,7 +2047,24 @@ async fn dispatch(
                     return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
                 }
             };
-            let space_root = project.root.join("spaces").join(&space_name);
+            let space_root = match target_workspace_id {
+                Some(target_workspace_id) => {
+                    let target = match state.workspaces.get(&target_workspace_id).await {
+                        Ok(target) => target,
+                        Err(error) => return failed(error),
+                    };
+                    if target.root != project.root
+                        && !target.root.starts_with(project.root.join("spaces"))
+                    {
+                        return Handled::err(
+                            ErrorCode::Forbidden,
+                            "AgentSpaceBuilder target is outside the project boundary",
+                        );
+                    }
+                    target.root
+                }
+                None => project.root.join("spaces").join(&space_name),
+            };
             let (command, require_no_post_commands) = match operation {
                 genehub_proto::AgentSpaceBuilderOperation::Init => {
                     (crate::agent_space_builder::Command::Init, true)
@@ -1635,6 +2106,9 @@ async fn dispatch(
             apply,
             agent_id,
             model_id,
+            plan_digest,
+            action_id,
+            expected_revision,
         } => {
             if let Err(message) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
@@ -1657,18 +2131,163 @@ async fn dispatch(
                     .as_ref()
                     .and_then(|session| session.model_id.clone())
             });
-            match crate::bootstrap_pack::execute(
-                state,
-                &workspace_id,
-                &pack_id,
-                apply,
-                &agent_id,
-                model_id.as_deref(),
-            )
-            .await
-            {
-                Ok(report) => Handled::ok(Reply::BootstrapPack(report)),
-                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+            if apply {
+                if let (Some(session_id), Some(plan_digest), Some(action_id)) = (
+                    caller.session_controller_id(),
+                    plan_digest.as_deref(),
+                    action_id.as_deref(),
+                ) {
+                    match state
+                        .project_control
+                        .completed_action::<genehub_proto::BootstrapPackReport>(
+                            &workspace_id,
+                            session_id,
+                            "project.bootstrap.apply",
+                            plan_digest,
+                            action_id,
+                        ) {
+                        Ok(Some(report)) => {
+                            return Handled::ok(Reply::BootstrapPack(report));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                        }
+                    }
+                }
+            }
+            if !apply {
+                match crate::bootstrap_pack::prepare(
+                    state,
+                    &workspace_id,
+                    &pack_id,
+                    &agent_id,
+                    model_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(prepared) => {
+                        let mut report = prepared.report();
+                        if !report.current {
+                            if let Some(session_id) = caller.session_controller_id() {
+                                report.approval = Some(
+                                    state
+                                        .project_control
+                                        .issue(prepared.challenge_spec(session_id))
+                                        .await,
+                                );
+                            }
+                        }
+                        Handled::ok(Reply::BootstrapPack(report))
+                    }
+                    Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                }
+            } else {
+                let _mutation = state.project_control.mutation_lock().await;
+                let prepared = match crate::bootstrap_pack::prepare(
+                    state,
+                    &workspace_id,
+                    &pack_id,
+                    &agent_id,
+                    model_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                    }
+                };
+                if prepared.report().current {
+                    let session_id = caller.session_controller_id().unwrap_or_default();
+                    return match crate::bootstrap_pack::apply(state, prepared, session_id).await {
+                        Ok(report) => Handled::ok(Reply::BootstrapPack(report)),
+                        Err(error) => failed(error),
+                    };
+                }
+                let Some(session_id) = caller.session_controller_id() else {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "approvalRequired: 请在 Agent Session 中生成 plan 并由用户确认",
+                    );
+                };
+                let Some(plan_digest) = plan_digest.as_deref() else {
+                    return Handled::err(ErrorCode::BadRequest, "apply requires --plan-digest");
+                };
+                let Some(action_id) = action_id.as_deref() else {
+                    return Handled::err(ErrorCode::BadRequest, "apply requires --action-id");
+                };
+                let Some(expected_revision) = expected_revision else {
+                    return Handled::err(
+                        ErrorCode::BadRequest,
+                        "apply requires --expected-revision",
+                    );
+                };
+                let current = prepared.report();
+                let canonical_root = prepared.canonical_root();
+                if current.plan_digest != plan_digest
+                    || current.expected_revision != expected_revision
+                {
+                    return Handled::err(
+                        ErrorCode::Conflict,
+                        "approvalStale: project facts changed; create and approve a new plan",
+                    );
+                }
+                let challenge = match state
+                    .project_control
+                    .reserve(
+                        session_id,
+                        &workspace_id,
+                        &canonical_root,
+                        "project.bootstrap.apply",
+                        &pack_id,
+                        &current.pack_digest,
+                        plan_digest,
+                        expected_revision,
+                        current.git.head.as_deref(),
+                        &current.git.status_digest,
+                        action_id,
+                    )
+                    .await
+                {
+                    Ok(challenge) => challenge,
+                    Err(error) => {
+                        return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+                    }
+                };
+                match crate::bootstrap_pack::apply(state, prepared, session_id).await {
+                    Ok(report) => {
+                        if let Err(error) = state.project_control.record_completed_action(
+                            &workspace_id,
+                            session_id,
+                            "project.bootstrap.apply",
+                            plan_digest,
+                            action_id,
+                            &report,
+                        ) {
+                            // The project transaction itself is already
+                            // durably complete. Do not lie that it failed;
+                            // the durable Pack receipt and exact team facts
+                            // still make a repeated apply a no-op. Surface the
+                            // degraded action-replay receipt in diagnostics.
+                            tracing::error!(
+                                workspace = %workspace_id,
+                                action_id,
+                                %error,
+                                "could not persist the completed Bootstrap action receipt"
+                            );
+                        }
+                        state.project_control.complete(&challenge, action_id).await;
+                        Handled::ok(Reply::BootstrapPack(report))
+                    }
+                    Err(error) => {
+                        state
+                            .project_control
+                            .release_failed(&challenge, action_id)
+                            .await;
+                        Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
+                    }
+                }
             }
         }
 
@@ -1707,9 +2326,30 @@ async fn dispatch(
                     "stop the workspace's running or waiting sessions before removing it",
                 );
             }
+            let binding_snapshot = match state.project_control.binding_snapshot(&workspace_id) {
+                Ok(snapshot) => snapshot,
+                Err(error) => return failed(error),
+            };
+            if let Err(error) = state.project_control.remove_binding(&workspace_id) {
+                return failed(error);
+            }
+            state.project_control.revoke_workspace(&workspace_id).await;
             match state.workspaces.remove(&workspace_id).await {
                 Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
-                Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                Err(error) => {
+                    if let Err(restore) = state
+                        .project_control
+                        .restore_binding_snapshot(&workspace_id, binding_snapshot.as_deref())
+                    {
+                        return Handled::err(
+                            ErrorCode::Internal,
+                            format!(
+                                "workspaceRemoveRollbackIncomplete: {error:#}; restoring project control binding failed: {restore:#}"
+                            ),
+                        );
+                    }
+                    Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
+                }
             }
         }
 
@@ -2013,6 +2653,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
         Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
+        Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::ProjectBootstrap { .. } => Some("project.bootstrap"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
@@ -2121,6 +2762,44 @@ mod tests {
             created_at_ms: 10,
             updated_at_ms: 20,
         }
+    }
+
+    fn unregistered_space() -> crate::config::AgentSpaceEntry {
+        crate::config::AgentSpaceEntry {
+            workspace_id: "w_project".into(),
+            parent_workspace_id: None,
+            revision: 0,
+            lifecycle: "persistent".into(),
+            builder_lock_digest: String::new(),
+            components: Vec::new(),
+            guidance: Vec::new(),
+            bootstrap_pack: None,
+        }
+    }
+
+    #[test]
+    fn only_pm_managed_projects_require_a_project_control_binding() {
+        let legacy = unregistered_space();
+        assert!(!agent_space_requires_project_control(&legacy));
+
+        let pm = crate::agent_space::apply(
+            &legacy,
+            &genehub_proto::AgentSpaceOperation::SetComponent {
+                component_id: crate::agent_space::COMPONENT_PM.into(),
+                enabled: true,
+                role: None,
+            },
+        )
+        .expect("mounting PM should be valid");
+        assert!(agent_space_requires_project_control(&pm));
+
+        let mut packed = legacy;
+        packed.bootstrap_pack = Some(crate::config::AgentSpacePackEntry {
+            id: "game-delivery-v1".into(),
+            version: 1,
+            digest: "sha256:pack".into(),
+        });
+        assert!(agent_space_requires_project_control(&packed));
     }
 
     #[test]

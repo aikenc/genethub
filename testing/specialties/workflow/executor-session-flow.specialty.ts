@@ -12,6 +12,44 @@ function git(root: string, args: string[]): string {
   return result.stdout.trim();
 }
 
+function shellArg(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function fieldFromRequest(value: unknown, field: string): unknown {
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const found = fieldFromRequest(value[index], field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record[field] !== undefined) return record[field];
+    for (const child of Object.values(record).reverse()) {
+      const found = fieldFromRequest(child, field);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  for (const candidate of [value, ...value.split("\n")]) {
+    const trimmed = candidate.trim();
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) continue;
+    try {
+      const found = fieldFromRequest(JSON.parse(trimmed) as unknown, field);
+      if (found !== undefined) return found;
+    } catch {
+      // Tool results may contain prose around their JSON envelope.
+    }
+  }
+  const quoted = value.match(new RegExp(`"${field}"\\s*:\\s*"([^"]+)"`));
+  if (quoted) return quoted[1];
+  const numeric = value.match(new RegExp(`"${field}"\\s*:\\s*(\\d+)`));
+  return numeric ? Number(numeric[1]) : undefined;
+}
+
 defineSpecialty(
   {
     id: "specialty.workflow.executor-session-flow",
@@ -55,54 +93,104 @@ defineSpecialty(
 
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
       const gameHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Asteroid Garden</title><style>body{margin:0;background:#08152b;color:#fff;font:16px sans-serif;text-align:center}canvas{background:#10264c;border:2px solid #79e8ff;margin:20px}</style></head><body><h1>Asteroid Garden</h1><p>方向键移动，收集星种</p><canvas id="game" width="640" height="360"></canvas><script>const c=document.querySelector('#game'),x=c.getContext('2d');let px=320,score=0;addEventListener('keydown',e=>{px+=e.key==='ArrowLeft'?-20:e.key==='ArrowRight'?20:0;score++;draw()});function draw(){x.fillStyle='#10264c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#79e8ff';x.fillRect(px,300,28,28);x.fillStyle='#fff';x.fillText('星种 '+score,20,30)}draw()</script></body></html>`;
-      opened.mock.script(
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                '"$GENEHUB_CLI" space bootstrap list && "$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1 && "$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 && git add . && git commit -m "bootstrap game delivery team"',
+      let pmStage = 0;
+      let coderStage = 0;
+      let reviewerStage = 0;
+      const respond = (request: unknown) => {
+        const body = JSON.stringify(request);
+        if (body.includes("你是小游戏项目的 Coder")) {
+          const stage = coderStage++;
+          if (stage === 0) {
+            return {
+              tool: {
+                name: "write",
+                arguments: { path: path.join(projectRoot, "index.html"), content: gameHtml },
+              },
+            };
+          }
+          if (stage === 1) {
+            return {
+              tool: {
+                name: "bash",
+                arguments: {
+                  command: `cd ${shellArg(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke"`,
+                },
+              },
+            };
+          }
+          return { text: "实现节点已完成。" };
+        }
+        if (body.includes("你是小游戏项目的 Reviewer")) {
+          const stage = reviewerStage++;
+          if (stage === 0) {
+            return {
+              tool: {
+                name: "bash",
+                arguments: {
+                  command: `cd ${shellArg(projectRoot)} && test -s index.html && grep -q "<canvas" index.html && grep -q "ArrowLeft" index.html && rejected=$("$GENEHUB_CLI" workflow complete --evidence review=rejected --evidence checks="canvas-input-smoke" 2>&1); status=$?; test "$status" -ne 0 && printf "%s" "$rejected" | grep -q "必须等于" && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks="canvas-input-smoke"`,
+                },
+              },
+            };
+          }
+          return { text: "评审已通过。" };
+        }
+
+        const stage = pmStage++;
+        if (stage === 0) {
+          return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space inspect' } } };
+        }
+        if (stage === 1) {
+          return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap list' } } };
+        }
+        if (stage === 2) {
+          return {
+            tool: {
+              name: "bash",
+              arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' },
             },
-          },
-        },
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                '"$GENEHUB_CLI" workflow dispatch --kind game --complexity project --task asteroid-garden --message "制作一个可玩的太空花园小游戏，方向键移动、收集星种并显示得分。" --wait --timeout 120',
+          };
+        }
+        if (stage === 3) {
+          const challengeId = fieldFromRequest(request, "challengeId");
+          if (typeof challengeId !== "string") throw new Error(`plan omitted challengeId: ${body.slice(-4000)}`);
+          return {
+            tool: {
+              name: "request_user_input",
+              arguments: {
+                questions: [
+                  {
+                    id: challengeId,
+                    header: "项目接管",
+                    question: "是否按这一份计划转换为 PM 驱动项目？",
+                    options: [
+                      { label: "确认", description: "只允许这一份计划执行一次。" },
+                      { label: "暂不", description: "保持项目不变。" },
+                    ],
+                  },
+                ],
+              },
             },
-          },
-        },
-        {
-          tool: {
-            name: "write",
-            arguments: { path: path.join(projectRoot, "index.html"), content: gameHtml },
-          },
-        },
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                `cd ${JSON.stringify(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke" && sleep 2`,
+          };
+        }
+        if (stage === 4) {
+          const planDigest = fieldFromRequest(request, "planDigest");
+          const expectedRevision = fieldFromRequest(request, "expectedRevision");
+          if (typeof planDigest !== "string" || typeof expectedRevision !== "number") {
+            throw new Error(`approved turn lost plan facts: ${body.slice(-5000)}`);
+          }
+          return {
+            tool: {
+              name: "bash",
+              arguments: {
+                command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(planDigest)} --expected-revision ${expectedRevision} --action-id bootstrap-asteroid-garden && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --kind game --complexity project --task asteroid-garden --no-wait --message "制作一个可玩的太空花园小游戏，方向键移动、收集星种并显示得分。"`,
+              },
             },
-          },
-        },
-        {
-          tool: {
-            name: "bash",
-            arguments: {
-              command:
-                `cd ${JSON.stringify(projectRoot)} && test -s index.html && grep -q "<canvas" index.html && grep -q "ArrowLeft" index.html && rejected=$("$GENEHUB_CLI" workflow complete --evidence review=rejected --evidence checks="canvas-input-smoke" 2>&1); status=$?; test "$status" -ne 0 && printf "%s" "$rejected" | grep -q "必须等于" && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks="canvas-input-smoke"`,
-            },
-          },
-        },
-        { text: "节点已完成。" },
-        { text: "评审已通过。" },
-        { text: "节点已完成。" },
-        { text: "小游戏已经由 Coder 实现并由 Reviewer 验收。" },
-      );
+          };
+        }
+        if (stage === 5) return { text: "Executor 已接收目标。" };
+        return { text: "小游戏已经由 Coder 实现并由 Reviewer 验收。" };
+      };
+      opened.mock.script(...Array.from({ length: 48 }, () => ({ respond })));
 
       const pmSessionId = await t.flows.main.createBuiltinSession(opened.client, projectId);
       const pmEvents = await t.flows.main.attachEventLog(opened.client, pmSessionId);
@@ -113,8 +201,33 @@ defineSpecialty(
       );
       await t.tools.waitUntil(
         () =>
-          pmEvents.some((event) => event.type === "turnCompleted") ||
-          pmEvents.some((event) => event.type === "turnFailed"),
+          pmEvents.some((event) => {
+            const inner = t.flows.main.sessionEventOf(event);
+            const request = inner?.request as { kind?: string } | undefined;
+            return inner?.type === "permissionRequested" && request?.kind === "planApproval";
+          }),
+        120_000,
+      );
+      const requested = pmEvents.find((event) => {
+        const inner = t.flows.main.sessionEventOf(event);
+        const request = inner?.request as { kind?: string } | undefined;
+        return inner?.type === "permissionRequested" && request?.kind === "planApproval";
+      });
+      const requestId = requested
+        ? (t.flows.main.sessionEventOf(requested)?.request as { id?: string } | undefined)?.id
+        : undefined;
+      if (!requestId) throw new Error("PM takeover request omitted request id");
+      const approval = await opened.client.call({
+        type: "session.respondPermission",
+        payload: {
+          sessionId: pmSessionId,
+          requestId,
+          outcome: { outcome: "selected", optionId: "approve-once" },
+        },
+      });
+      t.assertions.assert(approval?.type === "ack", `Human approval failed: ${JSON.stringify(approval)}`);
+      await t.tools.waitUntil(
+        () => pmEvents.filter((event) => event.type === "turnCompleted").length >= 2,
         140_000,
       );
       t.assertions.assert(
@@ -123,6 +236,13 @@ defineSpecialty(
         `PM turn failed: ${JSON.stringify(pmEvents.slice(-10).map((event) => event.raw)).slice(-6000)}`,
       );
 
+      await t.tools.waitUntil(async () => {
+        const history = await opened.client.call({
+          type: "workflow.history",
+          payload: { workspaceId: projectId, limit: 10 },
+        });
+        return history?.type === "workflowRuns" && history.data.some((run) => run.status === "completed");
+      }, 140_000);
       const listed = await opened.client.call({
         type: "session.list",
         payload: { workspaceId: null, includeArchived: false },

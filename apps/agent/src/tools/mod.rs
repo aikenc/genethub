@@ -207,6 +207,43 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["command"]
             }
         }),
+        json!({
+            "name": "request_user_input",
+            "description": "Pause this turn and ask the user one to three structured questions. This never grants shell or filesystem authority. When a GeneHub Skill supplies an approval challenge, copy its challengeId exactly into the sole question id; do not invent or alter it.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "header": { "type": "string" },
+                                "question": { "type": "string" },
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 3,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string" },
+                                            "description": { "type": "string" }
+                                        },
+                                        "required": ["label", "description"]
+                                    }
+                                }
+                            },
+                            "required": ["id", "header", "question", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }
+        }),
     ]
 }
 
@@ -221,6 +258,49 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
         "bash" => bash::run(args, cwd).await,
         other => ToolResult::error(format!("Tool {other} not found")),
     }
+}
+
+/// Validates the built-in Agent's stopped-interaction payload before it is
+/// emitted onto the daemon protocol. The daemon will independently decide
+/// whether this is an ordinary question or matches one of its own challenges.
+pub fn user_input(args: &Value) -> Result<Value, String> {
+    let questions = args
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "request_user_input: 'questions' is required".to_string())?;
+    if !(1..=3).contains(&questions.len()) {
+        return Err("request_user_input: provide one to three questions".into());
+    }
+    for question in questions {
+        for field in ["id", "header", "question"] {
+            if question
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .is_none_or(str::is_empty)
+            {
+                return Err(format!("request_user_input: question.{field} is required"));
+            }
+        }
+        let options = question
+            .get("options")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "request_user_input: question.options is required".to_string())?;
+        if !(1..=3).contains(&options.len())
+            || options.iter().any(|option| {
+                option
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+            })
+        {
+            return Err(
+                "request_user_input: each question needs one to three labeled options".into(),
+            );
+        }
+    }
+    Ok(json!({ "questions": questions }))
 }
 
 pub fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
@@ -328,10 +408,32 @@ mod tests {
             .iter()
             .map(|d| d["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 7);
-        for name in ["read", "write", "edit", "ls", "grep", "find", "bash"] {
+        assert_eq!(names.len(), 8);
+        for name in [
+            "read",
+            "write",
+            "edit",
+            "ls",
+            "grep",
+            "find",
+            "bash",
+            "request_user_input",
+        ] {
             assert!(names.contains(&name.to_string()), "missing {name}");
         }
+    }
+
+    #[test]
+    fn user_input_requires_bounded_structured_questions() {
+        assert!(user_input(&json!({"questions": [{
+            "id": "challenge",
+            "header": "项目接管",
+            "question": "是否应用？",
+            "options": [{"label": "确认", "description": "apply once"}]
+        }]}))
+        .is_ok());
+        assert!(user_input(&json!({"questions": []})).is_err());
+        assert!(user_input(&json!({"questions": [{"id": "x"}]})).is_err());
     }
 
     #[test]

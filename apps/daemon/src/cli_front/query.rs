@@ -1659,6 +1659,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::WorkflowRun(_) => "workflow run",
         Reply::WorkflowRuns(_) => "workflow runs",
         Reply::AgentSpaceBuilder(_) => "agent space builder",
+        Reply::AgentSpaceChangePlan(_) => "agent space change plan",
         Reply::BootstrapPack(_) => "bootstrap pack",
         Reply::BootstrapPacks(_) => "bootstrap packs",
         Reply::Workspace(_) => "workspace",

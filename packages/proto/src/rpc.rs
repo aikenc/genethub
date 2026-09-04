@@ -154,6 +154,23 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
         operation: AgentSpaceOperation,
+        /// Required when the caller is a SessionController; omitted for a
+        /// direct authenticated Human UI action.
+        #[serde(default)]
+        #[ts(optional)]
+        plan_digest: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        action_id: Option<String>,
+    },
+    /// Creates the immutable challenge used before an Agent-driven
+    /// Component/Parent/lifecycle mutation.
+    #[serde(rename = "agentSpace.changePlan", rename_all = "camelCase")]
+    AgentSpaceChangePlan {
+        workspace_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        operation: AgentSpaceOperation,
     },
     /// Runs one deterministic AgentSpaceBuilder operation inside the
     /// authenticated project's `spaces/` boundary. The operation never
@@ -161,7 +178,12 @@ pub enum Request {
     /// Pack or the caller's project Skill.
     #[serde(rename = "agentSpace.builder", rename_all = "camelCase")]
     AgentSpaceBuilder {
+        /// Project boundary that owns the target Space.
         workspace_id: String,
+        /// Existing Workspace to check/build. Absent preserves the CLI's
+        /// `<project>/spaces/<spaceName>` creation contract.
+        #[serde(default)]
+        target_workspace_id: Option<String>,
         space_name: String,
         operation: AgentSpaceBuilderOperation,
     },
@@ -175,6 +197,16 @@ pub enum Request {
         agent_id: Option<String>,
         #[serde(default)]
         model_id: Option<String>,
+        /// Required for apply and copied verbatim from the preceding plan.
+        #[serde(default)]
+        plan_digest: Option<String>,
+        /// Stable id chosen by the Agent for idempotent apply replay.
+        #[serde(default)]
+        action_id: Option<String>,
+        /// CAS value copied from the preceding plan.
+        #[serde(default)]
+        #[ts(type = "number | null")]
+        expected_revision: Option<u64>,
     },
     /// Lists the versioned Bootstrap Packs available in this daemon build.
     #[serde(rename = "project.bootstrap.list")]
@@ -828,6 +860,7 @@ pub enum Reply {
     WorkflowRun(WorkflowRunStatus),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),
+    AgentSpaceChangePlan(AgentSpaceChangePlan),
     BootstrapPack(BootstrapPackReport),
     BootstrapPacks(Vec<BootstrapPackInfo>),
     Workspace(WorkspaceInfo),

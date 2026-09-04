@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    AgentSpaceOperation, DirectoryEntry, DirectoryListing, FileNode, WorkspaceFolderInfo,
-    WorkspaceInfo,
+    AgentSpaceHealth, AgentSpaceOperation, DirectoryEntry, DirectoryListing, FileNode,
+    WorkspaceFolderInfo, WorkspaceInfo,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -54,6 +54,8 @@ pub(crate) struct BootstrapSpaceRegistration {
     pub parent_workspace_id: Option<String>,
     pub lifecycle: String,
     pub components: Vec<(String, Option<String>)>,
+    pub guidance: Vec<String>,
+    pub pack: Option<crate::config::AgentSpacePackEntry>,
 }
 
 /// Empty path asks for machine roots. Elsewhere `None` still means home.
@@ -282,6 +284,39 @@ impl Workspaces {
         self.collapse_same_directory_projects(&mut entries).await;
     }
 
+    /// Captures the durable registry before a multi-step Kernel transaction.
+    /// The snapshot never leaves the daemon and is used only for compensation
+    /// if a Bootstrap Pack fails before it can publish a completed receipt.
+    pub(crate) async fn config_snapshot(&self) -> Config {
+        self.config.read().await.clone()
+    }
+
+    /// Restores one transaction-local registry snapshot and its Session-home
+    /// projection. Callers serialize the encompassing mutation and may only
+    /// use a snapshot they took immediately before that mutation.
+    pub(crate) async fn restore_config_snapshot(&self, snapshot: Config) -> Result<()> {
+        let mut entries = self.entries.write().await;
+        let mut config = self.config.write().await;
+        snapshot.save(&self.config_path)?;
+
+        for workspace_id in entries.keys() {
+            self.homes.detach(workspace_id);
+        }
+        let restored = snapshot
+            .workspaces
+            .iter()
+            .cloned()
+            .map(|entry| (entry.id.clone(), entry))
+            .collect::<HashMap<_, _>>();
+        for entry in restored.values().filter(|entry| !entry.removed) {
+            self.homes
+                .attach_project(&entry.id, &session_project_key(entry), &entry.root);
+        }
+        *entries = restored;
+        *config = snapshot;
+        Ok(())
+    }
+
     /// Gives a machine that has never been used somewhere to work.
     ///
     /// Without this the first thing a new install can do is refuse: no
@@ -483,6 +518,7 @@ impl Workspaces {
     pub(crate) async fn apply_bootstrap_space_plan(
         &self,
         project_workspace_id: &str,
+        expected_project_revision: u64,
         plan: &[BootstrapSpaceRegistration],
     ) -> Result<Vec<WorkspaceInfo>> {
         let entries = self.entries.read().await;
@@ -504,6 +540,13 @@ impl Workspaces {
 
         let mut config = self.config.write().await;
         let mut next = config.clone();
+        let project_current = existing_or_unregistered(&next, project_workspace_id);
+        if project_current.revision != expected_project_revision {
+            anyhow::bail!(
+                "revisionConflict: project AgentSpace is at revision {}, not {expected_project_revision}",
+                project_current.revision
+            );
+        }
         for desired in plan {
             let current = existing_or_unregistered(&next, &desired.workspace_id);
             if current.revision > 0 && current.parent_workspace_id != desired.parent_workspace_id {
@@ -548,6 +591,8 @@ impl Workspaces {
                 .get(&desired.workspace_id)
                 .expect("every planned Space was verified")
                 .clone();
+            proposed.guidance = desired.guidance.clone();
+            proposed.bootstrap_pack = desired.pack.clone();
             if proposed != current {
                 proposed.revision = current.revision.saturating_add(1);
             }
@@ -574,6 +619,7 @@ impl Workspaces {
     fn describe_with_space(&self, entry: &WorkspaceEntry, config: &Config) -> WorkspaceInfo {
         let mut info = describe(entry);
         apply_space_projection(&mut info, config);
+        apply_space_health(&mut info, entry, config);
         info
     }
 
@@ -1074,6 +1120,7 @@ fn active_descriptions<'a>(
         .map(|entry| {
             let mut info = describe(entry);
             apply_space_projection(&mut info, config);
+            apply_space_health(&mut info, entry, config);
             info
         })
         .collect();
@@ -1095,6 +1142,60 @@ fn apply_space_projection(info: &mut WorkspaceInfo, config: &Config) {
     info.pipe_space = Some(crate::agent_space::describe_legacy(space));
 }
 
+fn apply_space_health(info: &mut WorkspaceInfo, entry: &WorkspaceEntry, config: &Config) {
+    let Some(space) = config
+        .agent_spaces
+        .iter()
+        .find(|space| space.workspace_id == entry.id)
+    else {
+        return;
+    };
+    let mut reasons = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = space;
+    let root_id = loop {
+        if !seen.insert(cursor.workspace_id.as_str()) {
+            reasons.push("cycle: AgentSpace Parent relationship contains a cycle".to_string());
+            break cursor.workspace_id.as_str();
+        }
+        let Some(parent_id) = cursor.parent_workspace_id.as_deref() else {
+            break cursor.workspace_id.as_str();
+        };
+        let Some(parent) = config
+            .agent_spaces
+            .iter()
+            .find(|candidate| candidate.workspace_id == parent_id)
+        else {
+            reasons.push(format!("missingParent: {parent_id}"));
+            break cursor.workspace_id.as_str();
+        };
+        cursor = parent;
+    };
+    if let Some(project) = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == root_id && !workspace.removed)
+    {
+        match verify_pipe_space(&project.root, entry) {
+            Ok(digest) if digest == space.builder_lock_digest => {}
+            Ok(_) => reasons.push("builderLockDrift: verified lock digest changed".into()),
+            Err(error) => reasons.push(format!("builderVerifyFailed: {error:#}")),
+        }
+    } else {
+        reasons.push(format!("missingProjectRoot: {root_id}"));
+    }
+    if let Some(agent_space) = info.agent_space.as_mut() {
+        agent_space.health = Some(AgentSpaceHealth {
+            status: if reasons.is_empty() {
+                "healthy".into()
+            } else {
+                "unhealthy".into()
+            },
+            reasons,
+        });
+    }
+}
+
 /// A folder with no registration answers the same questions as a registered
 /// one, at revision zero. Callers therefore never branch on "does a
 /// registration exist" before they can compare-and-set.
@@ -1111,6 +1212,8 @@ fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEn
             lifecycle: "persistent".into(),
             builder_lock_digest: String::new(),
             components: Vec::new(),
+            guidance: Vec::new(),
+            bootstrap_pack: None,
         })
 }
 

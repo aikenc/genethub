@@ -214,7 +214,8 @@ pub fn usage() -> i32 {
   genet space builder init|check|explain|build|verify|clean --name <agent-space>
                                     run the daemon-owned AgentSpaceBuilder inside this project
   genet space bootstrap list       discover versioned project team/workflow packs
-  genet space bootstrap plan|apply --pack <id> [--agent <id>] [--model <id>]
+  genet space bootstrap plan --pack <id> [--agent <id>] [--model <id>]
+  genet space bootstrap apply --pack <id> --plan-digest <digest> --action-id <id> --expected-revision <n> [--agent <id>] [--model <id>]
                                     install a versioned project team and workflow pack
   genet session components <id>     which responsibilities are live in this session
   genet session flow <id>           read an Executor Session's structured DCG timeline

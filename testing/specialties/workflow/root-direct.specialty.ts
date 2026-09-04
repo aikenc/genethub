@@ -285,12 +285,11 @@ defineSpecialty(
 
       const requestText = JSON.stringify(opened.mock.requests);
       t.assertions.assert(
-        requestText.includes("daemon 只提供类型化机械动作") &&
-          requestText.includes("space bootstrap list") &&
-          requestText.includes("entrySkill") &&
-          requestText.includes("源文件修改只形成 Candidate") &&
+        requestText.includes("<name>pm-project-bootstrap</name>") &&
+          requestText.includes("PM-managed project") &&
+          requestText.includes("<genehub_cli>") &&
           requestText.includes("你是当前项目直达流程中的实现 Worker"),
-        "generic Pack discovery or Worker Workflow contract was not delivered in Chinese",
+        "the built-in PM entrypoint or Worker Workflow contract was not delivered",
       );
       t.note(
         `root=${rootSessionId} worker=${managed?.id} run=${runId} branch=${initialBranch} commits=3`,

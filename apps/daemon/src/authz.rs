@@ -445,6 +445,11 @@ pub fn required(request: &Request) -> Capability {
         | Request::HubConnect { .. }
         | Request::HubUnpair => Capability::Settings,
 
+        // Planning is read-only. The returned approval challenge is bound to
+        // the caller Session but cannot mutate anything until a Human answers
+        // it and the same Session presents the one-use grant on apply.
+        Request::AgentSpaceChangePlan { .. } => Capability::Read,
+
         Request::DeviceList
         | Request::DeviceInvite(_)
         | Request::DeviceRevoke { .. }

@@ -4,6 +4,16 @@
   "version": 1,
   "description": "PM-managed small-game delivery with an Executor, Coder, Reviewer, and WorkflowManager.",
   "entrySkill": ".pipebuilder/skills/project-manager/SKILL.md",
+  "intentMatches": [
+    "new-game",
+    "game-feature",
+    "game-workflow-improvement"
+  ],
+  "rootGuidance": [
+    "做一个 15 分钟内可交付的可玩小游戏，核心玩法是……",
+    "给现有游戏增加一个复杂 Feature：……",
+    "检查团队状态和最近一次 Run 的结果"
+  ],
   "rootComponents": [
     {"componentId": "pm"}
   ],
@@ -12,13 +22,19 @@
       "name": "executor",
       "parent": "$project",
       "lifecycle": "pooled",
-      "components": [{"componentId": "executor"}]
+      "components": [{"componentId": "executor"}],
+      "guidance": [
+        "查看当前 Run 的流程状态、预算和阻塞原因"
+      ]
     },
     {
       "name": "coder",
       "parent": "executor",
       "lifecycle": "pooled",
-      "components": [{"componentId": "worker", "role": "coder"}]
+      "components": [{"componentId": "worker", "role": "coder"}],
+      "guidance": [
+        "这是 Coder WorkerSpace；普通调试 Session 不会自动获得受管 assignment"
+      ]
     },
     {
       "name": "reviewer",
@@ -27,6 +43,9 @@
       "components": [
         {"componentId": "worker", "role": "reviewer"},
         {"componentId": "reviewer"}
+      ],
+      "guidance": [
+        "这是 Reviewer WorkerSpace；检查由项目 DCG 派发的实现与证据"
       ]
     },
     {
@@ -36,6 +55,9 @@
       "components": [
         {"componentId": "worker", "role": "workflow-manager"},
         {"componentId": "executor"}
+      ],
+      "guidance": [
+        "分析最近两次 Workflow 的耗时、返工和 Review，形成改进 Candidate"
       ]
     }
   ]

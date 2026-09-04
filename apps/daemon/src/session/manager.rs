@@ -418,6 +418,9 @@ pub struct SessionManager {
     /// Agent processes receive a fresh proof, so it never becomes project
     /// source or durable user data.
     controller_secret: String,
+    /// Shared with the request router: it associates an Agent-native question
+    /// with a daemon-authored mutation plan before the card reaches a Human.
+    project_control: Option<crate::project_control::Broker>,
 }
 
 impl SessionManager {
@@ -442,6 +445,7 @@ impl SessionManager {
             skills_dir: None,
             front_door_cli: None,
             controller_secret: uuid::Uuid::new_v4().simple().to_string(),
+            project_control: None,
         }
     }
 
@@ -452,6 +456,11 @@ impl SessionManager {
     ) -> Self {
         self.skills_dir = Some(dir.into());
         self.front_door_cli = front_door_cli;
+        self
+    }
+
+    pub fn with_project_control(mut self, broker: crate::project_control::Broker) -> Self {
+        self.project_control = Some(broker);
         self
     }
 
@@ -2452,6 +2461,7 @@ impl SessionManager {
             self.replay_window,
             self.processes.clone(),
             self.diagnostics.clone(),
+            self.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         Ok(())
@@ -2761,6 +2771,20 @@ impl SessionManager {
             .await;
         }
         Ok(())
+    }
+
+    pub async fn pending_permission_kind(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<PermissionRequestKind>> {
+        let live = self.live(session_id).await?;
+        let pending = live.pending_permissions.lock().await;
+        let kind = pending
+            .iter()
+            .find(|request| request.id == request_id)
+            .map(|request| request.kind);
+        Ok(kind)
     }
 
     pub async fn archive(&self, session_id: &str, archived: bool) -> Result<SessionSummary> {
@@ -3771,7 +3795,13 @@ fn continuation_for(
                 return Ok(None);
             };
             if option.kind == PermissionOptionKind::Reject {
-                return Ok(None);
+                return Ok(Some(Continuation {
+                    elevated: false,
+                    prompt: format!(
+                        "The user rejected the interrupted plan '{}'. Do not apply it or perform any of its mutations. Briefly confirm that no changes were made, then stop unless the user gives a different goal.",
+                        request.title
+                    ),
+                }));
             }
             Ok(Some(Continuation {
                 elevated: false,
@@ -4074,6 +4104,7 @@ async fn pump_events(
     replay_window: usize,
     processes: Arc<crate::processes::Processes>,
     diagnostics: Arc<Diagnostics>,
+    project_control: Option<crate::project_control::Broker>,
 ) {
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
@@ -4468,6 +4499,15 @@ async fn pump_events(
                 overview::condense_event(&event)
             }
         };
+
+        if let (Some(project_control), SessionEvent::PermissionRequested { request }) =
+            (&project_control, &event)
+        {
+            let request = project_control
+                .normalize_request(&session_id, request)
+                .await;
+            event = SessionEvent::PermissionRequested { request };
+        }
 
         if let SessionEvent::PermissionRequested { request } = &event {
             if let Some(execution) = owner.as_mut() {
@@ -7396,16 +7436,18 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_only_resumes_after_explicit_approval() {
+    fn a_plan_rejection_resumes_only_to_confirm_zero_mutation() {
         let request = interaction(PermissionRequestKind::PlanApproval);
-        assert!(continuation_for(
+        let rejected = continuation_for(
             &request,
             &PermissionOutcome::Selected {
                 option_id: "no".into(),
             },
         )
         .unwrap()
-        .is_none());
+        .expect("a plan rejection resumes for a zero-change acknowledgement");
+        assert!(!rejected.elevated);
+        assert!(rejected.prompt.contains("Do not apply"));
         let approved = continuation_for(
             &request,
             &PermissionOutcome::Selected {
@@ -7566,6 +7608,7 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             Arc::new(Diagnostics::new()),
+            Some(crate::project_control::Broker::new(dir.path())),
         ));
         for event in script {
             agent_events.send(event).expect("the pump is listening");
@@ -8196,6 +8239,7 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
+            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         (sessions, events, turn_ids)
@@ -9097,6 +9141,7 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
+            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
 
@@ -9763,6 +9808,7 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             diagnostics.clone(),
+            Some(crate::project_control::Broker::new(dir.path())),
         ));
 
         agent_events

@@ -42,6 +42,7 @@ pub use genet_frontdoor::lifecycle;
 pub mod logs;
 pub mod process;
 pub mod processes;
+pub mod project_control;
 pub mod provider;
 pub mod pty;
 pub mod remote;

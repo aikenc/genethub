@@ -270,8 +270,16 @@ defineSpecialty(
 
       const cycle = space(["parent", "set", "--workspace", ids.project, "--parent", ids.coder]);
       t.assertions.assert(
-        cycle.status !== 0 && cycle.text.includes("cycle"),
+        cycle.status !== 0 &&
+          (cycle.text.includes("cycle") || cycle.text.includes("childSpaceConflict")),
         `a cycle in the ownership tree was accepted: ${cycle.text}`,
+      );
+      const afterCycle = space(["inspect", "--workspace", ids.project]);
+      t.assertions.assert(afterCycle.status === 0, `inspect after refused cycle failed: ${afterCycle.text}`);
+      t.assertions.assert(
+        registration(afterCycle).revision === 2 &&
+          registration(afterCycle).parentWorkspaceId == null,
+        `the cycle-forming reparent changed the project despite rejection: ${afterCycle.text}`,
       );
 
       const listed = await opened.client.call({ type: "workspace.list" });

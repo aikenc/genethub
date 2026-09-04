@@ -7,9 +7,9 @@ description: Manage a game project through its Bootstrap Pack and project DCG wh
 
 Understand the user's goal, acceptance, risk, and time budget. Do not implement or review the game yourself.
 
-For a new game request, discover available packs with `"$GENEHUB_CLI" space bootstrap list`. When `game-delivery-v1` is the declared match, run exactly `"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1`, then `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1`. Pack ids are never positional arguments. Do not copy product source files as a substitute for these typed actions.
+This Skill is installed only after the product's built-in `pm-project-bootstrap` Skill has completed Human-approved takeover. Inspect the resulting team and the Pack receipt before dispatching. If either is missing or unhealthy, stop and report the exact bootstrap recovery action; do not recreate the Pack or team yourself.
 
-Read the `entrySkill` returned by apply, inspect the resulting team, and commit every installed or generated project/Space asset as one bootstrap commit with `git add -A && git commit -m "chore: bootstrap game delivery workflow"` before dispatching work.
+The bootstrap commit is produced by the daemon from an exact declared path allowlist and returned in the receipt. Never run `git add -A`, stage unrelated files, or make a second bootstrap commit.
 
 Then run exactly `"$GENEHUB_CLI" workflow dispatch --kind game --complexity project --no-wait --message <full-user-goal>`. For a feature request, reuse the existing team and run exactly `"$GENEHUB_CLI" workflow dispatch --kind feature --complexity complex --no-wait --message <full-user-goal>`.
 

@@ -239,6 +239,22 @@ pub struct AgentSpaceEntry {
     pub builder_lock_digest: String,
     #[serde(default)]
     pub components: Vec<AgentComponentEntry>,
+    /// User-facing Session starters supplied by the owning Bootstrap Pack.
+    /// Empty for hand-composed Spaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guidance: Vec<String>,
+    /// Provenance of a Pack-created Space. This is display/reconciliation
+    /// metadata, never an authority source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_pack: Option<AgentSpacePackEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpacePackEntry {
+    pub id: String,
+    pub version: u32,
+    pub digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +373,8 @@ impl Config {
                 lifecycle: legacy.lifecycle,
                 builder_lock_digest: legacy.builder_lock_digest,
                 components,
+                guidance: Vec::new(),
+                bootstrap_pack: None,
             });
         }
     }
@@ -880,6 +898,8 @@ mod tests {
                     enabled: true,
                     role: None,
                 }],
+                guidance: Vec::new(),
+                bootstrap_pack: None,
             }],
             ..Default::default()
         })
