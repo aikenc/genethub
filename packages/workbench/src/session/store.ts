@@ -799,7 +799,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }),
     );
     if (reply?.type !== "workspace") return;
-    await get().refreshWorkspaces();
+    // The rename reply is the authority for this action. A follow-up list can
+    // lag behind it (and older daemons may not answer that request at all), so
+    // applying the returned Workspace locally also updates every derived
+    // AgentSpace breadcrumb without reverting the visible rename.
+    set((state) => ({
+      workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
+    }));
   },
 
   async removeWorkspace(workspaceId) {
