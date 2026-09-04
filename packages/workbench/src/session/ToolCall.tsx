@@ -29,7 +29,7 @@ export function ToolCallView({
         <span className="shrink-0 text-base" role="img" aria-label={kindLabel(toolKind(detail))}>
           {kindEmoji(toolKind(detail))}
         </span>
-        <span className="shrink-0 font-mono text-fg">{name}</span>
+        <span className="shrink-0 font-mono text-fg">{name || kindLabel(toolKind(detail))}</span>
         <span className="min-w-0 flex-1 truncate text-muted">{summary}</span>
         <button
           type="button"
@@ -164,8 +164,8 @@ const LABEL: Record<ToolKind, string> = {
   other: "工具",
 };
 
-const kindEmoji = (kind: ToolKind) => EMOJI[kind];
-const kindLabel = (kind: ToolKind) => LABEL[kind];
+export const kindEmoji = (kind: ToolKind) => EMOJI[kind];
+export const kindLabel = (kind: ToolKind) => LABEL[kind];
 
 function clip(text: string, max: number): string {
   const characters = [...text];

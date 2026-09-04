@@ -912,6 +912,236 @@ describe("what the user sees in a session", () => {
     expect(rows[2]!).not.toHaveTextContent("kind: edit");
   });
 
+  it("shows a tool row's kind, relative time and duration without inventing them", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 2,
+      text: "读取配置",
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 2,
+      title: "读取配置。",
+      batches: [batch],
+    };
+    const expandedTrunk: RoundTrunk = {
+      summary,
+      batches: [
+        {
+          summary: batch,
+          monologue: "读取配置。",
+          blobs: [
+            {
+              itemId: "tool1",
+              kind: "toolCall",
+              overview: "packages/proto/src/domain.rs",
+              toolKind: "read",
+              status: "ok",
+              startedAtMs: Date.now() - 3 * 60_000,
+              durationMs: 400,
+            },
+            {
+              itemId: "tool2",
+              kind: "toolCall",
+              overview: "旧行没有时间",
+            },
+          ],
+        },
+      ],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "看配置", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary], expandedTrunk } },
+        roundTrunks: { "r1:0": expandedTrunk },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
+    const rows = screen.getAllByTestId("blob-row");
+    expect(within(rows[0]!).getByRole("img", { name: "读取文件" })).toBeInTheDocument();
+    expect(within(rows[0]!).getByTestId("blob-timing")).toHaveTextContent("3 分钟前 · 0.4s");
+    expect(within(rows[1]!).queryByTestId("blob-timing")).not.toBeInTheDocument();
+    expect(rows[1]!).not.toHaveTextContent("刚刚");
+  });
+
+  it("shows trunk and batch metrics as rounds, duration and relative time", async () => {
+    const now = Date.now();
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const firstBatch = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 3,
+      text: "读取配置",
+      llmRounds: 5,
+      startedAtMs: now - 3 * 60_000,
+      durationMs: 61_000,
+      toolDurationMs: 30_000,
+    };
+    const secondBatch = {
+      index: 1,
+      firstItemId: "tool4",
+      blobCount: 2,
+      text: "写入修改",
+      llmRounds: 7,
+      startedAtMs: now - 2 * 60_000,
+      durationMs: 119_000,
+      toolDurationMs: 80_000,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 5,
+      title: "先检查配置。",
+      batches: [firstBatch, secondBatch],
+      llmRounds: 12,
+      startedAtMs: now - 3 * 60_000,
+      durationMs: 200_000,
+      toolDurationMs: 110_000,
+    };
+    const expandedTrunk: RoundTrunk = {
+      summary,
+      batches: [
+        { summary: firstBatch, monologue: "读取配置。", blobs: [] },
+        { summary: secondBatch, monologue: "写入修改。", blobs: [] },
+      ],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "看配置", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary], expandedTrunk } },
+        roundTrunks: { "r1:0": expandedTrunk },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    const trunk = screen.getByTestId("round-trunk");
+    const trunkMetrics = within(trunk).getByTestId("summary-metrics");
+    expect(trunkMetrics).toHaveTextContent("12 轮 · 3m 20s");
+    expect(trunkMetrics).toHaveTextContent("3 分钟前 · 工具 1m 50s");
+    expect(trunkMetrics).not.toHaveTextContent("5 项");
+
+    await userEvent.click(within(trunk).getByRole("button"));
+    const batches = screen.getAllByTestId("round-batch");
+    const firstMetrics = within(batches[0]!).getByTestId("summary-metrics");
+    expect(firstMetrics).toHaveTextContent("5 轮 · 1m 1s");
+    expect(firstMetrics).toHaveTextContent("3 分钟前 · 工具 30s");
+    expect(within(batches[1]!).getByTestId("summary-metrics")).toHaveTextContent(
+      "7 轮 · 1m 59s",
+    );
+  });
+
+  it("keeps the blob count for trunk rows written before metrics existed", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 4,
+      title: "盘点入口。",
+      batches: [],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary] } },
+        roundTrunks: {},
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    const trunk = screen.getByTestId("round-trunk");
+    expect(trunk).toHaveTextContent("4 项");
+    expect(within(trunk).queryByTestId("summary-metrics")).not.toBeInTheDocument();
+  });
+
+  it("shows live rounds and elapsed time on the in-progress card", () => {
+    const now = Date.now();
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对配置", attachments: [] },
+    });
+    state = apply(state, { type: "turnStarted", turnId: "t1", startedAtMs: now - 65_000 });
+    state = apply(state, {
+      type: "turnProgress",
+      turnId: "t1",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        llmRounds: 3,
+        toolOutputTokens: 0,
+        compactionCount: 0,
+        outputRateEstimated: false,
+        costUsd: undefined,
+      },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "ok",
+        detail: { kind: "read", path: "role.json", content: "x", truncated: false },
+        images: [],
+        startedAtMs: now - 90_000,
+        finishedAtMs: now - 80_000,
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    const card = screen.getByTestId("round-trunk");
+    const metrics = within(card).getByTestId("summary-metrics");
+    expect(metrics).toHaveTextContent("3 轮");
+    expect(metrics).toHaveTextContent("1 分钟前");
+    expect(metrics).toHaveTextContent("工具 10s");
+    expect(card).not.toHaveTextContent("1 项");
+  });
+
   it("calls only the live tail progress and completed trunks process", () => {
     const round = {
       roundId: "r1",

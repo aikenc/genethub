@@ -643,7 +643,7 @@ impl EventsExt for [SessionEvent] {
     fn assistant_text(&self) -> String {
         let mut latest: Vec<(String, String)> = Vec::new();
         for item in self.items() {
-            if let genehub_proto::TimelineItem::AssistantMessage { id, text } = item {
+            if let genehub_proto::TimelineItem::AssistantMessage { id, text, .. } = item {
                 match latest.iter_mut().find(|(seen, _)| seen == id) {
                     Some((_, value)) => *value = text.clone(),
                     None => latest.push((id.clone(), text.clone())),

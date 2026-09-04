@@ -94,20 +94,25 @@ pub struct RoundRecord {
 pub type TrunkSummary = RoundTrunkSummary;
 pub type BatchSummary = RoundBatchSummary;
 
-/// Once a batch has accumulated this many tool calls, the next reasoning block
+/// Once a batch has accumulated this many LLM rounds, the next reasoning block
 /// is useful enough to become the title of a fresh semantic batch.
-pub const BATCH_REASONING_TOOL_THRESHOLD: u32 = 16;
+pub const BATCH_REASONING_ROUND_THRESHOLD: u32 = 16;
 /// A tool-only run still needs a bounded fallback when the agent provides no
 /// narration or reasoning boundary at all.
-pub const BATCH_MAX_TOOL_CALLS: u32 = 64;
+pub const BATCH_MAX_ROUNDS: u32 = 64;
 /// Reasoning is a blob too. Keep a wider storage safety bound so a malformed
 /// or unusually chatty adapter cannot grow one batch without limit, while
 /// leaving normal grouping driven by semantic tool boundaries.
 pub const BATCH_MAX_BLOBS: u32 = 128;
-/// Once a trunk has passed this many tool calls, its next semantic batch starts
+/// Once a trunk has passed this many LLM rounds, its next semantic batch starts
 /// a new trunk. This is deliberately a soft threshold: a batch is never cut in
 /// half merely to make the number exact.
-pub const TRUNK_TOOL_CALL_THRESHOLD: u32 = 100;
+pub const TRUNK_ROUND_THRESHOLD: u32 = 100;
+/// Hard storage bound for one trunk. An adapter that never reports LLM rounds
+/// (or a model that never narrates) would otherwise grow a single trunk
+/// without limit; at a batch boundary past this many blobs the trunk closes
+/// regardless of the round counter.
+pub const TRUNK_MAX_BLOBS: u32 = 500;
 
 pub enum TrunkItem<'a> {
     Monologue,
@@ -120,6 +125,14 @@ pub enum TrunkItem<'a> {
     Compaction(&'a str),
 }
 
+/// Wall-clock and tool-time facts one item contributes to its batch/trunk.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ItemTiming {
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub tool_duration_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct BatchBuilder {
     item_ids: Vec<String>,
@@ -127,6 +140,25 @@ struct BatchBuilder {
     monologue_item_id: Option<String>,
     first_reasoning_item_id: Option<String>,
     tool_count: u32,
+    llm_rounds: u32,
+    started_at_ms: Option<i64>,
+    last_finished_at_ms: Option<i64>,
+    tool_duration_ms: u64,
+}
+
+impl BatchBuilder {
+    fn note_timing(&mut self, timing: ItemTiming) {
+        if self.started_at_ms.is_none() {
+            self.started_at_ms = timing.started_at_ms;
+        }
+        if let Some(end) = timing.finished_at_ms {
+            self.last_finished_at_ms =
+                Some(self.last_finished_at_ms.map_or(end, |last| last.max(end)));
+        }
+        if let Some(duration) = timing.tool_duration_ms {
+            self.tool_duration_ms = self.tool_duration_ms.saturating_add(duration);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +171,10 @@ pub struct ClosedBatch {
     /// The compaction reason when this batch is a context-compaction marker:
     /// a zero-blob batch whose only item is the compaction event itself.
     pub marker: Option<String>,
+    pub llm_rounds: u32,
+    pub started_at_ms: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub tool_duration_ms: u64,
 }
 
 impl ClosedBatch {
@@ -150,6 +186,10 @@ impl ClosedBatch {
             first_reasoning_item_id: None,
             tool_count: 0,
             marker: Some(reason.to_string()),
+            llm_rounds: 0,
+            started_at_ms: None,
+            duration_ms: None,
+            tool_duration_ms: 0,
         }
     }
 }
@@ -160,6 +200,10 @@ pub struct ClosedTrunk {
     pub blob_count: u32,
     pub first_monologue_item_id: Option<String>,
     pub batches: Vec<ClosedBatch>,
+    pub llm_rounds: u32,
+    pub started_at_ms: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub tool_duration_ms: u64,
 }
 
 impl ClosedTrunk {
@@ -197,6 +241,10 @@ impl ClosedTrunk {
                     blob_count: batch.blob_count,
                     text,
                     marker: batch.marker,
+                    llm_rounds: Some(batch.llm_rounds as u64),
+                    started_at_ms: batch.started_at_ms,
+                    duration_ms: batch.duration_ms,
+                    tool_duration_ms: Some(batch.tool_duration_ms),
                 }
             })
             .collect();
@@ -219,6 +267,10 @@ impl ClosedTrunk {
             blob_count: self.blob_count,
             title,
             batches,
+            llm_rounds: Some(self.llm_rounds as u64),
+            started_at_ms: self.started_at_ms,
+            duration_ms: self.duration_ms,
+            tool_duration_ms: Some(self.tool_duration_ms),
         }
     }
 }
@@ -228,17 +280,31 @@ pub struct TrunkBuilder {
     current_batch: BatchBuilder,
     closed_batches: Vec<ClosedBatch>,
     blob_count: u32,
-    tool_count: u32,
+    llm_rounds: u32,
+    started_at_ms: Option<i64>,
+    last_finished_at_ms: Option<i64>,
+    tool_duration_ms: u64,
     first_item_id: Option<String>,
     first_monologue_item_id: Option<String>,
 }
 
 impl TrunkBuilder {
-    pub fn push(&mut self, item_id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
+    /// `llm_round_delta` is the number of LLM request rounds attributed to
+    /// this item by the caller (the manager measures the cumulative counter's
+    /// movement between two recorded items), never a cumulative value.
+    pub fn push(
+        &mut self,
+        item_id: &str,
+        item: TrunkItem<'_>,
+        timing: ItemTiming,
+        llm_round_delta: u32,
+    ) -> Option<ClosedTrunk> {
         // A compaction cuts the batch short and then takes its own place in
         // the stream: a zero-blob marker batch whose first_item_id is the
         // compaction item itself, so every reader renders the marker at the
-        // exact batch boundary where the context was squeezed.
+        // exact batch boundary where the context was squeezed. The marker is
+        // the trunk's closing batch — the important monologue that follows a
+        // squeeze opens the next trunk.
         if let TrunkItem::Compaction(reason) = item {
             self.close_batch();
             if self.first_item_id.is_none() {
@@ -246,13 +312,26 @@ impl TrunkBuilder {
             }
             self.closed_batches
                 .push(ClosedBatch::marker(item_id, reason));
-            return None;
+            return self.close_finished();
         }
+        let new_rounds = llm_round_delta;
         let mut closed_trunk = None;
+        // A batch that already holds enough rounds closes before this item
+        // joins it, so the item that opens the next batch is also where the
+        // next round's work starts. The check counts this item's own rounds:
+        // the batch that crosses the threshold with this item still contains
+        // it, and the next item opens the fresh batch.
+        let batch_rounds_with_item = self.current_batch.llm_rounds.saturating_add(new_rounds);
         let starts_semantic_batch = match item {
             TrunkItem::Monologue => !self.current_batch.item_ids.is_empty(),
-            TrunkItem::Reasoning => self.current_batch.tool_count >= BATCH_REASONING_TOOL_THRESHOLD,
-            TrunkItem::ToolCall(_) => false,
+            TrunkItem::Reasoning => {
+                batch_rounds_with_item > BATCH_REASONING_ROUND_THRESHOLD
+                    || self.current_batch.blob_count >= BATCH_MAX_BLOBS
+            }
+            TrunkItem::ToolCall(_) => {
+                batch_rounds_with_item > BATCH_MAX_ROUNDS
+                    || self.current_batch.blob_count >= BATCH_MAX_BLOBS
+            }
             TrunkItem::Compaction(_) => unreachable!("handled above"),
         };
         if starts_semantic_batch {
@@ -260,8 +339,11 @@ impl TrunkBuilder {
         }
         // Batch boundaries are the only safe trunk boundaries. Crossing the
         // threshold marks the trunk ready to close; the item that begins the
-        // next batch belongs wholly to the new trunk.
-        if self.current_batch.item_ids.is_empty() && self.tool_count > TRUNK_TOOL_CALL_THRESHOLD {
+        // next batch belongs wholly to the new trunk. The blob count is a
+        // hard backstop for adapters that never report rounds.
+        if self.current_batch.item_ids.is_empty()
+            && (self.llm_rounds > TRUNK_ROUND_THRESHOLD || self.blob_count >= TRUNK_MAX_BLOBS)
+        {
             closed_trunk = self.close_finished();
         }
 
@@ -271,6 +353,7 @@ impl TrunkBuilder {
         if !self.current_batch.item_ids.iter().any(|id| id == item_id) {
             self.current_batch.item_ids.push(item_id.to_string());
         }
+        self.current_batch.note_timing(timing);
         match item {
             TrunkItem::Monologue => {
                 if self.current_batch.monologue_item_id.is_none() {
@@ -284,7 +367,6 @@ impl TrunkBuilder {
                 self.current_batch.blob_count += 1;
                 self.current_batch.tool_count += 1;
                 self.blob_count += 1;
-                self.tool_count += 1;
             }
             TrunkItem::Reasoning => {
                 self.current_batch.blob_count += 1;
@@ -295,11 +377,20 @@ impl TrunkBuilder {
             }
             TrunkItem::Compaction(_) => unreachable!("handled above"),
         }
-
-        if self.current_batch.tool_count >= BATCH_MAX_TOOL_CALLS
-            || self.current_batch.blob_count >= BATCH_MAX_BLOBS
-        {
-            self.close_batch();
+        // Rounds land after the split decisions on purpose: an item that
+        // opens a fresh batch/trunk must not drag the rounds of the items
+        // that closed the previous one into it.
+        self.current_batch.llm_rounds = self.current_batch.llm_rounds.saturating_add(new_rounds);
+        self.llm_rounds = self.llm_rounds.saturating_add(new_rounds);
+        if self.started_at_ms.is_none() {
+            self.started_at_ms = timing.started_at_ms;
+        }
+        if let Some(end) = timing.finished_at_ms {
+            self.last_finished_at_ms =
+                Some(self.last_finished_at_ms.map_or(end, |last| last.max(end)));
+        }
+        if let Some(duration) = timing.tool_duration_ms {
+            self.tool_duration_ms = self.tool_duration_ms.saturating_add(duration);
         }
         closed_trunk
     }
@@ -314,6 +405,10 @@ impl TrunkBuilder {
             return;
         }
         let batch = std::mem::take(&mut self.current_batch);
+        let duration_ms = match (batch.started_at_ms, batch.last_finished_at_ms) {
+            (Some(start), Some(end)) if end >= start => Some((end - start) as u64),
+            _ => None,
+        };
         self.closed_batches.push(ClosedBatch {
             first_item_id: batch.item_ids[0].clone(),
             blob_count: batch.blob_count,
@@ -321,6 +416,10 @@ impl TrunkBuilder {
             first_reasoning_item_id: batch.first_reasoning_item_id,
             tool_count: batch.tool_count,
             marker: None,
+            llm_rounds: batch.llm_rounds,
+            started_at_ms: batch.started_at_ms,
+            duration_ms,
+            tool_duration_ms: batch.tool_duration_ms,
         });
     }
 
@@ -328,13 +427,22 @@ impl TrunkBuilder {
         if self.closed_batches.is_empty() {
             return None;
         }
-        self.tool_count = 0;
-        Some(ClosedTrunk {
+        let duration_ms = match (self.started_at_ms, self.last_finished_at_ms) {
+            (Some(start), Some(end)) if end >= start => Some((end - start) as u64),
+            _ => None,
+        };
+        let closed = ClosedTrunk {
             first_item_id: self.first_item_id.take().unwrap_or_default(),
             blob_count: std::mem::take(&mut self.blob_count),
             first_monologue_item_id: self.first_monologue_item_id.take(),
             batches: std::mem::take(&mut self.closed_batches),
-        })
+            llm_rounds: std::mem::take(&mut self.llm_rounds),
+            started_at_ms: self.started_at_ms.take(),
+            duration_ms,
+            tool_duration_ms: std::mem::take(&mut self.tool_duration_ms),
+        };
+        self.last_finished_at_ms = None;
+        Some(closed)
     }
 }
 
@@ -358,11 +466,91 @@ fn first_sentence(text: &str) -> String {
     overview::clip(text[..end].trim(), 100)
 }
 
-pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
+/// The wall-clock and tool-time facts one timeline item contributes to its
+/// batch/trunk. Monologue and reasoning carry no timestamps; only tool calls
+/// know when they started and finished.
+pub fn item_timing(item: &TimelineItem) -> ItemTiming {
+    match item {
+        TimelineItem::ToolCall {
+            started_at_ms,
+            finished_at_ms,
+            ..
+        } => {
+            let duration_ms = match (*started_at_ms, *finished_at_ms) {
+                (Some(start), Some(end)) if end >= start => Some((end - start) as u64),
+                _ => None,
+            };
+            ItemTiming {
+                started_at_ms: *started_at_ms,
+                finished_at_ms: *finished_at_ms,
+                tool_duration_ms: duration_ms,
+            }
+        }
+        // A monologue/reasoning/compaction marks its own instant: it starts
+        // the batch clock when it leads and never extends the tool total.
+        TimelineItem::AssistantMessage {
+            received_at_ms: Some(at),
+            ..
+        }
+        | TimelineItem::Reasoning {
+            received_at_ms: Some(at),
+            ..
+        }
+        | TimelineItem::Compaction {
+            received_at_ms: Some(at),
+            ..
+        } => ItemTiming {
+            started_at_ms: Some(*at),
+            finished_at_ms: Some(*at),
+            tool_duration_ms: None,
+        },
+        _ => ItemTiming::default(),
+    }
+}
+
+/// Subtracts the round's blocked intervals (permission and guidance waits)
+/// from the trunk's and every batch's wall-clock duration, so the displayed
+/// span is time spent working, not time spent waiting on a human.
+pub fn exclude_blocked(trunk: &mut RoundTrunk, intervals: &[(i64, i64)]) {
+    if intervals.is_empty() {
+        return;
+    }
+    trunk.summary.duration_ms = trunk
+        .summary
+        .started_at_ms
+        .zip(trunk.summary.duration_ms)
+        .map(|(start, duration)| net_of_blocked(start, duration, intervals));
+    for batch in &mut trunk.batches {
+        batch.summary.duration_ms = batch
+            .summary
+            .started_at_ms
+            .zip(batch.summary.duration_ms)
+            .map(|(start, duration)| net_of_blocked(start, duration, intervals));
+    }
+}
+
+fn net_of_blocked(start: i64, duration: u64, intervals: &[(i64, i64)]) -> u64 {
+    let end = start.saturating_add(duration as i64);
+    let blocked: u64 = intervals
+        .iter()
+        .map(|&(block_start, block_end)| {
+            (end.min(block_end) - start.max(block_start)).max(0) as u64
+        })
+        .sum();
+    duration.saturating_sub(blocked)
+}
+
+/// `llm_round_deltas` maps an item id to the rounds attributed to that item
+/// (never a cumulative counter), so a rebuild needs no base value and sums to
+/// exactly what the live builder counted.
+pub fn summarize_trunks(
+    items: &[TimelineItem],
+    llm_round_deltas: &HashMap<String, u32>,
+) -> Vec<TrunkSummary> {
     let texts: HashMap<String, String> = items
         .iter()
         .filter_map(|item| match item {
-            TimelineItem::AssistantMessage { id, text } | TimelineItem::Reasoning { id, text } => {
+            TimelineItem::AssistantMessage { id, text, .. } | TimelineItem::Reasoning { id, text, .. } => {
                 Some((id.clone(), text.clone()))
             }
             _ => None,
@@ -378,7 +566,8 @@ pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
             TimelineItem::Compaction { reason, .. } => TrunkItem::Compaction(reason),
             _ => continue,
         };
-        if let Some(trunk) = builder.push(item.id(), kind) {
+        let rounds = llm_round_deltas.get(item.id()).copied().unwrap_or(0);
+        if let Some(trunk) = builder.push(item.id(), kind, item_timing(item), rounds) {
             trunks.push(trunk);
         }
     }
@@ -400,7 +589,16 @@ pub fn summarize_trunks(items: &[TimelineItem]) -> Vec<TrunkSummary> {
 /// not match its summary. Blob references are left empty; only the writer
 /// knows where a payload landed.
 pub fn trunks_from_items(items: &[TimelineItem]) -> Vec<RoundTrunk> {
-    let summaries = summarize_trunks(items);
+    trunks_from_items_with_rounds(items, &HashMap::new())
+}
+
+/// The same rebuild with per-item LLM round deltas, so a live round's open
+/// trunk reports the same `llmRounds` the builder counted while streaming.
+pub fn trunks_from_items_with_rounds(
+    items: &[TimelineItem],
+    llm_round_deltas: &HashMap<String, u32>,
+) -> Vec<RoundTrunk> {
+    let summaries = summarize_trunks(items, llm_round_deltas);
     let position = |id: &str| items.iter().position(|item| item.id() == id);
     let mut trunks = Vec::new();
     for (index, summary) in summaries.iter().enumerate() {
@@ -444,15 +642,39 @@ pub fn trunks_from_items(items: &[TimelineItem]) -> Vec<RoundTrunk> {
 /// (`<tool item>:img:<n>`) — the same id the pump's blob writer used — so the
 /// regular ref merge addresses their produced-image payloads.
 pub fn blob_overviews(item: &TimelineItem) -> Vec<BlobOverview> {
-    let (kind, overview) = match item {
-        TimelineItem::Reasoning { text, .. } => (BlobKind::Reasoning, text.clone()),
-        TimelineItem::ToolCall { name, detail, .. } => (
-            BlobKind::ToolCall,
-            match detail {
-                ToolCallDetail::Overview { overview, .. } => overview.clone(),
-                _ => name.clone(),
-            },
-        ),
+    let (kind, overview, started_at_ms, duration_ms, tool_kind, status) = match item {
+        TimelineItem::Reasoning { text, .. } => {
+            (BlobKind::Reasoning, text.clone(), None, None, None, None)
+        }
+        TimelineItem::ToolCall {
+            name,
+            detail,
+            status,
+            started_at_ms,
+            finished_at_ms,
+            ..
+        } => {
+            let (overview, tool_kind) = match detail {
+                ToolCallDetail::Overview {
+                    overview,
+                    tool_kind,
+                    ..
+                } => (overview.clone(), Some(*tool_kind)),
+                _ => (name.clone(), None),
+            };
+            let duration_ms = match (*started_at_ms, *finished_at_ms) {
+                (Some(start), Some(end)) if end >= start => Some((end - start) as u64),
+                _ => None,
+            };
+            (
+                BlobKind::ToolCall,
+                overview,
+                *started_at_ms,
+                duration_ms,
+                tool_kind,
+                Some(*status),
+            )
+        }
         _ => return Vec::new(),
     };
     let mut rows = vec![BlobOverview {
@@ -462,6 +684,10 @@ pub fn blob_overviews(item: &TimelineItem) -> Vec<BlobOverview> {
         blob: None,
         thumb: None,
         path: None,
+        started_at_ms,
+        duration_ms,
+        tool_kind,
+        status,
     }];
     if let TimelineItem::ToolCall { id, images, .. } = item {
         for (index, image) in images.iter().enumerate() {
@@ -472,6 +698,10 @@ pub fn blob_overviews(item: &TimelineItem) -> Vec<BlobOverview> {
                 blob: None,
                 thumb: image.thumb.clone(),
                 path: image.path.clone(),
+                started_at_ms: None,
+                duration_ms: None,
+                tool_kind: None,
+                status: None,
             });
         }
     }
@@ -531,6 +761,10 @@ pub fn split_produced_image_batches(batches: Vec<RoundBatch>) -> Vec<RoundBatch>
                     blob_count: produced.len() as u32,
                     text: format!("{} 张图片", produced.len()),
                     marker: None,
+                    llm_rounds: None,
+                    started_at_ms: None,
+                    duration_ms: None,
+                    tool_duration_ms: None,
                 },
                 monologue: None,
                 blobs: produced,
@@ -554,17 +788,30 @@ mod tests {
             .collect()
     }
 
+    fn push(builder: &mut TrunkBuilder, id: &str, item: TrunkItem<'_>) -> Option<ClosedTrunk> {
+        builder.push(id, item, ItemTiming::default(), 0)
+    }
+
+    fn push_rounds(
+        builder: &mut TrunkBuilder,
+        id: &str,
+        item: TrunkItem<'_>,
+        llm_rounds: u32,
+    ) -> Option<ClosedTrunk> {
+        builder.push(id, item, ItemTiming::default(), llm_rounds)
+    }
+
     #[test]
     fn monologues_split_batches_but_not_trunks() {
         let mut builder = TrunkBuilder::default();
-        builder.push("a1", TrunkItem::Monologue);
-        builder.push("t1", TrunkItem::ToolCall("read"));
-        builder.push("t2", TrunkItem::ToolCall("read"));
+        push(&mut builder, "a1", TrunkItem::Monologue);
+        push(&mut builder, "t1", TrunkItem::ToolCall("read"));
+        push(&mut builder, "t2", TrunkItem::ToolCall("read"));
         assert!(
-            builder.push("a2", TrunkItem::Monologue).is_none(),
+            push(&mut builder, "a2", TrunkItem::Monologue).is_none(),
             "a monologue starts a batch, not a new trunk"
         );
-        builder.push("r1", TrunkItem::Reasoning);
+        push(&mut builder, "r1", TrunkItem::Reasoning);
         let summary = builder.close().unwrap().into_summary(
             0,
             &texts(&[("a1", "先读取配置。再检查环境"), ("a2", "开始修改")]),
@@ -580,11 +827,11 @@ mod tests {
     #[test]
     fn every_monologue_starts_a_fresh_semantic_batch() {
         let mut builder = TrunkBuilder::default();
-        builder.push("r1", TrunkItem::Reasoning);
-        builder.push("a1", TrunkItem::Monologue);
-        builder.push("t1", TrunkItem::ToolCall("read"));
-        builder.push("t2", TrunkItem::ToolCall("search"));
-        builder.push("a2", TrunkItem::Monologue);
+        push(&mut builder, "r1", TrunkItem::Reasoning);
+        push(&mut builder, "a1", TrunkItem::Monologue);
+        push(&mut builder, "t1", TrunkItem::ToolCall("read"));
+        push(&mut builder, "t2", TrunkItem::ToolCall("search"));
+        push(&mut builder, "a2", TrunkItem::Monologue);
         let summary = builder.close().unwrap().into_summary(
             0,
             &texts(&[
@@ -606,26 +853,78 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_only_batch_closes_at_sixty_four_calls() {
+    fn a_tool_only_batch_closes_at_sixty_four_rounds() {
         let mut builder = TrunkBuilder::default();
-        for index in 0..BATCH_MAX_TOOL_CALLS + 1 {
-            builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        // 64 rounds, each one tool call; the 65th round's first tool call
+        // finds the batch at budget and opens a fresh one.
+        for index in 0..BATCH_MAX_ROUNDS + 1 {
+            push_rounds(
+                &mut builder,
+                &format!("t{index}"),
+                TrunkItem::ToolCall("grep"),
+                1,
+            );
         }
         let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
         assert_eq!(summary.batches.len(), 2);
         assert_eq!(summary.batches[0].blob_count, 64);
+        assert_eq!(summary.batches[0].llm_rounds, Some(BATCH_MAX_ROUNDS as u64));
         assert_eq!(summary.batches[0].text, "调用了 64 次工具");
         assert_eq!(summary.batches[1].blob_count, 1);
+        assert_eq!(summary.batches[1].llm_rounds, Some(1));
     }
 
     #[test]
-    fn reasoning_after_sixteen_tools_titles_a_fresh_batch() {
+    fn a_tool_only_batch_closes_at_sixty_four_rounds_via_rebuild() {
+        // The same shape must come out of a rebuild from items, because the
+        // live round's open trunk is rebuilt from memory rather than read
+        // from the builder that streamed it.
+        let items: Vec<TimelineItem> = (0..BATCH_MAX_ROUNDS + 1)
+            .map(|index| TimelineItem::ToolCall {
+                id: format!("t{index}"),
+                name: "grep".into(),
+                status: genehub_proto::ToolStatus::Ok,
+                detail: ToolCallDetail::Shell {
+                    command: "grep".into(),
+                    output: String::new(),
+                    exit_code: Some(0),
+                },
+                images: vec![],
+                started_at_ms: None,
+                finished_at_ms: None,
+            })
+            .collect();
+        let llm_rounds: HashMap<String, u32> = items
+            .iter()
+            .map(|item| (item.id().to_string(), 1))
+            .collect();
+        let trunks = trunks_from_items_with_rounds(&items, &llm_rounds);
+        assert_eq!(trunks.len(), 1);
+        assert_eq!(trunks[0].summary.batches.len(), 2);
+        assert_eq!(trunks[0].summary.batches[0].blob_count, 64);
+        assert_eq!(
+            trunks[0].summary.batches[0].llm_rounds,
+            Some(BATCH_MAX_ROUNDS as u64)
+        );
+        assert_eq!(trunks[0].summary.batches[1].blob_count, 1);
+        assert_eq!(trunks[0].summary.batches[1].llm_rounds, Some(1));
+    }
+
+    #[test]
+    fn reasoning_after_sixteen_rounds_titles_a_fresh_batch() {
         let mut builder = TrunkBuilder::default();
-        for index in 0..BATCH_REASONING_TOOL_THRESHOLD {
-            builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        // 16 rounds of tool work, then the round-17 reasoning block: the
+        // batch already holds 16 rounds, so the reasoning titles a fresh one.
+        for index in 0..BATCH_REASONING_ROUND_THRESHOLD {
+            push_rounds(
+                &mut builder,
+                &format!("t{index}"),
+                TrunkItem::ToolCall("grep"),
+                1,
+            );
         }
-        builder.push("r1", TrunkItem::Reasoning);
-        builder.push("t16", TrunkItem::ToolCall("write"));
+        push_rounds(&mut builder, "r1", TrunkItem::Reasoning, 1);
+        push_rounds(&mut builder, "t16", TrunkItem::ToolCall("write"), 0);
         let summary = builder
             .close()
             .unwrap()
@@ -633,19 +932,29 @@ mod tests {
 
         assert_eq!(summary.batches.len(), 2);
         assert_eq!(summary.batches[0].blob_count, 16);
+        assert_eq!(
+            summary.batches[0].llm_rounds,
+            Some(BATCH_REASONING_ROUND_THRESHOLD as u64)
+        );
         assert_eq!(summary.batches[0].text, "调用了 16 次工具");
         assert_eq!(summary.batches[1].first_item_id, "r1");
         assert_eq!(summary.batches[1].blob_count, 2);
+        assert_eq!(summary.batches[1].llm_rounds, Some(1));
         assert_eq!(summary.batches[1].text, "开始修改并验证结果");
     }
 
     #[test]
-    fn reasoning_before_sixteen_tools_stays_with_the_current_batch() {
+    fn reasoning_before_sixteen_rounds_stays_with_the_current_batch() {
         let mut builder = TrunkBuilder::default();
-        for index in 0..BATCH_REASONING_TOOL_THRESHOLD - 1 {
-            builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        for index in 0..BATCH_REASONING_ROUND_THRESHOLD - 1 {
+            push_rounds(
+                &mut builder,
+                &format!("t{index}"),
+                TrunkItem::ToolCall("grep"),
+                1,
+            );
         }
-        builder.push("r1", TrunkItem::Reasoning);
+        push_rounds(&mut builder, "r1", TrunkItem::Reasoning, 0);
         let summary = builder
             .close()
             .unwrap()
@@ -653,6 +962,10 @@ mod tests {
 
         assert_eq!(summary.batches.len(), 1);
         assert_eq!(summary.batches[0].blob_count, 16);
+        assert_eq!(
+            summary.batches[0].llm_rounds,
+            Some(BATCH_REASONING_ROUND_THRESHOLD as u64 - 1)
+        );
         assert_eq!(summary.batches[0].text, "继续确认剩余入口");
     }
 
@@ -660,7 +973,7 @@ mod tests {
     fn the_blob_safety_limit_still_bounds_reasoning_only_batches() {
         let mut builder = TrunkBuilder::default();
         for index in 0..BATCH_MAX_BLOBS + 1 {
-            builder.push(&format!("r{index}"), TrunkItem::Reasoning);
+            push(&mut builder, &format!("r{index}"), TrunkItem::Reasoning);
         }
         let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
         assert_eq!(summary.batches.len(), 2);
@@ -669,29 +982,117 @@ mod tests {
     }
 
     #[test]
-    fn a_trunk_closes_on_the_batch_after_its_tool_call_threshold() {
+    fn blocked_intervals_are_subtracted_from_trunk_and_batch_durations() {
+        let items = vec![
+            TimelineItem::ToolCall {
+                id: "t1".into(),
+                name: "grep".into(),
+                status: genehub_proto::ToolStatus::Ok,
+                detail: ToolCallDetail::Shell {
+                    command: "grep".into(),
+                    output: String::new(),
+                    exit_code: Some(0),
+                },
+                images: vec![],
+                started_at_ms: Some(1_000),
+                finished_at_ms: Some(2_000),
+            },
+            TimelineItem::ToolCall {
+                id: "t2".into(),
+                name: "grep".into(),
+                status: genehub_proto::ToolStatus::Ok,
+                detail: ToolCallDetail::Shell {
+                    command: "grep".into(),
+                    output: String::new(),
+                    exit_code: Some(0),
+                },
+                images: vec![],
+                started_at_ms: Some(62_000),
+                finished_at_ms: Some(63_000),
+            },
+        ];
+        let mut trunks = trunks_from_items(&items);
+        assert_eq!(trunks[0].summary.duration_ms, Some(62_000));
+        // A permission wait from 5s to 60s sits between the two calls.
+        exclude_blocked(&mut trunks[0], &[(5_000, 60_000)]);
+        assert_eq!(trunks[0].summary.duration_ms, Some(7_000));
+        assert_eq!(trunks[0].batches[0].summary.duration_ms, Some(7_000));
+        // The tool's own duration is untouched: it never overlapped the wait.
+        assert_eq!(trunks[0].summary.tool_duration_ms, Some(2_000));
+    }
+
+    #[test]
+    fn a_trunk_closes_at_the_blob_backstop_without_any_reported_rounds() {
+        // An adapter that never reports LLM rounds still gets bounded trunks:
+        // past 500 blobs the next batch boundary closes the trunk.
         let mut builder = TrunkBuilder::default();
         let mut closed = None;
-        for index in 0..129 {
-            closed = builder.push(&format!("t{index}"), TrunkItem::ToolCall("grep"));
+        for index in 0..TRUNK_MAX_BLOBS {
+            closed = push(
+                &mut builder,
+                &format!("t{index}"),
+                TrunkItem::ToolCall("grep"),
+            );
+            assert!(closed.is_none());
         }
+        // The monologue opens a fresh batch, finds the trunk over the blob
+        // backstop and closes it — the opener itself joins the new trunk.
+        closed = push(&mut builder, "a1", TrunkItem::Monologue);
         let summary = closed
-            .expect("the first item after the threshold-crossing batch closes the trunk")
+            .expect("the first batch boundary past the backstop closes the trunk")
             .into_summary(0, &HashMap::new());
-        assert_eq!(summary.blob_count, 128);
+        assert_eq!(summary.blob_count, TRUNK_MAX_BLOBS);
+        assert_eq!(summary.llm_rounds, Some(0));
+    }
+
+    #[test]
+    fn a_trunk_closes_on_the_batch_after_its_round_threshold() {
+        let mut builder = TrunkBuilder::default();
+        let mut closed = None;
+        // 100 rounds of tool work, then the round-101 monologue: it opens a
+        // fresh batch, which crosses the threshold and closes the trunk.
+        for index in 0..TRUNK_ROUND_THRESHOLD {
+            closed = push_rounds(
+                &mut builder,
+                &format!("t{index}"),
+                TrunkItem::ToolCall("grep"),
+                1,
+            );
+            assert!(closed.is_none());
+        }
+        closed = push_rounds(&mut builder, "a100", TrunkItem::Monologue, 1);
+        assert!(
+            closed.is_none(),
+            "the monologue that opens the next batch belongs to the new trunk"
+        );
+        closed = push_rounds(&mut builder, "t100", TrunkItem::ToolCall("grep"), 0);
+        assert!(closed.is_none(), "the trunk closes once a new round begins");
+        closed = push_rounds(&mut builder, "a101", TrunkItem::Monologue, 1);
+        let summary = closed
+            .expect("the round-102 monologue closes the over-budget trunk")
+            .into_summary(0, &texts(&[("a100", "开始收尾"), ("a101", "继续")]));
+        assert_eq!(summary.llm_rounds, Some(101));
         assert_eq!(
             summary
                 .batches
                 .iter()
-                .map(|batch| batch.blob_count)
-                .sum::<u32>(),
-            summary.blob_count,
-            "every counted blob must belong to a listed batch, or the rows for \
+                .filter_map(|batch| batch.llm_rounds)
+                .sum::<u64>(),
+            101,
+            "every counted round must belong to a listed batch, or the rows for \
              the trailing partial batch are written nowhere"
         );
-        assert_eq!(summary.batches.len(), 2);
-        assert_eq!(summary.batches.last().unwrap().blob_count, 64);
-        assert_eq!(summary.title, "调用了 64 次工具");
+        assert_eq!(summary.batches.len(), 3);
+        assert_eq!(summary.batches[0].blob_count, 64);
+        assert_eq!(summary.batches[0].llm_rounds, Some(64));
+        assert_eq!(summary.batches[1].blob_count, 36);
+        assert_eq!(summary.batches[1].llm_rounds, Some(36));
+        assert_eq!(summary.batches[2].first_item_id, "a100");
+        assert_eq!(summary.batches[2].llm_rounds, Some(1));
+        let rest = builder.close().unwrap().into_summary(1, &HashMap::new());
+        assert_eq!(rest.llm_rounds, Some(1));
+        assert_eq!(rest.batches.len(), 1);
+        assert_eq!(rest.batches[0].first_item_id, "a101");
     }
 
     #[test]
@@ -706,8 +1107,8 @@ mod tests {
     #[test]
     fn no_monologue_uses_the_first_thinking_text_for_batch_and_trunk() {
         let mut builder = TrunkBuilder::default();
-        builder.push("r1", TrunkItem::Reasoning);
-        builder.push("t1", TrunkItem::ToolCall("read"));
+        push(&mut builder, "r1", TrunkItem::Reasoning);
+        push(&mut builder, "t1", TrunkItem::ToolCall("read"));
         let summary = builder
             .close()
             .unwrap()
@@ -719,8 +1120,8 @@ mod tests {
     #[test]
     fn consecutive_monologues_each_start_a_batch() {
         let mut builder = TrunkBuilder::default();
-        builder.push("a1", TrunkItem::Monologue);
-        builder.push("a2", TrunkItem::Monologue);
+        push(&mut builder, "a1", TrunkItem::Monologue);
+        push(&mut builder, "a2", TrunkItem::Monologue);
         let summary = builder
             .close()
             .unwrap()
@@ -731,94 +1132,145 @@ mod tests {
     }
 
     #[test]
-    fn a_compaction_stands_as_a_marker_batch_between_work_batches() {
+    fn a_compaction_closes_the_trunk_as_its_last_marker_batch() {
         let mut builder = TrunkBuilder::default();
-        builder.push("a1", TrunkItem::Monologue);
-        builder.push("t1", TrunkItem::ToolCall("read"));
-        builder.push("c1", TrunkItem::Compaction("auto"));
-        builder.push("a2", TrunkItem::Monologue);
-        builder.push("t2", TrunkItem::ToolCall("write"));
-        let summary = builder
+        push(&mut builder, "a1", TrunkItem::Monologue);
+        push(&mut builder, "t1", TrunkItem::ToolCall("read"));
+        let closed = push(&mut builder, "c1", TrunkItem::Compaction("auto"))
+            .expect("a compaction closes the trunk it lands in");
+        push(&mut builder, "a2", TrunkItem::Monologue);
+        push(&mut builder, "t2", TrunkItem::ToolCall("write"));
+        let first = closed.into_summary(0, &texts(&[("a1", "先读取配置")]));
+        let second = builder
             .close()
             .unwrap()
-            .into_summary(0, &texts(&[("a1", "先读取配置"), ("a2", "再写入修改")]));
+            .into_summary(1, &texts(&[("a2", "再写入修改")]));
 
-        assert_eq!(summary.batches.len(), 3);
-        assert_eq!(summary.batches[0].first_item_id, "a1");
-        assert_eq!(summary.batches[0].marker, None);
-        let marker = &summary.batches[1];
+        assert_eq!(first.batches.len(), 2);
+        assert_eq!(first.batches[0].first_item_id, "a1");
+        assert_eq!(first.batches[0].marker, None);
+        let marker = &first.batches[1];
         assert_eq!(marker.first_item_id, "c1");
         assert_eq!(marker.blob_count, 0);
         assert_eq!(marker.marker.as_deref(), Some("auto"));
-        assert_eq!(summary.batches[2].first_item_id, "a2");
-        assert_eq!(summary.batches[2].marker, None);
-        assert_eq!(summary.blob_count, 2, "a marker carries no blob");
-        assert_eq!(summary.title, "先读取配置");
+        assert_eq!(first.blob_count, 1, "a marker carries no blob");
+        assert_eq!(first.title, "先读取配置");
+
+        assert_eq!(second.batches.len(), 1);
+        assert_eq!(second.batches[0].first_item_id, "a2");
+        assert_eq!(second.batches[0].marker, None);
+        assert_eq!(second.title, "再写入修改");
     }
 
     #[test]
-    fn consecutive_compactions_each_stand_as_a_marker_batch() {
+    fn consecutive_compactions_close_one_trunk_each() {
         let mut builder = TrunkBuilder::default();
-        builder.push("t1", TrunkItem::ToolCall("read"));
-        builder.push("c1", TrunkItem::Compaction("auto"));
-        builder.push("c2", TrunkItem::Compaction("manual"));
-        builder.push("t2", TrunkItem::ToolCall("write"));
-        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        push(&mut builder, "t1", TrunkItem::ToolCall("read"));
+        let first = push(&mut builder, "c1", TrunkItem::Compaction("auto"))
+            .expect("first compaction closes its trunk");
+        let second = push(&mut builder, "c2", TrunkItem::Compaction("manual"))
+            .expect("a second compaction closes its own marker-only trunk");
+        push(&mut builder, "t2", TrunkItem::ToolCall("write"));
+        let first = first.into_summary(0, &HashMap::new());
+        let second = second.into_summary(1, &HashMap::new());
+        let third = builder.close().unwrap().into_summary(2, &HashMap::new());
 
-        assert_eq!(summary.batches.len(), 4);
-        assert_eq!(summary.batches[1].first_item_id, "c1");
-        assert_eq!(summary.batches[1].marker.as_deref(), Some("auto"));
-        assert_eq!(summary.batches[2].first_item_id, "c2");
-        assert_eq!(summary.batches[2].marker.as_deref(), Some("manual"));
-        assert_eq!(summary.batches[3].first_item_id, "t2");
+        assert_eq!(first.batches.len(), 2);
+        assert_eq!(first.batches[1].first_item_id, "c1");
+        assert_eq!(first.batches[1].marker.as_deref(), Some("auto"));
+        assert_eq!(second.batches.len(), 1);
+        assert_eq!(second.batches[0].first_item_id, "c2");
+        assert_eq!(second.batches[0].marker.as_deref(), Some("manual"));
+        assert_eq!(third.batches.len(), 1);
+        assert_eq!(third.batches[0].first_item_id, "t2");
     }
 
     #[test]
-    fn a_compaction_before_any_work_opens_the_trunk() {
+    fn a_compaction_before_any_work_opens_and_closes_its_own_trunk() {
         let mut builder = TrunkBuilder::default();
-        builder.push("c1", TrunkItem::Compaction("auto"));
-        builder.push("t1", TrunkItem::ToolCall("read"));
-        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        let closed = push(&mut builder, "c1", TrunkItem::Compaction("auto"))
+            .expect("a leading compaction still closes a trunk");
+        push(&mut builder, "t1", TrunkItem::ToolCall("read"));
+        let first = closed.into_summary(0, &HashMap::new());
+        let second = builder.close().unwrap().into_summary(1, &HashMap::new());
 
-        assert_eq!(summary.first_item_id, "c1");
-        assert_eq!(summary.batches.len(), 2);
-        assert_eq!(summary.batches[0].marker.as_deref(), Some("auto"));
-        assert_eq!(summary.batches[1].first_item_id, "t1");
+        assert_eq!(first.first_item_id, "c1");
+        assert_eq!(first.batches.len(), 1);
+        assert_eq!(first.batches[0].marker.as_deref(), Some("auto"));
+        assert_eq!(second.batches.len(), 1);
+        assert_eq!(second.batches[0].first_item_id, "t1");
         assert_eq!(
-            summary.title, "调用了 1 次工具",
-            "a leading marker batch must not become the trunk title"
+            second.title, "调用了 1 次工具",
+            "a leading marker batch must not become the next trunk's title"
         );
     }
 
     #[test]
-    fn a_marker_batch_slices_out_exactly_the_compaction_item() {
+    fn timing_rolls_up_from_tool_items() {
+        let mut builder = TrunkBuilder::default();
+        builder.push(
+            "t1",
+            TrunkItem::ToolCall("read"),
+            ItemTiming {
+                started_at_ms: Some(1_000),
+                finished_at_ms: Some(4_000),
+                tool_duration_ms: Some(3_000),
+            },
+            0,
+        );
+        builder.push(
+            "t2",
+            TrunkItem::ToolCall("write"),
+            ItemTiming {
+                started_at_ms: Some(5_000),
+                finished_at_ms: Some(9_500),
+                tool_duration_ms: Some(4_500),
+            },
+            0,
+        );
+        let summary = builder.close().unwrap().into_summary(0, &HashMap::new());
+        assert_eq!(summary.started_at_ms, Some(1_000));
+        assert_eq!(summary.duration_ms, Some(8_500));
+        assert_eq!(summary.tool_duration_ms, Some(7_500));
+        assert_eq!(summary.batches[0].started_at_ms, Some(1_000));
+        assert_eq!(summary.batches[0].duration_ms, Some(8_500));
+        assert_eq!(summary.batches[0].tool_duration_ms, Some(7_500));
+    }
+
+    #[test]
+    fn a_marker_batch_closes_its_trunk_and_the_next_monologue_opens_a_new_one() {
         let items = vec![
             TimelineItem::AssistantMessage {
                 id: "a1".into(),
                 text: "先读取配置".into(),
+                received_at_ms: None,
             },
             TimelineItem::Compaction {
                 id: "c1".into(),
                 reason: "auto".into(),
+                received_at_ms: None,
             },
             TimelineItem::AssistantMessage {
                 id: "a2".into(),
                 text: "再写入修改".into(),
+                received_at_ms: None,
             },
         ];
         let trunks = trunks_from_items(&items);
-        assert_eq!(trunks.len(), 1);
-        let batches = &trunks[0].batches;
-        assert_eq!(batches.len(), 3);
-        let marker = &batches[1];
+        assert_eq!(trunks.len(), 2);
+        let first = &trunks[0];
+        assert_eq!(first.batches.len(), 2);
+        assert_eq!(first.batches[0].monologue.as_deref(), Some("先读取配置"));
+        let marker = &first.batches[1];
         assert_eq!(marker.summary.marker.as_deref(), Some("auto"));
         assert_eq!(marker.summary.first_item_id, "c1");
         assert!(
             marker.monologue.is_none() && marker.blobs.is_empty(),
             "the marker batch must not absorb neighbouring work"
         );
-        assert_eq!(batches[0].monologue.as_deref(), Some("先读取配置"));
-        assert_eq!(batches[2].monologue.as_deref(), Some("再写入修改"));
+        let second = &trunks[1];
+        assert_eq!(second.batches.len(), 1);
+        assert_eq!(second.batches[0].monologue.as_deref(), Some("再写入修改"));
     }
 
     #[test]
@@ -849,6 +1301,8 @@ mod tests {
                 }),
                 path: Some(path.into()),
             }],
+            started_at_ms: None,
+            finished_at_ms: None,
         }
     }
 
@@ -858,6 +1312,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "a1".into(),
                 text: "开始画。".into(),
+                received_at_ms: None,
             },
             produced(
                 "t1",
@@ -917,6 +1372,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "a2".into(),
                 text: "画好了。".into(),
+                received_at_ms: None,
             },
         ];
         let batches = &trunks_from_items(&items)[0].batches;

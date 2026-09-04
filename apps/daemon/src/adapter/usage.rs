@@ -515,6 +515,8 @@ mod tests {
                 raw: json!({"rawOutput": {"content": "abcdefgh"}}),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }];
         assert_eq!(estimate_item_tool_output(&items), 2);
     }
@@ -537,6 +539,7 @@ mod tests {
                 TimelineItem::AssistantMessage {
                     id: "a".into(),
                     text: "abcdefgh".into(),
+                    received_at_ms: None,
                 },
                 TimelineItem::ToolCall {
                     id: "c1".into(),
@@ -546,10 +549,13 @@ mod tests {
                         raw: json!({"rawOutput": {"content": "abcdefghijkl"}}),
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
                 TimelineItem::Compaction {
                     id: "k1".into(),
                     reason: "auto".into(),
+                    received_at_ms: None,
                 },
             ],
         );

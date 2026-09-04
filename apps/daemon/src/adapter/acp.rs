@@ -18,8 +18,8 @@ use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
-    Usage,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError,
+    TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -35,7 +35,13 @@ use super::{
 const EVENT_CAPACITY: usize = 1024;
 const PROTOCOL_VERSION: i64 = 1;
 /// How long a throwaway handshake may take. Cursor's first answer can be slow.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
+///
+/// Two of these can happen in one send — a resume that fails is retried on a
+/// fresh thread — and the whole handover has to come back inside the sixty
+/// seconds a client waits, or the user gets a timeout while the session goes on
+/// claiming a turn that never started. That budget, not the patience of a slow
+/// CLI, is what sets this: twice this plus the work around it has to fit.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `cursor-agent --list-models` is a file/network read, not a session.
 const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Asking whether this install is logged in. Short: it reads a file.
@@ -251,7 +257,8 @@ impl AgentAdapter for AcpAdapter {
             additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
-        tokio::spawn(read_loop(stdout, stdin, events, pending, turn));
+        tokio::spawn(read_loop(stdout, stdin, events, pending.clone(), turn));
+        tokio::spawn(watch_for_exit(child.clone(), pending));
 
         session.initialize(&config).await?;
         Ok(Box::new(session))
@@ -512,6 +519,7 @@ fn acp_history_items(updates: &[Value]) -> Vec<TimelineItem> {
             TimelineItem::AssistantMessage {
                 id,
                 text: text.to_string(),
+                received_at_ms: None,
             }
         });
     }
@@ -1653,6 +1661,59 @@ async fn read_loop(
             }
         }
     }
+    // Stdout ended, so no answer to anything still outstanding is ever coming.
+    // Saying so is what turns a dead agent into a failed turn; without it the
+    // session sits on `running` forever with nothing behind it, which is the
+    // freeze users report. Every other adapter already does this.
+    abandon_pending(&pending).await;
+}
+
+/// Fails everything still waiting on this agent.
+///
+/// Dropping the sender is the message: `AcpSession::send` reads a dropped
+/// sender as the agent having gone away mid-turn, and reports it with the
+/// process's exit code and last words rather than a bare timeout.
+async fn abandon_pending(pending: &PendingMap) {
+    let waiting: Vec<_> = pending
+        .lock()
+        .await
+        .drain()
+        .map(|(_, sender)| sender)
+        .collect();
+    if !waiting.is_empty() {
+        tracing::warn!(
+            outstanding = waiting.len(),
+            "an ACP agent went away with requests still open"
+        );
+    }
+}
+
+/// How often to ask whether the agent process is still there.
+///
+/// Only reached when the process is gone but its stdout is not: a shim that
+/// exits leaving the real CLI holding the pipe, or a grandchild that inherited
+/// it. Waiting for EOF in that shape waits forever.
+const EXIT_POLL: Duration = Duration::from_millis(500);
+
+async fn watch_for_exit(child: Arc<Mutex<Option<crate::os_process::Child>>>, pending: PendingMap) {
+    loop {
+        tokio::time::sleep(EXIT_POLL).await;
+        let gone = {
+            // Never queue behind `close`: it holds this lock while it kills the
+            // tree, and it takes the child away when it is done.
+            let Ok(mut held) = child.try_lock() else {
+                continue;
+            };
+            match held.as_mut() {
+                None => return,
+                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            }
+        };
+        if gone {
+            abandon_pending(&pending).await;
+            return;
+        }
+    }
 }
 
 /// Builds a `session/prompt` content block array from a turn's text and
@@ -2006,6 +2067,9 @@ fn translate_update(
                 usage::record_first_token(&mut state.usage);
                 usage::record_visible_output(&mut state.usage, &delta);
             }
+            // Progress goes out before the item so the item that opens a round
+            // is already attributed to it when the trunk builder sees it.
+            usage::emit_progress(events, &turn_id, &state.usage);
             match state.text_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id: turn_id.clone(),
@@ -2018,11 +2082,10 @@ fn translate_update(
                     state.reasoning_item = None;
                     emit(SessionEvent::Item {
                         turn_id: turn_id.clone(),
-                        item: TimelineItem::AssistantMessage { id, text: delta },
+                        item: TimelineItem::AssistantMessage { id, text: delta, received_at_ms: None },
                     });
                 }
             }
-            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "agent_thought_chunk" => {
             let delta = text_of(update);
@@ -2034,6 +2097,8 @@ fn translate_update(
                 usage::record_first_token(&mut state.usage);
                 usage::record_visible_output(&mut state.usage, &delta);
             }
+            // Same ordering as agent_message_chunk: progress before the item.
+            usage::emit_progress(events, &turn_id, &state.usage);
             match state.reasoning_item.clone() {
                 Some(id) => emit(SessionEvent::ItemDelta {
                     turn_id: turn_id.clone(),
@@ -2046,11 +2111,10 @@ fn translate_update(
                     state.text_item = None;
                     emit(SessionEvent::Item {
                         turn_id: turn_id.clone(),
-                        item: TimelineItem::Reasoning { id, text: delta },
+                        item: TimelineItem::Reasoning { id, text: delta, received_at_ms: None },
                     });
                 }
             }
-            usage::emit_progress(events, &turn_id, &state.usage);
         }
         "tool_call" | "tool_call_update" => {
             // Any tool activity ends the current text run, so the next chunk
@@ -2066,10 +2130,13 @@ fn translate_update(
                 Some("failed") => ToolStatus::Error,
                 _ => ToolStatus::Pending,
             };
+            // No "tool" placeholder here: updates often omit the title, and a
+            // placeholder would win over the real name when the daemon merges
+            // the update into the item it replaces. Empty means "inherit".
             let name = update
                 .get("title")
                 .and_then(Value::as_str)
-                .unwrap_or("tool")
+                .unwrap_or("")
                 .to_string();
             emit(SessionEvent::Item {
                 turn_id,
@@ -2079,6 +2146,8 @@ fn translate_update(
                     name,
                     status,
                     detail: detail_from_update(update),
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -2178,6 +2247,13 @@ fn is_catalog_noise_title(title: &str) -> bool {
 /// `read`-kind call's first location is the source path; everything else is
 /// treated as produced bytes.
 fn images_from_update(update: &Value, name: &str) -> Vec<ToolImage> {
+    // Alt text is internal accessibility text; a kind word beats an empty
+    // string when the update omitted the title.
+    let name = if name.is_empty() {
+        update.get("kind").and_then(Value::as_str).unwrap_or("tool")
+    } else {
+        name
+    };
     let read_path = (update.get("kind").and_then(Value::as_str) == Some("read"))
         .then(|| {
             update
@@ -2228,15 +2304,74 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
         .get("kind")
         .and_then(Value::as_str)
         .unwrap_or("other");
-    let path = update
+    let title = update.get("title").and_then(Value::as_str).unwrap_or("");
+    let path = acp_path(update);
+    let command = acp_raw_str(update, &["command", "cmd"]);
+    let query = acp_raw_str(update, &["pattern", "query"]);
+    let content = acp_content(update);
+
+    match kind {
+        "execute" => ToolCallDetail::Shell {
+            command: first_filled(&[&command, title]),
+            output: content,
+            exit_code: None,
+        },
+        "read" => ToolCallDetail::Read {
+            path,
+            content,
+            truncated: false,
+        },
+        "edit" => ToolCallDetail::Edit {
+            path,
+            diff: content,
+        },
+        "search" => ToolCallDetail::Search {
+            query: first_filled(&[&query, title]),
+            matches: Vec::new(),
+        },
+        "fetch" => ToolCallDetail::Fetch {
+            url: first_filled(&[&query, title, &path]),
+            summary: content,
+        },
+        _ => ToolCallDetail::Overview {
+            tool_kind: acp_tool_kind(kind),
+            overview: title.to_string(),
+            input: first_filled(&[&path, &command, &query]),
+            output: content,
+        },
+    }
+}
+
+fn acp_path(update: &Value) -> String {
+    if let Some(path) = update
         .get("locations")
         .and_then(Value::as_array)
         .and_then(|locations| locations.first())
         .and_then(|location| location.get("path"))
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let content = update
+        .filter(|path| !path.is_empty())
+    {
+        return path.to_string();
+    }
+    acp_raw_str(update, &["path", "file_path", "filePath"])
+}
+
+fn acp_raw_str(update: &Value, keys: &[&str]) -> String {
+    let Some(raw) = update.get("rawInput") else {
+        return String::new();
+    };
+    for key in keys {
+        if let Some(value) = raw.get(*key).and_then(Value::as_str) {
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn acp_content(update: &Value) -> String {
+    let from_blocks = update
         .get("content")
         .and_then(Value::as_array)
         .map(|blocks| {
@@ -2253,66 +2388,41 @@ fn detail_from_update(update: &Value) -> ToolCallDetail {
                 .join("\n")
         })
         .unwrap_or_default();
-    let content = if content.is_empty() {
-        update
-            .get("rawOutput")
-            .and_then(|value| value.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    } else {
-        content
-    };
-
-    match kind {
-        "execute" => ToolCallDetail::Shell {
-            command: update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            output: content,
-            exit_code: None,
-        },
-        "read" => ToolCallDetail::Read {
-            path,
-            content,
-            truncated: false,
-        },
-        "edit" => ToolCallDetail::Edit {
-            path,
-            diff: content,
-        },
-        "search" => ToolCallDetail::Search {
-            query: update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            matches: Vec::new(),
-        },
-        "fetch" => ToolCallDetail::Fetch {
-            url: update
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            summary: content,
-        },
-        _ if !content.is_empty() => ToolCallDetail::Read {
-            path,
-            content,
-            truncated: false,
-        },
-        _ => ToolCallDetail::Unknown {
-            raw: update.clone(),
-        },
+    if !from_blocks.is_empty() {
+        return from_blocks;
     }
+    update
+        .get("rawOutput")
+        .and_then(|value| value.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn acp_tool_kind(kind: &str) -> ToolKind {
+    match kind {
+        "execute" => ToolKind::Shell,
+        "read" => ToolKind::Read,
+        "edit" => ToolKind::Edit,
+        "search" => ToolKind::Search,
+        "fetch" => ToolKind::Fetch,
+        "switch_mode" | "plan" => ToolKind::Plan,
+        _ => ToolKind::Other,
+    }
+}
+
+fn first_filled(values: &[&str]) -> String {
+    values
+        .iter()
+        .copied()
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use genehub_proto::Attachment;
+    use genehub_proto::{Attachment, ToolKind};
 
     use super::*;
 
@@ -2550,13 +2660,21 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_tool_kind_still_renders_through_unknown() {
+    fn an_unrecognised_tool_kind_keeps_a_compact_overview() {
         let detail = detail_from_update(&json!({"kind": "quantum", "title": "?"}));
-        assert!(matches!(detail, ToolCallDetail::Unknown { .. }));
+        assert_eq!(
+            detail,
+            ToolCallDetail::Overview {
+                tool_kind: ToolKind::Other,
+                overview: "?".into(),
+                input: String::new(),
+                output: String::new(),
+            }
+        );
     }
 
     #[test]
-    fn cursor_raw_output_becomes_readable_tool_content() {
+    fn cursor_raw_output_stays_in_output_not_the_overview() {
         let detail = detail_from_update(&json!({
             "sessionUpdate": "tool_call_update",
             "status": "completed",
@@ -2565,9 +2683,28 @@ mod tests {
         }));
         assert_eq!(
             detail,
+            ToolCallDetail::Overview {
+                tool_kind: ToolKind::Other,
+                overview: String::new(),
+                input: String::new(),
+                output: "skill text".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn cursor_read_uses_location_or_raw_input_path() {
+        let detail = detail_from_update(&json!({
+            "kind": "read",
+            "title": "Read File",
+            "rawInput": {"path": "packages/proto/src/domain.rs"},
+            "rawOutput": {"content": "---\nname: ignored-body"}
+        }));
+        assert_eq!(
+            detail,
             ToolCallDetail::Read {
-                path: String::new(),
-                content: "skill text".into(),
+                path: "packages/proto/src/domain.rs".into(),
+                content: "---\nname: ignored-body".into(),
                 truncated: false
             }
         );

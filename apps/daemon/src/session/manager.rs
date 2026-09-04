@@ -76,6 +76,50 @@ struct CachedImportCandidate {
     expires_at_ms: i64,
 }
 
+/// LLM request round counter for one round. `turn` is the current adapter
+/// turn's high-water mark — the adapter counts from zero every turn — and
+/// `round_base` folds in every earlier turn of the round, so the value handed
+/// to the trunk builder stays cumulative across permission resumes.
+///
+/// Turn boundaries are explicit: a progress event whose `turn_id` differs
+/// from the current one opens a new turn and folds the previous mark into the
+/// base. A progress event from an already-finished turn (a late frame still
+/// sitting in the channel) is ignored, so it cannot double-fold the base.
+#[derive(Default)]
+struct LlmRounds {
+    round_base: u32,
+    turn: u32,
+    turn_id: Option<String>,
+    finished_turns: Vec<String>,
+}
+
+impl LlmRounds {
+    /// Records the current turn's merged counter.
+    fn observe(&mut self, turn_id: &str, turn_rounds: u32) {
+        if self.turn_id.as_deref() == Some(turn_id) {
+            self.turn = turn_rounds;
+            return;
+        }
+        if self.finished_turns.iter().any(|id| id == turn_id) {
+            return;
+        }
+        if let Some(previous) = self.turn_id.take() {
+            self.round_base = self.round_base.saturating_add(self.turn);
+            self.finished_turns.push(previous);
+        }
+        self.turn = turn_rounds;
+        self.turn_id = Some(turn_id.to_string());
+    }
+
+    fn cumulative(&self) -> u32 {
+        self.round_base.saturating_add(self.turn)
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// One live session.
 struct Live {
     /// Where this session's own directory is. Held here so the trunk writer
@@ -103,7 +147,12 @@ struct Live {
     seq: AtomicU64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
-    agent: Mutex<Option<Box<dyn AgentSession>>>,
+    /// Shared rather than owned so a caller can take a handle to the agent and
+    /// let go of the lock before awaiting it. Everything that reaches an agent
+    /// crosses a process boundary, and holding this across one of those awaits
+    /// is what turns "the agent stopped answering" into "the session stopped
+    /// answering": stop, close, and every read of the session queue behind it.
+    agent: Mutex<Option<Arc<dyn AgentSession>>>,
     /// Deployment-aware context supplied by the authenticated UI. It is kept
     /// for an in-process Agent restart but not persisted: the next browser send
     /// recomposes domain/channel/workspace from its actual address.
@@ -116,6 +165,12 @@ struct Live {
     /// boundary during tool-heavy work
     /// however many adapter turns the round spans.
     open_trunk_items: Mutex<Vec<String>>,
+    /// LLM request round counter feeding trunk pagination, mirrored from the
+    /// pump's `TurnProgress` merge. The adapter's counter is cumulative within
+    /// one turn only, but a round spans several turns (permission resumes,
+    /// client-declared continuations), so each finished turn's high-water mark
+    /// is folded into a round base the moment the counter is seen resetting.
+    llm_rounds: Mutex<LlmRounds>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Daemon-owned round bookkeeping — one user request, possibly several
     /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
@@ -157,6 +212,9 @@ struct ActiveRound {
     /// Total time this round spent waiting on a human, across every pause —
     /// not counted as the agent's own working time.
     blocked_ms: i64,
+    /// Every completed waiting interval, so trunk/batch durations can exclude
+    /// the time the round spent waiting on a human instead of working.
+    blocked_intervals: Vec<(i64, i64)>,
     /// `None` while the round is still open (running or blocked on a human).
     outcome: Option<RoundOutcome>,
     /// This round's still-open trunk — a bounded slice of its tool-call-
@@ -165,6 +223,13 @@ struct ActiveRound {
     /// long enough that "every item carries an overview" alone re-blows the
     /// byte budget the round layer itself exists to avoid.
     current_trunk: TrunkBuilder,
+    /// The LLM round delta attributed to each recorded item, so the open
+    /// trunk's rebuild reports the same rounds the builder counted while
+    /// streaming. Deltas are absolute: a rebuild needs no base counter.
+    round_deltas: HashMap<String, u32>,
+    /// The cumulative round counter as of the last recorded trunk item — the
+    /// next item's delta is measured from here.
+    last_attributed_rounds: u32,
     /// Trunks already closed, in order. Becomes `RoundRecord::trunk_summaries`
     /// once the round settles (`close_current_trunk` folds in whatever was
     /// still open, so nothing since the last boundary is lost).
@@ -200,7 +265,11 @@ impl ActiveRound {
     /// plans, turn summaries, … never affect trunk boundaries. Returns a
     /// just-closed trunk unresolved: its overview needs a live look at the
     /// item store, which only `Live` has (`resolve_monologue_text`).
-    fn record_trunk_item(&mut self, item: &TimelineItem) -> Option<rounds::ClosedTrunk> {
+    fn record_trunk_item(
+        &mut self,
+        item: &TimelineItem,
+        cumulative_rounds: u32,
+    ) -> Option<rounds::ClosedTrunk> {
         let trunk_item = match item {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
             TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
@@ -208,7 +277,14 @@ impl ActiveRound {
             TimelineItem::Compaction { reason, .. } => TrunkItem::Compaction(reason.as_str()),
             _ => return None,
         };
-        self.current_trunk.push(item.id(), trunk_item)
+        // The rounds this item answers for are the counter's movement since
+        // the previous recorded item; adapters emit progress before the item
+        // that opens a round, so that item carries the round.
+        let delta = cumulative_rounds.saturating_sub(self.last_attributed_rounds);
+        self.last_attributed_rounds = cumulative_rounds;
+        self.round_deltas.insert(item.id().to_string(), delta);
+        self.current_trunk
+            .push(item.id(), trunk_item, rounds::item_timing(item), delta)
     }
 
     /// Closes whatever trunk is still being built, if any, so a round that
@@ -1602,8 +1678,13 @@ impl SessionManager {
             status: SessionStatus::Running,
         })
         .await;
-        let started = self
-            .start_turn(
+        // The claim above needs an owner. Announcing a running turn and then
+        // handing over without a deadline is what leaves a session saying it is
+        // working with nothing behind it: no round, no agent turn, and every
+        // later prompt refused as a conflict with a turn that never began.
+        let started = match tokio::time::timeout(
+            HANDOVER_BUDGET,
+            self.start_turn(
                 &live,
                 session_id,
                 text,
@@ -1611,8 +1692,16 @@ impl SessionManager {
                 providers,
                 additional_system_prompt,
                 continues_round,
-            )
-            .await;
+            ),
+        )
+        .await
+        {
+            Ok(started) => started,
+            Err(_) => Err(anyhow!(
+                "the agent did not take this message within {}s",
+                HANDOVER_BUDGET.as_secs()
+            )),
+        };
         if started.is_err() {
             // Nothing is running after all, and a session stuck on Running would
             // refuse every later prompt. Withdrawn on the wire as well, or every
@@ -1707,9 +1796,9 @@ impl SessionManager {
             }
         }
 
-        let agent = live.agent.lock().await;
-        let agent = agent
-            .as_ref()
+        let agent = live
+            .agent()
+            .await
             .ok_or_else(|| anyhow!("the session has no running agent"))?;
         let turn_id = agent
             .send(PromptInput {
@@ -1825,7 +1914,18 @@ impl SessionManager {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _starting = gate.lock().await;
+        // Bounded, because this gate is the one place where one conversation can
+        // stop another. Everything inside it has its own deadline; waiting for
+        // it did not, so a single CLI that never finishes its first run took
+        // every other session of that kind down with it — the caller sits here,
+        // having already announced a running turn, with no round behind it and
+        // no way to withdraw. That is the shape of the "状态坏了？" report.
+        let Ok(_starting) = tokio::time::timeout(START_GATE_BUDGET, gate.lock()).await else {
+            anyhow::bail!(
+                "another {} session is still starting up; try again in a moment",
+                meta.agent_id
+            );
+        };
         // Whoever held the gate may have been starting this very session.
         if live.agent.lock().await.is_some() {
             return Ok(());
@@ -1911,7 +2011,7 @@ impl SessionManager {
             let session_id = live.meta.lock().await.id.clone();
             self.processes.watch(&session_id, pid).await;
         }
-        *live.agent.lock().await = Some(session);
+        *live.agent.lock().await = Some(Arc::from(session));
 
         if let Some(previous) = live.pump.lock().await.take() {
             if !previous.is_finished() {
@@ -1940,12 +2040,29 @@ impl SessionManager {
             agent = %agent_id,
             "forwarding a user interrupt to the active agent"
         );
-        let agent = live.agent.lock().await;
-        let result = match agent.as_ref() {
-            Some(agent) => agent.interrupt().await,
+        let result = match live.agent().await {
+            Some(agent) => match tokio::time::timeout(INTERRUPT_ASK, agent.interrupt()).await {
+                Ok(result) => result,
+                // The ask itself did not get through — the agent is not reading
+                // any more. Abandoning a half-written cancel would matter if
+                // anything else were going to be said down this pipe, and the
+                // escalation below is there precisely because nothing is.
+                Err(_) => Err(anyhow!("the agent did not accept the interrupt in time")),
+            },
             // Nothing running is not a failure: the user pressed stop late.
             None => Ok(()),
         };
+        // Asking is not stopping. An agent is free to ignore a cancel, and one
+        // that does leaves the user with a conversation that says it is still
+        // working and a stop button that has already been pressed — so the ask
+        // gets a deadline, and missing it ends the agent instead.
+        let stopping = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .map(|round| round.round_id.clone());
+        stop_if_still_running(&live, self.store.clone(), session_id.to_string(), stopping);
         match &result {
             Ok(()) => tracing::info!(
                 event = "session_interrupt_forwarded",
@@ -1995,7 +2112,7 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_model(model_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2027,7 +2144,7 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_effort(effort_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2075,7 +2192,7 @@ impl SessionManager {
             value_id,
             axis.values.iter().map(|value| value.id.as_str()),
         )?;
-        if let Some(agent) = live.agent.lock().await.as_ref() {
+        if let Some(agent) = live.agent().await {
             agent.set_runtime_axis(axis_id, value_id).await?;
         }
         {
@@ -2106,7 +2223,7 @@ impl SessionManager {
                 "answer or cancel the pending Agent interaction before changing mode"
             ));
         }
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_mode(mode_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2163,18 +2280,16 @@ impl SessionManager {
                 .await
                 .context("resuming the stopped Agent session")?;
             *live.status.lock().await = SessionStatus::Running;
-            let sent = {
-                let agent = live.agent.lock().await;
-                let agent = agent
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
-                agent
-                    .send(PromptInput {
-                        text: continuation.prompt,
-                        attachments: Vec::new(),
-                    })
-                    .await
-            };
+            let agent = live
+                .agent()
+                .await
+                .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
+            let sent = agent
+                .send(PromptInput {
+                    text: continuation.prompt,
+                    attachments: Vec::new(),
+                })
+                .await;
             match sent {
                 Ok(turn_id) => {
                     // This is the daemon deciding to resume, not the client
@@ -2418,6 +2533,7 @@ fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize, 
             TimelineItem::Compaction {
                 id: format!("import-{}", uuid::Uuid::new_v4().simple()),
                 reason: format!("导入历史过长，较早的 {omitted} 项未放入当前可见窗口"),
+                received_at_ms: None,
             },
         );
     }
@@ -2450,6 +2566,7 @@ fn truncate_import_item(mut item: TimelineItem, max_bytes: usize) -> TimelineIte
         TimelineItem::Compaction {
             id,
             reason: "单条历史记录过长，导入时已省略".into(),
+            received_at_ms: None,
         }
     }
 }
@@ -2513,6 +2630,7 @@ impl Live {
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
             open_trunk_items: Mutex::new(Vec::new()),
+            llm_rounds: Mutex::new(LlmRounds::default()),
             pump: Mutex::new(None),
             active_round: Mutex::new(None),
         }
@@ -2577,10 +2695,13 @@ impl Live {
                 return;
             }
         }
+        let llm_rounds = self.llm_rounds.lock().await.cumulative();
         let closed = {
             let mut active = self.active_round.lock().await;
             match active.as_mut() {
-                Some(round) if round.outcome.is_none() => round.record_trunk_item(item),
+                Some(round) if round.outcome.is_none() => {
+                    round.record_trunk_item(item, llm_rounds)
+                }
                 _ => None,
             }
         };
@@ -2611,7 +2732,15 @@ impl Live {
                 .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
                 .collect::<Vec<_>>()
         };
-        let mut trunk = rounds::trunks_from_items(&items).into_iter().next()?;
+        let (round_deltas, blocked_intervals) = {
+            let active = self.active_round.lock().await;
+            let round = active.as_ref()?;
+            (round.round_deltas.clone(), round.blocked_intervals.clone())
+        };
+        let mut trunk = rounds::trunks_from_items_with_rounds(&items, &round_deltas)
+            .into_iter()
+            .next()?;
+        rounds::exclude_blocked(&mut trunk, &blocked_intervals);
         trunk.summary.index = index;
         let refs = self.blob_refs.lock().await;
         for batch in &mut trunk.batches {
@@ -2721,6 +2850,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.llm_rounds.lock().await.clear();
 
         let superseded = self
             .active_round
@@ -2736,8 +2866,11 @@ impl Live {
             started_at_ms: now_ms(),
             blocked_since_ms: None,
             blocked_ms: 0,
+            blocked_intervals: Vec::new(),
             outcome: None,
             current_trunk: TrunkBuilder::default(),
+            round_deltas: HashMap::new(),
+            last_attributed_rounds: 0,
             closed_trunks: Vec::new(),
         };
         // Recorded before the agent runs, so a daemon that dies mid-request
@@ -2795,13 +2928,24 @@ impl Live {
         if let Some(round) = active.as_mut() {
             if round.outcome.is_none() {
                 if let Some(since) = round.blocked_since_ms.take() {
-                    round.blocked_ms += (now_ms() - since).max(0);
+                    let now = now_ms();
+                    round.blocked_ms += (now - since).max(0);
+                    round.blocked_intervals.push((since, now));
                 }
                 if !round.adapter_turn_ids.iter().any(|id| id == turn_id) {
                     round.adapter_turn_ids.push(turn_id.to_string());
                 }
             }
         }
+    }
+
+    /// A handle to the running agent, if there is one, with the lock released
+    /// before the caller does anything with it.
+    ///
+    /// The awaits that follow all end at a process the daemon does not
+    /// control, so none of them may be made while holding this.
+    async fn agent(&self) -> Option<Arc<dyn AgentSession>> {
+        self.agent.lock().await.clone()
     }
 
     /// Marks the open round as waiting on a human. A no-op if it is already
@@ -2829,7 +2973,9 @@ impl Live {
                 return None;
             }
             if let Some(since) = round.blocked_since_ms.take() {
-                round.blocked_ms += (now_ms() - since).max(0);
+                let now = now_ms();
+                round.blocked_ms += (now - since).max(0);
+                round.blocked_intervals.push((since, now));
             }
             round.outcome = Some(outcome);
             round.close_current_trunk_pending().is_some()
@@ -2839,6 +2985,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.llm_rounds.lock().await.clear();
         self.active_round.lock().await.clone()
     }
 
@@ -2846,7 +2993,14 @@ impl Live {
         if let Some(pump) = self.pump.lock().await.take() {
             pump.abort();
         }
-        if let Some(agent) = self.agent.lock().await.take() {
+        // Taken in its own statement on purpose. Edition 2021 keeps the guard a
+        // scrutinee produces alive for the whole `if let`, so writing this as
+        // `if let Some(agent) = self.agent.lock().await.take()` would hold the
+        // session's agent lock across the close — which reaches a third-party
+        // process and can take as long as that process likes. Everything else
+        // that wants this session queues behind it.
+        let agent = self.agent.lock().await.take();
+        if let Some(agent) = agent {
             let _ = agent.close().await;
         }
         *self.status.lock().await = SessionStatus::Closed;
@@ -2860,6 +3014,24 @@ impl Live {
 /// machine, not to whoever asked it to start. See `ensure_started`.
 static STARTING: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How long a session waits for another session's first start of the same kind.
+///
+/// Bounded, and inside the handover budget below: whoever is waiting here has
+/// already told every client that a turn is running, and being told "another
+/// one is still starting, try again" is a better answer than silence.
+const START_GATE_BUDGET: Duration = Duration::from_secs(40);
+
+/// How long the whole handover gets before the claim behind it is withdrawn.
+///
+/// Under the sixty seconds a client waits for any request, deliberately. A
+/// handover that takes longer than the caller is prepared to wait is the freeze
+/// itself: the client gives up and reports a timeout, the daemon carries on
+/// holding a running status with no round behind it, and every prompt in
+/// between is refused as a conflict with a turn that never began. Whatever goes
+/// wrong in here, the answer and the withdrawal have to arrive while someone is
+/// still listening.
+const HANDOVER_BUDGET: Duration = Duration::from_secs(55);
 
 struct Continuation {
     elevated: bool,
@@ -2992,6 +3164,74 @@ fn question_answer(
     Ok((!lines.is_empty()).then(|| lines.join("\n")))
 }
 
+/// How long the agent has to accept a cancel before the ask is abandoned.
+///
+/// Generous, because a healthy agent answers this in microseconds and the only
+/// thing a longer wait buys is a longer freeze.
+const INTERRUPT_ASK: Duration = Duration::from_secs(3);
+
+/// How long a cancelled turn has to end before the agent is stopped outright.
+const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+/// Ends an agent that was asked to stop and did not.
+///
+/// Runs on its own task so that pressing stop stays instant: the answer the
+/// user is waiting for is "your request was taken", and the enforcement that
+/// follows is the daemon's problem, not theirs.
+fn stop_if_still_running(
+    live: &Arc<Live>,
+    store: Store,
+    session_id: String,
+    stopping: Option<String>,
+) {
+    let live = live.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(INTERRUPT_GRACE).await;
+        if *live.status.lock().await != SessionStatus::Running {
+            return;
+        }
+        // Pressing stop and immediately typing again is ordinary, and five
+        // seconds is long enough for it. Without this the next message is what
+        // gets killed, which is worse than the freeze this is here to end.
+        let open = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .map(|round| round.round_id.clone());
+        if open != stopping {
+            return;
+        }
+        tracing::warn!(
+            event = "session_interrupt_escalated",
+            session = %session_id,
+            grace_ms = INTERRUPT_GRACE.as_millis() as u64,
+            "an agent ignored a cancel and is being stopped"
+        );
+        // Taking it first is what makes this safe to race: whoever else was
+        // about to reach for the agent finds nothing rather than a process
+        // being killed underneath them.
+        let agent = live.agent.lock().await.take();
+        if let Some(agent) = agent {
+            if let Err(error) = agent.close().await {
+                tracing::warn!(error = %error, "could not stop an agent that ignored a cancel");
+            }
+        }
+        // The pump would eventually see the event channel close and clean up,
+        // but only if the process lets go of its own stdout. Settling here
+        // means the conversation stops saying it is working either way.
+        if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+            persist_round(&live, round).await;
+        }
+        flush_turn(&live, &store).await;
+        *live.status.lock().await = SessionStatus::Idle;
+        live.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Idle,
+        })
+        .await;
+    });
+}
+
 async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
     live.round_blocked().await;
     let agent = live.agent.lock().await.take();
@@ -3037,6 +3277,7 @@ fn flush_reasoning_blobs(
         let value = serde_json::to_value(TimelineItem::Reasoning {
             id: id.clone(),
             text,
+            received_at_ms: None,
         });
         if let Ok(value) = value {
             let _ = sender.send(BlobWrite::Put { item_id: id, value });
@@ -3168,6 +3409,10 @@ async fn pump_events(
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
             token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
             if let Some(merged) = live_usage.get(turn_id) {
+                live.llm_rounds
+                    .lock()
+                    .await
+                    .observe(turn_id, merged.llm_rounds as u32);
                 event = SessionEvent::TurnProgress {
                     turn_id: turn_id.clone(),
                     usage: merged.clone(),
@@ -3268,7 +3513,7 @@ async fn pump_events(
 
         let updates_reasoning = match &event {
             SessionEvent::Item {
-                item: TimelineItem::Reasoning { id, text },
+                item: TimelineItem::Reasoning { id, text, received_at_ms: None },
                 ..
             } => {
                 raw_thinking.insert(id.clone(), text.clone());
@@ -3344,7 +3589,7 @@ async fn pump_events(
             flush_blob_writer(&blob_sender).await;
         }
 
-        let event = match event {
+        let mut event = match event {
             SessionEvent::ItemDelta {
                 turn_id,
                 item_id,
@@ -3371,12 +3616,13 @@ async fn pump_events(
                     item: TimelineItem::Reasoning {
                         id: item_id,
                         text: sentence,
+                        received_at_ms: None,
                     },
                 }
             }
             event => {
                 if let SessionEvent::Item {
-                    item: TimelineItem::Reasoning { id, text },
+                    item: TimelineItem::Reasoning { id, text, received_at_ms: None },
                     ..
                 } = &event
                 {
@@ -3445,6 +3691,22 @@ async fn pump_events(
             SessionEvent::TitleChanged { title } => agent_title_would_apply(&live, title).await,
             _ => true,
         };
+
+        if let SessionEvent::Item { item, .. } = &mut event {
+            let previous = {
+                let items = live.items.lock().await;
+                items
+                    .iter()
+                    .find(|existing| existing.id() == item.id())
+                    .cloned()
+            };
+            // Merge before both apply and publish so the store, the trunk
+            // builder and every live subscriber see the completed card rather
+            // than a bare status update blanking it.
+            item.merge_tool_update(previous.as_ref());
+            item.inherit_and_stamp_tool_times(previous.as_ref(), now_ms());
+            item.inherit_and_stamp_received_at(previous.as_ref(), now_ms());
+        }
 
         apply(&live, &event).await;
 
@@ -3621,8 +3883,19 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
         SessionEvent::Item { item, .. } => {
             let mut items = live.items.lock().await;
             match items.iter_mut().find(|existing| existing.id() == item.id()) {
-                Some(existing) => *existing = item.clone(),
-                None => items.push(item.clone()),
+                Some(existing) => {
+                    let mut next = item.clone();
+                    next.merge_tool_update(Some(existing));
+                    next.inherit_and_stamp_tool_times(Some(existing), now_ms());
+                    next.inherit_and_stamp_received_at(Some(existing), now_ms());
+                    *existing = next;
+                }
+                None => {
+                    let mut next = item.clone();
+                    next.inherit_and_stamp_tool_times(None, now_ms());
+                    next.inherit_and_stamp_received_at(None, now_ms());
+                    items.push(next);
+                }
             }
             // Dropped explicitly, not just left to fall out of scope at the
             // end of this match arm: `record_round_item` can re-lock
@@ -3666,6 +3939,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                             *current_images = images.clone();
                         }
                     }
+                    item.stamp_tool_times(now_ms());
                 }
             }
         }
@@ -3954,6 +4228,7 @@ mod tests {
         TimelineItem::AssistantMessage {
             id: id.into(),
             text: text.into(),
+            received_at_ms: None,
         }
     }
 
@@ -4287,6 +4562,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "assistant-1".into(),
                 text: "The health check path is stale".into(),
+                received_at_ms: None,
             },
             TimelineItem::TurnSummary {
                 id: "summary-1".into(),
@@ -4355,6 +4631,8 @@ mod tests {
                     }),
                     path: Some("assets/logo.png".into()),
                 }],
+                started_at_ms: None,
+                finished_at_ms: None,
             },
         );
         *live.items.lock().await = items;
@@ -5051,6 +5329,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "assistant-live".into(),
                 text: "I can investigate errors".into(),
+                received_at_ms: None,
             },
         ];
         *source_live.status.lock().await = SessionStatus::Waiting;
@@ -5145,6 +5424,7 @@ mod tests {
             .map(|index| TimelineItem::AssistantMessage {
                 id: format!("i-{index}"),
                 text: "reply".into(),
+                received_at_ms: None,
             })
             .collect();
         let (bounded, omitted, altered) = bound_imported_items(items);
@@ -5159,6 +5439,7 @@ mod tests {
         let huge = vec![TimelineItem::AssistantMessage {
             id: "huge".into(),
             text: "四".repeat(IMPORT_VISIBLE_BYTES),
+            received_at_ms: None,
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge);
         assert_eq!((omitted, altered), (0, 1));
@@ -5172,6 +5453,8 @@ mod tests {
                 raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge_tool);
         assert_eq!((omitted, altered), (0, 1));
@@ -5609,7 +5892,84 @@ mod tests {
 
         let items = live.items.lock().await;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0], item("a", "final"));
+        match &items[0] {
+            TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms,
+            } => {
+                assert_eq!(id, "a");
+                assert_eq!(text, "final");
+                assert!(received_at_ms.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bare_tool_update_inherits_the_card_it_replaces() {
+        // ACP shape: the initial event carries title/kind, the completion
+        // update only carries status and rawOutput. The update must not blank
+        // the card the initial event filled in.
+        let (live, _store_dir) = live_session(meta());
+        apply(
+            &live,
+            &SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "call-1".into(),
+                    name: "Read File".into(),
+                    status: ToolStatus::Running,
+                    detail: ToolCallDetail::Read {
+                        path: "src/main.rs".into(),
+                        content: String::new(),
+                        truncated: false,
+                    },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+            },
+        )
+        .await;
+        apply(
+            &live,
+            &SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "call-1".into(),
+                    name: String::new(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Overview {
+                        tool_kind: genehub_proto::ToolKind::Other,
+                        overview: String::new(),
+                        input: String::new(),
+                        output: "fn main() {}".into(),
+                    },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+            },
+        )
+        .await;
+
+        let items = live.items.lock().await;
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            TimelineItem::ToolCall { name, detail, .. } => {
+                assert_eq!(name, "Read File");
+                assert_eq!(
+                    detail,
+                    &ToolCallDetail::Read {
+                        path: "src/main.rs".into(),
+                        content: "fn main() {}".into(),
+                        truncated: false,
+                    }
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -5636,7 +5996,19 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(live.items.lock().await[0], item("a", "hello"));
+        let items = live.items.lock().await;
+        match &items[0] {
+            TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms,
+            } => {
+                assert_eq!(id, "a");
+                assert_eq!(text, "hello");
+                assert!(received_at_ms.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -5671,6 +6043,8 @@ mod tests {
                         exit_code: None,
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             },
         )
@@ -5869,7 +6243,7 @@ mod tests {
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (events, _) = broadcast::channel(1);
-        *live.agent.lock().await = Some(Box::new(StoppingSession {
+        *live.agent.lock().await = Some(Arc::new(StoppingSession {
             events,
             interrupted: interrupted.clone(),
             closed: closed.clone(),
@@ -6233,6 +6607,7 @@ mod tests {
                 item: TimelineItem::Reasoning {
                     id: "r".into(),
                     text: String::new(),
+                    received_at_ms: None,
                 },
             },
         ];
@@ -6328,6 +6703,8 @@ mod tests {
                         exit_code: Some(0),
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             },
             SessionEvent::TurnCompleted {
@@ -6577,6 +6954,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn llm_rounds_fold_each_adapter_turn_into_the_round_base() {
+        let mut rounds = LlmRounds::default();
+        rounds.observe("t1", 1);
+        rounds.observe("t1", 3);
+        assert_eq!(rounds.cumulative(), 3);
+        // A new adapter turn of the same round restarts its counter at zero.
+        rounds.observe("t2", 1);
+        assert_eq!(rounds.cumulative(), 4);
+        rounds.observe("t2", 2);
+        assert_eq!(rounds.cumulative(), 5);
+        // A late frame from the finished turn cannot fold the base twice.
+        rounds.observe("t1", 9);
+        assert_eq!(rounds.cumulative(), 5);
+        // A fresh round starts from zero.
+        rounds.clear();
+        rounds.observe("t3", 1);
+        assert_eq!(rounds.cumulative(), 1);
+    }
+
     #[tokio::test]
     async fn blocked_time_is_folded_in_when_the_round_resumes_or_ends() {
         let (live, _store_dir) = live_session(meta());
@@ -6697,7 +7094,7 @@ mod tests {
         // send more than 64 events and are not overflow tests.
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
-        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
             turn_ids.clone(),
         )));
@@ -6801,7 +7198,7 @@ mod tests {
         let (sessions, events, _) = wired(dir.path()).await;
         let providers = ProviderMap::new();
         let live = sessions.live("s1").await.unwrap();
-        *live.agent.lock().await = Some(Box::new(FakeSession::refusing(events.clone())));
+        *live.agent.lock().await = Some(Arc::new(FakeSession::refusing(events.clone())));
         let mut seen = live.events.subscribe();
 
         sessions
@@ -6887,6 +7284,8 @@ mod tests {
                 exit_code: Some(0),
             },
             images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }
     }
 
@@ -7005,12 +7404,21 @@ mod tests {
             .unwrap();
         for i in 0..132u32 {
             events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn_id.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
                 .send(SessionEvent::Item {
                     turn_id: turn_id.clone(),
                     item: tool_call(&format!("t{i}"), "grep"),
                 })
                 .unwrap();
-            if i % 64 == 63 {
+            if i % 16 == 15 {
                 tokio::task::yield_now().await;
             }
         }
@@ -7028,10 +7436,13 @@ mod tests {
             let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
                 return false;
             };
-            chat.rounds
+            let done = chat
+                .rounds
                 .first()
                 .is_some_and(|round| round.trunk_count == 2)
                 && trunks.len() == 2
+                && trunks[1].blob_count == 4;
+            done
         })
         .await;
 
@@ -7043,10 +7454,186 @@ mod tests {
             2,
             "132 tool calls split after the threshold-crossing batch: {trunks:?}"
         );
+        assert_eq!(
+            trunks[0].batches.len(),
+            2,
+            "trunks: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            trunks[0].llm_rounds,
+            Some(128),
+            "trunks: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
         assert_eq!(trunks[0].blob_count, 128);
-        assert_eq!(trunks[0].batches.len(), 2);
         assert_eq!(trunks[1].blob_count, 4);
         assert_eq!(trunks[1].batches.len(), 1);
+        assert_eq!(trunks[1].llm_rounds, Some(4));
+    }
+
+    /// A permission resume (or any client-declared continuation) starts a new
+    /// adapter turn whose `llmRounds` counts from zero again. The trunk
+    /// builder must still see a round-cumulative counter, or everything after
+    /// the resume stops counting until the new turn passes the old high-water
+    /// mark.
+    #[tokio::test]
+    async fn llm_rounds_stay_cumulative_when_a_continued_turn_restarts_the_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn1 = sessions
+            .send("s1", "start".into(), vec![], &providers, None, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn1.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for i in 0..3u32 {
+            events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn1.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn1.clone(),
+                    item: tool_call(&format!("a{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        // A permission interrupt cancels the adapter turn but leaves the
+        // round open for the resume.
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: turn1.clone(),
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .expect("the interrupted round is left dangling")
+            .round_id
+            .clone();
+        let turn2 = sessions
+            .send(
+                "s1",
+                "approved, keep going".into(),
+                vec![],
+                &providers,
+                None,
+                Some(round_id),
+            )
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn2.clone(),
+                started_at_ms: 2,
+            })
+            .unwrap();
+        // The resumed adapter turn counts its own LLM rounds from 1 again.
+        for i in 0..2u32 {
+            events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn2.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn2.clone(),
+                    item: tool_call(&format!("b{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn2.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+
+        eventually("persisted the continued round's trunk", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 1)
+        })
+        .await;
+
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(trunks.len(), 1, "trunks: {trunks:?}");
+        assert_eq!(trunks[0].blob_count, 5);
+        assert_eq!(
+            trunks[0].llm_rounds,
+            Some(5),
+            "the resumed turn's two rounds add to the interrupted turn's three: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -7083,6 +7670,8 @@ mod tests {
                         truncated: false,
                     },
                     images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             })
             .unwrap();
@@ -7183,6 +7772,10 @@ mod tests {
                             blob_count: 100,
                             title: format!("阶段 {index}"),
                             batches: vec![],
+                            llm_rounds: None,
+                            started_at_ms: None,
+                            duration_ms: None,
+                            tool_duration_ms: None,
                         },
                         batches: vec![],
                     },
@@ -7247,6 +7840,10 @@ mod tests {
                             blob_count: 0,
                             title: format!("阶段 {index}"),
                             batches: vec![],
+                            llm_rounds: None,
+                            started_at_ms: None,
+                            duration_ms: None,
+                            tool_duration_ms: None,
                         },
                         batches: vec![],
                     },
@@ -7379,7 +7976,7 @@ mod tests {
         // fake stands in for whatever `ensure_started_in_mode` would really
         // start on approval, sharing the turn-id counter so the ids stay
         // distinct across the "restart".
-        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
             turn_ids.clone(),
         )));

@@ -87,6 +87,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "a1".into(),
                 text: "hi there".into(),
+                received_at_ms: None,
             },
         ]);
         assert_eq!(assert_normalized_reply(&events, "Say hi"), "hi there");
@@ -117,6 +118,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "a1".into(),
                 text: "Say hi".into(),
+                received_at_ms: None,
             },
         ]);
         assert_normalized_reply(&events, "Say hi");
