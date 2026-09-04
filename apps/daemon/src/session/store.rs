@@ -745,6 +745,12 @@ impl Store {
         self.homes.root(workspace_id)
     }
 
+    /// Everything the daemon owns for one Space, sessions included. Component
+    /// storage that must outlive a single conversation lives here.
+    pub fn space_home(&self, workspace_id: &str) -> Result<PathBuf> {
+        self.homes.home_dir(workspace_id)
+    }
+
     fn raw_session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
     }

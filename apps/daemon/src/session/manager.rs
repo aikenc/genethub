@@ -1416,6 +1416,17 @@ impl SessionManager {
         live.snapshot().await
     }
 
+    /// Which Space this Session instantiates, and the two directories its
+    /// Component Instances write to. The caller supplies the Space's
+    /// composition, so this stays ignorant of the project registry.
+    pub async fn component_scope(&self, session_id: &str) -> Result<(String, PathBuf, PathBuf)> {
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        let space_home = self.store.space_home(&workspace_id)?;
+        let session_dir = self.store.session_dir(&workspace_id, session_id)?;
+        Ok((workspace_id, space_home, session_dir))
+    }
+
     /// A bounded-reader view frozen at an optional round boundary. This is the
     /// single source for the CLI pages below, so inspect/narrative/rounds agree
     /// on both the digest and what "through round" means.

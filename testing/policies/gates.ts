@@ -75,6 +75,8 @@ export function qualificationReasons(input: {
   requiredCloudSha?: string;
   requiredArtifactHash?: string;
   requiredNotExecuted?: string[];
+  unprovenArtifacts?: string[];
+  leakedProcessGroups?: number;
 }): string[] {
   const reasons: string[] = [];
   if (input.failed > 0) reasons.push("failed cases present");
@@ -101,6 +103,18 @@ export function qualificationReasons(input: {
   }
   if (input.requiredNotExecuted && input.requiredNotExecuted.length > 0) {
     reasons.push(`required cases not executed: ${input.requiredNotExecuted.join(",")}`);
+  }
+  if (
+    (input.gate === "dev" || input.gate === "beta" || input.gate === "stable") &&
+    input.unprovenArtifacts &&
+    input.unprovenArtifacts.length > 0
+  ) {
+    reasons.push(
+      `release gate cannot accept an unproven build: ${input.unprovenArtifacts.join(",")}`,
+    );
+  }
+  if (input.leakedProcessGroups && input.leakedProcessGroups > 0) {
+    reasons.push(`${input.leakedProcessGroups} unit process group(s) survived the run`);
   }
   return reasons;
 }

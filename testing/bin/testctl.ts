@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { catalogDigest, loadCatalog } from "../infrastructure/engine/catalog.ts";
 import { artifactIdentity, repoIdentity, runsIgnored } from "../infrastructure/engine/git.ts";
 import { planCases } from "../infrastructure/engine/planner.ts";
+import { preflightRun } from "../infrastructure/engine/preflight.ts";
+import { unreapedProcessGroups } from "../infrastructure/environment/cleanup.ts";
 import { addResult, emptyCounts, rollupStatus } from "../infrastructure/engine/result.ts";
 import {
   claimNext,
@@ -56,7 +58,9 @@ function usage(): string {
   lint [--open <path>] [--cloud <path>]
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>]
-  run --space <abs> --gate <gate> --topic <slug> [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms]
+  run --space <abs path of the PipeSpace directory> --gate <gate> --topic <slug>
+      [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms]
+      [--no-build]
   inspect --run <abs> [--failed|--case <id>]
   compare --base <run> --candidate <run>
   list --space <abs>
@@ -122,16 +126,43 @@ async function main(): Promise<number> {
     const summaryLanguage = parseSummaryLanguage(flag(args, "--summary-language", "en"));
     const environments = Number(flag(args, "--environments", "16")) || 16;
     const maxRunMs = Number(flag(args, "--max-run-ms", "0")) || 0;
+    // Every refusal below names the value it received and the shape it wanted.
+    // "--space is required" and "space runs/ is not gitignored" both read like
+    // the flag was wrong when the usual mistake is passing a PipeSpace *name*
+    // where an absolute path belongs.
     if (!space) {
-      process.stderr.write("--space is required\n");
+      process.stderr.write(
+        "--space is required: the absolute path of the PipeSpace directory that will hold runs/,\n" +
+          "for example --space /path/to/genethub-spaces/spaces/dev-agent (a space name is not a path)\n",
+      );
+      return 2;
+    }
+    if (!existsSync(space) || !statSync(space).isDirectory()) {
+      process.stderr.write(
+        `--space must be an existing directory; ${space} is not one.\n` +
+          "Pass the absolute path of the PipeSpace directory, not its name.\n",
+      );
       return 2;
     }
     if (!runsIgnored(space)) {
-      process.stderr.write("space runs/ is not gitignored\n");
+      process.stderr.write(
+        `${path.join(space, "runs")} is not gitignored, so a run would commit its own evidence.\n` +
+          "Add runs/ to that repository's ignore rules, then rerun.\n",
+      );
       return 2;
     }
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const plan = planCases(cases, gate, tagsOf(args));
+    const preflight = preflightRun({
+      units: plan.units,
+      openRoot,
+      cloudRoot,
+      build: !has(args, "--no-build"),
+    });
+    if (preflight.refusals.length > 0) {
+      process.stderr.write(`${preflight.refusals.join("\n")}\n`);
+      return 2;
+    }
     const store = createRunStore(space, topic);
     const startedAt = new Date();
     const results: UnitResult[] = [];
@@ -231,6 +262,7 @@ async function main(): Promise<number> {
     if (inflight.size > 0) await Promise.all(inflight);
 
     const endedAt = new Date();
+    const leakedProcessGroups = unreapedProcessGroups();
     const counts = emptyCounts();
     for (const result of results) addResult(counts, result);
     const status = rollupStatus(results);
@@ -258,6 +290,8 @@ async function main(): Promise<number> {
       requiredCloudSha: process.env.TESTCTL_REQUIRE_CLOUD_SHA,
       requiredArtifactHash: process.env.TESTCTL_REQUIRE_ARTIFACT_HASH,
       requiredNotExecuted: requiredCases.filter((id) => !executed.has(id)),
+      unprovenArtifacts: preflight.unprovenArtifacts,
+      leakedProcessGroups,
     });
     const manifest: RunManifest = {
       schema: "genehub.test-run.v1",
@@ -288,7 +322,10 @@ async function main(): Promise<number> {
       governanceDigest: checkGovernance(openRoot, cloudRoot).digest,
       environments,
       resultsPath: path.join(store.dir, "results.ndjson"),
-      leak: { processes: 0, ports: 0 },
+      // Measured, not assumed. There is no port registry to audit, so `ports`
+      // stays null rather than claiming a zero nobody counted.
+      leak: { processes: leakedProcessGroups, ports: null },
+      unprovenArtifacts: preflight.unprovenArtifacts,
     };
     const failed = results.filter((item) => item.status !== "passed" && item.status !== "not-applicable");
     const slowest = [...results].sort((a, b) => b.durationMs - a.durationMs).slice(0, 5);

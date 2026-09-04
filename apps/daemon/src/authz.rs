@@ -353,6 +353,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
         | Request::AgentSpaceChildren { .. }
+        | Request::SessionComponents { .. }
         | Request::DirectoryList { .. }
         | Request::FileTree { .. }
         | Request::LogTail { .. }
