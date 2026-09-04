@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -145,6 +145,13 @@ struct Live {
     /// with the trunk's items.
     blob_refs: Mutex<HashMap<String, BlobRef>>,
     seq: AtomicU64,
+    /// When this session last published anything.
+    ///
+    /// Reported to clients while a turn is running, and only then, so that a
+    /// person waiting can see how long it has been quiet. Nothing in the daemon
+    /// reads it: silence is not evidence of death, and the only party who can
+    /// tell a long thought from a wedged process is the one who asked.
+    last_activity_ms: AtomicI64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
     /// Shared rather than owned so a caller can take a handle to the agent and
@@ -1042,7 +1049,11 @@ impl SessionManager {
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
-        let summary = live.meta.lock().await.summary(status);
+        let summary = live
+            .meta
+            .lock()
+            .await
+            .summary_with_activity(status, live.activity_of(status));
         Ok(summary)
     }
 
@@ -1113,12 +1124,15 @@ impl SessionManager {
             }
             // A suspended approval survives daemon restarts without a live
             // Agent process or client connection.
-            let status = match self.sessions.read().await.get(&meta.id) {
-                Some(live) => *live.status.lock().await,
-                None if meta.pending_permission.is_some() => SessionStatus::Waiting,
-                None => SessionStatus::Idle,
+            let (status, activity) = match self.sessions.read().await.get(&meta.id) {
+                Some(live) => {
+                    let status = *live.status.lock().await;
+                    (status, live.activity_of(status))
+                }
+                None if meta.pending_permission.is_some() => (SessionStatus::Waiting, None),
+                None => (SessionStatus::Idle, None),
             };
-            out.push(meta.summary(status));
+            out.push(meta.summary_with_activity(status, activity));
         }
         Ok(out)
     }
@@ -1201,9 +1215,10 @@ impl SessionManager {
         through_round_id: Option<&str>,
     ) -> Result<SessionInspection> {
         let view = self.read_view(session_id, through_round_id).await?;
-        let status = *self.live(session_id).await?.status.lock().await;
+        let live = self.live(session_id).await?;
+        let status = *live.status.lock().await;
         Ok(SessionInspection {
-            summary: view.meta.summary(status),
+            summary: view.meta.summary_with_activity(status, live.activity_of(status)),
             source: view.source,
             narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
             round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
@@ -2623,6 +2638,7 @@ impl Live {
             rounds: Mutex::new(Vec::new()),
             blob_refs: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            last_activity_ms: AtomicI64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
@@ -2636,10 +2652,27 @@ impl Live {
         }
     }
 
+    /// The running turn's last sign of life, for whoever is waiting on it.
+    ///
+    /// Reported only while a turn is running: a session that is idle is not
+    /// quiet, it is finished, and an age on a finished session reads as a
+    /// problem where there is none.
+    fn activity_of(&self, status: SessionStatus) -> Option<i64> {
+        if status != SessionStatus::Running {
+            return None;
+        }
+        let at = self.last_activity_ms.load(Ordering::SeqCst);
+        (at > 0).then_some(at)
+    }
+
     async fn snapshot(&self) -> Result<SessionSnapshot> {
         let status = *self.status.lock().await;
         Ok(SessionSnapshot {
-            summary: self.meta.lock().await.summary(status),
+            summary: self
+                .meta
+                .lock()
+                .await
+                .summary_with_activity(status, self.activity_of(status)),
             items: self.items.lock().await.clone(),
             seq: self.seq.load(Ordering::SeqCst),
             pending_permissions: self.pending_permissions.lock().await.clone(),
@@ -2651,6 +2684,10 @@ impl Live {
     /// Assigns a sequence number, retains for replay, and fans out.
     async fn publish(&self, event: SessionEvent) -> SequencedEvent {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        // Every kind of event counts, deltas included: the question this
+        // answers is "is anything still coming out of it", not "has it made
+        // progress", which nobody outside the agent can judge.
+        self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
         let sequenced = SequencedEvent {
             seq,
             session_id: self.meta.lock().await.id.clone(),

@@ -250,7 +250,21 @@ impl SessionMeta {
     }
 
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
+        self.summary_with_activity(status, None)
+    }
+
+    /// The same, plus when the running turn last produced anything.
+    ///
+    /// Only a live session can answer that, so it is passed in rather than read
+    /// from disk: metadata records when the session was last written, which is
+    /// a different question and a misleading answer to this one.
+    pub fn summary_with_activity(
+        &self,
+        status: SessionStatus,
+        last_activity_at_ms: Option<i64>,
+    ) -> SessionSummary {
         SessionSummary {
+            last_activity_at_ms,
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
             agent_id: self.agent_id.clone(),
