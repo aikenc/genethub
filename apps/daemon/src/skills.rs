@@ -351,6 +351,9 @@ mod tests {
         assert!(body.contains("only requests approval"));
         assert!(body.contains("Only the authenticated Human response"));
         assert!(body.contains("ordinary chat reply"));
+        assert!(body.contains("Keep this command attached until it exits"));
+        assert!(body.contains("running session or cell identifier"));
+        assert!(body.contains("Do not send a final answer"));
         assert!(!body.contains("request_user_input"));
         assert!(!body.contains("AskQuestion"));
     }

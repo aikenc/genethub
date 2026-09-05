@@ -947,10 +947,26 @@ export function App({
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
                             request={workbench.timeline.pendingPermission}
+                            submitting={
+                              workbench.timeline.permissionProgress?.requestId ===
+                                workbench.timeline.pendingPermission.id &&
+                              workbench.timeline.permissionProgress.stage === "submitting"
+                            }
                             onAnswer={(outcome) =>
                               void workbench.answerPermission(outcome)
                             }
                           />
+                        </div>
+                      </div>
+                    ) : null}
+                    {!workbench.timeline.pendingPermission &&
+                    workbench.timeline.permissionProgress ? (
+                      <div className="z-20 shrink-0 px-4 pb-2 pt-2">
+                        <div
+                          role="status"
+                          className="mx-auto max-w-chat rounded-xl border border-accent/40 bg-raised px-3 py-2 text-sm text-fg"
+                        >
+                          {workbench.timeline.permissionProgress.message}
                         </div>
                       </div>
                     ) : null}

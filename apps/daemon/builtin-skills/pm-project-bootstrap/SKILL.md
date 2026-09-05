@@ -34,6 +34,8 @@ For a non-current plan, parse its JSON result and find `approval.challengeId`. P
 
 This command only requests approval and deliberately waits. It displays the existing `PlanApproval` card in this Session; it cannot select an answer or create a grant. Only the authenticated Human response releases the command. Never call `session.respondPermission`, any permission response API, or a shell command that attempts to approve the request. Never interpret an ordinary chat reply such as “yes”, “确认” or “可以” as authorization.
 
+Keep this command attached until it exits. Run it as a foreground operation with a long initial wait. If the execution tool yields a running session or cell identifier, immediately use that tool's wait/poll continuation with the exact identifier until the command exits. Empty output plus a running identifier is not completion. Do not send a final answer, start another tool call, or tell the user to wait while this command is still pending; after the Human answers, consume its success or rejection in this same Agent turn.
+
 Only after `space approval request` returns success, use the plan's exact `planDigest` and `expectedRevision`, and choose one stable action id containing only letters, digits, `_` or `-`:
 
 ```text

@@ -674,6 +674,60 @@ describe("live session status in the sidebar", () => {
   });
 });
 
+describe("Human interaction acknowledgement", () => {
+  it("shows submission immediately and continuation when approval resolves", async () => {
+    const stub = stubClient();
+    let finish!: (reply: { type: "ack" }) => void;
+    const response = new Promise<{ type: "ack" }>((resolve) => {
+      finish = resolve;
+    });
+    const client = {
+      ...stub.client,
+      call: vi.fn(async () => response),
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+    await useWorkbench.getState().selectSession("s1");
+    stub.fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "permissionRequested",
+        request: {
+          id: "plan-1",
+          kind: "planApproval",
+          title: "初始化 PM 项目",
+          options: [{ id: "yes", label: "确认并继续", kind: "allowOnce" }],
+        },
+      },
+    });
+
+    const answering = useWorkbench
+      .getState()
+      .answerPermission({ outcome: "selected", optionId: "yes" });
+    expect(useWorkbench.getState().timeline.permissionProgress).toEqual({
+      requestId: "plan-1",
+      stage: "submitting",
+      message: "正在提交计划确认…",
+    });
+
+    stub.fire({
+      seq: 2,
+      sessionId: "s1",
+      event: {
+        type: "permissionResolved",
+        requestId: "plan-1",
+        outcome: { outcome: "selected", optionId: "yes" },
+      },
+    });
+    expect(useWorkbench.getState().timeline.permissionProgress?.message).toBe(
+      "计划已确认，Agent 正在继续执行。",
+    );
+
+    finish({ type: "ack" });
+    await answering;
+  });
+});
+
 /**
  * The sidebar shows every project's sessions at once, so the session that was
  * clicked is no longer guaranteed to be in the project on screen. The file

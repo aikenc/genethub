@@ -2044,12 +2044,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const sessionId = get().activeSessionId;
     const request = get().timeline.pendingPermission;
     if (!sessionId || !request) return;
-    await asked(set, () =>
+    patchTimeline(sessionId, set, () => ({
+      permissionProgress: {
+        requestId: request.id,
+        stage: "submitting",
+        message:
+          request.kind === "question"
+            ? "正在提交回答…"
+            : request.kind === "planApproval"
+              ? "正在提交计划确认…"
+              : "正在提交授权决定…",
+      },
+    }));
+    const reply = await asked(set, () =>
       require_(get().client).call({
         type: "session.respondPermission",
         payload: { sessionId, requestId: request.id, outcome },
       }),
     );
+    if (reply === undefined) {
+      patchTimeline(sessionId, set, (timeline) => ({
+        permissionProgress:
+          timeline.permissionProgress?.requestId === request.id
+            ? null
+            : timeline.permissionProgress,
+      }));
+    }
   },
 }));
 

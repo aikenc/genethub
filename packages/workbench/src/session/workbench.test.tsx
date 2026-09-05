@@ -2560,6 +2560,28 @@ describe("the controls offered to the user", () => {
     expect(screen.getByText("任务已暂停；确认计划后会从原会话继续。")).toBeInTheDocument();
   });
 
+  it("acknowledges an approval click while the daemon records it", () => {
+    render(
+      <PermissionCard
+        request={{
+          id: "plan-pending",
+          kind: "planApproval",
+          title: "初始化 PM 项目",
+          options: [
+            { id: "accept", label: "确认并继续", kind: "allowOnce" },
+            { id: "reject", label: "拒绝", kind: "reject" },
+          ],
+        }}
+        submitting
+        onAnswer={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("正在提交你的决定，请稍候…");
+    expect(screen.getByRole("button", { name: "确认并继续" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "拒绝" })).toBeDisabled();
+  });
+
   it("keeps multi-question answers together in one durable interaction", async () => {
     const onAnswer = vi.fn();
     render(
