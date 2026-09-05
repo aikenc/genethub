@@ -348,12 +348,13 @@ mod tests {
         let body = std::fs::read_to_string(&skill.file_path).unwrap();
 
         assert!(body.contains("space approval request --challenge <challengeId>"));
-        assert!(body.contains("only requests approval"));
-        assert!(body.contains("Only the authenticated Human response"));
-        assert!(body.contains("ordinary chat reply"));
-        assert!(body.contains("Keep this command attached until it exits"));
-        assert!(body.contains("running session or cell identifier"));
-        assert!(body.contains("Do not send a final answer"));
+        assert!(body.contains("only submits a durable approval request"));
+        assert!(body.contains("authenticated Human answers"));
+        assert!(body.contains("ordinary chat"));
+        assert!(body.contains("stops this Agent turn"));
+        assert!(body.contains("command success is not approval"));
+        assert!(body.contains("stable action ID"));
+        assert!(!body.contains("Keep this command attached"));
         assert!(!body.contains("request_user_input"));
         assert!(!body.contains("AskQuestion"));
     }

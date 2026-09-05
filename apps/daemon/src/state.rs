@@ -137,7 +137,7 @@ impl AppState {
                 "GENEHUB_CLI is unavailable or not absolute; Agent sessions will not guess a channel command"
             );
         }
-        let project_control = crate::project_control::Broker::new(&paths.root);
+        let project_control = crate::project_control::Broker::new(&paths.root)?;
         let sessions = SessionManager::new_with_diagnostics(
             store,
             registry.clone(),

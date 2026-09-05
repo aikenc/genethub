@@ -24,7 +24,7 @@ const CHALLENGE_TTL_MS: i64 = 10 * 60 * 1_000;
 const APPROVE: &str = "approve-once";
 const REJECT: &str = "reject";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeSpec {
     pub controller_session_id: String,
     pub workspace_id: String,
@@ -40,7 +40,7 @@ pub struct ChallengeSpec {
     pub detail: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Challenge {
     spec: ChallengeSpec,
     id: String,
@@ -50,11 +50,14 @@ struct Challenge {
     rejected: bool,
     reserved_action_id: Option<String>,
     applying: bool,
+    #[serde(default)]
+    consumed: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct State {
     challenges: HashMap<String, Challenge>,
+    #[serde(skip)]
     request_to_challenge: HashMap<(String, String), String>,
 }
 
@@ -79,19 +82,47 @@ pub struct Broker {
 }
 
 impl Broker {
-    pub fn new(data_root: &Path) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(State::default())),
-            root: data_root.join("project-control"),
-            mutation: Arc::new(Mutex::new(())),
+    pub fn new(data_root: &Path) -> Result<Self> {
+        let root = data_root.join("project-control");
+        let mut state: State = match std::fs::read(root.join("approvals.json")) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).context("reading persisted project approvals")?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => State::default(),
+            Err(error) => return Err(error.into()),
+        };
+        for challenge in state.challenges.values() {
+            if let Some(request) = &challenge.request_id {
+                state.request_to_challenge.insert(
+                    (
+                        challenge.spec.controller_session_id.clone(),
+                        request.clone(),
+                    ),
+                    challenge.id.clone(),
+                );
+            }
         }
+        Ok(Self {
+            state: Arc::new(Mutex::new(state)),
+            root,
+            mutation: Arc::new(Mutex::new(())),
+        })
+    }
+
+    fn save(&self, guard: &mut State, next: State) -> Result<()> {
+        crate::config::save_private(
+            &self.root.join("approvals.json"),
+            &serde_json::to_vec(&next)?,
+        )?;
+        *guard = next;
+        Ok(())
     }
 
     pub async fn mutation_lock(&self) -> MutexGuard<'_, ()> {
         self.mutation.lock().await
     }
 
-    pub async fn issue(&self, spec: ChallengeSpec) -> BootstrapApprovalChallenge {
+    pub async fn issue(&self, spec: ChallengeSpec) -> Result<BootstrapApprovalChallenge> {
         let now = now_ms();
         let id = format!("pm-bootstrap-{}", uuid::Uuid::new_v4().simple());
         let challenge = Challenge {
@@ -103,8 +134,10 @@ impl Broker {
             rejected: false,
             reserved_action_id: None,
             applying: false,
+            consumed: false,
         };
-        let mut state = self.state.lock().await;
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let superseded = state
             .challenges
             .iter()
@@ -121,12 +154,13 @@ impl Broker {
             .request_to_challenge
             .retain(|_, known_id| !superseded.contains(known_id));
         state.challenges.insert(id.clone(), challenge);
-        BootstrapApprovalChallenge {
+        self.save(&mut guard, state)?;
+        Ok(BootstrapApprovalChallenge {
             challenge_id: id,
             title: spec.title,
             detail: spec.detail,
             expires_at_ms: now.saturating_add(CHALLENGE_TTL_MS),
-        }
+        })
     }
 
     /// Replaces an Agent-authored question with the daemon-authored plan card
@@ -136,29 +170,30 @@ impl Broker {
         &self,
         session_id: &str,
         request: &PermissionRequest,
-    ) -> PermissionRequest {
+    ) -> Result<PermissionRequest> {
         let Some(challenge_id) = request
             .questions
             .as_ref()
             .and_then(|questions| (questions.len() == 1).then_some(&questions[0]))
             .map(|question| question.id.as_str())
         else {
-            return request.clone();
+            return Ok(request.clone());
         };
-        let mut state = self.state.lock().await;
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let now = now_ms();
         let Some(challenge) = state.challenges.get_mut(challenge_id) else {
-            return request.clone();
+            return Ok(request.clone());
         };
         if challenge.expires_at_ms < now
             || challenge.spec.controller_session_id != session_id
             || challenge.rejected
             || challenge.approved
         {
-            return request.clone();
+            return Ok(request.clone());
         }
         if let Some(existing_request_id) = challenge.request_id.as_deref() {
-            return if existing_request_id == request.id {
+            return Ok(if existing_request_id == request.id {
                 plan_permission_request(
                     request.id.clone(),
                     challenge.spec.title.clone(),
@@ -167,7 +202,7 @@ impl Broker {
                 )
             } else {
                 request.clone()
-            };
+            });
         }
         challenge.request_id = Some(request.id.clone());
         let challenge_key = challenge.id.clone();
@@ -176,12 +211,13 @@ impl Broker {
         state
             .request_to_challenge
             .insert((session_id.to_string(), request.id.clone()), challenge_key);
-        plan_permission_request(
+        self.save(&mut guard, state)?;
+        Ok(plan_permission_request(
             request.id.clone(),
             title,
             detail,
             request.tool_call_id.clone(),
-        )
+        ))
     }
 
     /// Turns one live, same-Session plan challenge into a Human-facing
@@ -194,7 +230,8 @@ impl Broker {
         session_id: &str,
         challenge_id: &str,
     ) -> Result<(PermissionRequest, i64)> {
-        let mut state = self.state.lock().await;
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let now = now_ms();
         let challenge = state
             .challenges
@@ -206,8 +243,19 @@ impl Broker {
         if challenge.spec.controller_session_id != session_id {
             bail!("approvalStale: this plan challenge belongs to another Session");
         }
-        if challenge.rejected || challenge.approved || challenge.request_id.is_some() {
-            bail!("approvalStale: this plan challenge was already presented or resolved");
+        if challenge.rejected || challenge.approved {
+            bail!("approvalStale: this plan challenge was already resolved");
+        }
+        if let Some(id) = &challenge.request_id {
+            return Ok((
+                plan_permission_request(
+                    id.clone(),
+                    challenge.spec.title.clone(),
+                    challenge.spec.detail.clone(),
+                    None,
+                ),
+                challenge.expires_at_ms,
+            ));
         }
 
         let request_id = format!("project-approval-{}", uuid::Uuid::new_v4().simple());
@@ -219,6 +267,7 @@ impl Broker {
         state
             .request_to_challenge
             .insert((session_id.to_string(), request_id.clone()), challenge_key);
+        self.save(&mut guard, state)?;
         Ok((
             plan_permission_request(request_id, title, detail, None),
             expires_at_ms,
@@ -236,11 +285,12 @@ impl Broker {
     /// Releases a presentation that never reached a Human answer (for
     /// example, Session persistence failed or the challenge expired). It does
     /// not undo an approval or rejection.
-    pub async fn abandon_request(&self, session_id: &str, request_id: &str) {
-        let mut state = self.state.lock().await;
+    pub async fn abandon_request(&self, session_id: &str, request_id: &str) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let key = (session_id.to_string(), request_id.to_string());
         let Some(challenge_id) = state.request_to_challenge.remove(&key) else {
-            return;
+            return Ok(());
         };
         if let Some(challenge) = state.challenges.get_mut(&challenge_id) {
             if challenge.request_id.as_deref() == Some(request_id)
@@ -250,6 +300,7 @@ impl Broker {
                 challenge.request_id = None;
             }
         }
+        self.save(&mut guard, state)
     }
 
     pub async fn record_human_response(
@@ -258,7 +309,34 @@ impl Broker {
         request_id: &str,
         outcome: &PermissionOutcome,
     ) -> Result<()> {
-        let mut state = self.state.lock().await;
+        self.record_human_response_at(session_id, request_id, outcome, now_ms())
+            .await
+    }
+
+    pub async fn validate_human_response(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        outcome: &PermissionOutcome,
+    ) -> Result<()> {
+        let state = self.state.lock().await;
+        let challenge = state
+            .request_to_challenge
+            .get(&(session_id.into(), request_id.into()))
+            .and_then(|id| state.challenges.get(id))
+            .ok_or_else(|| anyhow!("approvalStale: this plan challenge is no longer active"))?;
+        validate_decision(challenge, outcome, now_ms())
+    }
+
+    pub async fn record_human_response_at(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        outcome: &PermissionOutcome,
+        decided_at_ms: i64,
+    ) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let key = (session_id.to_string(), request_id.to_string());
         let challenge_id = state
             .request_to_challenge
@@ -269,9 +347,7 @@ impl Broker {
             .challenges
             .get_mut(&challenge_id)
             .ok_or_else(|| anyhow!("approvalStale: this plan challenge no longer exists"))?;
-        if challenge.expires_at_ms < now_ms() {
-            bail!("approvalStale: this plan challenge expired; create a new plan");
-        }
+        validate_decision(challenge, outcome, decided_at_ms)?;
         match outcome {
             PermissionOutcome::Selected { option_id } if option_id == APPROVE => {
                 challenge.approved = true;
@@ -284,7 +360,7 @@ impl Broker {
             }
             _ => bail!("approvalStale: invalid answer for a project mutation plan"),
         }
-        Ok(())
+        self.save(&mut guard, state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -303,13 +379,15 @@ impl Broker {
         action_id: &str,
     ) -> Result<String> {
         validate_action_id(action_id)?;
-        let mut state = self.state.lock().await;
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let challenge = state
             .challenges
             .values_mut()
             .find(|challenge| {
                 challenge.approved
                     && !challenge.rejected
+                    && !challenge.consumed
                     && challenge.spec.controller_session_id == controller_session_id
                     && challenge.spec.workspace_id == workspace_id
                     && challenge.spec.canonical_root == canonical_root
@@ -341,35 +419,37 @@ impl Broker {
             }
             Some(_) => bail!("approvalConsumed: this approval was already used"),
         }
-        Ok(challenge.id.clone())
+        let id = challenge.id.clone();
+        self.save(&mut guard, state)?;
+        Ok(id)
     }
 
-    pub async fn release_failed(&self, challenge_id: &str, action_id: &str) {
-        if let Some(challenge) = self.state.lock().await.challenges.get_mut(challenge_id) {
+    pub async fn release_failed(&self, challenge_id: &str, action_id: &str) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
+        if let Some(challenge) = state.challenges.get_mut(challenge_id) {
             if challenge.reserved_action_id.as_deref() == Some(action_id) {
-                // Keep the Human-approved action identity pinned. The same
-                // failed transaction may be retried; a different action id
-                // cannot spend the one-use answer.
                 challenge.applying = false;
             }
         }
+        self.save(&mut guard, state)
     }
 
-    pub async fn complete(&self, challenge_id: &str, action_id: &str) {
-        let mut state = self.state.lock().await;
-        if let Some(challenge) = state.challenges.get(challenge_id) {
-            if challenge.reserved_action_id.as_deref() != Some(action_id) {
-                return;
+    pub async fn complete(&self, challenge_id: &str, action_id: &str) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
+        if let Some(challenge) = state.challenges.get_mut(challenge_id) {
+            if challenge.reserved_action_id.as_deref() == Some(action_id) {
+                challenge.consumed = true;
+                challenge.applying = false;
             }
         }
-        state.challenges.remove(challenge_id);
-        state
-            .request_to_challenge
-            .retain(|_, known| known != challenge_id);
+        self.save(&mut guard, state)
     }
 
-    pub async fn revoke_session(&self, session_id: &str) {
-        let mut state = self.state.lock().await;
+    pub async fn revoke_session(&self, session_id: &str) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let removed = state
             .challenges
             .iter()
@@ -384,15 +464,17 @@ impl Broker {
             .retain(|(session, _), challenge| {
                 session != session_id && !removed.contains(challenge)
             });
+        self.save(&mut guard, state)
     }
 
     /// Revokes every pending mutation whose exact target is being removed.
     ///
-    /// Challenges are process-local and deliberately cannot survive the
+    /// Challenges are durable but deliberately cannot survive the
     /// disappearance/reopening of a Workspace identity. Project bindings are
     /// removed separately because they are durable authority.
-    pub async fn revoke_workspace(&self, workspace_id: &str) {
-        let mut state = self.state.lock().await;
+    pub async fn revoke_workspace(&self, workspace_id: &str) -> Result<()> {
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
         let removed = state
             .challenges
             .iter()
@@ -405,6 +487,7 @@ impl Broker {
         state
             .request_to_challenge
             .retain(|_, challenge| !removed.contains(challenge));
+        self.save(&mut guard, state)
     }
 
     pub fn bind(
@@ -559,6 +642,32 @@ impl Broker {
     }
 }
 
+fn validate_decision(
+    challenge: &Challenge,
+    outcome: &PermissionOutcome,
+    decided_at_ms: i64,
+) -> Result<()> {
+    let approved = match outcome {
+        PermissionOutcome::Selected { option_id } if option_id == APPROVE => true,
+        PermissionOutcome::Selected { option_id } if option_id == REJECT => false,
+        PermissionOutcome::Canceled | PermissionOutcome::TimedOut { .. } => false,
+        _ => bail!("approvalStale: invalid Human decision"),
+    };
+    if challenge.approved || challenge.rejected {
+        if challenge.approved == approved {
+            return Ok(());
+        }
+        bail!("approvalStale: this plan already has a different Human decision");
+    }
+    if approved
+        && (decided_at_ms > challenge.expires_at_ms
+            || decided_at_ms < challenge.expires_at_ms - CHALLENGE_TTL_MS)
+    {
+        bail!("approvalStale: this plan challenge expired; create a new plan");
+    }
+    Ok(())
+}
+
 fn plan_permission_request(
     id: String,
     title: String,
@@ -686,20 +795,22 @@ mod tests {
     #[tokio::test]
     async fn only_the_matching_session_question_becomes_a_plan_approval() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let issued = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let issued = broker.issue(spec()).await.unwrap();
         let foreign = broker
             .normalize_request("s_other", &question(&issued.challenge_id))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(foreign.kind, PermissionRequestKind::Question);
         let normalized = broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(normalized.kind, PermissionRequestKind::PlanApproval);
         assert_eq!(normalized.title, "接管项目？");
         assert!(normalized.questions.is_none());
 
-        broker.issue(spec()).await;
+        broker.issue(spec()).await.unwrap();
         assert!(
             !broker.is_plan_request("s_pm", "ask_1").await,
             "a superseded plan left its old request mapped to authority"
@@ -709,8 +820,8 @@ mod tests {
     #[tokio::test]
     async fn a_session_can_present_its_own_challenge_without_approving_it() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let issued = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let issued = broker.issue(spec()).await.unwrap();
 
         assert!(broker
             .request_permission("s_other", &issued.challenge_id)
@@ -742,20 +853,26 @@ mod tests {
             )
             .await
             .is_err());
-        assert!(broker
-            .request_permission("s_pm", &issued.challenge_id)
-            .await
-            .is_err());
+        assert_eq!(
+            broker
+                .request_permission("s_pm", &issued.challenge_id)
+                .await
+                .unwrap()
+                .0
+                .id,
+            request.id
+        );
     }
 
     #[tokio::test]
     async fn approval_is_single_session_single_plan_and_single_action() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let issued = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let issued = broker.issue(spec()).await.unwrap();
         broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
-            .await;
+            .await
+            .unwrap();
         broker
             .record_human_response(
                 "s_pm",
@@ -798,7 +915,7 @@ mod tests {
             )
             .await
             .is_err());
-        broker.complete(&challenge, "bootstrap_1").await;
+        broker.complete(&challenge, "bootstrap_1").await.unwrap();
         assert!(broker
             .reserve(
                 "s_pm",
@@ -820,11 +937,12 @@ mod tests {
     #[tokio::test]
     async fn removing_a_workspace_revokes_its_pending_challenge() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let issued = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let issued = broker.issue(spec()).await.unwrap();
         let normalized = broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
-            .await;
+            .await
+            .unwrap();
         broker
             .record_human_response(
                 "s_pm",
@@ -836,7 +954,7 @@ mod tests {
             .await
             .unwrap();
 
-        broker.revoke_workspace("w_project").await;
+        broker.revoke_workspace("w_project").await.unwrap();
         assert!(broker
             .reserve(
                 "s_pm",
@@ -858,7 +976,7 @@ mod tests {
     #[test]
     fn deleting_the_controller_session_removes_only_its_binding() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
+        let broker = Broker::new(root.path()).unwrap();
         broker
             .bind("w_project", "s_pm", "game-delivery-v1", "sha256:pack")
             .unwrap();
@@ -884,11 +1002,12 @@ mod tests {
     #[tokio::test]
     async fn rejection_and_fact_drift_never_create_a_spendable_grant() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let rejected = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let rejected = broker.issue(spec()).await.unwrap();
         broker
             .normalize_request("s_pm", &question(&rejected.challenge_id))
-            .await;
+            .await
+            .unwrap();
         broker
             .record_human_response(
                 "s_pm",
@@ -916,10 +1035,11 @@ mod tests {
             .await
             .is_err());
 
-        let approved = broker.issue(spec()).await;
+        let approved = broker.issue(spec()).await.unwrap();
         broker
             .normalize_request("s_pm", &question(&approved.challenge_id))
-            .await;
+            .await
+            .unwrap();
         broker
             .record_human_response(
                 "s_pm",
@@ -952,8 +1072,8 @@ mod tests {
     #[tokio::test]
     async fn an_expired_challenge_cannot_be_normalized_or_approved() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let issued = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let issued = broker.issue(spec()).await.unwrap();
         broker
             .state
             .lock()
@@ -965,7 +1085,8 @@ mod tests {
 
         let untouched = broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
-            .await;
+            .await
+            .unwrap();
         assert_eq!(untouched.kind, PermissionRequestKind::Question);
         assert!(broker
             .record_human_response(
@@ -982,11 +1103,12 @@ mod tests {
     #[tokio::test]
     async fn a_failed_action_can_only_retry_its_same_identity() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
-        let issued = broker.issue(spec()).await;
+        let broker = Broker::new(root.path()).unwrap();
+        let issued = broker.issue(spec()).await.unwrap();
         broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
-            .await;
+            .await
+            .unwrap();
         broker
             .record_human_response(
                 "s_pm",
@@ -1013,7 +1135,10 @@ mod tests {
             )
             .await
             .unwrap();
-        broker.release_failed(&challenge, "bootstrap_1").await;
+        broker
+            .release_failed(&challenge, "bootstrap_1")
+            .await
+            .unwrap();
         assert!(broker
             .reserve(
                 "s_pm",
@@ -1054,7 +1179,7 @@ mod tests {
     #[test]
     fn completed_action_is_private_idempotency_not_a_cross_session_token() {
         let root = tempfile::tempdir().unwrap();
-        let broker = Broker::new(root.path());
+        let broker = Broker::new(root.path()).unwrap();
         let result = serde_json::json!({"status": "applied"});
         broker
             .record_completed_action(

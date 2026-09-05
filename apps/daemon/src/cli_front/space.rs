@@ -272,7 +272,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 "space.approval.requested",
                 json!({
                     "challengeId": challenge_id,
-                    "approved": true,
+                    "status": "waitingForHuman",
+                    "approved": false,
                 }),
             );
             Ok(EXIT_OK)

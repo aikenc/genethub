@@ -96,7 +96,9 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     read-only imported transcript to send into a blank Agent context.
 /// 7 — managed parent and human-interaction policy. An older build would let a
 ///     human write into a Workflow-owned child Session.
-pub const SESSION_FORMAT: u32 = 7;
+/// 8 — durable Human decision delivery. Older builds would discard an
+///     acknowledged continuation when rewriting metadata.
+pub const SESSION_FORMAT: u32 = 8;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -125,6 +127,22 @@ struct MetaHeader {
     updated_at_ms: i64,
     #[serde(default)]
     project_key: String,
+}
+
+/// Durable Human decision and delivery intent. Completion is acknowledged only
+/// when its adapter turn terminates; a lost process may therefore redeliver it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanContinuation {
+    pub request: PermissionRequest,
+    pub outcome: genehub_proto::PermissionOutcome,
+    pub decided_at_ms: i64,
+    #[serde(default)]
+    pub project_approval: bool,
+    #[serde(default)]
+    pub grant_recorded: bool,
+    #[serde(default)]
+    pub completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +192,10 @@ pub struct SessionMeta {
     /// Stored in meta so no live socket or Agent process is required.
     #[serde(default)]
     pub pending_permission: Option<PermissionRequest>,
+    #[serde(default)]
+    pub pending_project_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_continuation: Option<HumanContinuation>,
     /// The Agent this session runs remains `agent_id`; lineage only describes
     /// where inherited history came from and how it reached this Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,6 +270,8 @@ impl SessionMeta {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,
@@ -1934,6 +1958,8 @@ mod project_home_tests {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,

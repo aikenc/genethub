@@ -1265,7 +1265,9 @@ async fn dispatch(
         }
 
         Request::SessionClose { session_id } => {
-            state.project_control.revoke_session(&session_id).await;
+            if let Err(error) = state.project_control.revoke_session(&session_id).await {
+                return failed(error);
+            }
             match state.sessions.close(&session_id).await {
                 Ok(()) => Handled::ok(Reply::Ack),
                 Err(error) => failed(error),
@@ -1288,7 +1290,9 @@ async fn dispatch(
         }
 
         Request::SessionDelete { session_id } => {
-            state.project_control.revoke_session(&session_id).await;
+            if let Err(error) = state.project_control.revoke_session(&session_id).await {
+                return failed(error);
+            }
             let summary = match state.sessions.summary(&session_id).await {
                 Ok(summary) => summary,
                 Err(error) => return failed(error),
@@ -1395,32 +1399,11 @@ async fn dispatch(
                 Ok(kind) => kind,
                 Err(error) => return failed(error),
             };
-            if kind == Some(genehub_proto::PermissionRequestKind::PlanApproval) {
-                if matches!(caller, crate::authz::Principal::SessionController { .. }) {
-                    return Handled::err(
-                        ErrorCode::Forbidden,
-                        "Agent/CLI 不能替用户响应项目接管确认",
-                    );
-                }
-                if !state
-                    .project_control
-                    .is_plan_request(&session_id, &request_id)
-                    .await
-                {
-                    return Handled::err(
-                        ErrorCode::Conflict,
-                        "approvalStale: 该接管计划已过期，请让 Agent 重新生成 plan",
-                    );
-                }
-                if let Err(error) = state
-                    .project_control
-                    .record_human_response(&session_id, &request_id, &outcome)
-                    .await
-                {
-                    return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
-                }
+            if kind == Some(genehub_proto::PermissionRequestKind::PlanApproval)
+                && matches!(caller, crate::authz::Principal::SessionController { .. })
+            {
+                return Handled::err(ErrorCode::Forbidden, "Agent/CLI 不能替用户响应计划确认");
             }
-            let plan_approval = kind == Some(genehub_proto::PermissionRequestKind::PlanApproval);
             let providers = state.providers().await;
             match state
                 .sessions
@@ -1428,15 +1411,7 @@ async fn dispatch(
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),
-                Err(error) => {
-                    // Approval becomes useful only if the stopped Session was
-                    // actually resumed. A failed continuation must not leave a
-                    // grant behind for a later CLI turn to consume.
-                    if plan_approval {
-                        state.project_control.revoke_session(&session_id).await;
-                    }
-                    failed(error)
-                }
+                Err(error) => failed(error),
             }
         }
 
@@ -1820,10 +1795,7 @@ async fn dispatch(
             let approval = if let Some(session_id) = caller.session_controller_id() {
                 let detail = serde_json::to_string_pretty(&operation)
                     .unwrap_or_else(|_| format!("{operation:?}"));
-                Some(
-                    state
-                        .project_control
-                        .issue(crate::project_control::ChallengeSpec {
+                Some(match state.project_control.issue(crate::project_control::ChallengeSpec {
                             controller_session_id: session_id.into(),
                             workspace_id: workspace_id.clone(),
                             canonical_root,
@@ -1839,8 +1811,7 @@ async fn dispatch(
                                 "只对 Workspace {workspace_id} 执行一次 revision {expected_revision} CAS：\n{detail}\nplan: {plan_digest}"
                             ),
                         })
-                        .await,
-                )
+                        .await { Ok(challenge) => challenge, Err(error) => return failed(error) })
             } else {
                 None
             };
@@ -1947,10 +1918,13 @@ async fn dispatch(
             };
             if let Err(error) = guard_agent_space_mutation(state, &workspace_id, &operation).await {
                 if let Some((challenge, action_id)) = &reserved {
-                    state
+                    if let Err(error) = state
                         .project_control
                         .release_failed(challenge, action_id)
-                        .await;
+                        .await
+                    {
+                        return failed(error);
+                    }
                 }
                 return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
             }
@@ -1990,10 +1964,13 @@ async fn dispatch(
                                     .map_err(|rollback| format!("; rollback failed: {rollback:#}")),
                                 None => Ok(()),
                             };
-                            state
+                            if let Err(error) = state
                                 .project_control
                                 .release_failed(challenge, action_id)
-                                .await;
+                                .await
+                            {
+                                return failed(error);
+                            }
                             return Handled::err(
                                 ErrorCode::Internal,
                                 format!(
@@ -2002,16 +1979,23 @@ async fn dispatch(
                                 ),
                             );
                         }
-                        state.project_control.complete(challenge, action_id).await;
+                        if let Err(error) =
+                            state.project_control.complete(challenge, action_id).await
+                        {
+                            return failed(error);
+                        }
                     }
                     Handled::ok(Reply::Workspace(workspace))
                 }
                 Err(error) => {
                     if let Some((challenge, action_id)) = &reserved {
-                        state
+                        if let Err(error) = state
                             .project_control
                             .release_failed(challenge, action_id)
-                            .await;
+                            .await
+                        {
+                            return failed(error);
+                        }
                     }
                     Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
                 }
@@ -2171,10 +2155,14 @@ async fn dispatch(
                         if !report.current {
                             if let Some(session_id) = caller.session_controller_id() {
                                 report.approval = Some(
-                                    state
+                                    match state
                                         .project_control
                                         .issue(prepared.challenge_spec(session_id))
-                                        .await,
+                                        .await
+                                    {
+                                        Ok(challenge) => challenge,
+                                        Err(error) => return failed(error),
+                                    },
                                 );
                             }
                         }
@@ -2277,14 +2265,21 @@ async fn dispatch(
                                 "could not persist the completed Bootstrap action receipt"
                             );
                         }
-                        state.project_control.complete(&challenge, action_id).await;
+                        if let Err(error) =
+                            state.project_control.complete(&challenge, action_id).await
+                        {
+                            return failed(error);
+                        }
                         Handled::ok(Reply::BootstrapPack(report))
                     }
                     Err(error) => {
-                        state
+                        if let Err(error) = state
                             .project_control
                             .release_failed(&challenge, action_id)
-                            .await;
+                            .await
+                        {
+                            return failed(error);
+                        }
                         Handled::err(ErrorCode::BadRequest, format!("{error:#}"))
                     }
                 }
@@ -2313,34 +2308,16 @@ async fn dispatch(
                     return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
                 }
             };
-            let request_id = request.id.clone();
-            let approve_option = request
-                .options
-                .iter()
-                .find(|option| option.kind == genehub_proto::PermissionOptionKind::AllowOnce)
-                .map(|option| option.id.clone())
-                .expect("daemon-authored plan approvals have an allow-once option");
             match state
                 .sessions
                 .request_project_approval(session_id, request, expires_at_ms)
                 .await
             {
-                Ok(genehub_proto::PermissionOutcome::Selected { option_id })
-                    if option_id == approve_option =>
-                {
-                    Handled::ok(Reply::Ack)
-                }
-                Ok(_) => Handled::err(
-                    ErrorCode::Forbidden,
-                    "approvalRejected: 用户没有批准这次项目变更",
-                ),
-                Err(error) => {
-                    state
-                        .project_control
-                        .abandon_request(session_id, &request_id)
-                        .await;
-                    Handled::err(ErrorCode::Conflict, format!("{error:#}"))
-                }
+                Ok(()) => Handled::ok(Reply::Ack),
+                // Presentation may already be durable even if closing the
+                // old Agent failed. Keep its identity for recovery/retry;
+                // presenting a challenge never grants authority.
+                Err(error) => Handled::err(ErrorCode::Conflict, format!("{error:#}")),
             }
         }
 
@@ -2381,7 +2358,9 @@ async fn dispatch(
             if let Err(error) = state.project_control.remove_binding(&workspace_id) {
                 return failed(error);
             }
-            state.project_control.revoke_workspace(&workspace_id).await;
+            if let Err(error) = state.project_control.revoke_workspace(&workspace_id).await {
+                return failed(error);
+            }
             match state.workspaces.remove(&workspace_id).await {
                 Ok(workspaces) => Handled::ok(Reply::Workspaces(workspaces)),
                 Err(error) => {

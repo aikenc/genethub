@@ -10,6 +10,8 @@ import type { EnvironmentLease } from "../environment/lease.ts";
 export type ControlledAgentProfile =
   /** Answers normally. The control case every fault is compared against. */
   | "normal"
+  /** Sends a native Cursor plan request, then accepts a new resumed prompt. */
+  | "native-plan"
   /** Emits one chunk, then exits with no terminal frame: stdout reaches EOF. */
   | "exit-without-terminal"
   /** The same exit, but a grandchild keeps stdout open, so there is no EOF. */
