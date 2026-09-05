@@ -1638,6 +1638,23 @@ impl SessionManager {
                 None => summaries.push(open.summary),
             }
         }
+        // Codex builds that emitted both the started and completed
+        // `contextCompaction` item could persist the same marker twice. The
+        // first marker closed the real trunk; the second became a marker-only
+        // trunk. Keep old sessions readable without rewriting their ledger.
+        let mut marker_ids = HashSet::new();
+        summaries.retain(|summary| {
+            let duplicate_marker_only = summary.blob_count == 0
+                && summary.batches.len() == 1
+                && summary.batches[0].marker.is_some()
+                && marker_ids.contains(&summary.batches[0].first_item_id);
+            for batch in &summary.batches {
+                if batch.marker.is_some() {
+                    marker_ids.insert(batch.first_item_id.clone());
+                }
+            }
+            !duplicate_marker_only
+        });
         Ok(summaries)
     }
 

@@ -879,6 +879,12 @@ enum Kind {
     Reasoning,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum CompactionSignal {
+    Thread,
+    Item,
+}
+
 #[derive(Default)]
 struct TurnState {
     /// Our own id for the turn in flight.
@@ -899,11 +905,15 @@ struct TurnState {
     /// We asked for this turn to stop, so its end is a cancellation however the
     /// CLI happens to label it.
     interrupt_requested: bool,
-    /// Codex reports one compaction twice: a `thread/compacted` notification and
-    /// a completed `contextCompaction` item. This counts the notifications that
-    /// arrived first so the item does not emit a second marker for the same
-    /// squeeze.
-    unpaired_compactions: u32,
+    /// Codex can report one compaction as both `thread/compacted` and a
+    /// completed `contextCompaction` item. The two signals have no shared id,
+    /// so pair them while they are adjacent in the item stream. Either signal
+    /// may arrive first.
+    unpaired_compaction: Option<CompactionSignal>,
+    /// A started and completed context-compaction frame carry the same id.
+    /// Only the completed frame is a boundary, and repeated completed frames
+    /// must remain idempotent after that boundary has closed its trunk.
+    completed_compactions: HashSet<String>,
 }
 
 struct CodexSession {
@@ -1986,8 +1996,13 @@ async fn translate(
         }
         "turn/plan/updated" if is_current_turn(params, &state) => plan(params, &mut state, events),
         "thread/compacted" if is_current_turn(params, &state) => {
-            if let Some(turn_id) = state.id.clone() {
-                state.unpaired_compactions += 1;
+            if state.unpaired_compaction == Some(CompactionSignal::Item) {
+                state.unpaired_compaction = None;
+            } else if state.unpaired_compaction.is_none() {
+                state.unpaired_compaction = Some(CompactionSignal::Thread);
+                let Some(turn_id) = state.id.clone() else {
+                    return;
+                };
                 let _ = events.send(SessionEvent::Item {
                     turn_id,
                     item: TimelineItem::Compaction {
@@ -2202,6 +2217,12 @@ fn item_frame(
             .unwrap_or_default()
             .to_string()
     };
+
+    if kind != "contextCompaction" {
+        // Once another item begins, an unpaired signal belonged to an older
+        // compaction that this Codex build reported through only one channel.
+        state.unpaired_compaction = None;
+    }
     let emit = |item: TimelineItem| {
         let _ = events.send(SessionEvent::Item {
             turn_id: turn_id.clone(),
@@ -2399,17 +2420,22 @@ fn item_frame(
             });
         }
         "contextCompaction" => {
-            // The same squeeze already produced a marker via `thread/compacted`;
-            // only emit when no notification is waiting to be paired.
-            if state.unpaired_compactions > 0 {
-                state.unpaired_compactions -= 1;
-            } else {
-                emit(TimelineItem::Compaction {
-                    id,
-                    reason: "Codex pruned its own history to make room.".into(),
-                    received_at_ms: None,
-                });
+            // `item/started` announces work that has not yet made a durable
+            // boundary. Waiting for completion also prevents the start and
+            // completion frames with the same id from closing two trunks.
+            if !settled || !state.completed_compactions.insert(id.clone()) {
+                return;
             }
+            if state.unpaired_compaction == Some(CompactionSignal::Thread) {
+                state.unpaired_compaction = None;
+                return;
+            }
+            state.unpaired_compaction = Some(CompactionSignal::Item);
+            emit(TimelineItem::Compaction {
+                id,
+                reason: "Codex pruned its own history to make room.".into(),
+                received_at_ms: None,
+            });
         }
         "error" => emit(TimelineItem::Error {
             id,
