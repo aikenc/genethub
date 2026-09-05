@@ -1202,6 +1202,75 @@ impl Store {
         Ok(log)
     }
 
+    // -- the turn in progress -----------------------------------------------
+
+    /// Where the narrative of an unfinished turn waits.
+    ///
+    /// `chat.jsonl` is append-only and is written when a turn ends, which is
+    /// the right home for a settled conversation and the wrong one for a turn
+    /// that has not settled: the same growing answer cannot be appended
+    /// repeatedly without appearing repeatedly. This file is rewritten whole
+    /// instead — the last write is the truth, exactly as for a trunk — and is
+    /// removed once the turn ends and its items reach the log for good.
+    ///
+    /// What it buys is a bound. Without it a daemon that dies mid-answer costs
+    /// the reader everything they had already read; with it, the last moment
+    /// of it.
+    fn open_turn_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .session_dir(workspace_id, session_id)?
+            .join("open-turn.jsonl"))
+    }
+
+    pub fn write_open_turn(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        items: &[TimelineItem],
+    ) -> Result<()> {
+        let path = self.open_turn_path(workspace_id, session_id)?;
+        self.prepare_write(
+            workspace_id,
+            session_id,
+            path.parent().expect("open-turn.jsonl always has a parent"),
+        )?;
+        let mut body = Vec::new();
+        for item in items.iter().filter(|item| !is_work_item(item)) {
+            writeln!(
+                body,
+                "{}",
+                serde_json::to_string(&ChatRow::Item { item: item.clone() })?
+            )?;
+        }
+        crate::config::save_private(&path, &body)
+    }
+
+    /// Empty whenever there is nothing to recover, a missing file and an
+    /// unreadable one alike: a turn that cannot be restored must not stop the
+    /// conversation it belongs to from opening.
+    pub fn load_open_turn(&self, workspace_id: &str, session_id: &str) -> Vec<TimelineItem> {
+        let Ok(path) = self.open_turn_path(workspace_id, session_id) else {
+            return Vec::new();
+        };
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| match serde_json::from_str::<ChatRow>(line) {
+                Ok(ChatRow::Item { item }) => Some(item),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn clear_open_turn(&self, workspace_id: &str, session_id: &str) {
+        if let Ok(path) = self.open_turn_path(workspace_id, session_id) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     // -- round layer --------------------------------------------------------
 
     /// Writes one trunk in full and records its summary.
