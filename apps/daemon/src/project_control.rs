@@ -157,6 +157,18 @@ impl Broker {
         {
             return request.clone();
         }
+        if let Some(existing_request_id) = challenge.request_id.as_deref() {
+            return if existing_request_id == request.id {
+                plan_permission_request(
+                    request.id.clone(),
+                    challenge.spec.title.clone(),
+                    challenge.spec.detail.clone(),
+                    request.tool_call_id.clone(),
+                )
+            } else {
+                request.clone()
+            };
+        }
         challenge.request_id = Some(request.id.clone());
         let challenge_key = challenge.id.clone();
         let title = challenge.spec.title.clone();
@@ -164,26 +176,53 @@ impl Broker {
         state
             .request_to_challenge
             .insert((session_id.to_string(), request.id.clone()), challenge_key);
-        PermissionRequest {
-            id: request.id.clone(),
-            kind: PermissionRequestKind::PlanApproval,
+        plan_permission_request(
+            request.id.clone(),
             title,
-            detail: Some(detail),
-            tool_call_id: request.tool_call_id.clone(),
-            options: vec![
-                PermissionOption {
-                    id: APPROVE.into(),
-                    label: "确认并仅执行这一次".into(),
-                    kind: PermissionOptionKind::AllowOnce,
-                },
-                PermissionOption {
-                    id: REJECT.into(),
-                    label: "暂不接管".into(),
-                    kind: PermissionOptionKind::Reject,
-                },
-            ],
-            questions: None,
+            detail,
+            request.tool_call_id.clone(),
+        )
+    }
+
+    /// Turns one live, same-Session plan challenge into a Human-facing
+    /// interaction without granting any authority. This is the portable
+    /// fallback for Agent runtimes that do not expose a native structured
+    /// question tool: the SessionController may present the card, but only an
+    /// authenticated Human can answer it and create the one-use grant.
+    pub async fn request_permission(
+        &self,
+        session_id: &str,
+        challenge_id: &str,
+    ) -> Result<(PermissionRequest, i64)> {
+        let mut state = self.state.lock().await;
+        let now = now_ms();
+        let challenge = state
+            .challenges
+            .get_mut(challenge_id)
+            .ok_or_else(|| anyhow!("approvalStale: this plan challenge no longer exists"))?;
+        if challenge.expires_at_ms < now {
+            bail!("approvalStale: this plan challenge expired; create a new plan");
         }
+        if challenge.spec.controller_session_id != session_id {
+            bail!("approvalStale: this plan challenge belongs to another Session");
+        }
+        if challenge.rejected || challenge.approved || challenge.request_id.is_some() {
+            bail!("approvalStale: this plan challenge was already presented or resolved");
+        }
+
+        let request_id = format!("project-approval-{}", uuid::Uuid::new_v4().simple());
+        challenge.request_id = Some(request_id.clone());
+        let challenge_key = challenge.id.clone();
+        let title = challenge.spec.title.clone();
+        let detail = challenge.spec.detail.clone();
+        let expires_at_ms = challenge.expires_at_ms;
+        state
+            .request_to_challenge
+            .insert((session_id.to_string(), request_id.clone()), challenge_key);
+        Ok((
+            plan_permission_request(request_id, title, detail, None),
+            expires_at_ms,
+        ))
     }
 
     pub async fn is_plan_request(&self, session_id: &str, request_id: &str) -> bool {
@@ -192,6 +231,25 @@ impl Broker {
             .await
             .request_to_challenge
             .contains_key(&(session_id.to_string(), request_id.to_string()))
+    }
+
+    /// Releases a presentation that never reached a Human answer (for
+    /// example, Session persistence failed or the challenge expired). It does
+    /// not undo an approval or rejection.
+    pub async fn abandon_request(&self, session_id: &str, request_id: &str) {
+        let mut state = self.state.lock().await;
+        let key = (session_id.to_string(), request_id.to_string());
+        let Some(challenge_id) = state.request_to_challenge.remove(&key) else {
+            return;
+        };
+        if let Some(challenge) = state.challenges.get_mut(&challenge_id) {
+            if challenge.request_id.as_deref() == Some(request_id)
+                && !challenge.approved
+                && !challenge.rejected
+            {
+                challenge.request_id = None;
+            }
+        }
     }
 
     pub async fn record_human_response(
@@ -501,6 +559,34 @@ impl Broker {
     }
 }
 
+fn plan_permission_request(
+    id: String,
+    title: String,
+    detail: String,
+    tool_call_id: Option<String>,
+) -> PermissionRequest {
+    PermissionRequest {
+        id,
+        kind: PermissionRequestKind::PlanApproval,
+        title,
+        detail: Some(detail),
+        tool_call_id,
+        options: vec![
+            PermissionOption {
+                id: APPROVE.into(),
+                label: "确认并仅执行这一次".into(),
+                kind: PermissionOptionKind::AllowOnce,
+            },
+            PermissionOption {
+                id: REJECT.into(),
+                label: "暂不接管".into(),
+                kind: PermissionOptionKind::Reject,
+            },
+        ],
+        questions: None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompletedAction {
@@ -618,6 +704,48 @@ mod tests {
             !broker.is_plan_request("s_pm", "ask_1").await,
             "a superseded plan left its old request mapped to authority"
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_can_present_its_own_challenge_without_approving_it() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = Broker::new(root.path());
+        let issued = broker.issue(spec()).await;
+
+        assert!(broker
+            .request_permission("s_other", &issued.challenge_id)
+            .await
+            .is_err());
+        let (request, expires_at_ms) = broker
+            .request_permission("s_pm", &issued.challenge_id)
+            .await
+            .unwrap();
+
+        assert_eq!(expires_at_ms, issued.expires_at_ms);
+        assert_eq!(request.kind, PermissionRequestKind::PlanApproval);
+        assert_eq!(request.title, "接管项目？");
+        assert_eq!(request.options.len(), 2);
+        assert!(broker.is_plan_request("s_pm", &request.id).await);
+        assert!(broker
+            .reserve(
+                "s_pm",
+                "w_project",
+                "/project",
+                "project.bootstrap.apply",
+                "game-delivery-v1",
+                "sha256:pack",
+                "sha256:plan",
+                0,
+                None,
+                "sha256:clean",
+                "bootstrap-before-human",
+            )
+            .await
+            .is_err());
+        assert!(broker
+            .request_permission("s_pm", &issued.challenge_id)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

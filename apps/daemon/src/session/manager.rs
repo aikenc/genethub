@@ -179,6 +179,12 @@ struct Live {
     /// recomposes domain/channel/workspace from its actual address.
     additional_system_prompt: Mutex<Option<String>>,
     pending_permissions: Mutex<Vec<PermissionRequest>>,
+    /// Human interactions requested through the session-bound CLI while the
+    /// Agent keeps its current tool call open. The sender contains no grant;
+    /// it only releases the waiting CLI after `SessionRespondPermission` was
+    /// authenticated as Human and the project-control broker recorded the
+    /// answer.
+    cli_approval_waiters: Mutex<HashMap<String, oneshot::Sender<PermissionOutcome>>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
     /// When the turn in progress last had its narrative written out, which
@@ -2682,6 +2688,19 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
         let continuation = continuation_for(&request, &outcome)?;
 
+        if let Some(waiter) = live.cli_approval_waiters.lock().await.remove(request_id) {
+            if !waiter.is_closed() {
+                resolve_cli_interaction(&live, &self.store, request_id, outcome.clone()).await?;
+                let _ = waiter.send(outcome);
+                return Ok(());
+            }
+            // The RPC that presented the card disappeared. Stop the possibly
+            // still-running Agent before falling back to the normal persisted
+            // Session continuation below; sending a second prompt into an
+            // unknown active turn would be the unsafe choice.
+            stop_agent_for_interaction(&live, &self.store, &request).await;
+        }
+
         if let Some(continuation) = continuation {
             let execution = live.claim_execution(true).await?;
             let mut ownership = Handover {
@@ -2771,6 +2790,79 @@ impl SessionManager {
             .await;
         }
         Ok(())
+    }
+
+    /// Presents a daemon-authored plan approval while keeping the Agent's
+    /// current CLI tool call blocked. This supplies one portable interaction
+    /// path for Agents without a native structured-question tool. It cannot
+    /// approve anything: only the Human-only response RPC releases the wait.
+    pub async fn request_project_approval(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+        expires_at_ms: i64,
+    ) -> Result<PermissionOutcome> {
+        if request.kind != PermissionRequestKind::PlanApproval {
+            bail!("only daemon-authored plan approvals may use this interaction path");
+        }
+        let live = self.live(session_id).await?;
+        {
+            let pending = live.pending_permissions.lock().await;
+            if !pending.is_empty() {
+                bail!("answer or cancel the pending Agent interaction first");
+            }
+        }
+        let wait_ms = expires_at_ms.saturating_sub(now_ms());
+        if wait_ms <= 0 {
+            bail!("approvalStale: this plan challenge expired; create a new plan");
+        }
+
+        let (sender, receiver) = oneshot::channel();
+        live.cli_approval_waiters
+            .lock()
+            .await
+            .insert(request.id.clone(), sender);
+        live.round_blocked().await;
+        {
+            let mut meta = live.meta.lock().await;
+            meta.pending_permission = Some(request.clone());
+            meta.updated_at_ms = now_ms();
+            if let Err(error) = self.store.save_meta(&meta) {
+                live.cli_approval_waiters.lock().await.remove(&request.id);
+                return Err(error).context("persisting the requested plan approval");
+            }
+        }
+        let event = SessionEvent::PermissionRequested {
+            request: request.clone(),
+        };
+        apply(&live, &event).await;
+        live.publish(event).await;
+        live.trim_replay(self.replay_window).await;
+
+        match tokio::time::timeout(Duration::from_millis(wait_ms as u64), receiver).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(_)) => Err(anyhow!("the Human approval interaction was canceled")),
+            Err(_) => {
+                if live
+                    .cli_approval_waiters
+                    .lock()
+                    .await
+                    .remove(&request.id)
+                    .is_some()
+                {
+                    resolve_cli_interaction(
+                        &live,
+                        &self.store,
+                        &request.id,
+                        PermissionOutcome::TimedOut {
+                            applied_default: "reject".into(),
+                        },
+                    )
+                    .await?;
+                }
+                bail!("approvalStale: this plan challenge expired; create a new plan")
+            }
+        }
     }
 
     pub async fn pending_permission_kind(
@@ -3189,6 +3281,7 @@ impl Live {
             agent: Mutex::new(None),
             additional_system_prompt: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
+            cli_approval_waiters: Mutex::new(HashMap::new()),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
             open_turn_dirty: AtomicBool::new(false),
@@ -3639,6 +3732,21 @@ impl Live {
         }
     }
 
+    /// Ends a Human wait without starting another adapter turn. CLI-backed
+    /// approval stays inside the same tool call and therefore the same turn.
+    async fn round_unblocked(&self) {
+        let mut active = self.active_round.lock().await;
+        if let Some(round) = active.as_mut() {
+            if round.outcome.is_none() {
+                if let Some(since) = round.blocked_since_ms.take() {
+                    let now = now_ms();
+                    round.blocked_ms += (now - since).max(0);
+                    round.blocked_intervals.push((since, now));
+                }
+            }
+        }
+    }
+
     /// Ends the open round, if there is one, returning it together with the
     /// item ids it accumulated so the caller can append a `RoundRecord`
     /// (`session/rounds.rs`). `None` when there was nothing open to settle —
@@ -4043,6 +4151,38 @@ async fn stop_agent_for_interaction(
         // way, so no approval request or live transport has to survive.
         let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
         close_current_agent(live).await?;
+    }
+    Ok(())
+}
+
+/// Resolves a Human interaction whose Agent is still blocked inside the CLI
+/// call that presented it. Unlike adapter-native questions, this resumes no
+/// process and injects no prompt: returning from the CLI call is the resume.
+async fn resolve_cli_interaction(
+    live: &Arc<Live>,
+    store: &Store,
+    request_id: &str,
+    outcome: PermissionOutcome,
+) -> Result<()> {
+    {
+        let mut meta = live.meta.lock().await;
+        meta.pending_permission = None;
+        meta.updated_at_ms = now_ms();
+        store.save_meta(&meta)?;
+    }
+    live.round_unblocked().await;
+    let resolved = SessionEvent::PermissionResolved {
+        request_id: request_id.to_string(),
+        outcome,
+    };
+    apply(live, &resolved).await;
+    live.publish(resolved).await;
+    if live.agent().await.is_some() {
+        *live.status.lock().await = SessionStatus::Running;
+        live.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Running,
+        })
+        .await;
     }
     Ok(())
 }
@@ -7165,6 +7305,80 @@ mod tests {
             .pending_permissions
             .is_empty());
         assert_eq!(*live.status.lock().await, SessionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn cli_requested_plan_approval_waits_for_a_human_response() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(manager(workspace.path()));
+        sessions.store.save_meta(&meta()).unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (events, _) = broadcast::channel(1);
+        *live.agent.lock().await = Some(Arc::new(StoppingSession {
+            events,
+            interrupted: interrupted.clone(),
+            closed: closed.clone(),
+        }));
+        let request = interaction(PermissionRequestKind::PlanApproval);
+        let request_id = request.id.clone();
+        let waiting = {
+            let sessions = sessions.clone();
+            tokio::spawn(async move {
+                sessions
+                    .request_project_approval("s1", request, now_ms() + 60_000)
+                    .await
+            })
+        };
+
+        for _ in 0..100 {
+            if sessions
+                .pending_permission_kind("s1", &request_id)
+                .await
+                .unwrap()
+                == Some(PermissionRequestKind::PlanApproval)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!waiting.is_finished());
+        assert_eq!(
+            sessions.summary("s1").await.unwrap().status,
+            SessionStatus::Waiting
+        );
+
+        sessions
+            .respond_permission(
+                "s1",
+                &request_id,
+                PermissionOutcome::Selected {
+                    option_id: "yes".into(),
+                },
+                &ProviderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            waiting.await.unwrap().unwrap(),
+            PermissionOutcome::Selected {
+                option_id: "yes".into()
+            }
+        );
+        assert!(sessions
+            .snapshot("s1")
+            .await
+            .unwrap()
+            .pending_permissions
+            .is_empty());
+        assert!(!interrupted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!closed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            sessions.summary("s1").await.unwrap().status,
+            SessionStatus::Running,
+            "returning from the blocked CLI call continues the same Agent turn"
+        );
     }
 
     #[tokio::test]

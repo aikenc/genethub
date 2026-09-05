@@ -382,6 +382,7 @@ pub fn required(request: &Request) -> Capability {
         Request::SessionCreate { .. }
         | Request::AgentSpaceBuilder { .. }
         | Request::ProjectBootstrap { .. }
+        | Request::ProjectApprovalRequest { .. }
         | Request::WorkflowInitialize { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }

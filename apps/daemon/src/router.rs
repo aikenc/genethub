@@ -2296,6 +2296,54 @@ async fn dispatch(
             Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
         },
 
+        Request::ProjectApprovalRequest { challenge_id } => {
+            let Some(session_id) = caller.session_controller_id() else {
+                return Handled::err(
+                    ErrorCode::Forbidden,
+                    "只有生成该计划的 Agent Session 可以请求用户确认",
+                );
+            };
+            let (request, expires_at_ms) = match state
+                .project_control
+                .request_permission(session_id, &challenge_id)
+                .await
+            {
+                Ok(interaction) => interaction,
+                Err(error) => {
+                    return Handled::err(ErrorCode::Conflict, format!("{error:#}"));
+                }
+            };
+            let request_id = request.id.clone();
+            let approve_option = request
+                .options
+                .iter()
+                .find(|option| option.kind == genehub_proto::PermissionOptionKind::AllowOnce)
+                .map(|option| option.id.clone())
+                .expect("daemon-authored plan approvals have an allow-once option");
+            match state
+                .sessions
+                .request_project_approval(session_id, request, expires_at_ms)
+                .await
+            {
+                Ok(genehub_proto::PermissionOutcome::Selected { option_id })
+                    if option_id == approve_option =>
+                {
+                    Handled::ok(Reply::Ack)
+                }
+                Ok(_) => Handled::err(
+                    ErrorCode::Forbidden,
+                    "approvalRejected: 用户没有批准这次项目变更",
+                ),
+                Err(error) => {
+                    state
+                        .project_control
+                        .abandon_request(session_id, &request_id)
+                        .await;
+                    Handled::err(ErrorCode::Conflict, format!("{error:#}"))
+                }
+            }
+        }
+
         Request::AgentSpaceChildren { workspace_id } => {
             match state.workspaces.schedulable_children(&workspace_id).await {
                 Ok(children) => Handled::ok(Reply::Workspaces(children)),
@@ -2655,6 +2703,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::ProjectBootstrap { .. } => Some("project.bootstrap"),
+        Request::ProjectApprovalRequest { .. } => Some("project.approval.request"),
         Request::SessionSend { .. } => Some("session.send"),
         Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
         Request::SessionArtifactChunk { .. } => Some("session.artifact.chunk"),

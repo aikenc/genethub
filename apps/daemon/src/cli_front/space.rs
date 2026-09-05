@@ -46,6 +46,9 @@ enum Command {
         action_id: Option<String>,
         expected_revision: Option<u64>,
     },
+    RequestApproval {
+        challenge_id: String,
+    },
     BootstrapList,
 }
 
@@ -251,6 +254,27 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 ));
             };
             output::succeed("space.bootstrap.list", json!({"packs": packs}));
+            Ok(EXIT_OK)
+        }
+        Command::RequestApproval { challenge_id } => {
+            let Reply::Ack = rpc
+                .call(Request::ProjectApprovalRequest {
+                    challenge_id: challenge_id.clone(),
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered project.approval.request with the wrong reply",
+                ));
+            };
+            output::succeed(
+                "space.approval.requested",
+                json!({
+                    "challengeId": challenge_id,
+                    "approved": true,
+                }),
+            );
             Ok(EXIT_OK)
         }
     }
@@ -547,6 +571,13 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             }
             Ok(Command::BootstrapList)
         }
+        ("approval", "request") => {
+            let mut values = Values::parse(rest(2))?;
+            let challenge_id = values.challenge.take().ok_or_else(|| {
+                CliFailure::invalid_args("space approval request 需要 --challenge <id>")
+            })?;
+            Ok(Command::RequestApproval { challenge_id })
+        }
         ("bootstrap", action @ ("plan" | "apply")) => {
             let mut values = Values::parse(rest(2))?;
             let pack_id = values.pack.take().ok_or_else(|| {
@@ -583,7 +614,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             })
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet space inspect|children|component set|component remove|parent set|lifecycle set|builder|bootstrap list|plan|apply ...",
+            "usage: genet space inspect|children|component set|component remove|parent set|lifecycle set|builder|bootstrap list|plan|apply|approval request ...",
         )),
     }
 }
@@ -602,6 +633,7 @@ struct Values {
     plan_digest: Option<String>,
     action_id: Option<String>,
     expected_revision: Option<u64>,
+    challenge: Option<String>,
     plan: bool,
     revision: Option<u64>,
     disabled: bool,
@@ -655,6 +687,7 @@ impl Values {
                         CliFailure::invalid_args("--expected-revision 需要非负整数")
                     })?);
                 }
+                "--challenge" => values.challenge = Some(next(&mut index)?),
                 "--plan" => values.plan = true,
                 "--revision" => {
                     let value = next(&mut index)?;
@@ -924,6 +957,28 @@ mod tests {
         .unwrap_err()
         .message
         .contains("--plan-digest"));
+    }
+
+    #[test]
+    fn approval_request_is_a_distinct_non_approving_command() {
+        let Command::RequestApproval { challenge_id } = parse(&[
+            "approval".into(),
+            "request".into(),
+            "--challenge".into(),
+            "pm-bootstrap-123".into(),
+        ])
+        .unwrap() else {
+            panic!("wrong command")
+        };
+        assert_eq!(challenge_id, "pm-bootstrap-123");
+        assert!(parse(&["approval".into(), "request".into()]).is_err());
+        assert!(parse(&[
+            "approval".into(),
+            "approve".into(),
+            "--challenge".into(),
+            "pm-bootstrap-123".into(),
+        ])
+        .is_err());
     }
 
     #[test]
