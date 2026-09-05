@@ -7,9 +7,8 @@
 // frame, leave a grandchild holding the pipe, ignore a cancel, ignore
 // SIGTERM, stop draining stdin, or shout.
 //
-// Every profile completes the handshake normally. A fault that fired during
-// `initialize`/`session/new` would be a different (and already covered) bug:
-// these cases are about a turn that is already in flight.
+// Startup profiles deliberately stall initialize or session/new. Other
+// profiles complete the handshake and exercise an execution already in flight.
 //
 // Usage:
 //   node controlled-agent.mjs --profile <name> --journal <path> [--chunks N]
@@ -155,6 +154,20 @@ async function onPrompt(id, params) {
       journal("went-silent", { id });
       return;
     }
+    case "reasoning-ignore-interrupt": {
+      update(sessionId, { sessionUpdate: "agent_thought_chunk", content: {
+        type: "text", text: "Reasoning overview. " + "source detail ".repeat(512) + "final-reasoning-marker",
+      } });
+      journal("went-silent", { id });
+      return;
+    }
+    case "burst-then-silent": {
+      messageChunk(sessionId, "checkpoint-prefix ");
+      await sleep(150);
+      messageChunk(sessionId, "checkpoint-tail ");
+      journal("went-silent", { id });
+      return;
+    }
     // Alive and deaf: neither the turn nor the cancel will ever be answered.
     case "ignore-interrupt":
     // Also refuses to die politely, so only the escalation to SIGKILL ends it.
@@ -185,7 +198,7 @@ async function onPrompt(id, params) {
 
 function onCancel() {
   journal("cancel", { pending: pendingPrompt?.id ?? null });
-  if (args.profile === "ignore-interrupt" || args.profile === "ignore-sigterm") {
+  if (args.profile === "ignore-interrupt" || args.profile === "ignore-sigterm" || args.profile === "reasoning-ignore-interrupt") {
     journal("cancel-ignored");
     return;
   }
@@ -224,6 +237,10 @@ async function onFrame(frame) {
       return;
     }
     case "session/new": {
+      if (args.profile === "hang-session-new") {
+        journal("withholding-session-new", { id });
+        return;
+      }
       sessionCounter += 1;
       currentSessionId = `controlled-${process.pid}-${sessionCounter}`;
       respond(id, { sessionId: currentSessionId });

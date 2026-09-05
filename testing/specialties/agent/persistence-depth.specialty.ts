@@ -352,8 +352,8 @@ function midTurnDurabilityCase(
         );
         // Recovering an unfinished turn moves it into the log, and a second
         // start must find that move already done rather than repeat it.
-        opened[0].client.close();
-        opened[0].daemon.stop();
+        opened[0]!.client.close();
+        opened[0]!.daemon.stop();
         const again = await reopen();
         t.assertions.assert(
           timesSaid(again) === 1,

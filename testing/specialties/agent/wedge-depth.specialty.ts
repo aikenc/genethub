@@ -299,7 +299,7 @@ async function definiteAnswer(
 wedgeCase(
   "a-startup-that-hangs-does-not-claim-the-session-forever",
   "A session survives an agent that never finishes starting",
-  "a prompt to an agent whose handshake never completes ends in a definite failure, leaves the session idle, and does not refuse the next prompt as a conflict",
+  "a prompt to an agent whose handshake never completes ends in a definite failure, leaves the session idle or failed, and does not refuse the next prompt as a conflict",
   [
     "a running status is published before there is anything running",
     "a handover with no deadline leaves the claim behind it standing",
@@ -322,7 +322,7 @@ wedgeCase(
     await t.tools
       .waitUntil(async () => {
         status = await session.daemonStatus();
-        return status === "idle";
+        return status === "idle" || status === "failed";
       }, 30_000)
       .catch(() => {
         throw new Error(

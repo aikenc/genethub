@@ -6,7 +6,7 @@
 // These cases hold the escape hatches to a wall clock. "Eventually" is not a
 // property a person waiting on a frozen chat can observe.
 
-import { BlockedError, defineSpecialty, type CaseContext } from "../../framework/public.ts";
+import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
 
 type ControlledAgent = Awaited<
   ReturnType<CaseContext["flows"]["branches"]["openControlledAgentSession"]>
@@ -74,52 +74,34 @@ function livenessCase(
   );
 }
 
-/** Drives a session into the state a user reaches by pressing stop on an
- * agent that has stopped reading, and returns only once one of those presses
- * is demonstrably still unanswered.
- *
- * The wait matters more than the presses. A later control call that answers
- * quickly because nothing was ever blocked looks exactly like one that
- * answers quickly because the product keeps its escape hatches free, and only
- * the second is the property under test — so failing to wedge blocks the case
- * rather than passing it.
- */
+/** The external fault is a live CLI whose stdin is paused. Control requests
+ * must remain available regardless of whether cancellation is queued or
+ * immediately acknowledged. Requiring a stuck control request as the fixture
+ * made the previous oracle block when the control plane was fixed. */
 async function wedgeControlPlane(t: CaseContext, session: ControlledAgent): Promise<string> {
-  await t.tools.waitUntil(
-    () => session.journal().some((entry) => entry.event === "stdin-paused"),
-    10_000,
-  );
+  const before = session.journal().length;
   await t.flows.main.sendPrompt(session.client, session.sessionId, OVERSIZED_PROMPT);
-  await t.tools.waitUntil(
-    () => session.journal().some((entry) => entry.event === "stdin-idle"),
-    5_000,
-  );
-
-  let answered = 0;
-  for (let press = 0; press < STOP_PRESSES; press += 1) {
-    void session.client
-      .call({ type: "session.interrupt", payload: { sessionId: session.sessionId } })
-      .then(
-        () => { answered += 1; },
-        () => { answered += 1; },
-      );
-  }
-  // Every press before the queue fills is answered almost immediately, so a
-  // short settle is enough to tell "all of them came back" from "one is
-  // stuck".
-  await new Promise((resolve) => setTimeout(resolve, 3_000));
-  if (answered >= STOP_PRESSES) {
-    throw new BlockedError(
-      `all ${STOP_PRESSES} stop presses were answered; nothing is holding the session, so this case proves nothing`,
-    );
-  }
-  return `${answered}/${STOP_PRESSES} stop presses answered`;
+  const samples = () => session.journal().slice(before).filter((entry) => entry.event === "stdin-idle"
+    && t.flows.branches.processAlive(Number(entry.pid)));
+  await t.tools.waitUntil(() => samples().length >= 2, 10_000);
+  const [first, second] = samples().slice(-2);
+  if (!first || !second) throw new Error("the CLI stopped before its unreadable state could be observed");
+  t.assertions.assert(first.pid === second.pid && first.bytesRead === second.bytesRead,
+    "the live CLI did not stop consuming stdin");
+  const started = Date.now();
+  const presses = Array.from({ length: STOP_PRESSES }, () => session.client.call({
+    type: "session.interrupt", payload: { sessionId: session.sessionId },
+  }));
+  const answers = await Promise.allSettled(presses);
+  t.assertions.assert(Date.now() - started < CONTROL_BUDGET_MS, "repeated stop requests blocked the control plane");
+  t.assertions.assert(answers.every((answer) => answer.status === "fulfilled"), "a stop request failed");
+  return `${STOP_PRESSES} stop presses answered against unreadable CLI pid ${first.pid}`;
 }
 
 livenessCase(
   "close-after-repeated-stop-presses",
   "Close still answers after stop was pressed on an unreadable agent",
-  "with one stop press still unanswered against an agent that stopped reading, session.close returns within 15s",
+  "after repeated stop presses against an agent confirmed to have stopped reading, session.close returns within 15s",
   [
     "interrupt holds the agent lock across a write that can block",
     "one stuck control call wedges every other control call on the session",
@@ -143,7 +125,7 @@ livenessCase(
 livenessCase(
   "one-wedged-session-does-not-wedge-the-rest",
   "A wedged session does not take the workspace with it",
-  "with one stop press still unanswered on a wedged session, session.list and a second session's send both answer within 15s",
+  "after repeated stop presses on an unreadable agent, session.list and a second session's creation both answer within 15s",
   [
     "a per-session wedge escalates to a daemon-wide stall",
     "the sidebar stops answering because one conversation is stuck",
@@ -264,14 +246,6 @@ livenessCase(
       () => session.journal().some((entry) => entry.event === "went-silent"),
       10_000,
     );
-    // The process that took the prompt, not the one the daemon started to ask
-    // the agent what it offers: that probe is gone by now, and asking whether
-    // it is alive would answer "no" no matter what this case does.
-    const agentPid = Number(
-      session.journal().find((entry) => entry.event === "went-silent")?.pid ?? 0,
-    );
-    t.assertions.assert(agentPid > 0, "the controlled agent never reported its pid");
-
     await session.client.call({
       type: "session.interrupt",
       payload: { sessionId: session.sessionId },
@@ -279,9 +253,12 @@ livenessCase(
     await t.tools.waitUntil(async () => (await session.daemonStatus()) !== "running", 15_000);
 
     // The impatient retype, well inside the window the stop armed.
+    const beforeSecond = session.journal().length;
     await t.flows.main.sendPrompt(session.client, session.sessionId, "actually, this instead");
     await t.tools.waitUntil(async () => (await session.daemonStatus()) === "running", 15_000);
 
+    await t.tools.waitUntil(() => session.journal().slice(beforeSecond).some((entry) => entry.event === "went-silent"), 10_000);
+    const agentPid = Number(session.journal().slice(beforeSecond).find((entry) => entry.event === "went-silent")!.pid);
     await new Promise((resolve) => setTimeout(resolve, 8_000));
     const status = await session.daemonStatus();
     t.note(`status after the grace window: ${status}`);

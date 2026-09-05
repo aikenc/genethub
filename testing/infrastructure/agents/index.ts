@@ -16,8 +16,14 @@ export type ControlledAgentProfile =
   | "grandchild-holds-stdout"
   /** Accepts the turn and never answers. Honours a cancel. */
   | "accept-then-silent"
+  /** Emits a second chunk shortly after the first, then stays silent. */
+  | "burst-then-silent"
+  /** Answers catalog probes, but never finishes creating a session. */
+  | "hang-session-new"
   /** Never answers the turn and never answers a cancel. */
   | "ignore-interrupt"
+  /** Leaves a raw reasoning tail pending and refuses cancellation. */
+  | "reasoning-ignore-interrupt"
   /** Also ignores SIGTERM, so only an escalation to SIGKILL ends it. */
   | "ignore-sigterm"
   /** Stops draining stdin after the handshake, so a large prompt blocks. */
