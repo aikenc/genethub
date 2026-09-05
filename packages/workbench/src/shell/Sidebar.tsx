@@ -769,7 +769,7 @@ function WorkspaceRow({
                   label="健康"
                   value={workspace.agentSpace.health?.status ?? "unknown"}
                 />
-                {workspace.agentSpace.health?.reasons.map((reason) => (
+                {(workspace.agentSpace.health?.reasons ?? []).map((reason) => (
                   <p key={reason} className="py-0.5 text-[10px] text-danger">{reason}</p>
                 ))}
                 <Detail label="生命周期" value={workspace.agentSpace.lifecycle} />

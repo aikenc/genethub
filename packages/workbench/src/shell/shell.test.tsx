@@ -331,6 +331,32 @@ describe("the left edge", () => {
     });
   });
 
+  it("opens a healthy AgentSpace whose empty health reasons were omitted on the wire", async () => {
+    const fromWire = structuredClone(
+      agentWorkspace("project", "小游戏", undefined, [
+        { componentId: "pm", schemaVersion: 1, enabled: true },
+      ]),
+    ) as WorkspaceInfo;
+    // `reasons` is skipped by serde when the Vec is empty. Keep this fixture at
+    // the JSON boundary shape rather than filling the field as TypeScript's
+    // generated projection does.
+    delete (fromWire.agentSpace?.health as { reasons?: string[] } | undefined)?.reasons;
+    useWorkbench.setState({
+      sessions: [],
+      activeSessionId: null,
+      workspaces: [fromWire],
+      activeWorkspaceId: "project",
+    });
+    sidebar();
+
+    await userEvent.click(screen.getByRole("button", { name: "小游戏 的工作区操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "详情" }));
+
+    const details = screen.getByText("工作区详情").parentElement?.parentElement;
+    expect(details).toHaveTextContent("健康healthy");
+    expect(details).toHaveTextContent("pm · v1");
+  });
+
   it("distinguishes folders from saved workspaces and removes only after confirmation", async () => {
     const saved = {
       ...workspace("w2", "paseo"),

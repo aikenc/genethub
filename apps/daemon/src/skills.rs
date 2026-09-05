@@ -338,6 +338,23 @@ mod tests {
     }
 
     #[test]
+    fn pm_bootstrap_uses_the_running_agents_native_structured_question() {
+        let root = temp_dir("pm-bootstrap-interaction");
+        let skills = load(&root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "pm-project-bootstrap")
+            .expect("PM bootstrap built-in");
+        let body = std::fs::read_to_string(&skill.file_path).unwrap();
+
+        assert!(body.contains("request_user_input"));
+        assert!(body.contains("Cursor"));
+        assert!(body.contains("AskQuestion"));
+        assert!(body.contains("exactly that challenge id"));
+        assert!(body.contains("ordinary chat reply"));
+    }
+
+    #[test]
     fn unknown_data_dir_skill_is_not_in_the_genehub_catalog() {
         let root = temp_dir("unknown");
         write_skill(
