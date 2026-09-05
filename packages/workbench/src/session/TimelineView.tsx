@@ -22,6 +22,7 @@ import {
   type ForkSelection,
 } from "./ForkDialog";
 import { ForwardDialog } from "./ForwardDialog";
+import { ExecutorFlow } from "./ExecutorFlow";
 import { ImageThumbStrip } from "./ImageStrip";
 import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
@@ -234,6 +235,8 @@ export function TimelineView({
   const agents = useWorkbench((workbench) => workbench.agents);
   const workspaces = useWorkbench((workbench) => workbench.workspaces);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
+  const hasExecutor = workspaces.find((space) => space.id === activeSession?.workspaceId)
+    ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
   const agentLabel = useWorkbench((workbench) => {
     const session = workbench.sessions.find((entry) => entry.id === activeSessionId);
@@ -605,6 +608,8 @@ export function TimelineView({
             );
           },
         )}
+
+        {hasExecutor && activeSessionId ? <ExecutorFlow key={activeSessionId} sessionId={activeSessionId} /> : null}
 
         {rounds
           .filter(

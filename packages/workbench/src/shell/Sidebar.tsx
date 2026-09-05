@@ -17,6 +17,7 @@ import {
   isDescendant,
   type AgentSpaceTreeNode,
 } from "../workspace/agent-space-tree";
+import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 import { TargetSwitcher } from "./TargetSwitcher";
 
@@ -485,7 +486,7 @@ function Projects({
         {shut ? null : (
           <>
             {node.children.length > 0 ? (
-              <ul className={`${depth === 0 ? "ml-3" : "ml-2"} border-l border-line pl-1`}>
+              <ul className="ml-1 border-l border-line pl-1">
                 {node.children.map((child) => renderNode(child, depth + 1))}
               </ul>
             ) : null}
@@ -626,7 +627,7 @@ function WorkspaceRow({
         />
       ) : (
         <div
-          className={`flex w-full items-center gap-1 rounded-md pr-1 text-sm md:text-xs ${active ? "text-fg" : "text-muted"}`}
+          className={`flex min-h-14 w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "text-fg" : "text-muted"}`}
         >
           <button
             type="button"
@@ -640,24 +641,23 @@ function WorkspaceRow({
           <button
             type="button"
             className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left font-medium hover:text-fg md:py-1"
+            aria-label={workspace.name}
             title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
             <WorkspaceIcon workspace={workspace} />
-            <span className="min-w-0 truncate">{workspace.name}</span>
-          </button>
-          {workspace.agentSpace ? (
-            <span
-              className={`max-w-[5.5rem] truncate rounded px-1 text-[9px] ${
-                workspace.agentSpace.health?.status === "unhealthy"
-                  ? "bg-danger/10 text-danger"
-                  : "bg-accent/10 text-accent"
-              }`}
-              title={componentSummary(workspace)}
-            >
-              {componentSummary(workspace)}
+            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="truncate text-sm leading-5">{workspace.name}</span>
+              <span
+                className={`block min-h-4 truncate text-[11px] font-normal leading-4 ${
+                  workspace.agentSpace?.health?.status === "unhealthy" ? "text-danger" : "text-muted"
+                }`}
+                title={workspace.agentSpace ? componentSummary(workspace) : undefined}
+              >
+                {workspace.agentSpace ? componentSummary(workspace) : "普通工作区"}
+              </span>
             </span>
-          ) : null}
+          </button>
           {relationAnomaly ? (
             <span className="text-[9px] text-danger" title="Parent 关系异常">!</span>
           ) : null}
@@ -729,18 +729,7 @@ function WorkspaceRow({
         </>
       ) : null}
       {details ? (
-        <div className="mx-1 mb-2 rounded-lg border border-line bg-surface p-3 text-xs">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="font-medium text-fg">工作区详情</span>
-            <button
-              type="button"
-              aria-label="关闭工作区详情"
-              className="rounded px-2 py-1 text-faint hover:bg-raised hover:text-fg"
-              onClick={() => setDetails(false)}
-            >
-              ×
-            </button>
-          </div>
+        <WorkspaceDetailsDialog onClose={() => setDetails(false)}>
           <Detail label="名称" value={workspace.name} />
           {workspace.workspaceFile ? (
             <Detail label="工作区文件" value={workspace.workspaceFile} />
@@ -967,7 +956,7 @@ function WorkspaceRow({
             </div>
             {builderSummary ? <p className="mt-1 text-[10px] text-muted">{builderSummary}</p> : null}
           </div>
-        </div>
+        </WorkspaceDetailsDialog>
       ) : null}
       {removing ? (
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
