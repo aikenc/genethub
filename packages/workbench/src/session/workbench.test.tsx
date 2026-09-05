@@ -2554,6 +2554,9 @@ describe("the controls offered to the user", () => {
     );
 
     expect(screen.getByLabelText("Agent 计划确认")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "需要你的确认" })).toBeInTheDocument();
+    expect(screen.getByText("实现计划")).toBeInTheDocument();
+    expect(screen.getByText("先持久化，再恢复。")).toBeInTheDocument();
     expect(screen.getByText("任务已暂停；确认计划后会从原会话继续。")).toBeInTheDocument();
   });
 

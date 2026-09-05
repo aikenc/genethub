@@ -925,7 +925,9 @@ export function App({
                             state={workbench.timeline}
                             {...(forkController ? { forkController } : {})}
                             {...(forwardController ? { forwardController } : {})}
-                            bottomInset={composerHeight}
+                            bottomInset={
+                              workbench.timeline.pendingPermission ? 0 : composerHeight
+                            }
                             onScrollBack={() => setComposerMinimized(true)}
                             onReturnToBottom={() => setComposerMinimized(false)}
                           />
@@ -933,7 +935,7 @@ export function App({
                       )}
                     </div>
                     {workbench.timeline.pendingPermission && managedReadOnly ? (
-                      <div className="z-20 shrink-0 px-4">
+                      <div className="z-20 shrink-0 px-4 pb-4 pt-2">
                         <div
                           role="status"
                           className="mx-auto max-w-chat rounded-xl border border-line bg-raised px-3 py-2 text-xs text-muted"
@@ -942,7 +944,7 @@ export function App({
                         </div>
                       </div>
                     ) : workbench.timeline.pendingPermission ? (
-                      <div className="z-20 shrink-0 px-4">
+                      <div className="z-20 shrink-0 px-4 pb-4 pt-2">
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
                             request={workbench.timeline.pendingPermission}
@@ -953,91 +955,93 @@ export function App({
                         </div>
                       </div>
                     ) : null}
-                    <Composer
-                      phase={phase}
-                      lastActivityAtMs={session?.lastActivityAtMs ?? null}
-                      disabled={sessionReadOnly}
-                      disabledReason={
-                        managedReadOnly
-                          ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
-                          : importedReadOnly
-                          ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
-                          : undefined
-                      }
-                      agents={workbench.agents}
-                      agentId={agentId}
-                      modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
-                      modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
-                      effortId={
-                        workbench.timeline.effortId ?? draft?.effortId ?? null
-                      }
-                      runtimeValues={
-                        workbench.activeSessionId
-                          ? workbench.timeline.runtimeValues
-                          : (draft?.runtimeValues ?? {})
-                      }
-                      // A message in flight locks the Agent too: switching would
-                      // open a new conversation and abandon it.
-                      agentLocked={
-                        workbench.timeline.items.length > 0 || Boolean(pending)
-                      }
-                      attachmentsSupported={
-                        currentAgent?.capabilities.attachments ?? false
-                      }
-                      commands={currentAgent?.catalog.commands}
-                      restoreDraft={workbench.restoreDraft}
-                      insertDraft={
-                        workbench.composerDraftInserts.find(
-                          (insert) => insert.sessionId === workbench.activeSessionId,
-                        ) ?? null
-                      }
-                      forwardDraft={
-                        workbench.forwardDraft?.sessionId === workbench.activeSessionId
-                          ? workbench.forwardDraft
-                          : null
-                      }
-                      onClearForwardDraft={() => workbench.setForwardDraft(null)}
-                      speech={
-                        workbench.client &&
-                        workbench.activeWorkspaceId &&
-                        workbench.client.identity?.features?.includes("speech.transcribe.v2")
-                          ? {
-                              client: workbench.client,
-                              workspaceId: workbench.activeWorkspaceId,
-                              ...(workbench.activeSessionId
-                                ? { sessionId: workbench.activeSessionId }
-                                : {}),
-                              onOpenSettings: () => workbench.openTab("settings"),
-                              onOpenLogs: () => workbench.openTab("logs"),
-                              ...(onReportSpeechProblem
-                                ? { onReportProblem: onReportSpeechProblem }
-                                : {}),
-                            }
-                          : undefined
-                      }
-                      onRestoreDraft={workbench.restoredDraft}
-                      onInsertDraft={workbench.consumedComposerDraftInsert}
-                      onHeightChange={setComposerHeight}
-                      minimized={composerMinimized}
-                      onExpand={() => setComposerMinimized(false)}
-                      onSend={(text, attachments) =>
-                        void workbench.send(text, attachments)
-                      }
-                      onInterrupt={() => void workbench.interrupt()}
-                      // Switching agent opens an empty conversation rather than
-                      // handing this one over: no adapter can pick up another's
-                      // history (`ComposerControls` on why the chip locks once
-                      // anything has been said). Nothing is written until that
-                      // conversation is used.
-                      onPickAgent={(id) => workbench.newSession(null, id)}
-                      onPickModel={(id) => void workbench.setModel(id)}
-                      onPickMode={(id) => void workbench.setMode(id)}
-                      onPickEffort={(id) => void workbench.setEffort(id)}
-                      onPickRuntimeAxis={(axisId, valueId) =>
-                        void workbench.setRuntimeAxis(axisId, valueId)
-                      }
-                      onRefreshAgents={() => void workbench.refreshAgents()}
-                    />
+                    {!workbench.timeline.pendingPermission ? (
+                      <Composer
+                        phase={phase}
+                        lastActivityAtMs={session?.lastActivityAtMs ?? null}
+                        disabled={sessionReadOnly}
+                        disabledReason={
+                          managedReadOnly
+                            ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
+                            : importedReadOnly
+                            ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
+                            : undefined
+                        }
+                        agents={workbench.agents}
+                        agentId={agentId}
+                        modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
+                        modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
+                        effortId={
+                          workbench.timeline.effortId ?? draft?.effortId ?? null
+                        }
+                        runtimeValues={
+                          workbench.activeSessionId
+                            ? workbench.timeline.runtimeValues
+                            : (draft?.runtimeValues ?? {})
+                        }
+                        // A message in flight locks the Agent too: switching would
+                        // open a new conversation and abandon it.
+                        agentLocked={
+                          workbench.timeline.items.length > 0 || Boolean(pending)
+                        }
+                        attachmentsSupported={
+                          currentAgent?.capabilities.attachments ?? false
+                        }
+                        commands={currentAgent?.catalog.commands}
+                        restoreDraft={workbench.restoreDraft}
+                        insertDraft={
+                          workbench.composerDraftInserts.find(
+                            (insert) => insert.sessionId === workbench.activeSessionId,
+                          ) ?? null
+                        }
+                        forwardDraft={
+                          workbench.forwardDraft?.sessionId === workbench.activeSessionId
+                            ? workbench.forwardDraft
+                            : null
+                        }
+                        onClearForwardDraft={() => workbench.setForwardDraft(null)}
+                        speech={
+                          workbench.client &&
+                          workbench.activeWorkspaceId &&
+                          workbench.client.identity?.features?.includes("speech.transcribe.v2")
+                            ? {
+                                client: workbench.client,
+                                workspaceId: workbench.activeWorkspaceId,
+                                ...(workbench.activeSessionId
+                                  ? { sessionId: workbench.activeSessionId }
+                                  : {}),
+                                onOpenSettings: () => workbench.openTab("settings"),
+                                onOpenLogs: () => workbench.openTab("logs"),
+                                ...(onReportSpeechProblem
+                                  ? { onReportProblem: onReportSpeechProblem }
+                                  : {}),
+                              }
+                            : undefined
+                        }
+                        onRestoreDraft={workbench.restoredDraft}
+                        onInsertDraft={workbench.consumedComposerDraftInsert}
+                        onHeightChange={setComposerHeight}
+                        minimized={composerMinimized}
+                        onExpand={() => setComposerMinimized(false)}
+                        onSend={(text, attachments) =>
+                          void workbench.send(text, attachments)
+                        }
+                        onInterrupt={() => void workbench.interrupt()}
+                        // Switching agent opens an empty conversation rather than
+                        // handing this one over: no adapter can pick up another's
+                        // history (`ComposerControls` on why the chip locks once
+                        // anything has been said). Nothing is written until that
+                        // conversation is used.
+                        onPickAgent={(id) => workbench.newSession(null, id)}
+                        onPickModel={(id) => void workbench.setModel(id)}
+                        onPickMode={(id) => void workbench.setMode(id)}
+                        onPickEffort={(id) => void workbench.setEffort(id)}
+                        onPickRuntimeAxis={(axisId, valueId) =>
+                          void workbench.setRuntimeAxis(axisId, valueId)
+                        }
+                        onRefreshAgents={() => void workbench.refreshAgents()}
+                      />
+                    ) : null}
                   </>
                 ) : (
                   <FirstRun
