@@ -954,6 +954,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       sessionId,
       {
         onEvent: (event) => {
+        if (get().client !== client) return;
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
@@ -979,6 +980,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           }
         },
         onResync: (resnapshot, events, reset) => {
+        if (get().client !== client) return;
         const previous = timelineOf(get(), sessionId);
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot, previous.pending, previous)
@@ -994,12 +996,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         // dropped. Replaying only what survived leaves a finished turn showing
         // as still running, with a composer that will not take the next
         // message — the shape of every freeze report we have.
-        adoptSnapshotStatus(sessionId, resnapshot as SessionSnapshot, set);
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
           applySessionStatus(sessionId, event.event, set);
         }
-        const timeline = events.reduce(applySequenced, base);
+        adoptSnapshotStatus(sessionId, resnapshot as SessionSnapshot, set);
+        const timeline = withSnapshotStatus(events.reduce(applySequenced, base), resnapshot as SessionSnapshot);
         set((state) => ({
           sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
           ...(state.activeSessionId === sessionId ? { timeline } : {}),
@@ -1009,6 +1011,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       { expandLastRound: shouldExpandLastRound(summary) },
     );
 
+    if (get().client !== client) return;
     const typedSnapshot = snapshot as SessionSnapshot;
     const previous = timelineOf(get(), sessionId);
     const base = fromSnapshot(typedSnapshot, previous.pending, previous);
@@ -1017,7 +1020,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // are valid, but only the currently selected session owns the timeline.
     markSessionRead(typedSnapshot.summary);
     adoptSnapshotStatus(sessionId, typedSnapshot, set);
-    const timeline = replayed.reduce(applySequenced, base);
+    const timeline = withSnapshotStatus(replayed.reduce(applySequenced, base), typedSnapshot);
     set((state) => {
       // Whose subscriptions these are. A client that has been replaced takes its
       // subscriptions with it, so the list restarts from this one.

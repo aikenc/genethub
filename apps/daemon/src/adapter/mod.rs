@@ -202,6 +202,37 @@ pub trait AgentSession: Send + Sync {
 
 pub type SharedAdapter = Arc<dyn AgentAdapter>;
 
+/// Background IO belongs to the session even before initialize completes.
+/// Dropping a canceled startup must release every pipe and process reference.
+#[derive(Default)]
+pub struct SessionTasks(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+
+impl SessionTasks {
+    pub fn spawn(&self, future: impl std::future::Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.0.lock().expect("session tasks poisoned");
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(tokio::spawn(future));
+    }
+
+    pub async fn stop(&self) {
+        let tasks = std::mem::take(&mut *self.0.lock().expect("session tasks poisoned"));
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for SessionTasks {
+    fn drop(&mut self) {
+        for task in self.0.get_mut().expect("session tasks poisoned") {
+            task.abort();
+        }
+    }
+}
+
 /// The last thing a child process said, kept for whoever has to read the failure.
 ///
 /// Every adapter here starts a program somebody else wrote, and when one of those
@@ -259,13 +290,16 @@ impl Chatter {
     /// thing left to read once the child is gone. Bounded, because a child that
     /// left its pipes to a grandchild would otherwise hold this open forever.
     pub async fn settle(&self) {
-        let readers = std::mem::take(&mut *self.readers.lock().await);
+        let mut readers = std::mem::take(&mut *self.readers.lock().await);
         let _ = tokio::time::timeout(Duration::from_secs(1), async {
-            for reader in readers {
+            for reader in &mut readers {
                 let _ = reader.await;
             }
         })
         .await;
+        for reader in &readers {
+            reader.abort();
+        }
     }
 
     /// Formatted to sit at the end of a sentence, and to disappear when there is
@@ -276,6 +310,14 @@ impl Chatter {
             return String::new();
         }
         format!(": {}", Vec::from_iter(held.iter().cloned()).join(" / "))
+    }
+}
+
+impl Drop for Chatter {
+    fn drop(&mut self) {
+        for reader in self.readers.get_mut() {
+            reader.abort();
+        }
     }
 }
 
@@ -401,38 +443,45 @@ pub(super) fn append_system_prompt_arg(
 /// the one we hold. They are reachable because the agent was started in a
 /// process group of its own (`crate::process::own_group`).
 pub async fn kill_tree(child: &mut crate::os_process::Child) {
+    if let Err(error) = kill_tree_checked(child).await {
+        tracing::warn!(%error, "could not confirm child cleanup");
+    }
+}
+
+pub async fn close_child(child: &Mutex<Option<crate::os_process::Child>>) -> Result<()> {
+    let mut held = child.lock().await;
+    if let Some(child) = held.as_mut() {
+        kill_tree_checked(child).await?;
+    }
+    held.take();
+    Ok(())
+}
+
+async fn kill_tree_checked(child: &mut crate::os_process::Child) -> Result<()> {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
         crate::process::stop_tree(pid);
     }
     #[cfg(windows)]
     if let Some(pid) = child.id() {
-        // `/T` is the whole point: the tree, not the shim. Failure is not worth
-        // reporting — the direct kill below is still coming.
-        let _ = crate::os_process::Command::new("taskkill")
+        let mut command = crate::os_process::Command::new("taskkill");
+        command
             .args(["/T", "/F", "/PID", &pid.to_string()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .await;
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), command.status()).await;
     }
-    let _ = child.start_kill();
-    // Reaping is a courtesy, not a precondition. A process that is killed is
-    // normally gone by the time this asks, but one blocked in the kernel — an
-    // unresponsive mount, a device that stopped answering — is not, and SIGKILL
-    // does not reach it until it comes back. Waiting for that without a deadline
-    // makes the recovery path itself the thing that hangs, and the caller is
-    // usually a user who already pressed stop once.
-    if tokio::time::timeout(REAP_BUDGET, child.wait())
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    child.start_kill()?;
+    tokio::time::timeout(REAP_BUDGET, child.wait())
         .await
-        .is_err()
-    {
-        tracing::warn!(
-            pid = child.id(),
-            budget_ms = REAP_BUDGET.as_millis() as u64,
-            "a killed agent has not been reaped yet; leaving it to the OS"
-        );
-    }
+        .map_err(|_| {
+            anyhow::anyhow!("the killed agent has not exited; cleanup can be retried")
+        })??;
+    Ok(())
 }
 
 /// How long a killed agent gets to be reaped before the caller moves on.

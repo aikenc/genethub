@@ -276,6 +276,7 @@ impl AgentAdapter for GenetAdapter {
         said.watch("genet-agent", Some(stderr)).await;
 
         let session = GenetSession {
+            tasks: super::SessionTasks::default(),
             stdin: Mutex::new(stdin),
             events: events.clone(),
             turn: turn.clone(),
@@ -284,7 +285,9 @@ impl AgentAdapter for GenetAdapter {
             session_file,
         };
 
-        tokio::spawn(translate_stream(stdout, events, turn, child, said));
+        session
+            .tasks
+            .spawn(translate_stream(stdout, events, turn, child, said));
 
         Ok(Box::new(session))
     }
@@ -314,6 +317,7 @@ impl TurnState {
 }
 
 struct GenetSession {
+    tasks: super::SessionTasks,
     stdin: Mutex<ChildStdin>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
@@ -378,13 +382,8 @@ impl AgentSession for GenetSession {
     }
 
     async fn close(&self) -> Result<()> {
-        // Dropping stdin is the agent's shutdown signal; it drains in-flight
-        // work before exiting, so wait rather than killing outright.
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 

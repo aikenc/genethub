@@ -20,7 +20,7 @@
 //! session proportional to what was actually said rather than to the number of
 //! tokens streamed (`docs/daemon.md` §4).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -1155,10 +1155,20 @@ impl Store {
         )?;
         let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
+        // Separate a previous interrupted append from this batch. Empty lines
+        // are ignored on load; an incomplete JSON row must not swallow a retry.
+        writeln!(file)?;
         for row in rows {
             writeln!(file, "{}", serde_json::to_string(row)?)?;
         }
         file.flush()?;
+        file.sync_all()?;
+        // As with save_private, directory syncing depends on the host OS
+        // (including when this code runs as WASI on Windows). File contents
+        // must sync successfully; directory sync is attempted where supported.
+        if let Ok(directory) = File::open(path.parent().expect("chat has a parent")) {
+            let _ = directory.sync_all();
+        }
         Ok(())
     }
 
@@ -1174,13 +1184,24 @@ impl Store {
             Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
         };
         let mut log = ChatLog::default();
+        let mut item_positions = HashMap::<String, usize>::new();
         for (index, line) in BufReader::new(file).lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<ChatRow>(&line) {
-                Ok(ChatRow::Item { item }) => log.items.push(item),
+                Ok(ChatRow::Item { item }) => {
+                    // A failed append may have written complete rows before
+                    // returning an error. Retrying preserves one item per id.
+                    match item_positions.get(item.id()) {
+                        Some(&position) => log.items[position] = item,
+                        None => {
+                            item_positions.insert(item.id().to_string(), log.items.len());
+                            log.items.push(item);
+                        }
+                    }
+                }
                 Ok(ChatRow::Round { round }) => {
                     match log
                         .rounds
@@ -1245,22 +1266,28 @@ impl Store {
         crate::config::save_private(&path, &body)
     }
 
-    /// Empty whenever there is nothing to recover, a missing file and an
-    /// unreadable one alike: a turn that cannot be restored must not stop the
-    /// conversation it belongs to from opening.
-    pub fn load_open_turn(&self, workspace_id: &str, session_id: &str) -> Vec<TimelineItem> {
-        let Ok(path) = self.open_turn_path(workspace_id, session_id) else {
-            return Vec::new();
-        };
-        let Ok(contents) = std::fs::read_to_string(&path) else {
-            return Vec::new();
+    /// Missing is empty; unreadable is an error. An unreadable recovery copy
+    /// cannot safely be replaced by the next execution's checkpoint.
+    pub fn load_open_turn(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<TimelineItem>> {
+        let path = self.open_turn_path(workspace_id, session_id)?;
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error)
+                    .context("reading the interrupted answer before accepting new writes")
+            }
         };
         contents
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| match serde_json::from_str::<ChatRow>(line) {
-                Ok(ChatRow::Item { item }) => Some(item),
-                _ => None,
+            .map(|line| match serde_json::from_str::<ChatRow>(line)? {
+                ChatRow::Item { item } => Ok(item),
+                _ => anyhow::bail!("unexpected row in the interrupted answer"),
             })
             .collect()
     }

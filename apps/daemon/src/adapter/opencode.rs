@@ -134,7 +134,8 @@ impl AgentAdapter for OpenCodeAdapter {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
 
-        tokio::spawn(stream_events(
+        let tasks = super::SessionTasks::default();
+        tasks.spawn(stream_events(
             http.clone(),
             base.clone(),
             remote_session.clone(),
@@ -143,6 +144,8 @@ impl AgentAdapter for OpenCodeAdapter {
         ));
 
         Ok(Box::new(OpenCodeSession {
+            tasks,
+            _chatter: chatter,
             http,
             base,
             remote_session,
@@ -374,6 +377,8 @@ impl TurnState {
 }
 
 struct OpenCodeSession {
+    tasks: super::SessionTasks,
+    _chatter: Chatter,
     http: crate::http::Client,
     base: String,
     remote_session: String,
@@ -423,7 +428,7 @@ impl AgentSession for OpenCodeSession {
         // that can still be in flight when this returns, which on a fast turn
         // means the reply would otherwise arrive after the turn was declared
         // over — or never.
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let outcome = http.post(url).json(&body).send().await;
             let event = match outcome {
                 Ok(response) if response.status().is_success() => {
@@ -513,12 +518,8 @@ impl AgentSession for OpenCodeSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            // The tree: on Windows this handle is the `.cmd` shim, and the HTTP
-            // server with the open port is its child.
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 

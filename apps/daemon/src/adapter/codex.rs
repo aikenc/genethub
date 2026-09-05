@@ -394,6 +394,7 @@ impl AgentAdapter for CodexAdapter {
             .or_else(|| hello.default_effort.clone());
 
         let session = CodexSession {
+            tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
             pending: pending.clone(),
@@ -413,7 +414,7 @@ impl AgentAdapter for CodexAdapter {
             scratch_dir: config.scratch_dir.clone(),
         };
 
-        tokio::spawn(read_loop(Reader {
+        session.tasks.spawn(read_loop(Reader {
             stdout,
             stdin,
             events,
@@ -904,6 +905,7 @@ struct TurnState {
 }
 
 struct CodexSession {
+    tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
@@ -1194,10 +1196,8 @@ impl AgentSession for CodexSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 

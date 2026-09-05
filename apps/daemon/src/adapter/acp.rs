@@ -233,6 +233,7 @@ impl AgentAdapter for AcpAdapter {
 
         let stdin = Arc::new(Mutex::new(stdin));
         let session = AcpSession {
+            tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
             pending: pending.clone(),
@@ -257,8 +258,10 @@ impl AgentAdapter for AcpAdapter {
             additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
-        tokio::spawn(read_loop(stdout, stdin, events, pending.clone(), turn));
-        tokio::spawn(watch_for_exit(child.clone(), pending));
+        session
+            .tasks
+            .spawn(read_loop(stdout, stdin, events, pending.clone(), turn));
+        session.tasks.spawn(watch_for_exit(child.clone(), pending));
 
         session.initialize(&config).await?;
         Ok(Box::new(session))
@@ -556,6 +559,7 @@ impl TurnState {
 }
 
 struct AcpSession {
+    tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
@@ -773,7 +777,7 @@ impl AgentSession for AcpSession {
         let child = self.child.clone();
         let said = self.said.clone();
         let label = self.label.clone();
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let outcome = rx.await;
             let mut state = turn_state.lock().await;
             // A newer turn may already have started; do not close it out.
@@ -858,12 +862,8 @@ impl AgentSession for AcpSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            // The tree: on Windows this handle is an npm `.cmd` shim and the CLI
-            // itself is its child, which would otherwise outlive the session.
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 

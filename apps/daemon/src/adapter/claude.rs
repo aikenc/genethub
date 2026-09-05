@@ -708,6 +708,7 @@ impl AgentAdapter for ClaudeAdapter {
         let awaiting: Awaiting = Arc::default();
 
         let session = ClaudeSession {
+            tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
             turn: turn.clone(),
@@ -729,7 +730,7 @@ impl AgentAdapter for ClaudeAdapter {
             always_allow,
             pending_tools,
         };
-        tokio::spawn(read_loop(
+        session.tasks.spawn(read_loop(
             stdout,
             events,
             turn,
@@ -1068,6 +1069,7 @@ impl TurnState {
 }
 
 struct ClaudeSession {
+    tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
@@ -1247,12 +1249,8 @@ impl AgentSession for ClaudeSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            // The tree: on Windows this handle is an npm `.cmd` shim and the CLI
-            // itself is its child, which would otherwise outlive the session.
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 

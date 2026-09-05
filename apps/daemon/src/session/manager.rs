@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -122,6 +122,13 @@ impl LlmRounds {
 
 /// One live session.
 struct Live {
+    /// The sole execution claim. Round identity is archival and may span many
+    /// of these claims. This lock never covers a call into an agent.
+    execution: Mutex<Option<Execution>>,
+    next_execution: AtomicU64,
+    closing: AtomicBool,
+    retirement: Mutex<()>,
+    cleanup: crate::adapter::SessionTasks,
     /// Where this session's own directory is. Held here so the trunk writer
     /// can run from inside the event pump, which is the only place that knows
     /// when a trunk closed.
@@ -140,6 +147,7 @@ struct Live {
     /// extended as rounds settle. One small record each, never the round's
     /// contents.
     rounds: Mutex<Vec<RoundRecord>>,
+    unsaved_rounds: Mutex<Vec<String>>,
     /// Where each work item of the open trunk landed in the blob layer. Filled
     /// by the blob writer, consumed when the trunk is written, then dropped
     /// with the trunk's items.
@@ -170,6 +178,7 @@ struct Live {
     /// When the turn in progress last had its narrative written out, which
     /// paces that write rather than doing it per streamed token.
     open_turn_written_ms: AtomicI64,
+    open_turn_dirty: AtomicBool,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
     /// when that trunk is written out, so this stays bounded by a soft batch
     /// boundary during tool-heavy work
@@ -182,6 +191,7 @@ struct Live {
     /// is folded into a round base the moment the counter is seen resetting.
     llm_rounds: Mutex<LlmRounds>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pump_stop: tokio::sync::watch::Sender<bool>,
     /// Daemon-owned round bookkeeping — one user request, possibly several
     /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
     /// `None` before the first `session.send` on this session. Kept around
@@ -189,6 +199,68 @@ struct Live {
     /// in memory until the next round replaces it; the durable copy lives in
     /// the round ledger (`session/rounds.rs`, §8 step 2).
     active_round: Mutex<Option<ActiveRound>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionPhase {
+    Starting,
+    Running,
+    Stopping,
+    Saving,
+    CleanupFailed,
+}
+
+#[derive(Clone)]
+struct Execution {
+    id: u64,
+    phase: ExecutionPhase,
+    turn_id: Option<String>,
+    cancel: tokio::sync::watch::Sender<bool>,
+    ready: tokio::sync::watch::Sender<bool>,
+    terminal: tokio::sync::watch::Sender<bool>,
+}
+
+impl Execution {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            phase: ExecutionPhase::Starting,
+            turn_id: None,
+            cancel: tokio::sync::watch::channel(false).0,
+            ready: tokio::sync::watch::channel(false).0,
+            terminal: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+/// A transport may drop a request future while initialize/send is pending.
+/// The execution still owns the cleanup, regardless of the caller's lifetime.
+struct Handover {
+    live: Arc<Live>,
+    id: u64,
+    complete: bool,
+}
+
+impl Drop for Handover {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        let live = self.live.clone();
+        let id = self.id;
+        self.live.cleanup.spawn(async move {
+            if let Err(error) = retire_execution(
+                &live,
+                id,
+                Some("handover was abandoned; delivery may be unknown".into()),
+                false,
+            )
+            .await
+            {
+                tracing::error!(id, %error, "could not retire abandoned handover");
+            }
+        });
+    }
 }
 
 /// One user request's lifecycle, possibly spanning several adapter turns.
@@ -1031,6 +1103,10 @@ impl SessionManager {
         if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
             return Ok(live);
         }
+        let mut sessions = self.sessions.write().await;
+        if let Some(live) = sessions.get(session_id) {
+            return Ok(live.clone());
+        }
         // Not in memory: rehydrate from disk so a restart does not lose access
         // to past conversations.
         let meta = self
@@ -1050,14 +1126,12 @@ impl SessionManager {
             ));
         }
         let mut chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
-        self.recover_interrupted_turn(&meta, &mut chat).await;
+        let unsaved = self.recover_interrupted_turn(&meta, &mut chat).await?;
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
         *live.rounds.lock().await = chat.rounds;
-        self.sessions
-            .write()
-            .await
-            .insert(session_id.to_string(), live.clone());
+        *live.turn_items.lock().await = unsaved;
+        sessions.insert(session_id.to_string(), live.clone());
         Ok(live)
     }
 
@@ -1068,10 +1142,14 @@ impl SessionManager {
     /// durable home again and the next start does not have to know any of this
     /// happened. Anything already in the log wins: a crash between the append
     /// and the removal below would otherwise show the answer twice.
-    async fn recover_interrupted_turn(&self, meta: &SessionMeta, chat: &mut ChatLog) {
-        let recovered = self.store.load_open_turn(&meta.workspace_id, &meta.id);
+    async fn recover_interrupted_turn(
+        &self,
+        meta: &SessionMeta,
+        chat: &mut ChatLog,
+    ) -> Result<Vec<String>> {
+        let recovered = self.store.load_open_turn(&meta.workspace_id, &meta.id)?;
         if recovered.is_empty() {
-            return;
+            return Ok(Vec::new());
         }
         let fresh: Vec<TimelineItem> = recovered
             .into_iter()
@@ -1089,12 +1167,14 @@ impl SessionManager {
                     "could not recover the interrupted turn of {}: {error}",
                     meta.id
                 );
+                let unsaved = fresh.iter().map(|item| item.id().to_string()).collect();
                 chat.items.extend(fresh);
-                return;
+                return Ok(unsaved);
             }
             chat.items.extend(fresh);
         }
         self.store.clear_open_turn(&meta.workspace_id, &meta.id);
+        Ok(Vec::new())
     }
 
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
@@ -1369,11 +1449,10 @@ impl SessionManager {
 
     async fn snapshot_for_open(
         &self,
-        session_id: &str,
+        live: &Arc<Live>,
         expand_last_round: bool,
     ) -> Result<SessionSnapshot> {
-        let live = self.live(session_id).await?;
-        let mut snapshot = live.snapshot().await?;
+        let mut snapshot = live.snapshot_unlocked().await?;
         // The open trunk's work items live alongside the narrative in memory
         // so the round layer can serve them without a read; they are addressed
         // through that layer, never replayed here.
@@ -1651,6 +1730,7 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         // Subscribe before snapshotting so nothing can slip through the gap
         // between the two.
+        let _owner = live.execution.lock().await;
         let receiver = live.events.subscribe();
         let replay = live.replay.lock().await;
 
@@ -1667,7 +1747,9 @@ impl SessionManager {
                 let current = live.seq.load(Ordering::SeqCst);
                 if seq == current {
                     (Vec::new(), false)
-                } else if oldest.is_none_or(|oldest| seq + 1 < oldest) {
+                } else if seq > current
+                    || oldest.is_none_or(|oldest| seq.saturating_add(1) < oldest)
+                {
                     // The gap starts before anything we still hold.
                     (Vec::new(), true)
                 } else {
@@ -1684,9 +1766,7 @@ impl SessionManager {
         };
         drop(replay);
 
-        let snapshot = self
-            .snapshot_for_open(session_id, expand_last_round)
-            .await?;
+        let snapshot = self.snapshot_for_open(&live, expand_last_round).await?;
         Ok((snapshot, events, reset, receiver))
     }
 
@@ -1727,59 +1807,28 @@ impl SessionManager {
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
         ));
-        {
-            let mut status = live.status.lock().await;
-            if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
-                return Err(anyhow!("a turn is already running in this session"));
-            }
-            // Claimed before the handover, not after it: a second send arriving
-            // while the first is still being handed over has to lose the race
-            // rather than join it.
-            *status = SessionStatus::Running;
-        }
-        // Told to every client, not just the one that pressed send. The claim
-        // above was invisible on the wire until `TurnStarted`, which is behind
-        // the agent's startup — seconds for a third-party CLI — so a second
-        // window went on showing an idle session it was happy to send into, and
-        // got this same refusal for its trouble.
-        live.publish(SessionEvent::SessionStatusChanged {
-            status: SessionStatus::Running,
-        })
-        .await;
-        // The claim above needs an owner. Announcing a running turn and then
-        // handing over without a deadline is what leaves a session saying it is
-        // working with nothing behind it: no round, no agent turn, and every
-        // later prompt refused as a conflict with a turn that never began.
-        let started = match tokio::time::timeout(
-            HANDOVER_BUDGET,
-            self.start_turn(
-                &live,
-                session_id,
-                text,
-                attachments,
-                providers,
-                additional_system_prompt,
-                continues_round,
-            ),
-        )
-        .await
-        {
-            Ok(started) => started,
-            Err(_) => Err(anyhow!(
-                "the agent did not take this message within {}s",
-                HANDOVER_BUDGET.as_secs()
-            )),
+        let execution = live.claim_execution(false).await?;
+        let mut handover = Handover {
+            live: live.clone(),
+            id: execution.id,
+            complete: false,
         };
-        if started.is_err() {
-            // Nothing is running after all, and a session stuck on Running would
-            // refuse every later prompt. Withdrawn on the wire as well, or every
-            // client keeps the busy state this call just announced.
-            *live.status.lock().await = SessionStatus::Idle;
-            live.publish(SessionEvent::SessionStatusChanged {
-                status: SessionStatus::Idle,
-            })
-            .await;
+        let mut cancel = execution.cancel.subscribe();
+        let started = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("the execution was stopped during handover")),
+            result = tokio::time::timeout(HANDOVER_BUDGET, self.start_turn(
+                &live, session_id, text, attachments, providers,
+                additional_system_prompt, continues_round, execution.id,
+            )) => result.unwrap_or_else(|_| Err(anyhow!(
+                "the agent did not take this message within {}s; delivery may be unknown",
+                HANDOVER_BUDGET.as_secs()
+            ))),
+        };
+        if let Err(error) = &started {
+            retire_execution(&live, execution.id, Some(error.to_string()), false).await?;
         }
+        handover.complete = true;
         started
     }
 
@@ -1795,6 +1844,7 @@ impl SessionManager {
         providers: &ProviderMap,
         additional_system_prompt: Option<String>,
         continues_round: Option<String>,
+        execution_id: u64,
     ) -> Result<String> {
         // The process is lazy, so this is still before any Agent sees the first
         // turn. A running Agent retains the exact prefix it started with; if it
@@ -1885,28 +1935,21 @@ impl SessionManager {
                 turn_id
             }
             Err(error) => {
-                // A returned error means the adapter did not accept a turn.
-                // Put the seed back for an explicit retry. A daemon crash while
-                // the await is pending leaves `Applying`, which is intentionally
-                // blocked above because its outcome is unknowable.
-                if let Some(seed) = &mut applying_seed {
-                    seed.state = ContextSeedState::Pending;
-                    if let Err(save_error) =
-                        self.store.save_seed(&seed_owner.0, &seed_owner.1, seed)
-                    {
-                        tracing::error!(
-                            %save_error,
-                            session = %seed_owner.1,
-                            "could not restore reconstructed history seed after a failed send"
-                        );
-                    }
-                }
+                // An IO error can happen after the CLI accepted the bytes.
+                // Keep Applying: an explicit retry must not duplicate context
+                // on an outcome we could not observe.
                 return Err(error).context("handing the prompt to the agent");
             }
         };
-        // Only recorded once the handover actually succeeded: a failed send
-        // must not leave a round with zero adapter turns behind (`send`
-        // resets status to Idle on this same error, as if it never happened).
+        // The pump waits until both the handover and its round are bound.
+        // A terminal emitted synchronously by send cannot outrun this commit.
+        let mut owner = live.execution.lock().await;
+        let execution = owner
+            .as_mut()
+            .filter(|execution| execution.id == execution_id)
+            .ok_or_else(|| anyhow!("this handover no longer owns the session"))?;
+        execution.turn_id = Some(turn_id.clone());
+        execution.phase = ExecutionPhase::Running;
         if let Some(superseded) = live
             .begin_round(continues_round.as_deref(), &turn_id, item.id())
             .await
@@ -1926,6 +1969,7 @@ impl SessionManager {
             item,
         })
         .await;
+        execution.ready.send_replace(true);
         Ok(turn_id)
     }
 
@@ -2079,13 +2123,9 @@ impl SessionManager {
             let session_id = live.meta.lock().await.id.clone();
             self.processes.watch(&session_id, pid).await;
         }
+        live.stop_pump().await?;
+        live.pump_stop.send_replace(false);
         *live.agent.lock().await = Some(Arc::from(session));
-
-        if let Some(previous) = live.pump.lock().await.take() {
-            if !previous.is_finished() {
-                previous.abort();
-            }
-        }
         let pump = tokio::spawn(pump_events(
             live.clone(),
             receiver,
@@ -2100,55 +2140,35 @@ impl SessionManager {
 
     pub async fn interrupt(&self, session_id: &str) -> Result<()> {
         let live = self.live(session_id).await?;
-        let agent_id = live.meta.lock().await.agent_id.clone();
-        let started = std::time::Instant::now();
-        tracing::info!(
-            event = "session_interrupt_requested",
-            session = %session_id,
-            agent = %agent_id,
-            "forwarding a user interrupt to the active agent"
-        );
-        let result = match live.agent().await {
-            Some(agent) => match tokio::time::timeout(INTERRUPT_ASK, agent.interrupt()).await {
-                Ok(result) => result,
-                // The ask itself did not get through — the agent is not reading
-                // any more. Abandoning a half-written cancel would matter if
-                // anything else were going to be said down this pipe, and the
-                // escalation below is there precisely because nothing is.
-                Err(_) => Err(anyhow!("the agent did not accept the interrupt in time")),
-            },
-            // Nothing running is not a failure: the user pressed stop late.
-            None => Ok(()),
+        let mut owner = live.execution.lock().await;
+        let Some(execution) = owner.as_mut() else {
+            return Ok(());
         };
-        // Asking is not stopping. An agent is free to ignore a cancel, and one
-        // that does leaves the user with a conversation that says it is still
-        // working and a stop button that has already been pressed — so the ask
-        // gets a deadline, and missing it ends the agent instead.
-        let stopping = live
-            .active_round
-            .lock()
-            .await
-            .as_ref()
-            .map(|round| round.round_id.clone());
-        stop_if_still_running(&live, self.store.clone(), session_id.to_string(), stopping);
-        match &result {
-            Ok(()) => tracing::info!(
-                event = "session_interrupt_forwarded",
-                session = %session_id,
-                agent = %agent_id,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "the agent accepted the interrupt request"
-            ),
-            Err(error) => tracing::warn!(
-                event = "session_interrupt_failed",
-                session = %session_id,
-                agent = %agent_id,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                %error,
-                "the agent rejected the interrupt request"
-            ),
+        if execution.phase == ExecutionPhase::Starting {
+            execution.cancel.send_replace(true);
+            return Ok(());
         }
-        result
+        if execution.phase == ExecutionPhase::Stopping {
+            return Ok(());
+        }
+        execution.phase = ExecutionPhase::Stopping;
+        let execution = execution.clone();
+        // Captured before any external await. The archival round may continue
+        // later, but this task can only retire this one execution.
+        let agent = live.agent().await;
+        drop(owner);
+        let task_live = live.clone();
+        live.cleanup.spawn(async move {
+            if let Some(agent) = agent {
+                let mut terminal = execution.terminal.subscribe();
+                let _ = tokio::time::timeout(INTERRUPT_ASK, agent.interrupt()).await;
+                let _ = tokio::time::timeout(INTERRUPT_GRACE, terminal.wait_for(|seen| *seen)).await;
+            }
+            if let Err(error) = retire_execution(&task_live, execution.id, None, false).await {
+                tracing::error!(execution = execution.id, %error, "could not retire interrupted execution");
+            }
+        });
+        Ok(())
     }
 
     /// What this session's agent says it offers, for checking a choice against
@@ -2334,42 +2354,59 @@ impl SessionManager {
         let continuation = continuation_for(&request, &outcome)?;
 
         if let Some(continuation) = continuation {
-            let mode_override = if continuation.elevated {
-                let agent_id = live.meta.lock().await.agent_id.clone();
-                self.registry
-                    .require(&agent_id)?
-                    .catalog(providers)
-                    .await
-                    .default_mode
-            } else {
-                None
+            let execution = live.claim_execution(true).await?;
+            let mut ownership = Handover {
+                live: live.clone(),
+                id: execution.id,
+                complete: false,
             };
-            self.ensure_started_in_mode(&live, providers, mode_override)
-                .await
-                .context("resuming the stopped Agent session")?;
-            *live.status.lock().await = SessionStatus::Running;
-            let agent = live
-                .agent()
-                .await
-                .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
-            let sent = agent
-                .send(PromptInput {
-                    text: continuation.prompt,
-                    attachments: Vec::new(),
-                })
-                .await;
-            match sent {
-                Ok(turn_id) => {
-                    // This is the daemon deciding to resume, not the client
-                    // asking to — the round the interaction interrupted
-                    // continues, no `continuesRound` involved (§3.2).
-                    live.continue_round(&turn_id).await;
-                }
-                Err(error) => {
-                    *live.status.lock().await = SessionStatus::Waiting;
-                    return Err(error).context("continuing after the user response");
-                }
+            let mut cancel = execution.cancel.subscribe();
+            let handover = async {
+                let mode_override = if continuation.elevated {
+                    let agent_id = live.meta.lock().await.agent_id.clone();
+                    self.registry
+                        .require(&agent_id)?
+                        .catalog(providers)
+                        .await
+                        .default_mode
+                } else {
+                    None
+                };
+                self.ensure_started_in_mode(&live, providers, mode_override)
+                    .await?;
+                let agent = live
+                    .agent()
+                    .await
+                    .ok_or_else(|| anyhow!("the resumed session has no agent"))?;
+                let turn_id = agent
+                    .send(PromptInput {
+                        text: continuation.prompt,
+                        attachments: Vec::new(),
+                    })
+                    .await?;
+                let mut owner = live.execution.lock().await;
+                let current = owner
+                    .as_mut()
+                    .filter(|current| current.id == execution.id)
+                    .ok_or_else(|| anyhow!("this continuation no longer owns the session"))?;
+                live.continue_round(&turn_id).await;
+                current.turn_id = Some(turn_id);
+                current.phase = ExecutionPhase::Running;
+                current.ready.send_replace(true);
+                Ok::<_, anyhow::Error>(())
+            };
+            let sent = tokio::select! {
+                biased;
+                _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("continuation stopped during handover")),
+                result = tokio::time::timeout(HANDOVER_BUDGET, handover) =>
+                    result.unwrap_or_else(|_| Err(anyhow!("continuation handover timed out; delivery may be unknown"))),
+            };
+            if let Err(error) = sent {
+                retire_execution(&live, execution.id, Some(error.to_string()), false).await?;
+                ownership.complete = true;
+                return Err(error);
             }
+            ownership.complete = true;
         } else {
             // Denied or canceled: no more agent work is coming for this
             // request, so the round it belonged to is done, not dangling.
@@ -2381,6 +2418,7 @@ impl SessionManager {
             }
         }
 
+        let _owner = live.execution.lock().await;
         {
             let mut pending = live.pending_permissions.lock().await;
             pending.retain(|request| request.id != request_id);
@@ -2463,7 +2501,7 @@ impl SessionManager {
         // reappear a moment after being deleted.
         if let Some(live) = live {
             self.end_what_it_left(session_id).await;
-            live.shutdown().await;
+            live.shutdown().await?;
         }
         self.processes.forget(session_id).await;
         let Some(workspace_id) = workspace_id else {
@@ -2473,12 +2511,13 @@ impl SessionManager {
     }
 
     pub async fn close(&self, session_id: &str) -> Result<()> {
-        let live = match self.sessions.write().await.remove(session_id) {
+        let live = match self.sessions.read().await.get(session_id).cloned() {
             Some(live) => live,
             None => return Ok(()),
         };
         self.end_what_it_left(session_id).await;
-        live.shutdown().await;
+        live.shutdown().await?;
+        self.sessions.write().await.remove(session_id);
         self.processes.forget(session_id).await;
         Ok(())
     }
@@ -2509,7 +2548,9 @@ impl SessionManager {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
         for (session_id, live) in sessions {
             self.end_what_it_left(&session_id).await;
-            live.shutdown().await;
+            if let Err(error) = live.shutdown().await {
+                tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+            }
         }
     }
 }
@@ -2679,10 +2720,113 @@ fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
 }
 
 impl Live {
+    async fn claim_execution(&self, resume: bool) -> Result<Execution> {
+        let mut owner = self.execution.lock().await;
+        if self.closing.load(Ordering::SeqCst) {
+            bail!("this session is closing");
+        }
+        if owner
+            .as_ref()
+            .is_some_and(|execution| execution.phase == ExecutionPhase::Saving)
+        {
+            flush_turn(self, &self.store).await?;
+            owner.take();
+        }
+        if owner.is_some() || (!resume && *self.status.lock().await == SessionStatus::Waiting) {
+            bail!("a turn is already running or awaiting a response in this session");
+        }
+        // Recovered data or a failed final write must reach the log before a
+        // new execution can replace its checkpoint.
+        flush_turn(self, &self.store).await?;
+        let execution = Execution::new(self.next_execution.fetch_add(1, Ordering::SeqCst));
+        *owner = Some(execution.clone());
+        *self.status.lock().await = SessionStatus::Running;
+        self.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Running,
+        })
+        .await;
+        Ok(execution)
+    }
+
+    /// Called with the execution lock after event admission or resource
+    /// retirement. This is the common commit for terminal paths.
+    async fn finish_execution(
+        &self,
+        owner: &mut Option<Execution>,
+        event: SessionEvent,
+        closed: bool,
+    ) -> Result<()> {
+        let outcome = match &event {
+            SessionEvent::TurnCompleted { .. } => Some(RoundOutcome::Completed),
+            SessionEvent::TurnFailed { .. } => Some(RoundOutcome::Failed),
+            _ if closed => Some(RoundOutcome::Canceled),
+            _ => None, // A user can explicitly continue an interrupted round.
+        };
+        if let Some(outcome) = outcome {
+            let by = if closed {
+                Settling::Kernel
+            } else {
+                event_turn(&event)
+                    .map(Settling::Turn)
+                    .unwrap_or(Settling::Kernel)
+            };
+            if let Some(round) = self.settle_round(by, outcome).await {
+                persist_round(self, round).await;
+            }
+        }
+        if let Some(execution) = owner.as_mut() {
+            execution.phase = ExecutionPhase::Saving;
+            execution.ready.send_replace(true);
+            execution.terminal.send_replace(true);
+        }
+        if let Err(error) = flush_turn(self, &self.store).await {
+            let notice = SessionEvent::Item {
+                turn_id: owner
+                    .as_ref()
+                    .and_then(|execution| execution.turn_id.clone())
+                    .unwrap_or_default(),
+                item: TimelineItem::Error {
+                    id: format!(
+                        "save-error-{}",
+                        owner.as_ref().map(|execution| execution.id).unwrap_or(0)
+                    ),
+                    message: format!(
+                        "保存回答失败，当前内容仍保留在会话中；下次发送会先重试保存：{error}"
+                    ),
+                },
+            };
+            apply(self, &notice).await;
+            self.publish(notice).await;
+            *self.status.lock().await = SessionStatus::Failed;
+            self.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Failed,
+            })
+            .await;
+            return Err(error)
+                .context("the answer remains pending on disk; a new send will retry saving it");
+        }
+        apply(self, &event).await;
+        self.publish(event).await;
+        if closed {
+            *self.status.lock().await = SessionStatus::Closed;
+            self.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Closed,
+            })
+            .await;
+        }
+        owner.take();
+        Ok(())
+    }
+
     fn new(meta: SessionMeta, store: Store) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let pending = meta.pending_permission.clone();
         Live {
+            execution: Mutex::new(None),
+            next_execution: AtomicU64::new(1),
+            closing: AtomicBool::new(false),
+            retirement: Mutex::new(()),
+            cleanup: crate::adapter::SessionTasks::default(),
             store,
             meta: Mutex::new(meta),
             status: Mutex::new(if pending.is_some() {
@@ -2692,6 +2836,7 @@ impl Live {
             }),
             items: Mutex::new(Vec::new()),
             rounds: Mutex::new(Vec::new()),
+            unsaved_rounds: Mutex::new(Vec::new()),
             blob_refs: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             last_activity_ms: AtomicI64::new(0),
@@ -2702,9 +2847,11 @@ impl Live {
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
+            open_turn_dirty: AtomicBool::new(false),
             open_trunk_items: Mutex::new(Vec::new()),
             llm_rounds: Mutex::new(LlmRounds::default()),
             pump: Mutex::new(None),
+            pump_stop: tokio::sync::watch::channel(false).0,
             active_round: Mutex::new(None),
         }
     }
@@ -2723,6 +2870,11 @@ impl Live {
     }
 
     async fn snapshot(&self) -> Result<SessionSnapshot> {
+        let _owner = self.execution.lock().await;
+        self.snapshot_unlocked().await
+    }
+
+    async fn snapshot_unlocked(&self) -> Result<SessionSnapshot> {
         let status = *self.status.lock().await;
         Ok(SessionSnapshot {
             summary: self
@@ -2922,6 +3074,10 @@ impl Live {
         /// short enough that what it can cost is a sentence.
         const AT_MOST_EVERY_MS: i64 = 1_000;
 
+        if !self.open_turn_dirty.load(Ordering::SeqCst) {
+            return;
+        }
+
         let now = now_ms();
         let last = self.open_turn_written_ms.load(Ordering::SeqCst);
         if now - last < AT_MOST_EVERY_MS {
@@ -2952,6 +3108,8 @@ impl Live {
             .write_open_turn(&meta.workspace_id, &meta.id, &narrative)
         {
             tracing::warn!("could not persist the open turn of {}: {error}", meta.id);
+        } else {
+            self.open_turn_dirty.store(false, Ordering::SeqCst);
         }
     }
 
@@ -3080,6 +3238,10 @@ impl Live {
                 record.ord,
                 meta.id
             );
+            let mut pending = self.unsaved_rounds.lock().await;
+            if !pending.contains(&record.round_id) {
+                pending.push(record.round_id);
+            }
         }
     }
 
@@ -3178,34 +3340,48 @@ impl Live {
         self.active_round.lock().await.clone()
     }
 
-    async fn shutdown(&self) {
-        if let Some(pump) = self.pump.lock().await.take() {
-            pump.abort();
+    /// Stop receiving, then drain and join the pump's blob writer. The task
+    /// handle stays in Live across cancellation and timeouts, so a retry can
+    /// still join the same writer before releasing the execution.
+    async fn stop_pump(&self) -> Result<()> {
+        self.pump_stop.send_replace(true);
+        let mut held = self.pump.lock().await;
+        if let Some(task) = held.as_mut() {
+            let joined = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .context("the timeline writer has not finished; stopping can be retried")?;
+            held.take();
+            joined.context("the timeline writer stopped unexpectedly")?;
         }
-        // Whatever this turn already put on screen was, to the person who read
-        // it, said — and quitting is not a reason to take it back. Nothing
-        // else on this path would write it: `flush_turn` otherwise only runs
-        // from a terminal event, and a turn interrupted by the daemon closing
-        // never gets one. The pump is stopped first so the timeline being
-        // written is not still moving.
-        if let Some(round) = self
-            .settle_round(Settling::Kernel, RoundOutcome::Canceled)
-            .await
-        {
-            persist_round(self, round).await;
+        Ok(())
+    }
+
+    async fn shutdown(self: &Arc<Self>) -> Result<()> {
+        self.closing.store(true, Ordering::SeqCst);
+        let starting = {
+            let owner = self.execution.lock().await;
+            owner
+                .as_ref()
+                .filter(|execution| execution.phase == ExecutionPhase::Starting)
+                .cloned()
+        };
+        if let Some(starting) = starting {
+            let mut terminal = starting.terminal.subscribe();
+            starting.cancel.send_replace(true);
+            tokio::time::timeout(Duration::from_secs(10), terminal.wait_for(|done| *done))
+                .await
+                .context("the canceled handover has not released its resources")??;
         }
-        flush_turn(self, &self.store).await;
-        // Taken in its own statement on purpose. Edition 2021 keeps the guard a
-        // scrutinee produces alive for the whole `if let`, so writing this as
-        // `if let Some(agent) = self.agent.lock().await.take()` would hold the
-        // session's agent lock across the close — which reaches a third-party
-        // process and can take as long as that process likes. Everything else
-        // that wants this session queues behind it.
-        let agent = self.agent.lock().await.take();
-        if let Some(agent) = agent {
-            let _ = agent.close().await;
-        }
-        *self.status.lock().await = SessionStatus::Closed;
+        self.cleanup.stop().await;
+        let id = {
+            let mut owner = self.execution.lock().await;
+            owner
+                .get_or_insert_with(|| {
+                    Execution::new(self.next_execution.fetch_add(1, Ordering::SeqCst))
+                })
+                .id
+        };
+        retire_execution(self, id, None, true).await
     }
 }
 
@@ -3375,71 +3551,118 @@ const INTERRUPT_ASK: Duration = Duration::from_secs(3);
 /// How long a cancelled turn has to end before the agent is stopped outright.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
-/// Ends an agent that was asked to stop and did not.
-///
-/// Runs on its own task so that pressing stop stays instant: the answer the
-/// user is waiting for is "your request was taken", and the enforcement that
-/// follows is the daemon's problem, not theirs.
-fn stop_if_still_running(
+/// Retire resources before releasing the execution claim. No newer send can
+/// enter while close awaits; the session lock itself stays available to reads
+/// and stop. A failed close keeps both the handle and the claim for retry.
+async fn retire_execution(
     live: &Arc<Live>,
-    store: Store,
-    session_id: String,
-    stopping: Option<String>,
-) {
-    let live = live.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(INTERRUPT_GRACE).await;
-        if *live.status.lock().await != SessionStatus::Running {
-            return;
-        }
-        // Pressing stop and immediately typing again is ordinary, and five
-        // seconds is long enough for it. Without this the next message is what
-        // gets killed, which is worse than the freeze this is here to end.
-        let open = live
-            .active_round
-            .lock()
-            .await
-            .as_ref()
-            .map(|round| round.round_id.clone());
-        if open != stopping {
-            return;
-        }
-        tracing::warn!(
-            event = "session_interrupt_escalated",
-            session = %session_id,
-            grace_ms = INTERRUPT_GRACE.as_millis() as u64,
-            "an agent ignored a cancel and is being stopped"
-        );
-        // Taking it first is what makes this safe to race: whoever else was
-        // about to reach for the agent finds nothing rather than a process
-        // being killed underneath them.
-        let agent = live.agent.lock().await.take();
-        if let Some(agent) = agent {
-            if let Err(error) = agent.close().await {
-                tracing::warn!(error = %error, "could not stop an agent that ignored a cancel");
+    id: u64,
+    error: Option<String>,
+    closed: bool,
+) -> Result<()> {
+    {
+        let mut owner = live.execution.lock().await;
+        let Some(execution) = owner.as_mut().filter(|execution| execution.id == id) else {
+            return Ok(());
+        };
+        execution.phase = ExecutionPhase::Stopping;
+        execution.cancel.send_replace(true);
+        execution.ready.send_replace(true);
+    }
+    if let Err(error) = live.stop_pump().await {
+        report_cleanup_failure(live, &error).await;
+        return Err(error);
+    }
+    // Joining a pump cannot hold retirement: a terminal already being handled
+    // by that pump may itself be waiting to close the agent under this lock.
+    let _retirement = live.retirement.lock().await;
+    {
+        let mut owner = live.execution.lock().await;
+        if owner.as_ref().is_none_or(|execution| execution.id != id) {
+            if closed && owner.is_none() {
+                live.finish_execution(
+                    &mut owner,
+                    SessionEvent::SessionStatusChanged {
+                        status: SessionStatus::Closed,
+                    },
+                    true,
+                )
+                .await?;
             }
+            return Ok(());
         }
-        // The pump would eventually see the event channel close and clean up,
-        // but only if the process lets go of its own stdout. Settling here
-        // means the conversation stops saying it is working either way.
-        if let Some(round) = live
-            .settle_round(Settling::Kernel, RoundOutcome::Canceled)
-            .await
-        {
-            persist_round(&live, round).await;
-        }
-        flush_turn(&live, &store).await;
-        *live.status.lock().await = SessionStatus::Idle;
-        live.publish(SessionEvent::SessionStatusChanged {
-            status: SessionStatus::Idle,
-        })
-        .await;
-    });
+    }
+    close_current_agent(live).await?;
+    let mut owner = live.execution.lock().await;
+    if owner.as_ref().is_none_or(|execution| execution.id != id) {
+        return Ok(());
+    }
+    let turn_id = owner
+        .as_ref()
+        .and_then(|execution| execution.turn_id.clone())
+        .unwrap_or_default();
+    let event = match error {
+        Some(message) => SessionEvent::TurnFailed {
+            turn_id,
+            error: genehub_proto::TurnError {
+                code: TurnErrorCode::Internal,
+                message,
+            },
+        },
+        None => SessionEvent::TurnCanceled { turn_id },
+    };
+    live.finish_execution(&mut owner, event, closed).await
 }
 
-async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
+/// The caller holds retirement, never the execution lock, during agent IO.
+async fn close_current_agent(live: &Arc<Live>) -> Result<()> {
+    let agent = live.agent().await;
+    if let Some(agent) = agent {
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(8), agent.close())
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("agent close timed out")))
+        {
+            report_cleanup_failure(live, &error).await;
+            return Err(error);
+        }
+        live.agent.lock().await.take();
+    }
+    Ok(())
+}
+
+async fn report_cleanup_failure(live: &Arc<Live>, error: &anyhow::Error) {
+    let mut owner = live.execution.lock().await;
+    if let Some(execution) = owner.as_mut() {
+        execution.phase = ExecutionPhase::CleanupFailed;
+    }
+    // Keep Stop available. A cleanup error is not permission to send
+    // another prompt into an execution whose process is still owned.
+    *live.status.lock().await = SessionStatus::Running;
+    live.publish(SessionEvent::SessionStatusChanged {
+        status: SessionStatus::Running,
+    })
+    .await;
+    live.publish(SessionEvent::Item {
+        turn_id: owner
+            .as_ref()
+            .and_then(|execution| execution.turn_id.clone())
+            .unwrap_or_default(),
+        item: TimelineItem::Error {
+            id: format!("cleanup-{}", now_ms()),
+            message: format!("无法确认停止，请重试停止：{error}"),
+        },
+    })
+    .await;
+}
+
+async fn stop_agent_for_interaction(
+    live: &Arc<Live>,
+    store: &Store,
+    request: &PermissionRequest,
+) -> Result<()> {
+    let _retirement = live.retirement.lock().await;
     live.round_blocked().await;
-    let agent = live.agent.lock().await.take();
+    let agent = live.agent().await;
     let persist = agent.as_ref().and_then(|agent| agent.persistence());
     {
         let mut meta = live.meta.lock().await;
@@ -3460,10 +3683,9 @@ async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &P
         // Interruption is best-effort and bounded. The process is closed either
         // way, so no approval request or live transport has to survive.
         let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
-        if let Err(error) = agent.close().await {
-            tracing::warn!("could not close an Agent stopped for interaction: {error}");
-        }
+        close_current_agent(live).await?;
     }
+    Ok(())
 }
 
 enum BlobWrite {
@@ -3589,8 +3811,21 @@ async fn pump_events(
     let mut live_usage: HashMap<String, Usage> = HashMap::new();
     let mut counted_tools: HashSet<String> = HashSet::new();
     let mut channel_closed = false;
-    loop {
-        let mut event = match receiver.recv().await {
+    let mut stopping = live.pump_stop.subscribe();
+    let mut checkpoint = tokio::time::interval(Duration::from_secs(1));
+    checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    'events: loop {
+        let received = tokio::select! {
+            biased;
+            _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break,
+            event = receiver.recv() => event,
+            _ = checkpoint.tick() => {
+                let _owner = live.execution.lock().await;
+                live.persist_open_turn_if_due().await;
+                continue;
+            }
+        };
+        let mut event = match received {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Lagged(missed)) => {
                 diagnostics.record("agent", "event-stream", "error", Some("dropped"));
@@ -3610,6 +3845,52 @@ async fn pump_events(
                 break;
             }
         };
+
+        // Wait for the send result to bind the execution before accepting
+        // anything it emitted. Re-check after waiting, before ALL side effects.
+        loop {
+            let ready = {
+                let owner = live.execution.lock().await;
+                owner
+                    .as_ref()
+                    .filter(|execution| execution.phase == ExecutionPhase::Starting)
+                    .map(|execution| execution.ready.subscribe())
+            };
+            let Some(mut ready) = ready else { break };
+            if *ready.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break 'events,
+                _ = async { let _ = ready.wait_for(|ready| *ready).await; } => {}
+            }
+        }
+        let mut owner = live.execution.lock().await;
+        if owner.as_ref().is_some_and(|execution| {
+            matches!(
+                execution.phase,
+                ExecutionPhase::Saving | ExecutionPhase::CleanupFailed
+            )
+        }) {
+            continue;
+        }
+        if let Some(turn_id) = event_turn(&event) {
+            if owner
+                .as_ref()
+                .and_then(|execution| execution.turn_id.as_deref())
+                != Some(turn_id)
+            {
+                tracing::debug!(named = turn_id, "ignored event from an obsolete execution");
+                continue;
+            }
+        } else if matches!(
+            event,
+            SessionEvent::PermissionRequested { .. } | SessionEvent::SessionStatusChanged { .. }
+        ) && owner.is_none()
+        {
+            continue;
+        }
 
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
             token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
@@ -3854,7 +4135,15 @@ async fn pump_events(
         };
 
         if let SessionEvent::PermissionRequested { request } = &event {
-            stop_agent_for_interaction(&live, &store, request).await;
+            if let Some(execution) = owner.as_mut() {
+                execution.phase = ExecutionPhase::Stopping;
+            }
+            drop(owner);
+            if let Err(error) = stop_agent_for_interaction(&live, &store, request).await {
+                tracing::error!(%error, "could not stop for interaction");
+                break;
+            }
+            let mut owner = live.execution.lock().await;
 
             // End the old turn before exposing the request. Approval later
             // starts a new native turn from the Agent's persisted session.
@@ -3874,13 +4163,12 @@ async fn pump_events(
                     apply(&live, &summary_event).await;
                     live.publish(summary_event).await;
                 }
-                apply(&live, &canceled).await;
                 live.publish(canceled).await;
-                flush_turn(&live, &store).await;
             }
 
-            apply(&live, &event).await;
-            live.publish(event).await;
+            if let Err(error) = live.finish_execution(&mut owner, event, false).await {
+                tracing::error!(%error, "could not commit waiting execution");
+            }
             live.trim_replay(replay_window).await;
             break;
         }
@@ -3923,41 +4211,45 @@ async fn pump_events(
             item.inherit_and_stamp_received_at(previous.as_ref(), now_ms());
         }
 
-        apply(&live, &event).await;
-
+        let retire = matches!(
+            event,
+            SessionEvent::TurnCanceled { .. } | SessionEvent::TurnFailed { .. }
+        );
         let settle = matches!(
             event,
             SessionEvent::TurnCompleted { .. }
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
         );
-        // `TurnCanceled` deliberately does not settle the round here: the one
-        // triggered by a permission request already `break`s above before
-        // reaching this line, and every other `TurnCanceled` is a plain
-        // interrupt, which leaves the round dangling on purpose until the
-        // next `send` decides whether to continue or supersede it (§3.2).
-        match &event {
-            SessionEvent::TurnCompleted { turn_id, .. } => {
-                if let Some(round) = live
-                    .settle_round(Settling::Turn(turn_id), RoundOutcome::Completed)
-                    .await
-                {
-                    persist_round(&live, round).await;
-                }
+        if settle {
+            if let Some(execution) = owner
+                .as_ref()
+                .filter(|execution| execution.phase == ExecutionPhase::Stopping)
+            {
+                execution.terminal.send_replace(true);
+                continue;
             }
-            SessionEvent::TurnFailed { turn_id, .. } => {
-                if let Some(round) = live
-                    .settle_round(Settling::Turn(turn_id), RoundOutcome::Failed)
-                    .await
-                {
-                    persist_round(&live, round).await;
+            if retire {
+                if let Some(execution) = owner.as_mut() {
+                    execution.phase = ExecutionPhase::Stopping;
                 }
+                drop(owner);
+                let retirement = live.retirement.lock().await;
+                if let Err(error) = close_current_agent(&live).await {
+                    tracing::error!(%error, "could not retire terminal agent");
+                    break;
+                }
+                drop(retirement);
+                owner = live.execution.lock().await;
             }
-            _ => {}
-        }
-
-        if publish_title {
-            live.publish(event).await;
+            if let Err(error) = live.finish_execution(&mut owner, event, false).await {
+                tracing::error!(%error, "could not commit execution completion");
+            }
+        } else {
+            apply(&live, &event).await;
+            if publish_title {
+                live.publish(event).await;
+            }
         }
         if let Some(progress) = tool_progress {
             apply(&live, &progress).await;
@@ -3965,9 +4257,12 @@ async fn pump_events(
         }
         live.trim_replay(replay_window).await;
 
+        drop(owner);
+        if retire {
+            break;
+        }
         if settle {
             thinking.clear();
-            flush_turn(&live, &store).await;
             // The end of a turn is when "what is still running" starts to mean
             // something. Until then everything the agent started is running
             // because the agent is still working.
@@ -4099,7 +4394,7 @@ async fn agent_title_would_apply(live: &Live, title: &str) -> bool {
 }
 
 /// Applies an event to the in-memory timeline.
-async fn apply(live: &Arc<Live>, event: &SessionEvent) {
+async fn apply(live: &Live, event: &SessionEvent) {
     match event {
         SessionEvent::Item { item, .. } => {
             let mut items = live.items.lock().await;
@@ -4130,6 +4425,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             }
             drop(turn_items);
             live.record_round_item(item).await;
+            live.open_turn_dirty.store(true, Ordering::SeqCst);
             live.persist_open_turn_if_due().await;
         }
         SessionEvent::ItemDelta { item_id, delta, .. } => {
@@ -4167,6 +4463,7 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             // Released before the write, which locks `items` itself to read
             // the narrative back: `tokio::sync::Mutex` is not reentrant.
             drop(items);
+            live.open_turn_dirty.store(true, Ordering::SeqCst);
             live.persist_open_turn_if_due().await;
         }
         SessionEvent::PermissionRequested { request } => {
@@ -4265,24 +4562,38 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
 /// A no-op unless there was an open round — ordinary shutdown (`Live::
 /// shutdown`) aborts the pump task outright rather than letting `recv` see
 /// `Closed`, and a round that already settled has nothing left to clean up.
-async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
-    let Some(round) = live
-        .settle_round(Settling::Kernel, RoundOutcome::Failed)
-        .await
-    else {
+async fn finalize_after_channel_closed(live: &Arc<Live>, _store: &Store) {
+    let mut owner = live.execution.lock().await;
+    let Some(execution) = owner.as_ref() else {
         return;
     };
-    persist_round(live, round).await;
-    // Whatever this turn had produced so far would otherwise never reach
-    // disk: `flush_turn` only ever ran from inside this same loop, on a
-    // terminal event that, this time, never arrived.
-    flush_turn(live, store).await;
-    let pending = !live.pending_permissions.lock().await.is_empty();
-    *live.status.lock().await = if pending {
-        SessionStatus::Waiting
-    } else {
-        SessionStatus::Failed
+    if execution.phase == ExecutionPhase::Stopping {
+        execution.terminal.send_replace(true);
+        return;
+    }
+    let event = SessionEvent::TurnFailed {
+        turn_id: execution.turn_id.clone().unwrap_or_default(),
+        error: genehub_proto::TurnError {
+            code: TurnErrorCode::AgentCrashed,
+            message: "the agent event channel closed".into(),
+        },
     };
+    if let Err(error) = live.finish_execution(&mut owner, event, false).await {
+        tracing::error!(%error, "could not commit closed event channel");
+    }
+}
+
+fn event_turn(event: &SessionEvent) -> Option<&str> {
+    match event {
+        SessionEvent::TurnStarted { turn_id, .. }
+        | SessionEvent::TurnCompleted { turn_id, .. }
+        | SessionEvent::TurnFailed { turn_id, .. }
+        | SessionEvent::TurnCanceled { turn_id }
+        | SessionEvent::TurnProgress { turn_id, .. }
+        | SessionEvent::Item { turn_id, .. }
+        | SessionEvent::ItemDelta { turn_id, .. } => Some(turn_id),
+        _ => None,
+    }
 }
 
 /// Records a round's final state on `chat.jsonl`.
@@ -4302,10 +4613,25 @@ async fn persist_round(live: &Live, round: ActiveRound) {
 
 /// Writes what this turn produced, once, when the turn ends: narrative to the
 /// chat layer, work to the open trunk.
-async fn flush_turn(live: &Live, store: &Store) {
-    let ids: Vec<String> = std::mem::take(&mut *live.turn_items.lock().await);
+async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
+    let pending_rounds = live.unsaved_rounds.lock().await.clone();
+    if !pending_rounds.is_empty() {
+        let meta = live.meta.lock().await.clone();
+        let records = live.rounds.lock().await.clone();
+        for record in records
+            .iter()
+            .filter(|record| pending_rounds.contains(&record.round_id))
+        {
+            store.append_round(&meta.workspace_id, &meta.id, record)?;
+        }
+        live.unsaved_rounds
+            .lock()
+            .await
+            .retain(|id| !pending_rounds.contains(id));
+    }
+    let ids = live.turn_items.lock().await.clone();
     if ids.is_empty() {
-        return;
+        return Ok(());
     }
     let settled = live.turn_narrative(&ids).await;
 
@@ -4314,17 +4640,15 @@ async fn flush_turn(live: &Live, store: &Store) {
         (meta.workspace_id.clone(), meta.id.clone())
     };
     live.persist_open_trunk().await;
-    if let Err(error) = store.append_chat_items(&workspace_id, &session_id, &settled) {
-        tracing::error!("could not persist the timeline for {session_id}: {error}");
-    } else {
-        // The log owns these now. Leaving the copy behind would have the next
-        // start recover items that are already there.
-        store.clear_open_turn(&workspace_id, &session_id);
-        live.open_turn_written_ms.store(0, Ordering::SeqCst);
-    }
+    store.append_chat_items(&workspace_id, &session_id, &settled)?;
+    live.turn_items.lock().await.retain(|id| !ids.contains(id));
+    store.clear_open_turn(&workspace_id, &session_id);
+    live.open_turn_written_ms.store(0, Ordering::SeqCst);
+    live.open_turn_dirty.store(false, Ordering::SeqCst);
     let mut meta = live.meta.lock().await;
     meta.updated_at_ms = now_ms();
-    let _ = store.save_meta(&meta);
+    store.save_meta(&meta)?;
+    Ok(())
 }
 
 /// Tool status changes carry an implicit rule worth naming: a delta that names
@@ -6710,7 +7034,7 @@ mod tests {
         ] {
             apply(&live, &event).await;
         }
-        flush_turn(&live, &store).await;
+        flush_turn(&live, &store).await.unwrap();
 
         let written = store.load_chat("w1", "s1").unwrap().items;
         assert_eq!(written.len(), 1, "the prompt was persisted on arrival");
@@ -6776,6 +7100,11 @@ mod tests {
         // Work only reaches disk through a round's trunk files, and in
         // production `session.send` always opens one before the agent runs.
         live.begin_round(None, "t", "u0").await;
+        let mut execution = live.claim_execution(false).await.unwrap();
+        execution.turn_id = Some("t".into());
+        execution.phase = ExecutionPhase::Running;
+        execution.ready.send_replace(true);
+        *live.execution.lock().await = Some(execution);
         let (agent_events, _) = broadcast::channel(64);
         let mut seen = live.events.subscribe();
         let pump = tokio::spawn(pump_events(
@@ -7439,12 +7768,14 @@ mod tests {
         }
     }
 
-    /// Every `SessionStatusChanged` a call published, in order.
+    /// The session states a call published, including a failed handover.
     fn statuses(seen: &mut broadcast::Receiver<SequencedEvent>) -> Vec<SessionStatus> {
         let mut out = Vec::new();
         while let Ok(event) = seen.try_recv() {
-            if let SessionEvent::SessionStatusChanged { status } = event.event {
-                out.push(status);
+            match event.event {
+                SessionEvent::SessionStatusChanged { status } => out.push(status),
+                SessionEvent::TurnFailed { .. } => out.push(SessionStatus::Failed),
+                _ => {}
             }
         }
         out
@@ -7518,9 +7849,9 @@ mod tests {
 
         assert_eq!(
             statuses(&mut seen),
-            vec![SessionStatus::Running, SessionStatus::Idle]
+            vec![SessionStatus::Running, SessionStatus::Failed]
         );
-        assert_eq!(*live.status.lock().await, SessionStatus::Idle);
+        assert_eq!(*live.status.lock().await, SessionStatus::Failed);
     }
 
     #[tokio::test]
@@ -8428,7 +8759,7 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_round_is_continued_when_the_next_send_names_it() {
         let dir = tempfile::tempdir().unwrap();
-        let (sessions, events, _) = wired(dir.path()).await;
+        let (sessions, events, turn_ids) = wired(dir.path()).await;
         let providers = ProviderMap::new();
 
         let first_turn = sessions
@@ -8466,6 +8797,9 @@ mod tests {
             .round_id
             .clone();
 
+        // Cancellation retires the process. Install the next fake instance,
+        // just as the production registry starts a fresh resumable adapter.
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(events.clone(), turn_ids)));
         let second_turn = sessions
             .send(
                 "s1",
@@ -8504,7 +8838,7 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_round_is_superseded_by_a_plain_new_message() {
         let dir = tempfile::tempdir().unwrap();
-        let (sessions, events, _) = wired(dir.path()).await;
+        let (sessions, events, turn_ids) = wired(dir.path()).await;
         let providers = ProviderMap::new();
 
         let first_turn = sessions
@@ -8537,6 +8871,9 @@ mod tests {
             .round_id
             .clone();
 
+        // Cancellation retires the process. Install the next fake instance,
+        // just as the production registry starts a fresh resumable adapter.
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(events.clone(), turn_ids)));
         let second_turn = sessions
             .send(
                 "s1",
@@ -8942,6 +9279,11 @@ mod tests {
         let store = test_store(dir.path());
         let live = Arc::new(Live::new(meta(), store.clone()));
         live.begin_round(None, "t", "u0").await;
+        let mut execution = live.claim_execution(false).await.unwrap();
+        execution.turn_id = Some("t".into());
+        execution.phase = ExecutionPhase::Running;
+        execution.ready.send_replace(true);
+        *live.execution.lock().await = Some(execution);
         let (agent_events, _) = broadcast::channel(64);
         let mut seen = live.events.subscribe();
         let diagnostics = Arc::new(Diagnostics::new());

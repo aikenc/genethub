@@ -223,6 +223,10 @@ interface Subscription {
   onResync(snapshot: unknown, replayed: SequencedEvent[], reset: boolean): void;
   resync: Promise<void> | null;
   needsResync: boolean;
+  resetRequired: boolean;
+  initializing: boolean;
+  retry: ReturnType<typeof setTimeout> | null;
+  retryDelay: number;
   expandLastRound: boolean;
 }
 
@@ -379,6 +383,10 @@ export class Client {
     this.redialAbort = null;
     this.redialing = false;
     this.clearTimers();
+    for (const subscription of this.subscriptions.values()) {
+      if (subscription.retry !== null) clearTimeout(subscription.retry);
+      subscription.retry = null;
+    }
     this.detachLifecycle();
     const endpoint = this.endpoint;
     const socket = this.socket;
@@ -669,27 +677,42 @@ export class Client {
       ...handlers,
       resync: null,
       needsResync: false,
+      resetRequired: true,
+      initializing: true,
+      retry: null,
+      retryDelay: 250,
       expandLastRound: options.expandLastRound ?? true,
     };
+    const previous = this.subscriptions.get(sessionId);
+    if (previous?.retry != null) clearTimeout(previous.retry);
     this.subscriptions.set(sessionId, subscription);
+    const connection = this.connectionEpoch;
     const reply = await this.call({
       type: "subscribe",
       payload: { sessionId, sinceSeq: 0, expandLastRound: subscription.expandLastRound },
-    });
-    if (reply?.type !== "subscribed") {
-      this.subscriptions.delete(sessionId);
+    }).catch(() => undefined);
+    if (this.subscriptions.get(sessionId) !== subscription || connection !== this.connectionEpoch || reply?.type !== "subscribed") {
+      if (this.subscriptions.get(sessionId) === subscription) this.subscriptions.delete(sessionId);
       throw new Error(`unexpected reply to subscribe: ${reply?.type}`);
     }
-    for (const event of reply.data.replayed) subscription.seq = Math.max(subscription.seq, event.seq);
+    this.acceptCursor(subscription, reply.data);
+    subscription.initializing = false;
+    // Let the caller install the initial snapshot before delivering a repair.
+    if (subscription.needsResync) this.retrySubscription(sessionId, subscription, 0);
     return { snapshot: reply.data.snapshot, replayed: reply.data.replayed, reset: reply.data.reset };
   }
 
   async unsubscribe(sessionId: string): Promise<void> {
+    const subscription = this.subscriptions.get(sessionId);
+    if (subscription?.retry != null) clearTimeout(subscription.retry);
     this.subscriptions.delete(sessionId);
     await this.call({ type: "unsubscribe", payload: { sessionId } });
   }
 
   private dial(dial: ProtocolDial): void {
+    // Sequence numbers are scoped to a daemon lifetime. A reconnect cannot
+    // infer that lifetime from numeric ordering, even if the ranges overlap.
+    for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
     this.activeChannelCredential = dial.channelCredential;
     this.activeLocalServerProof = dial.localServerProof;
     this.activeFabricRouteTicket = dial.fabricRouteTicket;
@@ -1120,7 +1143,7 @@ export class Client {
         const sessionId = sessionOf(frame.topic);
         const subscription = this.subscriptions.get(sessionId);
         if (!subscription || frame.payload.seq <= subscription.seq) return;
-        if (subscription.resync || frame.payload.seq !== subscription.seq + 1) {
+        if (subscription.initializing || subscription.resync || subscription.needsResync || frame.payload.seq !== subscription.seq + 1) {
           void this.fillGap(sessionId);
           return;
         }
@@ -1158,20 +1181,29 @@ export class Client {
     const subscription = this.subscriptions.get(sessionId);
     if (!subscription) return;
     subscription.needsResync = true;
+    if (subscription.initializing || this.stopped) return;
     if (subscription.resync) return subscription.resync;
+    if (subscription.retry !== null) clearTimeout(subscription.retry);
+    subscription.retry = null;
     const repair = (async () => {
       while (this.subscriptions.get(sessionId) === subscription && subscription.needsResync) {
         subscription.needsResync = false;
+        const connection = this.connectionEpoch;
         const reply = await this.call({
           type: "subscribe",
           payload: {
             sessionId,
-            sinceSeq: subscription.seq,
+            sinceSeq: subscription.resetRequired ? 0 : subscription.seq,
             expandLastRound: subscription.expandLastRound,
           },
         }).catch(() => undefined);
-        if (reply?.type !== "subscribed") return;
-        for (const event of reply.data.replayed) subscription.seq = Math.max(subscription.seq, event.seq);
+        if (this.subscriptions.get(sessionId) !== subscription || this.stopped) return;
+        if (reply?.type !== "subscribed" || connection !== this.connectionEpoch) {
+          subscription.needsResync = true;
+          return;
+        }
+        this.acceptCursor(subscription, reply.data);
+        subscription.retryDelay = 250;
         this.callListener(() =>
           subscription.onResync(reply.data.snapshot, reply.data.replayed, reply.data.reset),
         );
@@ -1182,7 +1214,30 @@ export class Client {
       await repair;
     } finally {
       if (subscription.resync === repair) subscription.resync = null;
+      if (subscription.needsResync) this.retrySubscription(sessionId, subscription);
     }
+  }
+
+  private acceptCursor(subscription: Subscription, data: { snapshot: unknown; replayed: SequencedEvent[]; reset: boolean }): void {
+    subscription.resetRequired = false;
+    const seq = (data.snapshot as { seq?: number } | null)?.seq;
+    // A daemon restart restarts its sequence. The snapshot is the boundary,
+    // including when it moves backwards; replay alone cannot describe it.
+    if (typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0) {
+      subscription.seq = seq;
+    } else {
+      if (data.reset) subscription.seq = 0;
+      for (const event of data.replayed) subscription.seq = Math.max(subscription.seq, event.seq);
+    }
+  }
+
+  private retrySubscription(sessionId: string, subscription: Subscription, delay = subscription.retryDelay): void {
+    if (this.stopped || this.subscriptions.get(sessionId) !== subscription || subscription.retry !== null) return;
+    subscription.retry = setTimeout(() => {
+      subscription.retry = null;
+      if (this.subscriptions.get(sessionId) === subscription) void this.fillGap(sessionId);
+    }, delay);
+    subscription.retryDelay = Math.min(5_000, subscription.retryDelay * 2);
   }
 
   private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
