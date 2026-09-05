@@ -19,6 +19,7 @@ import {
   COMPOSER_TEXTAREA_PHONE_MAX_HEIGHT,
   COMPOSER_TEXTAREA_PHONE_MIN_HEIGHT,
   Composer,
+  quietFor,
   resolveComposerPhase,
   resizeComposerTextarea,
 } from "./Composer";
@@ -78,6 +79,7 @@ afterEach(() => {
     draft: null,
     retryPending,
     editPending,
+    previewFloat: null,
   });
   localStorage.clear();
 });
@@ -183,6 +185,99 @@ describe("what the user sees in a session", () => {
 
     render(<TimelineView state={state} />);
     expect(screen.getByText("正在写下一答")).toBeInTheDocument();
+  });
+
+  it("occupies a process card as soon as a live request exists, before any tool arrives", () => {
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对权限", attachments: [] },
+    });
+    state = { ...state, activeTurn: "t1", activeTurnStartedAtMs: 1 };
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("进行中");
+    expect(screen.getByTestId("live-tail")).toHaveTextContent("进行中");
+    expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+  });
+
+  it("keeps streaming tools inside that process card until the round layer arrives", () => {
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对权限", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "reasoning", id: "think1", text: "先核对权限链路" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "running",
+        detail: { kind: "read", path: "role.json", content: "", truncated: false },
+        images: [],
+      },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a1", text: "正在写" },
+    });
+    state = { ...state, activeTurn: "t1", activeTurnStartedAtMs: 1 };
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByText("核对权限")).toBeInTheDocument();
+    expect(screen.getByTestId("assistant-message")).toHaveTextContent("正在写");
+    expect(screen.queryByText("思考过程")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("先核对权限链路");
+    expect(screen.getByTestId("live-tail")).toHaveTextContent("先核对权限链路");
+    expect(screen.getByTestId("live-tail")).toHaveTextContent("role.json");
+  });
+
+  it("keeps the same process chrome when a named round still has no layer", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 0,
+    };
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对权限", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "running",
+        detail: { kind: "read", path: "role.json", content: "", truncated: false },
+        images: [],
+      },
+    });
+    state = showRounds(state, { rounds: [round], roundLayers: {} });
+
+    render(<TimelineView state={state} />);
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.getByTestId("round-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("role.json");
   });
 
   /**
@@ -337,6 +432,361 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("正在加载…")).toBeInTheDocument();
   });
 
+  it("shows a batch's images as a strip: reads and produced ones open Preview", async () => {
+    const thumb = {
+      mime: "image/jpeg",
+      dataBase64: "dGh1bWI=",
+      width: 128,
+      height: 64,
+    };
+    const batch = { index: 0, firstItemId: "a1", blobCount: 2, text: "看图" };
+    const trunkSummary = { index: 0, firstItemId: "a1", blobCount: 2, title: "看图。", batches: [batch] };
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const layer: RoundLayer = {
+      round,
+      trunks: [trunkSummary],
+      expandedTrunk: {
+        summary: trunkSummary,
+        batches: [
+          {
+            summary: batch,
+            monologue: "",
+            blobs: [
+              {
+                itemId: "tool1:img:0",
+                kind: "image",
+                overview: "Read: assets/logo.png",
+                thumb,
+                path: "assets/logo.png",
+              },
+              {
+                itemId: "tool2:img:0",
+                kind: "image",
+                overview: "generate_image",
+                thumb,
+                path: ".genethub/sessions/s1/images/abc.png",
+                blob: { id: "ef".repeat(12), bytes: 96, at: "ef:0:96" },
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const expanded = layer.expandedTrunk as RoundTrunk;
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "看看", attachments: [] },
+      }),
+      { rounds: [round], roundLayers: { r1: layer }, roundTrunks: { "r1:0": expanded } },
+    );
+    useWorkbench.setState({
+      activeWorkspaceId: "ws1",
+      workspaces: [
+        {
+          id: "ws1",
+          machineId: "dev1",
+          name: "repo",
+          root: "/repo",
+          folders: [{ path: "/repo", name: "repo", root: "/repo", rootHandle: "r_repo" }],
+        } as never,
+      ],
+      client: { identity: { machineId: "dev1" } } as never,
+    });
+
+    render(<TimelineView state={state} />);
+    expect(screen.getByTestId("round-image-batch")).toBeInTheDocument();
+    expect(screen.queryByTestId("turn-body-gallery")).not.toBeInTheDocument();
+
+    const strip = screen.getByTestId("image-thumb-strip");
+    const tiles = within(strip).getAllByTestId("image-thumb");
+    expect(tiles).toHaveLength(2);
+    // Every thumbnail renders through <img> — never inline markup — so an SVG
+    // payload stays inert.
+    expect(within(strip).getAllByRole("img")[0]).toHaveAttribute(
+      "src",
+      "data:image/jpeg;base64,dGh1bWI=",
+    );
+
+    // A workspace read opens the same Preview float Markdown file links use:
+    // root-qualified path, then asset.preview loads the original.
+    await userEvent.click(tiles[0]!);
+    expect(useWorkbench.getState().previewFloat).toMatchObject({
+      deviceHandle: "dev1",
+      workspaceHandle: "ws1",
+      path: "r_repo/assets/logo.png",
+    });
+    expect(screen.queryByTestId("image-expanded")).not.toBeInTheDocument();
+
+    // A produced image is a session file; click is the same Preview open.
+    await userEvent.click(tiles[1]!);
+    expect(useWorkbench.getState().previewFloat).toMatchObject({
+      deviceHandle: "dev1",
+      workspaceHandle: "ws1",
+      path: "r_repo/.genethub/sessions/s1/images/abc.png",
+    });
+    expect(screen.queryByTestId("image-expanded")).not.toBeInTheDocument();
+  });
+
+  it("keeps a mid-turn produced-image batch after the tool batch, not in the turn body", async () => {
+    const thumb = { mime: "image/jpeg", dataBase64: "dGh1bWI=", width: 128, height: 64 };
+    const tools = { index: 0, firstItemId: "t1", blobCount: 1, text: "生成图片" };
+    const images = { index: 1, firstItemId: "t1:img:0", blobCount: 1, text: "1 张图片" };
+    const more = { index: 2, firstItemId: "t2", blobCount: 1, text: "再读文件" };
+    const trunkSummary = {
+      index: 0,
+      firstItemId: "t1",
+      blobCount: 3,
+      title: "生成图片。",
+      batches: [tools, images, more],
+    };
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const expanded: RoundTrunk = {
+      summary: trunkSummary,
+      batches: [
+        {
+          summary: tools,
+          monologue: "",
+          blobs: [{ itemId: "t1", kind: "toolCall", overview: "imageGeneration" }],
+        },
+        {
+          summary: images,
+          monologue: "",
+          blobs: [
+            {
+              itemId: "t1:img:0",
+              kind: "image",
+              overview: "风景",
+              thumb,
+              path: ".genethub/sessions/s1/images/aa.png",
+            },
+          ],
+        },
+        {
+          summary: more,
+          monologue: "",
+          blobs: [{ itemId: "t2", kind: "toolCall", overview: "Read" }],
+        },
+      ],
+    };
+    const state = showRounds(
+      apply(
+        apply(emptyTimeline(), {
+          type: "item",
+          turnId: "t1",
+          item: { type: "userMessage", id: "u1", text: "画一张再读一下", attachments: [] },
+        }),
+        {
+          type: "item",
+          turnId: "t1",
+          item: { type: "assistantMessage", id: "a9", text: "画完了，也读过了。" },
+        },
+      ),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [trunkSummary], expandedTrunk: expanded } },
+        roundTrunks: { "r1:0": expanded },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
+    expect(screen.getByTestId("round-image-batch")).toBeInTheDocument();
+    expect(screen.queryByTestId("turn-body-gallery")).not.toBeInTheDocument();
+    expect(screen.getByText("画完了，也读过了。")).toBeInTheDocument();
+  });
+
+  it("hoists the last produced-image group into the turn body when the round has settled", async () => {
+    const thumb = { mime: "image/jpeg", dataBase64: "dGh1bWI=", width: 128, height: 64 };
+    const tools = { index: 0, firstItemId: "t1", blobCount: 1, text: "生成图片" };
+    const images = { index: 1, firstItemId: "t1:img:0", blobCount: 2, text: "2 张图片" };
+    const summary = { index: 2, firstItemId: "a2", blobCount: 0, text: "三张风景都画好了。" };
+    const trunkSummary = {
+      index: 0,
+      firstItemId: "t1",
+      blobCount: 3,
+      title: "生成图片。",
+      batches: [tools, images, summary],
+    };
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const expanded: RoundTrunk = {
+      summary: trunkSummary,
+      batches: [
+        {
+          summary: tools,
+          monologue: "",
+          blobs: [{ itemId: "t1", kind: "toolCall", overview: "imageGeneration" }],
+        },
+        {
+          summary: images,
+          monologue: "",
+          blobs: [
+            {
+              itemId: "t1:img:0",
+              kind: "image",
+              overview: "山",
+              thumb,
+              path: ".genethub/sessions/s1/images/aa.png",
+            },
+            {
+              itemId: "t1:img:1",
+              kind: "image",
+              overview: "海",
+              thumb,
+              path: ".genethub/sessions/s1/images/bb.png",
+            },
+          ],
+        },
+        {
+          summary,
+          monologue: "三张风景都画好了。",
+          blobs: [],
+        },
+      ],
+    };
+    const state = showRounds(
+      apply(
+        apply(emptyTimeline(), {
+          type: "item",
+          turnId: "t1",
+          item: { type: "userMessage", id: "u1", text: "画两张风景", attachments: [] },
+        }),
+        {
+          type: "item",
+          turnId: "t1",
+          item: { type: "assistantMessage", id: "a9", text: "三张风景都画好了。" },
+        },
+      ),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [trunkSummary], expandedTrunk: expanded } },
+        roundTrunks: { "r1:0": expanded },
+      },
+    );
+    useWorkbench.setState({
+      activeWorkspaceId: "ws1",
+      workspaces: [
+        {
+          id: "ws1",
+          machineId: "dev1",
+          name: "repo",
+          root: "/repo",
+          folders: [{ path: "/repo", name: "repo", root: "/repo", rootHandle: "r_repo" }],
+        } as never,
+      ],
+      client: { identity: { machineId: "dev1" } } as never,
+    });
+
+    render(<TimelineView state={state} />);
+    expect(screen.queryByTestId("round-image-batch")).not.toBeInTheDocument();
+    const gallery = screen.getByTestId("turn-body-gallery");
+    const tiles = within(gallery).getAllByTestId("image-thumb");
+    expect(tiles).toHaveLength(2);
+    expect(tiles[0]).toHaveClass("gh-markdown-image-ref");
+    expect(tiles[0]).toHaveAttribute("data-size", "document");
+    expect(screen.getByText("三张风景都画好了。")).toBeInTheDocument();
+
+    await userEvent.click(tiles[0]!);
+    expect(useWorkbench.getState().previewFloat).toMatchObject({
+      deviceHandle: "dev1",
+      workspaceHandle: "ws1",
+      path: "r_repo/.genethub/sessions/s1/images/aa.png",
+    });
+  });
+
+  it("does not hoist a second strip when the assistant already linked the pictures", async () => {
+    const thumb = { mime: "image/jpeg", dataBase64: "dGh1bWI=", width: 128, height: 64 };
+    const tools = { index: 0, firstItemId: "t1", blobCount: 1, text: "生成图片" };
+    const images = { index: 1, firstItemId: "t1:img:0", blobCount: 1, text: "1 张图片" };
+    const trunkSummary = {
+      index: 0,
+      firstItemId: "t1",
+      blobCount: 2,
+      title: "生成图片。",
+      batches: [tools, images],
+    };
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const expanded: RoundTrunk = {
+      summary: trunkSummary,
+      batches: [
+        {
+          summary: tools,
+          monologue: "",
+          blobs: [{ itemId: "t1", kind: "toolCall", overview: "imageGeneration" }],
+        },
+        {
+          summary: images,
+          monologue: "",
+          blobs: [
+            {
+              itemId: "t1:img:0",
+              kind: "image",
+              overview: "山间",
+              thumb,
+              path: ".genethub/sessions/s1/images/aa.png",
+            },
+          ],
+        },
+      ],
+    };
+    const state = showRounds(
+      apply(
+        apply(emptyTimeline(), {
+          type: "item",
+          turnId: "t1",
+          item: { type: "userMessage", id: "u1", text: "画一张", attachments: [] },
+        }),
+        {
+          type: "item",
+          turnId: "t1",
+          item: {
+            type: "assistantMessage",
+            id: "a9",
+            text: "好了 [山间](demos/landscapes/landscape-mountains.png)",
+          },
+        },
+      ),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [trunkSummary], expandedTrunk: expanded } },
+        roundTrunks: { "r1:0": expanded },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    expect(screen.queryByTestId("turn-body-gallery")).not.toBeInTheDocument();
+    expect(screen.getByText("山间")).toBeInTheDocument();
+  });
+
   it("renders reasoning as text, tools as YAML, and edits as a diff", async () => {
     const round = {
       roundId: "r1",
@@ -461,6 +911,236 @@ describe("what the user sees in a session", () => {
     );
     expect(rows[2]!).toHaveTextContent("src/main.ts");
     expect(rows[2]!).not.toHaveTextContent("kind: edit");
+  });
+
+  it("shows a tool row's kind, relative time and duration without inventing them", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const batch = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 2,
+      text: "读取配置",
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 2,
+      title: "读取配置。",
+      batches: [batch],
+    };
+    const expandedTrunk: RoundTrunk = {
+      summary,
+      batches: [
+        {
+          summary: batch,
+          monologue: "读取配置。",
+          blobs: [
+            {
+              itemId: "tool1",
+              kind: "toolCall",
+              overview: "packages/proto/src/domain.rs",
+              toolKind: "read",
+              status: "ok",
+              startedAtMs: Date.now() - 3 * 60_000,
+              durationMs: 400,
+            },
+            {
+              itemId: "tool2",
+              kind: "toolCall",
+              overview: "旧行没有时间",
+            },
+          ],
+        },
+      ],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "看配置", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary], expandedTrunk } },
+        roundTrunks: { "r1:0": expandedTrunk },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    await userEvent.click(within(screen.getByTestId("round-trunk")).getByRole("button"));
+    const rows = screen.getAllByTestId("blob-row");
+    expect(within(rows[0]!).getByRole("img", { name: "读取文件" })).toBeInTheDocument();
+    expect(within(rows[0]!).getByTestId("blob-timing")).toHaveTextContent("3 分钟前 · 0.4s");
+    expect(within(rows[1]!).queryByTestId("blob-timing")).not.toBeInTheDocument();
+    expect(rows[1]!).not.toHaveTextContent("刚刚");
+  });
+
+  it("shows trunk and batch metrics as rounds, duration and relative time", async () => {
+    const now = Date.now();
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const firstBatch = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 3,
+      text: "读取配置",
+      llmRounds: 5,
+      startedAtMs: now - 3 * 60_000,
+      durationMs: 61_000,
+      toolDurationMs: 30_000,
+    };
+    const secondBatch = {
+      index: 1,
+      firstItemId: "tool4",
+      blobCount: 2,
+      text: "写入修改",
+      llmRounds: 7,
+      startedAtMs: now - 2 * 60_000,
+      durationMs: 119_000,
+      toolDurationMs: 80_000,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "tool1",
+      blobCount: 5,
+      title: "先检查配置。",
+      batches: [firstBatch, secondBatch],
+      llmRounds: 12,
+      startedAtMs: now - 3 * 60_000,
+      durationMs: 200_000,
+      toolDurationMs: 110_000,
+    };
+    const expandedTrunk: RoundTrunk = {
+      summary,
+      batches: [
+        { summary: firstBatch, monologue: "读取配置。", blobs: [] },
+        { summary: secondBatch, monologue: "写入修改。", blobs: [] },
+      ],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "看配置", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary], expandedTrunk } },
+        roundTrunks: { "r1:0": expandedTrunk },
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    const trunk = screen.getByTestId("round-trunk");
+    const trunkMetrics = within(trunk).getByTestId("summary-metrics");
+    expect(trunkMetrics).toHaveTextContent("12 轮 · 3m 20s");
+    expect(trunkMetrics).toHaveTextContent("3 分钟前 · 工具 1m 50s");
+    expect(trunkMetrics).not.toHaveTextContent("5 项");
+
+    await userEvent.click(within(trunk).getByRole("button"));
+    const batches = screen.getAllByTestId("round-batch");
+    const firstMetrics = within(batches[0]!).getByTestId("summary-metrics");
+    expect(firstMetrics).toHaveTextContent("5 轮 · 1m 1s");
+    expect(firstMetrics).toHaveTextContent("3 分钟前 · 工具 30s");
+    expect(within(batches[1]!).getByTestId("summary-metrics")).toHaveTextContent(
+      "7 轮 · 1m 59s",
+    );
+  });
+
+  it("keeps the blob count for trunk rows written before metrics existed", () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "a1",
+      blobCount: 4,
+      title: "盘点入口。",
+      batches: [],
+    };
+    const state = showRounds(
+      apply(emptyTimeline(), {
+        type: "item",
+        turnId: "t1",
+        item: { type: "userMessage", id: "u1", text: "审计", attachments: [] },
+      }),
+      {
+        rounds: [round],
+        roundLayers: { r1: { round, trunks: [summary] } },
+        roundTrunks: {},
+      },
+    );
+
+    render(<TimelineView state={state} />);
+    const trunk = screen.getByTestId("round-trunk");
+    expect(trunk).toHaveTextContent("4 项");
+    expect(within(trunk).queryByTestId("summary-metrics")).not.toBeInTheDocument();
+  });
+
+  it("shows live rounds and elapsed time on the in-progress card", () => {
+    const now = Date.now();
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "核对配置", attachments: [] },
+    });
+    state = apply(state, { type: "turnStarted", turnId: "t1", startedAtMs: now - 65_000 });
+    state = apply(state, {
+      type: "turnProgress",
+      turnId: "t1",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        llmRounds: 3,
+        toolOutputTokens: 0,
+        compactionCount: 0,
+        outputRateEstimated: false,
+        costUsd: undefined,
+      },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "Read",
+        status: "ok",
+        detail: { kind: "read", path: "role.json", content: "x", truncated: false },
+        images: [],
+        startedAtMs: now - 90_000,
+        finishedAtMs: now - 80_000,
+      },
+    });
+
+    render(<TimelineView state={state} />);
+    const card = screen.getByTestId("round-trunk");
+    const metrics = within(card).getByTestId("summary-metrics");
+    expect(metrics).toHaveTextContent("3 轮");
+    expect(metrics).toHaveTextContent("1 分钟前");
+    expect(metrics).toHaveTextContent("工具 10s");
+    expect(card).not.toHaveTextContent("1 项");
   });
 
   it("calls only the live tail progress and completed trunks process", () => {
@@ -1505,6 +2185,25 @@ describe("the controls offered to the user", () => {
     expect(onInterrupt).toHaveBeenCalled();
   });
 
+  /**
+   * "又卡住了" was filed against a turn that had been running for six minutes
+   * and forty-nine seconds and finished normally. Nothing was wrong with it —
+   * the person waiting simply had no way to tell that from a wedged one, and
+   * the daemon cannot tell them, because it does not know either.
+   */
+  it("says how long a running turn has been quiet, once that is worth saying", () => {
+    const now = 1_000_000;
+    // An ordinary pause to think says nothing at all.
+    expect(quietFor(now - 5_000, now)).toBeNull();
+    expect(quietFor(now - 59_000, now)).toBeNull();
+    expect(quietFor(now - 61_000, now)).toBe("已静默 1 分 1 秒");
+    expect(quietFor(now - 409_000, now)).toBe("已静默 6 分 49 秒");
+    expect(quietFor(now - 120_000, now)).toBe("已静默 2 分");
+    // An idle session has no running turn, so there is nothing to be quiet.
+    expect(quietFor(null, now)).toBeNull();
+    expect(quietFor(undefined, now)).toBeNull();
+  });
+
   it("keeps the send control busy after the echo and when switching onto a running tab", () => {
     const pending = { text: "改这里", attachments: [], sentAtMs: 1, error: null };
     expect(
@@ -1926,6 +2625,7 @@ describe("a whole turn as the timeline sees it", () => {
       name: "write",
       status: "pending",
       detail: { kind: "write", path: "hello.txt", content: "hi" },
+      images: [],
     };
 
     let state = emptyTimeline();
@@ -1941,7 +2641,7 @@ describe("a whole turn as the timeline sees it", () => {
         type: "itemDelta" as const,
         turnId: "t1",
         itemId: "c1",
-        delta: { kind: "toolStatus" as const, status: "ok" as const },
+        delta: { kind: "toolStatus" as const, status: "ok" as const, images: [] },
       },
       {
         type: "item" as const,
@@ -1997,7 +2697,8 @@ describe("a whole turn as the timeline sees it", () => {
 
     render(<TimelineView state={state} />);
     expect(screen.getByText("写个文件")).toBeInTheDocument();
-    expect(screen.getByTestId("tool-call")).toHaveTextContent("hello.txt");
+    expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("hello.txt");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("2 分钟前");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("耗时 5s");
@@ -2007,7 +2708,7 @@ describe("a whole turn as the timeline sees it", () => {
     // turnCompleted event has cacheReadTokens:0 but the footer renders the
     // turnSummary stats, so the summary line shows the richer breakdown.
     expect(screen.getByTestId("usage-summary")).toHaveTextContent(
-      "input(cached:3, toolcall:4, uncached:7) output 5 turn 1/1",
+      "本 Turn · input(cached:3, uncached:7) output 5 · 工具 1 次 · 模型 1 轮 · 工具输出约 4 tokens",
     );
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");

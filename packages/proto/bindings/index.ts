@@ -49,12 +49,41 @@ sessionId: string, pid: number, parentPid: number,
  */
 command: string, runningForSeconds: number, };
 
-export type BlobKind = "reasoning" | "toolCall";
+export type BlobKind = "reasoning" | "toolCall" | "image";
 
 /**
  * One compact row in a batch. Full source content is fetched by `blob.get`.
  */
-export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, };
+export type BlobOverview = { itemId: string, kind: BlobKind, overview: string, blob?: BlobRef, 
+/**
+ * Present only on `Image` rows.
+ */
+thumb?: ImageThumb, 
+/**
+ * `Image` rows only: workspace-relative path when the image is a file the
+ * agent read. Clicking opens it through `asset.preview`; the bytes are
+ * never duplicated into the blob layer. Absent for agent-produced images
+ * (those carry `blob` instead) and for paths outside the workspace.
+ */
+path?: string, 
+/**
+ * When the tool first appeared. Absent on rows written before timing
+ * existed — the client hides the clock rather than inventing one.
+ */
+startedAtMs?: number, 
+/**
+ * Wall time from start to a terminal status. Absent while running, and
+ * on rows that never recorded a finish.
+ */
+durationMs?: number, 
+/**
+ * Tool rows only. Drives the same kind icon the expanded card uses.
+ */
+toolKind?: ToolKind, 
+/**
+ * Tool rows only. Lets a live row say it is still running.
+ */
+status?: ToolStatus, };
 
 export type BlobPayload = { id: string, value: JsonValue, };
 
@@ -277,7 +306,14 @@ workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, };
  * different machine. The destination daemon applies its own Agent catalog,
  * context budget and workspace validation; clients cannot supply a seed.
  */
-export type ForkTransfer = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, sourceRoundId?: string, title?: string, items: Array<TimelineItem>, coverage: HistoryCoverage, };
+export type ForkTransfer = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, sourceRoundId?: string, title?: string, items: Array<TimelineItem>, coverage: HistoryCoverage, 
+/**
+ * Batch overview rows (tool calls, reasoning, images) covering the
+ * exported history. Thumbnails ride inline; original payloads never do —
+ * `blob` refs resolve against `source_session_id` while that session is
+ * reachable, and image `path`s only while the source workspace is.
+ */
+blobAppendix: Array<BlobOverview>, };
 
 export type GitChange = { path: string, kind: GitChangeKind, staged: boolean, };
 
@@ -398,6 +434,22 @@ fabricRouteTicket: string, fabricRouteExpiresAt: string,
 fingerprint: string, };
 
 /**
+ * A downscaled stand-in for an image row, inlined into the batch overview so
+ * the strip renders with zero extra round trips. Daemon-generated at
+ * extraction time: 64px wide for images the agent read (workspace files),
+ * 128px for images it produced.
+ */
+export type ImageThumb = { 
+/**
+ * Encoded thumbnail mime: `image/jpeg` or `image/webp`.
+ */
+mime: string, dataBase64: string, 
+/**
+ * Original dimensions, so layout can reserve the aspect ratio box.
+ */
+width: number, height: number, };
+
+/**
  * Whether an imported conversation can keep talking through its original
  * Agent thread, or is a durable GeneHub transcript only.
  */
@@ -451,7 +503,13 @@ detail: string, };
  * Deltas are transport-only: they are never written to the session log, which
  * keeps file size proportional to final content rather than to token count.
  */
-export type ItemDelta = { "kind": "text", delta: string, } | { "kind": "toolStatus", status: ToolStatus, detail?: ToolCallDetail, };
+export type ItemDelta = { "kind": "text", delta: string, } | { "kind": "toolStatus", status: ToolStatus, detail?: ToolCallDetail, 
+/**
+ * Images the tool result carried. Adapters fill this when the result
+ * arrives (which is delta time, not item time); the daemon sheds it
+ * like `TimelineItem::ToolCall.images`.
+ */
+images: Array<ToolImage>, };
 
 export type LogEntry = { name: string, 
 /**
@@ -707,7 +765,24 @@ export type RoundBatchSummary = { index: number, firstItemId: string, blobCount:
  * the context was squeezed. Rows written before this field existed read
  * as `None` and their markers stay in the flat narrative stream.
  */
-marker?: string, };
+marker?: string, 
+/**
+ * LLM request rounds that ran inside this batch. `None` for rows written
+ * before the field existed; clients hide the metric rather than show 0.
+ */
+llmRounds?: number, 
+/**
+ * Wall-clock start of the first item in this batch.
+ */
+startedAtMs?: number, 
+/**
+ * Wall-clock span from the first item's start to the last item's finish.
+ */
+durationMs?: number, 
+/**
+ * Sum of every tool call's own duration inside this batch.
+ */
+toolDurationMs?: number, };
 
 /**
  * A page of visible trunks in one round. `nextCursor` asks for the preceding
@@ -728,7 +803,24 @@ export type RoundTrunk = { summary: RoundTrunkSummary, batches: Array<RoundBatch
  * A visible, bounded section of a round. Trunks are carried by the round
  * protocol layer; they are not a fourth storage/addressing layer.
  */
-export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, };
+export type RoundTrunkSummary = { index: number, firstItemId: string, blobCount: number, title: string, batches: Array<RoundBatchSummary>, 
+/**
+ * LLM request rounds that ran inside this trunk. `None` for rows written
+ * before the field existed; clients hide the metric rather than show 0.
+ */
+llmRounds?: number, 
+/**
+ * Wall-clock start of the first item in this trunk.
+ */
+startedAtMs?: number, 
+/**
+ * Wall-clock span from the first item's start to the last item's finish.
+ */
+durationMs?: number, 
+/**
+ * Sum of every tool call's own duration inside this trunk.
+ */
+toolDurationMs?: number, };
 
 /**
  * Non-trickle RTC signaling carried inside an already E2EE Exchange.
@@ -913,7 +1005,20 @@ lineage?: SessionLineage,
 /**
  * Present only for a conversation imported from an Agent's native store.
  */
-imported?: SessionImportOrigin, };
+imported?: SessionImportOrigin, 
+/**
+ * When this session last produced anything, while a turn is running.
+ *
+ * A turn that has gone quiet is not a turn that has died, and the daemon
+ * has no way to tell the two apart: agents think, and some of them think
+ * for a long time. Nothing here is a deadline — no one is killed for
+ * crossing it. It exists because the person waiting is the only one who
+ * can tell whether nine minutes of silence is normal for what they asked,
+ * and they cannot judge what they cannot see.
+ *
+ * Absent unless a turn is running.
+ */
+lastActivityAtMs?: number, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -1165,7 +1270,16 @@ export type SupportDiagnostics = { version: number, capturedAt: string, daemonVe
  * `id` is assigned by the daemon, not the agent, so that deltas can address an
  * item regardless of whether the underlying agent has a concept of message ids.
  */
-export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, } | { "type": "reasoning", id: string, text: string, } | { "type": "toolCall", id: string, name: string, status: ToolStatus, detail: ToolCallDetail, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
+export type TimelineItem = { "type": "userMessage", id: string, text: string, attachments: Array<Attachment>, } | { "type": "assistantMessage", id: string, text: string, 
+/**
+ * When the daemon first saw this item. Drives batch/trunk timing for
+ * items that carry no tool timestamps of their own.
+ */
+receivedAtMs?: number, } | { "type": "reasoning", id: string, text: string, receivedAtMs?: number, } | { "type": "toolCall", id: string, name: string, status: ToolStatus, detail: ToolCallDetail, 
+/**
+ * Images this call's result carried, in shed form (see `ToolImage`).
+ */
+images: Array<ToolImage>, startedAtMs?: number, finishedAtMs?: number, } | { "type": "todo", id: string, items: Array<TodoEntry>, } | { "type": "compaction", id: string, reason: string, receivedAtMs?: number, } | { "type": "error", id: string, message: string, } | { "type": "turnSummary", id: string, stats: TurnStats, };
 
 export type TodoEntry = { text: string, status: TodoStatus, };
 
@@ -1179,6 +1293,24 @@ export type TodoStatus = "pending" | "inProgress" | "completed" | "cancelled";
  * coupling point between every adapter we ever add.
  */
 export type ToolCallDetail = { "kind": "overview", toolKind: ToolKind, overview: string, input: string, output: string, } | { "kind": "shell", command: string, output: string, exitCode?: number, } | { "kind": "read", path: string, content: string, truncated: boolean, } | { "kind": "edit", path: string, diff: string, } | { "kind": "write", path: string, content: string, } | { "kind": "search", query: string, matches: Array<SearchMatch>, } | { "kind": "fetch", url: string, summary: string, } | { "kind": "plan", markdown: string, } | { "kind": "subAgent", agent: string, prompt: string, items: Array<TimelineItem>, } | { "kind": "unknown", raw: JsonValue, };
+
+/**
+ * An image the agent read or produced, extracted from a tool result.
+ *
+ * `data_base64` is adapter→daemon transport only: the daemon strips it at
+ * intake — thumbnails are generated, produced images move to the blob layer,
+ * read images keep only their workspace path — before the item is persisted,
+ * condensed or published. It must never reach disk or clients.
+ */
+export type ToolImage = { 
+/**
+ * Source description, e.g. `Read: assets/logo.png` or a tool name.
+ */
+alt: string, mime: string, dataBase64?: string, thumb?: ImageThumb, 
+/**
+ * Workspace-relative path when the image is a file the agent read.
+ */
+path?: string, };
 
 /**
  * A stable semantic category shared by every Agent adapter.

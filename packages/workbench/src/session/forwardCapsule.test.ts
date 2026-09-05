@@ -319,6 +319,47 @@ describe("buildForwardCapsule 裁剪方向（超预算裁摘要）", () => {
   });
 });
 
+describe("buildForwardCapsule 内联图片", () => {
+  it("把 trunk 里的缩略图写进正文并作为附件带出", () => {
+    const messages = [
+      {
+        ...message("a1", "assistant", "见图 [山](landscapes/one.png)"),
+        roundId: "r-001",
+        atMs: local(14, 1),
+      },
+    ];
+    const rounds = [round("r-001", "u1", local(14, 0))];
+    const imageTrunk: RoundTrunk = {
+      summary: trunkSummary(0, "画"),
+      batches: [
+        {
+          summary: { index: 0, firstItemId: "t1:img:0", blobCount: 1, text: "1 张图片" },
+          blobs: [
+            {
+              itemId: "t1:img:0",
+              kind: "image",
+              overview: "山",
+              path: "landscapes/one.png",
+              thumb: { mime: "image/jpeg", dataBase64: "dGh1bWI=", width: 128, height: 64 },
+            },
+          ],
+        },
+      ],
+    };
+    const built = buildForwardCapsule(
+      source,
+      messages,
+      rounds,
+      { layers: { "r-001": [imageTrunk.summary] }, trunks: { "r-001:0": imageTrunk }, blobs: {} },
+      { ...baseOptions, fillDetail: false },
+    );
+    expect(built.text).toContain("![山](data:image/jpeg;base64,dGh1bWI=)");
+    expect(built.imageAttachments).toEqual([
+      { name: "one.png", mime: "image/jpeg", dataBase64: "dGh1bWI=" },
+    ]);
+  });
+});
+
 describe("attributeRounds", () => {
   it("按 round 的 userItemId 边界归属选中消息", () => {
     const items = [{ id: "u1" }, { id: "a1" }, { id: "u2" }, { id: "a2" }];

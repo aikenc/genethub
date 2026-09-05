@@ -1,6 +1,6 @@
 //! Domain objects shared by requests, responses and the frontend's caches.
 
-use crate::timeline::TimelineItem;
+use crate::timeline::{TimelineItem, ToolKind, ToolStatus};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -270,6 +270,12 @@ pub struct ForkTransfer {
     pub title: Option<String>,
     pub items: Vec<TimelineItem>,
     pub coverage: HistoryCoverage,
+    /// Batch overview rows (tool calls, reasoning, images) covering the
+    /// exported history. Thumbnails ride inline; original payloads never do —
+    /// `blob` refs resolve against `source_session_id` while that session is
+    /// reachable, and image `path`s only while the source workspace is.
+    #[serde(default)]
+    pub blob_appendix: Vec<BlobOverview>,
 }
 
 /// Whether an imported conversation can keep talking through its original
@@ -516,6 +522,19 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<SessionImportOrigin>,
+    /// When this session last produced anything, while a turn is running.
+    ///
+    /// A turn that has gone quiet is not a turn that has died, and the daemon
+    /// has no way to tell the two apart: agents think, and some of them think
+    /// for a long time. Nothing here is a deadline — no one is killed for
+    /// crossing it. It exists because the person waiting is the only one who
+    /// can tell whether nine minutes of silence is normal for what they asked,
+    /// and they cannot judge what they cannot see.
+    ///
+    /// Absent unless a turn is running.
+    #[ts(optional, type = "number")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_ms: Option<i64>,
 }
 
 /// A session written by a newer build than this one.
@@ -604,6 +623,27 @@ pub struct RoundBatchSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub marker: Option<String>,
+    /// LLM request rounds that ran inside this batch. `None` for rows written
+    /// before the field existed; clients hide the metric rather than show 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub llm_rounds: Option<u64>,
+    /// Wall-clock start of the first item in this batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub started_at_ms: Option<i64>,
+    /// Wall-clock span from the first item's start to the last item's finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub duration_ms: Option<u64>,
+    /// Sum of every tool call's own duration inside this batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub tool_duration_ms: Option<u64>,
 }
 
 /// A visible, bounded section of a round. Trunks are carried by the round
@@ -620,6 +660,27 @@ pub struct RoundTrunkSummary {
     pub title: String,
     #[serde(default)]
     pub batches: Vec<RoundBatchSummary>,
+    /// LLM request rounds that ran inside this trunk. `None` for rows written
+    /// before the field existed; clients hide the metric rather than show 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub llm_rounds: Option<u64>,
+    /// Wall-clock start of the first item in this trunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub started_at_ms: Option<i64>,
+    /// Wall-clock span from the first item's start to the last item's finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub duration_ms: Option<u64>,
+    /// Sum of every tool call's own duration inside this trunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub tool_duration_ms: Option<u64>,
 }
 
 /// A complete address for one stored blob: what it is, and where it sits.
@@ -651,6 +712,25 @@ pub struct BlobRef {
 pub enum BlobKind {
     Reasoning,
     ToolCall,
+    Image,
+}
+
+/// A downscaled stand-in for an image row, inlined into the batch overview so
+/// the strip renders with zero extra round trips. Daemon-generated at
+/// extraction time: 64px wide for images the agent read (workspace files),
+/// 128px for images it produced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct ImageThumb {
+    /// Encoded thumbnail mime: `image/jpeg` or `image/webp`.
+    pub mime: String,
+    pub data_base64: String,
+    /// Original dimensions, so layout can reserve the aspect ratio box.
+    #[ts(type = "number")]
+    pub width: u32,
+    #[ts(type = "number")]
+    pub height: u32,
 }
 
 /// One trunk's address inside a session's round layer, for batch fetches.
@@ -673,6 +753,35 @@ pub struct BlobOverview {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub blob: Option<BlobRef>,
+    /// Present only on `Image` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thumb: Option<ImageThumb>,
+    /// `Image` rows only: workspace-relative path when the image is a file the
+    /// agent read. Clicking opens it through `asset.preview`; the bytes are
+    /// never duplicated into the blob layer. Absent for agent-produced images
+    /// (those carry `blob` instead) and for paths outside the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    /// When the tool first appeared. Absent on rows written before timing
+    /// existed — the client hides the clock rather than inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub started_at_ms: Option<i64>,
+    /// Wall time from start to a terminal status. Absent while running, and
+    /// on rows that never recorded a finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub duration_ms: Option<u64>,
+    /// Tool rows only. Drives the same kind icon the expanded card uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tool_kind: Option<ToolKind>,
+    /// Tool rows only. Lets a live row say it is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<ToolStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

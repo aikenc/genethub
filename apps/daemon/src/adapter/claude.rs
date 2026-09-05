@@ -71,8 +71,8 @@ use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, ImportContinuation, ItemDelta, ModeInfo, ModelInfo,
     PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
-    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolKind,
-    ToolStatus, TurnError, TurnErrorCode, Usage,
+    PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolImage,
+    ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -708,6 +708,7 @@ impl AgentAdapter for ClaudeAdapter {
         let awaiting: Awaiting = Arc::default();
 
         let session = ClaudeSession {
+            tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
             turn: turn.clone(),
@@ -729,7 +730,7 @@ impl AgentAdapter for ClaudeAdapter {
             always_allow,
             pending_tools,
         };
-        tokio::spawn(read_loop(
+        session.tasks.spawn(read_loop(
             stdout,
             events,
             turn,
@@ -952,7 +953,11 @@ async fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> 
                     attachments: Vec::new(),
                 });
             }
-            Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text }),
+            Some("assistant") => items.push(TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms: None,
+            }),
             _ => {}
         }
     }
@@ -1064,6 +1069,7 @@ impl TurnState {
 }
 
 struct ClaudeSession {
+    tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
@@ -1243,12 +1249,8 @@ impl AgentSession for ClaudeSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            // The tree: on Windows this handle is an npm `.cmd` shim and the CLI
-            // itself is its child, which would otherwise outlive the session.
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 
@@ -1478,7 +1480,11 @@ fn translate_system_frame(
                 .to_string();
             let _ = events.send(SessionEvent::Item {
                 turn_id,
-                item: TimelineItem::Compaction { id, reason },
+                item: TimelineItem::Compaction {
+                    id,
+                    reason,
+                    received_at_ms: None,
+                },
             });
         }
         _ => {}
@@ -1522,11 +1528,13 @@ fn translate_stream_event(
                         TimelineItem::Reasoning {
                             id,
                             text: String::new(),
+                            received_at_ms: None,
                         }
                     } else {
                         TimelineItem::AssistantMessage {
                             id,
                             text: String::new(),
+                            received_at_ms: None,
                         }
                     };
                     emit(SessionEvent::Item { turn_id, item });
@@ -1567,9 +1575,17 @@ fn translate_stream_event(
                 return;
             };
             let item = if kind == BlockKind::Thinking {
-                TimelineItem::Reasoning { id, text }
+                TimelineItem::Reasoning {
+                    id,
+                    text,
+                    received_at_ms: None,
+                }
             } else {
-                TimelineItem::AssistantMessage { id, text }
+                TimelineItem::AssistantMessage {
+                    id,
+                    text,
+                    received_at_ms: None,
+                }
             };
             emit(SessionEvent::Item { turn_id, item });
         }
@@ -1608,6 +1624,9 @@ fn collect_sub_tool_calls(frame: &Value, parent: &str, state: &mut TurnState) {
             detail: detail_from_tool(&name, &input, None),
             name,
             status: ToolStatus::Running,
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         });
     }
 }
@@ -1648,6 +1667,9 @@ fn settle_sub_tool_results(frame: &Value, parent: &str, state: &mut TurnState) {
             id,
             name,
             status,
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         };
     }
 }
@@ -1673,6 +1695,9 @@ fn emit_sub_agent(
             detail: sub_agent_detail(name, input, None, state.subs.get(parent)),
             name: name.clone(),
             status: ToolStatus::Running,
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         },
     });
 }
@@ -1793,6 +1818,9 @@ fn translate_assistant_snapshot(
                 detail: detail_from_tool(&name, &input, None),
                 name,
                 status: ToolStatus::Running,
+                images: vec![],
+                started_at_ms: None,
+                finished_at_ms: None,
             },
         });
     }
@@ -1841,6 +1869,7 @@ fn translate_user_frame(
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 let result_text = tool_result_text(&block);
+                let images = tool_result_images(&name, &input, &block);
                 let status = if is_error {
                     ToolStatus::Error
                 } else {
@@ -1862,6 +1891,9 @@ fn translate_user_frame(
                         ),
                         name,
                         status,
+                        images,
+                        started_at_ms: None,
+                        finished_at_ms: None,
                     },
                 });
             }
@@ -1874,6 +1906,41 @@ fn translate_user_frame(
             _ => {}
         }
     }
+}
+
+/// Pulls image blocks out of a tool result. The text path (`tool_result_text`)
+/// only keeps `text` parts, so without this a Read of a picture — or an
+/// image-producing tool — leaves no trace. A Read's `file_path` becomes the
+/// image's source path; everything else is treated as produced bytes.
+fn tool_result_images(name: &str, input: &Value, block: &Value) -> Vec<ToolImage> {
+    let Some(parts) = block.get("content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let read_path = (name == "Read")
+        .then(|| input.get("file_path").and_then(Value::as_str))
+        .flatten();
+    parts
+        .iter()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|part| {
+            let source = part.get("source")?;
+            let data = source.get("data").and_then(Value::as_str)?;
+            let mime = source
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            Some(ToolImage {
+                alt: match read_path {
+                    Some(path) => format!("{name}: {path}"),
+                    None => name.to_string(),
+                },
+                mime: mime.to_string(),
+                data_base64: Some(data.to_string()),
+                thumb: None,
+                path: read_path.map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 fn tool_result_text(block: &Value) -> Option<String> {
@@ -3092,5 +3159,39 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_read_result_image_becomes_a_path_backed_tool_image() {
+        let block = json!({
+            "type": "tool_result",
+            "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}},
+            ],
+        });
+        let images = tool_result_images("Read", &json!({"file_path": "assets/logo.png"}), &block);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].alt, "Read: assets/logo.png");
+        assert_eq!(images[0].mime, "image/png");
+        assert_eq!(images[0].path.as_deref(), Some("assets/logo.png"));
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
+        // The text path still drops the image bytes.
+        assert_eq!(tool_result_text(&block), None);
+    }
+
+    #[test]
+    fn a_produced_image_has_no_source_path() {
+        let block = json!({
+            "type": "tool_result",
+            "content": [
+                {"type": "text", "text": "done"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "eWVz"}},
+            ],
+        });
+        let images = tool_result_images("generate_image", &json!({"prompt": "a cat"}), &block);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].alt, "generate_image");
+        assert!(images[0].path.is_none());
+        assert_eq!(tool_result_text(&block).as_deref(), Some("done"));
     }
 }

@@ -90,14 +90,27 @@ fn every_release_package_embeds_one_signed_component_and_pins_its_baseline() {
     assert!(bundle.contains("preparedGuest ??"));
 }
 
+/// The WebView's sign-in is the startup route's job, not a tray-only recovery.
+///
+/// A bare workbench URL for a paired daemon assumed the cookie jar still held
+/// a session from an earlier claim; a fresh install or an expired cookie
+/// landed the window on the signed-out page with no way forward of its own
+/// (fb__Y-nM9ptEeYt). The paired route therefore always mints the one-use
+/// owner claim link, and the tray item simply re-runs the same flow.
 #[test]
-fn machine_claim_is_an_explicit_tray_recovery_not_an_every_start_side_effect() {
+fn startup_signs_the_webview_in_with_a_one_use_claim_link() {
     let shell = read(repo().join("apps/desktop/src-tauri/src/lib.rs"));
     let tray = read(repo().join("apps/desktop/src-tauri/src/tray.rs"));
-    assert!(shell.contains("if claim_existing"));
+    let route = read(repo().join("apps/daemon/src/cli_front/desktop.rs"));
+
+    assert!(!shell.contains("--claim"));
+    assert!(!route.contains("--claim"));
+    assert!(
+        !route.contains("if !claim"),
+        "the paired route skipped claim-link minting on ordinary startup again"
+    );
+    assert!(route.contains("Request::HubClaimLink"));
     assert!(tray.contains("crate::start_claim(app)"));
-    assert!(shell.contains("command.arg(\"--claim\")"));
-    assert!(!shell.contains("HubClaim"));
 }
 
 #[test]

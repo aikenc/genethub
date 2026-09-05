@@ -276,6 +276,7 @@ impl AgentAdapter for GenetAdapter {
         said.watch("genet-agent", Some(stderr)).await;
 
         let session = GenetSession {
+            tasks: super::SessionTasks::default(),
             stdin: Mutex::new(stdin),
             events: events.clone(),
             turn: turn.clone(),
@@ -284,7 +285,9 @@ impl AgentAdapter for GenetAdapter {
             session_file,
         };
 
-        tokio::spawn(translate_stream(stdout, events, turn, child, said));
+        session
+            .tasks
+            .spawn(translate_stream(stdout, events, turn, child, said));
 
         Ok(Box::new(session))
     }
@@ -314,6 +317,7 @@ impl TurnState {
 }
 
 struct GenetSession {
+    tasks: super::SessionTasks,
     stdin: Mutex<ChildStdin>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
@@ -378,13 +382,8 @@ impl AgentSession for GenetSession {
     }
 
     async fn close(&self) -> Result<()> {
-        // Dropping stdin is the agent's shutdown signal; it drains in-flight
-        // work before exiting, so wait rather than killing outright.
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 
@@ -515,6 +514,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 item: TimelineItem::AssistantMessage {
                     id,
                     text: String::new(),
+                    received_at_ms: None,
                 },
             });
         }
@@ -541,7 +541,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     .to_string();
                 emit(SessionEvent::Item {
                     turn_id,
-                    item: TimelineItem::AssistantMessage { id, text },
+                    item: TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 });
             }
         }
@@ -554,6 +558,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 item: TimelineItem::Reasoning {
                     id,
                     text: String::new(),
+                    received_at_ms: None,
                 },
             });
         }
@@ -594,6 +599,9 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     name: name.to_string(),
                     status: ToolStatus::Pending,
                     detail: detail_from_call(name, &arguments),
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -606,6 +614,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     delta: ItemDelta::ToolStatus {
                         status: ToolStatus::Running,
                         detail: None,
+                        images: vec![],
                     },
                 });
             }
@@ -637,6 +646,9 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     name: name.clone(),
                     status,
                     detail: detail_from_result(&name, &arguments, result, is_error),
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -675,7 +687,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 .to_string();
             emit(SessionEvent::Item {
                 turn_id,
-                item: TimelineItem::Compaction { id, reason },
+                item: TimelineItem::Compaction {
+                    id,
+                    reason,
+                    received_at_ms: None,
+                },
             });
         }
 
@@ -1120,7 +1136,12 @@ mod tests {
         assert!(matches!(events[0], SessionEvent::TurnStarted { .. }));
         let item_id = match &events[1] {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert!(text.is_empty(), "the opening item starts empty");
@@ -1134,7 +1155,12 @@ mod tests {
         ));
         match &events[4] {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert_eq!(id, &item_id, "the final item reuses the streaming id");

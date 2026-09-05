@@ -6,13 +6,13 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::{
-    Attachment, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
+    Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
     HistoryCoverage, ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer,
     RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
@@ -28,11 +28,12 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use super::context_seed::{
     build_context_seed, build_portable_context_seed, prompt_with_seed, seed_token_budget,
 };
+use super::images;
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, normalize_session_title, now_ms, title_from, ContextSeedState, ImportedSessionMeta,
-    SessionMeta, Store, SESSION_FORMAT,
+    self, agent_title_fits_current, normalize_session_title, now_ms, title_from, ChatLog,
+    ContextSeedState, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -75,8 +76,59 @@ struct CachedImportCandidate {
     expires_at_ms: i64,
 }
 
+/// LLM request round counter for one round. `turn` is the current adapter
+/// turn's high-water mark — the adapter counts from zero every turn — and
+/// `round_base` folds in every earlier turn of the round, so the value handed
+/// to the trunk builder stays cumulative across permission resumes.
+///
+/// Turn boundaries are explicit: a progress event whose `turn_id` differs
+/// from the current one opens a new turn and folds the previous mark into the
+/// base. A progress event from an already-finished turn (a late frame still
+/// sitting in the channel) is ignored, so it cannot double-fold the base.
+#[derive(Default)]
+struct LlmRounds {
+    round_base: u32,
+    turn: u32,
+    turn_id: Option<String>,
+    finished_turns: Vec<String>,
+}
+
+impl LlmRounds {
+    /// Records the current turn's merged counter.
+    fn observe(&mut self, turn_id: &str, turn_rounds: u32) {
+        if self.turn_id.as_deref() == Some(turn_id) {
+            self.turn = turn_rounds;
+            return;
+        }
+        if self.finished_turns.iter().any(|id| id == turn_id) {
+            return;
+        }
+        if let Some(previous) = self.turn_id.take() {
+            self.round_base = self.round_base.saturating_add(self.turn);
+            self.finished_turns.push(previous);
+        }
+        self.turn = turn_rounds;
+        self.turn_id = Some(turn_id.to_string());
+    }
+
+    fn cumulative(&self) -> u32 {
+        self.round_base.saturating_add(self.turn)
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// One live session.
 struct Live {
+    /// The sole execution claim. Round identity is archival and may span many
+    /// of these claims. This lock never covers a call into an agent.
+    execution: Mutex<Option<Execution>>,
+    next_execution: AtomicU64,
+    closing: AtomicBool,
+    retirement: Mutex<()>,
+    cleanup: crate::adapter::SessionTasks,
     /// Where this session's own directory is. Held here so the trunk writer
     /// can run from inside the event pump, which is the only place that knows
     /// when a trunk closed.
@@ -95,14 +147,30 @@ struct Live {
     /// extended as rounds settle. One small record each, never the round's
     /// contents.
     rounds: Mutex<Vec<RoundRecord>>,
+    unsaved_rounds: Mutex<Vec<String>>,
+    /// Captured ancestor rounds are immutable for this fork. Resolve once per
+    /// loaded session, without retaining ancestor narrative or tool bodies.
+    inherited_rounds: Mutex<Option<Vec<RoundView>>>,
     /// Where each work item of the open trunk landed in the blob layer. Filled
     /// by the blob writer, consumed when the trunk is written, then dropped
     /// with the trunk's items.
     blob_refs: Mutex<HashMap<String, BlobRef>>,
     seq: AtomicU64,
+    /// When this session last published anything.
+    ///
+    /// Reported to clients while a turn is running, and only then, so that a
+    /// person waiting can see how long it has been quiet. Nothing in the daemon
+    /// reads it: silence is not evidence of death, and the only party who can
+    /// tell a long thought from a wedged process is the one who asked.
+    last_activity_ms: AtomicI64,
     replay: Mutex<VecDeque<SequencedEvent>>,
     events: broadcast::Sender<SequencedEvent>,
-    agent: Mutex<Option<Box<dyn AgentSession>>>,
+    /// Shared rather than owned so a caller can take a handle to the agent and
+    /// let go of the lock before awaiting it. Everything that reaches an agent
+    /// crosses a process boundary, and holding this across one of those awaits
+    /// is what turns "the agent stopped answering" into "the session stopped
+    /// answering": stop, close, and every read of the session queue behind it.
+    agent: Mutex<Option<Arc<dyn AgentSession>>>,
     /// Deployment-aware context supplied by the authenticated UI. It is kept
     /// for an in-process Agent restart but not persisted: the next browser send
     /// recomposes domain/channel/workspace from its actual address.
@@ -110,12 +178,23 @@ struct Live {
     pending_permissions: Mutex<Vec<PermissionRequest>>,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
+    /// When the turn in progress last had its narrative written out, which
+    /// paces that write rather than doing it per streamed token.
+    open_turn_written_ms: AtomicI64,
+    open_turn_dirty: AtomicBool,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
     /// when that trunk is written out, so this stays bounded by a soft batch
     /// boundary during tool-heavy work
     /// however many adapter turns the round spans.
     open_trunk_items: Mutex<Vec<String>>,
+    /// LLM request round counter feeding trunk pagination, mirrored from the
+    /// pump's `TurnProgress` merge. The adapter's counter is cumulative within
+    /// one turn only, but a round spans several turns (permission resumes,
+    /// client-declared continuations), so each finished turn's high-water mark
+    /// is folded into a round base the moment the counter is seen resetting.
+    llm_rounds: Mutex<LlmRounds>,
     pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pump_stop: tokio::sync::watch::Sender<bool>,
     /// Daemon-owned round bookkeeping — one user request, possibly several
     /// adapter turns (`docs/agent-analysis-substrate-proposal.md` §3.2).
     /// `None` before the first `session.send` on this session. Kept around
@@ -123,6 +202,68 @@ struct Live {
     /// in memory until the next round replaces it; the durable copy lives in
     /// the round ledger (`session/rounds.rs`, §8 step 2).
     active_round: Mutex<Option<ActiveRound>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionPhase {
+    Starting,
+    Running,
+    Stopping,
+    Saving,
+    CleanupFailed,
+}
+
+#[derive(Clone)]
+struct Execution {
+    id: u64,
+    phase: ExecutionPhase,
+    turn_id: Option<String>,
+    cancel: tokio::sync::watch::Sender<bool>,
+    ready: tokio::sync::watch::Sender<bool>,
+    terminal: tokio::sync::watch::Sender<bool>,
+}
+
+impl Execution {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            phase: ExecutionPhase::Starting,
+            turn_id: None,
+            cancel: tokio::sync::watch::channel(false).0,
+            ready: tokio::sync::watch::channel(false).0,
+            terminal: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+/// A transport may drop a request future while initialize/send is pending.
+/// The execution still owns the cleanup, regardless of the caller's lifetime.
+struct Handover {
+    live: Arc<Live>,
+    id: u64,
+    complete: bool,
+}
+
+impl Drop for Handover {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        let live = self.live.clone();
+        let id = self.id;
+        self.live.cleanup.spawn(async move {
+            if let Err(error) = retire_execution(
+                &live,
+                id,
+                Some("handover was abandoned; delivery may be unknown".into()),
+                false,
+            )
+            .await
+            {
+                tracing::error!(id, %error, "could not retire abandoned handover");
+            }
+        });
+    }
 }
 
 /// One user request's lifecycle, possibly spanning several adapter turns.
@@ -136,6 +277,17 @@ struct Live {
 /// `workspaceStart` need the workspace-observation step (§8 step 5) to mean
 /// anything, and adding fields nobody populates yet would be exactly the
 /// "看起来完整却是假的" mistake the proposal itself warns against (rule D).
+/// Who is ending a round, and therefore whether the turn id has to match.
+#[derive(Clone, Copy, Debug)]
+enum Settling<'a> {
+    /// A terminal event from the agent. It must name the turn still running.
+    Turn(&'a str),
+    /// The kernel ending the round from its own side — an escalation past a
+    /// deaf agent, a channel that closed, an approval the user declined. There
+    /// is no turn id to match against because no turn reported anything.
+    Kernel,
+}
+
 #[derive(Debug, Clone)]
 struct ActiveRound {
     round_id: String,
@@ -156,6 +308,9 @@ struct ActiveRound {
     /// Total time this round spent waiting on a human, across every pause —
     /// not counted as the agent's own working time.
     blocked_ms: i64,
+    /// Every completed waiting interval, so trunk/batch durations can exclude
+    /// the time the round spent waiting on a human instead of working.
+    blocked_intervals: Vec<(i64, i64)>,
     /// `None` while the round is still open (running or blocked on a human).
     outcome: Option<RoundOutcome>,
     /// This round's still-open trunk — a bounded slice of its tool-call-
@@ -164,6 +319,13 @@ struct ActiveRound {
     /// long enough that "every item carries an overview" alone re-blows the
     /// byte budget the round layer itself exists to avoid.
     current_trunk: TrunkBuilder,
+    /// The LLM round delta attributed to each recorded item, so the open
+    /// trunk's rebuild reports the same rounds the builder counted while
+    /// streaming. Deltas are absolute: a rebuild needs no base counter.
+    round_deltas: HashMap<String, u32>,
+    /// The cumulative round counter as of the last recorded trunk item — the
+    /// next item's delta is measured from here.
+    last_attributed_rounds: u32,
     /// Trunks already closed, in order. Becomes `RoundRecord::trunk_summaries`
     /// once the round settles (`close_current_trunk` folds in whatever was
     /// still open, so nothing since the last boundary is lost).
@@ -175,6 +337,8 @@ struct ActiveRound {
 /// a caller actually asked to expand.
 #[derive(Debug, Clone)]
 struct RoundView {
+    /// Storage owner for a historical round inherited through a fork.
+    source: Option<(String, String)>,
     round_id: String,
     ord: u32,
     user_item_id: Option<String>,
@@ -199,7 +363,11 @@ impl ActiveRound {
     /// plans, turn summaries, … never affect trunk boundaries. Returns a
     /// just-closed trunk unresolved: its overview needs a live look at the
     /// item store, which only `Live` has (`resolve_monologue_text`).
-    fn record_trunk_item(&mut self, item: &TimelineItem) -> Option<rounds::ClosedTrunk> {
+    fn record_trunk_item(
+        &mut self,
+        item: &TimelineItem,
+        cumulative_rounds: u32,
+    ) -> Option<rounds::ClosedTrunk> {
         let trunk_item = match item {
             TimelineItem::AssistantMessage { .. } => TrunkItem::Monologue,
             TimelineItem::Reasoning { .. } => TrunkItem::Reasoning,
@@ -207,7 +375,14 @@ impl ActiveRound {
             TimelineItem::Compaction { reason, .. } => TrunkItem::Compaction(reason.as_str()),
             _ => return None,
         };
-        self.current_trunk.push(item.id(), trunk_item)
+        // The rounds this item answers for are the counter's movement since
+        // the previous recorded item; adapters emit progress before the item
+        // that opens a round, so that item carries the round.
+        let delta = cumulative_rounds.saturating_sub(self.last_attributed_rounds);
+        self.last_attributed_rounds = cumulative_rounds;
+        self.round_deltas.insert(item.id().to_string(), delta);
+        self.current_trunk
+            .push(item.id(), trunk_item, rounds::item_timing(item), delta)
     }
 
     /// Closes whatever trunk is still being built, if any, so a round that
@@ -552,6 +727,16 @@ impl SessionManager {
             coverage.reason =
                 Some("the portable fork retained a bounded recent visible-history window".into());
         }
+        // Thumbnails and blob references cross; payloads never do. A produced
+        // image's original stays in the source session's blob layer and is
+        // drilled into through its ref while the source remains reachable.
+        let refs = source.blob_refs.lock().await;
+        let mut blob_appendix: Vec<BlobOverview> =
+            selected.iter().flat_map(rounds::blob_overviews).collect();
+        for row in &mut blob_appendix {
+            row.blob = refs.get(&row.item_id).cloned();
+        }
+        drop(refs);
         Ok(ForkTransfer {
             source_session_id: session_id.to_string(),
             source_turn_id: turn_id.to_string(),
@@ -560,6 +745,7 @@ impl SessionManager {
             title: meta.title.clone(),
             coverage,
             items: selected,
+            blob_appendix,
         })
     }
 
@@ -567,11 +753,12 @@ impl SessionManager {
         &self,
         workspace_id: &str,
         cwd: PathBuf,
-        transfer: ForkTransfer,
+        mut transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
         source_accessible: bool,
     ) -> Result<SessionSummary> {
+        let blob_appendix = std::mem::take(&mut transfer.blob_appendix);
         if target.workspace_id.as_deref() != Some(workspace_id) {
             anyhow::bail!("the fork target workspace does not match the validated workspace");
         }
@@ -682,6 +869,10 @@ impl SessionManager {
             self.store
                 .append_chat_items(workspace_id, &meta.id, &items)?;
             self.store.save_seed(workspace_id, &meta.id, &built.seed)?;
+            if !blob_appendix.is_empty() {
+                self.store
+                    .save_fork_appendix(workspace_id, &meta.id, &blob_appendix)?;
+            }
             Ok(())
         };
         if let Err(error) = write() {
@@ -917,6 +1108,10 @@ impl SessionManager {
         if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
             return Ok(live);
         }
+        let mut sessions = self.sessions.write().await;
+        if let Some(live) = sessions.get(session_id) {
+            return Ok(live.clone());
+        }
         // Not in memory: rehydrate from disk so a restart does not lose access
         // to past conversations.
         let meta = self
@@ -935,21 +1130,66 @@ impl SessionManager {
                 meta.format
             ));
         }
-        let chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        let mut chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        let unsaved = self.recover_interrupted_turn(&meta, &mut chat).await?;
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
         *live.rounds.lock().await = chat.rounds;
-        self.sessions
-            .write()
-            .await
-            .insert(session_id.to_string(), live.clone());
+        *live.turn_items.lock().await = unsaved;
+        sessions.insert(session_id.to_string(), live.clone());
         Ok(live)
+    }
+
+    /// Moves the narrative of a turn that never finished into the log.
+    ///
+    /// Reached when the previous process died with an answer in flight. The
+    /// items are promoted rather than merely displayed, so the log is the one
+    /// durable home again and the next start does not have to know any of this
+    /// happened. Anything already in the log wins: a crash between the append
+    /// and the removal below would otherwise show the answer twice.
+    async fn recover_interrupted_turn(
+        &self,
+        meta: &SessionMeta,
+        chat: &mut ChatLog,
+    ) -> Result<Vec<String>> {
+        let recovered = self.store.load_open_turn(&meta.workspace_id, &meta.id)?;
+        if recovered.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fresh: Vec<TimelineItem> = recovered
+            .into_iter()
+            .filter(|item| !chat.items.iter().any(|kept| kept.id() == item.id()))
+            .collect();
+        if !fresh.is_empty() {
+            if let Err(error) = self
+                .store
+                .append_chat_items(&meta.workspace_id, &meta.id, &fresh)
+            {
+                // Left in place to be tried again next time rather than
+                // dropped: an unwritable session directory is a reason to keep
+                // the only copy, not to discard it.
+                tracing::warn!(
+                    "could not recover the interrupted turn of {}: {error}",
+                    meta.id
+                );
+                let unsaved = fresh.iter().map(|item| item.id().to_string()).collect();
+                chat.items.extend(fresh);
+                return Ok(unsaved);
+            }
+            chat.items.extend(fresh);
+        }
+        self.store.clear_open_turn(&meta.workspace_id, &meta.id);
+        Ok(Vec::new())
     }
 
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
-        let summary = live.meta.lock().await.summary(status);
+        let summary = live
+            .meta
+            .lock()
+            .await
+            .summary_with_activity(status, live.activity_of(status));
         Ok(summary)
     }
 
@@ -1020,12 +1260,15 @@ impl SessionManager {
             }
             // A suspended approval survives daemon restarts without a live
             // Agent process or client connection.
-            let status = match self.sessions.read().await.get(&meta.id) {
-                Some(live) => *live.status.lock().await,
-                None if meta.pending_permission.is_some() => SessionStatus::Waiting,
-                None => SessionStatus::Idle,
+            let (status, activity) = match self.sessions.read().await.get(&meta.id) {
+                Some(live) => {
+                    let status = *live.status.lock().await;
+                    (status, live.activity_of(status))
+                }
+                None if meta.pending_permission.is_some() => (SessionStatus::Waiting, None),
+                None => (SessionStatus::Idle, None),
             };
-            out.push(meta.summary(status));
+            out.push(meta.summary_with_activity(status, activity));
         }
         Ok(out)
     }
@@ -1108,9 +1351,12 @@ impl SessionManager {
         through_round_id: Option<&str>,
     ) -> Result<SessionInspection> {
         let view = self.read_view(session_id, through_round_id).await?;
-        let status = *self.live(session_id).await?.status.lock().await;
+        let live = self.live(session_id).await?;
+        let status = *live.status.lock().await;
         Ok(SessionInspection {
-            summary: view.meta.summary(status),
+            summary: view
+                .meta
+                .summary_with_activity(status, live.activity_of(status)),
             source: view.source,
             narrative_item_count: u64::try_from(view.items.len()).unwrap_or(u64::MAX),
             round_count: u64::try_from(view.rounds.len()).unwrap_or(u64::MAX),
@@ -1208,11 +1454,10 @@ impl SessionManager {
 
     async fn snapshot_for_open(
         &self,
-        session_id: &str,
+        live: &Arc<Live>,
         expand_last_round: bool,
     ) -> Result<SessionSnapshot> {
-        let live = self.live(session_id).await?;
-        let mut snapshot = live.snapshot().await?;
+        let mut snapshot = live.snapshot_unlocked().await?;
         // The open trunk's work items live alongside the narrative in memory
         // so the round layer can serve them without a read; they are addressed
         // through that layer, never replayed here.
@@ -1244,6 +1489,7 @@ impl SessionManager {
             .await
             .iter()
             .map(|record| RoundView {
+                source: None,
                 round_id: record.round_id.clone(),
                 ord: record.ord,
                 user_item_id: record.user_item_id.clone(),
@@ -1277,6 +1523,7 @@ impl SessionManager {
                     view.trunk_count = open_trunks;
                 }
                 None => views.push(RoundView {
+                    source: None,
                     round_id: round.round_id.clone(),
                     ord: round.ord,
                     user_item_id: round.user_item_id.clone(),
@@ -1287,7 +1534,86 @@ impl SessionManager {
                 }),
             }
         }
-        views.sort_by_key(|view| view.ord);
+        // A fork owns its new rounds, while its inherited narrative refers to
+        // immutable completed turns in its ancestry. Resolve those rounds from
+        // their actual storage owner; never widen access beyond captured turns.
+        let meta = live.meta.lock().await.clone();
+        if meta.lineage.is_some() {
+            let mut cached = live.inherited_rounds.lock().await;
+            if let Some(inherited) = cached.as_ref() {
+                views.extend(inherited.iter().cloned());
+                views.sort_by_key(|view| (view.started_at_ms, view.ord));
+                return views;
+            }
+            let own_count = views.len();
+            let mut complete = true;
+            let captured: HashSet<String> = live
+                .items
+                .lock()
+                .await
+                .iter()
+                .filter_map(|item| {
+                    if let TimelineItem::TurnSummary { stats, .. } = item {
+                        Some(stats.turn_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let metas = match self.store.list_meta() {
+                Ok(metas) => metas,
+                Err(_) => return views,
+            };
+            let mut lineage = meta.lineage;
+            let mut visited = HashSet::from([meta.id]);
+            while let Some(origin) = lineage {
+                if !visited.insert(origin.source_session_id.clone()) {
+                    break;
+                }
+                let Some(parent) = metas
+                    .iter()
+                    .find(|meta| meta.id == origin.source_session_id)
+                else {
+                    break;
+                };
+                let Ok(chat) = self.store.load_chat(&parent.workspace_id, &parent.id) else {
+                    complete = false;
+                    break;
+                };
+                for record in chat.rounds {
+                    if record.adapter_turn_ids.is_empty()
+                        || !record
+                            .adapter_turn_ids
+                            .iter()
+                            .all(|id| captured.contains(id))
+                        || record.outcome.is_none()
+                        || views.iter().any(|view| view.round_id == record.round_id)
+                    {
+                        continue;
+                    }
+                    views.push(RoundView {
+                        source: Some((parent.workspace_id.clone(), parent.id.clone())),
+                        round_id: record.round_id,
+                        ord: record.ord,
+                        user_item_id: record.user_item_id,
+                        started_at_ms: record.started_at_ms,
+                        ended_at_ms: record.ended_at_ms,
+                        outcome: match record.outcome {
+                            Some(RoundOutcome::Completed) => RoundLayerOutcome::Completed,
+                            Some(RoundOutcome::Canceled) => RoundLayerOutcome::Canceled,
+                            Some(RoundOutcome::Superseded) => RoundLayerOutcome::Superseded,
+                            _ => RoundLayerOutcome::Failed,
+                        },
+                        trunk_count: record.trunk_count,
+                    });
+                }
+                lineage = parent.lineage.clone();
+            }
+            if complete {
+                *cached = Some(views[own_count..].to_vec());
+            }
+        }
+        views.sort_by_key(|view| (view.started_at_ms, view.ord));
         views
     }
 
@@ -1295,9 +1621,14 @@ impl SessionManager {
     /// plus the trunk still being built, which only memory knows about.
     async fn trunk_index(&self, live: &Arc<Live>, view: &RoundView) -> Result<Vec<TrunkSummary>> {
         let meta = live.meta.lock().await.clone();
+        let (workspace_id, session_id) = view
+            .source
+            .as_ref()
+            .map(|(workspace, session)| (workspace.as_str(), session.as_str()))
+            .unwrap_or((&meta.workspace_id, &meta.id));
         let mut summaries = self
             .store
-            .load_trunk_index(&meta.workspace_id, &meta.id, view.ord)?;
+            .load_trunk_index(workspace_id, session_id, view.ord)?;
         if let Some(open) = self.open_trunk(live, view).await {
             match summaries
                 .iter_mut()
@@ -1307,12 +1638,32 @@ impl SessionManager {
                 None => summaries.push(open.summary),
             }
         }
+        // Codex builds that emitted both the started and completed
+        // `contextCompaction` item could persist the same marker twice. The
+        // first marker closed the real trunk; the second became a marker-only
+        // trunk. Keep old sessions readable without rewriting their ledger.
+        let mut marker_ids = HashSet::new();
+        summaries.retain(|summary| {
+            let duplicate_marker_only = summary.blob_count == 0
+                && summary.batches.len() == 1
+                && summary.batches[0].marker.is_some()
+                && marker_ids.contains(&summary.batches[0].first_item_id);
+            for batch in &summary.batches {
+                if batch.marker.is_some() {
+                    marker_ids.insert(batch.first_item_id.clone());
+                }
+            }
+            !duplicate_marker_only
+        });
         Ok(summaries)
     }
 
     /// The trunk currently being built for this round, if this round is the
     /// open one and it has anything in it yet.
     async fn open_trunk(&self, live: &Arc<Live>, view: &RoundView) -> Option<RoundTrunk> {
+        if view.source.is_some() {
+            return None;
+        }
         let index = {
             let active = live.active_round.lock().await;
             let round = active.as_ref()?;
@@ -1359,14 +1710,34 @@ impl SessionManager {
         view: &RoundView,
         summary: &TrunkSummary,
     ) -> Result<RoundTrunk> {
-        if let Some(open) = self.open_trunk(live, view).await {
-            if open.summary.index == summary.index {
-                return Ok(open);
-            }
+        let mut meta = live.meta.lock().await.clone();
+        if let Some((workspace_id, session_id)) = &view.source {
+            meta.workspace_id = workspace_id.clone();
+            meta.id = session_id.clone();
         }
-        let meta = live.meta.lock().await.clone();
-        self.store
-            .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)
+        let mut trunk = if let Some(open) = self.open_trunk(live, view).await {
+            if open.summary.index == summary.index {
+                open
+            } else {
+                self.store
+                    .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)?
+            }
+        } else {
+            self.store
+                .load_trunk(&meta.workspace_id, &meta.id, view.ord, summary)?
+        };
+        if let Ok(root) = self.store.workspace_root(&meta.workspace_id) {
+            let store = self.store.clone();
+            let workspace_id = meta.workspace_id.clone();
+            let session_id = meta.id.clone();
+            images::hydrate_produced_images(
+                &root,
+                &session_id,
+                |blob| store.get_blob(&workspace_id, &session_id, blob),
+                &mut trunk,
+            );
+        }
+        Ok(trunk)
     }
 
     pub async fn round_layer(
@@ -1411,10 +1782,37 @@ impl SessionManager {
 
     pub async fn blob(&self, session_id: &str, blob: &BlobRef) -> Result<BlobPayload> {
         let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        self.store
-            .get_blob(&meta.workspace_id, &meta.id, blob)?
-            .ok_or_else(|| anyhow!("no such blob: {}", blob.id))
+        let meta = live.meta.lock().await.clone();
+        if let Some(payload) = self.store.get_blob(&meta.workspace_id, &meta.id, blob)? {
+            return Ok(payload);
+        }
+        // A locator alone is not authority to read a parent's blob bucket.
+        // It must appear in a round visible within this fork's boundary.
+        for view in self.round_views(&live).await {
+            let Some((workspace_id, owner_id)) = &view.source else {
+                continue;
+            };
+            for summary in self
+                .store
+                .load_trunk_index(workspace_id, owner_id, view.ord)?
+            {
+                let trunk = self
+                    .store
+                    .load_trunk(workspace_id, owner_id, view.ord, &summary)?;
+                if trunk
+                    .batches
+                    .iter()
+                    .flat_map(|batch| &batch.blobs)
+                    .any(|row| row.blob.as_ref().is_some_and(|reference| reference == blob))
+                {
+                    return self
+                        .store
+                        .get_blob(workspace_id, owner_id, blob)?
+                        .ok_or_else(|| anyhow!("no such blob: {}", blob.id));
+                }
+            }
+        }
+        Err(anyhow!("no such blob: {}", blob.id))
     }
 
     /// Batch variant of `round_trunk`: one live lookup, then the same
@@ -1474,6 +1872,7 @@ impl SessionManager {
         let live = self.live(session_id).await?;
         // Subscribe before snapshotting so nothing can slip through the gap
         // between the two.
+        let _owner = live.execution.lock().await;
         let receiver = live.events.subscribe();
         let replay = live.replay.lock().await;
 
@@ -1490,7 +1889,9 @@ impl SessionManager {
                 let current = live.seq.load(Ordering::SeqCst);
                 if seq == current {
                     (Vec::new(), false)
-                } else if oldest.is_none_or(|oldest| seq + 1 < oldest) {
+                } else if seq > current
+                    || oldest.is_none_or(|oldest| seq.saturating_add(1) < oldest)
+                {
                     // The gap starts before anything we still hold.
                     (Vec::new(), true)
                 } else {
@@ -1507,9 +1908,7 @@ impl SessionManager {
         };
         drop(replay);
 
-        let snapshot = self
-            .snapshot_for_open(session_id, expand_last_round)
-            .await?;
+        let snapshot = self.snapshot_for_open(&live, expand_last_round).await?;
         Ok((snapshot, events, reset, receiver))
     }
 
@@ -1550,46 +1949,28 @@ impl SessionManager {
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
         ));
-        {
-            let mut status = live.status.lock().await;
-            if matches!(*status, SessionStatus::Running | SessionStatus::Waiting) {
-                return Err(anyhow!("a turn is already running in this session"));
-            }
-            // Claimed before the handover, not after it: a second send arriving
-            // while the first is still being handed over has to lose the race
-            // rather than join it.
-            *status = SessionStatus::Running;
+        let execution = live.claim_execution(false).await?;
+        let mut handover = Handover {
+            live: live.clone(),
+            id: execution.id,
+            complete: false,
+        };
+        let mut cancel = execution.cancel.subscribe();
+        let started = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("the execution was stopped during handover")),
+            result = tokio::time::timeout(HANDOVER_BUDGET, self.start_turn(
+                &live, session_id, text, attachments, providers,
+                additional_system_prompt, continues_round, execution.id,
+            )) => result.unwrap_or_else(|_| Err(anyhow!(
+                "the agent did not take this message within {}s; delivery may be unknown",
+                HANDOVER_BUDGET.as_secs()
+            ))),
+        };
+        if let Err(error) = &started {
+            retire_execution(&live, execution.id, Some(error.to_string()), false).await?;
         }
-        // Told to every client, not just the one that pressed send. The claim
-        // above was invisible on the wire until `TurnStarted`, which is behind
-        // the agent's startup — seconds for a third-party CLI — so a second
-        // window went on showing an idle session it was happy to send into, and
-        // got this same refusal for its trouble.
-        live.publish(SessionEvent::SessionStatusChanged {
-            status: SessionStatus::Running,
-        })
-        .await;
-        let started = self
-            .start_turn(
-                &live,
-                session_id,
-                text,
-                attachments,
-                providers,
-                additional_system_prompt,
-                continues_round,
-            )
-            .await;
-        if started.is_err() {
-            // Nothing is running after all, and a session stuck on Running would
-            // refuse every later prompt. Withdrawn on the wire as well, or every
-            // client keeps the busy state this call just announced.
-            *live.status.lock().await = SessionStatus::Idle;
-            live.publish(SessionEvent::SessionStatusChanged {
-                status: SessionStatus::Idle,
-            })
-            .await;
-        }
+        handover.complete = true;
         started
     }
 
@@ -1605,6 +1986,7 @@ impl SessionManager {
         providers: &ProviderMap,
         additional_system_prompt: Option<String>,
         continues_round: Option<String>,
+        execution_id: u64,
     ) -> Result<String> {
         // The process is lazy, so this is still before any Agent sees the first
         // turn. A running Agent retains the exact prefix it started with; if it
@@ -1674,9 +2056,9 @@ impl SessionManager {
             }
         }
 
-        let agent = live.agent.lock().await;
-        let agent = agent
-            .as_ref()
+        let agent = live
+            .agent()
+            .await
             .ok_or_else(|| anyhow!("the session has no running agent"))?;
         let turn_id = agent
             .send(PromptInput {
@@ -1695,28 +2077,21 @@ impl SessionManager {
                 turn_id
             }
             Err(error) => {
-                // A returned error means the adapter did not accept a turn.
-                // Put the seed back for an explicit retry. A daemon crash while
-                // the await is pending leaves `Applying`, which is intentionally
-                // blocked above because its outcome is unknowable.
-                if let Some(seed) = &mut applying_seed {
-                    seed.state = ContextSeedState::Pending;
-                    if let Err(save_error) =
-                        self.store.save_seed(&seed_owner.0, &seed_owner.1, seed)
-                    {
-                        tracing::error!(
-                            %save_error,
-                            session = %seed_owner.1,
-                            "could not restore reconstructed history seed after a failed send"
-                        );
-                    }
-                }
+                // An IO error can happen after the CLI accepted the bytes.
+                // Keep Applying: an explicit retry must not duplicate context
+                // on an outcome we could not observe.
                 return Err(error).context("handing the prompt to the agent");
             }
         };
-        // Only recorded once the handover actually succeeded: a failed send
-        // must not leave a round with zero adapter turns behind (`send`
-        // resets status to Idle on this same error, as if it never happened).
+        // The pump waits until both the handover and its round are bound.
+        // A terminal emitted synchronously by send cannot outrun this commit.
+        let mut owner = live.execution.lock().await;
+        let execution = owner
+            .as_mut()
+            .filter(|execution| execution.id == execution_id)
+            .ok_or_else(|| anyhow!("this handover no longer owns the session"))?;
+        execution.turn_id = Some(turn_id.clone());
+        execution.phase = ExecutionPhase::Running;
         if let Some(superseded) = live
             .begin_round(continues_round.as_deref(), &turn_id, item.id())
             .await
@@ -1736,6 +2111,7 @@ impl SessionManager {
             item,
         })
         .await;
+        execution.ready.send_replace(true);
         Ok(turn_id)
     }
 
@@ -1792,7 +2168,18 @@ impl SessionManager {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _starting = gate.lock().await;
+        // Bounded, because this gate is the one place where one conversation can
+        // stop another. Everything inside it has its own deadline; waiting for
+        // it did not, so a single CLI that never finishes its first run took
+        // every other session of that kind down with it — the caller sits here,
+        // having already announced a running turn, with no round behind it and
+        // no way to withdraw. That is the shape of the "状态坏了？" report.
+        let Ok(_starting) = tokio::time::timeout(START_GATE_BUDGET, gate.lock()).await else {
+            anyhow::bail!(
+                "another {} session is still starting up; try again in a moment",
+                meta.agent_id
+            );
+        };
         // Whoever held the gate may have been starting this very session.
         if live.agent.lock().await.is_some() {
             return Ok(());
@@ -1878,13 +2265,9 @@ impl SessionManager {
             let session_id = live.meta.lock().await.id.clone();
             self.processes.watch(&session_id, pid).await;
         }
-        *live.agent.lock().await = Some(session);
-
-        if let Some(previous) = live.pump.lock().await.take() {
-            if !previous.is_finished() {
-                previous.abort();
-            }
-        }
+        live.stop_pump().await?;
+        live.pump_stop.send_replace(false);
+        *live.agent.lock().await = Some(Arc::from(session));
         let pump = tokio::spawn(pump_events(
             live.clone(),
             receiver,
@@ -1899,38 +2282,35 @@ impl SessionManager {
 
     pub async fn interrupt(&self, session_id: &str) -> Result<()> {
         let live = self.live(session_id).await?;
-        let agent_id = live.meta.lock().await.agent_id.clone();
-        let started = std::time::Instant::now();
-        tracing::info!(
-            event = "session_interrupt_requested",
-            session = %session_id,
-            agent = %agent_id,
-            "forwarding a user interrupt to the active agent"
-        );
-        let agent = live.agent.lock().await;
-        let result = match agent.as_ref() {
-            Some(agent) => agent.interrupt().await,
-            // Nothing running is not a failure: the user pressed stop late.
-            None => Ok(()),
+        let mut owner = live.execution.lock().await;
+        let Some(execution) = owner.as_mut() else {
+            return Ok(());
         };
-        match &result {
-            Ok(()) => tracing::info!(
-                event = "session_interrupt_forwarded",
-                session = %session_id,
-                agent = %agent_id,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "the agent accepted the interrupt request"
-            ),
-            Err(error) => tracing::warn!(
-                event = "session_interrupt_failed",
-                session = %session_id,
-                agent = %agent_id,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                %error,
-                "the agent rejected the interrupt request"
-            ),
+        if execution.phase == ExecutionPhase::Starting {
+            execution.cancel.send_replace(true);
+            return Ok(());
         }
-        result
+        if execution.phase == ExecutionPhase::Stopping {
+            return Ok(());
+        }
+        execution.phase = ExecutionPhase::Stopping;
+        let execution = execution.clone();
+        // Captured before any external await. The archival round may continue
+        // later, but this task can only retire this one execution.
+        let agent = live.agent().await;
+        drop(owner);
+        let task_live = live.clone();
+        live.cleanup.spawn(async move {
+            if let Some(agent) = agent {
+                let mut terminal = execution.terminal.subscribe();
+                let _ = tokio::time::timeout(INTERRUPT_ASK, agent.interrupt()).await;
+                let _ = tokio::time::timeout(INTERRUPT_GRACE, terminal.wait_for(|seen| *seen)).await;
+            }
+            if let Err(error) = retire_execution(&task_live, execution.id, None, false).await {
+                tracing::error!(execution = execution.id, %error, "could not retire interrupted execution");
+            }
+        });
+        Ok(())
     }
 
     /// What this session's agent says it offers, for checking a choice against
@@ -1962,7 +2342,7 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_model(model_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -1994,7 +2374,7 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_effort(effort_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2042,7 +2422,7 @@ impl SessionManager {
             value_id,
             axis.values.iter().map(|value| value.id.as_str()),
         )?;
-        if let Some(agent) = live.agent.lock().await.as_ref() {
+        if let Some(agent) = live.agent().await {
             agent.set_runtime_axis(axis_id, value_id).await?;
         }
         {
@@ -2073,7 +2453,7 @@ impl SessionManager {
                 "answer or cancel the pending Agent interaction before changing mode"
             ));
         }
-        match live.agent.lock().await.as_ref() {
+        match live.agent().await {
             Some(agent) => agent.set_mode(mode_id).await?,
             None => {
                 let offered = self.offered(&live, providers).await?;
@@ -2116,52 +2496,71 @@ impl SessionManager {
         let continuation = continuation_for(&request, &outcome)?;
 
         if let Some(continuation) = continuation {
-            let mode_override = if continuation.elevated {
-                let agent_id = live.meta.lock().await.agent_id.clone();
-                self.registry
-                    .require(&agent_id)?
-                    .catalog(providers)
-                    .await
-                    .default_mode
-            } else {
-                None
+            let execution = live.claim_execution(true).await?;
+            let mut ownership = Handover {
+                live: live.clone(),
+                id: execution.id,
+                complete: false,
             };
-            self.ensure_started_in_mode(&live, providers, mode_override)
-                .await
-                .context("resuming the stopped Agent session")?;
-            *live.status.lock().await = SessionStatus::Running;
-            let sent = {
-                let agent = live.agent.lock().await;
-                let agent = agent
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("the resumed session has no running agent"))?;
-                agent
+            let mut cancel = execution.cancel.subscribe();
+            let handover = async {
+                let mode_override = if continuation.elevated {
+                    let agent_id = live.meta.lock().await.agent_id.clone();
+                    self.registry
+                        .require(&agent_id)?
+                        .catalog(providers)
+                        .await
+                        .default_mode
+                } else {
+                    None
+                };
+                self.ensure_started_in_mode(&live, providers, mode_override)
+                    .await?;
+                let agent = live
+                    .agent()
+                    .await
+                    .ok_or_else(|| anyhow!("the resumed session has no agent"))?;
+                let turn_id = agent
                     .send(PromptInput {
                         text: continuation.prompt,
                         attachments: Vec::new(),
                     })
-                    .await
+                    .await?;
+                let mut owner = live.execution.lock().await;
+                let current = owner
+                    .as_mut()
+                    .filter(|current| current.id == execution.id)
+                    .ok_or_else(|| anyhow!("this continuation no longer owns the session"))?;
+                live.continue_round(&turn_id).await;
+                current.turn_id = Some(turn_id);
+                current.phase = ExecutionPhase::Running;
+                current.ready.send_replace(true);
+                Ok::<_, anyhow::Error>(())
             };
-            match sent {
-                Ok(turn_id) => {
-                    // This is the daemon deciding to resume, not the client
-                    // asking to — the round the interaction interrupted
-                    // continues, no `continuesRound` involved (§3.2).
-                    live.continue_round(&turn_id).await;
-                }
-                Err(error) => {
-                    *live.status.lock().await = SessionStatus::Waiting;
-                    return Err(error).context("continuing after the user response");
-                }
+            let sent = tokio::select! {
+                biased;
+                _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("continuation stopped during handover")),
+                result = tokio::time::timeout(HANDOVER_BUDGET, handover) =>
+                    result.unwrap_or_else(|_| Err(anyhow!("continuation handover timed out; delivery may be unknown"))),
+            };
+            if let Err(error) = sent {
+                retire_execution(&live, execution.id, Some(error.to_string()), false).await?;
+                ownership.complete = true;
+                return Err(error);
             }
+            ownership.complete = true;
         } else {
             // Denied or canceled: no more agent work is coming for this
             // request, so the round it belonged to is done, not dangling.
-            if let Some(round) = live.settle_round(RoundOutcome::Canceled).await {
+            if let Some(round) = live
+                .settle_round(Settling::Kernel, RoundOutcome::Canceled)
+                .await
+            {
                 persist_round(&live, round).await;
             }
         }
 
+        let _owner = live.execution.lock().await;
         {
             let mut pending = live.pending_permissions.lock().await;
             pending.retain(|request| request.id != request_id);
@@ -2244,7 +2643,7 @@ impl SessionManager {
         // reappear a moment after being deleted.
         if let Some(live) = live {
             self.end_what_it_left(session_id).await;
-            live.shutdown().await;
+            live.shutdown().await?;
         }
         self.processes.forget(session_id).await;
         let Some(workspace_id) = workspace_id else {
@@ -2254,12 +2653,13 @@ impl SessionManager {
     }
 
     pub async fn close(&self, session_id: &str) -> Result<()> {
-        let live = match self.sessions.write().await.remove(session_id) {
+        let live = match self.sessions.read().await.get(session_id).cloned() {
             Some(live) => live,
             None => return Ok(()),
         };
         self.end_what_it_left(session_id).await;
-        live.shutdown().await;
+        live.shutdown().await?;
+        self.sessions.write().await.remove(session_id);
         self.processes.forget(session_id).await;
         Ok(())
     }
@@ -2290,7 +2690,9 @@ impl SessionManager {
         let sessions: Vec<(String, Arc<Live>)> = self.sessions.write().await.drain().collect();
         for (session_id, live) in sessions {
             self.end_what_it_left(&session_id).await;
-            live.shutdown().await;
+            if let Err(error) = live.shutdown().await {
+                tracing::error!(session = %session_id, %error, "session shutdown did not complete");
+            }
         }
     }
 }
@@ -2385,6 +2787,7 @@ fn bound_imported_items(items: Vec<TimelineItem>) -> (Vec<TimelineItem>, usize, 
             TimelineItem::Compaction {
                 id: format!("import-{}", uuid::Uuid::new_v4().simple()),
                 reason: format!("导入历史过长，较早的 {omitted} 项未放入当前可见窗口"),
+                received_at_ms: None,
             },
         );
     }
@@ -2417,6 +2820,7 @@ fn truncate_import_item(mut item: TimelineItem, max_bytes: usize) -> TimelineIte
         TimelineItem::Compaction {
             id,
             reason: "单条历史记录过长，导入时已省略".into(),
+            received_at_ms: None,
         }
     }
 }
@@ -2458,10 +2862,113 @@ fn parse_trunk_cursor(cursor: Option<&str>, len: usize) -> Result<usize> {
 }
 
 impl Live {
+    async fn claim_execution(&self, resume: bool) -> Result<Execution> {
+        let mut owner = self.execution.lock().await;
+        if self.closing.load(Ordering::SeqCst) {
+            bail!("this session is closing");
+        }
+        if owner
+            .as_ref()
+            .is_some_and(|execution| execution.phase == ExecutionPhase::Saving)
+        {
+            flush_turn(self, &self.store).await?;
+            owner.take();
+        }
+        if owner.is_some() || (!resume && *self.status.lock().await == SessionStatus::Waiting) {
+            bail!("a turn is already running or awaiting a response in this session");
+        }
+        // Recovered data or a failed final write must reach the log before a
+        // new execution can replace its checkpoint.
+        flush_turn(self, &self.store).await?;
+        let execution = Execution::new(self.next_execution.fetch_add(1, Ordering::SeqCst));
+        *owner = Some(execution.clone());
+        *self.status.lock().await = SessionStatus::Running;
+        self.publish(SessionEvent::SessionStatusChanged {
+            status: SessionStatus::Running,
+        })
+        .await;
+        Ok(execution)
+    }
+
+    /// Called with the execution lock after event admission or resource
+    /// retirement. This is the common commit for terminal paths.
+    async fn finish_execution(
+        &self,
+        owner: &mut Option<Execution>,
+        event: SessionEvent,
+        closed: bool,
+    ) -> Result<()> {
+        let outcome = match &event {
+            SessionEvent::TurnCompleted { .. } => Some(RoundOutcome::Completed),
+            SessionEvent::TurnFailed { .. } => Some(RoundOutcome::Failed),
+            _ if closed => Some(RoundOutcome::Canceled),
+            _ => None, // A user can explicitly continue an interrupted round.
+        };
+        if let Some(outcome) = outcome {
+            let by = if closed {
+                Settling::Kernel
+            } else {
+                event_turn(&event)
+                    .map(Settling::Turn)
+                    .unwrap_or(Settling::Kernel)
+            };
+            if let Some(round) = self.settle_round(by, outcome).await {
+                persist_round(self, round).await;
+            }
+        }
+        if let Some(execution) = owner.as_mut() {
+            execution.phase = ExecutionPhase::Saving;
+            execution.ready.send_replace(true);
+            execution.terminal.send_replace(true);
+        }
+        if let Err(error) = flush_turn(self, &self.store).await {
+            let notice = SessionEvent::Item {
+                turn_id: owner
+                    .as_ref()
+                    .and_then(|execution| execution.turn_id.clone())
+                    .unwrap_or_default(),
+                item: TimelineItem::Error {
+                    id: format!(
+                        "save-error-{}",
+                        owner.as_ref().map(|execution| execution.id).unwrap_or(0)
+                    ),
+                    message: format!(
+                        "保存回答失败，当前内容仍保留在会话中；下次发送会先重试保存：{error}"
+                    ),
+                },
+            };
+            apply(self, &notice).await;
+            self.publish(notice).await;
+            *self.status.lock().await = SessionStatus::Failed;
+            self.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Failed,
+            })
+            .await;
+            return Err(error)
+                .context("the answer remains pending on disk; a new send will retry saving it");
+        }
+        apply(self, &event).await;
+        self.publish(event).await;
+        if closed {
+            *self.status.lock().await = SessionStatus::Closed;
+            self.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Closed,
+            })
+            .await;
+        }
+        owner.take();
+        Ok(())
+    }
+
     fn new(meta: SessionMeta, store: Store) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let pending = meta.pending_permission.clone();
         Live {
+            execution: Mutex::new(None),
+            next_execution: AtomicU64::new(1),
+            closing: AtomicBool::new(false),
+            retirement: Mutex::new(()),
+            cleanup: crate::adapter::SessionTasks::default(),
             store,
             meta: Mutex::new(meta),
             status: Mutex::new(if pending.is_some() {
@@ -2471,24 +2978,53 @@ impl Live {
             }),
             items: Mutex::new(Vec::new()),
             rounds: Mutex::new(Vec::new()),
+            unsaved_rounds: Mutex::new(Vec::new()),
+            inherited_rounds: Mutex::new(None),
             blob_refs: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            last_activity_ms: AtomicI64::new(0),
             replay: Mutex::new(VecDeque::new()),
             events,
             agent: Mutex::new(None),
             additional_system_prompt: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
             turn_items: Mutex::new(Vec::new()),
+            open_turn_written_ms: AtomicI64::new(0),
+            open_turn_dirty: AtomicBool::new(false),
             open_trunk_items: Mutex::new(Vec::new()),
+            llm_rounds: Mutex::new(LlmRounds::default()),
             pump: Mutex::new(None),
+            pump_stop: tokio::sync::watch::channel(false).0,
             active_round: Mutex::new(None),
         }
     }
 
+    /// The running turn's last sign of life, for whoever is waiting on it.
+    ///
+    /// Reported only while a turn is running: a session that is idle is not
+    /// quiet, it is finished, and an age on a finished session reads as a
+    /// problem where there is none.
+    fn activity_of(&self, status: SessionStatus) -> Option<i64> {
+        if status != SessionStatus::Running {
+            return None;
+        }
+        let at = self.last_activity_ms.load(Ordering::SeqCst);
+        (at > 0).then_some(at)
+    }
+
     async fn snapshot(&self) -> Result<SessionSnapshot> {
+        let _owner = self.execution.lock().await;
+        self.snapshot_unlocked().await
+    }
+
+    async fn snapshot_unlocked(&self) -> Result<SessionSnapshot> {
         let status = *self.status.lock().await;
         Ok(SessionSnapshot {
-            summary: self.meta.lock().await.summary(status),
+            summary: self
+                .meta
+                .lock()
+                .await
+                .summary_with_activity(status, self.activity_of(status)),
             items: self.items.lock().await.clone(),
             seq: self.seq.load(Ordering::SeqCst),
             pending_permissions: self.pending_permissions.lock().await.clone(),
@@ -2499,16 +3035,32 @@ impl Live {
 
     /// Assigns a sequence number, retains for replay, and fans out.
     async fn publish(&self, event: SessionEvent) -> SequencedEvent {
+        // Every kind of event counts, deltas included: the question this
+        // answers is "is anything still coming out of it", not "has it made
+        // progress", which nobody outside the agent can judge.
+        self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
+        let session_id = self.meta.lock().await.id.clone();
+
+        // Numbering, retaining and fanning out are one step, not three.
+        //
+        // Several tasks publish to the same session at once — the event pump, a
+        // stop that escalated, the call that started the turn — and a sequence
+        // number taken outside this lock is a promise about ordering that
+        // nothing then keeps. Two publishers could take 5 and 6 and reach the
+        // replay buffer in the other order, leaving a client that asked to be
+        // caught up with the events in an order that never happened; the same
+        // inversion on the broadcast reaches live subscribers directly.
+        //
+        // Holding one lock across all three costs nothing here: there is no
+        // await inside it that leaves this process.
+        let mut replay = self.replay.lock().await;
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let sequenced = SequencedEvent {
             seq,
-            session_id: self.meta.lock().await.id.clone(),
+            session_id,
             event,
         };
-        {
-            let mut replay = self.replay.lock().await;
-            replay.push_back(sequenced.clone());
-        }
+        replay.push_back(sequenced.clone());
         // A send error only means nobody is listening, which is normal when a
         // task runs with every client disconnected.
         let _ = self.events.send(sequenced.clone());
@@ -2544,13 +3096,23 @@ impl Live {
                 return;
             }
         }
+        let llm_rounds = self.llm_rounds.lock().await.cumulative();
         let closed = {
             let mut active = self.active_round.lock().await;
             match active.as_mut() {
-                Some(round) if round.outcome.is_none() => round.record_trunk_item(item),
+                Some(round) if round.outcome.is_none() => round.record_trunk_item(item, llm_rounds),
                 _ => None,
             }
         };
+        if closed.is_some() && matches!(item, TimelineItem::Compaction { .. }) {
+            // Compaction closes AFTER its marker, unlike a size boundary.
+            self.open_trunk_items
+                .lock()
+                .await
+                .push(item.id().to_string());
+            self.finish_trunk().await;
+            return;
+        }
         if closed.is_some() {
             // `push` closes the previous trunk before placing this item in the
             // new one. Keep the trigger out of the old trunk's persisted id
@@ -2578,7 +3140,15 @@ impl Live {
                 .filter_map(|id| by_id.get(id.as_str()).map(|item| (*item).clone()))
                 .collect::<Vec<_>>()
         };
-        let mut trunk = rounds::trunks_from_items(&items).into_iter().next()?;
+        let (round_deltas, blocked_intervals) = {
+            let active = self.active_round.lock().await;
+            let round = active.as_ref()?;
+            (round.round_deltas.clone(), round.blocked_intervals.clone())
+        };
+        let mut trunk = rounds::trunks_from_items_with_rounds(&items, &round_deltas)
+            .into_iter()
+            .next()?;
+        rounds::exclude_blocked(&mut trunk, &blocked_intervals);
         trunk.summary.index = index;
         let refs = self.blob_refs.lock().await;
         for batch in &mut trunk.batches {
@@ -2627,6 +3197,72 @@ impl Live {
             .lock()
             .await
             .retain(|item| !(store::is_work_item(item) && ids.iter().any(|id| id == item.id())));
+    }
+
+    /// What this turn has said so far, in the order it was said.
+    ///
+    /// The prompt is left out because it was written when it arrived, and work
+    /// items because they belong to the round's trunk. Shared by the write
+    /// that happens while the turn runs and the one that ends it, so the two
+    /// cannot disagree about what a turn's narrative is.
+    async fn turn_narrative(&self, ids: &[String]) -> Vec<TimelineItem> {
+        let items = self.items.lock().await;
+        ids.iter()
+            .filter_map(|id| items.iter().find(|item| item.id() == id))
+            .filter(|item| !matches!(item, TimelineItem::UserMessage { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Writes the turn in progress, at most once a second.
+    ///
+    /// Called from the event pump as an answer streams in. The rate limit is
+    /// the whole design: writing per token would rewrite the file thousands of
+    /// times for one reply, and writing only at the end — which is what used
+    /// to happen — costs the reader the entire answer if this process dies
+    /// while producing it.
+    async fn persist_open_turn_if_due(&self) {
+        /// Long enough that a fast stream does not turn into a write loop,
+        /// short enough that what it can cost is a sentence.
+        const AT_MOST_EVERY_MS: i64 = 1_000;
+
+        if !self.open_turn_dirty.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let now = now_ms();
+        let last = self.open_turn_written_ms.load(Ordering::SeqCst);
+        if now - last < AT_MOST_EVERY_MS {
+            return;
+        }
+        // Emptiness is settled before the slot is claimed, not after. A turn
+        // whose only item so far is the prompt has nothing to write, and
+        // stamping the clock for it would delay the first real write by the
+        // full interval — which is exactly the moment worth not losing.
+        let ids: Vec<String> = self.turn_items.lock().await.clone();
+        let narrative = self.turn_narrative(&ids).await;
+        if narrative.is_empty() {
+            return;
+        }
+        // Two pump-adjacent callers arriving together would otherwise both
+        // write the same content; whoever loses the exchange lets the other
+        // one do it.
+        if self
+            .open_turn_written_ms
+            .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let meta = self.meta.lock().await.clone();
+        if let Err(error) = self
+            .store
+            .write_open_turn(&meta.workspace_id, &meta.id, &narrative)
+        {
+            tracing::warn!("could not persist the open turn of {}: {error}", meta.id);
+        } else {
+            self.open_turn_dirty.store(false, Ordering::SeqCst);
+        }
     }
 
     /// Rewrites the open trunk so a crash cannot cost more than the turn in
@@ -2688,6 +3324,7 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.llm_rounds.lock().await.clear();
 
         let superseded = self
             .active_round
@@ -2703,8 +3340,11 @@ impl Live {
             started_at_ms: now_ms(),
             blocked_since_ms: None,
             blocked_ms: 0,
+            blocked_intervals: Vec::new(),
             outcome: None,
             current_trunk: TrunkBuilder::default(),
+            round_deltas: HashMap::new(),
+            last_attributed_rounds: 0,
             closed_trunks: Vec::new(),
         };
         // Recorded before the agent runs, so a daemon that dies mid-request
@@ -2750,6 +3390,10 @@ impl Live {
                 record.ord,
                 meta.id
             );
+            let mut pending = self.unsaved_rounds.lock().await;
+            if !pending.contains(&record.round_id) {
+                pending.push(record.round_id);
+            }
         }
     }
 
@@ -2762,13 +3406,24 @@ impl Live {
         if let Some(round) = active.as_mut() {
             if round.outcome.is_none() {
                 if let Some(since) = round.blocked_since_ms.take() {
-                    round.blocked_ms += (now_ms() - since).max(0);
+                    let now = now_ms();
+                    round.blocked_ms += (now - since).max(0);
+                    round.blocked_intervals.push((since, now));
                 }
                 if !round.adapter_turn_ids.iter().any(|id| id == turn_id) {
                     round.adapter_turn_ids.push(turn_id.to_string());
                 }
             }
         }
+    }
+
+    /// A handle to the running agent, if there is one, with the lock released
+    /// before the caller does anything with it.
+    ///
+    /// The awaits that follow all end at a process the daemon does not
+    /// control, so none of them may be made while holding this.
+    async fn agent(&self) -> Option<Arc<dyn AgentSession>> {
+        self.agent.lock().await.clone()
     }
 
     /// Marks the open round as waiting on a human. A no-op if it is already
@@ -2788,15 +3443,42 @@ impl Live {
     /// (`session/rounds.rs`). `None` when there was nothing open to settle —
     /// this is also how a caller like the channel-closed fallback tells
     /// "there was a dangling round to clean up" from "there was nothing to do".
-    async fn settle_round(&self, outcome: RoundOutcome) -> Option<ActiveRound> {
+    /// Ends the open round, if the thing ending it is entitled to.
+    ///
+    /// A round folds several adapter turns, and only the last of them is the
+    /// one still running. A terminal naming an earlier turn is a straggler from
+    /// work that has already been superseded, and acting on it would end the
+    /// turn the user is watching on the strength of one they cancelled.
+    ///
+    /// The check belongs here rather than in each adapter because two of the
+    /// four cannot make it: claude's `result` frame carries no turn id at all,
+    /// so the adapter stamps whichever turn is current when the frame arrives,
+    /// and genet's `agent_end` does the same. Whatever they stamp, the kernel
+    /// knows which turn it is actually waiting on.
+    async fn settle_round(&self, by: Settling<'_>, outcome: RoundOutcome) -> Option<ActiveRound> {
         let has_open_trunk = {
             let mut active = self.active_round.lock().await;
             let round = active.as_mut()?;
             if round.outcome.is_some() {
                 return None;
             }
+            if let Settling::Turn(turn_id) = by {
+                let running = round.adapter_turn_ids.last().map(String::as_str);
+                if running != Some(turn_id) {
+                    tracing::warn!(
+                        event = "session_stale_terminal_ignored",
+                        round = %round.round_id,
+                        running = running.unwrap_or("<none>"),
+                        named = %turn_id,
+                        "a terminal named a turn this round is no longer running"
+                    );
+                    return None;
+                }
+            }
             if let Some(since) = round.blocked_since_ms.take() {
-                round.blocked_ms += (now_ms() - since).max(0);
+                let now = now_ms();
+                round.blocked_ms += (now - since).max(0);
+                round.blocked_intervals.push((since, now));
             }
             round.outcome = Some(outcome);
             round.close_current_trunk_pending().is_some()
@@ -2806,17 +3488,52 @@ impl Live {
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
+        self.llm_rounds.lock().await.clear();
         self.active_round.lock().await.clone()
     }
 
-    async fn shutdown(&self) {
-        if let Some(pump) = self.pump.lock().await.take() {
-            pump.abort();
+    /// Stop receiving, then drain and join the pump's blob writer. The task
+    /// handle stays in Live across cancellation and timeouts, so a retry can
+    /// still join the same writer before releasing the execution.
+    async fn stop_pump(&self) -> Result<()> {
+        self.pump_stop.send_replace(true);
+        let mut held = self.pump.lock().await;
+        if let Some(task) = held.as_mut() {
+            let joined = tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .context("the timeline writer has not finished; stopping can be retried")?;
+            held.take();
+            joined.context("the timeline writer stopped unexpectedly")?;
         }
-        if let Some(agent) = self.agent.lock().await.take() {
-            let _ = agent.close().await;
+        Ok(())
+    }
+
+    async fn shutdown(self: &Arc<Self>) -> Result<()> {
+        self.closing.store(true, Ordering::SeqCst);
+        let starting = {
+            let owner = self.execution.lock().await;
+            owner
+                .as_ref()
+                .filter(|execution| execution.phase == ExecutionPhase::Starting)
+                .cloned()
+        };
+        if let Some(starting) = starting {
+            let mut terminal = starting.terminal.subscribe();
+            starting.cancel.send_replace(true);
+            tokio::time::timeout(Duration::from_secs(10), terminal.wait_for(|done| *done))
+                .await
+                .context("the canceled handover has not released its resources")??;
         }
-        *self.status.lock().await = SessionStatus::Closed;
+        self.cleanup.stop().await;
+        let id = {
+            let mut owner = self.execution.lock().await;
+            owner
+                .get_or_insert_with(|| {
+                    Execution::new(self.next_execution.fetch_add(1, Ordering::SeqCst))
+                })
+                .id
+        };
+        retire_execution(self, id, None, true).await
     }
 }
 
@@ -2827,6 +3544,24 @@ impl Live {
 /// machine, not to whoever asked it to start. See `ensure_started`.
 static STARTING: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How long a session waits for another session's first start of the same kind.
+///
+/// Bounded, and inside the handover budget below: whoever is waiting here has
+/// already told every client that a turn is running, and being told "another
+/// one is still starting, try again" is a better answer than silence.
+const START_GATE_BUDGET: Duration = Duration::from_secs(40);
+
+/// How long the whole handover gets before the claim behind it is withdrawn.
+///
+/// Under the sixty seconds a client waits for any request, deliberately. A
+/// handover that takes longer than the caller is prepared to wait is the freeze
+/// itself: the client gives up and reports a timeout, the daemon carries on
+/// holding a running status with no round behind it, and every prompt in
+/// between is refused as a conflict with a turn that never began. Whatever goes
+/// wrong in here, the answer and the withdrawal have to arrive while someone is
+/// still listening.
+const HANDOVER_BUDGET: Duration = Duration::from_secs(55);
 
 struct Continuation {
     elevated: bool,
@@ -2959,9 +3694,127 @@ fn question_answer(
     Ok((!lines.is_empty()).then(|| lines.join("\n")))
 }
 
-async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &PermissionRequest) {
+/// How long the agent has to accept a cancel before the ask is abandoned.
+///
+/// Generous, because a healthy agent answers this in microseconds and the only
+/// thing a longer wait buys is a longer freeze.
+const INTERRUPT_ASK: Duration = Duration::from_secs(3);
+
+/// How long a cancelled turn has to end before the agent is stopped outright.
+const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+/// Retire resources before releasing the execution claim. No newer send can
+/// enter while close awaits; the session lock itself stays available to reads
+/// and stop. A failed close keeps both the handle and the claim for retry.
+async fn retire_execution(
+    live: &Arc<Live>,
+    id: u64,
+    error: Option<String>,
+    closed: bool,
+) -> Result<()> {
+    {
+        let mut owner = live.execution.lock().await;
+        let Some(execution) = owner.as_mut().filter(|execution| execution.id == id) else {
+            return Ok(());
+        };
+        execution.phase = ExecutionPhase::Stopping;
+        execution.cancel.send_replace(true);
+        execution.ready.send_replace(true);
+    }
+    if let Err(error) = live.stop_pump().await {
+        report_cleanup_failure(live, &error).await;
+        return Err(error);
+    }
+    // Joining a pump cannot hold retirement: a terminal already being handled
+    // by that pump may itself be waiting to close the agent under this lock.
+    let _retirement = live.retirement.lock().await;
+    {
+        let mut owner = live.execution.lock().await;
+        if owner.as_ref().is_none_or(|execution| execution.id != id) {
+            if closed && owner.is_none() {
+                live.finish_execution(
+                    &mut owner,
+                    SessionEvent::SessionStatusChanged {
+                        status: SessionStatus::Closed,
+                    },
+                    true,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+    }
+    close_current_agent(live).await?;
+    let mut owner = live.execution.lock().await;
+    if owner.as_ref().is_none_or(|execution| execution.id != id) {
+        return Ok(());
+    }
+    let turn_id = owner
+        .as_ref()
+        .and_then(|execution| execution.turn_id.clone())
+        .unwrap_or_default();
+    let event = match error {
+        Some(message) => SessionEvent::TurnFailed {
+            turn_id,
+            error: genehub_proto::TurnError {
+                code: TurnErrorCode::Internal,
+                message,
+            },
+        },
+        None => SessionEvent::TurnCanceled { turn_id },
+    };
+    live.finish_execution(&mut owner, event, closed).await
+}
+
+/// The caller holds retirement, never the execution lock, during agent IO.
+async fn close_current_agent(live: &Arc<Live>) -> Result<()> {
+    let agent = live.agent().await;
+    if let Some(agent) = agent {
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(8), agent.close())
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("agent close timed out")))
+        {
+            report_cleanup_failure(live, &error).await;
+            return Err(error);
+        }
+        live.agent.lock().await.take();
+    }
+    Ok(())
+}
+
+async fn report_cleanup_failure(live: &Arc<Live>, error: &anyhow::Error) {
+    let mut owner = live.execution.lock().await;
+    if let Some(execution) = owner.as_mut() {
+        execution.phase = ExecutionPhase::CleanupFailed;
+    }
+    // Keep Stop available. A cleanup error is not permission to send
+    // another prompt into an execution whose process is still owned.
+    *live.status.lock().await = SessionStatus::Running;
+    live.publish(SessionEvent::SessionStatusChanged {
+        status: SessionStatus::Running,
+    })
+    .await;
+    live.publish(SessionEvent::Item {
+        turn_id: owner
+            .as_ref()
+            .and_then(|execution| execution.turn_id.clone())
+            .unwrap_or_default(),
+        item: TimelineItem::Error {
+            id: format!("cleanup-{}", now_ms()),
+            message: format!("无法确认停止，请重试停止：{error}"),
+        },
+    })
+    .await;
+}
+
+async fn stop_agent_for_interaction(
+    live: &Arc<Live>,
+    store: &Store,
+    request: &PermissionRequest,
+) -> Result<()> {
+    let _retirement = live.retirement.lock().await;
     live.round_blocked().await;
-    let agent = live.agent.lock().await.take();
+    let agent = live.agent().await;
     let persist = agent.as_ref().and_then(|agent| agent.persistence());
     {
         let mut meta = live.meta.lock().await;
@@ -2982,10 +3835,9 @@ async fn stop_agent_for_interaction(live: &Arc<Live>, store: &Store, request: &P
         // Interruption is best-effort and bounded. The process is closed either
         // way, so no approval request or live transport has to survive.
         let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
-        if let Err(error) = agent.close().await {
-            tracing::warn!("could not close an Agent stopped for interaction: {error}");
-        }
+        close_current_agent(live).await?;
     }
+    Ok(())
 }
 
 enum BlobWrite {
@@ -3004,6 +3856,7 @@ fn flush_reasoning_blobs(
         let value = serde_json::to_value(TimelineItem::Reasoning {
             id: id.clone(),
             text,
+            received_at_ms: None,
         });
         if let Ok(value) = value {
             let _ = sender.send(BlobWrite::Put { item_id: id, value });
@@ -3110,9 +3963,27 @@ async fn pump_events(
     let mut live_usage: HashMap<String, Usage> = HashMap::new();
     let mut counted_tools: HashSet<String> = HashSet::new();
     let mut channel_closed = false;
-    loop {
-        let mut event = match receiver.recv().await {
+    let mut stopping = live.pump_stop.subscribe();
+    let mut checkpoint = tokio::time::interval(Duration::from_secs(1));
+    checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    'events: loop {
+        let received = tokio::select! {
+            biased;
+            _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break,
+            event = receiver.recv() => event,
+            _ = checkpoint.tick() => {
+                let _owner = live.execution.lock().await;
+                live.persist_open_turn_if_due().await;
+                continue;
+            }
+        };
+        let mut event = match received {
             Ok(event) => event,
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
+                tracing::warn!("dropped {missed} agent events: the pump fell behind");
+                continue;
+            }
             Err(broadcast::error::RecvError::Closed) => {
                 diagnostics.record("agent", "event-stream", "error", Some("closed"));
                 flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
@@ -3125,16 +3996,61 @@ async fn pump_events(
                 channel_closed = true;
                 break;
             }
-            Err(broadcast::error::RecvError::Lagged(missed)) => {
-                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
-                tracing::warn!("dropped {missed} agent events: the pump fell behind");
+        };
+
+        // Wait for the send result to bind the execution before accepting
+        // anything it emitted. Re-check after waiting, before ALL side effects.
+        loop {
+            let ready = {
+                let owner = live.execution.lock().await;
+                owner
+                    .as_ref()
+                    .filter(|execution| execution.phase == ExecutionPhase::Starting)
+                    .map(|execution| execution.ready.subscribe())
+            };
+            let Some(mut ready) = ready else { break };
+            if *ready.borrow() {
+                break;
+            }
+            tokio::select! {
+                biased;
+                _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break 'events,
+                _ = async { let _ = ready.wait_for(|ready| *ready).await; } => {}
+            }
+        }
+        let mut owner = live.execution.lock().await;
+        if owner.as_ref().is_some_and(|execution| {
+            matches!(
+                execution.phase,
+                ExecutionPhase::Saving | ExecutionPhase::CleanupFailed
+            )
+        }) {
+            continue;
+        }
+        if let Some(turn_id) = event_turn(&event) {
+            if owner
+                .as_ref()
+                .and_then(|execution| execution.turn_id.as_deref())
+                != Some(turn_id)
+            {
+                tracing::debug!(named = turn_id, "ignored event from an obsolete execution");
                 continue;
             }
-        };
+        } else if matches!(
+            event,
+            SessionEvent::PermissionRequested { .. } | SessionEvent::SessionStatusChanged { .. }
+        ) && owner.is_none()
+        {
+            continue;
+        }
 
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
             token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
             if let Some(merged) = live_usage.get(turn_id) {
+                live.llm_rounds
+                    .lock()
+                    .await
+                    .observe(turn_id, merged.llm_rounds as u32);
                 event = SessionEvent::TurnProgress {
                     turn_id: turn_id.clone(),
                     usage: merged.clone(),
@@ -3143,6 +4059,64 @@ async fn pump_events(
         }
         let tool_progress =
             token_usage::record_tool_output(&event, &mut live_usage, &mut counted_tools);
+
+        // Shed tool-result images before anything persists, condenses or
+        // publishes the event: thumbnails are generated here, produced-image
+        // bytes go to the blob writer, and `data_base64` travels no further.
+        {
+            let images = match &mut event {
+                SessionEvent::Item {
+                    item: TimelineItem::ToolCall { id, images, .. },
+                    ..
+                } if images.iter().any(|image| image.data_base64.is_some()) => {
+                    Some((id.clone(), images))
+                }
+                SessionEvent::ItemDelta {
+                    item_id,
+                    delta: ItemDelta::ToolStatus { images, .. },
+                    ..
+                } if images.iter().any(|image| image.data_base64.is_some()) => {
+                    Some((item_id.clone(), images))
+                }
+                _ => None,
+            };
+            if let Some((item_id, images)) = images {
+                let cwd = live.meta.lock().await.cwd.clone();
+                let workspace_root = store
+                    .workspace_root(&workspace_id)
+                    .unwrap_or_else(|_| cwd.clone());
+                let mut taken = std::mem::take(images);
+                let shed_id = item_id.clone();
+                let shed_cwd = cwd.clone();
+                let shed_root = workspace_root.clone();
+                let shed_session = session_id.clone();
+                let shed = crate::blocking::run(move || {
+                    let puts = images::shed_tool_images(
+                        &shed_id,
+                        &mut taken,
+                        &shed_cwd,
+                        &shed_root,
+                        &shed_session,
+                    );
+                    (taken, puts)
+                })
+                .await;
+                match shed {
+                    Ok((shed_images, puts)) => {
+                        *images = shed_images;
+                        for put in puts {
+                            let _ = blob_sender.send(BlobWrite::Put {
+                                item_id: put.item_id,
+                                value: put.value,
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!("could not shed tool images for {item_id}: {error}")
+                    }
+                }
+            }
+        }
 
         match &event {
             SessionEvent::TurnStarted { .. } => {
@@ -3177,7 +4151,12 @@ async fn pump_events(
 
         let updates_reasoning = match &event {
             SessionEvent::Item {
-                item: TimelineItem::Reasoning { id, text },
+                item:
+                    TimelineItem::Reasoning {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 raw_thinking.insert(id.clone(), text.clone());
@@ -3209,19 +4188,28 @@ async fn pump_events(
             }
             SessionEvent::ItemDelta {
                 item_id,
-                delta: ItemDelta::ToolStatus { status, detail },
+                delta:
+                    ItemDelta::ToolStatus {
+                        status,
+                        detail,
+                        images,
+                    },
                 ..
             } => {
                 if let Some(item) = raw_tools.get_mut(item_id) {
                     if let TimelineItem::ToolCall {
                         status: raw_status,
                         detail: raw_detail,
+                        images: raw_images,
                         ..
                     } = item
                     {
                         *raw_status = *status;
                         if let Some(detail) = detail {
                             *raw_detail = detail.clone();
+                        }
+                        if !images.is_empty() {
+                            *raw_images = images.clone();
                         }
                     }
                     preserve_tool_blob(&blob_sender, item);
@@ -3240,11 +4228,17 @@ async fn pump_events(
             SessionEvent::TurnCompleted { .. }
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
+                | SessionEvent::Item {
+                    item: TimelineItem::Compaction { .. },
+                    ..
+                }
         ) {
+            // A compaction persists and releases its closing trunk immediately.
+            // Its blob references must already be durable, just as at turn end.
             flush_blob_writer(&blob_sender).await;
         }
 
-        let event = match event {
+        let mut event = match event {
             SessionEvent::ItemDelta {
                 turn_id,
                 item_id,
@@ -3271,12 +4265,18 @@ async fn pump_events(
                     item: TimelineItem::Reasoning {
                         id: item_id,
                         text: sentence,
+                        received_at_ms: None,
                     },
                 }
             }
             event => {
                 if let SessionEvent::Item {
-                    item: TimelineItem::Reasoning { id, text },
+                    item:
+                        TimelineItem::Reasoning {
+                            id,
+                            text,
+                            received_at_ms: None,
+                        },
                     ..
                 } = &event
                 {
@@ -3293,7 +4293,15 @@ async fn pump_events(
         };
 
         if let SessionEvent::PermissionRequested { request } = &event {
-            stop_agent_for_interaction(&live, &store, request).await;
+            if let Some(execution) = owner.as_mut() {
+                execution.phase = ExecutionPhase::Stopping;
+            }
+            drop(owner);
+            if let Err(error) = stop_agent_for_interaction(&live, &store, request).await {
+                tracing::error!(%error, "could not stop for interaction");
+                break;
+            }
+            let mut owner = live.execution.lock().await;
 
             // End the old turn before exposing the request. Approval later
             // starts a new native turn from the Agent's persisted session.
@@ -3313,17 +4321,30 @@ async fn pump_events(
                     apply(&live, &summary_event).await;
                     live.publish(summary_event).await;
                 }
-                apply(&live, &canceled).await;
                 live.publish(canceled).await;
-                flush_turn(&live, &store).await;
             }
 
-            apply(&live, &event).await;
-            live.publish(event).await;
+            if let Err(error) = live.finish_execution(&mut owner, event, false).await {
+                tracing::error!(%error, "could not commit waiting execution");
+            }
             live.trim_replay(replay_window).await;
             break;
         }
 
+        if matches!(
+            event,
+            SessionEvent::TurnCompleted { .. }
+                | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnCanceled { .. }
+        ) {
+            let cumulative = live.llm_rounds.lock().await.cumulative();
+            let last_item = live.open_trunk_items.lock().await.last().cloned();
+            if let (Some(id), Some(round)) = (last_item, live.active_round.lock().await.as_mut()) {
+                let delta = cumulative.saturating_sub(round.last_attributed_rounds);
+                *round.round_deltas.entry(id).or_default() += delta;
+                round.last_attributed_rounds = cumulative;
+            }
+        }
         let summary = {
             let items = live.items.lock().await;
             turn_summary(&event, &mut turns, &mut live_usage, &items)
@@ -3346,35 +4367,61 @@ async fn pump_events(
             _ => true,
         };
 
-        apply(&live, &event).await;
+        if let SessionEvent::Item { item, .. } = &mut event {
+            let previous = {
+                let items = live.items.lock().await;
+                items
+                    .iter()
+                    .find(|existing| existing.id() == item.id())
+                    .cloned()
+            };
+            // Merge before both apply and publish so the store, the trunk
+            // builder and every live subscriber see the completed card rather
+            // than a bare status update blanking it.
+            item.merge_tool_update(previous.as_ref());
+            item.inherit_and_stamp_tool_times(previous.as_ref(), now_ms());
+            item.inherit_and_stamp_received_at(previous.as_ref(), now_ms());
+        }
 
+        let retire = matches!(
+            event,
+            SessionEvent::TurnCanceled { .. } | SessionEvent::TurnFailed { .. }
+        );
         let settle = matches!(
             event,
             SessionEvent::TurnCompleted { .. }
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
         );
-        // `TurnCanceled` deliberately does not settle the round here: the one
-        // triggered by a permission request already `break`s above before
-        // reaching this line, and every other `TurnCanceled` is a plain
-        // interrupt, which leaves the round dangling on purpose until the
-        // next `send` decides whether to continue or supersede it (§3.2).
-        match &event {
-            SessionEvent::TurnCompleted { .. } => {
-                if let Some(round) = live.settle_round(RoundOutcome::Completed).await {
-                    persist_round(&live, round).await;
-                }
+        if settle {
+            if let Some(execution) = owner
+                .as_ref()
+                .filter(|execution| execution.phase == ExecutionPhase::Stopping)
+            {
+                execution.terminal.send_replace(true);
+                continue;
             }
-            SessionEvent::TurnFailed { .. } => {
-                if let Some(round) = live.settle_round(RoundOutcome::Failed).await {
-                    persist_round(&live, round).await;
+            if retire {
+                if let Some(execution) = owner.as_mut() {
+                    execution.phase = ExecutionPhase::Stopping;
                 }
+                drop(owner);
+                let retirement = live.retirement.lock().await;
+                if let Err(error) = close_current_agent(&live).await {
+                    tracing::error!(%error, "could not retire terminal agent");
+                    break;
+                }
+                drop(retirement);
+                owner = live.execution.lock().await;
             }
-            _ => {}
-        }
-
-        if publish_title {
-            live.publish(event).await;
+            if let Err(error) = live.finish_execution(&mut owner, event, false).await {
+                tracing::error!(%error, "could not commit execution completion");
+            }
+        } else {
+            apply(&live, &event).await;
+            if publish_title {
+                live.publish(event).await;
+            }
         }
         if let Some(progress) = tool_progress {
             apply(&live, &progress).await;
@@ -3382,9 +4429,12 @@ async fn pump_events(
         }
         live.trim_replay(replay_window).await;
 
+        drop(owner);
+        if retire {
+            break;
+        }
         if settle {
             thinking.clear();
-            flush_turn(&live, &store).await;
             // The end of a turn is when "what is still running" starts to mean
             // something. Until then everything the agent started is running
             // because the agent is still working.
@@ -3483,7 +4533,16 @@ fn turn_summary(
         ),
         _ => return None,
     };
-    token_usage::fill_usage_from_items(&mut usage, items);
+    let start = items
+        .iter()
+        .rposition(|item| {
+            matches!(
+                item,
+                TimelineItem::UserMessage { .. } | TimelineItem::TurnSummary { .. }
+            )
+        })
+        .map_or(0, |index| index + 1);
+    token_usage::fill_usage_from_items(&mut usage, &items[start..]);
     let finished_at_ms = now_ms();
     let (started_at_ms, tools) = turns
         .remove(turn_id)
@@ -3510,17 +4569,30 @@ async fn agent_title_would_apply(live: &Live, title: &str) -> bool {
         return false;
     };
     let meta = live.meta.lock().await;
-    !meta.title_locked && meta.title.as_deref() != Some(title.as_str())
+    !meta.title_locked
+        && meta.title.as_deref() != Some(title.as_str())
+        && agent_title_fits_current(meta.title.as_deref(), &title)
 }
 
 /// Applies an event to the in-memory timeline.
-async fn apply(live: &Arc<Live>, event: &SessionEvent) {
+async fn apply(live: &Live, event: &SessionEvent) {
     match event {
         SessionEvent::Item { item, .. } => {
             let mut items = live.items.lock().await;
             match items.iter_mut().find(|existing| existing.id() == item.id()) {
-                Some(existing) => *existing = item.clone(),
-                None => items.push(item.clone()),
+                Some(existing) => {
+                    let mut next = item.clone();
+                    next.merge_tool_update(Some(existing));
+                    next.inherit_and_stamp_tool_times(Some(existing), now_ms());
+                    next.inherit_and_stamp_received_at(Some(existing), now_ms());
+                    *existing = next;
+                }
+                None => {
+                    let mut next = item.clone();
+                    next.inherit_and_stamp_tool_times(None, now_ms());
+                    next.inherit_and_stamp_received_at(None, now_ms());
+                    items.push(next);
+                }
             }
             // Dropped explicitly, not just left to fall out of scope at the
             // end of this match arm: `record_round_item` can re-lock
@@ -3534,6 +4606,8 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
             }
             drop(turn_items);
             live.record_round_item(item).await;
+            live.open_turn_dirty.store(true, Ordering::SeqCst);
+            live.persist_open_turn_if_due().await;
         }
         SessionEvent::ItemDelta { item_id, delta, .. } => {
             let mut items = live.items.lock().await;
@@ -3544,10 +4618,15 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 ItemDelta::Text { delta } => {
                     item.append_text(delta);
                 }
-                ItemDelta::ToolStatus { status, detail } => {
+                ItemDelta::ToolStatus {
+                    status,
+                    detail,
+                    images,
+                } => {
                     if let TimelineItem::ToolCall {
                         status: current,
                         detail: current_detail,
+                        images: current_images,
                         ..
                     } = item
                     {
@@ -3555,9 +4634,18 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                         if let Some(detail) = detail {
                             *current_detail = detail.clone();
                         }
+                        if !images.is_empty() {
+                            *current_images = images.clone();
+                        }
                     }
+                    item.stamp_tool_times(now_ms());
                 }
             }
+            // Released before the write, which locks `items` itself to read
+            // the narrative back: `tokio::sync::Mutex` is not reentrant.
+            drop(items);
+            live.open_turn_dirty.store(true, Ordering::SeqCst);
+            live.persist_open_turn_if_due().await;
         }
         SessionEvent::PermissionRequested { request } => {
             *live.pending_permissions.lock().await = vec![request.clone()];
@@ -3634,7 +4722,10 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
                 return;
             };
             let mut meta = live.meta.lock().await;
-            if meta.title_locked || meta.title.as_deref() == Some(title.as_str()) {
+            if meta.title_locked
+                || meta.title.as_deref() == Some(title.as_str())
+                || !agent_title_fits_current(meta.title.as_deref(), &title)
+            {
                 return;
             }
             meta.title = Some(title);
@@ -3652,21 +4743,38 @@ async fn apply(live: &Arc<Live>, event: &SessionEvent) {
 /// A no-op unless there was an open round — ordinary shutdown (`Live::
 /// shutdown`) aborts the pump task outright rather than letting `recv` see
 /// `Closed`, and a round that already settled has nothing left to clean up.
-async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
-    let Some(round) = live.settle_round(RoundOutcome::Failed).await else {
+async fn finalize_after_channel_closed(live: &Arc<Live>, _store: &Store) {
+    let mut owner = live.execution.lock().await;
+    let Some(execution) = owner.as_ref() else {
         return;
     };
-    persist_round(live, round).await;
-    // Whatever this turn had produced so far would otherwise never reach
-    // disk: `flush_turn` only ever ran from inside this same loop, on a
-    // terminal event that, this time, never arrived.
-    flush_turn(live, store).await;
-    let pending = !live.pending_permissions.lock().await.is_empty();
-    *live.status.lock().await = if pending {
-        SessionStatus::Waiting
-    } else {
-        SessionStatus::Failed
+    if execution.phase == ExecutionPhase::Stopping {
+        execution.terminal.send_replace(true);
+        return;
+    }
+    let event = SessionEvent::TurnFailed {
+        turn_id: execution.turn_id.clone().unwrap_or_default(),
+        error: genehub_proto::TurnError {
+            code: TurnErrorCode::AgentCrashed,
+            message: "the agent event channel closed".into(),
+        },
     };
+    if let Err(error) = live.finish_execution(&mut owner, event, false).await {
+        tracing::error!(%error, "could not commit closed event channel");
+    }
+}
+
+fn event_turn(event: &SessionEvent) -> Option<&str> {
+    match event {
+        SessionEvent::TurnStarted { turn_id, .. }
+        | SessionEvent::TurnCompleted { turn_id, .. }
+        | SessionEvent::TurnFailed { turn_id, .. }
+        | SessionEvent::TurnCanceled { turn_id }
+        | SessionEvent::TurnProgress { turn_id, .. }
+        | SessionEvent::Item { turn_id, .. }
+        | SessionEvent::ItemDelta { turn_id, .. } => Some(turn_id),
+        _ => None,
+    }
 }
 
 /// Records a round's final state on `chat.jsonl`.
@@ -3674,7 +4782,7 @@ async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
 /// Failure is logged, not propagated: a missing record degrades a later
 /// cross-session query to "this round is invisible to it", not data loss —
 /// the round's narrative and trunks already reached disk.
-async fn persist_round(live: &Arc<Live>, round: ActiveRound) {
+async fn persist_round(live: &Live, round: ActiveRound) {
     if round.outcome.is_none() {
         // Should not happen: every caller only reaches here after setting an
         // outcome. Guarded anyway rather than unwrapped, because a ledger
@@ -3686,32 +4794,42 @@ async fn persist_round(live: &Arc<Live>, round: ActiveRound) {
 
 /// Writes what this turn produced, once, when the turn ends: narrative to the
 /// chat layer, work to the open trunk.
-async fn flush_turn(live: &Arc<Live>, store: &Store) {
-    let ids: Vec<String> = std::mem::take(&mut *live.turn_items.lock().await);
-    if ids.is_empty() {
-        return;
+async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
+    let pending_rounds = live.unsaved_rounds.lock().await.clone();
+    if !pending_rounds.is_empty() {
+        let meta = live.meta.lock().await.clone();
+        let records = live.rounds.lock().await.clone();
+        for record in records
+            .iter()
+            .filter(|record| pending_rounds.contains(&record.round_id))
+        {
+            store.append_round(&meta.workspace_id, &meta.id, record)?;
+        }
+        live.unsaved_rounds
+            .lock()
+            .await
+            .retain(|id| !pending_rounds.contains(id));
     }
-    let items = live.items.lock().await;
-    let settled: Vec<TimelineItem> = ids
-        .iter()
-        .filter_map(|id| items.iter().find(|item| item.id() == id))
-        // The prompt was already written when it arrived.
-        .filter(|item| !matches!(item, TimelineItem::UserMessage { .. }))
-        .cloned()
-        .collect();
-    drop(items);
+    let ids = live.turn_items.lock().await.clone();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let settled = live.turn_narrative(&ids).await;
 
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
         (meta.workspace_id.clone(), meta.id.clone())
     };
     live.persist_open_trunk().await;
-    if let Err(error) = store.append_chat_items(&workspace_id, &session_id, &settled) {
-        tracing::error!("could not persist the timeline for {session_id}: {error}");
-    }
+    store.append_chat_items(&workspace_id, &session_id, &settled)?;
+    live.turn_items.lock().await.retain(|id| !ids.contains(id));
+    store.clear_open_turn(&workspace_id, &session_id);
+    live.open_turn_written_ms.store(0, Ordering::SeqCst);
+    live.open_turn_dirty.store(false, Ordering::SeqCst);
     let mut meta = live.meta.lock().await;
     meta.updated_at_ms = now_ms();
-    let _ = store.save_meta(&meta);
+    store.save_meta(&meta)?;
+    Ok(())
 }
 
 /// Tool status changes carry an implicit rule worth naming: a delta that names
@@ -3841,6 +4959,7 @@ mod tests {
         TimelineItem::AssistantMessage {
             id: id.into(),
             text: text.into(),
+            received_at_ms: None,
         }
     }
 
@@ -4174,6 +5293,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "assistant-1".into(),
                 text: "The health check path is stale".into(),
+                received_at_ms: None,
             },
             TimelineItem::TurnSummary {
                 id: "summary-1".into(),
@@ -4189,6 +5309,141 @@ mod tests {
                 },
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn a_fork_carries_thumbnails_and_blob_refs_but_never_payloads() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = SessionManager::new(
+            test_store(source_dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let summary = source
+            .create(
+                "w1",
+                source_dir.path().to_path_buf(),
+                "source",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let live = source.live(&summary.id).await.unwrap();
+        let mut items = completed_turn(None);
+        items.insert(
+            1,
+            TimelineItem::ToolCall {
+                id: "tool-1".into(),
+                name: "Read".into(),
+                status: ToolStatus::Ok,
+                detail: ToolCallDetail::Overview {
+                    tool_kind: genehub_proto::ToolKind::Read,
+                    overview: "assets/logo.png".into(),
+                    input: "assets/logo.png".into(),
+                    output: String::new(),
+                },
+                images: vec![genehub_proto::ToolImage {
+                    alt: "Read: assets/logo.png".into(),
+                    mime: "image/png".into(),
+                    data_base64: None,
+                    thumb: Some(genehub_proto::ImageThumb {
+                        mime: "image/jpeg".into(),
+                        data_base64: "dGh1bWI=".into(),
+                        width: 64,
+                        height: 32,
+                    }),
+                    path: Some("assets/logo.png".into()),
+                }],
+                started_at_ms: None,
+                finished_at_ms: None,
+            },
+        );
+        *live.items.lock().await = items;
+        let blob_ref = BlobRef {
+            id: "ab".repeat(32),
+            bytes: 48,
+            at: "ab:0:48".into(),
+        };
+        live.blob_refs
+            .lock()
+            .await
+            .insert("tool-1".to_string(), blob_ref.clone());
+
+        let transfer = source
+            .fork_export(&summary.id, "source-turn")
+            .await
+            .unwrap();
+        let tool_row = transfer
+            .blob_appendix
+            .iter()
+            .find(|row| row.item_id == "tool-1")
+            .expect("the tool call has an appendix row");
+        assert_eq!(tool_row.blob.as_ref(), Some(&blob_ref));
+        let image_row = transfer
+            .blob_appendix
+            .iter()
+            .find(|row| row.item_id == "tool-1:img:0")
+            .expect("the image has an appendix row");
+        assert_eq!(image_row.kind, genehub_proto::BlobKind::Image);
+        assert_eq!(image_row.path.as_deref(), Some("assets/logo.png"));
+        assert_eq!(
+            image_row
+                .thumb
+                .as_ref()
+                .map(|thumb| thumb.data_base64.as_str()),
+            Some("dGh1bWI=")
+        );
+        // No payload crosses: nothing in the appendix or the items carries bytes.
+        let encoded = serde_json::to_vec(&transfer).unwrap();
+        assert!(!encoded
+            .windows(9)
+            .any(|window| window == b"aW1hZ2U".as_slice()));
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let target_homes = crate::session::WorkspaceHomes::default();
+        target_homes.attach("target-workspace", target_dir.path());
+        let target = SessionManager::new(
+            Store::new(target_homes),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "target",
+                native_fork: true,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            })])),
+            16,
+        );
+        let forked = target
+            .fork_import(
+                "target-workspace",
+                target_dir.path().to_path_buf(),
+                transfer,
+                ForkTarget {
+                    agent_id: "target".into(),
+                    workspace_id: Some("target-workspace".into()),
+                    model_id: None,
+                    mode_id: None,
+                    effort_id: None,
+                },
+                &ProviderMap::new(),
+                false,
+            )
+            .await
+            .unwrap();
+        let persisted = target
+            .store
+            .load_fork_appendix("target-workspace", &forked.id)
+            .unwrap();
+        // One row for the tool call, one for its image.
+        assert_eq!(persisted.len(), 2);
+        assert!(persisted.iter().any(|row| row.item_id == "tool-1:img:0"));
     }
 
     #[tokio::test]
@@ -4805,6 +6060,7 @@ mod tests {
             TimelineItem::AssistantMessage {
                 id: "assistant-live".into(),
                 text: "I can investigate errors".into(),
+                received_at_ms: None,
             },
         ];
         *source_live.status.lock().await = SessionStatus::Waiting;
@@ -4899,6 +6155,7 @@ mod tests {
             .map(|index| TimelineItem::AssistantMessage {
                 id: format!("i-{index}"),
                 text: "reply".into(),
+                received_at_ms: None,
             })
             .collect();
         let (bounded, omitted, altered) = bound_imported_items(items);
@@ -4913,6 +6170,7 @@ mod tests {
         let huge = vec![TimelineItem::AssistantMessage {
             id: "huge".into(),
             text: "四".repeat(IMPORT_VISIBLE_BYTES),
+            received_at_ms: None,
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge);
         assert_eq!((omitted, altered), (0, 1));
@@ -4925,6 +6183,9 @@ mod tests {
             detail: ToolCallDetail::Unknown {
                 raw: serde_json::json!({ "payload": "x".repeat(IMPORT_VISIBLE_BYTES * 2) }),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }];
         let (bounded, omitted, altered) = bound_imported_items(huge_tool);
         assert_eq!((omitted, altered), (0, 1));
@@ -5143,6 +6404,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_latin_agent_title_does_not_replace_a_cjk_prompt_title() {
+        let (live, _dir) = live_session(SessionMeta {
+            title: Some("生成三张风景画，简笔风".into()),
+            ..meta()
+        });
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "Sketchy Scenery Creator".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            live.meta.lock().await.title.as_deref(),
+            Some("生成三张风景画，简笔风")
+        );
+    }
+
+    #[tokio::test]
     async fn an_agent_title_does_not_replace_a_name_the_user_typed() {
         let dir = tempfile::tempdir().unwrap();
         let sessions = manager(dir.path());
@@ -5343,7 +6623,84 @@ mod tests {
 
         let items = live.items.lock().await;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0], item("a", "final"));
+        match &items[0] {
+            TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms,
+            } => {
+                assert_eq!(id, "a");
+                assert_eq!(text, "final");
+                assert!(received_at_ms.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_bare_tool_update_inherits_the_card_it_replaces() {
+        // ACP shape: the initial event carries title/kind, the completion
+        // update only carries status and rawOutput. The update must not blank
+        // the card the initial event filled in.
+        let (live, _store_dir) = live_session(meta());
+        apply(
+            &live,
+            &SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "call-1".into(),
+                    name: "Read File".into(),
+                    status: ToolStatus::Running,
+                    detail: ToolCallDetail::Read {
+                        path: "src/main.rs".into(),
+                        content: String::new(),
+                        truncated: false,
+                    },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+            },
+        )
+        .await;
+        apply(
+            &live,
+            &SessionEvent::Item {
+                turn_id: "t".into(),
+                item: TimelineItem::ToolCall {
+                    id: "call-1".into(),
+                    name: String::new(),
+                    status: ToolStatus::Ok,
+                    detail: ToolCallDetail::Overview {
+                        tool_kind: genehub_proto::ToolKind::Other,
+                        overview: String::new(),
+                        input: String::new(),
+                        output: "fn main() {}".into(),
+                    },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                },
+            },
+        )
+        .await;
+
+        let items = live.items.lock().await;
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            TimelineItem::ToolCall { name, detail, .. } => {
+                assert_eq!(name, "Read File");
+                assert_eq!(
+                    detail,
+                    &ToolCallDetail::Read {
+                        path: "src/main.rs".into(),
+                        content: "fn main() {}".into(),
+                        truncated: false,
+                    }
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -5370,7 +6727,19 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(live.items.lock().await[0], item("a", "hello"));
+        let items = live.items.lock().await;
+        match &items[0] {
+            TimelineItem::AssistantMessage {
+                id,
+                text,
+                received_at_ms,
+            } => {
+                assert_eq!(id, "a");
+                assert_eq!(text, "hello");
+                assert!(received_at_ms.is_some());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -5404,6 +6773,9 @@ mod tests {
                         output: String::new(),
                         exit_code: None,
                     },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             },
         )
@@ -5416,6 +6788,7 @@ mod tests {
                 delta: ItemDelta::ToolStatus {
                     status: ToolStatus::Running,
                     detail: None,
+                    images: vec![],
                 },
             },
         )
@@ -5601,7 +6974,7 @@ mod tests {
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (events, _) = broadcast::channel(1);
-        *live.agent.lock().await = Some(Box::new(StoppingSession {
+        *live.agent.lock().await = Some(Arc::new(StoppingSession {
             events,
             interrupted: interrupted.clone(),
             closed: closed.clone(),
@@ -5842,7 +7215,7 @@ mod tests {
         ] {
             apply(&live, &event).await;
         }
-        flush_turn(&live, &store).await;
+        flush_turn(&live, &store).await.unwrap();
 
         let written = store.load_chat("w1", "s1").unwrap().items;
         assert_eq!(written.len(), 1, "the prompt was persisted on arrival");
@@ -5908,6 +7281,11 @@ mod tests {
         // Work only reaches disk through a round's trunk files, and in
         // production `session.send` always opens one before the agent runs.
         live.begin_round(None, "t", "u0").await;
+        let mut execution = live.claim_execution(false).await.unwrap();
+        execution.turn_id = Some("t".into());
+        execution.phase = ExecutionPhase::Running;
+        execution.ready.send_replace(true);
+        *live.execution.lock().await = Some(execution);
         let (agent_events, _) = broadcast::channel(64);
         let mut seen = live.events.subscribe();
         let pump = tokio::spawn(pump_events(
@@ -5965,6 +7343,7 @@ mod tests {
                 item: TimelineItem::Reasoning {
                     id: "r".into(),
                     text: String::new(),
+                    received_at_ms: None,
                 },
             },
         ];
@@ -6059,6 +7438,9 @@ mod tests {
                         output,
                         exit_code: Some(0),
                     },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             },
             SessionEvent::TurnCompleted {
@@ -6272,7 +7654,10 @@ mod tests {
             .unwrap()
             .round_id
             .clone();
-        assert!(live.settle_round(RoundOutcome::Completed).await.is_some());
+        assert!(live
+            .settle_round(Settling::Kernel, RoundOutcome::Completed)
+            .await
+            .is_some());
 
         // A stale continuesRound for a round that already finished on its own
         // must not reopen it, and must not be reported as "cut short" —
@@ -6285,18 +7670,98 @@ mod tests {
         assert!(current.outcome.is_none());
     }
 
+    /// Sequence numbers are a promise about order, so something has to keep it.
+    ///
+    /// Several tasks publish to one session at once: the event pump, a stop
+    /// that escalated past a deaf agent, the call that started the turn. When
+    /// the number was taken outside the lock that orders the replay buffer, two
+    /// of them could take 5 and 6 and arrive in the other order — and a client
+    /// asking to be caught up would be handed the session's history in an order
+    /// that never happened.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_publishers_leave_the_replay_in_sequence() {
+        let (live, _store_dir) = live_session(meta());
+
+        let mut publishers = Vec::new();
+        for n in 0..256 {
+            let live = live.clone();
+            publishers.push(tokio::spawn(async move {
+                live.publish(SessionEvent::TurnProgress {
+                    turn_id: format!("t{n}"),
+                    usage: Usage::default(),
+                })
+                .await;
+            }));
+        }
+        for publisher in publishers {
+            publisher.await.expect("a publisher panicked");
+        }
+
+        let replay = live.replay.lock().await;
+        let seqs: Vec<u64> = replay.iter().map(|event| event.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            seqs, sorted,
+            "the replay buffer holds the session's own history out of order"
+        );
+        assert_eq!(seqs.len(), 256, "an event went missing");
+    }
+
+    /// The straggler.
+    ///
+    /// A round folds several adapter turns, so "a terminal arrived" and "the
+    /// turn this round is running has ended" are different facts. Nothing in
+    /// the kernel used to tell them apart, and two adapters cannot: claude's
+    /// `result` frame carries no turn id, so it stamps whichever turn is
+    /// current when the frame arrives. Acting on a straggler ends the turn the
+    /// user is watching because of one they already cancelled.
+    #[tokio::test]
+    async fn a_terminal_from_a_superseded_turn_does_not_end_the_one_running() {
+        let (live, _store_dir) = live_session(meta());
+        live.begin_round(None, "t0", "u0").await;
+        live.continue_round("t1").await;
+
+        assert!(
+            live.settle_round(Settling::Turn("t0"), RoundOutcome::Completed)
+                .await
+                .is_none(),
+            "a terminal naming the superseded turn settled the round"
+        );
+        assert!(
+            live.active_round
+                .lock()
+                .await
+                .as_ref()
+                .expect("the round is still there")
+                .outcome
+                .is_none(),
+            "the round was closed by a turn it is no longer running"
+        );
+
+        // And the turn that is running still ends it, or the fence would be a
+        // freeze of its own.
+        let settled = live
+            .settle_round(Settling::Turn("t1"), RoundOutcome::Completed)
+            .await
+            .expect("the running turn must still be able to end its round");
+        assert_eq!(settled.outcome, Some(RoundOutcome::Completed));
+    }
+
     #[tokio::test]
     async fn settle_round_is_idempotent() {
         let (live, _store_dir) = live_session(meta());
         live.begin_round(None, "t0", "u0").await;
 
         let settled = live
-            .settle_round(RoundOutcome::Completed)
+            .settle_round(Settling::Kernel, RoundOutcome::Completed)
             .await
             .expect("the round was open");
         assert_eq!(settled.user_item_id.as_deref(), Some("u0"));
         assert!(
-            live.settle_round(RoundOutcome::Failed).await.is_none(),
+            live.settle_round(Settling::Kernel, RoundOutcome::Failed)
+                .await
+                .is_none(),
             "a round cannot be settled twice"
         );
 
@@ -6306,6 +7771,26 @@ mod tests {
             Some(RoundOutcome::Completed),
             "the first outcome wins"
         );
+    }
+
+    #[test]
+    fn llm_rounds_fold_each_adapter_turn_into_the_round_base() {
+        let mut rounds = LlmRounds::default();
+        rounds.observe("t1", 1);
+        rounds.observe("t1", 3);
+        assert_eq!(rounds.cumulative(), 3);
+        // A new adapter turn of the same round restarts its counter at zero.
+        rounds.observe("t2", 1);
+        assert_eq!(rounds.cumulative(), 4);
+        rounds.observe("t2", 2);
+        assert_eq!(rounds.cumulative(), 5);
+        // A late frame from the finished turn cannot fold the base twice.
+        rounds.observe("t1", 9);
+        assert_eq!(rounds.cumulative(), 5);
+        // A fresh round starts from zero.
+        rounds.clear();
+        rounds.observe("t3", 1);
+        assert_eq!(rounds.cumulative(), 1);
     }
 
     #[tokio::test]
@@ -6330,7 +7815,8 @@ mod tests {
 
         live.round_blocked().await;
         tokio::time::sleep(Duration::from_millis(20)).await;
-        live.settle_round(RoundOutcome::Canceled).await;
+        live.settle_round(Settling::Kernel, RoundOutcome::Canceled)
+            .await;
         let round = live.active_round.lock().await.clone().unwrap();
         assert!(
             round.blocked_ms >= 30,
@@ -6428,7 +7914,7 @@ mod tests {
         // send more than 64 events and are not overflow tests.
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
-        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
             turn_ids.clone(),
         )));
@@ -6463,12 +7949,14 @@ mod tests {
         }
     }
 
-    /// Every `SessionStatusChanged` a call published, in order.
+    /// The session states a call published, including a failed handover.
     fn statuses(seen: &mut broadcast::Receiver<SequencedEvent>) -> Vec<SessionStatus> {
         let mut out = Vec::new();
         while let Ok(event) = seen.try_recv() {
-            if let SessionEvent::SessionStatusChanged { status } = event.event {
-                out.push(status);
+            match event.event {
+                SessionEvent::SessionStatusChanged { status } => out.push(status),
+                SessionEvent::TurnFailed { .. } => out.push(SessionStatus::Failed),
+                _ => {}
             }
         }
         out
@@ -6532,7 +8020,7 @@ mod tests {
         let (sessions, events, _) = wired(dir.path()).await;
         let providers = ProviderMap::new();
         let live = sessions.live("s1").await.unwrap();
-        *live.agent.lock().await = Some(Box::new(FakeSession::refusing(events.clone())));
+        *live.agent.lock().await = Some(Arc::new(FakeSession::refusing(events.clone())));
         let mut seen = live.events.subscribe();
 
         sessions
@@ -6542,9 +8030,9 @@ mod tests {
 
         assert_eq!(
             statuses(&mut seen),
-            vec![SessionStatus::Running, SessionStatus::Idle]
+            vec![SessionStatus::Running, SessionStatus::Failed]
         );
-        assert_eq!(*live.status.lock().await, SessionStatus::Idle);
+        assert_eq!(*live.status.lock().await, SessionStatus::Failed);
     }
 
     #[tokio::test]
@@ -6617,6 +8105,9 @@ mod tests {
                 output: String::new(),
                 exit_code: Some(0),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }
     }
 
@@ -6735,12 +8226,21 @@ mod tests {
             .unwrap();
         for i in 0..132u32 {
             events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn_id.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
                 .send(SessionEvent::Item {
                     turn_id: turn_id.clone(),
                     item: tool_call(&format!("t{i}"), "grep"),
                 })
                 .unwrap();
-            if i % 64 == 63 {
+            if i % 16 == 15 {
                 tokio::task::yield_now().await;
             }
         }
@@ -6758,10 +8258,13 @@ mod tests {
             let Ok(trunks) = sessions.store.load_trunk_index("w1", "s1", 0) else {
                 return false;
             };
-            chat.rounds
+            let done = chat
+                .rounds
                 .first()
                 .is_some_and(|round| round.trunk_count == 2)
                 && trunks.len() == 2
+                && trunks[1].blob_count == 4;
+            done
         })
         .await;
 
@@ -6773,10 +8276,186 @@ mod tests {
             2,
             "132 tool calls split after the threshold-crossing batch: {trunks:?}"
         );
+        assert_eq!(
+            trunks[0].batches.len(),
+            2,
+            "trunks: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            trunks[0].llm_rounds,
+            Some(128),
+            "trunks: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
         assert_eq!(trunks[0].blob_count, 128);
-        assert_eq!(trunks[0].batches.len(), 2);
         assert_eq!(trunks[1].blob_count, 4);
         assert_eq!(trunks[1].batches.len(), 1);
+        assert_eq!(trunks[1].llm_rounds, Some(4));
+    }
+
+    /// A permission resume (or any client-declared continuation) starts a new
+    /// adapter turn whose `llmRounds` counts from zero again. The trunk
+    /// builder must still see a round-cumulative counter, or everything after
+    /// the resume stops counting until the new turn passes the old high-water
+    /// mark.
+    #[tokio::test]
+    async fn llm_rounds_stay_cumulative_when_a_continued_turn_restarts_the_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, events, _) = wired(dir.path()).await;
+        let providers = ProviderMap::new();
+
+        let turn1 = sessions
+            .send("s1", "start".into(), vec![], &providers, None, None)
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn1.clone(),
+                started_at_ms: 1,
+            })
+            .unwrap();
+        for i in 0..3u32 {
+            events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn1.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn1.clone(),
+                    item: tool_call(&format!("a{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        // A permission interrupt cancels the adapter turn but leaves the
+        // round open for the resume.
+        events
+            .send(SessionEvent::TurnCanceled {
+                turn_id: turn1.clone(),
+            })
+            .unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        eventually("released the interrupted turn", async || {
+            *live.status.lock().await == genehub_proto::SessionStatus::Idle
+        })
+        .await;
+        let round_id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .expect("the interrupted round is left dangling")
+            .round_id
+            .clone();
+        let turn2 = sessions
+            .send(
+                "s1",
+                "approved, keep going".into(),
+                vec![],
+                &providers,
+                None,
+                Some(round_id),
+            )
+            .await
+            .expect("accepted");
+        events
+            .send(SessionEvent::TurnStarted {
+                turn_id: turn2.clone(),
+                started_at_ms: 2,
+            })
+            .unwrap();
+        // The resumed adapter turn counts its own LLM rounds from 1 again.
+        for i in 0..2u32 {
+            events
+                .send(SessionEvent::TurnProgress {
+                    turn_id: turn2.clone(),
+                    usage: Usage {
+                        llm_rounds: u64::from(i + 1),
+                        ..Usage::default()
+                    },
+                })
+                .unwrap();
+            events
+                .send(SessionEvent::Item {
+                    turn_id: turn2.clone(),
+                    item: tool_call(&format!("b{i}"), "grep"),
+                })
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: turn2.clone(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+
+        eventually("persisted the continued round's trunk", async || {
+            let Ok(chat) = sessions.store.load_chat("w1", "s1") else {
+                return false;
+            };
+            chat.rounds
+                .first()
+                .is_some_and(|round| round.trunk_count == 1)
+        })
+        .await;
+
+        let trunks = sessions.store.load_trunk_index("w1", "s1", 0).unwrap();
+        assert_eq!(trunks.len(), 1, "trunks: {trunks:?}");
+        assert_eq!(trunks[0].blob_count, 5);
+        assert_eq!(
+            trunks[0].llm_rounds,
+            Some(5),
+            "the resumed turn's two rounds add to the interrupted turn's three: {:?}",
+            trunks
+                .iter()
+                .map(|trunk| {
+                    (
+                        trunk.index,
+                        trunk.blob_count,
+                        trunk.llm_rounds,
+                        trunk
+                            .batches
+                            .iter()
+                            .map(|batch| (batch.blob_count, batch.llm_rounds))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -6812,6 +8491,9 @@ mod tests {
                         content: "raw source content".repeat(100),
                         truncated: false,
                     },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             })
             .unwrap();
@@ -6912,6 +8594,10 @@ mod tests {
                             blob_count: 100,
                             title: format!("阶段 {index}"),
                             batches: vec![],
+                            llm_rounds: None,
+                            started_at_ms: None,
+                            duration_ms: None,
+                            tool_duration_ms: None,
                         },
                         batches: vec![],
                     },
@@ -6976,6 +8662,10 @@ mod tests {
                             blob_count: 0,
                             title: format!("阶段 {index}"),
                             batches: vec![],
+                            llm_rounds: None,
+                            started_at_ms: None,
+                            duration_ms: None,
+                            tool_duration_ms: None,
                         },
                         batches: vec![],
                     },
@@ -7108,7 +8798,7 @@ mod tests {
         // fake stands in for whatever `ensure_started_in_mode` would really
         // start on approval, sharing the turn-id counter so the ids stay
         // distinct across the "restart".
-        *live.agent.lock().await = Some(Box::new(FakeSession::sharing(
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
             turn_ids.clone(),
         )));
@@ -7250,7 +8940,7 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_round_is_continued_when_the_next_send_names_it() {
         let dir = tempfile::tempdir().unwrap();
-        let (sessions, events, _) = wired(dir.path()).await;
+        let (sessions, events, turn_ids) = wired(dir.path()).await;
         let providers = ProviderMap::new();
 
         let first_turn = sessions
@@ -7288,6 +8978,9 @@ mod tests {
             .round_id
             .clone();
 
+        // Cancellation retires the process. Install the next fake instance,
+        // just as the production registry starts a fresh resumable adapter.
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(events.clone(), turn_ids)));
         let second_turn = sessions
             .send(
                 "s1",
@@ -7326,7 +9019,7 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_round_is_superseded_by_a_plain_new_message() {
         let dir = tempfile::tempdir().unwrap();
-        let (sessions, events, _) = wired(dir.path()).await;
+        let (sessions, events, turn_ids) = wired(dir.path()).await;
         let providers = ProviderMap::new();
 
         let first_turn = sessions
@@ -7359,6 +9052,9 @@ mod tests {
             .round_id
             .clone();
 
+        // Cancellation retires the process. Install the next fake instance,
+        // just as the production registry starts a fresh resumable adapter.
+        *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(events.clone(), turn_ids)));
         let second_turn = sessions
             .send(
                 "s1",
@@ -7764,6 +9460,11 @@ mod tests {
         let store = test_store(dir.path());
         let live = Arc::new(Live::new(meta(), store.clone()));
         live.begin_round(None, "t", "u0").await;
+        let mut execution = live.claim_execution(false).await.unwrap();
+        execution.turn_id = Some("t".into());
+        execution.phase = ExecutionPhase::Running;
+        execution.ready.send_replace(true);
+        *live.execution.lock().await = Some(execution);
         let (agent_events, _) = broadcast::channel(64);
         let mut seen = live.events.subscribe();
         let diagnostics = Arc::new(Diagnostics::new());

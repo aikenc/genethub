@@ -1,10 +1,13 @@
 import type {
   BlobOverview,
   RoundBatch,
+  RoundBatchSummary,
   RoundSummary,
+  RoundTrunk,
   RoundTrunkSummary,
   SessionSummary,
   TimelineItem,
+  ToolCallDetail,
   TurnStats,
   Usage,
 } from "@genehub/proto";
@@ -19,6 +22,7 @@ import {
   type ForkSelection,
 } from "./ForkDialog";
 import { ForwardDialog } from "./ForwardDialog";
+import { ImageThumbStrip } from "./ImageStrip";
 import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
 
@@ -41,10 +45,20 @@ import {
   type SelectableMessage,
   type SelectionState,
 } from "./selection";
+import {
+  appendUnlinkedThumbs,
+  finalGalleryFromTrunks,
+  galleryNotInMarkdown,
+  hoistedImageIds,
+  inlineImagesFromTrunks,
+  isFinalSummaryBatch,
+  isImageOnlyBatch,
+  visibleProcessBatches,
+} from "./roundGallery";
 import { buildSelectionCopy } from "./selectionCopy";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
-import { ToolCallView } from "./ToolCall";
+import { kindEmoji, kindLabel, ToolCallView } from "./ToolCall";
 import { useSessionArtifact } from "./useSessionArtifact";
 
 /**
@@ -322,6 +336,22 @@ export function TimelineView({
   const copySelection = async () => {
     if (!selection || selection.selected.size === 0) return;
     const { messages } = selectedCapsuleInput();
+    const timelineState = useWorkbench.getState().timeline;
+    const messagesWithGallery = messages.map((message) => {
+      if (message.role !== "assistant") return message;
+      const turn = contextualTurns.find((block) => block.finalAssistant?.id === message.id);
+      if (!turn?.round) return message;
+      const layer = timelineState.roundLayers[turn.round.roundId];
+      if (!layer) return message;
+      const trunks = layer.trunks.map((summary) => {
+        const detail =
+          timelineState.roundTrunks[`${turn.round!.roundId}:${summary.index}`] ??
+          (layer.expandedTrunk?.summary.index === summary.index ? layer.expandedTrunk : undefined);
+        return detail ?? { summary, batches: [] };
+      });
+      const text = appendUnlinkedThumbs(message.text, inlineImagesFromTrunks(trunks));
+      return text === message.text ? message : { ...message, text };
+    });
     const source = forwardSource();
     const built = buildSelectionCopy(
       {
@@ -329,7 +359,7 @@ export function TimelineView({
         agentLabel: source.agentLabel,
         spanMs: source.spanMs,
       },
-      messages,
+      messagesWithGallery,
     );
     if (
       built.exceedsSoftLimit &&
@@ -418,6 +448,9 @@ export function TimelineView({
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
             const layerReady = Boolean(round && roundLayers[round.roundId]);
+            const liveTurn =
+              index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
+            const processItems = processItemsOf(turn);
             const narrative = turnNarrativeItems(
               turn,
               hasRound,
@@ -427,8 +460,6 @@ export function TimelineView({
             // A turn still in flight is not selectable: its items are still
             // being written, and a capsule built from them would go stale
             // before it was ever reviewed.
-            const liveTurn =
-              index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
             const turnSelectable = selectableByTurn[index] ?? [];
             const renderItem = (item: TimelineItem) => {
               if (!selection || !selectableSet.has(item.id)) {
@@ -505,9 +536,30 @@ export function TimelineView({
                     key={startedRound.roundId}
                     round={startedRound}
                     finalSummaryText={roundFinalText}
+                    processItems={processItems}
+                    live={liveTurn}
+                    liveUsage={state.usage ?? undefined}
+                    turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ))}
+                {startedRounds.length === 0 &&
+                shouldOccupyProcessCard(turn, liveTurn, layerReady) ? (
+                  <ProvisionalProcess
+                    items={processItems}
+                    live={liveTurn}
+                    usage={state.usage ?? undefined}
+                    turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
+                  />
+                ) : null}
                 {finalAssistant ? renderItem(finalAssistant) : null}
+                {startedRounds.map((startedRound) => (
+                  <TurnBodyGallery
+                    key={`${startedRound.roundId}-gallery`}
+                    round={startedRound}
+                    finalSummaryText={roundFinalText}
+                    markdown={finalAssistant?.text}
+                  />
+                ))}
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
@@ -537,7 +589,7 @@ export function TimelineView({
                 ) : index === turns.length - 1 && state.activeTurn ? (
                   <TurnFooter
                     liveStartedAtMs={state.activeTurnStartedAtMs ?? Date.now()}
-                    liveUsage={state.usage}
+                    liveUsage={state.usage ?? undefined}
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
                     canFork={canFork}
@@ -904,7 +956,14 @@ function Item({ item }: { item: TimelineItem }) {
       return <Reasoning text={item.text} />;
 
     case "toolCall":
-      return <ToolCallView name={item.name} status={item.status} detail={item.detail} />;
+      return (
+        <ToolCallView
+          name={item.name}
+          status={item.status}
+          detail={item.detail}
+          images={item.images}
+        />
+      );
 
     case "todo":
       return (
@@ -970,10 +1029,121 @@ function formatTokenEstimate(tokens: number): string {
   return tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : String(tokens);
 }
 
+function isProcessItem(
+  item: TimelineItem,
+): item is Extract<TimelineItem, { type: "reasoning" | "toolCall" }> {
+  return item.type === "reasoning" || item.type === "toolCall";
+}
+
+function isRequestTurn(turn: TurnBlock): boolean {
+  return turn.items.some((item) => item.type === "userMessage");
+}
+
+function processItemsOf(
+  turn: TurnBlock,
+): Extract<TimelineItem, { type: "reasoning" | "toolCall" }>[] {
+  return turn.items.filter(isProcessItem);
+}
+
 /**
- * What a turn paints as its narrative flow. When the round layer is ready,
- * process items (reasoning/tool calls) live in the round's cards and all but
- * the final assistant message collapse into it.
+ * A user request occupies a process card as soon as the turn exists. The
+ * daemon's trunk grouping may arrive later; until then the same chrome holds
+ * the event-stream items so they never paint as a flat narrative first.
+ */
+function shouldOccupyProcessCard(
+  turn: TurnBlock,
+  liveTurn: boolean,
+  layerReady: boolean,
+): boolean {
+  if (layerReady || !isRequestTurn(turn)) return false;
+  return liveTurn || processItemsOf(turn).length > 0;
+}
+
+function processRowOverview(
+  item: Extract<TimelineItem, { type: "reasoning" | "toolCall" }>,
+): string {
+  if (item.type === "reasoning") {
+    return (
+      item.text
+        .replace(/\r\n/gu, "\n")
+        .split("\n")
+        .find((line) => line.trim())
+        ?.trim() || "思考"
+    );
+  }
+  switch (item.detail.kind) {
+    case "overview":
+      return item.detail.overview;
+    case "shell":
+      return item.detail.command;
+    case "read":
+    case "edit":
+    case "write":
+      return item.detail.path;
+    case "search":
+      return item.detail.query;
+    case "fetch":
+      return item.detail.url;
+    case "plan":
+      return "计划";
+    case "subAgent":
+      return item.detail.agent;
+    case "unknown":
+      return "";
+  }
+}
+
+function processBlobsFromItems(items: TimelineItem[]): BlobOverview[] {
+  return items.filter(isProcessItem).map((item) => {
+    if (item.type === "reasoning") {
+      return { itemId: item.id, kind: "reasoning" as const, overview: processRowOverview(item) };
+    }
+    const startedAtMs = item.startedAtMs;
+    const finishedAtMs = item.finishedAtMs;
+    const durationMs =
+      startedAtMs != null && finishedAtMs != null && finishedAtMs >= startedAtMs
+        ? finishedAtMs - startedAtMs
+        : undefined;
+    return {
+      itemId: item.id,
+      kind: "toolCall" as const,
+      overview: processRowOverview(item),
+      startedAtMs,
+      durationMs,
+      toolKind: item.detail.kind === "overview" ? item.detail.toolKind : toolKindFromDetail(item.detail),
+      status: item.status,
+    };
+  });
+}
+
+function toolKindFromDetail(detail: ToolCallDetail) {
+  switch (detail.kind) {
+    case "overview":
+      return detail.toolKind;
+    case "subAgent":
+      return "subAgent" as const;
+    case "unknown":
+      return "other" as const;
+    default:
+      return detail.kind;
+  }
+}
+
+function provisionalProcessTitle(items: TimelineItem[], live: boolean): string {
+  const firstReasoning = items.find((item) => item.type === "reasoning");
+  if (firstReasoning?.type === "reasoning") {
+    const line = processRowOverview(firstReasoning);
+    return splitMonologue(line).first || line;
+  }
+  const firstTool = items.find((item) => item.type === "toolCall");
+  if (firstTool?.type === "toolCall") return processRowOverview(firstTool);
+  return live ? "进行中" : "工作过程";
+}
+
+/**
+ * What a turn paints as its narrative flow. Process items live in the process
+ * card (provisional or daemon-grouped). When the official layer is ready, all
+ * but the final assistant message collapse into it as well.
  */
 function turnNarrativeItems(
   turn: TurnBlock,
@@ -981,14 +1151,19 @@ function turnNarrativeItems(
   layerReady: boolean,
   absorbedCompactions: ReadonlySet<string> = new Set(),
 ): TimelineItem[] {
-  if (!layerReady) return turn.items;
-  return turn.items.filter(
-    (item) =>
-      item.type !== "reasoning" &&
-      item.type !== "toolCall" &&
-      (!hasRound || item.type !== "assistantMessage") &&
-      (item.type !== "compaction" || !absorbedCompactions.has(item.id)),
-  );
+  if (layerReady) {
+    return turn.items.filter(
+      (item) =>
+        item.type !== "reasoning" &&
+        item.type !== "toolCall" &&
+        (!hasRound || item.type !== "assistantMessage") &&
+        (item.type !== "compaction" || !absorbedCompactions.has(item.id)),
+    );
+  }
+  if (isRequestTurn(turn)) {
+    return turn.items.filter((item) => !isProcessItem(item));
+  }
+  return turn.items;
 }
 
 function turnBlocks(items: TimelineItem[]): TurnBlock[] {
@@ -1074,31 +1249,209 @@ function contextualizeTurns(
   });
 }
 
-function RoundProgress({
+function useRoundGallery(round: RoundSummary, finalSummaryText?: string): BlobOverview[] {
+  const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
+  const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
+  const loadTrunk = useWorkbench((state) => state.loadTrunk);
+  const lastIndex = layer?.trunks.at(-1)?.index;
+  const lastDetail = lastIndex === undefined ? undefined : roundTrunks[`${round.roundId}:${lastIndex}`];
+
+  useEffect(() => {
+    if (round.outcome === "running" || lastIndex === undefined) return;
+    if (!lastDetail && layer?.expandedTrunk?.summary.index !== lastIndex) {
+      void loadTrunk(round.roundId, lastIndex).catch(() => undefined);
+    }
+  }, [
+    layer?.expandedTrunk?.summary.index,
+    lastIndex,
+    loadTrunk,
+    round.outcome,
+    round.roundId,
+    lastDetail,
+  ]);
+
+  const trunks: RoundTrunk[] = (layer?.trunks ?? []).map((summary) => {
+    const detail =
+      roundTrunks[`${round.roundId}:${summary.index}`] ??
+      (layer?.expandedTrunk?.summary.index === summary.index ? layer.expandedTrunk : undefined);
+    return detail ?? { summary, batches: [] };
+  });
+  return finalGalleryFromTrunks(trunks, round.outcome, finalSummaryText);
+}
+
+function TurnBodyGallery({
   round,
   finalSummaryText,
+  markdown,
 }: {
   round: RoundSummary;
   finalSummaryText?: string;
+  markdown?: string;
+}) {
+  const gallery = galleryNotInMarkdown(useRoundGallery(round, finalSummaryText), markdown);
+  if (gallery.length === 0) return null;
+  return (
+    <div data-testid="turn-body-gallery">
+      <ImageThumbStrip
+        size="document"
+        images={gallery.map((blob) => ({
+          id: blob.itemId,
+          alt: blob.overview,
+          thumb: blob.thumb,
+          path: blob.path,
+          blob: blob.blob,
+        }))}
+      />
+    </div>
+  );
+}
+
+function ProvisionalProcess({
+  items,
+  live,
+  usage,
+  turnStartedAtMs,
+}: {
+  items: TimelineItem[];
+  live: boolean;
+  usage?: Usage;
+  turnStartedAtMs?: number;
+}) {
+  const blobs = processBlobsFromItems(items);
+  const title = provisionalProcessTitle(items, live);
+  const { open, toggle } = useCardOpen(live);
+  const summary = liveProcessSummary(items, blobs.length, usage, turnStartedAtMs);
+  return (
+    <div className="space-y-2" data-testid="round-progress">
+      <div
+        className="overflow-hidden rounded-lg border border-line bg-bg"
+        data-testid="round-trunk"
+      >
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left"
+          aria-expanded={open}
+          onClick={toggle}
+        >
+          <span className="shrink-0" aria-hidden="true">
+            🧭
+          </span>
+          <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={title}>
+            {title}
+          </span>
+          {summary ? (
+            <SummaryMetrics summary={summary} live liveSpan />
+          ) : (
+            <span className="shrink-0 text-xs text-muted">{blobs.length} 项</span>
+          )}
+          <span className="shrink-0 text-xs text-accent" aria-hidden="true">
+            {open ? "▴" : "▾"}
+          </span>
+        </button>
+        {open ? (
+          <div className="space-y-2 px-2 pb-2">
+            <LiveTail blobs={blobs} />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Builds the synthetic summary a still-running process card shows, from the
+ * items in flight and the live turn's usage. `undefined` when neither rounds
+ * nor a start time exist yet, so the card keeps the old blob count until
+ * there is something meaningful to say.
+ */
+function liveProcessSummary(
+  items: TimelineItem[],
+  blobCount: number,
+  usage: Usage | undefined,
+  turnStartedAtMs: number | undefined,
+): RoundTrunkSummary | undefined {
+  let startedAtMs: number | undefined;
+  let toolDurationMs = 0;
+  const now = Date.now();
+  for (const item of items) {
+    const at =
+      item.type === "toolCall"
+        ? item.startedAtMs
+        : "receivedAtMs" in item
+          ? item.receivedAtMs
+          : undefined;
+    if (at != null && (startedAtMs == null || at < startedAtMs)) startedAtMs = at;
+    if (item.type === "toolCall" && item.startedAtMs != null) {
+      toolDurationMs += Math.max(0, (item.finishedAtMs ?? now) - item.startedAtMs);
+    }
+  }
+  startedAtMs = startedAtMs ?? turnStartedAtMs;
+  const llmRounds = usage && usage.llmRounds > 0 ? usage.llmRounds : undefined;
+  if (startedAtMs == null && llmRounds == null) return undefined;
+  return {
+    index: 0,
+    firstItemId: "",
+    blobCount,
+    title: "",
+    batches: [],
+    llmRounds,
+    startedAtMs,
+    toolDurationMs: toolDurationMs > 0 ? toolDurationMs : undefined,
+  };
+}
+
+function RoundProgress({
+  round,
+  finalSummaryText,
+  processItems = [],
+  live = false,
+  liveUsage,
+  turnStartedAtMs,
+}: {
+  round: RoundSummary;
+  finalSummaryText?: string;
+  processItems?: TimelineItem[];
+  live?: boolean;
+  liveUsage?: Usage;
+  turnStartedAtMs?: number;
 }) {
   const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
+  const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
   const loadRound = useWorkbench((state) => state.loadRound);
   const loadOlder = useWorkbench((state) => state.loadOlderTrunks);
+  const hoisted = hoistedImageIds(useRoundGallery(round, finalSummaryText));
 
   useEffect(() => {
     if (!layer) void loadRound(round.roundId);
   }, [layer, loadRound, round.roundId]);
 
-  if (!layer) return null;
+  if (!layer) {
+    const occupy = live || round.outcome === "running" || processItems.length > 0;
+    if (!occupy) return null;
+    return (
+      <ProvisionalProcess
+        items={processItems}
+        live={live || round.outcome === "running"}
+        usage={liveUsage}
+        turnStartedAtMs={turnStartedAtMs}
+      />
+    );
+  }
 
-  const trunks = layer.trunks.filter(
-    (trunk) =>
-      !(
-        finalSummaryText &&
-        trunk.batches.length > 0 &&
-        trunk.batches.every((batch) => isFinalSummaryBatch(batch, finalSummaryText))
-      ),
-  );
+  const trunks = layer.trunks.filter((trunk) => {
+    if (
+      finalSummaryText &&
+      trunk.batches.length > 0 &&
+      trunk.batches.every((batch) => isFinalSummaryBatch(batch, finalSummaryText))
+    ) {
+      return false;
+    }
+    const detail =
+      roundTrunks[`${round.roundId}:${trunk.index}`] ??
+      (layer.expandedTrunk?.summary.index === trunk.index ? layer.expandedTrunk : undefined);
+    if (!detail || hoisted.size === 0) return true;
+    return visibleProcessBatches(detail.batches, finalSummaryText, hoisted).length > 0;
+  });
 
   return (
     <div className="space-y-2" data-testid="round-progress">
@@ -1117,6 +1470,7 @@ function RoundProgress({
           round={round}
           summary={trunk}
           finalSummaryText={finalSummaryText}
+          hoisted={hoisted}
           active={round.outcome === "running" && index === trunks.length - 1}
         />
       ))}
@@ -1124,15 +1478,64 @@ function RoundProgress({
   );
 }
 
+/**
+ * Right-side two-line metrics for a trunk/batch header: LLM rounds and
+ * wall-clock span on top, relative start time and summed tool time below in
+ * smaller type. Rows persisted before these fields existed keep the old blob
+ * count rather than showing zeros.
+ */
+function SummaryMetrics({
+  summary,
+  live = false,
+  liveSpan = false,
+}: {
+  summary: RoundTrunkSummary | RoundBatchSummary;
+  live?: boolean;
+  /** The card is still running: the span is `now - startedAtMs`, not a stored duration. */
+  liveSpan?: boolean;
+}) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!live || summary.startedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), liveSpan ? 1_000 : 30_000);
+    return () => window.clearInterval(timer);
+  }, [live, liveSpan, summary.startedAtMs]);
+  if (summary.llmRounds == null && summary.startedAtMs == null) {
+    return <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>;
+  }
+  const durationMs =
+    liveSpan && summary.startedAtMs != null
+      ? Math.max(0, now - summary.startedAtMs)
+      : summary.durationMs;
+  const top: string[] = [];
+  if (summary.llmRounds != null) top.push(`${summary.llmRounds} 轮`);
+  if (durationMs != null) top.push(formatDuration(durationMs));
+  const bottom: string[] = [];
+  if (summary.startedAtMs != null) bottom.push(relativeTime(summary.startedAtMs, now));
+  if (summary.toolDurationMs != null && summary.toolDurationMs > 0) {
+    bottom.push(`工具 ${formatToolDuration(summary.toolDurationMs)}`);
+  }
+  return (
+    <span className="flex shrink-0 flex-col items-end leading-tight" data-testid="summary-metrics">
+      {top.length > 0 ? <span className="text-xs text-muted">{top.join(" · ")}</span> : null}
+      {bottom.length > 0 ? (
+        <span className="text-[10px] text-faint">{bottom.join(" · ")}</span>
+      ) : null}
+    </span>
+  );
+}
+
 function TrunkCard({
   round,
   summary,
   finalSummaryText,
+  hoisted,
   active,
 }: {
   round: RoundSummary;
   summary: RoundTrunkSummary;
   finalSummaryText?: string;
+  hoisted: ReadonlySet<string>;
   active: boolean;
 }) {
   const detail = useWorkbench(
@@ -1143,12 +1546,12 @@ function TrunkCard({
   const { open, toggle } = useCardOpen(active);
 
   useEffect(() => {
-    if (open && !detail) void loadTrunk(round.roundId, summary.index);
+    if (open && !detail) void loadTrunk(round.roundId, summary.index).catch(() => undefined);
   }, [detail, loadTrunk, open, round.roundId, summary.index]);
 
-  const batches = detail?.batches.filter(
-    (batch) => !finalSummaryText || !isFinalSummaryBatch(batch.summary, finalSummaryText),
-  );
+  const batches = detail
+    ? visibleProcessBatches(detail.batches, finalSummaryText, hoisted)
+    : undefined;
   const firstBatch = batches?.[0];
   const flattenCompleted =
     !live && batches?.length === 1 && !firstBatch?.summary.marker ? firstBatch : undefined;
@@ -1170,7 +1573,7 @@ function TrunkCard({
         <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={trunkTitle}>
           {trunkTitle}
         </span>
-        <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>
+        <SummaryMetrics summary={summary} live={live && active} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1190,6 +1593,8 @@ function TrunkCard({
                   key={batch.summary.firstItemId}
                   reason={batch.summary.marker}
                 />
+              ) : isImageOnlyBatch(batch) ? (
+                <ImageBatchCard key={batch.summary.index} batch={batch} />
               ) : (
                 <BatchCard key={batch.summary.index} batch={batch} />
               ),
@@ -1198,6 +1603,27 @@ function TrunkCard({
           {live && active ? <LiveTail blobs={liveBlobs} /> : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function ImageBatchCard({ batch }: { batch: RoundBatch }) {
+  const images = batch.blobs.filter((blob) => blob.kind === "image");
+  if (images.length === 0) return null;
+  return (
+    <div
+      className="overflow-hidden rounded-lg border border-line bg-surface px-2 py-2"
+      data-testid="round-image-batch"
+    >
+      <ImageThumbStrip
+        images={images.map((blob) => ({
+          id: blob.itemId,
+          alt: blob.overview,
+          thumb: blob.thumb,
+          path: blob.path,
+          blob: blob.blob,
+        }))}
+      />
     </div>
   );
 }
@@ -1229,7 +1655,7 @@ function BatchCard({
         >
           {monologue.first || batch.summary.text}
         </span>
-        <span className="shrink-0 text-xs text-muted">{batch.summary.blobCount} 项</span>
+        <SummaryMetrics summary={batch.summary} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1254,6 +1680,8 @@ function BatchContent({
   batch: RoundBatch;
   monologue?: string;
 }) {
+  const images = batch.blobs.filter((blob) => blob.kind === "image");
+  const rows = batch.blobs.filter((blob) => blob.kind !== "image");
   return (
     <div className="space-y-1 px-2 pb-2">
       {monologue ? (
@@ -1261,7 +1689,18 @@ function BatchContent({
           <SessionMarkdown text={monologue} />
         </div>
       ) : null}
-      {batch.blobs.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
+      {images.length > 0 ? (
+        <ImageThumbStrip
+          images={images.map((blob) => ({
+            id: blob.itemId,
+            alt: blob.overview,
+            thumb: blob.thumb,
+            path: blob.path,
+            blob: blob.blob,
+          }))}
+        />
+      ) : null}
+      {rows.map((blob) => <BlobRow key={blob.itemId} blob={blob} />)}
     </div>
   );
 }
@@ -1274,13 +1713,8 @@ function LiveTail({ blobs }: { blobs: BlobOverview[] }) {
         <p className="px-2 py-1.5 text-xs text-muted">进行中</p>
       ) : (
         tail.map((blob) => (
-          <div
-            key={blob.itemId}
-            className="flex items-center gap-2 px-2 py-1.5 text-xs"
-            data-testid="live-blob-row"
-          >
-            <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
-            <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+          <div key={blob.itemId} className="px-2 py-1.5 text-xs">
+            <BlobLine blob={blob} testId="live-blob-row" />
           </div>
         ))
       )}
@@ -1342,15 +1776,54 @@ function progressTitle(title: string): string {
   return splitMonologue(normalized).first || normalized.replace(/(?:\.{3}|…)+$/u, "").trim();
 }
 
-function isFinalSummaryBatch(
-  batch: RoundBatch["summary"],
-  finalSummaryText: string,
-): boolean {
-  if (batch.blobCount !== 0) return false;
-  const compact = batch.text.trim();
-  if (!compact) return false;
-  const prefix = compact.endsWith("…") ? compact.slice(0, -1) : compact;
-  return finalSummaryText.trimStart().startsWith(prefix);
+function blobKindMark(blob: BlobOverview): string {
+  if (blob.kind === "reasoning") return "💭";
+  if (blob.kind === "image") return "🖼";
+  return kindEmoji(blob.toolKind ?? "other");
+}
+
+function blobKindLabel(blob: BlobOverview): string {
+  if (blob.kind === "reasoning") return "思考";
+  if (blob.kind === "image") return "图片";
+  return kindLabel(blob.toolKind ?? "other");
+}
+
+function formatToolDuration(ms: number): string {
+  if (ms < 100) return "<0.1s";
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  return formatDuration(ms);
+}
+
+function BlobTiming({ blob, now }: { blob: BlobOverview; now: number }) {
+  if (blob.kind !== "toolCall" || blob.startedAtMs == null) return null;
+  const running =
+    blob.status === "pending" || blob.status === "running" || blob.durationMs == null;
+  const duration = blob.durationMs ?? Math.max(0, now - blob.startedAtMs);
+  return (
+    <span className="shrink-0 text-muted" data-testid="blob-timing">
+      {running ? "进行中" : relativeTime(blob.startedAtMs, now)} · {formatToolDuration(duration)}
+    </span>
+  );
+}
+
+function BlobLine({ blob, testId }: { blob: BlobOverview; testId?: string }) {
+  const live =
+    blob.kind === "toolCall" && blob.startedAtMs != null && blob.durationMs == null;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (blob.startedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), live ? 1_000 : 60_000);
+    return () => window.clearInterval(timer);
+  }, [blob.startedAtMs, live]);
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2" data-testid={testId}>
+      <span className="shrink-0" role="img" aria-label={blobKindLabel(blob)}>
+        {blobKindMark(blob)}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
+      <BlobTiming blob={blob} now={now} />
+    </span>
+  );
 }
 
 function BlobRow({ blob }: { blob: BlobOverview }) {
@@ -1372,9 +1845,8 @@ function BlobRow({ blob }: { blob: BlobOverview }) {
           if (next && blob.blob && !payload) void loadBlob(blob.blob);
         }}
       >
-        <span className="text-muted">{blob.kind === "reasoning" ? "思考" : "工具"}</span>
-        <span className="min-w-0 flex-1 truncate">{blob.overview}</span>
-        {blob.blob ? <span className="text-accent">{open ? "收起" : "详情"}</span> : null}
+        <BlobLine blob={blob} />
+        {blob.blob ? <span className="shrink-0 text-accent">{open ? "收起" : "详情"}</span> : null}
       </button>
       {open ? (
         <div className="max-h-96 overflow-auto border-t border-line p-2 text-xs">
@@ -1640,7 +2112,7 @@ function TurnFooter({
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
           <span data-testid="usage-summary">
             {usage
-              ? `input(cached:${reportedTokens(usage.cacheReadTokens)}, toolcall:${reportedTokens(toolOut)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} turn ${tools}/${rounds}`
+              ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`
               : "—"}
           </span>
           {usage && usage.compactionCount > 0 ? (

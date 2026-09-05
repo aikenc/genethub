@@ -83,7 +83,7 @@ use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
     ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
     PermissionRequest, PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, TodoEntry,
-    TodoStatus, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    TodoStatus, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -394,6 +394,7 @@ impl AgentAdapter for CodexAdapter {
             .or_else(|| hello.default_effort.clone());
 
         let session = CodexSession {
+            tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
             pending: pending.clone(),
@@ -413,7 +414,7 @@ impl AgentAdapter for CodexAdapter {
             scratch_dir: config.scratch_dir.clone(),
         };
 
-        tokio::spawn(read_loop(Reader {
+        session.tasks.spawn(read_loop(Reader {
             stdout,
             stdin,
             events,
@@ -547,6 +548,7 @@ impl AgentAdapter for CodexAdapter {
                                 items.push(TimelineItem::AssistantMessage {
                                     id,
                                     text: text.to_string(),
+                                    received_at_ms: None,
                                 });
                             }
                         }
@@ -877,6 +879,12 @@ enum Kind {
     Reasoning,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum CompactionSignal {
+    Thread,
+    Item,
+}
+
 #[derive(Default)]
 struct TurnState {
     /// Our own id for the turn in flight.
@@ -892,17 +900,24 @@ struct TurnState {
     /// notification, not with the end of the turn, so they are held until there
     /// is a completed turn to attach them to.
     usage: Usage,
+    /// Last thread total, retained only to deduplicate usage notifications.
+    thread_usage: Option<Usage>,
     /// We asked for this turn to stop, so its end is a cancellation however the
     /// CLI happens to label it.
     interrupt_requested: bool,
-    /// Codex reports one compaction twice: a `thread/compacted` notification and
-    /// a completed `contextCompaction` item. This counts the notifications that
-    /// arrived first so the item does not emit a second marker for the same
-    /// squeeze.
-    unpaired_compactions: u32,
+    /// Codex can report one compaction as both `thread/compacted` and a
+    /// completed `contextCompaction` item. The two signals have no shared id,
+    /// so pair them while they are adjacent in the item stream. Either signal
+    /// may arrive first.
+    unpaired_compaction: Option<CompactionSignal>,
+    /// A started and completed context-compaction frame carry the same id.
+    /// Only the completed frame is a boundary, and repeated completed frames
+    /// must remain idempotent after that boundary has closed its trunk.
+    completed_compactions: HashSet<String>,
 }
 
 struct CodexSession {
+    tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
@@ -1039,6 +1054,25 @@ fn archived_thread(message: &str, thread_id: &str) -> bool {
     lower.contains("archived") && message.contains(thread_id)
 }
 
+/// The turn this CLI says it is actually running, taken from its refusal.
+///
+/// Codex can move to a new upstream turn inside one GeneHub turn, and it
+/// refuses a cancel aimed at the old one — but the refusal names the current
+/// one, which is the only authoritative answer available at that moment. A
+/// notification could tell us the same thing, except the one that would is
+/// deliberately ignored once a turn is bound, so that a stale start cannot
+/// hijack it.
+///
+/// Wording, as seen in the field:
+/// `expected active turn id <old> but found <new>`
+fn active_turn_named_in(message: &str) -> Option<String> {
+    let found = message.split("but found ").nth(1)?;
+    let id = found
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '.' || c == '"')
+        .find(|part| !part.is_empty())?;
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 #[async_trait]
 impl AgentSession for CodexSession {
     fn events(&self) -> broadcast::Receiver<SessionEvent> {
@@ -1055,12 +1089,10 @@ impl AgentSession for CodexSession {
         let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
         {
             let mut state = self.turn.lock().await;
-            // The token counts survive: they belong to the thread, and the CLI
-            // only re-sends them when they change.
-            let usage = state.usage.clone();
+            let thread_usage = state.thread_usage.clone();
             *state = TurnState {
                 id: Some(turn_id.clone()),
-                usage,
+                thread_usage,
                 ..TurnState::default()
             };
             usage::record_round_start(&mut state.usage);
@@ -1130,9 +1162,36 @@ impl AgentSession for CodexSession {
             // failure: the user pressed stop early, or late.
             return Ok(());
         };
+        let refused = match self
+            .call(
+                "turn/interrupt",
+                json!({ "threadId": thread, "turnId": codex_turn }),
+            )
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        // Being told the cancel named the wrong turn is not a failure to report
+        // to the user — it is the CLI handing over the right one. Reporting it
+        // instead is what left people pressing stop against a turn that had
+        // already been replaced, with nothing to show for it but an internal
+        // error.
+        let Some(actual) = active_turn_named_in(&refused.to_string()) else {
+            return Err(refused);
+        };
+        tracing::warn!(
+            stale = %codex_turn,
+            actual = %actual,
+            "codex rotated the upstream turn; cancelling the one it is running"
+        );
+        // Adopted, not just used once: everything else that is filtered by turn
+        // — completion, usage — is about this turn now, and leaving the old id
+        // bound would drop the end of the very turn being cancelled.
+        self.turn.lock().await.codex_turn = Some(actual.clone());
         self.call(
             "turn/interrupt",
-            json!({ "threadId": thread, "turnId": codex_turn }),
+            json!({ "threadId": thread, "turnId": actual }),
         )
         .await?;
         Ok(())
@@ -1147,10 +1206,8 @@ impl AgentSession for CodexSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 
@@ -1885,15 +1942,43 @@ async fn translate(
         }
         "turn/completed" if is_current_turn(params, &state) => finish(&mut state, params, events),
         "thread/tokenUsage/updated" if accepts_token_usage(params, &state) => {
-            if let Some(usage) = usage_in(params) {
-                let rounds = state.usage.llm_rounds;
-                let tool_out = state.usage.tool_output_tokens;
-                let previous = state.usage.clone();
-                state.usage = usage;
-                state.usage.llm_rounds = rounds;
-                state.usage.tool_output_tokens = tool_out;
-                usage::preserve_timing(&mut state.usage, &previous);
-                if let Some(turn_id) = state.id.clone() {
+            let Some(token_usage) = params.get("tokenUsage") else {
+                return;
+            };
+            let total = token_usage.get("total").map(token_counts);
+            let previous = state.thread_usage.clone();
+            let changed = total.as_ref().is_none_or(|total| {
+                previous.as_ref().is_none_or(|old| {
+                    total.input_tokens != old.input_tokens
+                        || total.output_tokens != old.output_tokens
+                        || total.cache_read_tokens != old.cache_read_tokens
+                })
+            });
+            state.thread_usage = total.clone().or(previous.clone());
+            if state.id.is_some() && changed {
+                let increment = token_usage
+                    .get("last")
+                    .and_then(|_| usage_in(params))
+                    .or_else(|| {
+                        total.map(|mut total| {
+                            if let Some(old) = previous {
+                                total.input_tokens =
+                                    total.input_tokens.saturating_sub(old.input_tokens);
+                                total.output_tokens =
+                                    total.output_tokens.saturating_sub(old.output_tokens);
+                                total.cache_read_tokens = total
+                                    .cache_read_tokens
+                                    .saturating_sub(old.cache_read_tokens);
+                            }
+                            total
+                        })
+                    });
+                if let Some(increment) = increment {
+                    state.usage.input_tokens += increment.input_tokens;
+                    state.usage.output_tokens += increment.output_tokens;
+                    state.usage.cache_read_tokens += increment.cache_read_tokens;
+                    state.usage.llm_rounds += 1;
+                    let turn_id = state.id.clone().expect("active turn checked");
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }
@@ -1911,13 +1996,19 @@ async fn translate(
         }
         "turn/plan/updated" if is_current_turn(params, &state) => plan(params, &mut state, events),
         "thread/compacted" if is_current_turn(params, &state) => {
-            if let Some(turn_id) = state.id.clone() {
-                state.unpaired_compactions += 1;
+            if state.unpaired_compaction == Some(CompactionSignal::Item) {
+                state.unpaired_compaction = None;
+            } else if state.unpaired_compaction.is_none() {
+                state.unpaired_compaction = Some(CompactionSignal::Thread);
+                let Some(turn_id) = state.id.clone() else {
+                    return;
+                };
                 let _ = events.send(SessionEvent::Item {
                     turn_id,
                     item: TimelineItem::Compaction {
                         id: format!("compaction-{}", uuid::Uuid::new_v4().simple()),
                         reason: "Codex pruned its own history to make room.".into(),
+                        received_at_ms: None,
                     },
                 });
             }
@@ -2031,16 +2122,20 @@ fn message_in(error: &Value) -> String {
 fn usage_in(params: &Value) -> Option<Usage> {
     let token_usage = params.get("tokenUsage")?;
     let source = token_usage
-        .get("total")
-        .or_else(|| token_usage.get("last"))?;
+        .get("last")
+        .or_else(|| token_usage.get("total"))?;
+    Some(token_counts(source))
+}
+
+fn token_counts(source: &Value) -> Usage {
     let count = |field: &str| source.get(field).and_then(Value::as_u64).unwrap_or(0);
-    Some(Usage {
+    Usage {
         input_tokens: count("inputTokens"),
         output_tokens: count("outputTokens"),
         cache_read_tokens: count("cachedInputTokens"),
         cache_write_tokens: 0,
         ..Usage::default()
-    })
+    }
 }
 
 /// Streamed text for an item, which may be the first anyone has heard of it.
@@ -2077,8 +2172,16 @@ fn stream(
     state.open.insert(item_id.to_string());
     let id = item_id.to_string();
     let item = match kind {
-        Kind::Assistant => TimelineItem::AssistantMessage { id, text: delta },
-        Kind::Reasoning => TimelineItem::Reasoning { id, text: delta },
+        Kind::Assistant => TimelineItem::AssistantMessage {
+            id,
+            text: delta,
+            received_at_ms: None,
+        },
+        Kind::Reasoning => TimelineItem::Reasoning {
+            id,
+            text: delta,
+            received_at_ms: None,
+        },
     };
     let _ = events.send(SessionEvent::Item { turn_id, item });
 }
@@ -2114,6 +2217,12 @@ fn item_frame(
             .unwrap_or_default()
             .to_string()
     };
+
+    if kind != "contextCompaction" {
+        // Once another item begins, an unpaired signal belonged to an older
+        // compaction that this Codex build reported through only one channel.
+        state.unpaired_compaction = None;
+    }
     let emit = |item: TimelineItem| {
         let _ = events.send(SessionEvent::Item {
             turn_id: turn_id.clone(),
@@ -2130,21 +2239,24 @@ fn item_frame(
         // not be mistaken for a new one and replace the whole text with itself.
         "agentMessage" => {
             state.open.insert(id.clone());
+            if settled {
+                usage::record_round_start(&mut state.usage);
+                // Progress before the item, so the message that completes a
+                // round is itself attributed to it.
+                usage::emit_progress(events, &turn_id, &state.usage);
+            }
             emit(TimelineItem::AssistantMessage {
                 id,
                 text: text_of("text"),
+                received_at_ms: None,
             });
-            if settled {
-                state.usage.llm_rounds += 1;
-                usage::record_round_start(&mut state.usage);
-                usage::emit_progress(events, &turn_id, &state.usage);
-            }
         }
         "reasoning" => {
             state.open.insert(id.clone());
             emit(TimelineItem::Reasoning {
                 id,
                 text: reasoning_text(item),
+                received_at_ms: None,
             });
         }
         "commandExecution" => emit(TimelineItem::ToolCall {
@@ -2163,25 +2275,95 @@ fn item_frame(
                     .and_then(Value::as_i64)
                     .map(|code| code as i32),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         "fileChange" => emit(TimelineItem::ToolCall {
             id,
             name: "Edit".into(),
             status: tool_status(item, settled),
             detail: edit_detail(item),
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         "mcpToolCall" => {
             let tool = text_of("tool");
             let server = text_of("server");
+            let name = if server.is_empty() {
+                tool
+            } else {
+                format!("{server}.{tool}")
+            };
+            let images = mcp_result_images(item, &name);
             emit(TimelineItem::ToolCall {
                 id,
-                name: if server.is_empty() {
-                    tool
-                } else {
-                    format!("{server}.{tool}")
-                },
+                name,
                 status: tool_status(item, settled),
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
+                images,
+                started_at_ms: None,
+                finished_at_ms: None,
+            });
+        }
+        // The agent opened a local image. Only the path crosses the wire — the
+        // daemon reads the workspace file for the thumbnail, so the row stays
+        // a path reference rather than a blob.
+        "imageView" => {
+            let path = text_of("path");
+            emit(TimelineItem::ToolCall {
+                id,
+                name: "View image".into(),
+                status: tool_status(item, settled),
+                detail: ToolCallDetail::Overview {
+                    tool_kind: ToolKind::Read,
+                    overview: path.clone(),
+                    input: path.clone(),
+                    output: String::new(),
+                },
+                images: vec![ToolImage {
+                    alt: format!("View image: {path}"),
+                    mime: crate::session::images::mime_from_path(&path),
+                    data_base64: None,
+                    thumb: None,
+                    path: Some(path),
+                }],
+                started_at_ms: None,
+                finished_at_ms: None,
+            });
+        }
+        // Native image generation. The picture crosses the wire as raw base64
+        // in `result` with no mime and an extensionless `savedPath`, so the
+        // mime comes from the payload signature. Treated as a produced image:
+        // no workspace path, the daemon moves the payload to the blob layer.
+        "imageGeneration" => {
+            let (mime, data) = match item.get("result").and_then(Value::as_str) {
+                Some(raw) => split_image_payload(raw),
+                None => (None, None),
+            };
+            let alt = text_of("revisedPrompt");
+            emit(TimelineItem::ToolCall {
+                id,
+                name: "Generate image".into(),
+                status: tool_status(item, settled),
+                detail: ToolCallDetail::Unknown { raw: item.clone() },
+                images: match data {
+                    Some(data_base64) => vec![ToolImage {
+                        alt: if alt.is_empty() {
+                            "Generate image".into()
+                        } else {
+                            alt
+                        },
+                        mime: mime.unwrap_or_else(|| "image/png".into()),
+                        data_base64: Some(data_base64),
+                        thumb: None,
+                        path: None,
+                    }],
+                    None => vec![],
+                },
+                started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         "webSearch" => emit(TimelineItem::ToolCall {
@@ -2193,6 +2375,9 @@ fn item_frame(
                 // It reports what it searched for, not what it found.
                 matches: Vec::new(),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         // A sub-agent this turn dispatched. The card says who was asked and
         // what for; its own steps arrive on a thread of their own, which is not
@@ -2207,6 +2392,9 @@ fn item_frame(
                 prompt: text_of("prompt"),
                 items: Vec::new(),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
         "subAgentActivity" => {
             let path = text_of("agentPath");
@@ -2226,19 +2414,28 @@ fn item_frame(
                     _ => ToolStatus::Running,
                 },
                 detail: ToolCallDetail::Unknown { raw: item.clone() },
+                images: vec![],
+                started_at_ms: None,
+                finished_at_ms: None,
             });
         }
         "contextCompaction" => {
-            // The same squeeze already produced a marker via `thread/compacted`;
-            // only emit when no notification is waiting to be paired.
-            if state.unpaired_compactions > 0 {
-                state.unpaired_compactions -= 1;
-            } else {
-                emit(TimelineItem::Compaction {
-                    id,
-                    reason: "Codex pruned its own history to make room.".into(),
-                });
+            // `item/started` announces work that has not yet made a durable
+            // boundary. Waiting for completion also prevents the start and
+            // completion frames with the same id from closing two trunks.
+            if !settled || !state.completed_compactions.insert(id.clone()) {
+                return;
             }
+            if state.unpaired_compaction == Some(CompactionSignal::Thread) {
+                state.unpaired_compaction = None;
+                return;
+            }
+            state.unpaired_compaction = Some(CompactionSignal::Item);
+            emit(TimelineItem::Compaction {
+                id,
+                reason: "Codex pruned its own history to make room.".into(),
+                received_at_ms: None,
+            });
         }
         "error" => emit(TimelineItem::Error {
             id,
@@ -2256,6 +2453,9 @@ fn item_frame(
             name: other.to_string(),
             status: tool_status(item, settled),
             detail: ToolCallDetail::Unknown { raw: item.clone() },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }),
     }
 }
@@ -2288,14 +2488,62 @@ fn reasoning_text(item: &Value) -> String {
 /// A command as this CLI reports it: one string, or the argv it will run.
 fn command_text(command: Option<&Value>) -> String {
     match command {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
+        Some(Value::String(text)) => unwrap_shell_command(text),
+        Some(Value::Array(parts)) => {
+            let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+            if parts.len() >= 3 && is_shell_bin(parts[0]) && is_shell_flag(parts[1]) {
+                return parts[2..].join(" ");
+            }
+            unwrap_shell_command(&parts.join(" "))
+        }
         _ => String::new(),
     }
+}
+
+fn is_shell_bin(name: &str) -> bool {
+    matches!(
+        name.rsplit('/').next().unwrap_or(name),
+        "bash" | "sh" | "dash" | "zsh"
+    )
+}
+
+fn is_shell_flag(flag: &str) -> bool {
+    matches!(flag, "-c" | "-lc" | "-cl")
+}
+
+fn unwrap_shell_command(command: &str) -> String {
+    let trimmed = command.trim();
+    let mut rest = trimmed;
+    for prefix in [
+        "/bin/bash -lc ",
+        "/bin/bash -c ",
+        "/usr/bin/bash -lc ",
+        "/usr/bin/bash -c ",
+        "bash -lc ",
+        "bash -c ",
+        "/bin/sh -lc ",
+        "/bin/sh -c ",
+        "sh -lc ",
+        "sh -c ",
+    ] {
+        if let Some(inner) = trimmed.strip_prefix(prefix) {
+            rest = inner;
+            break;
+        }
+    }
+    unquote_once(rest)
+}
+
+fn unquote_once(text: &str) -> String {
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2
+        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+    {
+        return text[1..text.len() - 1].to_string();
+    }
+    text.to_string()
 }
 
 /// The edit a `fileChange` item describes.
@@ -2379,6 +2627,51 @@ fn plan(params: &Value, state: &mut TurnState, events: &broadcast::Sender<Sessio
         turn_id,
         item: TimelineItem::Todo { id, items },
     });
+}
+
+/// MCP tool results carry content blocks; the image ones would otherwise be
+/// dropped by the text-only detail path. They are produced bytes, never
+/// workspace reads, so no source path is attached.
+/// Splits an image payload into (mime, raw base64). Accepts both a bare
+/// base64 string (mime sniffed from the magic prefix) and a `data:` URL
+/// (mime taken from the mediatype).
+fn split_image_payload(raw: &str) -> (Option<String>, Option<String>) {
+    if let Some(rest) = raw.strip_prefix("data:") {
+        if let Some((mediatype, data)) = rest.split_once(";base64,") {
+            return (Some(mediatype.to_string()), Some(data.to_string()));
+        }
+        return (None, None);
+    }
+    (
+        crate::session::images::sniff_image_mime_base64(raw),
+        Some(raw.to_string()),
+    )
+}
+
+fn mcp_result_images(item: &Value, name: &str) -> Vec<ToolImage> {
+    item.get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("image"))
+                .filter_map(|block| {
+                    Some(ToolImage {
+                        alt: name.to_string(),
+                        mime: block
+                            .get("mimeType")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_string(),
+                        data_base64: Some(block.get("data").and_then(Value::as_str)?.to_string()),
+                        thumb: None,
+                        path: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2720,15 +3013,26 @@ mod tests {
         )
         .await;
 
+        // Token accounting reports as it goes, so a `TurnProgress` can land
+        // between any two of these. This case is about what a child thread may
+        // and may not do to the root turn; the cadence of usage reporting is
+        // another case's business, and asserting it here only means this one
+        // fails the next time that cadence changes.
+        let mut next = || loop {
+            match seen.try_recv().expect("the root turn to keep answering") {
+                SessionEvent::TurnProgress { .. } => continue,
+                event => return event,
+            }
+        };
         assert!(matches!(
-            seen.try_recv().expect("the root answer started"),
+            next(),
             SessionEvent::Item {
                 ref turn_id,
-                item: TimelineItem::AssistantMessage { ref id, ref text },
+                item: TimelineItem::AssistantMessage { ref id, ref text, received_at_ms: None },
             } if turn_id == "t1" && id == "root-final" && text.is_empty()
         ));
         assert!(matches!(
-            seen.try_recv().expect("the root answer delta"),
+            next(),
             SessionEvent::ItemDelta {
                 turn_id,
                 item_id,
@@ -2736,16 +3040,16 @@ mod tests {
             } if turn_id == "t1" && item_id == "root-final" && delta == "Done."
         ));
         assert!(matches!(
-            seen.try_recv().expect("the root answer completed"),
+            next(),
             SessionEvent::Item {
                 ref turn_id,
-                item: TimelineItem::AssistantMessage { ref id, ref text },
+                item: TimelineItem::AssistantMessage { ref id, ref text, received_at_ms: None },
             } if turn_id == "t1" && id == "root-final" && text == "Done."
         ));
-        loop {
-            match seen.try_recv().expect("progress or completion") {
-                SessionEvent::TurnProgress { .. } => continue,
-                other => {
+        {
+            {
+                let other = next();
+                {
                     assert!(matches!(
                         other,
                         SessionEvent::TurnCompleted {
@@ -2759,7 +3063,6 @@ mod tests {
                             && usage.output_tokens == 13
                             && fork_checkpoint.as_deref() == Some("root-turn")
                     ));
-                    break;
                 }
             }
         }
@@ -2911,9 +3214,9 @@ mod tests {
     }
 
     /// Resume may replay the root thread's last usage while no turn is active.
-    /// Keeping it preserves the adapter's existing cross-turn usage behavior.
+    /// It must not become usage for a later empty turn.
     #[tokio::test]
-    async fn idle_root_usage_is_kept_for_the_next_completed_turn() {
+    async fn idle_root_usage_does_not_count_toward_the_next_turn() {
         let (events, mut seen) = broadcast::channel(4);
         let turn = Mutex::new(TurnState::default());
         translate(
@@ -2939,9 +3242,9 @@ mod tests {
         ));
         {
             let mut state = turn.lock().await;
-            assert_eq!(state.usage.input_tokens, 120);
-            assert_eq!(state.usage.cache_read_tokens, 40);
-            assert_eq!(state.usage.output_tokens, 7);
+            assert_eq!(state.usage.input_tokens, 0);
+            assert_eq!(state.usage.cache_read_tokens, 0);
+            assert_eq!(state.usage.output_tokens, 0);
             let usage = state.usage.clone();
             *state = TurnState {
                 id: Some("next-genehub-turn".into()),
@@ -2975,9 +3278,9 @@ mod tests {
         assert!(matches!(
             seen.try_recv().expect("the next completed turn"),
             SessionEvent::TurnCompleted { ref usage, .. }
-                if usage.input_tokens == 120
-                    && usage.cache_read_tokens == 40
-                    && usage.output_tokens == 7
+                if usage.input_tokens == 0
+                    && usage.cache_read_tokens == 0
+                    && usage.output_tokens == 0
         ));
     }
 
@@ -3021,7 +3324,8 @@ mod tests {
         assert!(matches!(
             seen.try_recv().expect("the root collaboration summary"),
             SessionEvent::Item {
-                item: TimelineItem::ToolCall { ref name, .. },
+                item: TimelineItem::ToolCall { ref name, ..
+        },
                 ..
             } if name == "Main agent"
         ));
@@ -3132,7 +3436,12 @@ mod tests {
 
         match seen.try_recv().expect("an item") {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert_eq!(id, "item-1");
@@ -3456,6 +3765,27 @@ mod tests {
     }
 
     #[test]
+    fn a_rotated_turn_is_recognised_from_the_refusal() {
+        // Verbatim from fb_VllHtElqFlpW, where two stops in a row failed this
+        // way and the conversation could not be stopped at all.
+        assert_eq!(
+            active_turn_named_in(
+                "turn/interrupt failed: expected active turn id \
+                 01a04cf4-1611-77c3-ac28-639c98eeb45d but found \
+                 79567dec-d147-4761-8cf2-be6401c889bd"
+            )
+            .as_deref(),
+            Some("79567dec-d147-4761-8cf2-be6401c889bd")
+        );
+        // A refusal for any other reason must be reported, not retried against
+        // a turn id invented out of its wording.
+        assert_eq!(
+            active_turn_named_in("turn/interrupt failed: no active turn"),
+            None
+        );
+    }
+
+    #[test]
     fn an_archived_thread_is_recognised_from_the_error_wording() {
         assert!(archived_thread(
             "session thread_abc is archived. Run `codex unarchive thread_abc`",
@@ -3492,5 +3822,86 @@ mod tests {
         assert_eq!(decode_base64("aGk=").expect("decodes"), b"hi");
         assert_eq!(decode_base64("YQ==").expect("decodes"), b"a");
         assert!(decode_base64("!!!").is_err());
+    }
+
+    /// Native image generation hands the picture over as raw base64 in
+    /// `result`; it must surface as a produced image, not vanish into an
+    /// unknown-tool payload.
+    #[test]
+    fn image_generation_result_becomes_a_produced_tool_image() {
+        let (events, mut seen) = broadcast::channel(8);
+        let mut state = state();
+        let item = json!({
+            "type": "imageGeneration",
+            "id": "exec-1",
+            "status": "completed",
+            "result": "iVBORw0KGgoAAAANSUhEUg==",
+            "revisedPrompt": "a landscape",
+            "savedPath": "/root/.codex/generated_images/t/exec-1",
+        });
+
+        item_frame(&item, true, &mut state, &events);
+
+        match seen.try_recv().expect("a tool call") {
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall { name, images, .. },
+                ..
+            } => {
+                assert_eq!(name, "Generate image");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].alt, "a landscape");
+                assert_eq!(images[0].mime, "image/png");
+                assert!(images[0].path.is_none());
+                assert_eq!(
+                    images[0].data_base64.as_deref(),
+                    Some("iVBORw0KGgoAAAANSUhEUg==")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_image_payload_accepts_data_urls_and_sniffs_bare_base64() {
+        assert_eq!(
+            split_image_payload("data:image/webp;base64,UklGRhI="),
+            (Some("image/webp".into()), Some("UklGRhI=".into()))
+        );
+        assert_eq!(
+            split_image_payload("/9j/4AAQ"),
+            (Some("image/jpeg".into()), Some("/9j/4AAQ".into()))
+        );
+        assert_eq!(split_image_payload("abcdef"), (None, Some("abcdef".into())));
+        assert_eq!(split_image_payload("data:broken"), (None, None));
+    }
+
+    #[test]
+    fn mcp_image_content_becomes_produced_tool_images() {
+        let item = json!({
+            "result": {"content": [
+                {"type": "text", "text": "ok"},
+                {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+            ]},
+        });
+        let images = mcp_result_images(&item, "shot.screenshot");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].alt, "shot.screenshot");
+        assert_eq!(images[0].mime, "image/png");
+        assert!(images[0].path.is_none());
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
+        assert!(mcp_result_images(&json!({"result": {"content": []}}), "t").is_empty());
+    }
+
+    #[test]
+    fn command_text_unwraps_a_bash_lc_wrapper() {
+        assert_eq!(
+            command_text(Some(&json!("/bin/bash -lc \"sed -n '1,20p' README.md\""))),
+            "sed -n '1,20p' README.md"
+        );
+        assert_eq!(
+            command_text(Some(&json!(["/bin/bash", "-lc", "git status"]))),
+            "git status"
+        );
+        assert_eq!(command_text(Some(&json!("ls -la"))), "ls -la");
     }
 }

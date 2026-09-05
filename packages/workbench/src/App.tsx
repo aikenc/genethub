@@ -938,6 +938,7 @@ export function App({
                     ) : null}
                     <Composer
                       phase={phase}
+                      lastActivityAtMs={session?.lastActivityAtMs ?? null}
                       disabled={importedReadOnly}
                       disabledReason={
                         importedReadOnly

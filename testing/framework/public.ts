@@ -42,6 +42,7 @@ export {
 } from "./drivers/network-link.ts";
 export { daemonEndpoint, type DaemonEndpoint, type DaemonHandle } from "./drivers/daemon.ts";
 export { startRelay, type RelayHandle } from "./drivers/relay.ts";
+export { startHub, type HubBrowser, type HubHandle } from "./drivers/hub.ts";
 export { data } from "./builders/index.ts";
 export { compareQueueTails } from "./queue.ts";
 export { qualificationReasons } from "../policies/gates.ts";
@@ -70,3 +71,5 @@ export function defineSpecialty(input: DefineInput, run: (ctx: CaseContext) => P
 export function defineE2e(input: DefineInput, run: (ctx: CaseContext) => Promise<void>): void {
   defineE2eBase(input, (ctx) => run(ctx as CaseContext), callerFile());
 }
+
+export { registerScriptedCodex } from "./builders/codex.ts";

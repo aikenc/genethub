@@ -2,6 +2,7 @@ node_modules/
 dist/
 data/
 target/
+target-dev/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

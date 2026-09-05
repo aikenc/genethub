@@ -1870,6 +1870,7 @@ mod tests {
             unsupported: None,
             lineage: None,
             imported: None,
+            last_activity_at_ms: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
-    SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
+    SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
+    Usage,
 };
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex};
@@ -133,7 +134,8 @@ impl AgentAdapter for OpenCodeAdapter {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
 
-        tokio::spawn(stream_events(
+        let tasks = super::SessionTasks::default();
+        tasks.spawn(stream_events(
             http.clone(),
             base.clone(),
             remote_session.clone(),
@@ -142,6 +144,8 @@ impl AgentAdapter for OpenCodeAdapter {
         ));
 
         Ok(Box::new(OpenCodeSession {
+            tasks,
+            _chatter: chatter,
             http,
             base,
             remote_session,
@@ -260,7 +264,11 @@ impl AgentAdapter for OpenCodeAdapter {
                         text,
                         attachments: Vec::new(),
                     }),
-                    Some("assistant") => items.push(TimelineItem::AssistantMessage { id, text }),
+                    Some("assistant") => items.push(TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    }),
                     _ => {}
                 }
             }
@@ -369,6 +377,8 @@ impl TurnState {
 }
 
 struct OpenCodeSession {
+    tasks: super::SessionTasks,
+    _chatter: Chatter,
     http: crate::http::Client,
     base: String,
     remote_session: String,
@@ -418,7 +428,7 @@ impl AgentSession for OpenCodeSession {
         // that can still be in flight when this returns, which on a fast turn
         // means the reply would otherwise arrive after the turn was declared
         // over — or never.
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let outcome = http.post(url).json(&body).send().await;
             let event = match outcome {
                 Ok(response) if response.status().is_success() => {
@@ -508,12 +518,8 @@ impl AgentSession for OpenCodeSession {
     }
 
     async fn close(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            // The tree: on Windows this handle is the `.cmd` shim, and the HTTP
-            // server with the open port is its child.
-            super::kill_tree(&mut child).await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 
@@ -875,9 +881,17 @@ fn emit_part(
                 usage::record_visible_output(&mut state.usage, &text);
             }
             if part_type == "reasoning" {
-                TimelineItem::Reasoning { id: item_id, text }
+                TimelineItem::Reasoning {
+                    id: item_id,
+                    text,
+                    received_at_ms: None,
+                }
             } else {
-                TimelineItem::AssistantMessage { id: item_id, text }
+                TimelineItem::AssistantMessage {
+                    id: item_id,
+                    text,
+                    received_at_ms: None,
+                }
             }
         }
         "compaction" => {
@@ -895,6 +909,7 @@ fn emit_part(
             TimelineItem::Compaction {
                 id: item_id,
                 reason: format!("OpenCode compressed its context ({trigger})."),
+                received_at_ms: None,
             }
         }
         "tool" => {
@@ -916,14 +931,64 @@ fn emit_part(
             };
             TimelineItem::ToolCall {
                 id: item_id,
+                images: images_from_part(&name, part),
                 name: name.clone(),
                 status,
                 detail: detail_from_part(&name, part),
+                started_at_ms: None,
+                finished_at_ms: None,
             }
         }
         _ => return,
     };
     let _ = events.send(SessionEvent::Item { turn_id, item });
+}
+
+/// Image output rides a tool state's `attachments` as file parts with data
+/// URLs (screenshot tools and the like). A `read` tool's `filePath` input is
+/// the source path; everything else is treated as produced bytes.
+fn images_from_part(name: &str, part: &Value) -> Vec<ToolImage> {
+    let state = part.get("state").unwrap_or(&Value::Null);
+    let read_path = (name == "read")
+        .then(|| {
+            state
+                .get("input")
+                .and_then(|input| input.get("filePath"))
+                .and_then(Value::as_str)
+        })
+        .flatten();
+    state
+        .get("attachments")
+        .and_then(Value::as_array)
+        .map(|attachments| {
+            attachments
+                .iter()
+                .filter(|part| {
+                    part.get("mime")
+                        .and_then(Value::as_str)
+                        .is_some_and(|mime| mime.starts_with("image/"))
+                })
+                .filter_map(|part| {
+                    let url = part.get("url").and_then(Value::as_str)?;
+                    let data = url.strip_prefix("data:")?.split_once(";base64,")?.1;
+                    Some(ToolImage {
+                        alt: match read_path {
+                            Some(path) => format!("{name}: {path}"),
+                            None => name.to_string(),
+                        },
+                        mime: part
+                            .get("mime")
+                            .and_then(Value::as_str)
+                            .unwrap_or("image/png")
+                            .to_string(),
+                        data_base64: Some(data.to_string()),
+                        thumb: None,
+                        path: read_path.map(str::to_string),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Builds the `parts` array for `POST /session/{id}/message`. Only inline
@@ -1250,7 +1315,12 @@ mod tests {
             .iter()
             .map(|event| match event {
                 SessionEvent::Item {
-                    item: TimelineItem::AssistantMessage { id, text },
+                    item:
+                        TimelineItem::AssistantMessage {
+                            id,
+                            text,
+                            received_at_ms: None,
+                        },
                     ..
                 } => (id.clone(), text.clone()),
                 other => panic!("unexpected {other:?}"),
@@ -1417,5 +1487,25 @@ mod tests {
             })),
             Some("ses_abc".into())
         );
+    }
+
+    #[test]
+    fn opencode_image_attachments_become_tool_images() {
+        let part = json!({
+            "tool": "read",
+            "state": {
+                "status": "completed",
+                "input": {"filePath": "docs/diagram.png"},
+                "attachments": [
+                    {"type": "file", "mime": "image/png", "url": "data:image/png;base64,aGk="},
+                    {"type": "file", "mime": "text/plain", "url": "data:text/plain;base64,bm8="},
+                ],
+            },
+        });
+        let images = images_from_part("read", &part);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].path.as_deref(), Some("docs/diagram.png"));
+        assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
+        assert!(images_from_part("shell", &json!({"state": {"status": "completed"}})).is_empty());
     }
 }
