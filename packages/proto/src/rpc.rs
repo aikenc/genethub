@@ -211,6 +211,12 @@ pub enum Request {
     /// Lists the versioned Bootstrap Packs available in this daemon build.
     #[serde(rename = "project.bootstrap.list")]
     BootstrapPackList,
+    /// Presents one daemon-authored project mutation plan to the Human and
+    /// waits for their answer. A SessionController may request this card but
+    /// cannot answer it; approval authority remains Human-only and the
+    /// resulting grant never crosses this API.
+    #[serde(rename = "project.approval.request", rename_all = "camelCase")]
+    ProjectApprovalRequest { challenge_id: String },
     /// The direct child Spaces this one may dispatch to.
     ///
     /// Refused unless the Space mounts an enabled `executor`, and never

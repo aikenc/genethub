@@ -967,7 +967,7 @@ actionId: string | null,
 /**
  * CAS value copied from the preceding plan.
  */
-expectedRevision: number | null, } } | { "type": "project.bootstrap.list" } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+expectedRevision: number | null, } } | { "type": "project.bootstrap.list" } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */

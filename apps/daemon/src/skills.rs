@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn pm_bootstrap_uses_the_running_agents_native_structured_question() {
+    fn pm_bootstrap_uses_the_session_bound_human_approval_request() {
         let root = temp_dir("pm-bootstrap-interaction");
         let skills = load(&root);
         let skill = skills
@@ -347,11 +347,12 @@ mod tests {
             .expect("PM bootstrap built-in");
         let body = std::fs::read_to_string(&skill.file_path).unwrap();
 
-        assert!(body.contains("request_user_input"));
-        assert!(body.contains("Cursor"));
-        assert!(body.contains("AskQuestion"));
-        assert!(body.contains("exactly that challenge id"));
+        assert!(body.contains("space approval request --challenge <challengeId>"));
+        assert!(body.contains("only requests approval"));
+        assert!(body.contains("Only the authenticated Human response"));
         assert!(body.contains("ordinary chat reply"));
+        assert!(!body.contains("request_user_input"));
+        assert!(!body.contains("AskQuestion"));
     }
 
     #[test]

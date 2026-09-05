@@ -7,7 +7,7 @@ description: Detect when a user wants GeneHub to take over an ordinary Workspace
 
 Use this Skill before giving generic process advice when the user asks to create or manage a project, build a team or pipeline, make a game, add a substantial feature, or otherwise expects PM-driven delivery.
 
-The daemon is the authority. This Skill only discovers facts, asks the Human through the running Agent's native structured-question interaction, and invokes typed CLI actions. Tool names differ by Agent: GeneHub's built-in Agent and Codex expose `request_user_input`; Cursor exposes `AskQuestion` (carried as `cursor/ask_question` over ACP). Use the structured-question tool that this runtime actually offers; do not require a tool merely because another Agent uses that name. Use exactly `$GENEHUB_CLI`; if it is unavailable, stop and explain that this Session has no GeneHub CLI binding.
+The daemon is the authority. This Skill only discovers facts, asks the Human through GeneHub's existing Session approval interaction, and invokes typed CLI actions. Use exactly `$GENEHUB_CLI`; if it is unavailable, stop and explain that this Session has no GeneHub CLI binding. Do not depend on an Agent-specific question tool: some runtimes do not expose one to the Agent even when their transport can render questions.
 
 First inspect the current Space and discover packs:
 
@@ -26,11 +26,15 @@ If it is an ordinary Workspace and a discovered Pack clearly matches the intent,
 
 If the user has not supplied enough information to choose a Pack or identify the main deliverable, ask only the single most important clarification. The request “搭建一套管线，用于开发小游戏。你会这么做？” is a PM-project intent: inspect and plan or ask one focused gameplay question; never answer it with only generic CI advice.
 
-For a non-current plan, parse its JSON result and find `approval.challengeId`. Then call the runtime's native structured-question tool as the only tool call in that assistant step. Use `request_user_input` when that is the offered name; in Cursor use `AskQuestion`. Submit exactly one question and set its `id` to exactly that challenge id. The prompt and options may be concise because the daemon replaces them with its authored plan summary and fixed approve/reject choices.
+For a non-current plan, parse its JSON result and find `approval.challengeId`. Present that exact daemon-authored challenge through the session-bound CLI:
 
-Never call `session.respondPermission`, any permission response API, or a shell command that attempts to approve the request. Never interpret an ordinary chat reply such as “yes”, “确认” or “可以” as authorization. A plan/create-plan tool is not a substitute for a structured question because it cannot carry the daemon challenge as the question id. If this Agent runtime offers no native structured-question interaction at all, explain that it cannot obtain the required approval and stop without changing files.
+```text
+"$GENEHUB_CLI" space approval request --challenge <challengeId>
+```
 
-After the Human response resumes this same Session, use the plan's exact `planDigest` and `expectedRevision`, and choose one stable action id containing only letters, digits, `_` or `-`:
+This command only requests approval and deliberately waits. It displays the existing `PlanApproval` card in this Session; it cannot select an answer or create a grant. Only the authenticated Human response releases the command. Never call `session.respondPermission`, any permission response API, or a shell command that attempts to approve the request. Never interpret an ordinary chat reply such as “yes”, “确认” or “可以” as authorization.
+
+Only after `space approval request` returns success, use the plan's exact `planDigest` and `expectedRevision`, and choose one stable action id containing only letters, digits, `_` or `-`:
 
 ```text
 "$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest <planDigest> --expected-revision <expectedRevision> --action-id <stableActionId>
@@ -53,6 +57,6 @@ When the user asks this Session to add, enable, disable or remove a Component, c
 "$GENEHUB_CLI" space lifecycle set --workspace <id> --lifecycle <value> --revision <n> --plan
 ```
 
-Pass the returned `approval.challengeId` through the same sole native structured-question call described above. After the Human approves and this Session resumes, repeat the exact command without `--plan` and add the returned `--plan-digest`, the same `--revision`, and one stable `--action-id`. Never change the operation between plan and apply. A copied command, an ordinary chat “yes”, or an apply from another Session has no authority. If the daemon reports an active Session, Run, lease, cycle, cross-project Parent or CAS conflict, report those structured conflict objects and stop; do not work around the guard.
+Pass the returned `approval.challengeId` through the same `space approval request` command described above. After it returns success, repeat the exact command without `--plan` and add the returned `--plan-digest`, the same `--revision`, and one stable `--action-id`. Never change the operation between plan and apply. A copied command, an ordinary chat “yes”, or an apply from another Session has no authority. If the daemon reports an active Session, Run, lease, cycle, cross-project Parent or CAS conflict, report those structured conflict objects and stop; do not work around the guard.
 
 This Skill only explains the safe protocol. Parent validity, Builder verification, active-resource guards, compare-and-set, and the one-use grant remain daemon decisions. A user clicking the same controls in Workspace details is already making an authenticated Human action and does not need a second chat approval.

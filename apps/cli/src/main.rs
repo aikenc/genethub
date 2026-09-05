@@ -217,6 +217,8 @@ pub fn usage() -> i32 {
   genet space bootstrap plan --pack <id> [--agent <id>] [--model <id>]
   genet space bootstrap apply --pack <id> --plan-digest <digest> --action-id <id> --expected-revision <n> [--agent <id>] [--model <id>]
                                     install a versioned project team and workflow pack
+  genet space approval request --challenge <id>
+                                    ask the Human to approve one daemon-authored plan; never approves it
   genet session components <id>     which responsibilities are live in this session
   genet session flow <id>           read an Executor Session's structured DCG timeline
   genet session send <id> \"<text>\"  continue a session
