@@ -496,6 +496,25 @@ function endsATurn(type: SequencedEvent["event"]["type"]): boolean {
   return type === "turnCompleted" || type === "turnFailed" || type === "turnCanceled";
 }
 
+/**
+ * A background Session may finish while this browser has no live subscription
+ * to it. PM bootstrap can change the AgentSpace catalog during that turn, so a
+ * transition observed by the cheap Session poll is the one useful signal to
+ * refresh the more expensive Workspace catalog. Stable idle Sessions must not
+ * turn the two-second poll into a Workspace poll as well.
+ */
+function polledTurnFinished(
+  previous: SessionSummary[],
+  current: SessionSummary[],
+): boolean {
+  const currentById = new Map(current.map((session) => [session.id, session]));
+  return previous.some((session) => {
+    if (session.status !== "running" && session.status !== "waiting") return false;
+    const next = currentById.get(session.id);
+    return !next || (next.status !== "running" && next.status !== "waiting");
+  });
+}
+
 function changesTheRoundLayer(event: SequencedEvent): boolean {
   switch (event.event.type) {
     case "turnCompleted":
@@ -759,7 +778,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async refreshSessions() {
     const client = get().client;
     if (!client) return;
-    await loadSessions(client, set).catch(unattended(client, get, set));
+    const previous = get().sessions;
+    const sessions = await loadSessions(client, set).catch(unattended(client, get, set));
+    if (get().client === client && sessions && polledTurnFinished(previous, sessions)) {
+      await loadWorkspaces(client, set).catch(unattended(client, get, set));
+    }
   },
 
   async refreshWorkspaces() {

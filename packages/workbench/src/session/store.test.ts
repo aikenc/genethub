@@ -1,4 +1,4 @@
-import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
+import type { AgentInfo, SequencedEvent, SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
@@ -594,6 +594,83 @@ describe("live session status in the sidebar", () => {
       },
     });
     expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
+  });
+
+  it("refreshes the AgentSpace tree when a polled background turn finishes", async () => {
+    const running: SessionSummary = { ...SESSION, status: "running" };
+    const root: WorkspaceInfo = {
+      id: "w1",
+      name: "game",
+      root: "/tmp/game",
+      isGitRepo: true,
+      folders: [{ name: "game", root: "/tmp/game", rootHandle: "r_game" }],
+      agentSpace: {
+        revision: 1,
+        lifecycle: "persistent",
+        builderLockDigest: "sha256:game",
+        components: [{ componentId: "pm", enabled: true, schemaVersion: 1 }],
+        guidance: [],
+      },
+    };
+    const executor: WorkspaceInfo = {
+      id: "w2",
+      name: "executor",
+      root: "/tmp/game/spaces/executor",
+      isGitRepo: false,
+      folders: [
+        {
+          name: "executor",
+          root: "/tmp/game/spaces/executor",
+          rootHandle: "r_executor",
+        },
+      ],
+      agentSpace: {
+        revision: 1,
+        parentWorkspaceId: root.id,
+        lifecycle: "pooled",
+        builderLockDigest: "sha256:executor",
+        components: [{ componentId: "executor", enabled: true, schemaVersion: 1 }],
+        guidance: [],
+      },
+    };
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [{ ...running, status: "idle" }] };
+        }
+        if (request.type === "workspace.list") {
+          return { type: "workspaces", data: [root, executor] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [running], workspaces: [root] });
+
+    await useWorkbench.getState().refreshSessions();
+
+    expect(calls).toEqual(["session.list", "workspace.list"]);
+    expect(useWorkbench.getState().workspaces.map(({ id }) => id)).toEqual(["w1", "w2"]);
+  });
+
+  it("does not turn stable Session polling into AgentSpace polling", async () => {
+    const idle: SessionSummary = { ...SESSION, status: "idle" };
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [idle] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [idle] });
+
+    await useWorkbench.getState().refreshSessions();
+
+    expect(calls).toEqual(["session.list"]);
   });
 });
 
