@@ -1,16 +1,15 @@
 import type { InteractionAnswer, PermissionOutcome, PermissionRequest } from "@genehub/proto";
 import { useEffect, useMemo, useState } from "react";
 
-/**
- * A stopped interaction sits at the bottom of the timeline rather than in a
- * modal. No Agent process or live browser connection is kept waiting for it.
- */
+/** A durable Human interaction sits beside the composer rather than in a modal. */
 export function PermissionCard({
   request,
   onAnswer,
+  submitting = false,
 }: {
   request: PermissionRequest;
   onAnswer(outcome: PermissionOutcome): void;
+  submitting?: boolean;
 }) {
   const [selected, setSelected] = useState<Record<string, string[]>>({});
   const [freeform, setFreeform] = useState<Record<string, string>>({});
@@ -72,7 +71,7 @@ export function PermissionCard({
           className="mt-3 space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
-            if (complete) onAnswer({ outcome: "answered", answers });
+            if (complete && !submitting) onAnswer({ outcome: "answered", answers });
           }}
         >
           {request.questions?.map((question) => (
@@ -120,13 +119,14 @@ export function PermissionCard({
           <div className="flex flex-wrap gap-3">
             <button
               type="submit"
-              disabled={!complete}
+              disabled={!complete || submitting}
               className="min-h-11 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
             >
               提交答案
             </button>
             <button
               type="button"
+              disabled={submitting}
               className="min-h-11 rounded-lg border border-line-strong px-4 py-2.5 text-sm font-medium text-muted hover:text-fg"
               onClick={() => onAnswer({ outcome: "canceled" })}
             >
@@ -140,10 +140,11 @@ export function PermissionCard({
             <button
               key={option.id}
               type="button"
+              disabled={submitting}
               className={
                 option.kind === "reject"
-                  ? "min-h-11 rounded-lg border border-line-strong px-4 py-2.5 text-sm font-medium hover:border-danger hover:text-danger"
-                  : "min-h-11 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white"
+                  ? "min-h-11 rounded-lg border border-line-strong px-4 py-2.5 text-sm font-medium hover:border-danger hover:text-danger disabled:opacity-50"
+                  : "min-h-11 rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
               }
               onClick={() => onAnswer({ outcome: "selected", optionId: option.id })}
             >
@@ -152,6 +153,11 @@ export function PermissionCard({
           ))}
         </div>
       )}
+      {submitting ? (
+        <p className="mt-3 text-sm text-muted" role="status">
+          正在提交你的决定，请稍候…
+        </p>
+      ) : null}
     </div>
   );
 }

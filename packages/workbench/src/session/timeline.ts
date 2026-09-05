@@ -32,6 +32,12 @@ export interface PendingMessage {
   error: string | null;
 }
 
+export interface PermissionProgress {
+  requestId: string;
+  stage: "submitting" | "continuing";
+  message: string;
+}
+
 export interface TimelineState {
   items: TimelineItem[];
   status: SessionStatus;
@@ -39,6 +45,8 @@ export interface TimelineState {
   activeTurn: string | null;
   activeTurnStartedAtMs?: number | null;
   pendingPermission: PermissionRequest | null;
+  /** Human-visible acknowledgement between answering a card and turn end. */
+  permissionProgress: PermissionProgress | null;
   /** The message this client has sent and not seen come back, if any. */
   pending: PendingMessage | null;
   lastError: TurnError | null;
@@ -65,6 +73,7 @@ export function emptyTimeline(): TimelineState {
     activeTurn: null,
     activeTurnStartedAtMs: null,
     pendingPermission: null,
+    permissionProgress: null,
     pending: null,
     lastError: null,
     usage: null,
@@ -195,6 +204,8 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
           event.item.type === "userMessage" && state.status === "idle"
             ? "running"
             : state.status,
+        permissionProgress:
+          event.item.type === "userMessage" ? null : state.permissionProgress,
       };
 
     case "itemDelta":
@@ -210,6 +221,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         activeTurnStartedAtMs: null,
         status: "idle",
         usage: event.usage,
+        permissionProgress: null,
       };
 
     case "turnFailed":
@@ -219,13 +231,25 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         activeTurnStartedAtMs: null,
         status: "failed",
         lastError: event.error,
+        permissionProgress: null,
       };
 
     case "turnCanceled":
-      return { ...state, activeTurn: null, activeTurnStartedAtMs: null, status: "idle" };
+      return {
+        ...state,
+        activeTurn: null,
+        activeTurnStartedAtMs: null,
+        status: "idle",
+        permissionProgress: null,
+      };
 
     case "permissionRequested":
-      return { ...state, status: "waiting", pendingPermission: event.request };
+      return {
+        ...state,
+        status: "waiting",
+        pendingPermission: event.request,
+        permissionProgress: null,
+      };
 
     case "permissionResolved":
       return state.pendingPermission?.id === event.requestId
@@ -233,6 +257,11 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
             ...state,
             status: state.activeTurn ? "running" : "idle",
             pendingPermission: null,
+            permissionProgress: {
+              requestId: event.requestId,
+              stage: "continuing",
+              message: permissionResolutionMessage(state.pendingPermission, event.outcome),
+            },
           }
         : state;
 
@@ -259,6 +288,20 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
     case "sessionStatusChanged":
       return { ...state, status: event.status };
   }
+}
+
+function permissionResolutionMessage(
+  request: PermissionRequest,
+  outcome: Extract<SessionEvent, { type: "permissionResolved" }>["outcome"],
+): string {
+  if (outcome.outcome === "timedOut") return "确认已超时；任务不会继续执行。";
+  if (outcome.outcome === "canceled") return "已取消；任务不会继续执行。";
+  if (outcome.outcome === "answered") return "回答已提交，Agent 正在继续执行。";
+
+  const option = request.options.find((candidate) => candidate.id === outcome.optionId);
+  if (option?.kind === "reject") return "已拒绝；Agent 正在安全结束本次任务。";
+  if (request.kind === "planApproval") return "计划已确认，Agent 正在继续执行。";
+  return "授权已接受，Agent 正在继续执行。";
 }
 
 export function applySequenced(state: TimelineState, event: SequencedEvent): TimelineState {
