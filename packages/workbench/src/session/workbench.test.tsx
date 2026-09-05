@@ -2708,7 +2708,7 @@ describe("a whole turn as the timeline sees it", () => {
     // turnCompleted event has cacheReadTokens:0 but the footer renders the
     // turnSummary stats, so the summary line shows the richer breakdown.
     expect(screen.getByTestId("usage-summary")).toHaveTextContent(
-      "input(cached:3, toolcall:4, uncached:7) output 5 turn 1/1",
+      "本 Turn · input(cached:3, uncached:7) output 5 · 工具 1 次 · 模型 1 轮 · 工具输出约 4 tokens",
     );
     expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
     expect(state.status).toBe("idle");

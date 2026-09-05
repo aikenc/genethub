@@ -2112,7 +2112,7 @@ function TurnFooter({
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
           <span data-testid="usage-summary">
             {usage
-              ? `input(cached:${reportedTokens(usage.cacheReadTokens)}, toolcall:${reportedTokens(toolOut)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} turn ${tools}/${rounds}`
+              ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`
               : "—"}
           </span>
           {usage && usage.compactionCount > 0 ? (

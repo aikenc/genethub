@@ -894,6 +894,8 @@ struct TurnState {
     /// notification, not with the end of the turn, so they are held until there
     /// is a completed turn to attach them to.
     usage: Usage,
+    /// Last thread total, retained only to deduplicate usage notifications.
+    thread_usage: Option<Usage>,
     /// We asked for this turn to stop, so its end is a cancellation however the
     /// CLI happens to label it.
     interrupt_requested: bool,
@@ -1077,12 +1079,10 @@ impl AgentSession for CodexSession {
         let turn_id = format!("turn_{}", uuid::Uuid::new_v4().simple());
         {
             let mut state = self.turn.lock().await;
-            // The token counts survive: they belong to the thread, and the CLI
-            // only re-sends them when they change.
-            let usage = state.usage.clone();
+            let thread_usage = state.thread_usage.clone();
             *state = TurnState {
                 id: Some(turn_id.clone()),
-                usage,
+                thread_usage,
                 ..TurnState::default()
             };
             usage::record_round_start(&mut state.usage);
@@ -1932,15 +1932,43 @@ async fn translate(
         }
         "turn/completed" if is_current_turn(params, &state) => finish(&mut state, params, events),
         "thread/tokenUsage/updated" if accepts_token_usage(params, &state) => {
-            if let Some(usage) = usage_in(params) {
-                let rounds = state.usage.llm_rounds;
-                let tool_out = state.usage.tool_output_tokens;
-                let previous = state.usage.clone();
-                state.usage = usage;
-                state.usage.llm_rounds = rounds;
-                state.usage.tool_output_tokens = tool_out;
-                usage::preserve_timing(&mut state.usage, &previous);
-                if let Some(turn_id) = state.id.clone() {
+            let Some(token_usage) = params.get("tokenUsage") else {
+                return;
+            };
+            let total = token_usage.get("total").map(token_counts);
+            let previous = state.thread_usage.clone();
+            let changed = total.as_ref().is_none_or(|total| {
+                previous.as_ref().is_none_or(|old| {
+                    total.input_tokens != old.input_tokens
+                        || total.output_tokens != old.output_tokens
+                        || total.cache_read_tokens != old.cache_read_tokens
+                })
+            });
+            state.thread_usage = total.clone().or(previous.clone());
+            if state.id.is_some() && changed {
+                let increment = token_usage
+                    .get("last")
+                    .and_then(|_| usage_in(params))
+                    .or_else(|| {
+                        total.map(|mut total| {
+                            if let Some(old) = previous {
+                                total.input_tokens =
+                                    total.input_tokens.saturating_sub(old.input_tokens);
+                                total.output_tokens =
+                                    total.output_tokens.saturating_sub(old.output_tokens);
+                                total.cache_read_tokens = total
+                                    .cache_read_tokens
+                                    .saturating_sub(old.cache_read_tokens);
+                            }
+                            total
+                        })
+                    });
+                if let Some(increment) = increment {
+                    state.usage.input_tokens += increment.input_tokens;
+                    state.usage.output_tokens += increment.output_tokens;
+                    state.usage.cache_read_tokens += increment.cache_read_tokens;
+                    state.usage.llm_rounds += 1;
+                    let turn_id = state.id.clone().expect("active turn checked");
                     usage::emit_progress(events, &turn_id, &state.usage);
                 }
             }
@@ -2079,16 +2107,20 @@ fn message_in(error: &Value) -> String {
 fn usage_in(params: &Value) -> Option<Usage> {
     let token_usage = params.get("tokenUsage")?;
     let source = token_usage
-        .get("total")
-        .or_else(|| token_usage.get("last"))?;
+        .get("last")
+        .or_else(|| token_usage.get("total"))?;
+    Some(token_counts(source))
+}
+
+fn token_counts(source: &Value) -> Usage {
     let count = |field: &str| source.get(field).and_then(Value::as_u64).unwrap_or(0);
-    Some(Usage {
+    Usage {
         input_tokens: count("inputTokens"),
         output_tokens: count("outputTokens"),
         cache_read_tokens: count("cachedInputTokens"),
         cache_write_tokens: 0,
         ..Usage::default()
-    })
+    }
 }
 
 /// Streamed text for an item, which may be the first anyone has heard of it.
@@ -2187,7 +2219,6 @@ fn item_frame(
         "agentMessage" => {
             state.open.insert(id.clone());
             if settled {
-                state.usage.llm_rounds += 1;
                 usage::record_round_start(&mut state.usage);
                 // Progress before the item, so the message that completes a
                 // round is itself attributed to it.
@@ -3157,9 +3188,9 @@ mod tests {
     }
 
     /// Resume may replay the root thread's last usage while no turn is active.
-    /// Keeping it preserves the adapter's existing cross-turn usage behavior.
+    /// It must not become usage for a later empty turn.
     #[tokio::test]
-    async fn idle_root_usage_is_kept_for_the_next_completed_turn() {
+    async fn idle_root_usage_does_not_count_toward_the_next_turn() {
         let (events, mut seen) = broadcast::channel(4);
         let turn = Mutex::new(TurnState::default());
         translate(
@@ -3185,9 +3216,9 @@ mod tests {
         ));
         {
             let mut state = turn.lock().await;
-            assert_eq!(state.usage.input_tokens, 120);
-            assert_eq!(state.usage.cache_read_tokens, 40);
-            assert_eq!(state.usage.output_tokens, 7);
+            assert_eq!(state.usage.input_tokens, 0);
+            assert_eq!(state.usage.cache_read_tokens, 0);
+            assert_eq!(state.usage.output_tokens, 0);
             let usage = state.usage.clone();
             *state = TurnState {
                 id: Some("next-genehub-turn".into()),
@@ -3221,9 +3252,9 @@ mod tests {
         assert!(matches!(
             seen.try_recv().expect("the next completed turn"),
             SessionEvent::TurnCompleted { ref usage, .. }
-                if usage.input_tokens == 120
-                    && usage.cache_read_tokens == 40
-                    && usage.output_tokens == 7
+                if usage.input_tokens == 0
+                    && usage.cache_read_tokens == 0
+                    && usage.output_tokens == 0
         ));
     }
 

@@ -334,6 +334,8 @@ struct ActiveRound {
 /// a caller actually asked to expand.
 #[derive(Debug, Clone)]
 struct RoundView {
+    /// Storage owner for a historical round inherited through a fork.
+    source: Option<(String, String)>,
     round_id: String,
     ord: u32,
     user_item_id: Option<String>,
@@ -1484,6 +1486,7 @@ impl SessionManager {
             .await
             .iter()
             .map(|record| RoundView {
+                source: None,
                 round_id: record.round_id.clone(),
                 ord: record.ord,
                 user_item_id: record.user_item_id.clone(),
@@ -1517,6 +1520,7 @@ impl SessionManager {
                     view.trunk_count = open_trunks;
                 }
                 None => views.push(RoundView {
+                    source: None,
                     round_id: round.round_id.clone(),
                     ord: round.ord,
                     user_item_id: round.user_item_id.clone(),
@@ -1527,7 +1531,71 @@ impl SessionManager {
                 }),
             }
         }
-        views.sort_by_key(|view| view.ord);
+        // A fork owns its new rounds, while its inherited narrative refers to
+        // immutable completed turns in its ancestry. Resolve those rounds from
+        // their actual storage owner; never widen access beyond captured turns.
+        let meta = live.meta.lock().await.clone();
+        if meta.lineage.is_some() {
+            let captured: HashSet<String> = live
+                .items
+                .lock()
+                .await
+                .iter()
+                .filter_map(|item| {
+                    if let TimelineItem::TurnSummary { stats, .. } = item {
+                        Some(stats.turn_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let metas = self.store.list_meta().unwrap_or_default();
+            let mut lineage = meta.lineage;
+            let mut visited = HashSet::from([meta.id]);
+            while let Some(origin) = lineage {
+                if !visited.insert(origin.source_session_id.clone()) {
+                    break;
+                }
+                let Some(parent) = metas
+                    .iter()
+                    .find(|meta| meta.id == origin.source_session_id)
+                else {
+                    break;
+                };
+                let Ok(chat) = self.store.load_chat(&parent.workspace_id, &parent.id) else {
+                    break;
+                };
+                for record in chat.rounds {
+                    if record.adapter_turn_ids.is_empty()
+                        || !record
+                            .adapter_turn_ids
+                            .iter()
+                            .all(|id| captured.contains(id))
+                        || record.outcome.is_none()
+                        || views.iter().any(|view| view.round_id == record.round_id)
+                    {
+                        continue;
+                    }
+                    views.push(RoundView {
+                        source: Some((parent.workspace_id.clone(), parent.id.clone())),
+                        round_id: record.round_id,
+                        ord: record.ord,
+                        user_item_id: record.user_item_id,
+                        started_at_ms: record.started_at_ms,
+                        ended_at_ms: record.ended_at_ms,
+                        outcome: match record.outcome {
+                            Some(RoundOutcome::Completed) => RoundLayerOutcome::Completed,
+                            Some(RoundOutcome::Canceled) => RoundLayerOutcome::Canceled,
+                            Some(RoundOutcome::Superseded) => RoundLayerOutcome::Superseded,
+                            _ => RoundLayerOutcome::Failed,
+                        },
+                        trunk_count: record.trunk_count,
+                    });
+                }
+                lineage = parent.lineage.clone();
+            }
+        }
+        views.sort_by_key(|view| (view.started_at_ms, view.ord));
         views
     }
 
@@ -1535,9 +1603,14 @@ impl SessionManager {
     /// plus the trunk still being built, which only memory knows about.
     async fn trunk_index(&self, live: &Arc<Live>, view: &RoundView) -> Result<Vec<TrunkSummary>> {
         let meta = live.meta.lock().await.clone();
+        let (workspace_id, session_id) = view
+            .source
+            .as_ref()
+            .map(|(workspace, session)| (workspace.as_str(), session.as_str()))
+            .unwrap_or((&meta.workspace_id, &meta.id));
         let mut summaries = self
             .store
-            .load_trunk_index(&meta.workspace_id, &meta.id, view.ord)?;
+            .load_trunk_index(workspace_id, session_id, view.ord)?;
         if let Some(open) = self.open_trunk(live, view).await {
             match summaries
                 .iter_mut()
@@ -1553,6 +1626,9 @@ impl SessionManager {
     /// The trunk currently being built for this round, if this round is the
     /// open one and it has anything in it yet.
     async fn open_trunk(&self, live: &Arc<Live>, view: &RoundView) -> Option<RoundTrunk> {
+        if view.source.is_some() {
+            return None;
+        }
         let index = {
             let active = live.active_round.lock().await;
             let round = active.as_ref()?;
@@ -1599,7 +1675,11 @@ impl SessionManager {
         view: &RoundView,
         summary: &TrunkSummary,
     ) -> Result<RoundTrunk> {
-        let meta = live.meta.lock().await.clone();
+        let mut meta = live.meta.lock().await.clone();
+        if let Some((workspace_id, session_id)) = &view.source {
+            meta.workspace_id = workspace_id.clone();
+            meta.id = session_id.clone();
+        }
         let mut trunk = if let Some(open) = self.open_trunk(live, view).await {
             if open.summary.index == summary.index {
                 open
@@ -1667,10 +1747,37 @@ impl SessionManager {
 
     pub async fn blob(&self, session_id: &str, blob: &BlobRef) -> Result<BlobPayload> {
         let live = self.live(session_id).await?;
-        let meta = live.meta.lock().await;
-        self.store
-            .get_blob(&meta.workspace_id, &meta.id, blob)?
-            .ok_or_else(|| anyhow!("no such blob: {}", blob.id))
+        let meta = live.meta.lock().await.clone();
+        if let Some(payload) = self.store.get_blob(&meta.workspace_id, &meta.id, blob)? {
+            return Ok(payload);
+        }
+        // A locator alone is not authority to read a parent's blob bucket.
+        // It must appear in a round visible within this fork's boundary.
+        for view in self.round_views(&live).await {
+            let Some((workspace_id, owner_id)) = &view.source else {
+                continue;
+            };
+            for summary in self
+                .store
+                .load_trunk_index(workspace_id, owner_id, view.ord)?
+            {
+                let trunk = self
+                    .store
+                    .load_trunk(workspace_id, owner_id, view.ord, &summary)?;
+                if trunk
+                    .batches
+                    .iter()
+                    .flat_map(|batch| &batch.blobs)
+                    .any(|row| row.blob.as_ref().is_some_and(|reference| reference == blob))
+                {
+                    return self
+                        .store
+                        .get_blob(workspace_id, owner_id, blob)?
+                        .ok_or_else(|| anyhow!("no such blob: {}", blob.id));
+                }
+            }
+        }
+        Err(anyhow!("no such blob: {}", blob.id))
     }
 
     /// Batch variant of `round_trunk`: one live lookup, then the same
@@ -2961,6 +3068,15 @@ impl Live {
                 _ => None,
             }
         };
+        if closed.is_some() && matches!(item, TimelineItem::Compaction { .. }) {
+            // Compaction closes AFTER its marker, unlike a size boundary.
+            self.open_trunk_items
+                .lock()
+                .await
+                .push(item.id().to_string());
+            self.finish_trunk().await;
+            return;
+        }
         if closed.is_some() {
             // `push` closes the previous trunk before placing this item in the
             // new one. Keep the trigger out of the old trunk's persisted id
@@ -4076,7 +4192,13 @@ async fn pump_events(
             SessionEvent::TurnCompleted { .. }
                 | SessionEvent::TurnFailed { .. }
                 | SessionEvent::TurnCanceled { .. }
+                | SessionEvent::Item {
+                    item: TimelineItem::Compaction { .. },
+                    ..
+                }
         ) {
+            // A compaction persists and releases its closing trunk immediately.
+            // Its blob references must already be durable, just as at turn end.
             flush_blob_writer(&blob_sender).await;
         }
 
@@ -4173,6 +4295,20 @@ async fn pump_events(
             break;
         }
 
+        if matches!(
+            event,
+            SessionEvent::TurnCompleted { .. }
+                | SessionEvent::TurnFailed { .. }
+                | SessionEvent::TurnCanceled { .. }
+        ) {
+            let cumulative = live.llm_rounds.lock().await.cumulative();
+            let last_item = live.open_trunk_items.lock().await.last().cloned();
+            if let (Some(id), Some(round)) = (last_item, live.active_round.lock().await.as_mut()) {
+                let delta = cumulative.saturating_sub(round.last_attributed_rounds);
+                *round.round_deltas.entry(id).or_default() += delta;
+                round.last_attributed_rounds = cumulative;
+            }
+        }
         let summary = {
             let items = live.items.lock().await;
             turn_summary(&event, &mut turns, &mut live_usage, &items)
@@ -4361,7 +4497,16 @@ fn turn_summary(
         ),
         _ => return None,
     };
-    token_usage::fill_usage_from_items(&mut usage, items);
+    let start = items
+        .iter()
+        .rposition(|item| {
+            matches!(
+                item,
+                TimelineItem::UserMessage { .. } | TimelineItem::TurnSummary { .. }
+            )
+        })
+        .map_or(0, |index| index + 1);
+    token_usage::fill_usage_from_items(&mut usage, &items[start..]);
     let finished_at_ms = now_ms();
     let (started_at_ms, tools) = turns
         .remove(turn_id)

@@ -71,3 +71,5 @@ export function defineSpecialty(input: DefineInput, run: (ctx: CaseContext) => P
 export function defineE2e(input: DefineInput, run: (ctx: CaseContext) => Promise<void>): void {
   defineE2eBase(input, (ctx) => run(ctx as CaseContext), callerFile());
 }
+
+export { registerScriptedCodex } from "./builders/codex.ts";
