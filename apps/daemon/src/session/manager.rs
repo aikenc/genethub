@@ -148,6 +148,9 @@ struct Live {
     /// contents.
     rounds: Mutex<Vec<RoundRecord>>,
     unsaved_rounds: Mutex<Vec<String>>,
+    /// Captured ancestor rounds are immutable for this fork. Resolve once per
+    /// loaded session, without retaining ancestor narrative or tool bodies.
+    inherited_rounds: Mutex<Option<Vec<RoundView>>>,
     /// Where each work item of the open trunk landed in the blob layer. Filled
     /// by the blob writer, consumed when the trunk is written, then dropped
     /// with the trunk's items.
@@ -1536,6 +1539,14 @@ impl SessionManager {
         // their actual storage owner; never widen access beyond captured turns.
         let meta = live.meta.lock().await.clone();
         if meta.lineage.is_some() {
+            let mut cached = live.inherited_rounds.lock().await;
+            if let Some(inherited) = cached.as_ref() {
+                views.extend(inherited.iter().cloned());
+                views.sort_by_key(|view| (view.started_at_ms, view.ord));
+                return views;
+            }
+            let own_count = views.len();
+            let mut complete = true;
             let captured: HashSet<String> = live
                 .items
                 .lock()
@@ -1549,7 +1560,10 @@ impl SessionManager {
                     }
                 })
                 .collect();
-            let metas = self.store.list_meta().unwrap_or_default();
+            let metas = match self.store.list_meta() {
+                Ok(metas) => metas,
+                Err(_) => return views,
+            };
             let mut lineage = meta.lineage;
             let mut visited = HashSet::from([meta.id]);
             while let Some(origin) = lineage {
@@ -1563,6 +1577,7 @@ impl SessionManager {
                     break;
                 };
                 let Ok(chat) = self.store.load_chat(&parent.workspace_id, &parent.id) else {
+                    complete = false;
                     break;
                 };
                 for record in chat.rounds {
@@ -1593,6 +1608,9 @@ impl SessionManager {
                     });
                 }
                 lineage = parent.lineage.clone();
+            }
+            if complete {
+                *cached = Some(views[own_count..].to_vec());
             }
         }
         views.sort_by_key(|view| (view.started_at_ms, view.ord));
@@ -2944,6 +2962,7 @@ impl Live {
             items: Mutex::new(Vec::new()),
             rounds: Mutex::new(Vec::new()),
             unsaved_rounds: Mutex::new(Vec::new()),
+            inherited_rounds: Mutex::new(None),
             blob_refs: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
             last_activity_ms: AtomicI64::new(0),

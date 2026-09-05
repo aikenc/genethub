@@ -1254,12 +1254,12 @@ function useRoundGallery(round: RoundSummary, finalSummaryText?: string): BlobOv
   const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
   const loadTrunk = useWorkbench((state) => state.loadTrunk);
   const lastIndex = layer?.trunks.at(-1)?.index;
+  const lastDetail = lastIndex === undefined ? undefined : roundTrunks[`${round.roundId}:${lastIndex}`];
 
   useEffect(() => {
     if (round.outcome === "running" || lastIndex === undefined) return;
-    const key = `${round.roundId}:${lastIndex}`;
-    if (!roundTrunks[key] && layer?.expandedTrunk?.summary.index !== lastIndex) {
-      void loadTrunk(round.roundId, lastIndex);
+    if (!lastDetail && layer?.expandedTrunk?.summary.index !== lastIndex) {
+      void loadTrunk(round.roundId, lastIndex).catch(() => undefined);
     }
   }, [
     layer?.expandedTrunk?.summary.index,
@@ -1267,7 +1267,7 @@ function useRoundGallery(round: RoundSummary, finalSummaryText?: string): BlobOv
     loadTrunk,
     round.outcome,
     round.roundId,
-    roundTrunks,
+    lastDetail,
   ]);
 
   const trunks: RoundTrunk[] = (layer?.trunks ?? []).map((summary) => {
@@ -1546,7 +1546,7 @@ function TrunkCard({
   const { open, toggle } = useCardOpen(active);
 
   useEffect(() => {
-    if (open && !detail) void loadTrunk(round.roundId, summary.index);
+    if (open && !detail) void loadTrunk(round.roundId, summary.index).catch(() => undefined);
   }, [detail, loadTrunk, open, round.roundId, summary.index]);
 
   const batches = detail

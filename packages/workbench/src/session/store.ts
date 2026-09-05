@@ -550,6 +550,9 @@ function reportError(set: Setter, error: unknown): void {
 }
 
 let roundReads: Promise<unknown> = Promise.resolve();
+// Scope pending detail reads to the connection as well as the session. A
+// reconnect must never adopt an old client's response or pending promise.
+const trunkReads = new WeakMap<Client, Map<string, Promise<void>>>();
 
 /**
  * Runs round-layer reads one after another.
@@ -1110,17 +1113,29 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async loadTrunk(roundId, trunkIndex) {
-    const sessionId = get().activeSessionId;
-    if (!sessionId) return;
-    const reply = await require_(get().client).call({
-      type: "round.trunk.get",
-      payload: { sessionId, roundId, trunkIndex },
+    const { activeSessionId: sessionId, client } = get();
+    if (!sessionId || !client) return;
+    const key = `${sessionId}:${roundId}:${trunkIndex}`;
+    let pending = trunkReads.get(client);
+    if (!pending) { pending = new Map(); trunkReads.set(client, pending); }
+    const existing = pending.get(key);
+    if (existing) return existing;
+    const read = oneAtATime(async () => {
+      // Navigation cancels queued background work before it reaches the wire.
+      if (get().client !== client || get().activeSessionId !== sessionId) return;
+      const reply = await client.call({
+        type: "round.trunk.get",
+        payload: { sessionId, roundId, trunkIndex },
+      });
+      if (get().client !== client || reply?.type !== "roundTrunk") return;
+      const trunk = reply.data;
+      patchTimeline(sessionId, set, (timeline) => ({
+        roundTrunks: { ...timeline.roundTrunks, [`${roundId}:${trunkIndex}`]: trunk },
+      }));
     });
-    if (reply?.type !== "roundTrunk") return;
-    const trunk = reply.data;
-    patchTimeline(sessionId, set, (timeline) => ({
-      roundTrunks: { ...timeline.roundTrunks, [`${roundId}:${trunkIndex}`]: trunk },
-    }));
+    pending.set(key, read);
+    try { await read; }
+    finally { pending.delete(key); }
   },
 
   async loadBlob(blob) {
