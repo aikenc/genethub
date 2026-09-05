@@ -67,6 +67,7 @@ pub struct Daemon {
     pub state: Shared,
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
+    human_continuations: tokio::task::JoinHandle<()>,
 }
 
 impl Daemon {
@@ -92,7 +93,24 @@ impl Daemon {
         remote.attach(&state).await;
         let _ = state.remote.set(remote);
 
+        let human_continuations = tokio::spawn({
+            let state = state.clone();
+            async move {
+                if let Err(error) = state.sessions.recover_human_continuations().await {
+                    tracing::error!(%error, "recovering pending Human decisions failed");
+                }
+                let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
+                loop {
+                    ticks.tick().await;
+                    state
+                        .sessions
+                        .dispatch_human_continuations(&state.providers().await)
+                        .await;
+                }
+            }
+        });
         Ok(Daemon {
+            human_continuations,
             state,
             port: listener.port,
             listener: listener.handle,
@@ -118,6 +136,8 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
+        self.human_continuations.abort();
+        let _ = self.human_continuations.await;
         self.state.sessions.shutdown().await;
         self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {

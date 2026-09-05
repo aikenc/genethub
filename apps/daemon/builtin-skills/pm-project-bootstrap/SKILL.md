@@ -32,11 +32,11 @@ For a non-current plan, parse its JSON result and find `approval.challengeId`. P
 "$GENEHUB_CLI" space approval request --challenge <challengeId>
 ```
 
-This command only requests approval and deliberately waits. It displays the existing `PlanApproval` card in this Session; it cannot select an answer or create a grant. Only the authenticated Human response releases the command. Never call `session.respondPermission`, any permission response API, or a shell command that attempts to approve the request. Never interpret an ordinary chat reply such as “yes”, “确认” or “可以” as authorization.
+This command only submits a durable approval request. The daemon persists the request and stops this Agent turn before exposing the existing `PlanApproval` card. It does not wait for the Human; command success is not approval. Do not poll or keep a tool attached, and do not apply the plan in this turn. The command may be interrupted as the daemon closes the Agent process; the persisted Session card is authoritative.
 
-Keep this command attached until it exits. Run it as a foreground operation with a long initial wait. If the execution tool yields a running session or cell identifier, immediately use that tool's wait/poll continuation with the exact identifier until the command exits. Empty output plus a running identifier is not completion. Do not send a final answer, start another tool call, or tell the user to wait while this command is still pending; after the Human answers, consume its success or rejection in this same Agent turn.
+Never call `session.respondPermission`, any permission response API, or a shell command that attempts to approve the request. Never interpret ordinary chat such as “yes” as authorization.
 
-Only after `space approval request` returns success, use the plan's exact `planDigest` and `expectedRevision`, and choose one stable action id containing only letters, digits, `_` or `-`:
+After the authenticated Human answers, GeneHub resumes this same Session in a new Agent turn with the durable decision. Only an approved continuation permits apply. Use the original plan's exact `planDigest` and `expectedRevision`, and the stable action ID supplied in the continuation for every retry:
 
 ```text
 "$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest <planDigest> --expected-revision <expectedRevision> --action-id <stableActionId>
@@ -59,6 +59,6 @@ When the user asks this Session to add, enable, disable or remove a Component, c
 "$GENEHUB_CLI" space lifecycle set --workspace <id> --lifecycle <value> --revision <n> --plan
 ```
 
-Pass the returned `approval.challengeId` through the same `space approval request` command described above. After it returns success, repeat the exact command without `--plan` and add the returned `--plan-digest`, the same `--revision`, and one stable `--action-id`. Never change the operation between plan and apply. A copied command, an ordinary chat “yes”, or an apply from another Session has no authority. If the daemon reports an active Session, Run, lease, cycle, cross-project Parent or CAS conflict, report those structured conflict objects and stop; do not work around the guard.
+Pass the returned `approval.challengeId` through the same `space approval request` command described above. After GeneHub resumes this Session with an approved Human decision, repeat the exact command without `--plan` and add the returned `--plan-digest`, the same `--revision`, and one stable `--action-id`. Never change the operation between plan and apply. A copied command, an ordinary chat “yes”, or an apply from another Session has no authority. If the daemon reports an active Session, Run, lease, cycle, cross-project Parent or CAS conflict, report those structured conflict objects and stop; do not work around the guard.
 
 This Skill only explains the safe protocol. Parent validity, Builder verification, active-resource guards, compare-and-set, and the one-use grant remain daemon decisions. A user clicking the same controls in Workspace details is already making an authenticated Human action and does not need a second chat approval.

@@ -720,7 +720,7 @@ describe("Human interaction acknowledgement", () => {
       },
     });
     expect(useWorkbench.getState().timeline.permissionProgress?.message).toBe(
-      "计划已确认，Agent 正在继续执行。",
+      "计划确认已保存，等待 Agent 恢复执行。",
     );
 
     finish({ type: "ack" });

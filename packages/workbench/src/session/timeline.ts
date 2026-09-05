@@ -300,7 +300,7 @@ function permissionResolutionMessage(
 
   const option = request.options.find((candidate) => candidate.id === outcome.optionId);
   if (option?.kind === "reject") return "已拒绝；Agent 正在安全结束本次任务。";
-  if (request.kind === "planApproval") return "计划已确认，Agent 正在继续执行。";
+  if (request.kind === "planApproval") return "计划确认已保存，等待 Agent 恢复执行。";
   return "授权已接受，Agent 正在继续执行。";
 }
 

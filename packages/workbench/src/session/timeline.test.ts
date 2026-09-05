@@ -233,7 +233,7 @@ describe("the session timeline", () => {
     expect(answered.permissionProgress).toEqual({
       requestId: "plan-1",
       stage: "continuing",
-      message: "计划已确认，Agent 正在继续执行。",
+      message: "计划确认已保存，等待 Agent 恢复执行。",
     });
   });
 
