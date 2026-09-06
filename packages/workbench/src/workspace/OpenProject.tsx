@@ -50,6 +50,14 @@ export const OpenProject = forwardRef<
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picker, setPicker] = useState<DirectoryListing | null>(null);
+  const pickerDialog = useRef<HTMLDivElement>(null);
+  const pickerOpen = Boolean(picker);
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const previous = document.activeElement;
+    pickerDialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
+  }, [pickerOpen]);
   const [pickerBusy, setPickerBusy] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newFolderName, setNewFolderName] = useState("新建文件夹");
@@ -327,6 +335,7 @@ export const OpenProject = forwardRef<
       {picker
         ? createPortal(
             <div
+              ref={pickerDialog}
               role="dialog"
               aria-modal="true"
               aria-label={
@@ -334,9 +343,16 @@ export const OpenProject = forwardRef<
                   ? "选择" + endpoint.label + "上的磁盘"
                   : "打开" + endpoint.label + "上的Agent"
               }
-              className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3 md:p-4"
+              className={`fixed inset-0 ${directoryAction ? "z-[90]" : "z-[70]"} flex items-center justify-center bg-black/60 p-3 md:p-4`}
               onKeyDown={(event) => {
+                if (event.key === "Tab") {
+                  const controls = [...(pickerDialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex="0"]') ?? [])].filter(e => e.getClientRects().length > 0);
+                  const first = controls[0], last = controls[controls.length - 1];
+                  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+                  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+                }
                 if (event.key === "Escape") {
+                  event.preventDefault(); event.stopPropagation();
                   if (creating) setCreating(false);
                   else closePicker();
                 }

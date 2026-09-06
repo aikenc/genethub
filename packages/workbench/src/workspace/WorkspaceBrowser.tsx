@@ -15,7 +15,7 @@ import {
 } from "./agent-space-tree";
 import { useAgentGroups, type AgentGroup } from "./agentGroups";
 import { AgentGroupManager } from "./AgentGroupManager";
-import { AgentDetails } from "./AgentDetails";
+import { AgentDetailsDialog } from "./AgentDetails";
 import { AgentList } from "./AgentList";
 import { FilesPanel } from "../files/FilesPanel";
 import { ChangesPanel } from "../changes/ChangesPanel";
@@ -106,6 +106,7 @@ export function WorkspaceBrowser({
         : (window.history.state?.genehubSpace?.surface ?? "sessions"),
     );
   }, [initialWorkspaceId, navigationKey]);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [terminals, setTerminals] = useState<string[]>([]);
   const tree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
@@ -170,7 +171,7 @@ export function WorkspaceBrowser({
     <div className="flex h-full min-h-0 min-w-0" aria-label="Agent 浏览">
       <aside aria-label="Agent 目录导航" className="hidden w-80 shrink-0 flex-col border-r border-line bg-sidebar lg:flex">
         <header className="shrink-0 border-b border-line p-3">{directoryToolbar}</header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2"><AgentList workspaces={workspaces} sessions={sessions} selectedId={selectedId} onPick={browse} query={query} memberIds={group?.workspaceIds} deviceName={deviceName} /></div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-2"><AgentList workspaces={workspaces} sessions={sessions} selectedId={selectedId} onPick={browse} onNewSession={onNewSession} query={query} memberIds={group?.workspaceIds} deviceName={deviceName} /></div>
       </aside>
       <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Agent 面板">
       <header className="shrink-0 border-b border-line px-4 py-3 md:px-6">
@@ -210,7 +211,7 @@ export function WorkspaceBrowser({
         {workspace ? (
           <div className="mt-2 flex flex-wrap gap-1" aria-label="Agent 工具">
             {[
-              ["sessions", "会话与资料"],
+              ["sessions", "会话"],
               ["files", "文件"],
               ["changes", "变更"],
               ["terminal", "终端"],
@@ -233,6 +234,7 @@ export function WorkspaceBrowser({
                 {label}
               </button>
             ))}
+            <button type="button" className="min-h-10 rounded-lg px-3 text-sm text-muted hover:bg-raised" onClick={() => setDetailsOpen(true)}>资料与配置</button>
             {extraTabs
               .filter((tab) => !tab.scope || tab.scope === "workspace")
               .map((tab) => (
@@ -279,6 +281,7 @@ export function WorkspaceBrowser({
                   onExpand={() => setChildrenOpen((value) => !value)}
                   onToggle={() => browse(workspace.id)}
                   onPick={() => browse(workspace.id)}
+                  onNewSession={() => onNewSession(workspace.id)}
                   onRename={(name) => void renameWorkspace(workspace.id, name)}
                   onRemove={() => removeWorkspace(workspace.id)}
                 >
@@ -286,24 +289,9 @@ export function WorkspaceBrowser({
                 </WorkspaceRow>
               </ul>
             ) : null}
-            {workspace && <div className="mb-5 hidden rounded-xl border border-line p-4 lg:block"><AgentDetails key={workspace.id} workspace={workspace} deviceName={deviceName} compact /></div>}
-            {workspace && childrenOpen && node.children.length > 0 && (
-              <section className="mb-4 rounded-xl border border-line p-2">
-                {childrenOpen && (
-                  <AgentList
-                    key={workspace.id}
-                    workspaces={workspaces}
-                    rootIds={node.children.map((child) => child.workspace.id)}
-                    sessions={sessions}
-                    onPick={browse}
-                    deviceName={deviceName}
-                  />
-                )}
-              </section>
-            )}
             {workspace && (
               <div className="mb-6 space-y-3">
-                <button
+                {continued && <button
                   type="button"
                   className="min-h-12 w-full rounded-xl bg-accent px-4 py-3 text-left text-white"
                   onClick={() =>
@@ -315,7 +303,7 @@ export function WorkspaceBrowser({
                   {continued
                     ? `${continued.managed?.userInteraction === "readOnly" ? "查看会话" : "继续会话"} · ${continued.title ?? "未命名会话"}`
                     : "开始会话"}
-                </button>
+                </button>}
                 {drafts.map((item) => (
                   <button
                     key={item.localId}
@@ -341,13 +329,7 @@ export function WorkspaceBrowser({
                   >
                     导入
                   </button>
-                  <button
-                    type="button"
-                    className="min-h-10 rounded-lg bg-accent px-3 text-sm text-white"
-                    onClick={() => onNewSession(workspace.id)}
-                  >
-                    新会话
-                  </button>
+
                 </div>
                 <RecentSessions
                   sessions={sessions
@@ -361,68 +343,32 @@ export function WorkspaceBrowser({
                 />
               </div>
             ) : null}
-            {!workspace && <p className="hidden py-16 text-center text-sm text-muted lg:block">从左侧选择一个 Agent，查看资料、会话和工具。</p>}
+            {workspace && childrenOpen && node.children.length > 0 && (
+              <section className="mb-4 rounded-xl border border-line p-2">
+                {childrenOpen && (
+                  <AgentList
+                    key={workspace.id}
+                    workspaces={workspaces}
+                    rootIds={node.children.map((child) => child.workspace.id)}
+                    sessions={sessions}
+                    onPick={browse} onNewSession={onNewSession}
+                    deviceName={deviceName}
+                  />
+                )}
+              </section>
+            )}
+            {!workspace && <p className="hidden py-16 text-center text-sm text-muted lg:block">从左侧选择一个 Agent，继续会话或打开工具。</p>}
             {!workspace && (
               <div className="lg:hidden"><AgentList
                 workspaces={workspaces}
                 sessions={sessions}
-                onPick={browse}
+                onPick={browse} onNewSession={onNewSession}
                 query={query}
                 memberIds={group?.workspaceIds}
                 deviceName={deviceName}
               /></div>
             )}
-            {workspace && (
-              <section
-                className="mt-6 rounded-xl border border-line p-4"
-                aria-label="Agent 目录"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <h2 className="text-sm font-medium">
-                    目录 · {workspace.folders.length}
-                  </h2>
-                  {workspace.workspaceFile && (
-                    <OpenProject
-                      key={workspace.id}
-                      host={host}
-                      endpoint={endpoint}
-                      directoryAction={{
-                        initialDirectory: workspace.root,
-                        onPick: async (root) => {
-                          if (!client) throw new Error("设备尚未连接");
-                          const reply = await client.call({
-                            type: "workspace.addRoot",
-                            payload: { workspaceId: workspace.id, root },
-                          });
-                          if (reply?.type !== "workspace")
-                            throw new Error("未收到目录更新结果");
-                          if (useWorkbench.getState().client === client)
-                            await useWorkbench.getState().refreshWorkspaces();
-                        },
-                      }}
-                    />
-                  )}
-                </div>
-                <ul className="mt-3 space-y-2">
-                  {workspace.folders.map((folder) => (
-                    <li
-                      key={folder.rootHandle || folder.root}
-                      className="min-w-0"
-                    >
-                      <p className="text-sm">{folder.name}</p>
-                      <p className="break-all text-xs text-muted">
-                        {folder.root}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-                {workspace.workspaceFile && (
-                  <p className="mt-3 text-xs text-muted">
-                    新增目录会写入 .code-workspace，新会话使用更新后的目录。
-                  </p>
-                )}
-              </section>
-            )}
+
 
           </div>
         </div>
@@ -451,6 +397,7 @@ export function WorkspaceBrowser({
             <TerminalPanel workspaceId={id} />
           </div>
         ))}
+      {detailsOpen && workspace && <AgentDetailsDialog key={workspace.id} workspace={workspace} deviceName={deviceName} onClose={() => setDetailsOpen(false)} />}
       {groupsOpen && <AgentGroupManager groups={groups} workspaces={workspaces} error={groupError} update={updateGroups} onClose={() => setGroupsOpen(false)} />}
       {importOpen && workspace && client ? (
         <ImportSessionsDialog

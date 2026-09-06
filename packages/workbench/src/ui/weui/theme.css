@@ -9,3 +9,6 @@
 
 .genehub-ui .weui-tabbar__item { display: flex; font-size: 12px; line-height: 1.4; }
 @media (min-width: 768px) { .genehub-ui .weui-tabbar__item { flex: 0 0 auto; } }
+
+/* Navigation stays above page content, below GeneHub menus and modal portals. */
+.genehub-ui .weui-tabbar { z-index: 10; }

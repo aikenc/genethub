@@ -1,5 +1,4 @@
 import type {
-  AgentSpaceBuilderOperation,
   SessionSummary,
   WorkspaceInfo,
 } from "@genehub/proto";
@@ -12,10 +11,8 @@ import { Info } from "lucide-react";
 import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
-import { AgentDetails } from "../workspace/AgentDetails";
+import { AgentDetailsDialog } from "../workspace/AgentDetails";
 import { AgentAvatar } from "../workspace/AgentAvatar";
-import { isDescendant } from "../workspace/agent-space-tree";
-import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
 interface RowActions {
@@ -30,9 +27,7 @@ type ListedSession = SessionSummary & { unread: boolean };
 /** Every workspace, with its conversations under it. */
 export function WorkspaceRow({
   workspace,
-  workspaces,
   breadcrumb,
-  projectWorkspaceId,
   relationAnomaly,
   running,
   shut,
@@ -42,6 +37,7 @@ export function WorkspaceRow({
   onPick,
   onRename,
   onRemove,
+  onNewSession,
   children,
   browse = false,
   density = "auto",
@@ -69,6 +65,7 @@ export function WorkspaceRow({
   onPick(): void;
   onRename(name: string): void;
   onRemove(): Promise<void>;
+  onNewSession?(): void;
   children: ReactNode;
 }) {
   const activity = useAgentActivity(workspace.id);
@@ -77,55 +74,6 @@ export function WorkspaceRow({
   const [details, setDetails] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
-  const [spaceBusy, setSpaceBusy] = useState(false);
-  const [componentId, setComponentId] = useState("worker");
-  const [workerRole, setWorkerRole] = useState("tester");
-  const [parentId, setParentId] = useState(
-    workspace.agentSpace?.parentWorkspaceId ?? "",
-  );
-  const [lifecycle, setLifecycle] = useState(
-    workspace.agentSpace?.lifecycle ?? "persistent",
-  );
-  const [builderSummary, setBuilderSummary] = useState<string | null>(null);
-  const configureAgentSpace = useWorkbench(
-    (state) => state.configureAgentSpace,
-  );
-  const inspectAgentSpaceBuild = useWorkbench(
-    (state) => state.inspectAgentSpaceBuild,
-  );
-  const revision = workspace.agentSpace?.revision ?? 0;
-  useEffect(() => {
-    setParentId(workspace.agentSpace?.parentWorkspaceId ?? "");
-    setLifecycle(workspace.agentSpace?.lifecycle ?? "persistent");
-  }, [workspace.id, revision]);
-  const mutate = async (
-    operation: Parameters<typeof configureAgentSpace>[2],
-  ) => {
-    setSpaceBusy(true);
-    try {
-      await configureAgentSpace(workspace.id, revision, operation);
-    } finally {
-      setSpaceBusy(false);
-    }
-  };
-  const inspectBuild = async (operation: AgentSpaceBuilderOperation) => {
-    setSpaceBusy(true);
-    try {
-      const report = await inspectAgentSpaceBuild(
-        projectWorkspaceId,
-        workspace.id,
-        operation,
-      );
-      setBuilderSummary(report ? `${report.status} · ${report.command}` : null);
-    } finally {
-      setSpaceBusy(false);
-    }
-  };
-  const parentChoices = workspaces.filter(
-    (candidate) =>
-      candidate.id !== workspace.id &&
-      !isDescendant(workspaces, candidate.id, workspace.id),
-  );
   return (
     <li data-density={density} className="entity-row group relative mb-1">
       {editing ? (
@@ -140,7 +88,7 @@ export function WorkspaceRow({
         />
       ) : (
         <div
-          className={`flex min-h-14 w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "bg-raised text-fg" : "text-fg"}`}
+          className={`agent-row-body relative flex min-h-14 w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "bg-raised text-fg" : "text-fg"}`}
         >
           {!browse && (
             <button
@@ -171,11 +119,13 @@ export function WorkspaceRow({
               <span className="entity-title truncate text-sm leading-6">
                 {workspace.name}
               </span>
-              <span className="entity-secondary block truncate text-xs font-normal leading-5 text-muted" title={activity.count === undefined ? "完整会话摘要尚未加载" : "会话数量包含已归档；时间为最近一条会话记录"}>
+              <span className="entity-secondary agent-meta block truncate text-xs font-normal leading-5 text-muted" title={activity.count === undefined ? "完整会话摘要尚未加载" : "会话数量包含已归档；时间为最近一条会话记录"}>
                 {activity.count === undefined ? (activity.error ? "会话信息暂不可用" : "正在读取会话…") : `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}
               </span>
             </span>
           </button>
+          <div className="agent-row-actions">
+            {onNewSession && <button type="button" aria-label={`与 ${workspace.name} 新建会话`} title="新建会话" className="agent-new min-h-11 rounded-lg px-2 text-xs font-medium text-accent hover:bg-raised" onClick={onNewSession}>＋ 新会话</button>}
           {relationAnomaly ? (
             <span className="text-[9px] text-danger" title="Parent 关系异常">
               !
@@ -187,7 +137,7 @@ export function WorkspaceRow({
               aria-label={`${expanded ? "收起" : "展开"} ${workspace.name} 的子 Agent`}
               aria-expanded={expanded}
               onClick={onExpand}
-              className="entity-expand flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised"
+              className="entity-expand flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised"
             >
               <span aria-hidden>{expanded ? "⌃" : "⌄"}</span>
             </button>
@@ -198,12 +148,13 @@ export function WorkspaceRow({
               type="button"
               aria-label={`${workspace.name} 的 Agent 操作`}
               aria-expanded={menu}
-              className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-8 md:w-8"
+              className="entity-more flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-sidebar-hover hover:text-fg"
               onClick={() => setMenu((open) => !open)}
             >
               <span aria-hidden>⋯</span>
             </button>
           )}
+          </div>
         </div>
       )}
       {menu ? (
@@ -260,237 +211,7 @@ export function WorkspaceRow({
           </div>
         </>
       ) : null}
-      {details ? (
-        <WorkspaceDetailsDialog onClose={() => setDetails(false)}>
-          <AgentDetails workspace={workspace} deviceName={deviceName} />
-          <details className="mt-3 border-t border-line pt-3"><summary className="cursor-pointer py-2 text-sm text-muted">高级 Agent 配置</summary>
-          <div>
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-fg">Agent 配置</span>
-              <span className="text-[10px] text-faint">
-                revision {revision}
-              </span>
-            </div>
-            {workspace.agentSpace ? (
-              <>
-                <Detail label="位置" value={breadcrumb} />
-                <Detail
-                  label="健康"
-                  value={workspace.agentSpace.health?.status ?? "unknown"}
-                />
-                {(workspace.agentSpace.health?.reasons ?? []).map((reason) => (
-                  <p key={reason} className="py-0.5 text-[10px] text-danger">
-                    {reason}
-                  </p>
-                ))}
-                <Detail
-                  label="生命周期"
-                  value={workspace.agentSpace.lifecycle}
-                />
-                <Detail
-                  label="Builder"
-                  value={workspace.agentSpace.builderLockDigest || "未验证"}
-                />
-                {workspace.agentSpace.bootstrapPack ? (
-                  <Detail
-                    label="Pack"
-                    value={`${workspace.agentSpace.bootstrapPack.id} v${workspace.agentSpace.bootstrapPack.version}`}
-                  />
-                ) : null}
-                <div className="mt-2 space-y-1" aria-label="Component 列表">
-                  {workspace.agentSpace.components.map((component) => (
-                    <div
-                      key={component.componentId}
-                      className="flex items-center gap-1 rounded border border-line px-2 py-1"
-                    >
-                      <span className="min-w-0 flex-1 truncate text-fg">
-                        {component.componentId}
-                        {component.role ? `:${component.role}` : ""}
-                        {` · v${component.schemaVersion}`}
-                        {!component.enabled ? " · 已停用" : ""}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={spaceBusy}
-                        className="rounded px-1 text-[10px] text-accent hover:bg-raised disabled:opacity-40"
-                        onClick={() =>
-                          void mutate({
-                            kind: "setComponent",
-                            componentId: component.componentId,
-                            enabled: !component.enabled,
-                            role: component.role ?? null,
-                          })
-                        }
-                      >
-                        {component.enabled ? "停用" : "启用"}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={spaceBusy}
-                        className="rounded px-1 text-[10px] text-danger hover:bg-raised disabled:opacity-40"
-                        onClick={() =>
-                          void mutate({
-                            kind: "removeComponent",
-                            componentId: component.componentId,
-                          })
-                        }
-                      >
-                        移除
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="mt-1 leading-relaxed text-muted">
-                尚未注册为 AgentSpace。添加 Component 时内核会先验证当前目录的
-                AgentSpaceBuilder 投影。
-              </p>
-            )}
-
-            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-1">
-              <select
-                aria-label="要添加的 Component"
-                value={componentId}
-                onChange={(event) => setComponentId(event.target.value)}
-                className="min-w-0 rounded border border-line bg-raised px-2 py-1 text-fg"
-              >
-                <option value="pm">PM</option>
-                <option value="executor">Executor</option>
-                <option value="worker">Worker</option>
-                <option value="reviewer">Reviewer</option>
-              </select>
-              {componentId === "worker" ? (
-                <input
-                  aria-label="Worker role"
-                  value={workerRole}
-                  onChange={(event) => setWorkerRole(event.target.value)}
-                  placeholder="role，例如 tester"
-                  className="min-w-0 rounded border border-line bg-raised px-2 py-1 text-fg"
-                />
-              ) : (
-                <span />
-              )}
-            </div>
-            <button
-              type="button"
-              disabled={
-                spaceBusy || (componentId === "worker" && !workerRole.trim())
-              }
-              className="mt-1 w-full rounded bg-accent px-2 py-1 text-white disabled:opacity-40"
-              onClick={() =>
-                void mutate({
-                  kind: "setComponent",
-                  componentId,
-                  enabled: true,
-                  role: componentId === "worker" ? workerRole.trim() : null,
-                })
-              }
-            >
-              添加或更新 Component
-            </button>
-
-            <div className="mt-3 flex gap-1">
-              <select
-                aria-label="Parent AgentSpace"
-                value={parentId}
-                onChange={(event) => setParentId(event.target.value)}
-                className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
-              >
-                <option value="">无 Parent（项目根）</option>
-                {parentChoices.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {candidate.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                disabled={spaceBusy || !workspace.agentSpace}
-                className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
-                onClick={() =>
-                  void mutate({
-                    kind: "setParent",
-                    parentWorkspaceId: parentId || null,
-                  })
-                }
-              >
-                保存 Parent
-              </button>
-            </div>
-
-            <div className="mt-2 flex gap-1">
-              <select
-                aria-label="AgentSpace 生命周期"
-                value={lifecycle}
-                onChange={(event) => setLifecycle(event.target.value)}
-                className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
-              >
-                <option value="persistent">persistent</option>
-                <option value="pooled">pooled</option>
-                <option value="ephemeral">ephemeral</option>
-              </select>
-              <button
-                type="button"
-                disabled={spaceBusy || !workspace.agentSpace}
-                className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
-                onClick={() => void mutate({ kind: "setLifecycle", lifecycle })}
-              >
-                保存生命周期
-              </button>
-            </div>
-
-            <div className="mt-2 grid grid-cols-2 gap-1">
-              {!workspace.agentSpace ? (
-                <>
-                  <button
-                    type="button"
-                    disabled={spaceBusy}
-                    className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
-                    onClick={() => void inspectBuild({ kind: "init" })}
-                  >
-                    Builder 初始化
-                  </button>
-                  <button
-                    type="button"
-                    disabled={spaceBusy}
-                    className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
-                    onClick={() =>
-                      void inspectBuild({
-                        kind: "build",
-                        dryRun: false,
-                        requireNoPostCommands: true,
-                      })
-                    }
-                  >
-                    Builder Build
-                  </button>
-                </>
-              ) : null}
-              <button
-                type="button"
-                disabled={spaceBusy}
-                className="flex-1 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
-                onClick={() => void inspectBuild({ kind: "check" })}
-              >
-                Builder Check
-              </button>
-              <button
-                type="button"
-                disabled={spaceBusy}
-                className="flex-1 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
-                onClick={() => void inspectBuild({ kind: "verify" })}
-              >
-                Builder Verify
-              </button>
-            </div>
-            {builderSummary ? (
-              <p className="mt-1 text-[10px] text-muted">{builderSummary}</p>
-            ) : null}
-          </div>
-          </details>
-        </WorkspaceDetailsDialog>
-      ) : null}
+      {details && <AgentDetailsDialog workspace={workspace} deviceName={deviceName} onClose={() => setDetails(false)} />}
       {removing ? (
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
           <p className="font-medium text-fg">
@@ -527,15 +248,6 @@ export function WorkspaceRow({
       ) : null}
       {children}
     </li>
-  );
-}
-
-function Detail({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="grid grid-cols-[4rem_minmax(0,1fr)] gap-2 py-1">
-      <span className="text-faint">{label}</span>
-      <span className="break-all text-fg">{value}</span>
-    </div>
   );
 }
 
@@ -630,7 +342,7 @@ function SessionRow({
   }
 
   return (
-    <li className="group relative flex items-center">
+    <li className="conversation-row group relative flex items-center">
       {selection && <input type="checkbox" aria-label={`选择 ${title(session)}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
       <button
         type="button"
@@ -665,7 +377,7 @@ function SessionRow({
         // Always there on a touch screen: hover is the one interaction a phone
         // cannot perform, and hiding the only way to delete a conversation
         // behind it is how this ended up missing entirely.
-        className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+        className="conversation-row-more flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-sidebar-hover hover:text-fg"
         onClick={() => setMenu((state) => (state === "shut" ? "open" : "shut"))}
       >
         <span aria-hidden>⋯</span>
