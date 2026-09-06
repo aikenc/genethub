@@ -44,6 +44,7 @@ export function Sidebar({
   open,
   hidden = false,
   endpoint = null,
+  sessionOnly = false,
   onPickTarget,
   onNavigate,
 }: {
@@ -54,6 +55,7 @@ export function Sidebar({
   hidden?: boolean;
   /** Which machine everything below is coming from. */
   endpoint?: Endpoint | null;
+  sessionOnly?: boolean;
   onPickTarget?(target: Target, endpoint: Endpoint): void;
   onNavigate(): void;
 }) {
@@ -78,6 +80,7 @@ export function Sidebar({
   const [expandedProjects, setExpandedProjects] = useState<string[]>(() =>
     recall(EXPANDED_PROJECTS_KEY, []),
   );
+  const [needsOnly, setNeedsOnly] = useState(false);
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [globalOpen, setGlobalOpen] = useState(false);
@@ -140,10 +143,9 @@ export function Sidebar({
   );
   const matching = useMemo(
     () =>
-      needle
-        ? listed.filter((session) => title(session).toLowerCase().includes(needle))
-        : listed,
-    [listed, needle],
+      (needle ? listed.filter((session) => `${title(session)} ${workspaces.find((w) => w.id === session.workspaceId)?.name ?? ""}`.toLowerCase().includes(needle)) : listed)
+        .filter((session) => !needsOnly || ["waiting", "failed"].includes(session.status)),
+    [listed, needle, needsOnly, workspaces],
   );
 
   const go = (sessionId: string) => {
@@ -179,7 +181,7 @@ export function Sidebar({
       {/* Tapping beside the drawer shuts it, which is what every phone app
           trains people to try first. Only on phones: on a desktop the sidebar
           is part of the layout and has nothing beside it to tap. */}
-      {open ? (
+      {open && !sessionOnly ? (
         <button
           type="button"
           aria-label="关闭会话列表"
@@ -192,9 +194,9 @@ export function Sidebar({
         // `invisible` and not just a transform: an off-screen drawer is still
         // in the document, and a keyboard or a screen reader would otherwise
         // walk straight into a list nobody can see.
-        className={`fixed inset-y-0 left-0 z-40 flex w-[84%] max-w-xs flex-col border-r border-line bg-sidebar transition-transform duration-200 md:visible md:static md:z-auto md:w-64 md:max-w-none md:translate-x-0 md:transition-none ${
-          open ? "visible translate-x-0" : "invisible -translate-x-full"
-        } ${hidden ? "md:hidden" : "md:flex"}`}
+        className={sessionOnly
+          ? `${open ? "flex" : "hidden"} min-h-0 w-full flex-1 flex-col border-r border-line bg-sidebar md:w-72 md:flex-none ${hidden ? "md:hidden" : "md:flex"}`
+          : `fixed inset-y-0 left-0 z-40 flex w-[84%] max-w-xs flex-col border-r border-line bg-sidebar transition-transform duration-200 md:visible md:static md:z-auto md:w-64 md:max-w-none md:translate-x-0 md:transition-none ${open ? "visible translate-x-0" : "invisible -translate-x-full"} ${hidden ? "md:hidden" : "md:flex"}`}
       >
         <div
           className="flex flex-col gap-2 border-b border-line px-3 pb-3"
@@ -318,7 +320,9 @@ export function Sidebar({
             three modes still fit after the type scale grew. */}
         <div className="flex items-center justify-between gap-2 px-3 pt-2">
           <span className="text-sm font-medium text-fg">会话</span>
-          {workspaces.length > 0 ? (
+          {sessionOnly ? (
+            <button type="button" aria-pressed={needsOnly} className="min-h-10 rounded-lg px-3 text-xs text-accent hover:bg-raised" onClick={() => setNeedsOnly((value) => !value)}>{needsOnly ? "显示全部" : "需处理"}{sessions.some((item) => ["waiting", "failed"].includes(item.status)) ? " ●" : ""}</button>
+          ) : workspaces.length > 0 ? (
             <GroupingSwitcher
               grouping={grouping}
               open={groupingOpen}
@@ -334,7 +338,7 @@ export function Sidebar({
         </div>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-2 py-2">
-          {grouping === "project" ? (
+          {!sessionOnly && grouping === "project" ? (
             <Projects
               workspaces={workspaces}
               sessions={matching}
@@ -357,7 +361,7 @@ export function Sidebar({
               onPickSession={go}
               {...actions}
             />
-          ) : grouping === "status" ? (
+          ) : !sessionOnly && grouping === "status" ? (
             <Statuses
               sessions={matching}
               workspaces={workspaces}
@@ -538,7 +542,7 @@ function Projects({
   );
 }
 
-function WorkspaceRow({
+export function WorkspaceRow({
   workspace,
   workspaces,
   breadcrumb,
@@ -553,7 +557,9 @@ function WorkspaceRow({
   onRename,
   onRemove,
   children,
+  browse = false,
 }: {
+  browse?: boolean;
   workspace: WorkspaceInfo;
   workspaces: WorkspaceInfo[];
   breadcrumb: string;
@@ -631,12 +637,12 @@ function WorkspaceRow({
         >
           <button
             type="button"
-            aria-label={shut ? `展开 ${workspace.name}` : `折叠 ${workspace.name}`}
-            aria-expanded={!shut}
+            aria-label={browse ? `进入 ${workspace.name}` : shut ? `展开 ${workspace.name}` : `折叠 ${workspace.name}`}
+            aria-expanded={browse ? undefined : !shut}
             className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-auto md:w-auto md:px-1 md:py-1"
             onClick={onToggle}
           >
-            <span aria-hidden>{shut ? "▸" : "▾"}</span>
+            <span aria-hidden>{browse ? "›" : shut ? "▸" : "▾"}</span>
           </button>
           <button
             type="button"
@@ -1078,7 +1084,7 @@ function Statuses({
   );
 }
 
-function RecentSessions({
+export function RecentSessions({
   sessions,
   workspaces,
   activeSessionId,

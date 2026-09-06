@@ -2,7 +2,7 @@ import type { FileNode } from "@genehub/proto";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { warnOp } from "../session/op-log";
-import { useWorkbench } from "../session/store";
+import { graft, useWorkbench } from "../session/store";
 import { FileTree } from "./FileTree";
 
 type Clipboard = {
@@ -13,15 +13,30 @@ type Clipboard = {
 type SelectIntent = "copy" | "cut" | "delete";
 
 /** File-system entry point for the in-workbench Asset Preview float. */
-export function FilesPanel() {
+export function FilesPanel({ workspaceId }: { workspaceId?: string } = {}) {
   const {
-    tree,
-    loadTree,
+    tree: sharedTree,
+    loadTree: sharedLoadTree,
     client,
-    activeWorkspaceId,
+    activeWorkspaceId: currentWorkspaceId,
     activeSessionId,
     openPreviewFloat,
   } = useWorkbench();
+  const activeWorkspaceId = workspaceId ?? currentWorkspaceId;
+  const [scopedTree, setScopedTree] = useState<FileNode | null>(null);
+  const requestOwner = useRef({ client, workspaceId });
+  requestOwner.current = { client, workspaceId };
+  const tree = workspaceId ? scopedTree : sharedTree;
+  const loadTree = useCallback(async (path?: string) => {
+    if (!workspaceId) return sharedLoadTree(path);
+    if (!client) return;
+    const owner = requestOwner.current;
+    try {
+      const reply = await client.call({ type: "file.tree", payload: { workspaceId, path: path ?? null, depth: 1 } });
+      if (requestOwner.current.client !== owner.client || requestOwner.current.workspaceId !== owner.workspaceId) return;
+      if (reply?.type === "fileTree") setScopedTree((current) => path && current ? graft(current, path, reply.data) : reply.data);
+    } catch (cause) { setError(String(cause)); }
+  }, [client, workspaceId, sharedLoadTree]);
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [focusIsDir, setFocusIsDir] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -80,7 +95,7 @@ export function FilesPanel() {
       deviceHandle,
       workspaceHandle: activeWorkspaceId,
       path,
-      sessionId: activeSessionId,
+      sessionId: workspaceId ? null : activeSessionId,
     });
   };
 

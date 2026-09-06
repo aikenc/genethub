@@ -12,15 +12,17 @@ import { useWorkbench } from "../session/store";
  * a build printing thousands of lines a second would otherwise flood the
  * timeline's sequence numbers and make replay useless.
  */
-export function TerminalPanel() {
+export function TerminalPanel({ workspaceId }: { workspaceId?: string } = {}) {
   const client = useWorkbench((state) => state.client);
   const workspaces = useWorkbench((state) => state.workspaces);
+  const activeWorkspaceId = useWorkbench((state) => state.activeWorkspaceId);
+  const selectedId = workspaceId ?? activeWorkspaceId;
+  const workspace = workspaces.find((item) => item.id === selectedId);
   const host = useRef<HTMLDivElement | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const element = host.current;
-    const workspace = workspaces[0];
     if (!client || !element || !workspace) return;
 
     const terminal = new Terminal({
@@ -66,6 +68,7 @@ export function TerminalPanel() {
     });
 
     const resize = () => {
+      if (!element.clientWidth || !element.clientHeight) return;
       fit.fit();
       if (ptyId) {
         void client.call({
@@ -84,7 +87,7 @@ export function TerminalPanel() {
       if (ptyId) void client.call({ type: "pty.close", payload: { ptyId } });
       terminal.dispose();
     };
-  }, [client, workspaces]);
+  }, [client, workspace?.id]);
 
   if (error) return <p className="p-4 text-sm text-danger">终端打不开：{error}</p>;
   return <div ref={host} className="h-full w-full p-2" data-testid="terminal" />;
