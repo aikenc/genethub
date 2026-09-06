@@ -11,6 +11,7 @@ import {
   buildAgentSpaceTree,
   type AgentSpaceTreeNode,
 } from "./agent-space-tree";
+import { AgentDetails } from "./AgentDetails";
 import { AgentList } from "./AgentList";
 import { FilesPanel } from "../files/FilesPanel";
 import { ChangesPanel } from "../changes/ChangesPanel";
@@ -155,10 +156,14 @@ export function WorkspaceBrowser({
     );
     setSelectedId(id);
     setSurfaceState("sessions");
-    setQuery("");
   };
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-label="Agent 浏览">
+    <div className="flex h-full min-h-0 min-w-0" aria-label="Agent 浏览">
+      <aside aria-label="Agent 目录导航" className="hidden w-80 shrink-0 flex-col border-r border-line bg-sidebar lg:flex">
+        <header className="shrink-0 space-y-3 border-b border-line p-4"><div className="flex items-center justify-between gap-2"><h1 className="text-xl font-semibold">Agent</h1><OpenProject host={host} endpoint={endpoint} /></div><input type="search" aria-label="搜索 Agent" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索名称或上级 Agent" className="min-h-11 w-full rounded-lg border border-line bg-surface px-3 text-sm" /></header>
+        <div className="min-h-0 flex-1 overflow-y-auto p-2"><AgentList workspaces={workspaces} sessions={sessions} selectedId={selectedId} onPick={browse} query={query} deviceName={deviceName} /></div>
+      </aside>
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Agent 面板">
       <header className="shrink-0 border-b border-line px-4 py-3 md:px-6">
         <div className="flex items-center gap-2">
           {workspace && (
@@ -237,7 +242,7 @@ export function WorkspaceBrowser({
         <div className="min-h-0 flex-1 overflow-y-auto p-4 md:px-6">
           <div className="mx-auto max-w-4xl">
             {!workspace && (
-              <div className="mb-4 flex flex-wrap items-center gap-2">
+              <div className="mb-4 flex flex-wrap items-center gap-2 lg:hidden">
                 <input
                   type="search"
                   aria-label="搜索 Agent"
@@ -284,6 +289,7 @@ export function WorkspaceBrowser({
                 </WorkspaceRow>
               </ul>
             ) : null}
+            {workspace && <div className="mb-5 hidden rounded-xl border border-line p-4 lg:block"><AgentDetails key={workspace.id} workspace={workspace} deviceName={deviceName} compact /></div>}
             {workspace && childrenOpen && node.children.length > 0 && (
               <section className="mb-4 rounded-xl border border-line p-2">
                 {childrenOpen && (
@@ -298,7 +304,7 @@ export function WorkspaceBrowser({
                 )}
               </section>
             )}
-            {workspace && !query && (
+            {workspace && (
               <div className="mb-6 space-y-3">
                 <button
                   type="button"
@@ -327,7 +333,7 @@ export function WorkspaceBrowser({
                 ))}
               </div>
             )}
-            {workspace && !query ? (
+            {workspace ? (
               <div className="mt-6 border-t border-line pt-4">
                 <div className="mb-3 flex items-center gap-2">
                   <h2 className="mr-auto text-sm font-medium">会话</h2>
@@ -358,14 +364,15 @@ export function WorkspaceBrowser({
                 />
               </div>
             ) : null}
+            {!workspace && <p className="hidden py-16 text-center text-sm text-muted lg:block">从左侧选择一个 Agent，查看资料、会话和工具。</p>}
             {!workspace && (
-              <AgentList
+              <div className="lg:hidden"><AgentList
                 workspaces={workspaces}
                 sessions={sessions}
                 onPick={browse}
                 query={query}
                 deviceName={deviceName}
-              />
+              /></div>
             )}
             {workspace && (
               <section
@@ -452,6 +459,7 @@ export function WorkspaceBrowser({
           onClose={() => setImportOpen(false)}
         />
       ) : null}
-    </section>
+      </section>
+    </div>
   );
 }

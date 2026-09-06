@@ -28,7 +28,7 @@ export function WorkspaceDetailsDialog({ children, onClose, title = "Agent详情
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
         if (event.key !== "Tab") return;
         const controls = [...(dialog.current?.querySelectorAll<HTMLElement>(
-          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex="0"]',
+          'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href], [tabindex="0"]',
         ) ?? [])].filter((element) => element.getClientRects().length > 0);
         const first = controls[0];
         const last = controls[controls.length - 1];

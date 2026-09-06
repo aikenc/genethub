@@ -44,6 +44,8 @@ import { defaultAgent, useWorkbench } from "../session/store";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
+import { AgentDetailsDialog } from "../workspace/AgentDetails";
+import { Info } from "lucide-react";
 import { WorkspaceBrowser } from "../workspace/WorkspaceBrowser";
 import type { ExtraTab } from "../shell/tabs";
 import { TitleBar } from "../shell/TitleBar";
@@ -168,6 +170,7 @@ export function App({
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage} = usePageNavigation();
   const [spaceDetail, setSpaceDetail] = useState(false);
+  const [agentDetailsOpen, setAgentDetailsOpen] = useState(false);
   const [spacesVisited, setSpacesVisited] = useState(false);
   const [browserNavigationKey, setBrowserNavigationKey] = useState(0);
   const [browserWorkspaceId, setBrowserWorkspaceId] = useState<string | null>(null);
@@ -792,7 +795,7 @@ export function App({
 
         {spacesVisited ? <div className={section === "spaces" ? "min-h-0 min-w-0 flex-1" : "hidden"}>
           <WorkspaceBrowser onDepthChange={setSpaceDetail} host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
-            onSession={(id) => { void workbench.selectSession(id); setSection("sessions"); }}
+            onSession={(id) => { void workbench.selectSession(id); setSessionsOpen(false); setSection("sessions"); }}
             onNewSession={(id, localId) => { workbench.newSession(id, null, {localId, addressScope: "workspace"}); setSessionsOpen(false); setSection("sessions"); }}
             onExtra={(tab, id) => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
         </div> : null}
@@ -833,20 +836,10 @@ export function App({
               </span>
             )}
             <BackgroundBadge />
-            <button type="button" aria-label="浏览当前Agent" className="min-h-11 shrink-0 rounded-lg px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>Agent</button>
-            <button
-              type="button"
-              aria-label="工具"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl text-muted active:bg-raised"
-              onClick={() => {
-                setSessionsOpen(false);
-                setSection("tools");
-              }}
-            >
-              <span aria-hidden>•••</span>
-            </button>
+            {workspace && <button type="button" aria-label="当前 Agent 详情" title="Agent 详情" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setAgentDetailsOpen(true)}><Info size={20} /></button>}
           </header>
 
+          {agentDetailsOpen && workspace && <AgentDetailsDialog key={workspace.id} workspace={workspace} deviceName={endpoint.label} onClose={() => setAgentDetailsOpen(false)} onBrowse={() => { setAgentDetailsOpen(false); setBrowserWorkspaceId(workspace.id); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }} />}
           {workbench.notice ? (
             <p
               role="alert"

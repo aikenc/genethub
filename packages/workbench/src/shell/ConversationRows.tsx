@@ -8,7 +8,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { readLocalDraft } from "../session/localConversation";
 import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
-import { AgentAvatar, AgentAvatarPicker } from "../workspace/AgentAvatar";
+import { Info } from "lucide-react";
+import { AgentDetails } from "../workspace/AgentDetails";
+import { AgentAvatar } from "../workspace/AgentAvatar";
 import { isDescendant } from "../workspace/agent-space-tree";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { SessionStatusIcon } from "./SessionStatusIcon";
@@ -204,6 +206,7 @@ export function WorkspaceRow({
               <span aria-hidden>{expanded ? "⌃" : "⌄"}</span>
             </button>
           )}
+          <button type="button" aria-label={`${workspace.name} 的详情`} title="Agent 详情" className="flex h-10 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setDetails(true)}><Info size={17} /></button>
           {actions && (
             <button
               type="button"
@@ -273,29 +276,9 @@ export function WorkspaceRow({
       ) : null}
       {details ? (
         <WorkspaceDetailsDialog onClose={() => setDetails(false)}>
-          <AgentAvatarPicker id={workspace.id} />
-          <Detail label="名称" value={workspace.name} />
-          {workspace.workspaceFile ? (
-            <Detail label="配置文件" value={workspace.workspaceFile} />
-          ) : null}
-          {(workspace.folders?.length
-            ? workspace.folders
-            : [
-                {
-                  name: workspace.name,
-                  root: workspace.root,
-                  rootHandle: "",
-                },
-              ]
-          ).map((folder, index) => (
-            <Detail
-              key={folder.root}
-              label={index === 0 ? "主目录" : folder.name}
-              value={folder.root}
-            />
-          ))}
-          <Detail label="所属设备" value={deviceName} />
-          <div className="mt-3 border-t border-line pt-3">
+          <AgentDetails workspace={workspace} deviceName={deviceName} />
+          <details className="mt-3 border-t border-line pt-3"><summary className="cursor-pointer py-2 text-sm text-muted">高级 Agent 配置</summary>
+          <div>
             <div className="flex items-center justify-between gap-2">
               <span className="font-medium text-fg">Agent 配置</span>
               <span className="text-[10px] text-faint">
@@ -519,6 +502,7 @@ export function WorkspaceRow({
               <p className="mt-1 text-[10px] text-muted">{builderSummary}</p>
             ) : null}
           </div>
+          </details>
         </WorkspaceDetailsDialog>
       ) : null}
       {removing ? (
@@ -695,7 +679,7 @@ function SessionRow({
       >
         <span className="relative shrink-0">
           <AgentAvatar id={session.workspaceId} name={project?.name ?? "Agent"} />
-          <span className="absolute -bottom-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>
+          <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
