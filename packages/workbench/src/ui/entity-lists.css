@@ -1,0 +1,48 @@
+/* Shared density follows the available list width, not the screen width. */
+.genehub-ui .entity-list {
+  container-type: inline-size;
+}
+.genehub-ui .agent-list > .entity-row {
+  border-radius: 12px;
+  background: rgb(var(--surface));
+}
+.genehub-ui .entity-row > div:first-child {
+  padding-inline: 12px 6px;
+  border-radius: 12px;
+}
+.genehub-ui .entity-row:hover > div:first-child {
+  background: rgb(var(--raised));
+}
+.genehub-ui .entity-main {
+  min-height: 68px;
+}
+.genehub-ui .entity-title {
+  color: rgb(var(--fg));
+}
+.genehub-ui .entity-list[data-density="compact"] .entity-secondary {
+  display: none;
+}
+.genehub-ui .entity-list[data-density="compact"] .entity-main {
+  min-height: 48px;
+  padding-block: 8px;
+}
+.genehub-ui .entity-list[data-density="compact"] .entity-row > div:first-child {
+  min-height: 48px;
+}
+.genehub-ui button:focus-visible,
+.genehub-ui select:focus-visible {
+  outline: 2px solid rgb(var(--accent));
+  outline-offset: 2px;
+}
+@container (max-width: 350px) {
+  .genehub-ui .entity-list[data-density="auto"] .entity-secondary {
+    display: none;
+  }
+  .genehub-ui .entity-list[data-density="auto"] .entity-main {
+    min-height: 48px;
+    padding-block: 8px;
+  }
+  .genehub-ui .entity-list[data-density="auto"] .entity-row > div:first-child {
+    min-height: 48px;
+  }
+}

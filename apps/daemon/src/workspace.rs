@@ -976,6 +976,91 @@ impl Workspaces {
         Ok(self.describe_with_space(&entry, &config))
     }
 
+    /// The saved workspace file is the source of folder membership. Serialize
+    /// local changes, validate before replacing it, and preserve the registry ID.
+    pub async fn add_root(&self, id: &str, requested: &Path) -> Result<WorkspaceInfo> {
+        let root = crate::guest_paths::guest_path(requested).canonicalize()?;
+        anyhow::ensure!(root.is_dir(), "the new root must be a directory");
+        let mut entries = self.entries.write().await;
+        let existing = entries
+            .get(id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        let path = existing
+            .workspace_file
+            .as_ref()
+            .ok_or_else(|| anyhow!("adding roots requires a .code-workspace Agent"))?;
+        let original = std::fs::read_to_string(path)?;
+        anyhow::ensure!(
+            original.len() as u64 <= MAX_WORKSPACE_FILE_BYTES,
+            "workspace file exceeds size limit"
+        );
+        // Read fresh disk contents: never replace external edits with our cached folders.
+        let current = parse_code_workspace(path, &original)?;
+        let mut document: serde_json::Value = json5::from_str(&original)?;
+        if !current.folders.iter().any(|folder| folder.root == root) {
+            anyhow::ensure!(
+                current.folders.len() < MAX_WORKSPACE_FOLDERS,
+                "workspace folder limit reached"
+            );
+            // The wire uses guest paths, but VS Code must also understand this
+            // saved file on a Windows host. Convert mounted volumes at this
+            // file-format boundary only; protocol paths stay unchanged.
+            let absolute = crate::guest_paths::windows_volumes()
+                .iter()
+                .find_map(|volume| {
+                    root.strip_prefix(&volume.guest).ok().map(|relative| {
+                        format!("{}:/{}", volume.letter, relative.to_string_lossy())
+                    })
+                })
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            document
+                .get_mut("folders")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| anyhow!("workspace folders must be an array"))?
+                .push(serde_json::json!({"path": absolute}));
+        }
+        let body = if current.folders.iter().any(|folder| folder.root == root) {
+            original.clone()
+        } else {
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        };
+        anyhow::ensure!(
+            body.len() as u64 <= MAX_WORKSPACE_FILE_BYTES,
+            "workspace file exceeds size limit"
+        );
+        let mut updated = parse_code_workspace(path, &body)?;
+        updated.id = existing.id.clone();
+        updated.name = existing.name.clone();
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        for folder in &mut updated.folders {
+            folder.root_handle = next.ensure_workspace_root(&folder.root);
+        }
+        *next
+            .workspaces
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| anyhow!("workspace missing from config"))? = updated.clone();
+        if updated != existing {
+            next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+        }
+        if body != original {
+            replace_workspace_file(path, &original, &body)?;
+        }
+        if let Err(error) = next.save(&self.config_path) {
+            if body != original {
+                replace_workspace_file(path, &body, &original)
+                    .context("registry save failed; workspace file rollback also failed")?;
+            }
+            return Err(error);
+        }
+        *config = next;
+        entries.insert(id.to_owned(), updated.clone());
+        Ok(self.describe_with_space(&updated, &config))
+    }
+
     /// Removes a project from the active registry without touching its files or
     /// conversations. The durable entry is a tombstone with enough identity to
     /// reactivate the same id when the source is opened again.
@@ -1271,6 +1356,42 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
     }
 }
 
+/// Atomic replacement using the existing cross-platform rename primitive.
+/// An external edit detected before publication is rejected instead of overwritten.
+fn replace_workspace_file(path: &Path, expected: &str, body: &str) -> Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("workspace file has no parent"))?;
+    let temporary = parent.join(format!(".genehub-workspace-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        #[cfg(not(target_family = "wasm"))]
+        let permissions = std::fs::metadata(path)?.permissions();
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(body.as_bytes())?;
+        #[cfg(not(target_family = "wasm"))]
+        file.set_permissions(permissions)?;
+        file.sync_all()?;
+        drop(file);
+        anyhow::ensure!(
+            std::fs::read_to_string(path)? == expected,
+            "workspace file changed; reopen and retry"
+        );
+        crate::config::replace_private(&temporary, path)?;
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("reading workspace file {}", path.display()))?;
@@ -1283,7 +1404,11 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
     }
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading workspace file {} as UTF-8", path.display()))?;
-    let parsed: CodeWorkspace = json5::from_str(&source)
+    parse_code_workspace(path, &source)
+}
+
+fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
+    let parsed: CodeWorkspace = json5::from_str(source)
         .with_context(|| format!("parsing workspace file {}", path.display()))?;
     if parsed.folders.is_empty() {
         anyhow::bail!("workspace file must contain at least one folder");

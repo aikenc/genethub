@@ -3,7 +3,7 @@ import { MessageSquare, Compass, Folder, SlidersHorizontal } from "lucide-react"
 export type WorkbenchSection = "sessions" | "spaces" | "discover" | "tools";
 const entries = [
   { id: "sessions", label: "会话", Icon: MessageSquare },
-  { id: "spaces", label: "空间", Icon: Folder },
+  { id: "spaces", label: "Agent", Icon: Folder },
   { id: "discover", label: "发现", Icon: Compass },
   { id: "tools", label: "工具", Icon: SlidersHorizontal },
 ] as const;

@@ -685,6 +685,9 @@ pub enum Request {
     WorkspaceList,
     #[serde(rename = "workspace.open", rename_all = "camelCase")]
     WorkspaceOpen { root: String },
+    /// Append a directory to a saved code-workspace; preserves workspace identity.
+    #[serde(rename = "workspace.addRoot", rename_all = "camelCase")]
+    WorkspaceAddRoot { workspace_id: String, root: String },
     #[serde(rename = "workspace.create", rename_all = "camelCase")]
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]

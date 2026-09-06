@@ -1,5 +1,6 @@
 import "../ui/weui/controls.css";
 import "../ui/weui/theme.css";
+import "../ui/entity-lists.css";
 import { usePageNavigation } from "./usePageNavigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -580,7 +581,7 @@ export function App({
             client.call({ type: "workspace.list" }),
           ]);
           if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-            throw new Error("目标机器没有返回可用的 Agent 和工作区列表。");
+            throw new Error("目标机器没有返回可用的执行引擎和 Agent 列表。");
           }
           return { agents: agents.data, workspaces: workspaces.data };
         });
@@ -795,8 +796,8 @@ export function App({
             onNewSession={(id, localId) => { workbench.newSession(id, null, {localId, addressScope: "workspace"}); setSessionsOpen(false); setSection("sessions"); }}
             onExtra={(tab, id) => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
         </div> : null}
-        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个空间的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一空间，请 Agent 基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览空间</button></div></section> : null}
-        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局工具"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">工具</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属空间。</p></header><ToolsMenu scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
+        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个Agent的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一Agent，请 Agent 基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览Agent</button></div></section> : null}
+        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局工具"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">工具</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属Agent。</p></header><ToolsMenu scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
         <main className={section === "sessions" ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
@@ -832,7 +833,7 @@ export function App({
               </span>
             )}
             <BackgroundBadge />
-            <button type="button" aria-label="浏览当前空间" className="min-h-11 shrink-0 rounded-lg px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>空间</button>
+            <button type="button" aria-label="浏览当前Agent" className="min-h-11 shrink-0 rounded-lg px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>Agent</button>
             <button
               type="button"
               aria-label="工具"
@@ -923,7 +924,7 @@ export function App({
                 composing ? (
                   <>
                     <div className="hidden items-center justify-end gap-2 border-b border-line px-3 py-1 md:flex">
-                      <button type="button" className="mr-auto min-h-9 rounded px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>{workspace?.name ?? "空间"} · 浏览空间</button>
+                      <button type="button" className="mr-auto min-h-9 rounded px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>{workspace?.name ?? "Agent"} · 浏览Agent</button>
                       <BackgroundBadge />
                       <ConnectionBadge
                         state={workbench.connection}
@@ -1300,9 +1301,9 @@ function FirstRun({
   if (!workspace) {
     return (
       <Splash>
-        <p className="text-sm">先打开一个工作区。</p>
+        <p className="text-sm">先打开一个Agent。</p>
         <p className="mb-3 text-xs text-muted">
-          agent 只能在你打开的工作区里读写，这一步同时决定了它的活动范围。工作区可以是一个文件夹，也可以是 .code-workspace 描述的多文件夹工作区。
+          为 Agent 选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
         </p>
         <OpenProject host={host} endpoint={endpoint} />
       </Splash>

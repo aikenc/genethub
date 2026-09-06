@@ -1774,6 +1774,17 @@ async fn dispatch(
             }
         }
 
+        Request::WorkspaceAddRoot { workspace_id, root } => {
+            match state
+                .workspaces
+                .add_root(&workspace_id, Path::new(&root))
+                .await
+            {
+                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::WorkspaceCreate { root, name } => {
             let path = crate::guest_paths::guest_path(Path::new(&root));
             if let Err(error) = std::fs::create_dir_all(&path) {
@@ -2721,6 +2732,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::DeviceRemoteAttach { .. } => Some("device.remoteAttach"),
         Request::DeviceRemoteDetach => Some("device.remoteDetach"),
         Request::WorkspaceOpen { .. } => Some("workspace.open"),
+        Request::WorkspaceAddRoot { .. } => Some("workspace.addRoot"),
         Request::WorkspaceCreate { .. } => Some("workspace.create"),
         Request::AgentSpaceConfigure { .. } => Some("agentSpace.configure"),
         Request::WorkspaceRename { .. } => Some("workspace.rename"),
