@@ -264,7 +264,8 @@ mod tests {
     }
 
     #[test]
-    fn guest_path_wraps_guest_form() {        if cfg!(target_family = "wasm") {
+    fn guest_path_wraps_guest_form() {
+        if cfg!(target_family = "wasm") {
             assert_eq!(
                 guest_path(Path::new(r"F:\dev\x")),
                 PathBuf::from("/f/dev/x")

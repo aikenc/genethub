@@ -996,8 +996,10 @@ impl CodexSession {
         // Payload paths are spelled for the host: a native codex resolves a
         // guest `/e/...` against its own drive and lands in a phantom
         // `E:\e\...` tree (fb_M5CQD86STboK).
-        let mut params =
-            with_thread_policy(json!({ "cwd": crate::guest_paths::host_path(&config.cwd) }), mode);
+        let mut params = with_thread_policy(
+            json!({ "cwd": crate::guest_paths::host_path(&config.cwd) }),
+            mode,
+        );
         if let Some(model) = self.model.lock().await.clone() {
             params["model"] = json!(model);
         }

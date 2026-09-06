@@ -370,7 +370,8 @@ mod tests {
         }];
         let cli = Path::new("/e/opt/genehub/genet-beta");
         let catalog = format_catalog(&skills, Some(cli), true);
-        let spelled = |path: &Path| crate::guest_paths::host_form(&path.to_string_lossy()).into_owned();
+        let spelled =
+            |path: &Path| crate::guest_paths::host_form(&path.to_string_lossy()).into_owned();
         assert!(catalog.contains(&format!("<genehub_cli>{}</genehub_cli>", spelled(cli))));
         assert!(catalog.contains(&format!(
             "<location>{}</location>",
@@ -381,7 +382,11 @@ mod tests {
     #[test]
     fn session_guidance_keeps_artifact_rules_and_appends_the_catalog() {
         let root = temp_dir("guidance");
-        let prompt = session_guidance(Some(&root), Some(Path::new("/opt/genehub/genet-beta")), false);
+        let prompt = session_guidance(
+            Some(&root),
+            Some(Path::new("/opt/genehub/genet-beta")),
+            false,
+        );
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-session-history"));
         assert!(prompt.contains("genehub-html-preview"));
