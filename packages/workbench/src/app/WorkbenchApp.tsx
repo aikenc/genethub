@@ -45,7 +45,7 @@ import { defaultAgent, useWorkbench } from "../session/store";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
-import { AgentDetailsDialog } from "../workspace/AgentDetails";
+import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { Info } from "lucide-react";
 import { WorkspaceBrowser } from "../workspace/WorkspaceBrowser";
 import type { ExtraTab } from "../shell/tabs";
@@ -765,6 +765,7 @@ export function App({
     workbench.workspaces[0];
 
   return (
+    <AgentDetailsEnvironment.Provider value={{ host, endpoint }}>
     <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
       <TitleBar
         host={host}
@@ -1169,6 +1170,7 @@ export function App({
         />
       ) : null}
     </div>
+    </AgentDetailsEnvironment.Provider>
   );
 }
 

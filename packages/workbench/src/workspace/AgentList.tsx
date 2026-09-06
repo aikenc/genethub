@@ -15,6 +15,7 @@ export function AgentList({
   sessions = [],
   selectedId,
   onPick,
+  onNewSession,
   query = "",
   density = "auto",
   actions = true,
@@ -28,6 +29,7 @@ export function AgentList({
   sessions?: SessionSummary[];
   selectedId?: string | null;
   onPick(id: string): void;
+  onNewSession?(id: string): void;
   query?: string;
   density?: ListDensity;
   actions?: boolean;
@@ -81,6 +83,7 @@ export function AgentList({
       deviceName={deviceName}
       onToggle={() => onPick(node.workspace.id)}
       onPick={() => onPick(node.workspace.id)}
+      onNewSession={onNewSession ? () => onNewSession(node.workspace.id) : undefined}
       onRename={(name) => void wb.renameWorkspace(node.workspace.id, name)}
       onRemove={() => wb.removeWorkspace(node.workspace.id)}
       density={density}

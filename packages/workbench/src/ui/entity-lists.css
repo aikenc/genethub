@@ -34,3 +34,24 @@
   outline: 2px solid rgb(var(--accent));
   outline-offset: 2px;
 }
+
+/* Actions share the secondary line. Titles never reserve a permanent menu column. */
+.genehub-ui .agent-row-body .entity-main { min-height: 88px; }
+.genehub-ui .agent-meta { padding-right: 116px; }
+.genehub-ui .agent-row-body:has(.entity-expand) .agent-meta { padding-right: 160px; }
+.genehub-ui .agent-row-actions {
+  position: absolute; right: 6px; bottom: 5px; display: flex; align-items: center;
+  gap: 0; background: rgb(var(--surface)); border-radius: 8px;
+}
+.genehub-ui .entity-row:hover > .agent-row-body .agent-row-actions { background: rgb(var(--raised)); }
+.genehub-ui .conversation-row-more { position: absolute; right: 2px; bottom: 0; }
+.genehub-ui .conversation-row .entity-secondary { padding-right: 38px; }
+@media (hover: hover) and (pointer: fine) {
+  .genehub-ui .conversation-row-more { opacity: 0; pointer-events: none; background: rgb(var(--surface)); }
+  .genehub-ui .conversation-row:hover > .conversation-row-more,
+  .genehub-ui .conversation-row:focus-within > .conversation-row-more,
+  .genehub-ui .conversation-row-more[aria-expanded="true"] { opacity: 1; pointer-events: auto; }
+  .genehub-ui .conversation-row .entity-secondary { padding-right: 0; }
+}
+.genehub-ui .entity-list[data-density="compact"] .agent-row-actions { position: static; }
+.genehub-ui .entity-list[data-density="compact"] .agent-row-body .entity-main { min-height: 48px; }
