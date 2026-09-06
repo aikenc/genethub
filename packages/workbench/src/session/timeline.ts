@@ -58,6 +58,9 @@ export interface TimelineState {
   seq: number;
   /** Every round of this session, in order, unexpanded. */
   rounds: RoundSummary[];
+  historyBefore?: string | null;
+  historyWindowed?: boolean;
+  historyExcerptIds?: string[];
   /** The trunk index of each round opened so far, by round id. */
   roundLayers: Record<string, RoundLayer>;
   /** Trunks pulled in full, by `roundId:trunkIndex`. */
@@ -105,10 +108,19 @@ export function fromSnapshot(
 ): TimelineState {
   const pendingPermission = snapshot.pendingPermissions?.[0] ?? null;
   const rounds = roundsFromSnapshot(snapshot);
+  const previousItems = new Map(previous?.items.map(item => [item.id, item]));
+  const excerptIds = new Set(snapshot.historyExcerptIds ?? []);
+  const items = snapshot.items.map(item => excerptIds.has(item.id) && previousItems.has(item.id) && !previous?.historyExcerptIds?.includes(item.id) ? previousItems.get(item.id)! : item);
+  const retainedExcerpts = [...new Set([...(previous?.historyExcerptIds ?? []).filter(id => !snapshot.items.some(item => item.id === id)), ...(snapshot.historyExcerptIds ?? []).filter(id => !previousItems.has(id) || previous?.historyExcerptIds?.includes(id))])];
   return {
     ...emptyTimeline(),
     pending,
-    items: snapshot.items,
+    items: snapshot.historyWindowed && previous
+      ? mergeHistoryItems(previous.items, items)
+      : items,
+    historyBefore: snapshot.historyWindowed && previous?.historyWindowed && snapshot.items.some(item => previousItems.has(item.id)) ? previous.historyBefore : snapshot.historyBefore,
+    historyWindowed: snapshot.historyWindowed,
+    historyExcerptIds: retainedExcerpts,
     // Old daemon snapshots may still say `running`; the durable interaction is
     // authoritative because there is deliberately no live turn behind it.
     status: pendingPermission ? "waiting" : snapshot.summary.status,
@@ -131,7 +143,9 @@ export function fromSnapshot(
       ),
     ),
     seq: snapshot.seq,
-    rounds: rounds.rounds,
+    rounds: snapshot.historyWindowed && previous
+      ? [...new Map([...previous.rounds, ...rounds.rounds].map(round => [round.roundId, round])).values()].sort((a,b) => a.startedAtMs - b.startedAtMs)
+      : rounds.rounds,
     roundLayers: previous
       ? { ...previous.roundLayers, ...rounds.roundLayers }
       : rounds.roundLayers,
@@ -209,6 +223,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
       };
 
     case "itemDelta":
+      if (state.historyExcerptIds?.includes(event.itemId)) return state;
       return { ...state, items: applyDelta(state.items, event) };
 
     case "turnProgress":
@@ -381,4 +396,23 @@ export function assistantText(state: TimelineState): string {
     )
     .map((item) => item.text)
     .join("");
+}
+
+/** Earlier page first; live/current copies win on overlap. Stable IDs survive reconnects. */
+export function mergeHistoryItems(earlier: TimelineItem[], current: TimelineItem[]): TimelineItem[] {
+  return [...new Map([...earlier, ...current].map(item => [item.id, item])).values()];
+}
+
+/** Insert a previous page at its cursor, including a gap between two retained windows. */
+export function insertHistoryPage(current: TimelineItem[], page: TimelineItem[], beforeId: string): TimelineItem[] {
+  const result = [...current];
+  let anchor = beforeId;
+  for (const item of [...page].reverse()) {
+    if (!result.some(entry => entry.id === item.id)) {
+      const at = result.findIndex(entry => entry.id === anchor);
+      result.splice(at < 0 ? 0 : at, 0, item);
+    }
+    anchor = item.id;
+  }
+  return result;
 }

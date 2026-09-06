@@ -11,7 +11,7 @@ import type {
   TurnStats,
   Usage,
 } from "@genehub/proto";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
 
 import { canStartAgent } from "../presentation/catalog/resolve";
@@ -57,6 +57,7 @@ import {
   visibleProcessBatches,
 } from "./roundGallery";
 import { buildSelectionCopy } from "./selectionCopy";
+import { localValue, saveLocalValue, markContentRead, type ReadingPosition } from "./localConversation";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { kindEmoji, kindLabel, ToolCallView } from "./ToolCall";
@@ -185,6 +186,8 @@ export type ForwardTarget =
 
 
 export function TimelineView({
+  readingKey,
+  visible = true,
   state,
   forkController,
   forwardController,
@@ -192,6 +195,8 @@ export function TimelineView({
   onScrollBack,
   onReturnToBottom,
 }: {
+  readingKey?: string;
+  visible?: boolean;
   state: TimelineState;
   forkController?: ForkController;
   forwardController?: ForwardController;
@@ -203,12 +208,56 @@ export function TimelineView({
   /** Fired when the end comes back into view, however they got there. */
   onReturnToBottom?(): void;
 }) {
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const loadHistory = async () => {
+    if (historyLoading) return;
+    const element = scroller.current;
+    const oldHeight = element?.scrollHeight ?? 0;
+    const oldTop = element?.scrollTop ?? 0;
+    setPinned(false);
+    pinnedRef.current = false;
+    setHistoryLoading(true); setHistoryError(null);
+    try {
+      await useWorkbench.getState().loadHistory();
+      requestAnimationFrame(() => { if (element) element.scrollTop = oldTop + element.scrollHeight - oldHeight; });
+    } catch (error) { setHistoryError(error instanceof Error ? error.message : "历史读取失败"); }
+    finally { setHistoryLoading(false); }
+  };
   const content = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const scrollRun = useRef(idleTimelineScroll());
-  const pinnedRef = useRef(true);
-  const [pinned, setPinned] = useState(true);
+  const press = useRef<{timer: ReturnType<typeof setTimeout>; x: number; y: number} | null>(null);
+  const cancelPress = () => { if (press.current) clearTimeout(press.current.timer); press.current = null; };
+  useEffect(() => cancelPress, []);
+  const [savedReading] = useState(() => readingKey ? localValue<ReadingPosition>(`position:${readingKey}`) : null);
+  const restorePending = useRef(Boolean(savedReading && !savedReading.bottom));
+  const pinnedRef = useRef(!restorePending.current);
+  const [pinned, setPinned] = useState(!restorePending.current);
+  const visibleRef = useRef(visible); visibleRef.current = visible;
+  const persistReading = () => {
+    const el = scroller.current;
+    if (!el || !readingKey || !visibleRef.current || !el.clientHeight) return;
+    const top = el.getBoundingClientRect().top;
+    const anchor = [...el.querySelectorAll<HTMLElement>("[data-reading-anchor]")].find(node => node.getBoundingClientRect().bottom > top);
+    if (anchor && !restorePending.current) saveLocalValue(`position:${readingKey}`, {anchor: anchor.dataset.readingAnchor, offset: anchor.getBoundingClientRect().top-top, bottom: pinnedRef.current});
+  };
+  useLayoutEffect(() => {
+    if (!visible || !savedReading || !restorePending.current || !scroller.current) return;
+    const el = scroller.current;
+    const anchor = [...el.querySelectorAll<HTMLElement>("[data-reading-anchor]")].find(node => node.dataset.readingAnchor === savedReading.anchor);
+    if (anchor) { el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - savedReading.offset; restorePending.current = false; }
+  }, [visible, savedReading, state.items]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      persistReading();
+      if (!visibleRef.current || document.visibilityState !== "visible" || !pinnedRef.current || !scroller.current?.clientHeight) return;
+      const wb = useWorkbench.getState(); const summary = wb.sessions.find(s => s.id === wb.activeSessionId);
+      if (summary?.messagePreview && wb.timeline.items.some(item => item.id === summary.messagePreview!.itemId) && wb.client?.identity) markContentRead(wb.client.identity.machineId, summary.id, summary.messagePreview.itemId);
+    }, 500);
+    return () => clearInterval(timer);
+  }, [readingKey]);
   const [adrift, setAdrift] = useState(false);
   const [forkRequest, setForkRequest] = useState<{
     turnId: string;
@@ -389,7 +438,7 @@ export function TimelineView({
     if (!root || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
       const element = scroller.current;
-      if (pinnedRef.current && element) element.scrollTo?.({ top: element.scrollHeight });
+      if (visibleRef.current && pinnedRef.current && element) element.scrollTo?.({ top: element.scrollHeight });
     });
     observer.observe(root);
     return () => observer.disconnect();
@@ -397,8 +446,8 @@ export function TimelineView({
 
   useEffect(() => {
     const element = scroller.current;
-    if (pinned && element) element.scrollTo?.({ top: element.scrollHeight });
-  }, [pinned, bottomInset]);
+    if (visible && pinned && element) element.scrollTo?.({ top: element.scrollHeight });
+  }, [pinned, bottomInset, visible]);
 
   useEffect(() => {
     if (!selection) return;
@@ -417,6 +466,7 @@ export function TimelineView({
     // A run that ends in a jump home is over, and the smooth scroll it starts
     // runs the other way anyway, so nothing left in it should be believed.
     scrollRun.current = idleTimelineScroll();
+    restorePending.current = false;
     setPinned(true);
     setAdrift(false);
     onReturnToBottom?.();
@@ -434,6 +484,8 @@ export function TimelineView({
           const element = event.currentTarget;
           const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
           const home = distance < 40;
+          pinnedRef.current = home;
+          persistReading();
           setPinned(home);
           setAdrift(showsReturnToBottom(distance, adrift));
           if (home && !pinned) onReturnToBottom?.();
@@ -447,6 +499,9 @@ export function TimelineView({
         }}
       >
         <div ref={content} className="space-y-4">
+        {state.historyBefore && <button type="button" disabled={historyLoading} className="mx-auto block min-h-11 rounded-lg px-4 text-sm text-accent" onClick={() => void loadHistory()}>{historyLoading ? "正在加载历史…" : "加载更早的 10 轮"}</button>}
+        {restorePending.current && <p className="text-xs text-muted">原阅读位置尚未加载，可加载更早历史恢复，或返回最新消息。</p>}
+        {historyError && <p role="alert" className="text-sm text-danger">{historyError}</p>}
         {contextualTurns.map(
           ({ turn, startedRounds, round, finalAssistant, roundFinalText }, index) => {
             const hasRound = Boolean(round);
@@ -465,8 +520,9 @@ export function TimelineView({
             // before it was ever reviewed.
             const turnSelectable = selectableByTurn[index] ?? [];
             const renderItem = (item: TimelineItem) => {
+              if (state.historyExcerptIds?.includes(item.id)) return <div key={item.id}><Item item={item} /><button type="button" disabled={state.status === "running"} className="min-h-11 text-sm text-accent disabled:text-muted" onClick={() => void useWorkbench.getState().loadNarrativeItem(item.id).catch(error => setHistoryError(String(error)))}>长消息仅显示摘要 · 加载完整内容与附件</button></div>;
               if (!selection || !selectableSet.has(item.id)) {
-                return <Item key={item.id} item={item} />;
+                return <div key={item.id} data-message-id={item.id}><Item item={item} /></div>;
               }
               const checked = selection.selected.has(item.id);
               return (
@@ -513,12 +569,25 @@ export function TimelineView({
               );
             };
             return (
-              <section key={turnSectionKey(turn, index)} className="space-y-4">
+              <section key={turnSectionKey(turn, index)} data-reading-anchor={turnSectionKey(turn, index)} className="space-y-4"
+                onPointerDown={event => {
+                  if (event.pointerType !== "touch" || liveTurn || state.historyExcerptIds?.length || selection) return;
+                  const target = event.target as HTMLElement;
+                  if (target.closest("button,a,input,textarea")) return;
+                  const id = target.closest<HTMLElement>("[data-message-id]")?.dataset.messageId;
+                  if (!id || !selectableSet.has(id)) return;
+                  cancelPress();
+                  press.current = {x:event.clientX,y:event.clientY,timer:setTimeout(() => { setSelection(applySelectionAddMany(emptySelection(),[id]).next); press.current = null; }, 550)};
+                }}
+                onPointerMove={event => { if(press.current && Math.hypot(event.clientX-press.current.x,event.clientY-press.current.y)>8) cancelPress(); }}
+                onPointerUp={cancelPress} onPointerCancel={cancelPress}
+                onContextMenu={event => { if(selection) event.preventDefault(); }}
+              >
                 {selection && turnSelectable.length > 0 ? (
                   <div className="flex justify-end">
                     <button
                       type="button"
-                      disabled={liveTurn}
+                      disabled={liveTurn || Boolean(state.historyExcerptIds?.length)}
                       className="text-xs text-accent underline decoration-dotted disabled:opacity-50"
                       onClick={() => {
                         const step = applySelectionAddMany(
@@ -574,7 +643,7 @@ export function TimelineView({
                       })
                     }
                     onSelect={
-                      !selection && turnSelectable.length > 0
+                      !selection && turnSelectable.length > 0 && !state.historyExcerptIds?.length
                         ? () => {
                             const ids = turnSelectable.map((message) => message.id);
                             const step = applySelectionAddMany(emptySelection(), ids);

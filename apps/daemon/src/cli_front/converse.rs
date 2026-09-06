@@ -385,6 +385,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
             reset,
         } = rpc
             .call(Request::Subscribe {
+                recent_rounds: None,
                 session_id: session.id.clone(),
                 since_seq: run.since_seq,
                 expand_last_round: false,
@@ -475,6 +476,7 @@ pub(crate) async fn wait_for_existing(
         reset: _,
     } = rpc
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session_id.to_string(),
             since_seq: Some(0),
             expand_last_round: false,
@@ -532,6 +534,8 @@ async fn attach(
 ) -> Result<SessionSummary, CliFailure> {
     let Reply::Snapshot(snapshot) = rpc
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session_id.to_string(),
         })
         .await

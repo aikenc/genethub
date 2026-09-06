@@ -579,9 +579,10 @@ async fn dispatch(
             session_id,
             since_seq,
             expand_last_round,
+            recent_rounds,
         } => match state
             .sessions
-            .subscribe(&session_id, since_seq, expand_last_round)
+            .subscribe_window(&session_id, since_seq, expand_last_round, recent_rounds)
             .await
         {
             Ok((snapshot, replayed, reset, receiver)) => Handled {
@@ -934,7 +935,19 @@ async fn dispatch(
             Err(error) => failed(error),
         },
 
-        Request::SessionGet { session_id } => match state.sessions.snapshot(&session_id).await {
+        Request::SessionGet {
+            session_id,
+            recent_rounds,
+            before_item_id,
+        } => match match recent_rounds {
+            Some(limit) => {
+                state
+                    .sessions
+                    .history_snapshot(&session_id, limit, before_item_id.as_deref())
+                    .await
+            }
+            None => state.sessions.snapshot(&session_id).await,
+        } {
             Ok(snapshot) => Handled::ok(Reply::Snapshot(snapshot)),
             Err(error) => failed(error),
         },

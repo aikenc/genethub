@@ -5,6 +5,8 @@
  * stale session from the URL that brought us here.
  */
 export type LandingIntent = {
+  localDraftId?: string;
+  localDraftWorkspaceId?: string;
   workspaceId: string | null;
   sessionId: string | null;
   previewPath: string | null;

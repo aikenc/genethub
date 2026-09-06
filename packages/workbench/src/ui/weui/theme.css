@@ -1,0 +1,11 @@
+.genehub-ui { --weui-FG-3: rgba(127,127,127,.12); }
+.genehub-ui .weui-cell { color: inherit; font-size: inherit; line-height: 1.5; }
+.genehub-ui .weui-cell::before { display: none; }
+.genehub-ui .weui-tabbar { position: static; background: inherit; padding-top: 0; }
+.genehub-ui .weui-tabbar__item { padding-top: 0; color: inherit; }
+.genehub-ui .weui-tabbar__item[aria-current="page"] { color: #07a65a; }
+
+@media (max-width: 767px) { .genehub-ui .weui-tabbar[data-detail="true"] { display: none; } }
+
+.genehub-ui .weui-tabbar__item { display: flex; font-size: 12px; line-height: 1.4; }
+@media (min-width: 768px) { .genehub-ui .weui-tabbar__item { flex: 0 0 auto; } }

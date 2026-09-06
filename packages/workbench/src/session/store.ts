@@ -1,3 +1,4 @@
+import { rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue } from "./localConversation";
 import type {
   AgentSpaceBuilderOperation,
   AgentSpaceBuilderReport,
@@ -51,6 +52,8 @@ import {
 import {
   applySequenced,
   emptyTimeline,
+  mergeHistoryItems,
+  insertHistoryPage,
   fromSnapshot,
   type PendingMessage,
   type TimelineState,
@@ -109,6 +112,8 @@ export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId"> & {
  * a model in an empty chat is not silently dropped.
  */
 export interface Draft {
+  /** Local identity, never a daemon Session ID. */
+  localId?: string;
   workspaceId: string;
   agentId: string | null;
   modelId: string | null;
@@ -176,6 +181,14 @@ export type ForwardDraft = {
   attachments?: Attachment[];
 };
 
+const forwardMemory = new Map<string, ForwardDraft | null>();
+function forwardKey(state: Pick<WorkbenchState, "client" | "activeSessionId" | "draft">, id?: string): string {
+  return `forward:${state.client?.identity?.machineId ?? "unconnected"}:${id ?? state.activeSessionId ?? state.draft?.localId ?? "empty"}`;
+}
+function recalledForward(key: string): ForwardDraft | null {
+  return forwardMemory.has(key) ? forwardMemory.get(key)! : localValue<ForwardDraft>(key);
+}
+
 /**
  * A finished piece of work the user may want to act on — a Fork or forward
  * that landed on another machine. The action is theirs to take; nothing here
@@ -196,6 +209,7 @@ interface WorkbenchState {
   workspaces: WorkspaceInfo[];
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
+  includeArchived: boolean;
   activeSessionId: string | null;
   /** Set while an unstarted conversation is on screen. See `Draft`. */
   draft: Draft | null;
@@ -376,9 +390,12 @@ interface WorkbenchState {
   newSession(
     workspaceId?: string | null,
     agentId?: string | null,
-    options?: { addressScope?: AddressScope },
+    options?: { addressScope?: AddressScope; localId?: string },
   ): void;
   selectSession(sessionId: string): Promise<void>;
+  archiveSession(sessionId: string, archived: boolean): Promise<void>;
+  loadHistory(): Promise<void>;
+  loadNarrativeItem(itemId: string): Promise<void>;
   loadRound(roundId: string): Promise<void>;
   loadOlderTrunks(roundId: string): Promise<void>;
   loadTrunk(roundId: string, trunkIndex: number): Promise<void>;
@@ -543,14 +560,6 @@ function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
   }
 }
 
-function markSessionRead(summary: SessionSummary): void {
-  try {
-    localStorage.setItem(`genehub:session-read:${summary.id}`, String(summary.updatedAtMs));
-  } catch {
-    // Storage can be disabled; the safe fallback is to prefetch next time.
-  }
-}
-
 /** The reconnect sentence this store put on screen, while it is still true. */
 let reconnectNotice: string | null = null;
 
@@ -669,6 +678,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
   sessions: [],
+  includeArchived: false,
   activeSessionId: null,
   draft: null,
   addressScope: "machine",
@@ -920,9 +930,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // switching projects is exactly when the Agent usually changes too. Only a
     // project's own history outranks the conversation in front of the user;
     // an inherited last-used choice does not.
+    const localId = options?.localId ?? crypto.randomUUID();
+    const cachedDraft = state.client?.identity ? draftIdentities(state.client.identity.machineId).find(item => item.localId === localId) : undefined;
     const own = recallRuntimeChoice(target, state.agents);
     const chosenAgentId =
-      agentId ??
+      agentId ?? cachedDraft?.agentId ??
       (own.scoped ? own.agentId : null) ??
       state.draft?.agentId ??
       state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
@@ -935,6 +947,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ? own
         : recallRuntimeChoice(target, state.agents, chosenAgentId);
     if (agentId) rememberRuntimeChoice(target, agentId);
+    const draftRuntime = cachedDraft?.runtimeValues ? {modelId:cachedDraft.modelId ?? null, modeId:cachedDraft.modeId ?? null, effortId:cachedDraft.effortId ?? null, runtimeValues:cachedDraft.runtimeValues} : remembered;
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -950,15 +964,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const evictedSessionIds = tabSessionIds(limited.evicted);
     set({
       draft: {
+        localId,
         workspaceId: target,
         agentId: chosenAgentId,
-        modelId: remembered.modelId,
-        modeId: remembered.modeId,
-        effortId: remembered.effortId,
-        runtimeValues: remembered.runtimeValues,
+        modelId: draftRuntime.modelId,
+        modeId: draftRuntime.modeId,
+        effortId: draftRuntime.effortId,
+        runtimeValues: draftRuntime.runtimeValues,
       },
       activeWorkspaceId: target,
       activeSessionId: null,
+      forwardDraft: recalledForward(forwardKey(state, localId)),
       addressScope:
         options?.addressScope ?? (state.addressScope === "machine" ? "machine" : "workspace"),
       timeline: emptyTimeline(),
@@ -975,6 +991,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async selectSession(sessionId) {
     const client = require_(get().client);
     const summary = get().sessions.find((entry) => entry.id === sessionId);
+    if (summary && client.identity) saveLocalValue(`last:${client.identity.machineId}:${summary.workspaceId}`, sessionId);
     const tabId = `chat:${sessionId}`;
     let evicted: WorkbenchTab[] = [];
     let warm = false;
@@ -1009,6 +1026,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       warm = mine.includes(sessionId);
       return {
         activeSessionId: sessionId,
+        forwardDraft: recalledForward(forwardKey(state, sessionId)),
         draft: null,
         // The project follows the conversation. Every workspace's sessions are
         // in the list at once now, so the one just clicked may belong to a
@@ -1090,7 +1108,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         }));
         },
       },
-      { expandLastRound: shouldExpandLastRound(summary) },
+      { expandLastRound: shouldExpandLastRound(summary), recentRounds: 10 },
     );
 
     if (get().client !== client) return;
@@ -1100,7 +1118,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
-    markSessionRead(typedSnapshot.summary);
     adoptSnapshotStatus(sessionId, typedSnapshot, set);
     const timeline = withSnapshotStatus(replayed.reduce(applySequenced, base), typedSnapshot);
     set((state) => {
@@ -1114,6 +1131,35 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ...(state.activeSessionId === sessionId ? { timeline } : {}),
       };
     });
+  },
+
+  async loadNarrativeItem(itemId) {
+    const sessionId = get().activeSessionId;
+    const client = get().client;
+    if (!sessionId || !client) return;
+    const reply = await client.call({type: "session.narrative", payload: {sessionId, itemId, throughRoundId: null, cursor: null, limit: null}});
+    if (get().client !== client || reply?.type !== "sessionNarrative") return;
+    patchTimeline(sessionId, set, timeline => ({
+      items: mergeHistoryItems(timeline.items, reply.data.items),
+      historyExcerptIds: timeline.historyExcerptIds?.filter(id => id !== itemId),
+    }));
+  },
+
+  async loadHistory() {
+    const sessionId = get().activeSessionId;
+    const client = get().client;
+    const beforeItemId = get().timeline.historyBefore;
+    if (!sessionId || !client || !beforeItemId) return;
+    const reply = await client.call({type: "session.get", payload: {sessionId, recentRounds: 10, beforeItemId}});
+    if (get().client !== client || reply?.type !== "snapshot") return;
+    const page = reply.data;
+    if (!page.historyWindowed) throw new Error("此服务尚不支持历史窗口，请更新服务后重试。");
+    patchTimeline(sessionId, set, timeline => ({
+      items: insertHistoryPage(timeline.items, page.items, beforeItemId),
+      rounds: [...new Map([...(page.rounds ?? []), ...timeline.rounds].map(round => [round.roundId, round])).values()].sort((a,b) => a.startedAtMs-b.startedAtMs),
+      historyBefore: page.historyBefore ?? null,
+      historyExcerptIds: [...new Set([...(page.historyExcerptIds ?? []).filter(id => !timeline.items.some(item => item.id === id) || timeline.historyExcerptIds?.includes(id)), ...(timeline.historyExcerptIds ?? [])])],
+    }));
   },
 
   async loadRound(roundId) {
@@ -1405,6 +1451,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // line does not get read as a description of what just happened.
     set({ notice: null });
     const active = get().activeSessionId;
+    const originClient = get().client;
+    const originDraft = get().draft?.localId;
+    const machine = originClient?.identity?.machineId;
+    const originKey = machine && (active || originDraft) ? `outbox:${machine}:${active || originDraft}` : null;
     // Only one message may be in flight. The daemon enforces this too, but its
     // refusal arrives as a red line about a turn already running — which is a
     // report of our own double send, not news the reader can act on.
@@ -1438,6 +1488,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       };
     });
 
+    if (originKey) saveLocalValue(originKey, {text, attachmentCount:attachments.length});
+
     // This is where a draft becomes a conversation: the machine hears about it
     // at the first message, not when the button was pressed.
     const sessionId = await start(get, set, pending);
@@ -1446,8 +1498,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // session there is a bubble to mark; a conversation that could not even be
       // created has nowhere to put one, so the text goes back to the composer
       // rather than nowhere — it only exists here.
+      if (get().client !== originClient) return;
       if (active) failPending(active, set, get().notice ?? "无法开始会话");
-      else
+      else if (get().draft?.localId === originDraft)
         set((state) => ({
           restoreDraft: { text, attachments },
           timeline: { ...state.timeline, pending: null },
@@ -1455,11 +1508,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       return;
     }
 
+    const sentKey = machine ? `outbox:${machine}:${sessionId}` : null;
+    if (sentKey) saveLocalValue(sentKey, {text, attachmentCount:attachments.length});
+    if (originKey && originKey !== sentKey) saveLocalValue(originKey, null);
+    if (machine && originDraft && !active) forgetDraftIdentity(machine, originDraft);
     try {
       // Artifact Preview URLs are bound at chat/document render time from the
       // current workspace roots. Agents emit relative/absolute file paths; the
       // daemon teaches path-linking rules (not a deployment-specific prefix).
-      await require_(get().client).call({
+      await require_(originClient).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
         // yet — every message from here is a fresh round until it is
@@ -1472,6 +1529,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           continuesRound: null,
         },
       });
+      if (sentKey) saveLocalValue(sentKey, null);
+      if (get().client !== originClient) return;
       // The daemon publishes the user message before it answers this call, and
       // replies and events share one socket in arrival order, so the real item
       // is already here. This is the second of the two ways the placeholder
@@ -1486,7 +1545,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // taken — `ConnectionOutcomeUnknownError` exists to say exactly that —
       // and calling it a failure would put a second bubble next to the real one
       // as soon as the replay lands. Leave it pending; the resync decides.
-      if (error instanceof ConnectionOutcomeUnknownError) return;
+      if (error instanceof ConnectionOutcomeUnknownError || get().client !== originClient) return;
       const message = error instanceof Error ? error.message : String(error);
       failPending(sessionId, set, message);
       set({ notice: message });
@@ -1536,6 +1595,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   setForwardDraft(draft) {
+    const key = forwardKey(get());
+    forwardMemory.set(key, draft);
+    // Capsules remain reviewable after refresh; binary thumbs remain in memory only.
+    saveLocalValue(key, draft ? {...draft, attachments: [], sourceTitle: `${draft.sourceTitle ?? "转发内容"}${draft.attachments?.length ? "（刷新后请重新附加图片）" : ""}`} : null);
     set({ forwardDraft: draft });
   },
 
@@ -1733,6 +1796,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // From the reply rather than from what was typed: the daemon trims and
     // caps, and the sidebar should show the name that was actually stored.
     applyTitle(sessionId, reply.data.title ?? wanted, set);
+  },
+
+  async archiveSession(sessionId, archived) {
+    const client = require_(get().client);
+    const reply = await asked(set, () => client.call({type: "session.archive", payload: {sessionId, archived}}));
+    if (reply) await loadSessions(client, set);
   },
 
   async deleteSession(sessionId) {
@@ -2179,6 +2248,13 @@ async function applyLanding(
     useWorkbench.setState({ notice: "这个会话已经不在了。" });
     return false;
   }
+  if (intent.localDraftId && intent.localDraftWorkspaceId && get().client?.identity) {
+    const cached = draftIdentities(get().client!.identity!.machineId).find(draft => draft.localId === intent.localDraftId && draft.workspaceId === intent.localDraftWorkspaceId);
+    if (cached && get().workspaces.some(workspace => workspace.id === cached.workspaceId)) {
+      get().newSession(cached.workspaceId, cached.agentId, {addressScope: "workspace", localId: cached.localId});
+      return true;
+    }
+  }
   const workspaceId = intent.workspaceId
     ? expandLocator(
         intent.workspaceId,
@@ -2247,7 +2323,7 @@ async function start(
   if (!agentId) return null;
 
   const reply = await asked(set, () =>
-    require_(get().client).call({
+    require_(state.client).call({
       type: "session.create",
       payload: {
         workspaceId: draft.workspaceId,
@@ -2260,7 +2336,7 @@ async function start(
       },
     }),
   );
-  if (reply?.type !== "session") return null;
+  if (reply?.type !== "session" || get().client !== state.client) return null;
 
   // The choice that actually started a conversation, not merely one that was
   // looked at: this is what the next new chat in this project opens with.
@@ -2276,7 +2352,7 @@ async function start(
     sessions: [reply.data, ...current.sessions],
     // A forward capsule parked on the unstarted conversation belongs to the
     // session that conversation just became; re-key it or the card vanishes.
-    ...(current.forwardDraft?.sessionId === null
+    ...(current.draft?.localId === draft.localId && current.forwardDraft?.sessionId === null
       ? { forwardDraft: { ...current.forwardDraft, sessionId: reply.data.id } }
       : {}),
     // Seed before `selectSession` so the first paint of the new session still
@@ -2291,14 +2367,20 @@ async function start(
         }
       : {}),
   }));
-  // Clears the draft and turns its tab into this session's.
-  await get().selectSession(reply.data.id);
+  if (get().forwardDraft?.sessionId === reply.data.id) {
+    const moved = get().forwardDraft;
+    forwardMemory.set(forwardKey(get(), reply.data.id), moved);
+    if (draft.localId) { forwardMemory.delete(forwardKey(get(), draft.localId)); saveLocalValue(forwardKey(get(), draft.localId), null); }
+  }
+  if (!pending && draft.localId && state.client?.identity) forgetDraftIdentity(state.client.identity.machineId, draft.localId);
+  // Only the originating draft may follow this late create response.
+  if (get().draft?.localId === draft.localId && !get().activeSessionId) await get().selectSession(reply.data.id);
   // Before `setEffort`, which is another round trip: the first message of a new
   // conversation should not be the one message that waits longest to appear.
   if (pending) patchTimeline(reply.data.id, set, () => ({ pending }));
   // `session.create` has no field for it, so the one choice that cannot ride
   // along is made immediately afterwards instead of being lost.
-  if (draft.effortId) await get().setEffort(draft.effortId);
+  if (draft.effortId) await asked(set, () => require_(state.client).call({type:"session.setEffort", payload:{sessionId:reply.data.id, effortId:draft.effortId!}}));
   return reply.data.id;
 }
 
@@ -2313,7 +2395,9 @@ function failPending(sessionId: string, set: Setter, message: string): void {
 function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>): void {
   const draft = get().draft;
   if (!draft) return;
-  set({ draft: { ...draft, ...change } });
+  const next = { ...draft, ...change };
+  if (next.localId && get().client?.identity) rememberDraftIdentity(get().client!.identity!.machineId, {...next, localId:next.localId, title:"新会话草稿"});
+  set({ draft: next });
 }
 
 /**
@@ -2378,7 +2462,7 @@ function remember(state: WorkbenchState, axes: AgentRuntimeMemory): void {
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
   const reply = await client.call({
     type: "session.list",
-    payload: { workspaceId: null, includeArchived: false },
+    payload: { workspaceId: null, includeArchived: useWorkbench.getState().includeArchived },
   });
   if (reply?.type !== "sessions") return [];
   set({ sessions: reply.data });
