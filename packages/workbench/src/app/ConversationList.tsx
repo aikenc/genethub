@@ -73,9 +73,9 @@ export function ConversationList({
   return (
     <aside
       aria-label="会话列表"
-      className={`${hidden ? "hidden" : open ? "flex" : "hidden md:flex"} min-h-0 w-full shrink-0 flex-col border-r border-line bg-sidebar md:w-80`}
+      className={`${hidden ? "hidden" : open ? "flex" : "hidden md:flex"} min-h-0 w-full flex-1 flex-col overflow-hidden border-r border-line bg-sidebar md:w-80 md:flex-none`}
     >
-      <header className="border-b border-line p-4">
+      <header className="shrink-0 border-b border-line p-4">
         {onPickTarget && (
           <TargetSwitcher
             host={host}
@@ -155,7 +155,7 @@ export function ConversationList({
           已归档
         </button>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      <div aria-label="会话滚动区域" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
         <RecentSessions
           sessions={rows}
           workspaces={wb.workspaces}

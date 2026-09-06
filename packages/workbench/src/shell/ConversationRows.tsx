@@ -8,7 +8,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { readLocalDraft } from "../session/localConversation";
 import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
-import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { AgentAvatar, AgentAvatarPicker } from "../workspace/AgentAvatar";
 import { isDescendant } from "../workspace/agent-space-tree";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { SessionStatusIcon } from "./SessionStatusIcon";
@@ -159,9 +159,7 @@ export function WorkspaceRow({
             title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
-            <span className="entity-avatar flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent">
-              <WorkspaceIcon workspace={workspace} className="h-5 w-5" />
-            </span>
+            <AgentAvatar id={workspace.id} name={workspace.name} />
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="entity-title truncate text-base leading-6">
                 {workspace.name}
@@ -273,6 +271,7 @@ export function WorkspaceRow({
       ) : null}
       {details ? (
         <WorkspaceDetailsDialog onClose={() => setDetails(false)}>
+          <AgentAvatarPicker id={workspace.id} />
           <Detail label="名称" value={workspace.name} />
           {workspace.workspaceFile ? (
             <Detail label="配置文件" value={workspace.workspaceFile} />
@@ -689,7 +688,10 @@ function SessionRow({
         }`}
         onClick={() => onPickSession(session.id)}
       >
-        <SessionStateIcon session={session} />
+        <span className="relative shrink-0">
+          <AgentAvatar id={session.workspaceId} name={project?.name ?? "Agent"} />
+          <span className="absolute -bottom-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>
+        </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
             <span className="min-w-0 flex-1 truncate text-base font-medium">

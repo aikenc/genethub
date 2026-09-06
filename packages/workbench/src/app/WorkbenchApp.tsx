@@ -762,7 +762,7 @@ export function App({
     workbench.workspaces[0];
 
   return (
-    <div className="genehub-ui flex h-full max-w-full flex-col overflow-x-hidden bg-bg">
+    <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
       <TitleBar
         host={host}
         endpoint={endpoint}

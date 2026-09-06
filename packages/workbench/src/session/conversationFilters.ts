@@ -15,15 +15,14 @@ export function matchesConversation(
   filter: ConversationFilter,
 ): boolean {
   const workspace = workspaces.find((w) => w.id === session.workspaceId);
-  // Missing/dangling parent records stay visible, rather than disappearing from navigation.
+  // A missing parent catalogue entry does not turn an internal conversation into a primary one.
   const child = Boolean(
     session.managed ||
-    (workspace?.agentSpace?.parentWorkspaceId &&
-      workspaces.some((w) => w.id === workspace.agentSpace!.parentWorkspaceId)),
+    workspace?.agentSpace?.parentWorkspaceId,
   );
   return (
     (filter.ownership === "all" ||
-      (filter.ownership === "children" ? child : !child)) &&
+      (filter.ownership === "children" ? child : Boolean(workspace) && !child)) &&
     Boolean(session.archived) === filter.archived &&
     (filter.state !== "blocked" ||
       ["waiting", "failed"].includes(session.status))
