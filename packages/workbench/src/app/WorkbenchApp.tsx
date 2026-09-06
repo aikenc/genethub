@@ -795,12 +795,13 @@ export function App({
           onNavigate={() => { setSessionsOpen(false); setSection("sessions"); }}
         />
 
-        {spacesVisited ? <div className={section === "spaces" ? "min-h-0 min-w-0 flex-1" : "hidden"}>
-          <WorkspaceBrowser onDepthChange={setSpaceDetail} host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
+        {spacesVisited && workbench.client?.identity?.machineId ? <div className={section === "spaces" ? "min-h-0 min-w-0 flex-1" : "hidden"}>
+          <WorkspaceBrowser onDepthChange={setSpaceDetail} host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={workbench.client?.identity?.machineId ?? deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
             onSession={(id) => { void workbench.selectSession(id); setSessionsOpen(false); setSection("sessions"); }}
             onNewSession={(id, localId) => { workbench.newSession(id, null, {localId, addressScope: id ? "workspace" : "machine"}); setSessionsOpen(false); setSection("sessions"); }}
             onExtra={(tab, id) => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
         </div> : null}
+        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备 Agent 列表…</p>}
         {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个Agent的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一Agent，请 Agent 基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览Agent</button></div></section> : null}
         {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属Agent。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 

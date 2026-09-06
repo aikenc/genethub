@@ -1,40 +1,29 @@
 import type { SessionSummary } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
-export interface ConversationGroup {
+export interface AgentGroup {
   id: string;
   name: string;
   workspaceIds: string[];
-  included: string[];
-  excluded: string[];
 }
-const prefix = "genehub.conversation.groups.v1:";
-const changed = "genehub-conversation-groups";
+const prefix = "genehub.agent.groups.v1:";
+const changed = "genehub-agent-groups";
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every((id) => typeof id === "string");
-function read(machine: string): ConversationGroup[] {
+function read(machine: string): AgentGroup[] {
   const raw = localStorage.getItem(prefix + machine);
   if (!raw) return [];
   const value: unknown = JSON.parse(raw);
-  if (!Array.isArray(value) || !value.every((g) => g && typeof g.id === "string" && typeof g.name === "string" && strings(g.workspaceIds) && strings(g.included) && strings(g.excluded))) {
+  if (!Array.isArray(value) || !value.every((g) => g && typeof g.id === "string" && typeof g.name === "string" && strings(g.workspaceIds))) {
     throw new Error("无法读取分组，请检查浏览器存储；原数据未覆盖。");
   }
   return value;
 }
-export function inConversationGroup(session: SessionSummary, group: ConversationGroup): boolean {
-  return !group.excluded.includes(session.id) &&
-    (group.included.includes(session.id) || group.workspaceIds.includes(session.workspaceId));
-}
-export function changeGroupMembers(group: ConversationGroup, ids: string[], add: boolean): ConversationGroup {
-  const selected = new Set(ids);
-  return {
-    ...group,
-    included: add ? [...new Set([...group.included, ...ids])] : group.included.filter((id) => !selected.has(id)),
-    excluded: add ? group.excluded.filter((id) => !selected.has(id)) : [...new Set([...group.excluded, ...ids])],
-  };
+export function inAgentGroup(session: SessionSummary, group: AgentGroup): boolean {
+  return group.workspaceIds.includes(session.workspaceId);
 }
 /** Personal navigation only: never writes Session metadata or sends a prompt. */
-export function useConversationGroups(machine: string) {
-  const [groups, setGroups] = useState<ConversationGroup[]>([]);
+export function useAgentGroups(machine: string) {
+  const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [error, setError] = useState("");
   useEffect(() => {
     const reload = () => {
@@ -47,7 +36,7 @@ export function useConversationGroups(machine: string) {
     window.addEventListener(changed, reload);
     return () => { window.removeEventListener("storage", storage); window.removeEventListener(changed, reload); };
   }, [machine]);
-  const update = (mutate: (current: ConversationGroup[]) => ConversationGroup[]) => {
+  const update = (mutate: (current: AgentGroup[]) => AgentGroup[]) => {
     if (!machine) { setError("连接设备后才能保存分组。"); return false; }
     try {
       const next = mutate(read(machine));

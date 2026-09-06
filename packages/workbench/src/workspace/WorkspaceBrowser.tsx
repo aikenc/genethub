@@ -1,8 +1,9 @@
-import { Plus, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Host, Endpoint } from "../host";
 import {
   localValue,
+  saveLocalValue,
   draftIdentities,
   readLocalDraft,
 } from "../session/localConversation";
@@ -12,6 +13,8 @@ import {
   buildAgentSpaceTree,
   type AgentSpaceTreeNode,
 } from "./agent-space-tree";
+import { useAgentGroups, type AgentGroup } from "./agentGroups";
+import { AgentGroupManager } from "./AgentGroupManager";
 import { AgentDetails } from "./AgentDetails";
 import { AgentList } from "./AgentList";
 import { FilesPanel } from "../files/FilesPanel";
@@ -102,7 +105,6 @@ export function WorkspaceBrowser({
         ? "sessions"
         : (window.history.state?.genehubSpace?.surface ?? "sessions"),
     );
-    setQuery("");
   }, [initialWorkspaceId, navigationKey]);
   const [importOpen, setImportOpen] = useState(false);
   const [terminals, setTerminals] = useState<string[]>([]);
@@ -124,6 +126,12 @@ export function WorkspaceBrowser({
       item.workspaceId === workspace?.id && !item.archived && !item.unsupported,
   );
   const machine = client?.identity?.machineId ?? deviceName;
+  const { groups, error: groupError, update: updateGroups } = useAgentGroups(machine);
+  const [groupId, setGroupId] = useState(() => localValue<string>(`agent-directory-group:${machine}`) ?? "");
+  const group = groups.find((g) => g.id === groupId);
+  const [groupsOpen, setGroupsOpen] = useState(false);
+  useEffect(() => { if (machine) saveLocalValue(`agent-directory-group:${machine}`, groupId); }, [machine, groupId]);
+  const directoryToolbar = <AgentDirectoryToolbar host={host} endpoint={endpoint} query={query} onQuery={setQuery} groups={groups} groupId={group?.id ?? ""} onGroup={setGroupId} onManage={() => setGroupsOpen(true)} />;
   const last = workspace
     ? localValue<string>(`last:${machine}:${workspace.id}`)
     : null;
@@ -161,8 +169,8 @@ export function WorkspaceBrowser({
   return (
     <div className="flex h-full min-h-0 min-w-0" aria-label="Agent 浏览">
       <aside aria-label="Agent 目录导航" className="hidden w-80 shrink-0 flex-col border-r border-line bg-sidebar lg:flex">
-        <header className="shrink-0 space-y-3 border-b border-line p-3"><div className="flex items-center justify-between gap-2"><h1 className="text-base font-semibold">Agent</h1><OpenProject host={host} endpoint={endpoint} /></div><AgentSearchCreate query={query} onQuery={setQuery} onCreate={() => onNewSession(selectedId)} /></header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-2"><AgentList workspaces={workspaces} sessions={sessions} selectedId={selectedId} onPick={browse} query={query} deviceName={deviceName} /></div>
+        <header className="shrink-0 border-b border-line p-3">{directoryToolbar}</header>
+        <div className="min-h-0 flex-1 overflow-y-auto p-2"><AgentList workspaces={workspaces} sessions={sessions} selectedId={selectedId} onPick={browse} query={query} memberIds={group?.workspaceIds} deviceName={deviceName} /></div>
       </aside>
       <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Agent 面板">
       <header className="shrink-0 border-b border-line px-4 py-3 md:px-6">
@@ -198,7 +206,7 @@ export function WorkspaceBrowser({
             <span className="truncate px-2">/ {workspace.name}</span>
           )}
         </nav>
-        {!workspace && <div className="mt-2 lg:hidden"><div className="mb-2 flex justify-end"><OpenProject host={host} endpoint={endpoint} /></div><AgentSearchCreate query={query} onQuery={setQuery} onCreate={() => onNewSession(selectedId)} /></div>}
+        {!workspace && <div className="mt-2 lg:hidden">{directoryToolbar}</div>}
         {workspace ? (
           <div className="mt-2 flex flex-wrap gap-1" aria-label="Agent 工具">
             {[
@@ -360,6 +368,7 @@ export function WorkspaceBrowser({
                 sessions={sessions}
                 onPick={browse}
                 query={query}
+                memberIds={group?.workspaceIds}
                 deviceName={deviceName}
               /></div>
             )}
@@ -442,6 +451,7 @@ export function WorkspaceBrowser({
             <TerminalPanel workspaceId={id} />
           </div>
         ))}
+      {groupsOpen && <AgentGroupManager groups={groups} workspaces={workspaces} error={groupError} update={updateGroups} onClose={() => setGroupsOpen(false)} />}
       {importOpen && workspace && client ? (
         <ImportSessionsDialog
           workspaceId={workspace.id}
@@ -453,9 +463,16 @@ export function WorkspaceBrowser({
   );
 }
 
-function AgentSearchCreate({ query, onQuery, onCreate }: { query: string; onQuery(value: string): void; onCreate(): void }) {
-  return <div aria-label="Agent 搜索与新建" className="flex min-w-0 items-center gap-2">
-    <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-raised px-2 text-muted"><Search size={16} className="shrink-0" /><input type="search" aria-label="搜索 Agent" placeholder="搜索 Agent" value={query} onChange={(e) => onQuery(e.target.value)} className="min-h-11 w-full min-w-0 bg-transparent text-sm outline-none" /></label>
-    <button type="button" className="flex min-h-11 shrink-0 items-center gap-1 rounded-lg bg-accent px-3 text-sm font-medium text-white" onClick={onCreate}><Plus size={18} />新建会话</button>
+function AgentDirectoryToolbar({ host, endpoint, query, onQuery, groups, groupId, onGroup, onManage }: {
+  host: Host; endpoint: Endpoint; query: string; onQuery(value: string): void;
+  groups: AgentGroup[]; groupId: string; onGroup(value: string): void; onManage(): void;
+}) {
+  return <div aria-label="Agent 目录工具栏" className="space-y-2">
+    <div className="flex min-w-0 items-center gap-1">
+      <select aria-label="Agent 分组筛选" value={groupId} onChange={(e) => onGroup(e.target.value)} className="min-h-11 min-w-0 flex-1 truncate rounded-lg bg-transparent text-sm font-medium"><option value="">全部 Agent</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}</select>
+      <button type="button" aria-label="管理 Agent 分组" className="min-h-11 shrink-0 rounded-lg px-2 text-sm text-muted hover:bg-raised" onClick={onManage}>分组</button>
+      <OpenProject host={host} endpoint={endpoint} />
+    </div>
+    <label className="flex min-w-0 items-center gap-2 rounded-lg bg-raised px-3 text-muted"><Search size={16} className="shrink-0" /><input type="search" aria-label="搜索 Agent" placeholder="搜索 Agent" value={query} onChange={(e) => onQuery(e.target.value)} className="min-h-11 w-full min-w-0 bg-transparent text-sm outline-none" /></label>
   </div>;
 }

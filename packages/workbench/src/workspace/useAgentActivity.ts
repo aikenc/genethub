@@ -56,7 +56,7 @@ function createSource(client: Client) {
 const sources = new WeakMap<Client, ReturnType<typeof createSource>>();
 const disconnected = { getSnapshot: () => offline, subscribe: (_listener: () => void) => () => {} };
 
-export function useAgentActivity(workspaceId: string) {
+export function useAgentActivities() {
   const client = useWorkbench((s) => s.client);
   const ready = useWorkbench((s) => s.connection === "ready");
   const source = useMemo(() => {
@@ -65,7 +65,11 @@ export function useAgentActivity(workspaceId: string) {
     if (!source) { source = createSource(client); sources.set(client, source); }
     return source;
   }, [client, ready]);
-  const snapshot = useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
+  return useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
+}
+
+export function useAgentActivity(workspaceId: string) {
+  const snapshot = useAgentActivities();
   const activity = snapshot.agents ? snapshot.agents.get(workspaceId) ?? noSessions : undefined;
   return { count: activity?.count, recent: activity?.recent, status: activity?.status, error: snapshot.error };
 }
