@@ -203,9 +203,21 @@ impl AgentAdapter for AcpAdapter {
             .ok_or_else(|| anyhow!("{} is not installed", self.command[0]))?;
         let hello = self.hello(&program).await.unwrap_or_default();
 
+        let launch_model = if speaks_cursor_acp(&self.command) {
+            let listed = list_models_from_cli(&program)
+                .await
+                .map(|(models, _)| models)
+                .unwrap_or_default();
+            config
+                .model_id
+                .as_deref()
+                .and_then(|id| cursor_launch_model(id, &listed))
+        } else {
+            config.model_id.clone()
+        };
         let mut command = Command::new(&program);
         command
-            .args(spawn_args(&self.command, config.model_id.as_deref()))
+            .args(spawn_args(&self.command, launch_model.as_deref()))
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1153,6 +1165,66 @@ fn speaks_cursor_acp(command: &[String]) -> bool {
             .unwrap_or(name);
         base == "cursor-agent" || base == "agent"
     }) && command.iter().any(|arg| arg == "acp")
+}
+
+/// Cursor's ACP catalog uses opaque ids such as `grok-4.6[effort=high,fast=true]`.
+/// The launch `--model` pin only accepts the CLI ids from `--list-models`,
+/// e.g. `cursor-grok-4.6-high-fast`. A pin the CLI rejects kills the process
+/// before `session/new`.
+fn cursor_launch_model(acp_id: &str, listed: &[ModelInfo]) -> Option<String> {
+    let id = acp_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if listed.iter().any(|model| model.id == id) {
+        return Some(id.to_string());
+    }
+    let (base, params) = parse_opaque_model_id(id);
+    if base.is_empty() {
+        return None;
+    }
+    let effort = params
+        .iter()
+        .find(|(key, _)| key == "effort")
+        .map(|(_, value)| value.as_str());
+    let fast = params
+        .iter()
+        .find(|(key, _)| key == "fast")
+        .is_some_and(|(_, value)| value == "true");
+    let mut suffixes = Vec::new();
+    if let Some(effort) = effort {
+        suffixes.push(effort.to_string());
+    }
+    if fast {
+        suffixes.push("fast".into());
+    }
+    let slug = if suffixes.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}-{}", suffixes.join("-"))
+    };
+    for candidate in [slug.clone(), format!("cursor-{slug}")] {
+        if listed.iter().any(|model| model.id == candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn parse_opaque_model_id(id: &str) -> (&str, Vec<(String, String)>) {
+    let Some((base, rest)) = id.split_once('[') else {
+        return (id, Vec::new());
+    };
+    let params = rest
+        .strip_suffix(']')
+        .unwrap_or(rest)
+        .split(',')
+        .filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            Some((key.trim().to_string(), value.trim().to_string()))
+        })
+        .collect();
+    (base.trim(), params)
 }
 
 /// Launch flags Cursor documents when ACP will not switch models at runtime.
@@ -3086,6 +3158,39 @@ mod tests {
             &tx,
         );
         assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn cursor_launch_model_maps_opaque_acp_ids_to_cli_ids() {
+        let listed = models_from_cli_list(
+            "auto - Auto (default)\n\
+             cursor-grok-4.6-high-fast - Cursor Grok 4.6 Fast\n\
+             cursor-grok-4.6-high - Cursor Grok 4.6\n\
+             composer-2.5 - Composer 2.5\n\
+             composer-2.5-fast - Composer 2.5 Fast\n",
+        )
+        .0;
+        assert_eq!(
+            cursor_launch_model("grok-4.6[effort=high,fast=true]", &listed).as_deref(),
+            Some("cursor-grok-4.6-high-fast")
+        );
+        assert_eq!(
+            cursor_launch_model("grok-4.6[effort=high,fast=false]", &listed).as_deref(),
+            Some("cursor-grok-4.6-high")
+        );
+        assert_eq!(
+            cursor_launch_model("composer-2.5[fast=true]", &listed).as_deref(),
+            Some("composer-2.5-fast")
+        );
+        assert_eq!(
+            cursor_launch_model("cursor-grok-4.6-high", &listed).as_deref(),
+            Some("cursor-grok-4.6-high")
+        );
+        assert_eq!(
+            cursor_launch_model("grok-4.6[effort=high,fast=true]", &[]),
+            None,
+            "an unmapped pin must not be passed through"
+        );
     }
 
     #[test]

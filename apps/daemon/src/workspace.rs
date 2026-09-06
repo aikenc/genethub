@@ -265,11 +265,12 @@ impl Workspaces {
                 })
             }));
             if !entry.removed {
-                self.homes
-                    .attach_project(&entry.id, &session_project_key(entry), &entry.root);
+                attach_project_home(&self.homes, entry);
             }
             entries.insert(entry.id.clone(), entry.clone());
         }
+        drop(config);
+        self.collapse_same_directory_projects(&mut entries).await;
     }
 
     /// Gives a machine that has never been used somewhere to work.
@@ -449,8 +450,10 @@ impl Workspaces {
         };
 
         // Keep the write lock from the source identity check through commit.
-        // A folder source and a `.code-workspace` source remain distinct even
-        // when their Agent roots happen to be the same directory.
+        // A `.code-workspace` file belongs to the directory that contains it,
+        // not to whichever folder happens to be listed first and not to the
+        // file path as a third identity. Opening that directory and opening
+        // the file are the same project.
         let mut entries = self.entries.write().await;
         let mut config = self.config.write().await;
         let mut next = config.clone();
@@ -458,11 +461,7 @@ impl Workspaces {
         for folder in &mut candidate.folders {
             folder.root_handle = next.ensure_workspace_root(&folder.root);
         }
-        if let Some(existing) = entries
-            .values()
-            .find(|entry| same_project_source(entry, &candidate))
-            .cloned()
-        {
+        if let Some(existing) = existing_project(&entries, &candidate).cloned() {
             let mut updated = candidate;
             updated.id = existing.id.clone();
             // The label belongs to the durable project identity, not whichever
@@ -488,8 +487,7 @@ impl Workspaces {
             }
             next.save(&self.config_path)?;
             *config = next;
-            self.homes
-                .attach_project(&updated.id, &session_project_key(&updated), &updated.root);
+            attach_project_home(&self.homes, &updated);
             entries.insert(updated.id.clone(), updated.clone());
             return Ok(describe(&updated));
         }
@@ -501,8 +499,7 @@ impl Workspaces {
         // the background Hub sync could upload a revision that restart loses.
         next.save(&self.config_path)?;
         *config = next;
-        self.homes
-            .attach_project(&entry.id, &session_project_key(&entry), &entry.root);
+        attach_project_home(&self.homes, &entry);
         entries.insert(entry.id.clone(), entry.clone());
 
         Ok(describe(&entry))
@@ -574,6 +571,60 @@ impl Workspaces {
         entries.insert(id.to_string(), updated.clone());
 
         Ok(describe(&updated))
+    }
+
+    /// One directory is one project. A leftover folder entry and a
+    /// `.code-workspace` file that lives in that folder used to be two ids;
+    /// keep the file entry (it already has the richer view) and tombstone the
+    /// rest so the sidebar stops listing the same project twice.
+    async fn collapse_same_directory_projects(
+        &self,
+        entries: &mut HashMap<String, WorkspaceEntry>,
+    ) {
+        let mut groups: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for entry in entries.values().filter(|entry| !entry.removed) {
+            groups
+                .entry(project_directory(entry))
+                .or_default()
+                .push(entry.id.clone());
+        }
+        let extras: Vec<String> = groups
+            .into_values()
+            .filter(|ids| ids.len() > 1)
+            .flat_map(|mut ids| {
+                ids.sort();
+                let keep = ids
+                    .iter()
+                    .find(|id| {
+                        entries
+                            .get(*id)
+                            .is_some_and(|entry| entry.workspace_file.is_some())
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| ids[0].clone());
+                ids.into_iter().filter(move |id| id != &keep)
+            })
+            .collect();
+        if extras.is_empty() {
+            return;
+        }
+
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        for id in extras {
+            if let Some(entry) = entries.get_mut(&id) {
+                entry.removed = true;
+            }
+            if let Some(saved) = next.workspaces.iter_mut().find(|entry| entry.id == id) {
+                saved.removed = true;
+            }
+            self.homes.detach(&id);
+        }
+        next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+        if next.save(&self.config_path).is_err() {
+            return;
+        }
+        *config = next;
     }
 }
 
@@ -804,25 +855,83 @@ fn hydrate_entry(
     Ok(entry)
 }
 
+fn attach_project_home(homes: &WorkspaceHomes, entry: &WorkspaceEntry) {
+    homes.attach_project_aliased(
+        &entry.id,
+        &session_project_key(entry),
+        &legacy_project_keys(entry),
+        &entry.root,
+    );
+}
+
+fn existing_project<'a>(
+    entries: &'a HashMap<String, WorkspaceEntry>,
+    candidate: &WorkspaceEntry,
+) -> Option<&'a WorkspaceEntry> {
+    entries
+        .values()
+        .filter(|entry| same_project_source(entry, candidate))
+        .min_by_key(|entry| {
+            (
+                entry.removed,
+                entry.workspace_file.is_none(),
+                entry.id.as_str(),
+            )
+        })
+}
+
+/// The directory that owns this project's conversations.
+///
+/// A folder open is that folder. A `.code-workspace` file is the directory
+/// that contains the file, not the first root and not the file path.
+fn project_directory(entry: &WorkspaceEntry) -> PathBuf {
+    match &entry.workspace_file {
+        Some(path) => path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| entry.root.clone()),
+        None => entry.root.clone(),
+    }
+}
+
 fn same_project_source(left: &WorkspaceEntry, right: &WorkspaceEntry) -> bool {
-    left.root == right.root
-        && match (&left.workspace_file, &right.workspace_file) {
-            (None, None) => true,
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        }
+    project_directory(left) == project_directory(right)
 }
 
 fn session_project_key(entry: &WorkspaceEntry) -> String {
     match &entry.workspace_file {
         None => "folder".to_string(),
         Some(path) => {
-            let mut digest = Sha256::new();
-            digest.update(b"genehub-workspace-source-v1\0");
-            update_path_digest(&mut digest, path);
-            format!("workspace:{:x}", digest.finalize())
+            let home = path.parent().unwrap_or(path);
+            if home == entry.root {
+                "folder".to_string()
+            } else {
+                hashed_workspace_key(home)
+            }
         }
     }
+}
+
+fn legacy_project_keys(entry: &WorkspaceEntry) -> Vec<String> {
+    match &entry.workspace_file {
+        Some(path) => {
+            let hashed = hashed_workspace_key(path);
+            let current = session_project_key(entry);
+            if hashed != current {
+                vec![hashed]
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    }
+}
+
+fn hashed_workspace_key(path: &Path) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"genehub-workspace-source-v1\0");
+    update_path_digest(&mut digest, path);
+    format!("workspace:{:x}", digest.finalize())
 }
 
 #[cfg(unix)]
@@ -1232,7 +1341,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changing_the_agent_root_creates_a_new_identity_instead_of_moving_history() {
+    async fn a_workspace_file_in_its_directory_is_the_same_project_as_that_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let definition = dir.path().join("release-beta.code-workspace");
+        std::fs::write(&definition, r#"{ folders: [{ path: "." }] }"#).unwrap();
+        let spaces = workspaces(dir.path()).await;
+
+        let folder = spaces.open(dir.path(), None).await.unwrap();
+        spaces.rename(&folder.id, "Release").await.unwrap();
+        let from_file = spaces.open(&definition, None).await.unwrap();
+
+        assert_eq!(from_file.id, folder.id);
+        assert_eq!(from_file.name, "Release");
+        assert_eq!(spaces.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn changing_the_first_root_keeps_the_workspace_file_identity() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["product", "replacement"] {
             std::fs::create_dir(dir.path().join(name)).unwrap();
@@ -1245,9 +1370,71 @@ mod tests {
         std::fs::write(&definition, r#"{ folders: [{ path: "replacement" }] }"#).unwrap();
         let moved = spaces.open(&definition, None).await.unwrap();
 
-        assert_ne!(moved.id, first.id);
-        assert_ne!(moved.root, first.root);
-        assert_eq!(spaces.list().await.len(), 2);
+        assert_eq!(moved.id, first.id);
+        assert_eq!(
+            moved.root,
+            dir.path()
+                .join("replacement")
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+        assert_eq!(spaces.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn load_collapses_a_folder_and_workspace_file_in_the_same_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let definition = dir.path().join("suite.code-workspace");
+        std::fs::write(&definition, r#"{ folders: [{ path: "." }] }"#).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = definition.canonicalize().unwrap();
+        let config = Arc::new(RwLock::new(Config {
+            workspace_roots: vec![crate::config::WorkspaceRootEntry {
+                handle: "r_root".into(),
+                root: root.clone(),
+            }],
+            workspaces: vec![
+                WorkspaceEntry {
+                    id: "w_folderaaaaaaaa".into(),
+                    name: "release-beta".into(),
+                    root: root.clone(),
+                    folders: vec![WorkspaceFolderEntry {
+                        name: "release-beta".into(),
+                        root: root.clone(),
+                        root_handle: "r_root".into(),
+                    }],
+                    workspace_file: None,
+                    removed: false,
+                    is_git_repo: false,
+                },
+                WorkspaceEntry {
+                    id: "w_filebbbbbbbbbb".into(),
+                    name: "suite".into(),
+                    root: root.clone(),
+                    folders: vec![WorkspaceFolderEntry {
+                        name: "release-beta".into(),
+                        root,
+                        root_handle: "r_root".into(),
+                    }],
+                    workspace_file: Some(file),
+                    removed: false,
+                    is_git_repo: false,
+                },
+            ],
+            ..Config::default()
+        }));
+        let spaces = Workspaces::new(
+            config,
+            dir.path().join("config.json"),
+            WorkspaceHomes::default(),
+        );
+        spaces.load().await;
+
+        let listed = spaces.list().await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "w_filebbbbbbbbbb");
     }
 
     #[tokio::test]
