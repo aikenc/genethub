@@ -330,6 +330,7 @@ impl Journey {
             Reply::Session(summary) => {
                 self.client
                     .call(Request::Subscribe {
+                        recent_rounds: None,
                         session_id: summary.id.clone(),
                         since_seq: None,
                         expand_last_round: false,

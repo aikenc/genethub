@@ -18,6 +18,7 @@ import {
 export function useWorkbenchHrefSync(
   enabled: boolean,
   location: WorkbenchLocation | null,
+  replaceOnly = false,
 ): void {
   const skipWrite = useRef(false);
   const hydrated = useRef(false);
@@ -55,11 +56,11 @@ export function useWorkbenchHrefSync(
     }
     const nextPath = next.split("?")[0] ?? next;
     const mode =
-      !hydrated.current || previousPath.current === nextPath ? "replace" : "push";
+      replaceOnly || !hydrated.current || previousPath.current === nextPath ? "replace" : "push";
     hydrated.current = true;
     previousPath.current = nextPath;
     goApp(next, mode);
-  }, [enabled, location]);
+  }, [enabled, location, replaceOnly]);
 
   useEffect(() => {
     if (!enabled) return;

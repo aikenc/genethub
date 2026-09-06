@@ -932,7 +932,11 @@ export type Request = { "type": "client.debug", "payload": ClientDebugRequest } 
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.
  */
-expandLastRound: boolean, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
+expandLastRound: boolean, 
+/**
+ * Optional UI history window. Does not alter Agent context or replay semantics.
+ */
+recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
 /**
  * Where the agent starts, inside the workspace. Absent means the
  * workspace root, which is what every client sent before this field
@@ -967,7 +971,7 @@ actionId: string | null,
 /**
  * CAS value copied from the preceding plan.
  */
-expectedRevision: number | null, } } | { "type": "project.bootstrap.list" } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+expectedRevision: number | null, } } | { "type": "project.bootstrap.list" } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -1232,6 +1236,11 @@ export type SessionInspection = { summary: SessionSummary, source: SessionReadSo
 export type SessionLineage = { sourceSessionId: string, sourceTurnId: string, sourceAgentId: string, method: ForkMethod, context?: ForkContextStats, };
 
 /**
+ * A content cursor independent of status, rename and transport sequence numbers.
+ */
+export type SessionMessagePreview = { itemId: string, text: string, atMs: number, };
+
+/**
  * A recent-first page of narrative items, returned in chronological order.
  */
 export type SessionNarrativePage = { source: SessionReadSource, items: Array<TimelineItem>, nextCursor?: string, };
@@ -1249,7 +1258,19 @@ export type SessionRoundPage = { source: SessionReadSource, rounds: Array<RoundS
 /**
  * Everything a client needs to render a session from scratch.
  */
-export type SessionSnapshot = { summary: SessionSummary, items: Array<TimelineItem>, 
+export type SessionSnapshot = { summary: SessionSummary, 
+/**
+ * Stable exclusive item cursor for the previous history window.
+ */
+historyBefore?: string, 
+/**
+ * Set only for windowed reads; absent preserves the legacy full-snapshot contract.
+ */
+historyWindowed?: boolean, 
+/**
+ * IDs whose body/attachments are excerpted; exact content remains available via session.narrative.
+ */
+historyExcerptIds?: Array<string>, items: Array<TimelineItem>, 
 /**
  * Sequence number this snapshot is current as of. Events with a lower or
  * equal seq have already been folded in.
@@ -1274,7 +1295,11 @@ export type SessionSourceRef = { id: string, sessionId: string, itemId?: string,
 
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
-export type SessionSummary = { id: string, workspaceId: string, agentId: string, 
+export type SessionSummary = { 
+/**
+ * Last durably stored visible message; absent for records not yet projected.
+ */
+messagePreview?: SessionMessagePreview, id: string, workspaceId: string, agentId: string, 
 /**
  * Present only when a project Workflow created this otherwise ordinary
  * Session. There is no parallel WorkSession runtime: timeline, storage,

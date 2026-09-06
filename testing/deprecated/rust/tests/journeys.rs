@@ -422,6 +422,8 @@ async fn switching_the_thinking_level_takes_effect_on_the_built_in_agent() {
     let snapshot = match journey
         .client
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session,
         })
         .await
@@ -472,6 +474,8 @@ async fn a_choice_made_before_the_first_prompt_is_announced_and_not_only_stored(
     let snapshot = match journey
         .client
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session.clone(),
         })
         .await
@@ -1253,6 +1257,7 @@ async fn a_commands_output_stays_behind_the_access_layer() {
     let snapshot = match journey
         .client
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: Some(0),
             expand_last_round: true,
@@ -1341,6 +1346,7 @@ async fn reconnecting_replays_the_gap_without_losing_or_repeating_events() {
     // signal a fresh open sends, and is answered with a snapshot instead.
     let (snapshot, replayed, reset) = match reconnected
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: Some(1),
             expand_last_round: false,
@@ -1397,6 +1403,7 @@ async fn asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset() {
 
     match reconnected
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session,
             since_seq: Some(0),
             expand_last_round: false,
@@ -1455,6 +1462,8 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
     let snapshot = match journey
         .client
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session.clone(),
         })
         .await
@@ -1484,6 +1493,7 @@ async fn history_survives_a_daemon_restart_and_the_conversation_continues() {
     journey
         .client
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: None,
             expand_last_round: false,
@@ -1579,6 +1589,7 @@ async fn a_session_found_in_the_list_can_be_reopened_and_continued() {
     let (snapshot, _replayed, _reset) = match journey
         .client
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: None,
             expand_last_round: false,
@@ -1665,6 +1676,8 @@ async fn interrupting_a_running_turn_ends_it_as_canceled() {
     let summary = match journey
         .client
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session.clone(),
         })
         .await
@@ -1940,6 +1953,7 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
     watching.hello("journey-2").await.expect("handshake");
     watching
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: None,
             expand_last_round: false,
@@ -1969,6 +1983,7 @@ async fn a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns() 
     returning.hello("journey-3").await.expect("handshake");
     let (snapshot, replayed, reset) = match returning
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: Some(seen_up_to),
             expand_last_round: false,
@@ -2020,6 +2035,7 @@ async fn a_second_client_sees_the_same_session_as_the_first() {
     second.hello("journey-2").await.expect("handshake");
     second
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: session.clone(),
             since_seq: None,
             expand_last_round: false,
@@ -2072,6 +2088,8 @@ async fn a_malformed_frame_gets_an_error_rather_than_silence() {
 
     let error = client
         .expect_error(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: "does-not-exist".into(),
         })
         .await;
@@ -2212,6 +2230,8 @@ async fn title_of(journey: &Journey, session: &str) -> Option<String> {
     match journey
         .client
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session.to_string(),
         })
         .await
@@ -2354,6 +2374,7 @@ async fn a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave() {
     journey
         .client
         .call(Request::Subscribe {
+            recent_rounds: None,
             session_id: summary.id.clone(),
             since_seq: None,
             expand_last_round: false,

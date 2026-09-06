@@ -534,6 +534,8 @@ async fn execute(
             let rpc = connect_selected(selection).await?;
             let snapshot = snapshot(
                 rpc.call(Request::SessionGet {
+                    recent_rounds: None,
+                    before_item_id: None,
                     session_id: session_id.clone(),
                 })
                 .await
@@ -1964,6 +1966,7 @@ mod tests {
         assert!(mismatch.message.contains("returned sessions"));
 
         let summary = SessionSummary {
+            message_preview: None,
             id: "s_1".into(),
             workspace_id: "w_1".into(),
             agent_id: "genet".into(),

@@ -490,6 +490,7 @@ impl SessionManager {
 
         let now = now_ms();
         let meta = SessionMeta {
+            message_preview: None,
             effort_id: None,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -562,6 +563,7 @@ impl SessionManager {
         self.registry.require(agent_id)?;
         let now = now_ms();
         let meta = SessionMeta {
+            message_preview: None,
             effort_id: None,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -765,6 +767,7 @@ impl SessionManager {
             .as_deref()
             .and_then(|title| title_from(&format!("{title} · 分支")));
         let meta = SessionMeta {
+            message_preview: None,
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
@@ -963,6 +966,7 @@ impl SessionManager {
         };
         let now = now_ms();
         let meta = SessionMeta {
+            message_preview: None,
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -1173,6 +1177,7 @@ impl SessionManager {
             now
         };
         let meta = SessionMeta {
+            message_preview: None,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
@@ -1478,6 +1483,96 @@ impl SessionManager {
     pub async fn snapshot(&self, session_id: &str) -> Result<SessionSnapshot> {
         let live = self.live(session_id).await?;
         live.snapshot().await
+    }
+
+    /// History-only reads share the snapshot shape but never create a subscription.
+    pub async fn history_snapshot(
+        &self,
+        session_id: &str,
+        recent_rounds: u32,
+        before_item_id: Option<&str>,
+    ) -> Result<SessionSnapshot> {
+        let live = self.live(session_id).await?;
+        let _owner = live.execution.lock().await;
+        let snapshot = self.snapshot_for_open(&live, false).await?;
+        Self::window_snapshot(snapshot, recent_rounds, before_item_id)
+    }
+
+    fn window_snapshot(
+        mut snapshot: SessionSnapshot,
+        recent_rounds: u32,
+        before_item_id: Option<&str>,
+    ) -> Result<SessionSnapshot> {
+        let end = match before_item_id {
+            Some(id) => snapshot
+                .items
+                .iter()
+                .position(|item| item.id() == id)
+                .ok_or_else(|| anyhow!("history cursor no longer exists; reopen the session"))?,
+            None => snapshot.items.len(),
+        };
+        let rounds = snapshot.rounds.as_deref().unwrap_or(&[]);
+        let positions: HashMap<&str, usize> = snapshot.items[..end]
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.id(), index))
+            .collect();
+        let boundaries: Vec<usize> = rounds
+            .iter()
+            .filter_map(|round| round.user_item_id.as_deref())
+            .filter_map(|id| positions.get(id).copied())
+            .collect();
+        let limit = recent_rounds.clamp(1, 100) as usize;
+        // Unround legacy/imported history remains reachable through the same stable cursor.
+        let mut start = if boundaries.len() > limit {
+            boundaries[boundaries.len() - limit]
+        } else if boundaries.is_empty() {
+            end.saturating_sub(limit * 4)
+        } else {
+            0
+        };
+        // Bound pathological legacy histories as well as the ordinary round count.
+        start = start.max(end.saturating_sub(128));
+        for item in &mut snapshot.items[start..end] {
+            let bytes = serde_json::to_vec(item)?.len();
+            if bytes <= 16 * 1024 {
+                continue;
+            }
+            match item {
+                TimelineItem::UserMessage {
+                    id,
+                    text,
+                    attachments,
+                } => {
+                    snapshot
+                        .history_excerpt_ids
+                        .get_or_insert_with(Vec::new)
+                        .push(id.clone());
+                    *text = text.chars().take(2048).collect();
+                    attachments.clear();
+                }
+                TimelineItem::AssistantMessage { id, text, .. } => {
+                    snapshot
+                        .history_excerpt_ids
+                        .get_or_insert_with(Vec::new)
+                        .push(id.clone());
+                    *text = text.chars().take(2048).collect();
+                }
+                _ => {}
+            }
+        }
+        snapshot.history_before = (start > 0).then(|| snapshot.items[start].id().to_owned());
+        snapshot.items = snapshot.items[start..end].to_vec();
+        if let Some(rounds) = snapshot.rounds.as_mut() {
+            rounds.retain(|round| {
+                round
+                    .user_item_id
+                    .as_deref()
+                    .is_some_and(|id| snapshot.items.iter().any(|item| item.id() == id))
+            });
+        }
+        snapshot.history_windowed = Some(true);
+        Ok(snapshot)
     }
 
     /// Which Space this Session instantiates, and the two directories its
@@ -2082,6 +2177,22 @@ impl SessionManager {
         bool,
         broadcast::Receiver<SequencedEvent>,
     )> {
+        self.subscribe_window(session_id, since_seq, expand_last_round, None)
+            .await
+    }
+
+    pub async fn subscribe_window(
+        &self,
+        session_id: &str,
+        since_seq: Option<u64>,
+        expand_last_round: bool,
+        recent_rounds: Option<u32>,
+    ) -> Result<(
+        SessionSnapshot,
+        Vec<SequencedEvent>,
+        bool,
+        broadcast::Receiver<SequencedEvent>,
+    )> {
         let live = self.live(session_id).await?;
         // Subscribe before snapshotting so nothing can slip through the gap
         // between the two.
@@ -2122,6 +2233,10 @@ impl SessionManager {
         drop(replay);
 
         let snapshot = self.snapshot_for_open(&live, expand_last_round).await?;
+        let snapshot = match recent_rounds {
+            Some(limit) => Self::window_snapshot(snapshot, limit, None)?,
+            None => snapshot,
+        };
         Ok((snapshot, events, reset, receiver))
     }
 
@@ -2280,6 +2395,11 @@ impl SessionManager {
         self.store
             .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
 
+        {
+            let mut meta = live.meta.lock().await;
+            meta.message_preview = visible_message_preview(std::slice::from_ref(&item));
+            self.store.save_meta(&meta)?;
+        }
         if needs_title {
             if let Some(title) = title_from(&text) {
                 {
@@ -3584,6 +3704,9 @@ impl Live {
             pending_permissions: self.pending_permissions.lock().await.clone(),
             rounds: None,
             expanded_round: None,
+            history_before: None,
+            history_windowed: None,
+            history_excerpt_ids: None,
         })
     }
 
@@ -5514,6 +5637,20 @@ async fn persist_round(live: &Live, round: ActiveRound) {
     live.record_round(&round).await;
 }
 
+fn visible_message_preview(items: &[TimelineItem]) -> Option<genehub_proto::SessionMessagePreview> {
+    items.iter().rev().find_map(|item| match item {
+        TimelineItem::UserMessage { id, text, .. }
+        | TimelineItem::AssistantMessage { id, text, .. } => {
+            Some(genehub_proto::SessionMessagePreview {
+                item_id: id.clone(),
+                text: text.chars().take(160).collect(),
+                at_ms: now_ms(),
+            })
+        }
+        _ => None,
+    })
+}
+
 /// Writes what this turn produced, once, when the turn ends: narrative to the
 /// chat layer, work to the open trunk.
 async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
@@ -5550,6 +5687,9 @@ async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
     live.open_turn_dirty.store(false, Ordering::SeqCst);
     let mut meta = live.meta.lock().await;
     meta.updated_at_ms = now_ms();
+    if let Some(preview) = visible_message_preview(&settled) {
+        meta.message_preview = Some(preview);
+    }
     store.save_meta(&meta)?;
     Ok(())
 }
@@ -5656,6 +5796,7 @@ mod tests {
 
     fn meta() -> SessionMeta {
         SessionMeta {
+            message_preview: None,
             effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
@@ -6974,6 +7115,7 @@ mod tests {
         sessions
             .store
             .save_meta(&SessionMeta {
+                message_preview: None,
                 agent_id: "amnesiac".into(),
                 persist: Some(stale),
                 ..meta()
@@ -7017,6 +7159,7 @@ mod tests {
         sessions
             .store
             .save_meta(&SessionMeta {
+                message_preview: None,
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -7068,6 +7211,7 @@ mod tests {
         sessions
             .store
             .save_meta(&SessionMeta {
+                message_preview: None,
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -7140,6 +7284,7 @@ mod tests {
     #[tokio::test]
     async fn an_agent_title_replaces_the_first_prompt_title() {
         let (live, _dir) = live_session(SessionMeta {
+            message_preview: None,
             title: Some("Fix the login redirect".into()),
             ..meta()
         });
@@ -7220,6 +7365,7 @@ mod tests {
     #[tokio::test]
     async fn a_latin_agent_title_does_not_replace_a_cjk_prompt_title() {
         let (live, _dir) = live_session(SessionMeta {
+            message_preview: None,
             title: Some("生成三张风景画，简笔风".into()),
             ..meta()
         });

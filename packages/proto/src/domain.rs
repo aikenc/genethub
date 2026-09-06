@@ -788,6 +788,10 @@ pub struct SessionContext {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionSummary {
+    /// Last durably stored visible message; absent for records not yet projected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub message_preview: Option<SessionMessagePreview>,
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
@@ -846,6 +850,17 @@ pub struct SessionSummary {
     #[ts(optional, type = "number")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at_ms: Option<i64>,
+}
+
+/// A content cursor independent of status, rename and transport sequence numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionMessagePreview {
+    pub item_id: String,
+    pub text: String,
+    #[ts(type = "number")]
+    pub at_ms: i64,
 }
 
 /// Durable parent/role binding for a Workflow-managed ordinary Session.
@@ -1060,6 +1075,18 @@ pub struct UnsupportedFormat {
 #[ts(export, export_to = "index.ts")]
 pub struct SessionSnapshot {
     pub summary: SessionSummary,
+    /// Stable exclusive item cursor for the previous history window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub history_before: Option<String>,
+    /// Set only for windowed reads; absent preserves the legacy full-snapshot contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub history_windowed: Option<bool>,
+    /// IDs whose body/attachments are excerpted; exact content remains available via session.narrative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub history_excerpt_ids: Option<Vec<String>>,
     pub items: Vec<crate::timeline::TimelineItem>,
     /// Sequence number this snapshot is current as of. Events with a lower or
     /// equal seq have already been folded in.

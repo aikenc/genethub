@@ -48,6 +48,10 @@ pub enum Request {
         /// the subscription response.
         #[serde(default)]
         expand_last_round: bool,
+        /// Optional UI history window. Does not alter Agent context or replay semantics.
+        #[serde(default)]
+        #[ts(optional)]
+        recent_rounds: Option<u32>,
     },
     #[serde(rename = "unsubscribe", rename_all = "camelCase")]
     Unsubscribe { session_id: String },
@@ -232,7 +236,15 @@ pub enum Request {
         include_archived: bool,
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
-    SessionGet { session_id: String },
+    SessionGet {
+        session_id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        recent_rounds: Option<u32>,
+        #[serde(default)]
+        #[ts(optional)]
+        before_item_id: Option<String>,
+    },
     /// Which responsibilities are live in this Session, and where each may
     /// write. Read-only: composition is changed on the Space, not here.
     #[serde(rename = "session.components", rename_all = "camelCase")]

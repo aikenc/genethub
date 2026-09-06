@@ -148,6 +148,8 @@ pub struct HumanContinuation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_preview: Option<genehub_proto::SessionMessagePreview>,
     pub id: String,
     /// Which workspace this conversation belongs to.
     ///
@@ -254,6 +256,7 @@ impl SessionMeta {
     /// does not know what the rest of it means.
     fn unopenable(id: String, workspace_id: String, cwd: PathBuf, header: MetaHeader) -> Self {
         SessionMeta {
+            message_preview: None,
             id,
             workspace_id,
             format: header.format,
@@ -300,6 +303,7 @@ impl SessionMeta {
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
         SessionSummary {
+            message_preview: self.message_preview.clone(),
             last_activity_at_ms,
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
@@ -1942,6 +1946,7 @@ mod project_home_tests {
 
     fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
         SessionMeta {
+            message_preview: None,
             id: id.into(),
             workspace_id: workspace_id.into(),
             format: SESSION_FORMAT,

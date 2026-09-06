@@ -18,6 +18,7 @@ import {
   type SpeechTextRange,
 } from "../speech/SpeechComposer";
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
+import { readLocalDraft, saveLocalDraft } from "./localConversation";
 import { ComposerControls } from "./ComposerControls";
 import type { ComposerDraftInsert, ForwardDraft } from "./store";
 
@@ -113,6 +114,7 @@ const COMPOSER_PHONE_DOCK =
  * of commands and skills that are invisible outside its own terminal.
  */
 export function Composer({
+  persistenceKey,
   phase,
   disabled,
   disabledReason,
@@ -145,6 +147,7 @@ export function Composer({
   minimized,
   onExpand,
 }: {
+  persistenceKey?: string;
   phase: ComposerPhase;
   disabled?: boolean;
   /** Why this transcript cannot accept a new turn, when the state is durable. */
@@ -200,7 +203,9 @@ export function Composer({
   minimized?: boolean;
   onExpand?(): void;
 }) {
-  const [draft, setDraft] = useState("");
+  const [saved] = useState(() => persistenceKey ? readLocalDraft(persistenceKey) : { text: "", attachments: [], missingAttachments: 0 });
+  const [draft, setDraft] = useState(saved.text);
+  const [missingAttachments, setMissingAttachments] = useState(saved.missingAttachments);
   // Only while a turn is running, and only every few seconds: the number this
   // feeds is read in minutes, and a per-second timer on the composer would cost
   // more than the precision is worth.
@@ -213,8 +218,11 @@ export function Composer({
     return () => clearInterval(timer);
   }, [watchingQuiet]);
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [pasteNotice, setPasteNotice] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
+  useEffect(() => {
+    if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments });
+  }, [persistenceKey, draft, attachments, missingAttachments]);
+  const [pasteNotice, setPasteNotice] = useState<string | null>(saved.missingAttachments ? `${saved.missingAttachments} 个附件未能恢复，请重新选择后发送。` : ("recoveryNotice" in saved ? saved.recoveryNotice ?? null : null));
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -332,6 +340,8 @@ export function Composer({
     setActiveSpeechSpan(null);
     setDraft("");
     setAttachments([]);
+    setMissingAttachments(0);
+    if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
     setDismissed(false);
     onSend(payload, outgoing);
     if (forwardDraft) onClearForwardDraft?.();

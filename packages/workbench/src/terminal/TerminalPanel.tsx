@@ -25,11 +25,12 @@ export function TerminalPanel({ workspaceId }: { workspaceId?: string } = {}) {
     const element = host.current;
     if (!client || !element || !workspace) return;
 
+    const foreground = getComputedStyle(element).color;
     const terminal = new Terminal({
       convertEol: true,
       fontSize: 12,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      theme: { background: "#00000000" },
+      theme: { background: "#00000000", foreground, cursor: foreground },
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
