@@ -22,7 +22,7 @@ export function WorkspaceDetailsDialog({ children, onClose }: {
       ref={dialog}
       role="dialog"
       aria-modal="true"
-      aria-label="工作区详情"
+      aria-label="Agent详情"
       onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
         if (event.key !== "Tab") return;
@@ -38,8 +38,8 @@ export function WorkspaceDetailsDialog({ children, onClose }: {
     >
       <div className="flex max-h-[88dvh] flex-col">
         <header className="flex shrink-0 items-center justify-between border-b border-line px-5 py-3">
-          <h2 className="text-base font-medium">工作区详情</h2>
-          <button type="button" autoFocus aria-label="关闭工作区详情" onClick={onClose}
+          <h2 className="text-base font-medium">Agent详情</h2>
+          <button type="button" autoFocus aria-label="关闭Agent详情" onClick={onClose}
             className="flex h-11 w-11 items-center justify-center rounded-lg text-xl text-muted hover:bg-raised">×</button>
         </header>
         <div className="min-h-0 overflow-y-auto overscroll-contain p-5 text-sm">{children}</div>

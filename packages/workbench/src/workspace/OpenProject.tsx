@@ -28,6 +28,7 @@ export const OpenProject = forwardRef<
     host: Host;
     endpoint: Endpoint;
     onOpened?: () => void;
+    directoryAction?: { initialDirectory?: string; onPick(root: string): Promise<void> };
     compact?: boolean;
     /** How the trigger is drawn. `none` keeps the picker mounted with no button. */
     variant?: "button" | "menuitem" | "inline" | "none";
@@ -39,7 +40,7 @@ export const OpenProject = forwardRef<
     driveUrl?: boolean;
   }
 >(function OpenProject(
-  { host, endpoint, onOpened, compact = false, variant = "button", onPickStart, driveUrl = false },
+  { host, endpoint, onOpened, compact = false, variant = "button", onPickStart, directoryAction, driveUrl = false },
   ref,
 ) {
   const openWorkspace = useWorkbench((state) => state.openWorkspace);
@@ -56,7 +57,7 @@ export const OpenProject = forwardRef<
   const activeWorkspace =
     workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
   const rememberedDirectory = () => recallPickerDirectory(endpoint);
-  const startingDirectory = () => activeWorkspace?.root ?? rememberedDirectory();
+  const startingDirectory = () => directoryAction?.initialDirectory ?? activeWorkspace?.root ?? rememberedDirectory();
   const opening = useRef(false);
   const [urlDialog, setUrlDialog] = useState(() => readWorkbenchDialog());
 
@@ -71,7 +72,7 @@ export const OpenProject = forwardRef<
   }, []);
 
   const writeDialog = () => {
-    if (host.kind !== "browser") return;
+    if (directoryAction || host.kind !== "browser") return;
     patchWorkbenchLocation({ dialog: "open-workspace" });
   };
 
@@ -79,7 +80,7 @@ export const OpenProject = forwardRef<
     opening.current = false;
     setPicker(null);
     setNativeChoice(false);
-    if (host.kind === "browser" && readWorkbenchDialog() === "open-workspace") {
+    if (!directoryAction && host.kind === "browser" && readWorkbenchDialog() === "open-workspace") {
       patchWorkbenchLocation({ dialog: null }, "replace");
     }
   };
@@ -89,7 +90,8 @@ export const OpenProject = forwardRef<
     setBusy(true);
     setError(null);
     try {
-      await openWorkspace(root.trim());
+      if (directoryAction) await directoryAction.onPick(root.trim());
+      else await openWorkspace(root.trim());
       rememberPickerDirectory(
         endpoint,
         isWorkspaceFile(root) ? (picker?.path ?? parentDirectory(root)) : root,
@@ -98,7 +100,7 @@ export const OpenProject = forwardRef<
       setCreating(false);
       onOpened?.();
     } catch (failure) {
-      setError(warnOp("workspace.open", failure));
+      setError(warnOp(directoryAction ? "workspace.addRoot" : "workspace.open", failure));
     } finally {
       setBusy(false);
     }
@@ -152,12 +154,12 @@ export const OpenProject = forwardRef<
     setPickerBusy(true);
     setError(null);
     const starts: Array<string | undefined> = [];
-    for (const candidate of [activeWorkspace?.root, rememberedDirectory()]) {
+    for (const candidate of [directoryAction?.initialDirectory, activeWorkspace?.root, rememberedDirectory()]) {
       if (candidate && !starts.includes(candidate)) starts.push(candidate);
     }
     // Let the daemon choose its home only after the two user-owned hints.
     starts.push(undefined);
-    let failure: unknown = new Error("无法读取工作区位置");
+    let failure: unknown = new Error("无法读取Agent位置");
     for (const start of starts) {
       try {
         const listing = await readDirectory(start);
@@ -175,7 +177,7 @@ export const OpenProject = forwardRef<
 
   const startOpen = () => {
     onPickStart?.();
-    if (host.kind === "browser" && !driveUrl) {
+    if (!directoryAction && host.kind === "browser" && !driveUrl) {
       writeDialog();
       return;
     }
@@ -183,7 +185,7 @@ export const OpenProject = forwardRef<
     if (!canBrowseThisMachine && !client) return;
     opening.current = true;
     if (canBrowseThisMachine) {
-      if (host.pickDirectory && host.pickWorkspaceFile) {
+      if (!directoryAction && host.pickDirectory && host.pickWorkspaceFile) {
         setNativeChoice(true);
         return;
       }
@@ -200,7 +202,7 @@ export const OpenProject = forwardRef<
   useImperativeHandle(ref, () => ({ open: () => startOpenRef.current() }), []);
 
   useEffect(() => {
-    if (!driveUrl || host.kind !== "browser") return;
+    if (directoryAction || !driveUrl || host.kind !== "browser") return;
     if (urlDialog === "open-workspace") {
       if (!picker && !nativeChoice && !pickerBusy && !busy && !opening.current) {
         startOpenRef.current();
@@ -237,7 +239,7 @@ export const OpenProject = forwardRef<
     }
   };
 
-  const triggerLabel = pickerBusy ? "读取中…" : busy ? "打开中…" : "打开工作区";
+  const triggerLabel = pickerBusy ? "读取中…" : busy ? "保存中…" : directoryAction ? "添加目录" : "添加 Agent";
   const triggerDisabled = busy || pickerBusy || (!canBrowseThisMachine && !client);
 
   const trigger =
@@ -280,16 +282,16 @@ export const OpenProject = forwardRef<
             <div
               role="dialog"
               aria-modal="true"
-              aria-label="打开工作区"
+              aria-label="打开Agent"
               className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3"
               onKeyDown={(event) => {
                 if (event.key === "Escape") closePicker();
               }}
             >
               <div className="w-full max-w-sm rounded-xl border border-line-strong bg-surface p-4 shadow-2xl">
-                <h2 className="text-sm font-medium text-fg">打开工作区</h2>
+                <h2 className="text-sm font-medium text-fg">打开Agent</h2>
                 <p className="mt-1 text-xs text-muted">
-                  工作区可以是一个文件夹，也可以是 .code-workspace 描述的多文件夹工作区。
+                  Agent可以是一个文件夹，也可以是 .code-workspace 描述的多文件夹Agent。
                 </p>
                 <div className="mt-3 flex flex-col gap-2">
                   <button
@@ -330,7 +332,7 @@ export const OpenProject = forwardRef<
               aria-label={
                 picker.roots
                   ? "选择" + endpoint.label + "上的磁盘"
-                  : "打开" + endpoint.label + "上的工作区"
+                  : "打开" + endpoint.label + "上的Agent"
               }
               className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3 md:p-4"
               onKeyDown={(event) => {
@@ -340,11 +342,11 @@ export const OpenProject = forwardRef<
                 }
               }}
             >
-              <div className="flex h-[75dvh] w-[75vw] max-h-[75dvh] flex-col overflow-hidden rounded-xl border border-line-strong bg-surface shadow-2xl md:h-auto md:max-h-[min(42rem,85vh)] md:w-full md:max-w-2xl">
+              <div className="flex h-[85dvh] w-full max-h-[75dvh] flex-col overflow-hidden rounded-xl border border-line-strong bg-surface shadow-2xl md:h-auto md:max-h-[min(42rem,85vh)] md:w-full md:max-w-2xl">
                 <header className="flex items-center gap-3 border-b border-line px-4 py-3">
                   <div className="min-w-0 flex-1">
                     <h2 className="text-sm font-medium text-fg">
-                      {picker.roots ? "选择磁盘" : "打开工作区"}
+                      {picker.roots ? "选择磁盘" : directoryAction ? "添加目录" : "添加 Agent"}
                     </h2>
                     <p className="truncate text-xs text-faint" title={picker.path || undefined}>
                       {picker.roots ? "此设备上的可用位置" : picker.path}
@@ -352,7 +354,7 @@ export const OpenProject = forwardRef<
                   </div>
                   <button
                     type="button"
-                    aria-label="关闭工作区选择器"
+                    aria-label="关闭Agent选择器"
                     className="rounded px-2 py-1 text-muted hover:bg-raised"
                     onClick={() => closePicker()}
                   >
@@ -381,7 +383,7 @@ export const OpenProject = forwardRef<
                       <span className="truncate">{directory.name}</span>
                     </button>
                   ))}
-                  {(picker.workspaceFiles ?? []).map((workspace) => (
+                  {(directoryAction ? [] : picker.workspaceFiles ?? []).map((workspace) => (
                     <button
                       key={workspace.path}
                       type="button"
@@ -432,6 +434,7 @@ export const OpenProject = forwardRef<
                     </button>
                   </div>
                 ) : null}
+                {directoryAction && <p className="border-t border-line px-4 py-2 text-xs text-muted">保存会保留配置字段，并将 .code-workspace 整理为 JSON 格式（不保留注释）。</p>}
                 <footer className="flex items-center justify-between gap-2 border-t border-line px-4 py-3">
                   <div>
                     {!picker.roots ? (
@@ -464,7 +467,7 @@ export const OpenProject = forwardRef<
                       disabled={busy || pickerBusy || picker.roots || !picker.path}
                       onClick={() => void open(picker.path)}
                     >
-                      {busy ? "打开中…" : "打开此工作区"}
+                      {busy ? "保存中…" : directoryAction ? "添加此目录" : "添加此 Agent"}
                     </button>
                   </div>
                 </footer>

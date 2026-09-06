@@ -1457,6 +1457,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::ProjectBootstrap { workspace_id, .. }
         | Request::WorkflowHistory { workspace_id, .. }
         | Request::AgentSpaceChildren { workspace_id }
+        | Request::WorkspaceAddRoot { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
         Request::BootstrapPackList => None,

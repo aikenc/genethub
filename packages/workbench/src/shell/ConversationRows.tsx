@@ -9,16 +9,14 @@ import { readLocalDraft } from "../session/localConversation";
 import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
-import {
-  isDescendant,
-} from "../workspace/agent-space-tree";
+import { isDescendant } from "../workspace/agent-space-tree";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
 interface RowActions {
- onPickSession(sessionId: string): void;
- onRename(sessionId: string, title: string): void;
- onDelete(sessionId: string): void;
+  onPickSession(sessionId: string): void;
+  onRename(sessionId: string, title: string): void;
+  onDelete(sessionId: string): void;
 }
 
 type ListedSession = SessionSummary & { unread: boolean };
@@ -40,8 +38,18 @@ export function WorkspaceRow({
   onRemove,
   children,
   browse = false,
+  density = "auto",
+  expanded,
+  onExpand,
+  childCount = 0,
+  actions = true,
 }: {
   browse?: boolean;
+  density?: "auto" | "comfortable" | "compact";
+  expanded?: boolean;
+  onExpand?(): void;
+  childCount?: number;
+  actions?: boolean;
   workspace: WorkspaceInfo;
   workspaces: WorkspaceInfo[];
   breadcrumb: string;
@@ -65,17 +73,27 @@ export function WorkspaceRow({
   const [spaceBusy, setSpaceBusy] = useState(false);
   const [componentId, setComponentId] = useState("worker");
   const [workerRole, setWorkerRole] = useState("tester");
-  const [parentId, setParentId] = useState(workspace.agentSpace?.parentWorkspaceId ?? "");
-  const [lifecycle, setLifecycle] = useState(workspace.agentSpace?.lifecycle ?? "persistent");
+  const [parentId, setParentId] = useState(
+    workspace.agentSpace?.parentWorkspaceId ?? "",
+  );
+  const [lifecycle, setLifecycle] = useState(
+    workspace.agentSpace?.lifecycle ?? "persistent",
+  );
   const [builderSummary, setBuilderSummary] = useState<string | null>(null);
-  const configureAgentSpace = useWorkbench((state) => state.configureAgentSpace);
-  const inspectAgentSpaceBuild = useWorkbench((state) => state.inspectAgentSpaceBuild);
+  const configureAgentSpace = useWorkbench(
+    (state) => state.configureAgentSpace,
+  );
+  const inspectAgentSpaceBuild = useWorkbench(
+    (state) => state.inspectAgentSpaceBuild,
+  );
   const revision = workspace.agentSpace?.revision ?? 0;
   useEffect(() => {
     setParentId(workspace.agentSpace?.parentWorkspaceId ?? "");
     setLifecycle(workspace.agentSpace?.lifecycle ?? "persistent");
   }, [workspace.id, revision]);
-  const mutate = async (operation: Parameters<typeof configureAgentSpace>[2]) => {
+  const mutate = async (
+    operation: Parameters<typeof configureAgentSpace>[2],
+  ) => {
     setSpaceBusy(true);
     try {
       await configureAgentSpace(workspace.id, revision, operation);
@@ -102,11 +120,11 @@ export function WorkspaceRow({
       !isDescendant(workspaces, candidate.id, workspace.id),
   );
   return (
-    <li className="group relative mb-1">
+    <li data-density={density} className="entity-row group relative mb-1">
       {editing ? (
         <Rename
           initial={workspace.name}
-          label="工作区名称"
+          label="Agent 名称"
           onCommit={(name) => {
             setEditing(false);
             onRename(name);
@@ -115,39 +133,59 @@ export function WorkspaceRow({
         />
       ) : (
         <div
-          className={`flex min-h-14 w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "text-fg" : "text-muted"}`}
+          className={`flex min-h-14 w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "bg-raised text-fg" : "text-fg"}`}
         >
+          {!browse && (
+            <button
+              type="button"
+              aria-label={
+                browse
+                  ? `进入 ${workspace.name}`
+                  : shut
+                    ? `展开 ${workspace.name}`
+                    : `折叠 ${workspace.name}`
+              }
+              aria-expanded={browse ? undefined : !shut}
+              className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-auto md:w-auto md:px-1 md:py-1"
+              onClick={onToggle}
+            >
+              <span aria-hidden>{browse ? "›" : shut ? "▸" : "▾"}</span>
+            </button>
+          )}
           <button
             type="button"
-            aria-label={browse ? `进入 ${workspace.name}` : shut ? `展开 ${workspace.name}` : `折叠 ${workspace.name}`}
-            aria-expanded={browse ? undefined : !shut}
-            className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-auto md:w-auto md:px-1 md:py-1"
-            onClick={onToggle}
-          >
-            <span aria-hidden>{browse ? "›" : shut ? "▸" : "▾"}</span>
-          </button>
-          <button
-            type="button"
-            className="flex min-w-0 flex-1 items-center gap-1.5 py-2 text-left font-medium hover:text-fg md:py-1"
+            className="entity-main flex min-w-0 flex-1 items-center gap-3 py-2 text-left font-medium hover:text-fg"
             aria-label={workspace.name}
             title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
-            <WorkspaceIcon workspace={workspace} />
+            <span className="entity-avatar flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent">
+              <WorkspaceIcon workspace={workspace} className="h-5 w-5" />
+            </span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="truncate text-sm leading-5">{workspace.name}</span>
+              <span className="entity-title truncate text-base leading-6">
+                {workspace.name}
+              </span>
               <span
-                className={`block min-h-4 truncate text-[11px] font-normal leading-4 ${
-                  workspace.agentSpace?.health?.status === "unhealthy" ? "text-danger" : "text-muted"
+                className={`entity-secondary block truncate text-xs font-normal leading-5 ${
+                  workspace.agentSpace?.health?.status === "unhealthy"
+                    ? "text-danger"
+                    : "text-muted"
                 }`}
-                title={workspace.agentSpace ? componentSummary(workspace) : undefined}
+                title={
+                  workspace.agentSpace ? componentSummary(workspace) : undefined
+                }
               >
-                {workspace.agentSpace ? componentSummary(workspace) : "普通工作区"}
+                {workspace.agentSpace
+                  ? componentSummary(workspace)
+                  : `${workspace.folders.length} 个目录`}
               </span>
             </span>
           </button>
           {relationAnomaly ? (
-            <span className="text-[9px] text-danger" title="Parent 关系异常">!</span>
+            <span className="text-[9px] text-danger" title="Parent 关系异常">
+              !
+            </span>
           ) : null}
           {running > 0 ? (
             <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
@@ -155,22 +193,35 @@ export function WorkspaceRow({
               {running}
             </span>
           ) : null}
-          <button
-            type="button"
-            aria-label={`${workspace.name} 的工作区操作`}
-            aria-expanded={menu}
-            className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
-            onClick={() => setMenu((open) => !open)}
-          >
-            <span aria-hidden>⋯</span>
-          </button>
+          {childCount > 0 && onExpand && (
+            <button
+              type="button"
+              aria-label={`${expanded ? "收起" : "展开"} ${workspace.name} 的子 Agent`}
+              aria-expanded={expanded}
+              onClick={onExpand}
+              className="entity-expand flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised"
+            >
+              <span aria-hidden>{expanded ? "⌃" : "⌄"}</span>
+            </button>
+          )}
+          {actions && (
+            <button
+              type="button"
+              aria-label={`${workspace.name} 的 Agent 操作`}
+              aria-expanded={menu}
+              className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+              onClick={() => setMenu((open) => !open)}
+            >
+              <span aria-hidden>⋯</span>
+            </button>
+          )}
         </div>
       )}
       {menu ? (
         <>
           <button
             type="button"
-            aria-label="收起工作区操作"
+            aria-label="收起 Agent 操作"
             className="fixed inset-0 z-40 cursor-default"
             onClick={() => setMenu(false)}
           />
@@ -204,7 +255,11 @@ export function WorkspaceRow({
               type="button"
               role="menuitem"
               disabled={running > 0}
-              title={running > 0 ? "先停止这个工作区中正在运行或等待的会话" : undefined}
+              title={
+                running > 0
+                  ? "先停止这个 Agent中正在运行或等待的会话"
+                  : undefined
+              }
               className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
               onClick={() => {
                 setMenu(false);
@@ -220,24 +275,31 @@ export function WorkspaceRow({
         <WorkspaceDetailsDialog onClose={() => setDetails(false)}>
           <Detail label="名称" value={workspace.name} />
           {workspace.workspaceFile ? (
-            <Detail label="工作区文件" value={workspace.workspaceFile} />
+            <Detail label="配置文件" value={workspace.workspaceFile} />
           ) : null}
-          {(workspace.folders?.length ? workspace.folders : [{
-            name: workspace.name,
-            root: workspace.root,
-            rootHandle: "",
-          }]).map((folder, index) => (
+          {(workspace.folders?.length
+            ? workspace.folders
+            : [
+                {
+                  name: workspace.name,
+                  root: workspace.root,
+                  rootHandle: "",
+                },
+              ]
+          ).map((folder, index) => (
             <Detail
               key={folder.root}
-              label={index === 0 ? "Agent 工作区路径" : folder.name}
+              label={index === 0 ? "主目录" : folder.name}
               value={folder.root}
             />
           ))}
           <Detail label="所属设备" value={deviceName} />
           <div className="mt-3 border-t border-line pt-3">
             <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-fg">AgentSpace</span>
-              <span className="text-[10px] text-faint">revision {revision}</span>
+              <span className="font-medium text-fg">Agent 配置</span>
+              <span className="text-[10px] text-faint">
+                revision {revision}
+              </span>
             </div>
             {workspace.agentSpace ? (
               <>
@@ -247,9 +309,14 @@ export function WorkspaceRow({
                   value={workspace.agentSpace.health?.status ?? "unknown"}
                 />
                 {(workspace.agentSpace.health?.reasons ?? []).map((reason) => (
-                  <p key={reason} className="py-0.5 text-[10px] text-danger">{reason}</p>
+                  <p key={reason} className="py-0.5 text-[10px] text-danger">
+                    {reason}
+                  </p>
                 ))}
-                <Detail label="生命周期" value={workspace.agentSpace.lifecycle} />
+                <Detail
+                  label="生命周期"
+                  value={workspace.agentSpace.lifecycle}
+                />
                 <Detail
                   label="Builder"
                   value={workspace.agentSpace.builderLockDigest || "未验证"}
@@ -306,7 +373,8 @@ export function WorkspaceRow({
               </>
             ) : (
               <p className="mt-1 leading-relaxed text-muted">
-                尚未注册为 AgentSpace。添加 Component 时内核会先验证当前目录的 AgentSpaceBuilder 投影。
+                尚未注册为 AgentSpace。添加 Component 时内核会先验证当前目录的
+                AgentSpaceBuilder 投影。
               </p>
             )}
 
@@ -336,7 +404,9 @@ export function WorkspaceRow({
             </div>
             <button
               type="button"
-              disabled={spaceBusy || (componentId === "worker" && !workerRole.trim())}
+              disabled={
+                spaceBusy || (componentId === "worker" && !workerRole.trim())
+              }
               className="mt-1 w-full rounded bg-accent px-2 py-1 text-white disabled:opacity-40"
               onClick={() =>
                 void mutate({
@@ -359,7 +429,9 @@ export function WorkspaceRow({
               >
                 <option value="">无 Parent（项目根）</option>
                 {parentChoices.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>{candidate.name}</option>
+                  <option key={candidate.id} value={candidate.id}>
+                    {candidate.name}
+                  </option>
                 ))}
               </select>
               <button
@@ -442,15 +514,19 @@ export function WorkspaceRow({
                 Builder Verify
               </button>
             </div>
-            {builderSummary ? <p className="mt-1 text-[10px] text-muted">{builderSummary}</p> : null}
+            {builderSummary ? (
+              <p className="mt-1 text-[10px] text-muted">{builderSummary}</p>
+            ) : null}
           </div>
         </WorkspaceDetailsDialog>
       ) : null}
       {removing ? (
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
-          <p className="font-medium text-fg">从列表移除「{workspace.name}」？</p>
+          <p className="font-medium text-fg">
+            从列表移除「{workspace.name}」？
+          </p>
           <p className="mt-1 leading-relaxed text-muted">
-            文件和会话不会删除；以后重新打开同一工作区即可继续。
+            文件和会话不会删除；以后重新打开同一Agent即可继续。
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <button
@@ -493,13 +569,14 @@ function Detail({ label, value }: { label: string; value: string }) {
 }
 
 function componentSummary(workspace: WorkspaceInfo): string {
-  const components = workspace.agentSpace?.components
-    .filter((component) => component.enabled)
-    .map((component) =>
-      component.componentId === "worker" && component.role
-        ? component.role
-        : component.componentId,
-    ) ?? [];
+  const components =
+    workspace.agentSpace?.components
+      .filter((component) => component.enabled)
+      .map((component) =>
+        component.componentId === "worker" && component.role
+          ? component.role
+          : component.componentId,
+      ) ?? [];
   return components.length > 0 ? components.join(" · ") : "AgentSpace";
 }
 
@@ -513,16 +590,26 @@ export function RecentSessions({
   sessions,
   workspaces,
   activeSessionId,
+  density = "auto",
   ...actions
 }: {
+  density?: "auto" | "comfortable" | "compact";
   sessions: ListedSession[];
   workspaces: WorkspaceInfo[];
   activeSessionId: string | null;
 } & RowActions) {
   return (
-    <ul className="space-y-0.5" aria-label="最近会话">
+    <ul
+      data-density={density}
+      className="entity-list conversation-list space-y-1"
+      aria-label="最近会话"
+    >
       {[...sessions]
-        .sort((left, right) => (right.messagePreview?.atMs ?? right.updatedAtMs) - (left.messagePreview?.atMs ?? left.updatedAtMs))
+        .sort(
+          (left, right) =>
+            (right.messagePreview?.atMs ?? right.updatedAtMs) -
+            (left.messagePreview?.atMs ?? left.updatedAtMs),
+        )
         .map((session) => (
           <SessionRow
             key={session.id}
@@ -553,9 +640,22 @@ function SessionRow({
   const [processesOpen, setProcessesOpen] = useState(false);
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
-  const draftText = readLocalDraft(`${useWorkbench.getState().client?.identity?.machineId ?? ""}:${session.id}`).text;
-  const messageDate = new Date(session.messagePreview?.atMs ?? session.updatedAtMs);
-  const messageTime = messageDate.toLocaleDateString() === new Date().toLocaleDateString() ? messageDate.toLocaleTimeString("zh-CN", {hour:"2-digit", minute:"2-digit"}) : messageDate.toLocaleDateString("zh-CN", {month:"numeric",day:"numeric"});
+  const draftText = readLocalDraft(
+    `${useWorkbench.getState().client?.identity?.machineId ?? ""}:${session.id}`,
+  ).text;
+  const messageDate = new Date(
+    session.messagePreview?.atMs ?? session.updatedAtMs,
+  );
+  const messageTime =
+    messageDate.toLocaleDateString() === new Date().toLocaleDateString()
+      ? messageDate.toLocaleTimeString("zh-CN", {
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : messageDate.toLocaleDateString("zh-CN", {
+          month: "numeric",
+          day: "numeric",
+        });
   const unsupported = session.unsupported;
   const managedReadOnly = session.managed?.userInteraction === "readOnly";
 
@@ -580,7 +680,7 @@ function SessionRow({
         type="button"
         disabled={Boolean(unsupported)}
         title={unsupported ? whyUnsupported(unsupported) : undefined}
-        className={`weui-cell weui-cell_active flex min-h-20 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
+        className={`entity-main conversation-main flex min-h-16 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
           unsupported
             ? "cursor-not-allowed text-faint"
             : active
@@ -590,7 +690,29 @@ function SessionRow({
         onClick={() => onPickSession(session.id)}
       >
         <SessionStateIcon session={session} />
-        <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><span className="min-w-0 flex-1 truncate text-base font-medium">{project?.name ?? "空间"}</span><time dateTime={messageDate.toISOString()} className="shrink-0 text-xs text-faint">{messageTime}</time></span><span className="mt-1 block truncate text-sm text-muted">{title(session)}</span><span className="mt-1 block truncate text-xs text-faint">{draftText ? `[草稿] ${draftText}` : session.messagePreview?.text ?? ""} · {managedReadOnly ? "受管 · 只读" : session.agentId}{unsupported ? " · 需升级" : ""}</span></span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-base font-medium">
+              {title(session)}
+              <span className="ml-2 text-xs font-normal text-muted">
+                · {project?.name ?? "Agent"}
+              </span>
+            </span>
+            <time
+              dateTime={messageDate.toISOString()}
+              className="shrink-0 text-xs text-faint"
+            >
+              {messageTime}
+            </time>
+          </span>
+          <span className="entity-secondary block truncate text-xs text-muted">
+            {draftText
+              ? `[草稿] ${draftText}`
+              : (session.messagePreview?.text ?? "")}{" "}
+            · {managedReadOnly ? "受管 · 只读" : session.agentId}
+            {unsupported ? " · 需升级" : ""}
+          </span>
+        </span>
       </button>
 
       <button
@@ -611,7 +733,12 @@ function SessionRow({
           confirming={menu === "confirming"}
           readOnly={managedReadOnly}
           archived={session.archived}
-          onArchive={() => { setMenu("shut"); void useWorkbench.getState().archiveSession(session.id, !session.archived); }}
+          onArchive={() => {
+            setMenu("shut");
+            void useWorkbench
+              .getState()
+              .archiveSession(session.id, !session.archived);
+          }}
           onRename={() => {
             setMenu("shut");
             setEditing(true);
@@ -629,7 +756,10 @@ function SessionRow({
         />
       )}
       {processesOpen ? (
-        <SessionProcessesDialog sessionId={session.id} onClose={() => setProcessesOpen(false)} />
+        <SessionProcessesDialog
+          sessionId={session.id}
+          onClose={() => setProcessesOpen(false)}
+        />
       ) : null}
     </li>
   );
@@ -700,7 +830,16 @@ function Menu({
           </>
         ) : (
           <>
-            {!readOnly && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised" onClick={onArchive}>{archived ? "恢复会话" : "归档会话"}</button>}
+            {!readOnly && (
+              <button
+                type="button"
+                role="menuitem"
+                className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised"
+                onClick={onArchive}
+              >
+                {archived ? "恢复会话" : "归档会话"}
+              </button>
+            )}
             {!readOnly ? (
               <button
                 type="button"
@@ -801,4 +940,3 @@ const title = (session: SessionSummary) => session.title || "新会话";
  */
 const whyUnsupported = (format: NonNullable<SessionSummary["unsupported"]>) =>
   `这个会话由更新版本的 GeneHub 写入（数据格式 ${format.written}，当前版本读到 ${format.supported}），升级后才能打开。`;
-

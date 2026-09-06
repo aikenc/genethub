@@ -4,22 +4,16 @@ import { useEffect, useMemo, useState } from "react";
 
 import type { Endpoint, Host } from "../host";
 import { OpenProject } from "../workspace/OpenProject";
-import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
-import { buildAgentSpaceTree, type AgentSpaceTreeNode } from "../workspace/agent-space-tree";
+
+import { AgentList } from "../workspace/AgentList";
 import { pickPromptSuggestions } from "./prompt-suggestions";
 import { useWorkbench } from "./store";
 
-/**
- * How many workspaces the panel offers before the rest are folded away.
- *
- * Two rows of the two-column grid. Someone who has opened twenty repositories
- * is not choosing between twenty of them right now; they are almost always
- * continuing in the one the sidebar already has selected, and that one is
- * always among these.
- */
+/** @deprecated Retained for older consumers; AgentList now owns a scrollable single-column picker. */
 export const NEW_SESSION_WORKSPACE_PREVIEW_LIMIT = 4;
 /** @deprecated Use {@link NEW_SESSION_WORKSPACE_PREVIEW_LIMIT}. */
-export const NEW_SESSION_PROJECT_PREVIEW_LIMIT = NEW_SESSION_WORKSPACE_PREVIEW_LIMIT;
+export const NEW_SESSION_PROJECT_PREVIEW_LIMIT =
+  NEW_SESSION_WORKSPACE_PREVIEW_LIMIT;
 
 /**
  * What an unstarted conversation shows instead of an empty transcript.
@@ -48,8 +42,10 @@ export function NewSessionPanel({
   const sessions = useWorkbench((state) => state.sessions);
   const draft = useWorkbench((state) => state.draft);
   const newSession = useWorkbench((state) => state.newSession);
-  const appendComposerDraftLine = useWorkbench((state) => state.appendComposerDraftLine);
-  const [showAllWorkspaces, setShowAllWorkspaces] = useState(false);
+  const appendComposerDraftLine = useWorkbench(
+    (state) => state.appendComposerDraftLine,
+  );
+
   const [suggestions, setSuggestions] = useState(() => pickPromptSuggestions());
   // The order is fixed when the panel opens. Sorting "the selected one first"
   // on every render meant a workspace jumped to the top of the grid under the
@@ -60,21 +56,9 @@ export function NewSessionPanel({
     () => recentFirst(workspaces, sessions, anchorId),
     [workspaces, sessions, anchorId],
   );
-  const tree = useMemo(() => buildAgentSpaceTree(ordered), [ordered]);
-  const rows = useMemo(() => {
-    const flattened: Array<{ workspace: WorkspaceInfo; depth: number; breadcrumb: string }> = [];
-    const visit = (node: AgentSpaceTreeNode, depth: number) => {
-      flattened.push({ workspace: node.workspace, depth, breadcrumb: node.breadcrumb });
-      node.children.forEach((child) => visit(child, depth + 1));
-    };
-    tree.roots.forEach((node) => visit(node, 0));
-    tree.anomalies.forEach((node) => visit(node, 0));
-    return flattened;
-  }, [tree]);
-  const visible = showAllWorkspaces
-    ? rows
-    : rows.slice(0, NEW_SESSION_WORKSPACE_PREVIEW_LIMIT);
-  const selected = workspaces.find((workspace) => workspace.id === draft?.workspaceId);
+  const selected = workspaces.find(
+    (workspace) => workspace.id === draft?.workspaceId,
+  );
   const guidance = selected?.agentSpace?.guidance ?? [];
 
   useEffect(() => {
@@ -90,52 +74,42 @@ export function NewSessionPanel({
   return (
     <div className="mx-auto h-full min-w-0 max-w-chat overflow-y-auto px-3 py-4">
       <h2 className="text-sm font-medium text-fg">新会话</h2>
-      <p className="mt-0.5 text-xs text-muted">选好工作区，然后在下面直接说要做什么。</p>
+      <p className="mt-0.5 text-xs text-muted">
+        选好 Agent，然后在下面直接说要做什么。
+      </p>
 
       <section className="mt-3 min-w-0" aria-labelledby="new-session-workspace">
         <div className="flex items-center justify-between gap-2">
-          <h3 id="new-session-workspace" className="text-sm font-medium text-fg">
-            工作区
+          <h3
+            id="new-session-workspace"
+            className="text-sm font-medium text-fg"
+          >
+            Agent
           </h3>
           {host && endpoint ? (
             <OpenProject host={host} endpoint={endpoint} variant="inline" />
           ) : null}
         </div>
-        <ul className="mt-1 grid grid-cols-2 gap-x-1">
-          {visible.map(({ workspace, depth, breadcrumb }) => {
-            const chosen = workspace.id === draft.workspaceId;
-            return (
-              <li key={workspace.id} className="min-w-0">
-                <button
-                  type="button"
-                  aria-current={chosen}
-                  title={`${breadcrumb}\n${workspace.root}`}
-                  onClick={() => newSession(workspace.id, null)}
-                  className={`flex h-8 w-full min-w-0 items-center gap-1.5 rounded-lg px-2 text-left text-sm ${
-                    chosen ? "bg-accent/10 text-fg" : "text-muted hover:bg-raised hover:text-fg"
-                  }`}
-                  style={{ paddingLeft: `${0.5 + Math.min(depth, 5) * 0.75}rem` }}
-                >
-                  <WorkspaceIcon workspace={workspace} />
-                  <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-        {rows.length > visible.length || showAllWorkspaces ? (
-          <button
-            type="button"
-            aria-expanded={showAllWorkspaces}
-            className="mt-0.5 h-7 rounded px-2 text-xs text-accent hover:bg-raised"
-            onClick={() => setShowAllWorkspaces((shown) => !shown)}
-          >
-            {showAllWorkspaces ? "收起" : `更多 ${rows.length - visible.length}`}
-          </button>
-        ) : null}
+        {selected && (
+          <p className="mt-2 truncate text-xs text-muted">
+            当前 Agent · {selected.name}
+          </p>
+        )}
+        <div className="mt-2 max-h-64 overflow-y-auto">
+          <AgentList
+            workspaces={ordered}
+            selectedId={draft.workspaceId}
+            onPick={(id) => newSession(id, null)}
+            density="compact"
+            actions={false}
+          />
+        </div>
       </section>
 
-      <section className="mt-4 min-w-0" aria-labelledby="new-session-suggestions">
+      <section
+        className="mt-4 min-w-0"
+        aria-labelledby="new-session-suggestions"
+      >
         <div className="flex items-center gap-1">
           <h3
             id="new-session-suggestions"
@@ -192,7 +166,10 @@ function recentFirst(
   const touched = new Map<string, number>();
   for (const session of sessions) {
     const at = Math.max(session.updatedAtMs, session.createdAtMs);
-    touched.set(session.workspaceId, Math.max(touched.get(session.workspaceId) ?? 0, at));
+    touched.set(
+      session.workspaceId,
+      Math.max(touched.get(session.workspaceId) ?? 0, at),
+    );
   }
   return [...workspaces].sort((left, right) => {
     if (left.id === anchorId) return -1;

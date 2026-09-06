@@ -104,7 +104,7 @@ export function RuntimeSettings({
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex flex-wrap items-center gap-1">
-        <div role="tablist" aria-label="Agent" className="contents">
+        <div role="tablist" aria-label="执行引擎" className="contents">
           {visibleAgents.map((agent) => {
             const presentation = resolveAgentPresentation(agent);
             const availability = resolveAgentAvailability(agent);
@@ -157,14 +157,14 @@ export function RuntimeSettings({
       </div>
 
       {agentLocked ? (
-        <p className="text-xs text-muted">当前会话已有内容；新建会话后可以切换 Agent。</p>
+        <p className="text-xs text-muted">当前会话已有内容；新建会话后可以切换执行引擎。</p>
       ) : null}
 
       <div id={bodyId} role="tabpanel" className="flex min-w-0 flex-col gap-3">
         {current?.probe.state === "ready" && !hasRuntimeChoices ? (
           <p className="rounded-lg border border-line bg-raised/40 px-2.5 py-2 text-xs text-muted">
             {currentProfile?.startWithoutModelCatalog
-              ? "这个 Agent 没有返回可切换的模型、思考强度或模式，将使用它自身的默认配置。"
+              ? "这个执行引擎 没有返回可切换的模型、思考强度或模式，将使用它自身的默认配置。"
               : "已接入，但当前没有可用模型；请先在设置中配置模型服务。"}
           </p>
         ) : null}
@@ -227,7 +227,7 @@ export function RuntimeSettings({
               })}
             </div>
             {!selection.effortId ? (
-              <p className="mt-1 text-[11px] text-faint">当前由 Agent 使用默认强度。</p>
+              <p className="mt-1 text-[11px] text-faint">当前由执行引擎 使用默认强度。</p>
             ) : null}
           </fieldset>
         ) : null}

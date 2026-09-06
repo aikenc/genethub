@@ -431,6 +431,7 @@ pub fn required(request: &Request) -> Capability {
         // reading one.
         Request::WorkspaceOpen { .. }
         | Request::WorkspaceCreate { .. }
+        | Request::WorkspaceAddRoot { .. }
         | Request::AgentSpaceConfigure { .. }
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }
