@@ -38,8 +38,9 @@ import type { ForkMachineOption } from "./session/ForkDialog";
 import type { MachineCatalog } from "./session/MachineCatalogPicker";
 import { defaultAgent, useWorkbench } from "./session/store";
 import { Sidebar } from "./shell/Sidebar";
-import { DesktopToolsDrawer } from "./shell/DesktopToolsDrawer";
-import { MobileToolsDrawer } from "./shell/MobileToolsDrawer";
+import { ToolsMenu } from "./shell/ToolsMenu";
+import { WorkbenchNavigation, type WorkbenchSection } from "./shell/WorkbenchNavigation";
+import { WorkspaceBrowser } from "./workspace/WorkspaceBrowser";
 import { MobileTitleSwitcher } from "./shell/MobileTitleSwitcher";
 import { TabBar } from "./shell/TabBar";
 import type { ExtraTab } from "./shell/tabs";
@@ -164,7 +165,10 @@ export function App({
     "idle" | "working" | { error: string }
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const [sessionsOpen, setSessionsOpen] = useState(false);
-  const [toolsOpen, setToolsOpen] = useState(false);
+  const [section, setSection] = useState<WorkbenchSection>("sessions");
+  const [spacesVisited, setSpacesVisited] = useState(false);
+  const [browserNavigationKey, setBrowserNavigationKey] = useState(0);
+  const [browserWorkspaceId, setBrowserWorkspaceId] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
@@ -174,6 +178,18 @@ export function App({
   const [sidebarHidden, setSidebarHidden] = useState(false);
   const [pendingJumpSession, setPendingJumpSession] = useState<string | null>(null);
   const workbench = useWorkbench();
+  // A background initial draft must not pull the user out of Space browsing.
+  // Explicit navigation here handles drafts; external session/tool jumps still
+  // reveal their destination (for example Preview feedback or a deep link).
+  const previousSession = useRef(workbench.activeSessionId);
+  useEffect(() => {
+    const tab = workbench.tabs.find((item) => item.id === workbench.activeTabId);
+    if ((workbench.activeSessionId && workbench.activeSessionId !== previousSession.current) || (tab && tab.kind !== "chat")) {
+      setSection("sessions");
+      setSessionsOpen(false);
+    }
+    previousSession.current = workbench.activeSessionId;
+  }, [workbench.activeTabId, workbench.activeSessionId]);
   const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
   const activeTab = workbench.tabs.find(
@@ -742,34 +758,36 @@ export function App({
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
+        <WorkbenchNavigation section={section === "sessions" && !showChat ? "tools" : section} needsAttention={workbench.sessions.some((item) => ["waiting", "failed"].includes(item.status))} onChange={(next) => {
+          setSessionsOpen(next === "sessions");
+          if (next === "sessions" && !showChat) {
+            const chat = [...workbench.tabs].reverse().find((tab) => tab.kind === "chat");
+            if (chat) workbench.activateTab(chat.id);
+            else workbench.newSession(null, null);
+          }
+          if (next === "spaces") setSpacesVisited(true);
+          setSection(next);
+        }} />
         <Sidebar
           host={host}
-          open={sessionsOpen}
-          hidden={sidebarHidden}
+          open={sessionsOpen && section === "sessions"}
+          sessionOnly
+          hidden={sidebarHidden || section !== "sessions" || !showChat}
           endpoint={endpoint}
           onPickTarget={pickTarget}
-          onNavigate={() => setSessionsOpen(false)}
+          onNavigate={() => { setSessionsOpen(false); setSection("sessions"); }}
         />
 
-        <MobileToolsDrawer
-          open={toolsOpen}
-          extraTabs={extraTabs}
-          onNavigate={() => setToolsOpen(false)}
-        >
-          {sidebarMenu}
-          {mobileTools}
-        </MobileToolsDrawer>
+        {spacesVisited ? <div className={section === "spaces" ? "min-h-0 min-w-0 flex-1" : "hidden"}>
+          <WorkspaceBrowser host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
+            onSession={(id) => { void workbench.selectSession(id); setSection("sessions"); }}
+            onNewSession={(id) => { workbench.newSession(id, null); setSection("sessions"); }}
+            onExtra={(tab, id) => { void workbench.selectWorkspace(id); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
+        </div> : null}
+        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个空间的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一空间，请 Agent 基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览空间</button></div></section> : null}
+        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局工具"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">工具</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属空间。</p></header><ToolsMenu scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
-        <DesktopToolsDrawer
-          open={toolsOpen}
-          extraTabs={extraTabs}
-          onNavigate={() => setToolsOpen(false)}
-        >
-          {sidebarMenu}
-          {desktopTools}
-        </DesktopToolsDrawer>
-
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <main className={section === "sessions" ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
               two 44px targets — the session list and the tools drawer.
               The title in the middle is where the open tabs live: one
@@ -805,13 +823,14 @@ export function App({
               </span>
             )}
             <BackgroundBadge />
+            <button type="button" aria-label="浏览当前空间" className="min-h-11 shrink-0 rounded-lg px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>空间</button>
             <button
               type="button"
               aria-label="工具"
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-xl text-muted active:bg-raised"
               onClick={() => {
                 setSessionsOpen(false);
-                setToolsOpen((open) => !open);
+                setSection("tools");
               }}
             >
               <span aria-hidden>•••</span>
@@ -822,7 +841,7 @@ export function App({
               control: at phone width it was a second title bar, and each tab
               was too narrow to read. */}
           <div className="hidden md:contents">
-            <TabBar onOpenTools={() => setToolsOpen(true)} />
+            <TabBar onOpenTools={() => setSection("tools")} />
           </div>
 
           {workbench.notice ? (
@@ -902,6 +921,7 @@ export function App({
                 composing ? (
                   <>
                     <div className="hidden items-center justify-end gap-2 border-b border-line px-3 py-1 md:flex">
+                      <button type="button" className="mr-auto min-h-9 rounded px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>{workspace?.name ?? "空间"} · 浏览空间</button>
                       <BackgroundBadge />
                       <ConnectionBadge
                         state={workbench.connection}

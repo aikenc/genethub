@@ -2528,7 +2528,7 @@ function discardSubscriptions(client: Client | null, tabs: WorkbenchTab[]): void
 }
 
 /** Replaces the node at `path` with a freshly loaded one, in place. */
-function graft(tree: FileNode, path: string, subtree: FileNode): FileNode {
+export function graft(tree: FileNode, path: string, subtree: FileNode): FileNode {
   if (tree.path === path) return subtree;
   if (!tree.children) return tree;
   return { ...tree, children: tree.children.map((child) => graft(child, path, subtree)) };
