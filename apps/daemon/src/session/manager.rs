@@ -489,6 +489,30 @@ impl SessionManager {
             imported: None,
         };
         self.store.save_meta(&meta)?;
+        // On a Windows host the guest spelling of the cwd is what every
+        // adapter payload had been leaking (fb_M5CQD86STboK); log both forms
+        // so the next path bug is diagnosable from the daemon log alone. The
+        // host form only differs there, so Unix logs stay quiet.
+        {
+            let cwd_guest = meta.cwd.to_string_lossy();
+            let cwd_host = crate::guest_paths::host_form(&cwd_guest);
+            if cwd_host == cwd_guest {
+                tracing::info!(
+                    session = %meta.id,
+                    agent = %meta.agent_id,
+                    cwd = %cwd_guest,
+                    "session created"
+                );
+            } else {
+                tracing::info!(
+                    session = %meta.id,
+                    agent = %meta.agent_id,
+                    cwd = %cwd_guest,
+                    cwd_host = %cwd_host,
+                    "session created"
+                );
+            }
+        }
         let summary = meta.summary(SessionStatus::Idle);
         self.sessions.write().await.insert(
             meta.id.clone(),
@@ -1945,9 +1969,22 @@ impl SessionManager {
         // must not be injected into Agent system prompts — only path-linking
         // rules (HTML entry file, supported kinds, no directory links).
         let _ = artifact_preview_base_url;
+        // Paths inside the guidance are spelled for the consumer: a native
+        // agent opens them on the host (fb_M5CQD86STboK — a Windows codex was
+        // told the CLI lived at /c/... and reported it missing), while the
+        // built-in agent's component child shares this daemon's preopen
+        // namespace and must keep guest form.
+        let host_paths = {
+            let agent_id = live.meta.lock().await.agent_id.clone();
+            self.registry
+                .get(&agent_id)
+                .map(|adapter| adapter.host_form_payloads())
+                .unwrap_or(true)
+        };
         let additional_system_prompt = Some(crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
+            host_paths,
         ));
         let execution = live.claim_execution(false).await?;
         let mut handover = Handover {

@@ -116,6 +116,15 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether protocol payloads must spell paths as the host names them.
+    /// Every native child answers true — a guest `/e/...` means nothing to it
+    /// (fb_M5CQD86STboK). The built-in agent answers true only for its legacy
+    /// native-binary launch: the component child shares this daemon's preopen
+    /// namespace and needs guest form.
+    fn host_form_payloads(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities;
 
     /// Is it installed and does it answer? Never an error: "not installed" is a

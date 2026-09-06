@@ -450,7 +450,10 @@ impl AgentAdapter for CodexAdapter {
             cwd,
             "thread/list",
             json!({
-                "cwd": cwd,
+                // The CLI is native: payload paths are spelled for the host,
+                // while the spawn cwd below stays guest (the host import
+                // translates that one itself).
+                "cwd": crate::guest_paths::host_path(cwd),
                 "limit": limit.clamp(1, 100),
                 "sortKey": "updated_at",
                 "sortDirection": "desc",
@@ -990,7 +993,11 @@ impl CodexSession {
         }
 
         let mode = mode_named(self.mode.lock().await.as_str());
-        let mut params = with_thread_policy(json!({ "cwd": config.cwd }), mode);
+        // Payload paths are spelled for the host: a native codex resolves a
+        // guest `/e/...` against its own drive and lands in a phantom
+        // `E:\e\...` tree (fb_M5CQD86STboK).
+        let mut params =
+            with_thread_policy(json!({ "cwd": crate::guest_paths::host_path(&config.cwd) }), mode);
         if let Some(model) = self.model.lock().await.clone() {
             params["model"] = json!(model);
         }
@@ -1336,7 +1343,13 @@ fn turn_input(input: &PromptInput, scratch: &Path) -> Result<Vec<Value>> {
             let ext = extension_for(&attachment.mime);
             let path = dir.join(format!("{}-{index}.{ext}", uuid::Uuid::new_v4().simple()));
             std::fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
-            blocks.push(json!({ "type": "localImage", "path": path }));
+            // The write has to happen in the guest namespace (the only one
+            // this component can open), but the CLI opens the file natively —
+            // the payload spells the host path or Windows codex looks for the
+            // image in a drive-duplicated phantom tree (fb_M5CQD86STboK).
+            let host_path = crate::guest_paths::host_path(&path);
+            tracing::info!(path = %host_path.display(), bytes = bytes.len(), "pasted image spilled for a codex localImage");
+            blocks.push(json!({ "type": "localImage", "path": host_path }));
         }
     }
     if blocks.is_empty() {
@@ -3815,6 +3828,36 @@ mod tests {
         assert!(path.ends_with(".png"), "{path}");
         assert_eq!(std::fs::read(path).expect("file written"), b"hi");
         assert_eq!(blocks[1]["type"], "localImage");
+    }
+
+    #[test]
+    fn the_local_image_payload_spells_the_path_for_the_host() {
+        // The write stays in the guest namespace while the payload path is
+        // translated at the push — on this native test host `host_path` is the
+        // identity, so the pin is that the payload matches the translation of
+        // the path on disk, not that the string happens to exist.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let input = PromptInput {
+            text: String::new(),
+            attachments: vec![genehub_proto::Attachment {
+                name: "shot.png".into(),
+                mime: "image/png".into(),
+                path: None,
+                data_base64: Some("aGk=".into()),
+            }],
+        };
+
+        let blocks = turn_input(&input, dir.path()).expect("input builds");
+        let spilled = std::fs::read_dir(dir.path().join("attachments"))
+            .expect("attachments dir")
+            .next()
+            .expect("one image")
+            .expect("entry")
+            .path();
+        assert_eq!(
+            blocks[0]["path"].as_str().expect("a path"),
+            crate::guest_paths::host_path(&spilled).to_string_lossy()
+        );
     }
 
     #[test]
