@@ -282,7 +282,10 @@ impl AgentAdapter for AcpAdapter {
                 return Ok(None);
             }
             let (listed, _) = probe
-                .call("session/list", json!({ "cwd": cwd, "cursor": null }))
+                .call(
+                    "session/list",
+                    json!({ "cwd": crate::guest_paths::host_path(cwd), "cursor": null }),
+                )
                 .await?;
             let mut candidates = listed
                 .get("sessions")
@@ -342,7 +345,7 @@ impl AgentAdapter for AcpAdapter {
             let (_, updates) = probe
                 .call(
                     method,
-                    json!({ "sessionId": source_id, "cwd": cwd, "mcpServers": [] }),
+                    json!({ "sessionId": source_id, "cwd": crate::guest_paths::host_path(cwd), "mcpServers": [] }),
                 )
                 .await?;
             let items = acp_history_items(&updates);
@@ -650,7 +653,7 @@ impl AcpSession {
                 },
                 json!({
                     "sessionId": session_id,
-                    "cwd": config.cwd,
+                    "cwd": crate::guest_paths::host_path(&config.cwd),
                     "mcpServers": [],
                 }),
             )
@@ -1064,7 +1067,7 @@ async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
                 "jsonrpc": "2.0",
                 "id": next_id,
                 "method": "session/new",
-                "params": { "cwd": scratch, "mcpServers": [] },
+                "params": { "cwd": crate::guest_paths::host_path(&scratch), "mcpServers": [] },
             }),
         )
         .await
@@ -1769,7 +1772,9 @@ fn wrap_system_guidance(context: &str) -> String {
 }
 
 fn session_new_params(cwd: &Path, prompt: Option<&str>) -> Value {
-    let mut params = json!({ "cwd": cwd, "mcpServers": [] });
+    // The ACP agent is a native child: payload paths are spelled for the
+    // host, not in this component's preopen namespace (fb_M5CQD86STboK).
+    let mut params = json!({ "cwd": crate::guest_paths::host_path(cwd), "mcpServers": [] });
     if let Some(prompt) = prompt.filter(|value| !value.trim().is_empty()) {
         params["_meta"] = json!({ "systemPrompt": { "append": prompt } });
     }

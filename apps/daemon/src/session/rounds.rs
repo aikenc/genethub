@@ -1025,7 +1025,7 @@ mod tests {
         // An adapter that never reports LLM rounds still gets bounded trunks:
         // past 500 blobs the next batch boundary closes the trunk.
         let mut builder = TrunkBuilder::default();
-        let mut closed = None;
+        let mut closed;
         for index in 0..TRUNK_MAX_BLOBS {
             closed = push(
                 &mut builder,
@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn a_trunk_closes_on_the_batch_after_its_round_threshold() {
         let mut builder = TrunkBuilder::default();
-        let mut closed = None;
+        let mut closed;
         // 100 rounds of tool work, then the round-101 monologue: it opens a
         // fresh batch, which crosses the threshold and closes the trunk.
         for index in 0..TRUNK_ROUND_THRESHOLD {

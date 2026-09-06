@@ -127,12 +127,20 @@ pub fn load(skills_root: &Path) -> Vec<Skill> {
 
 /// Artifact-link rules plus the Skill catalog, or just the rules when
 /// this daemon has no skills directory.
-pub fn session_guidance(skills_root: Option<&Path>, front_door_cli: Option<&Path>) -> String {
+///
+/// `host_form_paths` spells the embedded paths for a native agent (the only
+/// kind that opens them on the host filesystem); the built-in agent's
+/// component child shares this daemon's preopen namespace and passes false.
+pub fn session_guidance(
+    skills_root: Option<&Path>,
+    front_door_cli: Option<&Path>,
+    host_form_paths: bool,
+) -> String {
     let artifact = crate::session::artifact_links::guidance().to_string();
     let Some(root) = skills_root else {
         return artifact;
     };
-    let catalog = format_catalog(&load(root), front_door_cli);
+    let catalog = format_catalog(&load(root), front_door_cli, host_form_paths);
     if catalog.is_empty() {
         artifact
     } else {
@@ -140,7 +148,11 @@ pub fn session_guidance(skills_root: Option<&Path>, front_door_cli: Option<&Path
     }
 }
 
-pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String {
+pub fn format_catalog(
+    skills: &[Skill],
+    front_door_cli: Option<&Path>,
+    host_form_paths: bool,
+) -> String {
     let visible: Vec<&Skill> = skills
         .iter()
         .filter(|skill| !skill.disable_model_invocation)
@@ -149,14 +161,20 @@ pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String
         return String::new();
     }
 
+    // One path as the payload's consumer must spell it.
+    let spelled = |path: &Path| -> String {
+        if host_form_paths {
+            crate::guest_paths::host_form(&path.to_string_lossy()).into_owned()
+        } else {
+            path.to_string_lossy().into_owned()
+        }
+    };
+
     let mut lines = vec![
         "GeneHub provides these built-in Skills as ordinary files. When a task matches a skill description, read that file and follow it. Do not invent skill names, session ids, or channel commands.".to_string(),
         String::new(),
         match front_door_cli {
-            Some(path) => format!(
-                "<genehub_cli>{}</genehub_cli>",
-                escape_xml(&path.to_string_lossy())
-            ),
+            Some(path) => format!("<genehub_cli>{}</genehub_cli>", escape_xml(&spelled(path))),
             None => "<genehub_cli unavailable=\"true\" />".to_string(),
         },
         "Use exactly the GeneHub CLI path above. It is also exported to the Agent as GENEHUB_CLI. If unavailable, stop instead of guessing genet, genet-dev, genet-beta, or another command.".to_string(),
@@ -172,7 +190,7 @@ pub fn format_catalog(skills: &[Skill], front_door_cli: Option<&Path>) -> String
         ));
         lines.push(format!(
             "    <location>{}</location>",
-            escape_xml(&skill.file_path.to_string_lossy())
+            escape_xml(&spelled(&skill.file_path))
         ));
         lines.push("  </skill>".to_string());
     }
@@ -330,7 +348,7 @@ mod tests {
             file_path: PathBuf::from("/data/skills/demo/SKILL.md"),
             disable_model_invocation: false,
         }];
-        let catalog = format_catalog(&skills, Some(Path::new("/opt/genehub/genet-dev")));
+        let catalog = format_catalog(&skills, Some(Path::new("/opt/genehub/genet-dev")), false);
         assert!(catalog.contains("<available_skills>"));
         assert!(catalog.contains("<genehub_cli>/opt/genehub/genet-dev</genehub_cli>"));
         assert!(catalog.contains("<name>demo</name>"));
@@ -340,9 +358,35 @@ mod tests {
     }
 
     #[test]
+    fn the_host_form_flag_reaches_both_embedded_paths() {
+        // The guest→host translation itself is gated to a wasm build on a
+        // Windows host, so natively host_form is the identity; this pins that
+        // the flag flows to <genehub_cli> and every <location> alike.
+        let skills = vec![Skill {
+            name: "demo".into(),
+            description: "demo".into(),
+            file_path: PathBuf::from("/e/data/skills/demo/SKILL.md"),
+            disable_model_invocation: false,
+        }];
+        let cli = Path::new("/e/opt/genehub/genet-beta");
+        let catalog = format_catalog(&skills, Some(cli), true);
+        let spelled =
+            |path: &Path| crate::guest_paths::host_form(&path.to_string_lossy()).into_owned();
+        assert!(catalog.contains(&format!("<genehub_cli>{}</genehub_cli>", spelled(cli))));
+        assert!(catalog.contains(&format!(
+            "<location>{}</location>",
+            spelled(&skills[0].file_path)
+        )));
+    }
+
+    #[test]
     fn session_guidance_keeps_artifact_rules_and_appends_the_catalog() {
         let root = temp_dir("guidance");
-        let prompt = session_guidance(Some(&root), Some(Path::new("/opt/genehub/genet-beta")));
+        let prompt = session_guidance(
+            Some(&root),
+            Some(Path::new("/opt/genehub/genet-beta")),
+            false,
+        );
         assert!(prompt.contains("index.html"));
         assert!(prompt.contains("genehub-session-history"));
         assert!(prompt.contains("genehub-html-preview"));
@@ -353,7 +397,7 @@ mod tests {
 
     #[test]
     fn session_guidance_without_a_root_is_artifact_rules_only() {
-        let prompt = session_guidance(None, Some(Path::new("/opt/genehub/genet")));
+        let prompt = session_guidance(None, Some(Path::new("/opt/genehub/genet")), false);
         assert!(prompt.contains("index.html"));
         assert!(!prompt.contains("available_skills"));
     }
@@ -361,7 +405,7 @@ mod tests {
     #[test]
     fn missing_cli_binding_is_explicit_and_never_guessed() {
         let root = temp_dir("no-cli");
-        let prompt = session_guidance(Some(&root), None);
+        let prompt = session_guidance(Some(&root), None, false);
         assert!(prompt.contains("<genehub_cli unavailable=\"true\" />"));
         assert!(prompt.contains("stop instead of guessing"));
     }

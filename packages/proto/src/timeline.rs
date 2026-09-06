@@ -498,10 +498,10 @@ impl TimelineItem {
         match self {
             TimelineItem::AssistantMessage { received_at_ms, .. }
             | TimelineItem::Reasoning { received_at_ms, .. }
-            | TimelineItem::Compaction { received_at_ms, .. } => {
-                if received_at_ms.is_none() {
-                    *received_at_ms = Some(now);
-                }
+            | TimelineItem::Compaction { received_at_ms, .. }
+                if received_at_ms.is_none() =>
+            {
+                *received_at_ms = Some(now);
             }
             _ => {}
         }
@@ -511,13 +511,10 @@ impl TimelineItem {
     /// genuinely new sighting stamps `now`.
     pub fn inherit_and_stamp_received_at(&mut self, previous: Option<&TimelineItem>, now: i64) {
         let previous_at = previous.and_then(TimelineItem::received_at_ms);
-        match self.received_at_ms_mut() {
-            Some(slot) => {
-                if slot.is_none() {
-                    *slot = previous_at.or(Some(now));
-                }
+        if let Some(slot) = self.received_at_ms_mut() {
+            if slot.is_none() {
+                *slot = previous_at.or(Some(now));
             }
-            None => {}
         }
     }
 

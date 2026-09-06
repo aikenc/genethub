@@ -167,7 +167,7 @@ impl AgentAdapter for OpenCodeAdapter {
             let response = server
                 .http
                 .get(format!("{}/session", server.base))
-                .query(&[("directory", cwd.to_string_lossy().as_ref())])
+                .query(&[("directory", host_directory(cwd).as_str())])
                 .send()
                 .await
                 .context("listing OpenCode sessions")?
@@ -220,7 +220,7 @@ impl AgentAdapter for OpenCodeAdapter {
             let session: Value = server
                 .http
                 .get(format!("{}/session/{source_id}", server.base))
-                .query(&[("directory", cwd.to_string_lossy().as_ref())])
+                .query(&[("directory", host_directory(cwd).as_str())])
                 .send()
                 .await
                 .context("loading selected OpenCode session")?
@@ -231,7 +231,7 @@ impl AgentAdapter for OpenCodeAdapter {
             let messages: Value = server
                 .http
                 .get(format!("{}/session/{source_id}/message", server.base))
-                .query(&[("directory", cwd.to_string_lossy().as_ref())])
+                .query(&[("directory", host_directory(cwd).as_str())])
                 .send()
                 .await
                 .context("loading selected OpenCode history")?
@@ -573,7 +573,7 @@ async fn open_session(
     if let Some(session_id) = resume_session_id(resume) {
         let response = http
             .get(format!("{base}/session/{session_id}"))
-            .query(&[("directory", cwd.to_string_lossy().as_ref())])
+            .query(&[("directory", host_directory(cwd).as_str())])
             .send()
             .await
             .with_context(|| format!("looking up OpenCode session {session_id}"))?;
@@ -1012,6 +1012,13 @@ fn message_parts(input: &PromptInput) -> Vec<Value> {
         }
     }
     parts
+}
+
+/// The `directory` query parameter as the native server names it — the guest
+/// spelling `/e/dev` means nothing to a native process on Windows
+/// (fb_M5CQD86STboK). Identity everywhere else.
+fn host_directory(cwd: &Path) -> String {
+    crate::guest_paths::host_form(&cwd.to_string_lossy()).into_owned()
 }
 
 fn message_body(input: &PromptInput, model: Option<&str>, system: Option<&str>) -> Value {

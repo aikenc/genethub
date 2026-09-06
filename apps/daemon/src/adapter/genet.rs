@@ -133,6 +133,14 @@ impl AgentAdapter for GenetAdapter {
         }
     }
 
+    fn host_form_payloads(&self) -> bool {
+        // The v2 agent is the component's own agent-serve entry, spawned as a
+        // wasm child that shares this daemon's preopen namespace — guest paths
+        // are the only spelling it understands. Only the legacy branch, a
+        // native binary beside the daemon, needs host-form payloads.
+        self.binary.is_some()
+    }
+
     async fn probe(&self) -> ProbeState {
         match &self.binary {
             Some(_) => ProbeState::Ready,
@@ -197,6 +205,7 @@ impl AgentAdapter for GenetAdapter {
         write_models_file(&home, &config.providers)?;
 
         let session_file = home.join("session.jsonl");
+        let legacy_native = self.binary.is_some();
         let (mut command, describe) = match self.binary.clone() {
             Some(binary) => (Command::new(&binary), binary.display().to_string()),
             // v2: the agent is the `agent-run` entry of the same component the
@@ -216,11 +225,20 @@ impl AgentAdapter for GenetAdapter {
                 (command, format!("{cli} agent-serve"))
             }
         };
+        // The host's spawn import translates only argv[0]; a native agent
+        // binary receives --session verbatim, so on a Windows host it needs
+        // the host spelling. The wasm child shares our preopens and takes the
+        // guest path as-is.
+        let session_arg = if legacy_native {
+            crate::guest_paths::host_path(&session_file)
+        } else {
+            session_file.clone()
+        };
         command
             .arg("--mode")
             .arg("rpc")
             .arg("--session")
-            .arg(&session_file)
+            .arg(&session_arg)
             .arg("--genehub-session-id")
             .arg(&config.session_id)
             .current_dir(&config.cwd)
