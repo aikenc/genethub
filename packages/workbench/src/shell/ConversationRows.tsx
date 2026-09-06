@@ -9,6 +9,9 @@ import { readLocalDraft } from "../session/localConversation";
 import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { Info } from "lucide-react";
+import { relativeTime } from "../ui/relativeTime";
+import { useAgentActivity } from "../workspace/useAgentActivity";
+import { inConversationGroup, useConversationGroups } from "../session/conversationGroups";
 import { AgentDetails } from "../workspace/AgentDetails";
 import { AgentAvatar } from "../workspace/AgentAvatar";
 import { isDescendant } from "../workspace/agent-space-tree";
@@ -69,6 +72,7 @@ export function WorkspaceRow({
   onRemove(): Promise<void>;
   children: ReactNode;
 }) {
+  const activity = useAgentActivity(workspace.id);
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState(false);
   const [details, setDetails] = useState(false);
@@ -163,36 +167,19 @@ export function WorkspaceRow({
             title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
-            <AgentAvatar id={workspace.id} name={workspace.name} />
+            <span className="relative shrink-0"><AgentAvatar id={workspace.id} name={workspace.name} />{activity.status && <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStatusIcon status={activity.status} /></span>}</span>
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="entity-title truncate text-base leading-6">
+              <span className="entity-title truncate text-sm leading-6">
                 {workspace.name}
               </span>
-              <span
-                className={`entity-secondary block truncate text-xs font-normal leading-5 ${
-                  workspace.agentSpace?.health?.status === "unhealthy"
-                    ? "text-danger"
-                    : "text-muted"
-                }`}
-                title={
-                  workspace.agentSpace ? componentSummary(workspace) : undefined
-                }
-              >
-                {workspace.agentSpace
-                  ? componentSummary(workspace)
-                  : `${workspace.folders.length} 个目录`}
+              <span className="entity-secondary block truncate text-xs font-normal leading-5 text-muted" title={activity.count === undefined ? "完整会话摘要尚未加载" : "会话数量包含已归档；时间为最近一条会话记录"}>
+                {activity.count === undefined ? (activity.error ? "会话信息暂不可用" : "正在读取会话…") : `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}
               </span>
             </span>
           </button>
           {relationAnomaly ? (
             <span className="text-[9px] text-danger" title="Parent 关系异常">
               !
-            </span>
-          ) : null}
-          {running > 0 ? (
-            <span className="flex shrink-0 items-center gap-1 text-[10px] text-ok">
-              <span className="h-1.5 w-1.5 rounded-full bg-ok" aria-hidden />
-              {running}
             </span>
           ) : null}
           {childCount > 0 && onExpand && (
@@ -206,13 +193,13 @@ export function WorkspaceRow({
               <span aria-hidden>{expanded ? "⌃" : "⌄"}</span>
             </button>
           )}
-          <button type="button" aria-label={`${workspace.name} 的详情`} title="Agent 详情" className="flex h-10 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setDetails(true)}><Info size={17} /></button>
+          {!actions && <button type="button" aria-label={`${workspace.name} 的详情`} title="Agent 详情" className="flex h-10 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setDetails(true)}><Info size={17} /></button>}
           {actions && (
             <button
               type="button"
               aria-label={`${workspace.name} 的 Agent 操作`}
               aria-expanded={menu}
-              className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-7 md:w-6 md:opacity-0 md:group-focus-within:opacity-100 md:group-hover:opacity-100"
+              className="flex h-10 w-8 shrink-0 items-center justify-center rounded text-faint hover:bg-sidebar-hover hover:text-fg md:h-8 md:w-8"
               onClick={() => setMenu((open) => !open)}
             >
               <span aria-hidden>⋯</span>
@@ -553,18 +540,6 @@ function Detail({ label, value }: { label: string; value: string }) {
   );
 }
 
-function componentSummary(workspace: WorkspaceInfo): string {
-  const components =
-    workspace.agentSpace?.components
-      .filter((component) => component.enabled)
-      .map((component) =>
-        component.componentId === "worker" && component.role
-          ? component.role
-          : component.componentId,
-      ) ?? [];
-  return components.length > 0 ? components.join(" · ") : "AgentSpace";
-}
-
 /**
  * The other question: what is running, across every project.
  *
@@ -583,6 +558,8 @@ export function RecentSessions({
   workspaces: WorkspaceInfo[];
   activeSessionId: string | null;
 } & RowActions) {
+  const machine = useWorkbench((s) => s.client?.identity?.machineId ?? "");
+  const { groups } = useConversationGroups(machine);
   return (
     <ul
       data-density={density}
@@ -599,6 +576,7 @@ export function RecentSessions({
           <SessionRow
             key={session.id}
             session={session}
+            groupNames={groups.filter((g) => inConversationGroup(session, g)).map((g) => g.name)}
             active={session.id === activeSessionId}
             project={workspaces.find(({ id }) => id === session.workspaceId)}
             {...actions}
@@ -612,6 +590,7 @@ function SessionRow({
   session,
   active,
   project,
+  groupNames,
   onPickSession,
   onRename,
   onDelete,
@@ -621,6 +600,7 @@ function SessionRow({
   session: ListedSession;
   active: boolean;
   project?: WorkspaceInfo;
+  groupNames: string[];
 } & RowActions) {
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
@@ -633,16 +613,6 @@ function SessionRow({
   const messageDate = new Date(
     session.messagePreview?.atMs ?? session.updatedAtMs,
   );
-  const messageTime =
-    messageDate.toLocaleDateString() === new Date().toLocaleDateString()
-      ? messageDate.toLocaleTimeString("zh-CN", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : messageDate.toLocaleDateString("zh-CN", {
-          month: "numeric",
-          day: "numeric",
-        });
   const unsupported = session.unsupported;
   const managedReadOnly = session.managed?.userInteraction === "readOnly";
 
@@ -679,29 +649,13 @@ function SessionRow({
       >
         <span className="relative shrink-0">
           <AgentAvatar id={session.workspaceId} name={project?.name ?? "Agent"} />
-          <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>
+          {["waiting", "running", "failed"].includes(session.status) && <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-base font-medium">
-              {title(session)}
-              <span className="ml-2 text-xs font-normal text-muted">
-                · {project?.name ?? "Agent"}
-              </span>
-            </span>
-            <time
-              dateTime={messageDate.toISOString()}
-              className="shrink-0 text-xs text-faint"
-            >
-              {messageTime}
-            </time>
-          </span>
-          <span className="entity-secondary block truncate text-xs text-muted">
-            {draftText
-              ? `[草稿] ${draftText}`
-              : (session.messagePreview?.text ?? "")}{" "}
-            · {managedReadOnly ? "受管 · 只读" : session.agentId}
-            {unsupported ? " · 需升级" : ""}
+          <span className="block truncate text-sm font-medium text-fg">{title(session)}</span>
+          <span className="entity-secondary mt-1 flex min-w-0 items-center gap-1 text-xs text-muted" title={`${messageDate.toLocaleString()} · ${project?.name ?? "Agent"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+            <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
+            <span className="truncate">· {project?.name ?? "Agent"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{unsupported ? " · 需升级" : ""}</span>
           </span>
         </span>
       </button>

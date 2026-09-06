@@ -1,3 +1,4 @@
+import { Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Host, Endpoint } from "../host";
 import {
@@ -41,7 +42,7 @@ export function WorkspaceBrowser({
   initialWorkspaceId?: string | null;
   extraTabs: ExtraTab[];
   onSession(id: string): void;
-  onNewSession(id: string, localId?: string): void;
+  onNewSession(id: string | null, localId?: string): void;
   onExtra(tab: ExtraTab, workspaceId: string): void;
 }) {
   const {
@@ -160,7 +161,7 @@ export function WorkspaceBrowser({
   return (
     <div className="flex h-full min-h-0 min-w-0" aria-label="Agent 浏览">
       <aside aria-label="Agent 目录导航" className="hidden w-80 shrink-0 flex-col border-r border-line bg-sidebar lg:flex">
-        <header className="shrink-0 space-y-3 border-b border-line p-4"><div className="flex items-center justify-between gap-2"><h1 className="text-xl font-semibold">Agent</h1><OpenProject host={host} endpoint={endpoint} /></div><input type="search" aria-label="搜索 Agent" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索名称或上级 Agent" className="min-h-11 w-full rounded-lg border border-line bg-surface px-3 text-sm" /></header>
+        <header className="shrink-0 space-y-3 border-b border-line p-3"><div className="flex items-center justify-between gap-2"><h1 className="text-base font-semibold">Agent</h1><OpenProject host={host} endpoint={endpoint} /></div><AgentSearchCreate query={query} onQuery={setQuery} onCreate={() => onNewSession(selectedId)} /></header>
         <div className="min-h-0 flex-1 overflow-y-auto p-2"><AgentList workspaces={workspaces} sessions={sessions} selectedId={selectedId} onPick={browse} query={query} deviceName={deviceName} /></div>
       </aside>
       <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Agent 面板">
@@ -197,6 +198,7 @@ export function WorkspaceBrowser({
             <span className="truncate px-2">/ {workspace.name}</span>
           )}
         </nav>
+        {!workspace && <div className="mt-2 lg:hidden"><div className="mb-2 flex justify-end"><OpenProject host={host} endpoint={endpoint} /></div><AgentSearchCreate query={query} onQuery={setQuery} onCreate={() => onNewSession(selectedId)} /></div>}
         {workspace ? (
           <div className="mt-2 flex flex-wrap gap-1" aria-label="Agent 工具">
             {[
@@ -241,19 +243,6 @@ export function WorkspaceBrowser({
       {surface === "sessions" ? (
         <div className="min-h-0 flex-1 overflow-y-auto p-4 md:px-6">
           <div className="mx-auto max-w-4xl">
-            {!workspace && (
-              <div className="mb-4 flex flex-wrap items-center gap-2 lg:hidden">
-                <input
-                  type="search"
-                  aria-label="搜索 Agent"
-                  placeholder="搜索名称或上级 Agent"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  className="min-h-11 min-w-0 flex-1 rounded-xl border border-line bg-surface px-3 text-sm"
-                />
-                <OpenProject host={host} endpoint={endpoint} />
-              </div>
-            )}
             {workspace ? (
               <ul className="mb-4">
                 <WorkspaceRow
@@ -308,7 +297,7 @@ export function WorkspaceBrowser({
               <div className="mb-6 space-y-3">
                 <button
                   type="button"
-                  className="min-h-12 w-full rounded-xl bg-accent px-4 py-3 text-left text-on-accent"
+                  className="min-h-12 w-full rounded-xl bg-accent px-4 py-3 text-left text-white"
                   onClick={() =>
                     continued
                       ? onSession(continued.id)
@@ -462,4 +451,11 @@ export function WorkspaceBrowser({
       </section>
     </div>
   );
+}
+
+function AgentSearchCreate({ query, onQuery, onCreate }: { query: string; onQuery(value: string): void; onCreate(): void }) {
+  return <div aria-label="Agent 搜索与新建" className="flex min-w-0 items-center gap-2">
+    <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-raised px-2 text-muted"><Search size={16} className="shrink-0" /><input type="search" aria-label="搜索 Agent" placeholder="搜索 Agent" value={query} onChange={(e) => onQuery(e.target.value)} className="min-h-11 w-full min-w-0 bg-transparent text-sm outline-none" /></label>
+    <button type="button" className="flex min-h-11 shrink-0 items-center gap-1 rounded-lg bg-accent px-3 text-sm font-medium text-white" onClick={onCreate}><Plus size={18} />新建会话</button>
+  </div>;
 }

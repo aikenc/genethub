@@ -150,7 +150,7 @@ const TAB_TITLES: Record<string, string> = {
   chat: "新会话",
   files: "文件",
   terminal: "终端",
-  settings: "设置",
+  settings: "系统设置",
   devices: "设备",
   logs: "日志",
   processes: "此电脑的后台进程",

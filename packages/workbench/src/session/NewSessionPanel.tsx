@@ -100,7 +100,7 @@ export function NewSessionPanel({
             workspaces={ordered}
             selectedId={draft.workspaceId}
             onPick={(id) => newSession(id, null)}
-            density="compact"
+            density="comfortable"
             actions={false}
           />
         </div>

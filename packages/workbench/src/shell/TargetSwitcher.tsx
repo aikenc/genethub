@@ -8,11 +8,7 @@ import { useWorkbench } from "../session/store";
  * Which machine the workbench is pointed at, and how to point it somewhere
  * else.
  *
- * It sits at the top of the left column rather than inside a menu, because
- * everything below it belongs to one machine: the workspace tree is that
- * machine's local paths, the sessions are its sessions. A tree with no owner
- * named above it gets read as an account-wide directory, and then switching
- * machines looks like the workspaces disappeared.
+ * The active workbench places this control on its global Settings page.
  *
  * Nothing here knows about accounts. It renders whatever `Host.targets` hands
  * back, which is the local roster in a self-hosted copy and the account's
@@ -99,7 +95,7 @@ export function TargetSwitcher({
       >
         {compact ? (
           <>
-            <span className="min-w-0 flex-1 truncate">我的电脑</span>
+            <span className="min-w-0 flex-1 truncate">切换机器</span>
             <span className="min-w-0 max-w-[5.5rem] truncate text-[10px] text-faint">
               {current?.label ?? "未连接"}
             </span>
