@@ -14,6 +14,8 @@ import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
 interface RowActions {
+  selection?: { ids: ReadonlySet<string>; toggle(id: string): void; disabled?: boolean };
+  onOrganize?(sessionId: string): void;
   onPickSession(sessionId: string): void;
   onRename(sessionId: string, title: string): void;
   onDelete(sessionId: string): void;
@@ -629,6 +631,8 @@ function SessionRow({
   onPickSession,
   onRename,
   onDelete,
+  selection,
+  onOrganize,
 }: {
   session: ListedSession;
   active: boolean;
@@ -675,9 +679,10 @@ function SessionRow({
 
   return (
     <li className="group relative flex items-center">
+      {selection && <input type="checkbox" aria-label={`选择 ${title(session)}`} checked={selection.ids.has(session.id)} disabled={selection.disabled} onChange={() => selection.toggle(session.id)} className="ml-2 h-5 w-5 shrink-0 accent-[rgb(var(--accent))]" />}
       <button
         type="button"
-        disabled={Boolean(unsupported)}
+        disabled={selection ? selection.disabled : Boolean(unsupported)}
         title={unsupported ? whyUnsupported(unsupported) : undefined}
         className={`entity-main conversation-main flex min-h-16 min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${
           unsupported
@@ -686,7 +691,7 @@ function SessionRow({
               ? "bg-raised text-fg"
               : "text-muted hover:bg-sidebar-hover hover:text-fg"
         }`}
-        onClick={() => onPickSession(session.id)}
+        onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
       >
         <span className="relative shrink-0">
           <AgentAvatar id={session.workspaceId} name={project?.name ?? "Agent"} />
@@ -717,7 +722,7 @@ function SessionRow({
         </span>
       </button>
 
-      <button
+      {!selection && <button
         type="button"
         aria-label={`${title(session)} 的更多操作`}
         aria-expanded={menu !== "shut"}
@@ -728,10 +733,11 @@ function SessionRow({
         onClick={() => setMenu((state) => (state === "shut" ? "open" : "shut"))}
       >
         <span aria-hidden>⋯</span>
-      </button>
+      </button>}
 
-      {menu === "shut" ? null : (
+      {menu === "shut" || selection ? null : (
         <Menu
+          onOrganize={onOrganize ? () => { setMenu("shut"); onOrganize(session.id); } : undefined}
           confirming={menu === "confirming"}
           readOnly={managedReadOnly}
           archived={session.archived}
@@ -776,6 +782,7 @@ function SessionRow({
  * an app that otherwise never shows one.
  */
 function Menu({
+  onOrganize,
   archived,
   onArchive,
   confirming,
@@ -786,6 +793,7 @@ function Menu({
   onDelete,
   onDismiss,
 }: {
+  onOrganize?(): void;
   archived: boolean;
   onArchive(): void;
   confirming: boolean;
@@ -832,6 +840,7 @@ function Menu({
           </>
         ) : (
           <>
+            {onOrganize && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised" onClick={onOrganize}>加入分组</button>}
             {!readOnly && (
               <button
                 type="button"

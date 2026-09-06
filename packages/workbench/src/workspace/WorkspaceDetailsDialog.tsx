@@ -2,7 +2,8 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 /** Workspace management belongs to the whole window, including on phones. */
-export function WorkspaceDetailsDialog({ children, onClose }: {
+export function WorkspaceDetailsDialog({ children, onClose, title = "Agent详情" }: {
+  title?: string;
   children: ReactNode;
   onClose(): void;
 }) {
@@ -22,7 +23,7 @@ export function WorkspaceDetailsDialog({ children, onClose }: {
       ref={dialog}
       role="dialog"
       aria-modal="true"
-      aria-label="Agent详情"
+      aria-label={title}
       onKeyDown={(event) => {
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
         if (event.key !== "Tab") return;
@@ -38,8 +39,8 @@ export function WorkspaceDetailsDialog({ children, onClose }: {
     >
       <div className="flex max-h-[88dvh] flex-col">
         <header className="flex shrink-0 items-center justify-between border-b border-line px-5 py-3">
-          <h2 className="text-base font-medium">Agent详情</h2>
-          <button type="button" autoFocus aria-label="关闭Agent详情" onClick={onClose}
+          <h2 className="text-base font-medium">{title}</h2>
+          <button type="button" autoFocus aria-label={`关闭${title}`} onClick={onClose}
             className="flex h-11 w-11 items-center justify-center rounded-lg text-xl text-muted hover:bg-raised">×</button>
         </header>
         <div className="min-h-0 overflow-y-auto overscroll-contain p-5 text-sm">{children}</div>
