@@ -562,9 +562,18 @@ function Version({
       <h2 className="mb-2 text-sm font-medium">版本</h2>
       <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-3">
-          {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
+          {host.appVersion ? (
+            app ? (
+              <span data-testid="app-version">应用 {shown(app)}</span>
+            ) : null
+          ) : (
+            <span className="text-muted" data-testid="browser-no-app">
+              浏览器（无安装包版本）
+            </span>
+          )}
           <span className="text-muted" data-testid="daemon-version">
-            daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
+            {localBundle ? "本机 daemon" : "daemon"}{" "}
+            {daemonVersion ? `${shown(daemonVersion)} · Live` : "未连接"}
           </span>
           <button
             type="button"
@@ -589,7 +598,7 @@ function Version({
             into a bug report, and above it sits a button it must never push off
             the row. */}
         <code className="select-all break-all font-mono text-faint" data-testid="page-build">
-          页面 {BUILD}
+          页面（console） {BUILD}
         </code>
         <p className="text-muted" data-testid="manual-update-note">
           应用内自动下载和安装暂未启用。请从官方发布页手动下载，并通过独立可信渠道核对

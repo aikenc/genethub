@@ -1752,6 +1752,81 @@ pub fn agent_title_fits_current(current: Option<&str>, incoming: &str) -> bool {
     !matches!(current, Some(current) if has_cjk(current) && !has_cjk(incoming))
 }
 
+fn folded_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// ACP `session_info_update` often repeats the Skill catalog heading.
+/// Those are not conversation names; keep the first-prompt label instead.
+pub fn is_catalog_noise_title(title: &str) -> bool {
+    matches!(
+        folded_title(title).as_str(),
+        "skillselectionguidance"
+            | "skilldescription"
+            | "genehubsessionhistory"
+            | "genehubspeechruntime"
+            | "genehubhtmlpreview"
+            | "htmlpreviewinfo"
+            | "myskills"
+            | "whatareyourskills"
+    )
+}
+
+/// First user line that is itself a conversation name, not a catalog heading.
+pub fn first_user_title(chat: &ChatLog) -> Option<String> {
+    chat.items.iter().find_map(|item| match item {
+        TimelineItem::UserMessage { text, .. } => {
+            title_from(text).filter(|title| !is_catalog_noise_title(title))
+        }
+        _ => None,
+    })
+}
+
+/// Replaces a persisted catalog heading with the first user line, in memory.
+///
+/// Returns whether `meta.title` changed. The caller writes it back so a list
+/// scan and a rehydrate can share the rule without a second chat load.
+pub fn apply_catalog_title_repair(meta: &mut SessionMeta, chat: &ChatLog) -> bool {
+    if meta.title_locked {
+        return false;
+    }
+    let Some(current) = meta.title.as_deref() else {
+        return false;
+    };
+    if !is_catalog_noise_title(current) {
+        return false;
+    }
+    let Some(title) = first_user_title(chat) else {
+        return false;
+    };
+    meta.title = Some(title);
+    meta.updated_at_ms = now_ms();
+    true
+}
+
+impl Store {
+    /// Persists a catalog-heading repair when the chat already has a real name.
+    pub fn repair_catalog_noise_title(&self, meta: &mut SessionMeta) -> Result<bool> {
+        if meta.title_locked {
+            return Ok(false);
+        }
+        match meta.title.as_deref() {
+            Some(title) if is_catalog_noise_title(title) => {}
+            _ => return Ok(false),
+        }
+        let chat = self.load_chat(&meta.workspace_id, &meta.id)?;
+        if !apply_catalog_title_repair(meta, &chat) {
+            return Ok(false);
+        }
+        self.save_meta(meta)?;
+        Ok(true)
+    }
+}
+
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
     let joined = if candidate.is_absolute() {
         candidate.to_path_buf()
@@ -1876,6 +1951,43 @@ mod project_home_tests {
             Some("生成三张风景画，简笔风"),
             "简笔风景"
         ));
+    }
+
+    #[test]
+    fn catalog_headings_are_not_session_names() {
+        assert!(is_catalog_noise_title("Skill Selection Guidance"));
+        assert!(is_catalog_noise_title("  genehub-html-preview  "));
+        assert!(!is_catalog_noise_title("修复登录跳转"));
+        assert!(!is_catalog_noise_title("genet-beta 更新到最新"));
+    }
+
+    #[test]
+    fn catalog_noise_title_is_replaced_by_the_first_user_line() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach_project("w1", "folder", root.path());
+        let store = Store::new(homes);
+        let mut session = meta("s1", "w1", root.path());
+        session.title = Some("Skill Selection Guidance".into());
+        store.save_meta(&session).unwrap();
+        store
+            .append_chat_items(
+                "w1",
+                "s1",
+                &[TimelineItem::UserMessage {
+                    id: "u1".into(),
+                    text: "genet-beta 更新到最新".into(),
+                    attachments: vec![],
+                }],
+            )
+            .unwrap();
+
+        assert!(store.repair_catalog_noise_title(&mut session).unwrap());
+        assert_eq!(session.title.as_deref(), Some("genet-beta 更新到最新"));
+        assert_eq!(
+            store.load_meta("w1", "s1").unwrap().title.as_deref(),
+            Some("genet-beta 更新到最新")
+        );
     }
 
     #[test]

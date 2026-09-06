@@ -2226,33 +2226,11 @@ fn emit_session_title(update: &Value, events: &broadcast::Sender<SessionEvent>) 
         return;
     };
     let title = title.trim();
-    if title.is_empty() || is_catalog_noise_title(title) {
+    if title.is_empty() || crate::session::store::is_catalog_noise_title(title) {
         return;
     }
     let title: String = title.chars().take(120).collect();
     let _ = events.send(SessionEvent::TitleChanged { title });
-}
-
-fn folded_title(title: &str) -> String {
-    title
-        .chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn is_catalog_noise_title(title: &str) -> bool {
-    matches!(
-        folded_title(title).as_str(),
-        "skillselectionguidance"
-            | "skilldescription"
-            | "genehubsessionhistory"
-            | "genehubspeechruntime"
-            | "genehubhtmlpreview"
-            | "htmlpreviewinfo"
-            | "myskills"
-            | "whatareyourskills"
-    )
 }
 
 /// ACP tool-call content blocks can be images (`{type:"image", data,
@@ -3089,8 +3067,12 @@ mod tests {
             &tx,
         );
         assert!(drain(&mut rx).is_empty());
-        assert!(is_catalog_noise_title("  genehub-html-preview  "));
-        assert!(!is_catalog_noise_title("修复登录跳转"));
+        assert!(crate::session::store::is_catalog_noise_title(
+            "  genehub-html-preview  "
+        ));
+        assert!(!crate::session::store::is_catalog_noise_title(
+            "修复登录跳转"
+        ));
     }
 
     #[test]

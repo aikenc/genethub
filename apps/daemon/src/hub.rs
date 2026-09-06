@@ -415,8 +415,50 @@ impl Client {
         }))
     }
 
+    /// Tickets are keyed by the Hub row id (`mch_…`). Workbench URLs and
+    /// agents usually hold the daemon handle (`m_…` / `m-…`).
+    async fn resolve_ticket_machine_id(
+        &self,
+        enrollment: &Enrollment,
+        machine_id: &str,
+    ) -> Result<String> {
+        if machine_id.starts_with("mch_") {
+            return Ok(machine_id.to_string());
+        }
+        let wanted = machine_id
+            .trim()
+            .trim_start_matches("m-")
+            .trim_start_matches("m_")
+            .replace('-', "");
+        if wanted.is_empty() {
+            return Ok(machine_id.to_string());
+        }
+        let directory = self.machines(enrollment).await?;
+        let matches: Vec<_> = directory
+            .iter()
+            .filter(|entry| {
+                let handle = entry
+                    .device_handle
+                    .trim_start_matches("m-")
+                    .trim_start_matches("m_")
+                    .replace('-', "");
+                handle == wanted || (wanted.len() >= 8 && handle.starts_with(&wanted))
+            })
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok(one.id.clone()),
+            [] => Ok(machine_id.to_string()),
+            _ => Err(anyhow!(
+                "{machine_id} matches more than one machine in the Hub directory"
+            )),
+        }
+    }
+
     /// A one-time address for reaching one of them through the forwarding layer.
     pub async fn ticket(&self, enrollment: &Enrollment, machine_id: &str) -> Result<HubTicket> {
+        let machine_id = self
+            .resolve_ticket_machine_id(enrollment, machine_id)
+            .await?;
         let response = self
             .http
             .post(self.url(&format!("/api/machines/{}/tickets", enrollment.daemon_id))?)

@@ -32,8 +32,9 @@ use super::images;
 use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
-    self, agent_title_fits_current, normalize_session_title, now_ms, title_from, ChatLog,
-    ContextSeedState, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
+    self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
+    normalize_session_title, now_ms, title_from, ChatLog, ContextSeedState, ImportedSessionMeta,
+    SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -1138,7 +1139,7 @@ impl SessionManager {
         }
         // Not in memory: rehydrate from disk so a restart does not lose access
         // to past conversations.
-        let meta = self
+        let mut meta = self
             .store
             .list_meta()?
             .into_iter()
@@ -1155,6 +1156,15 @@ impl SessionManager {
             ));
         }
         let mut chat = self.store.load_chat(&meta.workspace_id, &meta.id)?;
+        if apply_catalog_title_repair(&mut meta, &chat) {
+            if let Err(error) = self.store.save_meta(&meta) {
+                tracing::warn!(
+                    error = %error,
+                    session_id,
+                    "could not persist a catalog-heading title repair"
+                );
+            }
+        }
         let unsaved = self.recover_interrupted_turn(&meta, &mut chat).await?;
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
@@ -1273,7 +1283,7 @@ impl SessionManager {
         include_archived: bool,
     ) -> Result<Vec<SessionSummary>> {
         let mut out = Vec::new();
-        for meta in self.store.list_meta()? {
+        for mut meta in self.store.list_meta()? {
             if let Some(workspace) = workspace_id {
                 if meta.workspace_id != workspace {
                     continue;
@@ -1281,6 +1291,23 @@ impl SessionManager {
             }
             if meta.archived && !include_archived {
                 continue;
+            }
+            match self.store.repair_catalog_noise_title(&mut meta) {
+                Ok(true) => {
+                    if let Some(live) = self.sessions.read().await.get(&meta.id) {
+                        let mut live_meta = live.meta.lock().await;
+                        if !live_meta.title_locked {
+                            live_meta.title = meta.title.clone();
+                            live_meta.updated_at_ms = meta.updated_at_ms;
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    session_id = %meta.id,
+                    "could not repair a catalog-heading session title"
+                ),
             }
             // A suspended approval survives daemon restarts without a live
             // Agent process or client connection.
@@ -2072,7 +2099,12 @@ impl SessionManager {
         // user locked the name with `rename`.
         let (workspace_id, needs_title) = {
             let meta = live.meta.lock().await;
-            (meta.workspace_id.clone(), meta.title.is_none())
+            let needs_title = match meta.title.as_deref() {
+                None => true,
+                Some(title) if !meta.title_locked && is_catalog_noise_title(title) => true,
+                _ => false,
+            };
+            (meta.workspace_id.clone(), needs_title)
         };
         self.store
             .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
@@ -4605,6 +4637,9 @@ async fn agent_title_would_apply(live: &Live, title: &str) -> bool {
     let Some(title) = normalize_session_title(title) else {
         return false;
     };
+    if is_catalog_noise_title(&title) {
+        return false;
+    }
     let meta = live.meta.lock().await;
     !meta.title_locked
         && meta.title.as_deref() != Some(title.as_str())
@@ -4761,6 +4796,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
             let mut meta = live.meta.lock().await;
             if meta.title_locked
                 || meta.title.as_deref() == Some(title.as_str())
+                || is_catalog_noise_title(&title)
                 || !agent_title_fits_current(meta.title.as_deref(), &title)
             {
                 return;
@@ -6454,6 +6490,58 @@ mod tests {
         assert!(
             !live.meta.lock().await.title_locked,
             "an extracted title must stay replaceable by a later extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_heading_does_not_replace_the_first_prompt_title() {
+        let (live, _dir) = live_session(SessionMeta {
+            title: Some("genet-beta 更新到最新".into()),
+            ..meta()
+        });
+        apply(
+            &live,
+            &SessionEvent::TitleChanged {
+                title: "Skill Selection Guidance".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            live.meta.lock().await.title.as_deref(),
+            Some("genet-beta 更新到最新")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_rewrites_a_catalog_heading_to_the_first_user_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        let mut session = meta();
+        session.title = Some("Skill Selection Guidance".into());
+        sessions.store.save_meta(&session).unwrap();
+        sessions
+            .store
+            .append_chat_items(
+                "w1",
+                "s1",
+                &[TimelineItem::UserMessage {
+                    id: "u1".into(),
+                    text: "genet-beta 更新到最新".into(),
+                    attachments: vec![],
+                }],
+            )
+            .unwrap();
+
+        let listed = sessions.list(None, false).await.unwrap();
+        assert_eq!(listed[0].title.as_deref(), Some("genet-beta 更新到最新"));
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("genet-beta 更新到最新")
         );
     }
 
