@@ -5,6 +5,7 @@ import {
   buildAgentSpaceTree,
   type AgentSpaceTreeNode,
 } from "./agent-space-tree";
+import { useAgentActivities } from "./useAgentActivity";
 import { useWorkbench } from "../session/store";
 
 export type ListDensity = "auto" | "comfortable" | "compact";
@@ -19,8 +20,10 @@ export function AgentList({
   actions = true,
   deviceName = "",
   rootIds,
+  memberIds,
 }: {
   rootIds?: string[];
+  memberIds?: string[];
   workspaces: WorkspaceInfo[];
   sessions?: SessionSummary[];
   selectedId?: string | null;
@@ -33,6 +36,9 @@ export function AgentList({
   const tree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const wb = useWorkbench();
+  const activity = useAgentActivities();
+  const recent = (id: string) => activity.agents?.get(id)?.recent ?? sessions.reduce((at, s) => s.workspaceId === id ? Math.max(at, s.messagePreview?.atMs ?? s.updatedAtMs) : at, 0);
+  const sorted = (nodes: AgentSpaceTreeNode[]) => [...nodes].sort((a, b) => recent(b.workspace.id) - recent(a.workspace.id) || a.workspace.name.localeCompare(b.workspace.name, "zh-CN") || a.workspace.id.localeCompare(b.workspace.id));
   const matching = (node: AgentSpaceTreeNode): AgentSpaceTreeNode[] => [
     node,
     ...node.children.flatMap(matching),
@@ -43,10 +49,10 @@ export function AgentList({
         .flatMap(matching)
         .filter((node) => rootIds.includes(node.workspace.id))
     : allRoots;
-  const visible = query.trim()
+  const visible = query.trim() || memberIds
     ? roots
         .flatMap(matching)
-        .filter((n) =>
+        .filter((n) => (!memberIds || memberIds.includes(n.workspace.id)) &&
           `${n.workspace.name} ${n.breadcrumb}`
             .toLowerCase()
             .includes(query.trim().toLowerCase()),
@@ -79,7 +85,7 @@ export function AgentList({
       onRemove={() => wb.removeWorkspace(node.workspace.id)}
       density={density}
       actions={actions}
-      childCount={query ? 0 : node.children.length}
+      childCount={query || memberIds ? 0 : node.children.length}
       expanded={expanded.has(node.workspace.id)}
       onExpand={() =>
         setExpanded((old) => {
@@ -91,9 +97,9 @@ export function AgentList({
         })
       }
     >
-      {!query && expanded.has(node.workspace.id) && (
+      {!query && !memberIds && expanded.has(node.workspace.id) && (
         <ul className="agent-children ml-3 border-l border-line pl-2">
-          {node.children.map((child) => row(child, depth + 1))}
+          {sorted(node.children).map((child) => row(child, depth + 1))}
         </ul>
       )}
     </WorkspaceRow>
@@ -104,7 +110,7 @@ export function AgentList({
       className="entity-list agent-list space-y-1"
       aria-label="Agent 列表"
     >
-      {visible.map((node) => row(node, 0))}
+      {sorted(visible).map((node) => row(node, 0))}
       {!visible.length && (
         <li className="px-4 py-8 text-sm text-muted">没有匹配的 Agent</li>
       )}

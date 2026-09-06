@@ -11,7 +11,7 @@ import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { Info } from "lucide-react";
 import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
-import { inConversationGroup, useConversationGroups } from "../session/conversationGroups";
+import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { AgentDetails } from "../workspace/AgentDetails";
 import { AgentAvatar } from "../workspace/AgentAvatar";
 import { isDescendant } from "../workspace/agent-space-tree";
@@ -20,7 +20,6 @@ import { SessionStatusIcon } from "./SessionStatusIcon";
 
 interface RowActions {
   selection?: { ids: ReadonlySet<string>; toggle(id: string): void; disabled?: boolean };
-  onOrganize?(sessionId: string): void;
   onPickSession(sessionId: string): void;
   onRename(sessionId: string, title: string): void;
   onDelete(sessionId: string): void;
@@ -559,7 +558,7 @@ export function RecentSessions({
   activeSessionId: string | null;
 } & RowActions) {
   const machine = useWorkbench((s) => s.client?.identity?.machineId ?? "");
-  const { groups } = useConversationGroups(machine);
+  const { groups } = useAgentGroups(machine);
   return (
     <ul
       data-density={density}
@@ -576,7 +575,7 @@ export function RecentSessions({
           <SessionRow
             key={session.id}
             session={session}
-            groupNames={groups.filter((g) => inConversationGroup(session, g)).map((g) => g.name)}
+            groupNames={groups.filter((g) => inAgentGroup(session, g)).map((g) => g.name)}
             active={session.id === activeSessionId}
             project={workspaces.find(({ id }) => id === session.workspaceId)}
             {...actions}
@@ -595,7 +594,6 @@ function SessionRow({
   onRename,
   onDelete,
   selection,
-  onOrganize,
 }: {
   session: ListedSession;
   active: boolean;
@@ -675,7 +673,6 @@ function SessionRow({
 
       {menu === "shut" || selection ? null : (
         <Menu
-          onOrganize={onOrganize ? () => { setMenu("shut"); onOrganize(session.id); } : undefined}
           confirming={menu === "confirming"}
           readOnly={managedReadOnly}
           archived={session.archived}
@@ -720,7 +717,6 @@ function SessionRow({
  * an app that otherwise never shows one.
  */
 function Menu({
-  onOrganize,
   archived,
   onArchive,
   confirming,
@@ -731,7 +727,6 @@ function Menu({
   onDelete,
   onDismiss,
 }: {
-  onOrganize?(): void;
   archived: boolean;
   onArchive(): void;
   confirming: boolean;
@@ -778,7 +773,6 @@ function Menu({
           </>
         ) : (
           <>
-            {onOrganize && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised" onClick={onOrganize}>加入分组</button>}
             {!readOnly && (
               <button
                 type="button"
