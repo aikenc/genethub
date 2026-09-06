@@ -5,7 +5,7 @@ const entries = [
   { id: "sessions", label: "会话", Icon: MessageSquare },
   { id: "spaces", label: "Agent", Icon: Folder },
   { id: "discover", label: "发现", Icon: Compass },
-  { id: "tools", label: "工具", Icon: SlidersHorizontal },
+  { id: "tools", label: "设置", Icon: SlidersHorizontal },
 ] as const;
 
 export function WorkbenchNavigation({ section, needsAttention, onChange, detail = false }: {

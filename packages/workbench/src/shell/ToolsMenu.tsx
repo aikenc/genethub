@@ -13,12 +13,14 @@ export function ToolsMenu({
   extraTabs,
   onNavigate,
   children,
+  leading,
   density = "desktop",
   scope = "all",
 }: {
   extraTabs: ExtraTab[];
   onNavigate(): void;
   children?: ReactNode;
+  leading?: ReactNode;
   density?: "desktop" | "phone";
   scope?: "all" | "global";
 }) {
@@ -43,6 +45,7 @@ export function ToolsMenu({
 
   return (
     <nav className={`flex flex-1 flex-col overflow-y-auto ${phone ? "gap-3 p-3" : "gap-3 p-3"}`}>
+      {leading}
       {scope === "all" ? <Section title="Agent" phone={phone}>
         <Entry phone={phone} label="变更" onClick={openChanges} />
         <Entry phone={phone} label="文件" onClick={openFiles} />
@@ -62,7 +65,7 @@ export function ToolsMenu({
         <Entry phone={phone} label="此电脑的后台进程" onClick={() => go("processes")} />
         <Entry phone={phone} label="设备" onClick={() => go("devices")} />
         <Entry phone={phone} label="联调" onClick={() => { openClientDebug(); onNavigate(); }} />
-        <Entry phone={phone} label="设置" onClick={() => go("settings")} />
+        <Entry phone={phone} label="系统设置" onClick={() => go("settings")} />
         {children ? (
           <div
             className={

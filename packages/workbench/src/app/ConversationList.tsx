@@ -6,7 +6,6 @@ import { matchesConversation, defaultConversationFilter, type ConversationFilter
 import { changeGroupMembers, inConversationGroup, useConversationGroups } from "../session/conversationGroups";
 import { localValue, saveLocalValue } from "../session/localConversation";
 import { RecentSessions } from "../shell/ConversationRows";
-import { TargetSwitcher } from "../shell/TargetSwitcher";
 import { OpenProject } from "../workspace/OpenProject";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { ConversationGroupEditor } from "./ConversationGroupEditor";
@@ -26,7 +25,7 @@ export function ConversationList(props: Props) {
   return <ConversationListContent key={machine} {...props} machine={machine} />;
 }
 
-function ConversationListContent({ host, endpoint, open, hidden, onPickTarget, onNavigate, machine }: Props & { machine: string }) {
+function ConversationListContent({ host, endpoint, open, hidden, onNavigate, machine }: Props & { machine: string }) {
   const wb = useWorkbench();
   const [, refreshLocal] = useState(0);
   const { groups, error: groupError, update } = useConversationGroups(machine);
@@ -35,7 +34,6 @@ function ConversationListContent({ host, endpoint, open, hidden, onPickTarget, o
   const group = groups.find((g) => g.id === groupId);
   const [editor, setEditor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
   const [listMenuOpen, setListMenuOpen] = useState(false);
   const [agentId, setAgentId] = useState("");
   const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("primary");
@@ -122,21 +120,20 @@ function ConversationListContent({ host, endpoint, open, hidden, onPickTarget, o
   const input = "min-h-10 min-w-0 rounded-lg border border-line bg-surface px-2 text-sm text-fg";
   return <aside aria-label="会话列表" className={`${hidden ? "hidden" : open ? "flex" : "hidden md:flex"} min-h-0 w-full flex-1 flex-col overflow-hidden border-r border-line bg-sidebar md:w-80 md:flex-none`}>
     <header className="relative shrink-0 border-b border-line px-3 pb-2 pt-3">
-      {onPickTarget && <TargetSwitcher host={host} current={endpoint ?? null} onPick={onPickTarget} onNavigate={onNavigate} />}
       <fieldset disabled={busy} className="min-w-0 space-y-2 disabled:opacity-60">
         <div aria-label="会话导航工具栏" className="flex min-h-11 min-w-0 items-center gap-0.5">
           <select aria-label="会话分组" value={group?.id ?? ""} onChange={(e) => { setGroupId(e.target.value); setAgentId(""); }} className="min-h-11 min-w-0 flex-1 truncate rounded-lg bg-transparent pr-1 text-base font-semibold text-fg">
             <option value="">会话 · 最近</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
-          <button type="button" aria-label="展开会话搜索" aria-expanded={searchOpen} className={`flex h-11 w-9 shrink-0 items-center justify-center rounded-lg hover:bg-raised ${searchOpen ? "text-accent" : "text-muted"}`} onClick={() => { setSearchOpen(!searchOpen); if (searchOpen) setQuery(""); }}><Search size={18} /></button>
+
           <button type="button" aria-pressed={managing} className="min-h-11 shrink-0 rounded-lg px-2 text-sm text-muted hover:bg-raised" onClick={() => { setManaging(!managing); setSelected(new Set()); setConfirmArchive(false); }}>{managing ? "完成" : "管理"}</button>
-          <button type="button" aria-label="新会话" className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-accent hover:bg-raised" onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={21} /></button>
+
           <button type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-11 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
         </div>
-        {searchOpen && <div className="flex items-center gap-2 rounded-lg bg-raised px-3">
-          <input autoFocus type="search" aria-label="搜索会话" placeholder="搜索当前列表" value={query} onChange={(e) => setQuery(e.target.value)} className="min-h-10 w-full min-w-0 bg-transparent text-sm outline-none" />
-          <button type="button" aria-label="收起会话搜索" className="h-10 w-8 shrink-0 text-muted" onClick={() => { setSearchOpen(false); setQuery(""); }}>×</button>
-        </div>}
+        <div aria-label="会话搜索与新建" className="flex min-w-0 items-center gap-2">
+          <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-raised px-2 text-muted"><Search size={16} className="shrink-0" /><input type="search" aria-label="搜索会话" placeholder="搜索会话" value={query} onChange={(e) => setQuery(e.target.value)} className="min-h-11 w-full min-w-0 bg-transparent text-sm outline-none" /></label>
+          <button type="button" aria-label="新建会话" className="flex min-h-11 shrink-0 items-center justify-center gap-1 rounded-lg bg-accent px-3 text-sm font-medium text-white" onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={18} />新建会话</button>
+        </div>
         <div className="flex items-center gap-1 text-xs">
           {([ ["all", "全部"], ["unread", "未读"], ["blocked", "受阻"], ["running", "运行中"] ] as const).map(([id, label]) => <button key={id} aria-pressed={state === id} onClick={() => setState(id)} className={`min-h-9 flex-1 rounded-lg px-1 ${state === id ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-raised"}`}>{label}</button>)}
           <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-7 shrink-0 items-center justify-center ${agentId || ownership !== "primary" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>

@@ -4,21 +4,18 @@ import { Loader2 } from "lucide-react";
 /** A compact, readable status mark shared by tabs and every session list. */
 export function SessionStatusIcon({
   status,
-  unread = false,
+  unread: _unread = false,
 }: {
   status: SessionSummary["status"] | undefined;
   unread?: boolean;
 }) {
+  if (status !== "failed" && status !== "waiting" && status !== "running") return null;
   const state =
     status === "failed"
       ? { icon: "⚠", label: "运行异常", tone: "text-danger" }
       : status === "waiting"
         ? { icon: "✋", label: "等待交互", tone: "text-accent" }
-        : status === "running"
-          ? { icon: null, label: "运行中", tone: "text-ok" }
-          : unread
-            ? { icon: "●", label: "已完成未阅读", tone: "text-accent" }
-            : { icon: "✓", label: "已完成已阅读", tone: "text-faint" };
+        : { icon: null, label: "运行中", tone: "text-ok" };
 
   return (
     <span
