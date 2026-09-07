@@ -1,3 +1,4 @@
+import { EntityAvatar, EntityText } from "../ui/EntityIdentity";
 import type {
   SessionSummary,
   WorkspaceInfo,
@@ -11,7 +12,6 @@ import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
-import { AgentAvatar } from "../workspace/AgentAvatar";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
 interface RowActions {
@@ -116,17 +116,12 @@ export function WorkspaceRow({
             title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
-            <span className="relative shrink-0"><AgentAvatar id={workspace.id} name={workspace.name} />{activity.status && <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStatusIcon status={activity.status} /></span>}</span>
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className="entity-title truncate text-sm leading-6">
-                {workspace.name}
-              </span>
-              <span className="entity-secondary agent-meta block truncate text-xs font-normal leading-5 text-muted" title={activity.count === undefined ? "完整会话摘要尚未加载" : "会话数量包含已归档；时间为最近一条会话记录"}>
-                {activity.count === undefined ? (activity.error ? "会话信息暂不可用" : "正在读取会话…") : `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}
-              </span>
-            </span>
+            <EntityAvatar id={workspace.id} name={workspace.name} badge={activity.status ? <SessionStatusIcon status={activity.status}/> : undefined}/>
+            <EntityText title={workspace.name} hint={activity.count === undefined ? "完整会话摘要尚未加载" : "会话数量包含已归档；时间为最近一条会话记录"}>
+              <span className="truncate">{activity.count === undefined ? (activity.error ? "会话信息暂不可用" : "正在读取会话…") : `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
+            </EntityText>
           </button>
-          <div className="agent-row-actions">
+          <div className="agent-row-actions" data-open={menu || undefined}>
             {onNewSession && <button type="button" aria-label={`与 ${workspace.name} 新建会话`} title="新建会话" className="agent-new min-h-11 rounded-lg px-2 text-xs font-medium text-accent hover:bg-raised" onClick={onNewSession}>＋ 新会话</button>}
           {relationAnomaly ? (
             <span className="text-[9px] text-danger" title="Parent 关系异常">
@@ -359,17 +354,11 @@ function SessionRow({
         }`}
         onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
       >
-        <span className="relative shrink-0">
-          <AgentAvatar id={session.workspaceId} name={project?.name ?? "专家"} />
-          {["waiting", "running", "failed"].includes(session.status) && <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm font-medium text-fg">{title(session)}</span>
-          <span className="entity-secondary mt-1 flex min-w-0 items-center gap-1 text-xs text-muted" title={`${messageDate.toLocaleString()} · ${project?.name ?? "专家"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
-            <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
-            <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{unsupported ? " · 需升级" : ""}</span>
-          </span>
-        </span>
+        <EntityAvatar id={session.workspaceId} name={project?.name ?? "专家"} badge={["waiting", "running", "failed"].includes(session.status) ? <SessionStateIcon session={session}/> : undefined}/>
+        <EntityText title={title(session)} hint={`${messageDate.toLocaleString()} · ${project?.name ?? "专家"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+          <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
+          <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{unsupported ? " · 需升级" : ""}</span>
+        </EntityText>
       </button>
 
       {!selection && <button

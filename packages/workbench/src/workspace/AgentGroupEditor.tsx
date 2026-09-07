@@ -1,3 +1,5 @@
+import { EntityAvatar, EntityText } from "../ui/EntityIdentity";
+import { ListSearch, listPrimaryAction } from "../ui/ListLayout";
 import { useState } from "react";
 import type { WorkspaceInfo } from "@genehub/proto";
 import type { AgentGroup } from "./agentGroups";
@@ -25,12 +27,12 @@ export function AgentGroupEditor({ group, groups, workspaces, error, onSave, onD
     {duplicate && <p role="alert" className="mt-2 text-danger">已有同名分组，请换一个名称。</p>}
     <p className="mb-2 mt-5 font-medium">选择组内专家</p>
     <p className="mb-3 text-xs leading-5 text-muted">可多选，一个专家可以属于多个分组。会话按所属专家自动进入分组，子专家需单独选择。</p>
-    <input aria-label="搜索分组专家" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索专家" className="mb-2 min-h-11 w-full rounded-lg bg-raised px-3" />
-    <div className="max-h-48 overflow-y-auto rounded-lg border border-line">
-      {workspaces.filter((w) => w.name.toLowerCase().includes(query.toLowerCase())).map((w) => <label key={w.id} className="flex min-h-11 items-center gap-3 border-b border-line px-3 last:border-0 hover:bg-raised">
+    <ListSearch label="搜索分组专家" value={query} onChange={setQuery}/>
+    <div className="mt-2 max-h-64 overflow-y-auto rounded-lg border border-line">
+      {workspaces.filter((w) => w.name.toLowerCase().includes(query.toLowerCase())).map((w) => <label key={w.id} className="entity-main flex items-center gap-3 border-b border-line px-3 last:border-0 hover:bg-raised">
         <input type="checkbox" checked={agents.includes(w.id)} onChange={(e) => setAgents((old) => e.target.checked ? [...old, w.id] : old.filter((id) => id !== w.id))} />
-        <span className="min-w-0 truncate">{w.name}</span>
-        {w.agentSpace?.parentWorkspaceId && <span className="ml-auto shrink-0 text-xs text-muted">子专家</span>}
+        <EntityAvatar id={w.id} name={w.name}/>
+        <EntityText title={w.name} hint={w.root}><span className="truncate">{w.root}</span></EntityText>
       </label>)}
       {!workspaces.length && <p className="p-3 text-muted">暂无专家，可先创建空分组。</p>}
     </div>
@@ -40,7 +42,7 @@ export function AgentGroupEditor({ group, groups, workspaces, error, onSave, onD
     <div className="mt-5 flex items-center justify-end gap-2">
       {group && <button className="mr-auto min-h-11 px-3 text-danger" onClick={() => setConfirmDelete(true)}>删除分组</button>}
       <button className="min-h-11 rounded-lg px-4 hover:bg-raised" onClick={onClose}>取消</button>
-      <button disabled={!valid} className="min-h-11 rounded-lg bg-accent px-4 text-white disabled:opacity-40" onClick={() => {
+      <button disabled={!valid} className={listPrimaryAction} onClick={() => {
         if (onSave({ id: group?.id ?? crypto.randomUUID(), name: name.trim(), workspaceIds: agents })) onClose();
       }}>保存分组</button>
     </div>
