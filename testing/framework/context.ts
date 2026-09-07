@@ -1,4 +1,4 @@
-import { createLease, releaseLease, type CaseMeta, type EnvironmentLease } from "../infrastructure/public.ts";
+import { BlockedError, createLease, releaseLease, type CaseMeta, type EnvironmentLease } from "../infrastructure/public.ts";
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
@@ -7,6 +7,7 @@ import { leftoverProcesses, openControlledAgentSession, processAlive, reconnectA
 import { waitUntil } from "./tools/wait.ts";
 
 export interface CaseContext {
+  browser?: import('playwright').BrowserContext;
   meta: CaseMeta;
   env: EnvironmentLease;
   openRoot: string;
@@ -77,11 +78,24 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
   } satisfies EnvironmentLease;
   const lease = env.root ? env : createLease();
   const openRoot = process.env.TESTCTL_OPEN_ROOT ?? process.cwd();
+  let browser: import('playwright').Browser | undefined;
+  let browserContext: import('playwright').BrowserContext | undefined;
+  if (process.env.TESTCTL_BROWSER_REQUIRED === '1') {
+    try {
+      const { chromium } = await import('playwright');
+      browser = await chromium.launch();
+      browserContext = await browser.newContext();
+    } catch (error) {
+      await browser?.close();
+      throw new BlockedError(`Browser prerequisite unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   const NOTE_BUDGET = 4096;
   const notes: string[] = [];
   let noteBytes = 0;
   return {
     meta,
+    browser: browserContext,
     env: lease,
     openRoot,
     note(text: string) {
@@ -136,6 +150,8 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
     assertions,
     tools: { waitUntil },
     async dispose() {
+      await browserContext?.close();
+      await browser?.close();
       if (!env.root) releaseLease(lease);
     },
   };

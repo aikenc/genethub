@@ -73,3 +73,6 @@ export function defineE2e(input: DefineInput, run: (ctx: CaseContext) => Promise
 }
 
 export { registerScriptedCodex } from "./builders/codex.ts";
+
+export { allocatePort } from "../infrastructure/public.ts";
+export { openPreviewBrowser } from './drivers/preview-browser.ts';

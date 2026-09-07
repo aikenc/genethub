@@ -13,7 +13,10 @@ defineE2e(
     timeoutMs: 45_000,
     surfaces: ["browser"],
   },
-  async () => {
-    throw new Error("browser e2e body is not reached without a selected Playwright gate");
+  async (t) => {
+    if(!t.browser) throw new Error('browser context missing');
+    const page=await t.browser.newPage();
+    await page.goto('about:blank');
+    t.assertions.assert(await page.evaluate(()=>navigator.userAgent.includes('Chrome')), 'a real Chromium page is required');
   },
 );

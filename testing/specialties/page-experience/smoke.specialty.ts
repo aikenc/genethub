@@ -13,7 +13,10 @@ defineSpecialty(
     timeoutMs: 30_000,
     surfaces: ["workbench-ui"],
   },
-  async () => {
-    throw new Error("Playwright adapter should block before this body when browsers are absent");
+  async (t) => {
+    if(!t.browser) throw new Error('browser context missing');
+    const page=await t.browser.newPage();
+    await page.goto('about:blank');
+    t.assertions.assert(await page.evaluate(()=>navigator.userAgent.includes('Chrome')), 'a real Chromium page is required');
   },
 );
