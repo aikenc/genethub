@@ -1,3 +1,4 @@
+import { listPrimaryAction } from "../ui/ListLayout";
 import type { DirectoryListing } from "@genehub/proto";
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import { createPortal } from "react-dom";
@@ -273,7 +274,7 @@ export const OpenProject = forwardRef<
     ) : (
       <button
         type="button"
-        className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
+        className={listPrimaryAction}
         disabled={triggerDisabled}
         onClick={startOpen}
       >
@@ -442,7 +443,7 @@ export const OpenProject = forwardRef<
                     </button>
                     <button
                       type="button"
-                      className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
+                      className={listPrimaryAction}
                       disabled={pickerBusy || !newFolderName.trim()}
                       onClick={() => void createFolder()}
                     >
@@ -479,7 +480,7 @@ export const OpenProject = forwardRef<
                     </button>
                     <button
                       type="button"
-                      className="rounded bg-accent px-3 py-1.5 text-xs text-white disabled:opacity-40"
+                      className={listPrimaryAction}
                       disabled={busy || pickerBusy || picker.roots || !picker.path}
                       onClick={() => void open(picker.path)}
                     >

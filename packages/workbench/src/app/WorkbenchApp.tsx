@@ -1,3 +1,4 @@
+import { ListPane, DetailBackButton } from "../ui/ListLayout";
 import "../ui/weui/controls.css";
 import "../ui/weui/theme.css";
 import "../ui/entity-lists.css";
@@ -187,8 +188,6 @@ export function App({
     return () => window.removeEventListener("popstate", restore);
   }, []);
   const [spacesVisited, setSpacesVisited] = useState(false);
-  const [browserNavigationKey] = useState(0);
-  const [browserWorkspaceId] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
@@ -791,7 +790,7 @@ export function App({
     const machine = state.client?.identity?.machineId ?? "";
     const existing = draftIdentities(machine).find(d => d.workspaceId === id && Boolean(readLocalDraft(`${machine}:${d.localId}`).text || readLocalDraft(`${machine}:${d.localId}`).attachments.length || readLocalDraft(`${machine}:${d.localId}`).missingAttachments));
     const draftId = localId ?? (state.draft?.workspaceId === id ? state.draft.localId : existing?.localId);
-    if (state.draft?.workspaceId !== id || state.activeSessionId || (localId && localId !== state.draft?.localId)) state.newSession(id, null, { localId: draftId, addressScope: "workspace" });
+    if (state.draft?.workspaceId !== id || state.activeSessionId || state.tabs.find(tab => tab.id === state.activeTabId)?.kind !== "chat" || (localId && localId !== state.draft?.localId)) state.newSession(id, null, { localId: draftId, addressScope: "workspace" });
     overviewEntry.current = {id: useWorkbench.getState().draft?.localId ?? "", surface};
     setOverviewSurfaceState(surface); setSessionsOpen(false); setSection("spaces");
     queueMicrotask(() => window.history.replaceState({...window.history.state, genehubOverview: {workspaceId: id, surface}}, ""));
@@ -828,17 +827,16 @@ export function App({
           onNavigate={() => { setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }}
         />
 
-        {spacesVisited && workbench.client?.identity?.machineId ? <div className={section === "spaces" && sessionsOpen ? "min-h-0 min-w-0 flex-1" : "hidden"}>
-          <WorkspaceBrowser host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={workbench.client?.identity?.machineId ?? deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
-            onSession={(id) => { void workbench.selectSession(id); setSessionsOpen(false); setSection("sessions"); }}
-            onNewSession={(id, localId) => { if (id) openOverview(id, "sessions", localId); }}
-            onExtra={(tab, id) => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
-        </div> : null}
+        {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="专家列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
+          <WorkspaceBrowser host={host} endpoint={endpoint} key={workbench.client.identity.machineId} deviceName={endpoint.label}
+            selectedId={starting ? draft?.workspaceId : undefined} onNewSession={id => openOverview(id)} />
+        </ListPane> : null}
         {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备专家列表…</p>}
         {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个专家的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一专家，请专家基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览专家</button></div></section> : null}
         {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属专家。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
-        <main className={section === "sessions" || (section === "spaces" && !sessionsOpen) ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
+        {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一位专家，查看会话与配置" : "选择会话，继续话题"}</section>}
+        <main className={(section === "sessions" && (!starting || !showChat)) || (section === "spaces" && starting && showChat) ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
               two 44px targets — the session list and the tools drawer.
               The title in the middle is where the open tabs live: one
@@ -847,14 +845,7 @@ export function App({
             className="relative flex shrink-0 items-center gap-1 border-b border-line bg-surface px-2"
             style={{ paddingTop: "env(safe-area-inset-top)" }}
           >
-            <button
-              type="button"
-              aria-label="会话列表"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-lg text-muted active:bg-raised"
-              onClick={backPage}
-            >
-              <span aria-hidden>‹</span>
-            </button>
+            <DetailBackButton label={showChat ? "会话列表" : "返回"} listVisible={showChat && !sidebarHidden} onClick={backPage}/>
             <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-base font-medium">{showChat ? starting ? "专家概要" : workspace?.name ?? "会话" : activeTab?.title}</h1><p className="truncate text-xs text-muted">{showChat ? session?.title ?? "新会话" : endpoint.label}</p></div>
             {/* Only when it is not what it should be. A green tick on every
                 screen is one more thing to read past, and this bar has room

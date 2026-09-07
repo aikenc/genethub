@@ -1,3 +1,4 @@
+import { DetailBackButton } from "../ui/ListLayout";
 import { useContext, useEffect, useMemo, useState } from "react";
 import type { Host, Endpoint } from "../host";
 import { useWorkbench } from "./store";
@@ -5,7 +6,7 @@ import { pickPromptSuggestions } from "./prompt-suggestions";
 import { ExpertPickerDialog } from "../workspace/ExpertPicker";
 import { ExpertSquad } from "../workspace/ExpertSquad";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
-import { ArrowLeft, MoreHorizontal } from "lucide-react";
+import { MoreHorizontal } from "lucide-react";
 import { AgentAvatar, AgentAvatarPicker } from "../workspace/AgentAvatar";
 import { AgentDetails, ExpertDirectories, AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { AgentAdvancedSettings } from "../workspace/AgentAdvancedSettings";
@@ -55,7 +56,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   return <section className="flex h-full min-h-0 flex-col" aria-label="专家页面">
     <header className="shrink-0 border-b border-line px-3 py-3 md:px-6" style={{ paddingTop: "calc(0.75rem + env(safe-area-inset-top))" }}>
       <div className="mx-auto flex max-w-4xl items-center gap-2">
-        <button type="button" aria-label="返回" className="flex min-h-12 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-raised" onClick={onBack}><ArrowLeft size={20} /></button>
+        <DetailBackButton onClick={onBack}/>
         <button type="button" aria-label="更换专家头像" className="shrink-0 rounded-lg" onClick={() => setAvatarOpen(true)}><AgentAvatar id={workspace.id} name={workspace.name} /></button>
         <div className="min-w-0 flex-1"><h1 className="truncate text-lg font-semibold"><button type="button" aria-label="重命名专家" title="点击修改专家名称" className="max-w-full truncate text-left hover:text-accent" onClick={() => { setName(workspace.name); setRenameError(""); setRenameOpen(true); }}>{workspace.name}</button></h1>
           <p className="mt-1 truncate text-xs text-muted">{workspace.agentSpace?.components.filter(c => c.enabled).map(c => c.role ? `${c.componentId} · ${c.role}` : c.componentId).join(" / ") || (workspace.workspaceFile ? "多目录专家" : "目录专家")}</p>

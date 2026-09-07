@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { ListFilter, MoreHorizontal, Plus, Search } from "lucide-react";
+import { ListFilter, MoreHorizontal, Plus } from "lucide-react";
 import type { Host, Endpoint, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { matchesConversation, defaultConversationFilter, type ConversationFilter } from "../session/conversationFilters";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { localValue, saveLocalValue } from "../session/localConversation";
 import { RecentSessions } from "../shell/ConversationRows";
+import { ListPane, ListHeader, ListScroll, ListToolbar, ListGroupSelect, ListSearch, listPrimaryAction } from "../ui/ListLayout";
 import { OpenProject } from "../workspace/OpenProject";
 import { ExpertPickerDialog } from "../workspace/ExpertPicker";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
@@ -110,25 +111,19 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
     batchLock.current = false;
   };
   const input = "min-h-10 min-w-0 rounded-lg border border-line bg-surface px-2 text-sm text-fg";
-  return <aside aria-label="会话列表" className={`${hidden ? "hidden" : open ? "flex" : "hidden md:flex"} min-h-0 w-full flex-1 flex-col overflow-hidden border-r border-line bg-sidebar md:w-80 md:flex-none`}>
-    <header className="relative shrink-0 border-b border-line px-3 pb-2 pt-3">
+  return <ListPane label="会话列表" open={open} hidden={hidden}>
+    <ListHeader>
       <fieldset disabled={busy} className="min-w-0 space-y-2 disabled:opacity-60">
-        <div aria-label="会话导航工具栏" className="flex min-h-11 min-w-0 items-center gap-2">
-          <button type="button" aria-label="搜索会话" aria-expanded={searchOpen} className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => { setSearchOpen(!searchOpen); if (searchOpen) setQuery(""); }}><Search size={18} /></button>
-          <select aria-label="按专家分组" value={group?.id ?? ""} onChange={(e) => { setGroupId(e.target.value); setAgentId(""); }} className="min-h-11 min-w-0 flex-1 truncate rounded-lg bg-transparent text-sm font-semibold text-fg">
-            <option value="">全部会话</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-          <button type="button" aria-label="新建会话" className="flex min-h-11 shrink-0 items-center gap-1 rounded-lg bg-accent px-3 text-sm font-medium text-white" onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={18} />新建</button>
-        </div>
+        <ListToolbar label="会话导航工具栏" searchLabel="搜索会话" searchOpen={searchOpen} onSearch={() => { setSearchOpen(!searchOpen); if (searchOpen) setQuery(""); }}>
+          <ListGroupSelect label="按专家分组" allLabel="全部会话" value={group?.id ?? ""} groups={groups} onChange={id => { setGroupId(id); setAgentId(""); }}/>
+          <button type="button" aria-label="新建会话" className={listPrimaryAction} onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={18} />新建</button>
+        </ListToolbar>
         <div aria-label="会话状态工具栏" className="flex min-w-0 items-center gap-1 text-xs">
           {([["all", "全部"], ["blocked", "受阻"], ["unread", "未读"], ["running", "运行"]] as const).map(([id, label]) => <button key={id} aria-pressed={state === id} onClick={() => setState(id)} className={`min-h-9 flex-1 rounded-lg px-1 ${state === id ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-raised"}`}>{label}</button>)}
           <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "primary" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
           <button type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
         </div>
-        {searchOpen && <div className="flex items-center gap-2 rounded-lg bg-raised px-3">
-          <input autoFocus type="search" aria-label="搜索会话" placeholder="搜索当前列表" value={query} onChange={(e) => setQuery(e.target.value)} className="min-h-10 w-full min-w-0 bg-transparent text-sm outline-none" />
-          <button type="button" aria-label="关闭搜索" className="h-10 w-8 shrink-0 text-muted" onClick={() => { setSearchOpen(false); setQuery(""); }}>×</button>
-        </div>}
+        {searchOpen && <ListSearch label="搜索会话" value={query} onChange={setQuery} onClose={() => { setSearchOpen(false); setQuery(""); }}/>}
         {wb.includeArchived && <div className="flex items-center justify-between text-xs text-muted"><span>已归档会话</span><button className="min-h-9 px-2 text-accent" onClick={() => { useWorkbench.setState({includeArchived: false}); void wb.refreshSessions(); }}>返回当前会话</button></div>}
 
       </fieldset>
@@ -140,16 +135,16 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
           <button type="button" role="menuitem" disabled={busy} className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); useWorkbench.setState({includeArchived: !wb.includeArchived}); void wb.refreshSessions(); }}>{wb.includeArchived ? "当前会话" : "已归档列表"}</button>
         </div>
       </>}
-    </header>
+    </ListHeader>
     {groupError && <p role="alert" className="shrink-0 px-3 py-2 text-xs text-danger">{groupError}</p>}
     {notice && <div role="status" className="flex max-h-[10%] shrink-0 gap-2 overflow-y-auto border-b border-line px-3 py-2 text-xs leading-5"><p className="min-w-0 flex-1 break-words">{notice}</p><button aria-label="关闭操作结果" className="h-8 w-8 shrink-0" onClick={() => setNotice("")}>×</button></div>}
-    <div aria-label="会话滚动区域" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">
+    <ListScroll label="会话滚动区域">
       <RecentSessions sessions={rows} workspaces={wb.workspaces} activeSessionId={wb.activeSessionId}
         selection={managing ? { ids: selection, toggle, disabled: busy } : undefined}
         onPickSession={(id) => { void wb.selectSession(id); onNavigate(); }}
         onRename={(id, title) => void wb.renameSession(id, title)} onDelete={(id) => void wb.deleteSession(id)} />
       {!rows.length && <div className="px-4 py-8 text-center text-sm text-muted"><p>{query || group || agentId || state !== "all" || wb.includeArchived ? "没有匹配的会话" : "从一个专家开始会话"}</p>{group && <p className="mt-2 text-xs leading-5">可在专家页管理此分组的成员。</p>}</div>}
-    </div>
+    </ListScroll>
     {managing && <footer aria-label="批量管理会话" className="max-h-[42%] shrink-0 space-y-2 overflow-y-auto border-t border-line bg-surface p-3">
       <p className="text-xs text-muted">已选 {selection.size} 条{busy ? " · 正在处理，请稍候…" : " · 切换筛选会清空选择"}</p>
       <div className="flex gap-2">
@@ -169,5 +164,5 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
         </div></WorkspaceDetailsDialog>}
       {confirmArchive && <WorkspaceDetailsDialog title={wb.includeArchived ? "恢复会话" : "归档会话"} onClose={() => setConfirmArchive(false)}><div className="text-sm"><p>{wb.includeArchived ? "恢复" : "归档"}选中的 {selection.size} 个会话？会话历史保留，变更会保存到设备。</p><div className="mt-1 flex justify-end gap-2"><button className="min-h-9 px-2" onClick={() => setConfirmArchive(false)}>取消</button><button className="min-h-9 px-2 text-accent" onClick={() => void archive()}>确认{wb.includeArchived ? "恢复" : "归档"}</button></div></div></WorkspaceDetailsDialog>}
     {!wb.workspaces.length && endpoint && <OpenProject host={host} endpoint={endpoint} />}
-  </aside>;
+  </ListPane>;
 }
