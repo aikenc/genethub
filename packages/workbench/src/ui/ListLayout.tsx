@@ -8,7 +8,7 @@ export function ListPane({label, open = true, hidden = false, children}: {
   return <aside aria-label={label} className={`${hidden ? "hidden" : open ? "flex" : "hidden md:flex"} list-pane min-h-0 w-full flex-1 flex-col overflow-hidden border-r border-line bg-sidebar md:w-80 md:flex-none`}>{children}</aside>;
 }
 export function ListHeader({children}: {children: ReactNode}) {
-  return <header className="relative shrink-0 space-y-2 border-b border-line px-3 pb-2 pt-3">{children}</header>;
+  return <header style={{ paddingTop: "calc(0.75rem + var(--safe-area-top))" }} className="relative shrink-0 space-y-2 border-b border-line px-3 pb-2 pt-3">{children}</header>;
 }
 export function ListScroll({label, children}: {label: string; children: ReactNode}) {
   return <div aria-label={label} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2">{children}</div>;

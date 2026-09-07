@@ -66,6 +66,7 @@ export function ToolsMenu({
         <Entry phone={phone} label="设备" onClick={() => go("devices")} />
         <Entry phone={phone} label="联调" onClick={() => { openClientDebug(); onNavigate(); }} />
         <Entry phone={phone} label="系统设置" onClick={() => go("settings")} />
+        {/* Extensions own their navigation; portal dialog events also bubble here. */}
         {children ? (
           <div
             className={
@@ -73,7 +74,6 @@ export function ToolsMenu({
                 ? "[&_button]:min-h-11 [&_button]:w-full [&_button]:justify-start [&_button]:rounded-xl [&_button]:px-4 [&_button]:text-left [&_button]:text-base [&_button]:shadow-none"
                 : "[&_button]:min-h-10 [&_button]:w-full [&_button]:justify-start [&_button]:rounded-lg [&_button]:px-3 [&_button]:text-left [&_button]:text-sm [&_button]:shadow-none"
             }
-            onClick={onNavigate}
           >
             {children}
           </div>
