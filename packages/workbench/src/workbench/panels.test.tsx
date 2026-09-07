@@ -618,6 +618,28 @@ describe("the settings panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("EEEE-FFFF");
   });
 
+  it("shows the RTC failure phase instead of a single 直连失败 sentence", async () => {
+    const { client } = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    Object.assign(client, {
+      rtcState: "failed",
+      rtcFailure: {
+        phase: "channel",
+        message: "RTC DataChannel did not open",
+        durationMs: 1840,
+      },
+      onRtcStateChange: () => () => {},
+    });
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByTestId("rtc-status")).toHaveTextContent("打开通道");
+    expect(screen.getByTestId("rtc-status")).toHaveTextContent("RTC DataChannel did not open");
+    expect(screen.getByTestId("rtc-status")).toHaveTextContent("1840ms");
+  });
+
   it("re-probes the agents after a key lands, so the list stops lying", async () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({

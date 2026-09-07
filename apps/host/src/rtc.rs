@@ -63,6 +63,26 @@ impl Shared {
     }
 }
 
+fn peer_connection_is_dead(state: RTCPeerConnectionState) -> bool {
+    matches!(
+        state,
+        RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+    )
+}
+
+/// Keep send order. Overflow ends the session instead of dropping the head of
+/// a framed stream the peer can no longer parse.
+fn enqueue_inbound(shared: &Arc<Mutex<Shared>>, data: Vec<u8>, depth: usize) -> bool {
+    let mut state = shared.lock().unwrap();
+    if state.inbound.len() >= depth {
+        drop(state);
+        Shared::close(shared);
+        return false;
+    }
+    state.inbound.push_back(data);
+    true
+}
+
 impl RtcSession {
     async fn accept(offer: &str, config: &wit::Config) -> Result<Self, String> {
         let api = APIBuilder::new().build();
@@ -166,12 +186,7 @@ impl RtcSession {
         connection.on_peer_connection_state_change(Box::new(move |state| {
             let shared = shared.clone();
             Box::pin(async move {
-                if matches!(
-                    state,
-                    RTCPeerConnectionState::Failed
-                        | RTCPeerConnectionState::Disconnected
-                        | RTCPeerConnectionState::Closed
-                ) {
+                if peer_connection_is_dead(state) {
                     Shared::close(&shared);
                 }
             })
@@ -198,11 +213,7 @@ fn attach(
             if message.is_string || message.data.len() > max_message {
                 return;
             }
-            let mut state = shared.lock().unwrap();
-            if state.inbound.len() >= depth {
-                state.inbound.pop_front();
-            }
-            state.inbound.push_back(message.data.to_vec());
+            enqueue_inbound(&shared, message.data.to_vec(), depth);
         })
     }));
 
@@ -424,6 +435,42 @@ mod tests {
         assert!(
             shared.inbound.is_empty(),
             "a refused channel must not be able to queue anything"
+        );
+    }
+
+    #[test]
+    fn brief_ice_disconnect_is_not_a_hangup() {
+        assert!(!peer_connection_is_dead(
+            RTCPeerConnectionState::Disconnected
+        ));
+        assert!(!peer_connection_is_dead(RTCPeerConnectionState::Connected));
+        assert!(!peer_connection_is_dead(RTCPeerConnectionState::Connecting));
+        assert!(peer_connection_is_dead(RTCPeerConnectionState::Failed));
+        assert!(peer_connection_is_dead(RTCPeerConnectionState::Closed));
+    }
+
+    #[test]
+    fn a_full_inbound_queue_closes_instead_of_dropping_the_oldest_record() {
+        let shared = Arc::new(Mutex::new(Shared {
+            state: State::Open,
+            ..Shared::default()
+        }));
+        for index in 0..8 {
+            assert!(enqueue_inbound(&shared, vec![index], 8));
+        }
+        assert!(!enqueue_inbound(&shared, vec![99], 8));
+        let inner = shared.lock().unwrap();
+        assert_eq!(inner.state, State::Closed);
+        assert!(
+            inner.inbound.is_empty() || inner.inbound.front() == Some(&vec![0]),
+            "overflow must not rotate the framed stream to keep the newest bytes"
+        );
+        assert!(
+            inner
+                .inbound
+                .iter()
+                .all(|record| record.first() != Some(&99)),
+            "the overflowing record must not displace earlier ones"
         );
     }
 }

@@ -7,3 +7,4 @@ pub mod frame;
 pub mod handshake;
 pub mod preview;
 pub mod rtc;
+pub mod service_preview;

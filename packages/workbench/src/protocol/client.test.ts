@@ -611,4 +611,40 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     expect(rtc?.detail.iceConnectionState).toBe("checking");
     client.close();
   });
+
+  it("keeps the failing RTC phase so settings can show more than 直连失败", async () => {
+    vi.stubGlobal("RTCPeerConnection", class {});
+    const { RtcUpgradeError } = await import("../dataplane/rtc");
+    const secret = "r".repeat(64);
+    const queue = socketQueue({
+      secret,
+      identity: {
+        machineId: "m_remote",
+        fingerprint: "FP-REMOTE",
+        transport: "forwarded",
+        rtcSupported: true,
+      },
+    });
+    const rtcFactory = vi.fn(async () => {
+      throw new RtcUpgradeError("channel", new Error("RTC DataChannel did not open"));
+    });
+    const client = new Client({
+      url: "wss://relay.example/fabric/v2",
+      channelCredential: { capabilityId: "cap-1", secret },
+      socketFactory: queue.factory,
+      rtcFactory,
+      rtcEnabled: true,
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.length === 1);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.rtcState === "failed");
+    expect(client.rtcFailure).toMatchObject({
+      phase: "channel",
+      message: "RTC DataChannel did not open",
+    });
+    expect(client.rtcFailure?.durationMs).toBeGreaterThanOrEqual(0);
+    client.close();
+  });
 });

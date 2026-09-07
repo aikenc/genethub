@@ -25,10 +25,12 @@ import {
   collectBodyExact,
   openRtcDataLink,
   preparePeerHandshake,
+  RtcUpgradeError,
   type DataStream,
   type FabricDataLink,
   type PeerCredential,
   type RtcDataLink,
+  type RtcPhase,
 } from "../dataplane";
 import type { BinaryWebSocketLike } from "../dataplane/websocket";
 import {
@@ -93,6 +95,12 @@ export type RtcState =
   | "connecting"
   | "connected"
   | "failed";
+
+export interface RtcFailure {
+  phase: RtcPhase | "identity" | "upgrade";
+  message: string;
+  durationMs: number;
+}
 
 export type ClientDiagnosticKind = "connection" | "transport" | "rtc" | "operation" | "error";
 export type ClientDiagnosticDetail = Record<string, string | number | boolean | null>;
@@ -285,6 +293,7 @@ export class Client {
   private lastClose: CloseReason | undefined;
   private rtcEnabled: boolean;
   private rtcState_: RtcState;
+  private rtcFailure_: RtcFailure | null = null;
   private rtcLink: RtcDataLink | null = null;
   private rtcGeneration = 0;
   private connectionEpoch = 0;
@@ -315,6 +324,10 @@ export class Client {
     return this.rtcState_;
   }
 
+  get rtcFailure(): RtcFailure | null {
+    return this.rtcFailure_;
+  }
+
   onStateChange(listener: (state: ConnectionState) => void): () => void {
     this.stateListeners.add(listener);
     return () => this.stateListeners.delete(listener);
@@ -330,6 +343,7 @@ export class Client {
     this.rtcEnabled = enabled;
     if (!enabled) {
       this.closeRtc();
+      this.rtcFailure_ = null;
       this.setRtcState("disabled");
       return;
     }
@@ -634,6 +648,16 @@ export class Client {
    * at a user device; this logical stream can travel over loopback, Fabric or
    * RTC without exposing runtime-specific transport to the UI.
    */
+  /** Public, permission-gated service Preview stream. Targets are daemon registrations. */
+  openServicePreview(request: { workspaceHandle: string; entryPath: string; operation: "describe" | "connect" | "ice"; runId?: string; allowTurn?: boolean }): DataStream {
+    return this.requireReadyEndpoint().open({
+      version: DATA_PLANE_VERSION,
+      method: "service.preview",
+      metadata: request,
+      ...(request.operation !== "connect" ? { bodyLength: 0, timeoutMs: 10_000 } : {}),
+    });
+  }
+
   openSpeechStream(): DataStream {
     return this.requireReadyEndpoint().open({
       version: DATA_PLANE_VERSION,
@@ -1485,16 +1509,19 @@ export class Client {
 
   private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
     if (!this.rtcEnabled) {
+      this.rtcFailure_ = null;
       this.setRtcState("disabled");
       return;
     }
     if (!this.identity?.rtcSupported || !rtcAvailableHere()) {
+      this.rtcFailure_ = null;
       this.setRtcState("unavailable");
       return;
     }
     // A loopback WebSocket is already direct, private and lower overhead. RTC
     // is an upgrade for network carriers, not a replacement for localhost.
     if (this.identity.transport === "loopback") {
+      this.rtcFailure_ = null;
       this.setRtcState("standby");
       return;
     }
@@ -1531,18 +1558,28 @@ export class Client {
         identity.data.fingerprint !== this.identity.fingerprint
       ) {
         link.close();
-        throw new PeerAuthenticationError("RTC 直连返回了不匹配的 daemon 身份");
+        throw Object.assign(new PeerAuthenticationError("RTC 直连返回了不匹配的 daemon 身份"), {
+          phase: "identity" as const,
+        });
       }
       if (generation !== this.rtcGeneration || this.endpoint !== base || this.epoch !== epoch) {
         link.close();
         return;
       }
+      this.rtcFailure_ = null;
       this.rtcLink = link;
       link.endpoint.onClose((reason) => {
         if (this.rtcLink !== link) return;
         this.rtcLink = null;
         this.report(reason);
-        if (this.rtcEnabled && this.state === "ready") this.setRtcState("failed");
+        if (this.rtcEnabled && this.state === "ready") {
+          this.rtcFailure_ = {
+            phase: "upgrade",
+            message: reason instanceof Error ? reason.message : String(reason ?? "RTC closed"),
+            durationMs: Math.round(this.now() - started),
+          };
+          this.setRtcState("failed");
+        }
       });
       this.setRtcState("connected");
       this.diagnostic("operation", {
@@ -1556,6 +1593,11 @@ export class Client {
     } catch (error) {
       if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
       this.report(error);
+      this.rtcFailure_ = {
+        phase: rtcPhaseOf(error),
+        message: error instanceof Error ? error.message : String(error),
+        durationMs: Math.round(this.now() - started),
+      };
       this.setRtcState("failed");
       this.diagnostic("operation", {
         operation: "rtc.negotiate",
@@ -1564,6 +1606,7 @@ export class Client {
         outcome: errorName(error),
         transport: this.carrier,
         durationMs: Math.round(this.now() - started),
+        rtcPhase: this.rtcFailure_.phase,
       });
     }
   }
@@ -1778,6 +1821,23 @@ function diagnosticId(prefix: string): string {
   } catch {
     return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
   }
+}
+
+function rtcPhaseOf(error: unknown): RtcFailure["phase"] {
+  if (error instanceof RtcUpgradeError) return error.phase;
+  if (error && typeof error === "object" && "phase" in error) {
+    const phase = (error as { phase?: unknown }).phase;
+    if (
+      phase === "gather" ||
+      phase === "signal" ||
+      phase === "channel" ||
+      phase === "handshake" ||
+      phase === "identity"
+    ) {
+      return phase;
+    }
+  }
+  return "upgrade";
 }
 
 function errorName(error: unknown): string {

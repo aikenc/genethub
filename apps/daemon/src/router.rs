@@ -156,6 +156,7 @@ async fn dispatch(
             machine_name: crate::link::default_display_name(),
             rtc_supported: crate::dataplane::rtc::SUPPORTED,
             features: Some(vec![
+                "service.preview.v1".to_string(),
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                 genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),

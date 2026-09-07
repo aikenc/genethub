@@ -10,7 +10,7 @@ import { BUILD } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
-import type { RtcState } from "../protocol/client";
+import type { RtcFailure, RtcState } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 import { UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
@@ -392,7 +392,7 @@ function RtcConnection() {
         <div className="min-w-0 flex-1">
           <p>优先使用 WebRTC 直连</p>
           <p className="mt-0.5 text-faint" data-testid="rtc-status">
-            {rtcLabel(state, client?.identity?.transport)}
+            {rtcLabel(state, client?.identity?.transport, client?.rtcFailure ?? null)}
           </p>
         </div>
         <label className="inline-flex shrink-0 items-center gap-2">
@@ -414,7 +414,7 @@ function RtcConnection() {
   );
 }
 
-function rtcLabel(state: RtcState, transport?: string): string {
+function rtcLabel(state: RtcState, transport?: string, failure: RtcFailure | null = null): string {
   switch (state) {
     case "disabled":
       return "已关闭";
@@ -427,7 +427,26 @@ function rtcLabel(state: RtcState, transport?: string): string {
     case "connected":
       return "RTC 已直连；新请求会走点对点通道";
     case "failed":
-      return "RTC 直连失败；当前仍使用端到端加密基础连接";
+      return failure
+        ? `RTC 直连失败（${rtcPhaseLabel(failure.phase)}：${failure.message}，${failure.durationMs}ms）；当前仍使用端到端加密基础连接`
+        : "RTC 直连失败；当前仍使用端到端加密基础连接";
+  }
+}
+
+function rtcPhaseLabel(phase: RtcFailure["phase"]): string {
+  switch (phase) {
+    case "gather":
+      return "收集候选";
+    case "signal":
+      return "交换信令";
+    case "channel":
+      return "打开通道";
+    case "handshake":
+      return "通道认证";
+    case "identity":
+      return "身份校验";
+    case "upgrade":
+      return "升级";
   }
 }
 

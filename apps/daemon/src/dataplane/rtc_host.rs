@@ -29,7 +29,7 @@ use crate::transport::admission::Admission;
 
 use super::{
     DATA_CHANNEL_LABEL, MAX_RTC_PEERS, RTC_ADMISSION_LIFETIME, RTC_CHANNEL_QUEUE,
-    RTC_GATHER_TIMEOUT, RTC_HELLO_TIMEOUT, RTC_SIGNAL_BYTES, STUN_SERVER,
+    RTC_GATHER_TIMEOUT, RTC_HELLO_TIMEOUT, RTC_SIGNAL_BYTES,
 };
 
 struct RtcPeer {
@@ -47,6 +47,13 @@ fn peers() -> &'static Registry {
 
 fn slots() -> &'static Arc<Semaphore> {
     RTC_SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_RTC_PEERS)))
+}
+
+fn peer_connection_is_dead(state: RTCPeerConnectionState) -> bool {
+    matches!(
+        state,
+        RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed
+    )
 }
 
 pub(crate) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
@@ -91,7 +98,7 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     let connection = Arc::new(
         api.new_peer_connection(RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: vec![STUN_SERVER.to_string()],
+                urls: super::stun_urls(&super::ice_config(&services.state).await),
                 ..Default::default()
             }],
             ..Default::default()
@@ -139,14 +146,12 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         let registry_key = registry_key.clone();
         let connection = connection_for_state.clone();
         Box::pin(async move {
-            match state {
-                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Disconnected => {
+            if peer_connection_is_dead(state) {
+                if state == RTCPeerConnectionState::Closed {
+                    peers().lock().await.remove(&registry_key);
+                } else {
                     remove_and_close(&registry_key, connection).await;
                 }
-                RTCPeerConnectionState::Closed => {
-                    peers().lock().await.remove(&registry_key);
-                }
-                _ => {}
             }
         })
     }));

@@ -33,3 +33,5 @@ export type {
   WebSocketLike,
 } from "./protocol/client";
 export type { DataStream } from "./dataplane";
+
+export { ServicePreviewClient } from "./preview/serviceClient";

@@ -1,3 +1,6 @@
+import { ServicePreviewClient } from "./serviceClient";
+import { ServiceMediaPanel } from "./ServiceMediaPanel";
+import { serviceBridgeScript, useServiceBridge } from "./serviceBridge";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetPreviewMetadata, SessionArtifactBundle } from "@genehub/proto";
@@ -340,7 +343,9 @@ function PreviewDocument({
   }
   if (metadata.kind === "html") {
     return (
-      <HtmlDocument
+      <ServiceHtmlDocument
+        client={client}
+        workspaceHandle={workspaceHandle}
         bytes={bytes}
         metadata={metadata}
         transfer={transfer}
@@ -389,6 +394,24 @@ function BlobDocument({
   );
 }
 
+function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string}) {
+  const [candidate,setCandidate]=useState<ServicePreviewClient|null>(null);
+  const [enabled,setEnabled]=useState(false);
+  const [problem,setProblem]=useState("");
+  useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setEnabled(false);setProblem("");
+    if(!props.client.identity?.features?.includes("service.preview.v1"))return;
+    void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled)value?.close();else setCandidate(value);}).catch(()=>{if(!cancelled)setProblem("服务登记不可用，请检查运行状态与 services 授权。");});
+    return()=>{cancelled=true;loaded?.close();};
+  },[props.client,props.workspaceHandle,props.entryPath]);
+  return <>{candidate?<section className="shrink-0 border-b border-line p-2 text-xs" aria-label="本地服务访问">
+    <span>{candidate.descriptor.name} · {candidate.descriptor.dataPolicy==='direct-only'?'业务仅直连':'允许 GeneHub 数据中继'}</span>
+    <button className="ml-3 rounded border border-line px-2 py-1" onClick={()=>{setEnabled(!enabled);}}>{enabled?'暂停服务访问':'允许本次预览访问登记服务'}</button>
+  </section>:null}
+  {problem?<p role="alert" className="p-2 text-xs">{problem}</p>:null}
+  {enabled&&candidate?<ServiceMediaPanel service={candidate}/>:null}
+  <HtmlDocument {...props} service={enabled?candidate:null}/></>;
+}
+
 /** Exported for tests. */
 export function HtmlDocument({
   bytes,
@@ -400,7 +423,9 @@ export function HtmlDocument({
   onMetaChange,
   onRuntimeArtifact,
   onRuntimeReady,
+  service = null,
 }: {
+  service?: ServicePreviewClient | null;
   bytes: Uint8Array;
   metadata: AssetPreviewMetadata;
   transfer?: AssetPreviewTransferStats;
@@ -417,6 +442,7 @@ export function HtmlDocument({
   const [collectorReady, setCollectorReady] = useState(false);
   const [eventCount, setEventCount] = useState(0);
   const frameRef = useRef<HTMLIFrameElement>(null);
+  useServiceBridge(frameRef, service, srcDoc);
   const eventsRef = useRef<PreviewRuntimeEvent[]>([]);
   const collectorReadyRef = useRef(false);
   const domRequestsRef = useRef(
@@ -698,7 +724,7 @@ export function HtmlDocument({
             : "未加载资源：0",
           ...remapped.warnings.slice(0, 40).map((warning) => `· ${warning}`),
         ];
-        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot));
+        setSrcDoc(isolatedHtml(remapped.html, storageSnapshot, Boolean(service)));
         setBaseMeta({ documentTitle, infoLines });
         emitPreviewDiagnostic("log", {
           topic: "html-site",
@@ -717,7 +743,7 @@ export function HtmlDocument({
       } catch (error) {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "资源解析失败";
-          setSrcDoc(isolatedHtml(sourceHtml, storageSnapshot));
+          setSrcDoc(isolatedHtml(sourceHtml, storageSnapshot, Boolean(service)));
           setBaseMeta({
             documentTitle,
             infoLines: [
@@ -740,7 +766,7 @@ export function HtmlDocument({
       cancelled = true;
       for (const url of blobUrls) URL.revokeObjectURL(url);
     };
-  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, storageNamespace]);
+  }, [bytes, entryPath, fetchAsset, metadata.sourceBytes, storageNamespace, service]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -761,6 +787,7 @@ export function HtmlDocument({
               ignoring flex sizing. Pin it to an absolutely-sized box. */}
           <div className="relative min-h-0 flex-1 overflow-hidden">
             <iframe
+              key={srcDoc}
               ref={frameRef}
               title="HTML 文件预览"
               sandbox="allow-scripts"
@@ -989,6 +1016,7 @@ function PageInfoIcon() {
 export function isolatedHtml(
   source: string,
   storageSnapshot?: Record<string, string> | null,
+  serviceEnabled = false,
 ): string {
   const document_ = new DOMParser().parseFromString(source, "text/html");
   document_.querySelectorAll("base, meta[http-equiv]").forEach((node) => {
@@ -1026,6 +1054,7 @@ export function isolatedHtml(
   const renderer = document_.createElement("script");
   renderer.textContent = modernScreenshotSource;
   const injected = [policy, base, renderer, bridge];
+  if (serviceEnabled) { const serviceScript = document_.createElement("script"); serviceScript.textContent = serviceBridgeScript(); injected.push(serviceScript); }
   if (storageSnapshot) {
     // Sandboxed frames have no storage of their own: the shim backed by a
     // parent-persisted snapshot must precede application scripts as well.

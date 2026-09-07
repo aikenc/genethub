@@ -155,6 +155,14 @@ impl Link {
     /// An empty list for a machine with no Hub, rather than an error: "nowhere
     /// else to go" is the truth on a self-hosted machine, and a switcher that
     /// refuses to draw is not an improvement over one with a single entry.
+    pub async fn rtc_config(&self, run_id: Option<&str>) -> Result<serde_json::Value> {
+        let enrollment = match &*self.stage.lock().await {
+            Stage::Paired { enrollment, .. } => enrollment.clone(),
+            _ => anyhow::bail!("No paired Channel ICE provider"),
+        };
+        hub::Client::new(&enrollment.hub_url).rtc_config(&enrollment,run_id).await
+    }
+
     pub async fn machines(&self) -> Result<Vec<HubMachine>> {
         match &*self.stage.lock().await {
             Stage::Paired { enrollment, .. } => {

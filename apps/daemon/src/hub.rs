@@ -337,6 +337,17 @@ impl Client {
     /// The daemon does not dial or attach business handlers in this phase; the
     /// method pins the trust boundary for that next step so no implementation
     /// needs to expose `Enrollment::secret` to a Relay.
+    pub async fn rtc_config(&self, enrollment: &Enrollment, run_id: Option<&str>) -> Result<serde_json::Value> {
+        let response = if let Some(run_id) = run_id {
+            self.http.post(self.url("/api/rtc/credentials")?)
+                .bearer_auth(&enrollment.secret)
+                .json(&serde_json::json!({"daemonId":enrollment.daemon_id,"runId":run_id}))
+                .send().await?
+        } else { self.http.get(self.url("/api/rtc/config")?).send().await? };
+        if !response.status().is_success() { anyhow::bail!("Channel ICE configuration is unavailable ({})",response.status()); }
+        read_json(response,16*1024,"ICE configuration").await
+    }
+
     pub async fn fabric_admission(&self, enrollment: &Enrollment) -> Result<FabricAdmission> {
         let response = self
             .http

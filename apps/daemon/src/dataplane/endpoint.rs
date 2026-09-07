@@ -402,7 +402,7 @@ pub(crate) struct PeerServices {
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    carrier_kind: CarrierKind,
+    pub(crate) carrier_kind: CarrierKind,
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -825,8 +825,10 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         StreamMethod::Events => handle_events(stream, services).await,
         StreamMethod::ProtocolIdentity => handle_protocol_identity(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
+        StreamMethod::ServicePreview => crate::dataplane::service_preview::handle(stream, services).await,
         StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
+        StreamMethod::RtcConfig => crate::dataplane::rtc::config_handle(stream, services).await,
         StreamMethod::SpeechTranscribe => crate::speech::handle(stream, services).await,
     }
 }

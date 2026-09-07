@@ -68,12 +68,14 @@ pub enum Capability {
     /// Capturing audio, compiling workspace context and spending speech
     /// provider quota. Separate from Agent sessions and from file access.
     Speech,
+    /// Access to explicitly registered local application services.
+    Services,
     /// Replacing the software this machine runs.
     Update,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 11] = [
+    pub const ALL: [Capability; 12] = [
         Capability::Handshake,
         Capability::Read,
         Capability::Session,
@@ -84,6 +86,7 @@ impl Capability {
         Capability::Devices,
         Capability::Settings,
         Capability::Speech,
+        Capability::Services,
         Capability::Update,
     ];
 
@@ -99,6 +102,7 @@ impl Capability {
             Capability::Devices => "devices",
             Capability::Settings => "settings",
             Capability::Speech => "speech",
+            Capability::Services => "services",
             Capability::Update => "update",
         }
     }
@@ -258,8 +262,10 @@ pub enum StreamMethod {
     ShellRun,
     /// Moves this same authenticated peer onto a direct carrier.
     RtcNegotiate,
+    RtcConfig,
     /// Provider-neutral speech-to-text duplex flow.
     SpeechTranscribe,
+    ServicePreview,
 }
 
 impl StreamMethod {
@@ -268,8 +274,10 @@ impl StreamMethod {
             "events" => Some(StreamMethod::Events),
             genehub_proto::PROTOCOL_IDENTITY_METHOD => Some(StreamMethod::ProtocolIdentity),
             "asset.preview" => Some(StreamMethod::AssetPreview),
+            "service.preview" => Some(StreamMethod::ServicePreview),
             "shell.run" => Some(StreamMethod::ShellRun),
             "rtc.negotiate" => Some(StreamMethod::RtcNegotiate),
+            "rtc.config" => Some(StreamMethod::RtcConfig),
             genehub_proto::SPEECH_TRANSCRIBE_METHOD => Some(StreamMethod::SpeechTranscribe),
             _ => None,
         }
@@ -283,6 +291,7 @@ impl StreamMethod {
             // Returns file bytes. That it arrives as a stream rather than a
             // request does not make it a cheaper thing to hand out.
             StreamMethod::AssetPreview => Capability::Files,
+            StreamMethod::ServicePreview => Capability::Services,
             // The same authority as a terminal, deliberately not a grant of
             // its own. Running one command and opening a shell to run it are
             // the same power, and a separate name for one of them would invite
@@ -290,7 +299,7 @@ impl StreamMethod {
             StreamMethod::ShellRun => Capability::Pty,
             // A transport upgrade for an already authenticated peer, which
             // inherits that peer's device identity and scope.
-            StreamMethod::RtcNegotiate => Capability::Handshake,
+            StreamMethod::RtcNegotiate | StreamMethod::RtcConfig => Capability::Handshake,
             StreamMethod::SpeechTranscribe => Capability::Speech,
         }
     }
