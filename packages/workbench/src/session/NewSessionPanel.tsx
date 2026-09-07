@@ -47,7 +47,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   if (!workspace) return <p className="p-4 text-sm text-muted">请选择可用专家后开始会话。</p>;
   const setSurface = (value: string) => onSurface?.(value);
   return <section className="flex h-full min-h-0 flex-col" aria-label="专家页面">
-    <header className="shrink-0 border-b border-line px-3 py-3 md:px-6">
+    <header className="shrink-0 border-b border-line px-3 py-3 md:px-6" style={{ paddingTop: "calc(0.75rem + env(safe-area-inset-top))" }}>
       <div className="mx-auto flex max-w-4xl items-center gap-2">
         <button type="button" aria-label="返回" className="flex min-h-12 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-raised" onClick={onBack}><ArrowLeft size={20} /></button>
         <AgentAvatar id={workspace.id} name={workspace.name} />
