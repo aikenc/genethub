@@ -9,6 +9,7 @@ export function usePageNavigation() {
  const current = useRef(page);
  const queued = useRef(false);
  const restoring = useRef(false);
+ const replacing = useRef(false);
  const update = (patch: Partial<Page>) => {
    if (restoring.current) return;
    const previous = current.current;
@@ -18,12 +19,20 @@ export function usePageNavigation() {
    current.current = next; setPage(next);
    if (restoring.current || queued.current) return;
    queued.current = true;
-   window.history.replaceState({...window.history.state, genehubPage: previous}, "");
+   // A conversation opened/sent from an expert has the same return destination
+   // as a conversation opened from the list, rather than a trail of draft pages.
+   const fromExpert = Boolean(previous.draftLocalId && next.sessionId && !next.list);
+   const returnPage = fromExpert ? {...initial, sessionId: null, tabId: null, workspaceId: null, draftLocalId: undefined} : previous;
+   // Switching experts replaces this page; opening a child keeps its parent entry.
+   if (!replacing.current) window.history.replaceState({...window.history.state, genehubPage: returnPage, ...(fromExpert ? {genehubOverview: null, genehubParent: false} : {})}, "");
    queueMicrotask(() => {
      queued.current = false;
      const wb = useWorkbench.getState();
      current.current = {...current.current, sessionId: wb.activeSessionId, workspaceId: wb.activeWorkspaceId, tabId: wb.activeTabId, draftLocalId: wb.draft?.localId};
-     window.history.pushState({...window.history.state, genehubPage: current.current, genehubParent: true}, "");
+     const state = {...window.history.state, genehubPage: current.current, genehubParent: true};
+     if (replacing.current) window.history.replaceState(state, "");
+     else window.history.pushState(state, "");
+     replacing.current = false;
    });
  };
  useEffect(() => {
@@ -40,6 +49,7 @@ export function usePageNavigation() {
    return () => window.removeEventListener("popstate", restore);
  }, []);
  return {
+   replaceNextPage: () => { replacing.current = true; queueMicrotask(() => { if (!queued.current) replacing.current = false; }); },
    section: page.section,
    sessionsOpen: page.list,
    setSection: (section: WorkbenchSection) => update({section}),

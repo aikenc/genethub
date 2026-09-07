@@ -170,14 +170,13 @@ export function App({
   const [claiming, setClaiming] = useState<
     "idle" | "working" | { error: string }
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
-  const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage} = usePageNavigation();
+  const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage, replaceNextPage} = usePageNavigation();
   const [spaceDetail, setSpaceDetail] = useState(false);
   const [overviewSurface, setOverviewSurfaceState] = useState("sessions");
   const overviewEntry = useRef<{id: string; surface: string} | null>(null);
   const setOverviewSurface = (surface: string) => {
     const workspaceId = useWorkbench.getState().draft?.workspaceId;
-    window.history.replaceState({...window.history.state, genehubOverview: {workspaceId, surface: overviewSurface}}, "");
-    window.history.pushState({...window.history.state, genehubOverview: {workspaceId, surface}}, "");
+    window.history.replaceState({...window.history.state, genehubOverview: {workspaceId, surface}}, "");
     setOverviewSurfaceState(surface);
   };
   useEffect(() => {
@@ -794,9 +793,10 @@ export function App({
     if (state.draft?.workspaceId !== id || state.activeSessionId || (localId && localId !== state.draft?.localId)) state.newSession(id, null, { localId: draftId, addressScope: "workspace" });
     overviewEntry.current = {id: useWorkbench.getState().draft?.localId ?? "", surface};
     setOverviewSurfaceState(surface); setSessionsOpen(false); setSection("sessions");
+    queueMicrotask(() => window.history.replaceState({...window.history.state, genehubOverview: {workspaceId: id, surface}}, ""));
   };
   return (
-    <AgentDetailsEnvironment.Provider value={{ host, endpoint, onOverview: openOverview, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
+    <AgentDetailsEnvironment.Provider value={{ host, endpoint, onOverview: (id, surface, child) => { if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
     <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
       <TitleBar
         host={host}
@@ -841,7 +841,7 @@ export function App({
               two 44px targets — the session list and the tools drawer.
               The title in the middle is where the open tabs live: one
               line while closed, a list when there is a choice to make. */}
-          <header
+          {!(showChat && starting) && <header
             className="relative flex shrink-0 items-center gap-1 border-b border-line bg-surface px-2"
             style={{ paddingTop: "env(safe-area-inset-top)" }}
           >
@@ -870,8 +870,8 @@ export function App({
               </span>
             )}
             <BackgroundBadge />
-            {workspace && !starting && <button type="button" aria-label="当前专家概要" title="专家概要" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => openOverview(workspace.id)}><Info size={20} /></button>}
-          </header>
+            {workspace && !starting && <button type="button" aria-label="当前专家" title="专家页面" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => openOverview(workspace.id)}><Info size={20} /></button>}
+          </header>}
 
           {workbench.notice ? (
             <p
@@ -955,7 +955,7 @@ export function App({
                           still needs — which workspace, which Agent — are least
                           hidden. */}
                       {starting ? (
-                        <NewSessionPanel host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} />
+                        <NewSessionPanel host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} onBack={backPage} />
                       ) : (
                         // Anchors the transcript's own furniture — the fade at
                         // its cut edge, the way back to the newest message — to

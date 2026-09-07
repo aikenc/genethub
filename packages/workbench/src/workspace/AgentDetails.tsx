@@ -8,11 +8,10 @@ import { useAgentGroups } from "./agentGroups";
 import { AgentAvatar, AgentAvatarPicker } from "./AgentAvatar";
 import { WorkspaceDetailsDialog } from "./WorkspaceDetailsDialog";
 
-export const AgentDetailsEnvironment = createContext<{ host: Host; endpoint: Endpoint; onOverview?(id: string, surface?: string): void; workspaceTools?(id: string): ReactNode } | null>(null);
+export const AgentDetailsEnvironment = createContext<{ host: Host; endpoint: Endpoint; onOverview?(id: string, surface?: string, child?: boolean): void; workspaceTools?(id: string): ReactNode } | null>(null);
 
 /** Shared facts for contact details, the desktop inspector and the chat header. */
 export function AgentDetails({ workspace, deviceName, compact = false }: { workspace: WorkspaceInfo; deviceName: string; compact?: boolean }) {
-  const environment = useContext(AgentDetailsEnvironment);
   const client = useWorkbench((s) => s.client);
   const connection = useWorkbench((s) => s.connection);
   const workspaces = useWorkbench((s) => s.workspaces);
@@ -31,7 +30,6 @@ export function AgentDetails({ workspace, deviceName, compact = false }: { works
     return () => { cancelled = true; };
   }, [client, connection, workspace.id, reload]);
   const rows = result?.owner === workspace.id ? result.sessions : undefined;
-  const folders = workspace.folders.length ? workspace.folders : [{ name: workspace.name, root: workspace.root }];
   const components = workspace.agentSpace?.components.filter((c) => c.enabled).map((c) => c.role ? `${c.componentId} · ${c.role}` : c.componentId) ?? [];
   const parent = workspaces.find((w) => w.id === workspace.agentSpace?.parentWorkspaceId);
   return <section aria-label={`${workspace.name} 的资料`} className="min-w-0 space-y-4">
@@ -48,16 +46,25 @@ export function AgentDetails({ workspace, deviceName, compact = false }: { works
         {result?.owner === workspace.id && result.error && <p role="alert" className="mt-1 break-words text-xs text-danger">{result.error}</p>}
       </Fact>
     </dl>
-    <details open={!compact}><summary className="mb-2 cursor-pointer text-sm font-medium">Root 目录 · {folders.length}</summary><ul className="space-y-2">{folders.map((folder) => <li key={folder.root} className="rounded-lg border border-line bg-raised/40 p-3"><p className="text-sm font-medium">{folder.name}</p><p className="mt-1 break-all text-xs leading-5 text-muted">{folder.root}</p></li>)}</ul>
+    <ExpertDirectories workspace={workspace} />
+    <details className="border-t border-line pt-2"><summary className="cursor-pointer py-2 text-sm text-muted">更换头像</summary><AgentAvatarPicker id={workspace.id} /></details>
+  </section>;
+}
+/** Root management shared by the expert page and legacy details. */
+export function ExpertDirectories({ workspace }: { workspace: WorkspaceInfo }) {
+  const environment = useContext(AgentDetailsEnvironment);
+  const client = useWorkbench(s => s.client);
+  const folders = workspace.folders.length ? workspace.folders : [{ name: workspace.name, root: workspace.root }];
+  return (
+    <section><h3 className="mb-2 text-sm font-medium">Root 目录 · {folders.length}</h3><ul className="space-y-2">{folders.map((folder) => <li key={folder.root} className="rounded-lg border border-line bg-raised/40 p-3"><p className="text-sm font-medium">{folder.name}</p><p className="mt-1 break-all text-xs leading-5 text-muted">{folder.root}</p></li>)}</ul>
       {workspace.workspaceFile && environment && <div className="mt-3"><OpenProject host={environment.host} endpoint={environment.endpoint} directoryAction={{initialDirectory: workspace.root, onPick: async (root) => {
         if (!client) throw new Error("设备尚未连接");
         const reply = await client.call({ type: "workspace.addRoot", payload: { workspaceId: workspace.id, root } });
         if (reply?.type !== "workspace") throw new Error("未收到目录更新结果");
         if (useWorkbench.getState().client === client) await useWorkbench.getState().refreshWorkspaces();
       }}} /><p className="mt-2 text-xs text-muted">新增目录会写入 .code-workspace，新会话使用更新后的目录。</p></div>}
-    </details>
-    <details className="border-t border-line pt-2"><summary className="cursor-pointer py-2 text-sm text-muted">更换头像</summary><AgentAvatarPicker id={workspace.id} /></details>
-  </section>;
+    </section>
+  );
 }
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return <div className="grid grid-cols-[5rem_minmax(0,1fr)] gap-3"><dt className="text-muted">{label}</dt><dd className="min-w-0 break-all">{children}</dd></div>;

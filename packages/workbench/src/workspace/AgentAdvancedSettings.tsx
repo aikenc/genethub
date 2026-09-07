@@ -1,10 +1,10 @@
 import type { AgentSpaceBuilderOperation, WorkspaceInfo } from "@genehub/proto";
-import { useEffect, useState } from "react";
+import { useEffect, useState, Fragment } from "react";
 import { useWorkbench } from "../session/store";
 import { buildAgentSpaceTree, isDescendant } from "./agent-space-tree";
 
 /** Shared configuration, independent of the row or dialog that opened it. */
-export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo }) {
+export function AgentAdvancedSettings({ workspace, section = "all", inline = false }: { workspace: WorkspaceInfo; section?: "all" | "components" | "relations"; inline?: boolean }) {
   const workspaces = useWorkbench((s) => s.workspaces);
   const tree = buildAgentSpaceTree(workspaces);
   const projectWorkspaceId = tree.projectRootById[workspace.id] ?? workspace.id;
@@ -65,12 +65,13 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
       candidate.id !== workspace.id &&
       !isDescendant(workspaces, candidate.id, workspace.id),
   );
+  const Container = inline ? Fragment : "details";
   return <>
-          <details className="mt-3 border-t border-line pt-3"><summary className="cursor-pointer py-2 text-sm text-muted">高级专家配置</summary>
+          <Container>{!inline && <summary className="cursor-pointer py-2 text-sm text-muted">高级专家配置</summary>}
           <div>
             <div className="flex items-center justify-between gap-2">
               <span className="font-medium text-fg">专家配置</span>
-              <span className="text-[10px] text-faint">
+              <span className="text-xs text-faint">
                 revision {revision}
               </span>
             </div>
@@ -82,7 +83,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                   value={workspace.agentSpace.health?.status ?? "unknown"}
                 />
                 {(workspace.agentSpace.health?.reasons ?? []).map((reason) => (
-                  <p key={reason} className="py-0.5 text-[10px] text-danger">
+                  <p key={reason} className="py-0.5 text-xs text-danger">
                     {reason}
                   </p>
                 ))}
@@ -100,7 +101,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                     value={`${workspace.agentSpace.bootstrapPack.id} v${workspace.agentSpace.bootstrapPack.version}`}
                   />
                 ) : null}
-                <div className="mt-2 space-y-1" aria-label="Component 列表">
+                {section !== "relations" && <div className="mt-2 space-y-1" aria-label="Component 列表">
                   {workspace.agentSpace.components.map((component) => (
                     <div
                       key={component.componentId}
@@ -115,7 +116,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                       <button
                         type="button"
                         disabled={spaceBusy}
-                        className="rounded px-1 text-[10px] text-accent hover:bg-raised disabled:opacity-40"
+                        className="min-h-10 rounded px-2 text-xs text-accent hover:bg-raised disabled:opacity-40"
                         onClick={() =>
                           void mutate({
                             kind: "setComponent",
@@ -130,7 +131,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                       <button
                         type="button"
                         disabled={spaceBusy}
-                        className="rounded px-1 text-[10px] text-danger hover:bg-raised disabled:opacity-40"
+                        className="min-h-10 rounded px-2 text-xs text-danger hover:bg-raised disabled:opacity-40"
                         onClick={() =>
                           void mutate({
                             kind: "removeComponent",
@@ -142,7 +143,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                       </button>
                     </div>
                   ))}
-                </div>
+                </div>}
               </>
             ) : (
               <p className="mt-1 leading-relaxed text-muted">
@@ -150,12 +151,12 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               </p>
             )}
 
-            <div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-1">
+            {section !== "relations" && <><div className="mt-3 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-1">
               <select
                 aria-label="要添加的 Component"
                 value={componentId}
                 onChange={(event) => setComponentId(event.target.value)}
-                className="min-w-0 rounded border border-line bg-raised px-2 py-1 text-fg"
+                className="min-w-0 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
               >
                 <option value="pm">PM</option>
                 <option value="executor">Executor</option>
@@ -168,7 +169,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                   value={workerRole}
                   onChange={(event) => setWorkerRole(event.target.value)}
                   placeholder="role，例如 tester"
-                  className="min-w-0 rounded border border-line bg-raised px-2 py-1 text-fg"
+                  className="min-w-0 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
                 />
               ) : (
                 <span />
@@ -179,7 +180,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               disabled={
                 spaceBusy || (componentId === "worker" && !workerRole.trim())
               }
-              className="mt-1 w-full rounded bg-accent px-2 py-1 text-white disabled:opacity-40"
+              className="mt-1 w-full rounded bg-accent min-h-10 px-2 py-2 text-white disabled:opacity-40"
               onClick={() =>
                 void mutate({
                   kind: "setComponent",
@@ -190,14 +191,14 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               }
             >
               添加或更新 Component
-            </button>
+            </button></>}
 
-            <div className="mt-3 flex gap-1">
+            {section !== "components" && <div className="mt-3 flex gap-1">
               <select
                 aria-label="上级专家"
                 value={parentId}
                 onChange={(event) => setParentId(event.target.value)}
-                className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
+                className="min-w-0 flex-1 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
               >
                 <option value="">无 Parent（项目根）</option>
                 {parentChoices.map((candidate) => (
@@ -209,7 +210,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               <button
                 type="button"
                 disabled={spaceBusy || !workspace.agentSpace}
-                className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                className="rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
                 onClick={() =>
                   void mutate({
                     kind: "setParent",
@@ -217,16 +218,16 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                   })
                 }
               >
-                保存 Parent
+                保存上级关系
               </button>
-            </div>
+            </div>}
 
             <div className="mt-2 flex gap-1">
               <select
                 aria-label="专家生命周期"
                 value={lifecycle}
                 onChange={(event) => setLifecycle(event.target.value)}
-                className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
+                className="min-w-0 flex-1 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
               >
                 <option value="persistent">persistent</option>
                 <option value="pooled">pooled</option>
@@ -235,7 +236,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               <button
                 type="button"
                 disabled={spaceBusy || !workspace.agentSpace}
-                className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                className="rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
                 onClick={() => void mutate({ kind: "setLifecycle", lifecycle })}
               >
                 保存生命周期
@@ -248,7 +249,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                   <button
                     type="button"
                     disabled={spaceBusy}
-                    className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                    className="rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
                     onClick={() => void inspectBuild({ kind: "init" })}
                   >
                     Builder 初始化
@@ -256,7 +257,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
                   <button
                     type="button"
                     disabled={spaceBusy}
-                    className="rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                    className="rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
                     onClick={() =>
                       void inspectBuild({
                         kind: "build",
@@ -272,7 +273,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               <button
                 type="button"
                 disabled={spaceBusy}
-                className="flex-1 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                className="flex-1 rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
                 onClick={() => void inspectBuild({ kind: "check" })}
               >
                 Builder Check
@@ -280,17 +281,17 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               <button
                 type="button"
                 disabled={spaceBusy}
-                className="flex-1 rounded border border-line px-2 py-1 text-fg hover:bg-raised disabled:opacity-40"
+                className="flex-1 rounded border border-line min-h-10 px-2 py-2 text-fg hover:bg-raised disabled:opacity-40"
                 onClick={() => void inspectBuild({ kind: "verify" })}
               >
                 Builder Verify
               </button>
             </div>
             {builderSummary ? (
-              <p className="mt-1 text-[10px] text-muted">{builderSummary}</p>
+              <p className="mt-1 text-xs text-muted">{builderSummary}</p>
             ) : null}
           </div>
-          </details>
+          </Container>
 {error && <p role="alert" className="mt-3 text-danger">{error}</p>}
 </>;
 }
