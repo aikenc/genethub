@@ -66,10 +66,10 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
       !isDescendant(workspaces, candidate.id, workspace.id),
   );
   return <>
-          <details className="mt-3 border-t border-line pt-3"><summary className="cursor-pointer py-2 text-sm text-muted">高级 Agent 配置</summary>
+          <details className="mt-3 border-t border-line pt-3"><summary className="cursor-pointer py-2 text-sm text-muted">高级专家配置</summary>
           <div>
             <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-fg">Agent 配置</span>
+              <span className="font-medium text-fg">专家配置</span>
               <span className="text-[10px] text-faint">
                 revision {revision}
               </span>
@@ -146,8 +146,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
               </>
             ) : (
               <p className="mt-1 leading-relaxed text-muted">
-                尚未注册为 AgentSpace。添加 Component 时内核会先验证当前目录的
-                AgentSpaceBuilder 投影。
+                尚未配置组件。添加组件前，会验证当前目录的构建配置。
               </p>
             )}
 
@@ -195,7 +194,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
 
             <div className="mt-3 flex gap-1">
               <select
-                aria-label="Parent AgentSpace"
+                aria-label="上级专家"
                 value={parentId}
                 onChange={(event) => setParentId(event.target.value)}
                 className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"
@@ -224,7 +223,7 @@ export function AgentAdvancedSettings({ workspace }: { workspace: WorkspaceInfo 
 
             <div className="mt-2 flex gap-1">
               <select
-                aria-label="AgentSpace 生命周期"
+                aria-label="专家生命周期"
                 value={lifecycle}
                 onChange={(event) => setLifecycle(event.target.value)}
                 className="min-w-0 flex-1 rounded border border-line bg-raised px-2 py-1 text-fg"

@@ -114,6 +114,7 @@ const COMPOSER_PHONE_DOCK =
  * of commands and skills that are invisible outside its own terminal.
  */
 export function Composer({
+  layout = "overlay",
   persistenceKey,
   phase,
   disabled,
@@ -147,6 +148,8 @@ export function Composer({
   minimized,
   onExpand,
 }: {
+  /** Overview reserves space; existing timelines retain their overlay contract. */
+  layout?: "overlay" | "inline";
   persistenceKey?: string;
   phase: ComposerPhase;
   disabled?: boolean;
@@ -431,7 +434,7 @@ export function Composer({
       // The transparent shell overlays the full-height transcript. Only its
       // interactive children catch taps; TimelineView reserves this measured
       // height at the end of its scroll *content*, not from its viewport.
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-2 md:px-4 max-md:px-0"
+      className={`pointer-events-none ${layout === "inline" ? "relative shrink-0" : "absolute inset-x-0 bottom-0"} z-10 px-3 pt-2 md:px-4 max-md:px-0`}
       style={{
         // Lift only for the on-screen keyboard (`shell/viewport.ts`: the
         // shell is covered, not shrunk). The home-indicator inset lives

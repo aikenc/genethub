@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import type { WorkspaceInfo, SessionSummary } from "@genehub/proto";
 import { WorkspaceRow } from "../shell/ConversationRows";
 import {
@@ -15,7 +15,6 @@ export function AgentList({
   sessions = [],
   selectedId,
   onPick,
-  onNewSession,
   query = "",
   density = "auto",
   actions = true,
@@ -36,7 +35,6 @@ export function AgentList({
   deviceName?: string;
 }) {
   const tree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const wb = useWorkbench();
   const activity = useAgentActivities();
   const recent = (id: string) => activity.agents?.get(id)?.recent ?? sessions.reduce((at, s) => s.workspaceId === id ? Math.max(at, s.messagePreview?.atMs ?? s.updatedAtMs) : at, 0);
@@ -60,7 +58,7 @@ export function AgentList({
             .includes(query.trim().toLowerCase()),
         )
     : roots;
-  const row = (node: AgentSpaceTreeNode, depth: number): ReactNode => (
+  const row = (node: AgentSpaceTreeNode): ReactNode => (
     <WorkspaceRow
       key={node.workspace.id}
       workspace={node.workspace}
@@ -83,39 +81,24 @@ export function AgentList({
       deviceName={deviceName}
       onToggle={() => onPick(node.workspace.id)}
       onPick={() => onPick(node.workspace.id)}
-      onNewSession={onNewSession ? () => onNewSession(node.workspace.id) : undefined}
       onRename={(name) => void wb.renameWorkspace(node.workspace.id, name)}
       onRemove={() => wb.removeWorkspace(node.workspace.id)}
       density={density}
       actions={actions}
-      childCount={query || memberIds ? 0 : node.children.length}
-      expanded={expanded.has(node.workspace.id)}
-      onExpand={() =>
-        setExpanded((old) => {
-          const next = new Set(old);
-          next.has(node.workspace.id)
-            ? next.delete(node.workspace.id)
-            : next.add(node.workspace.id);
-          return next;
-        })
-      }
+      childCount={0}
     >
-      {!query && !memberIds && expanded.has(node.workspace.id) && (
-        <ul className="agent-children ml-3 border-l border-line pl-2">
-          {sorted(node.children).map((child) => row(child, depth + 1))}
-        </ul>
-      )}
+      {null}
     </WorkspaceRow>
   );
   return (
     <ul
       data-density={density}
       className="entity-list agent-list space-y-1"
-      aria-label="Agent 列表"
+      aria-label="专家列表"
     >
-      {sorted(visible).map((node) => row(node, 0))}
+      {sorted(visible).map((node) => row(node))}
       {!visible.length && (
-        <li className="px-4 py-8 text-sm text-muted">没有匹配的 Agent</li>
+        <li className="px-4 py-8 text-sm text-muted">没有匹配的专家</li>
       )}
     </ul>
   );

@@ -215,13 +215,13 @@ export function WorkspaceList({
   const ordered = flattenAgentSpaceTree(tree);
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标Agent</legend>
+      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标专家</legend>
       {loading ? (
         <p className="mt-2 text-xs text-faint">正在读取目标机器…</p>
       ) : workspaces.length > 0 ? (
         <div
           role="listbox"
-          aria-label="目标Agent"
+          aria-label="目标专家"
           className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
         >
           {ordered.map((workspace) => {
@@ -253,7 +253,7 @@ export function WorkspaceList({
         </div>
       ) : (
         <p className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-          目标机器没有可用Agent。
+          目标机器没有可用专家。
         </p>
       )}
     </fieldset>

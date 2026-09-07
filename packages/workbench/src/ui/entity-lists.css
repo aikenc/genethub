@@ -55,3 +55,8 @@
 }
 .genehub-ui .entity-list[data-density="compact"] .agent-row-actions { position: static; }
 .genehub-ui .entity-list[data-density="compact"] .agent-row-body .entity-main { min-height: 48px; }
+
+/* Expert overview owns child navigation and starting a conversation. */
+.genehub-ui .agent-row-body:not(:has(.agent-new)):not(:has(.entity-expand)) .entity-main { min-height: 72px; }
+.genehub-ui .agent-row-body:not(:has(.agent-new)):not(:has(.entity-expand)) .agent-meta { padding-right: 40px; }
+.genehub-ui .entity-list[data-density="compact"] .agent-row-body .entity-main { min-height: 48px; }

@@ -46,7 +46,7 @@ export function ToolsMenu({
   return (
     <nav className={`flex flex-1 flex-col overflow-y-auto ${phone ? "gap-3 p-3" : "gap-3 p-3"}`}>
       {leading}
-      {scope === "all" ? <Section title="Agent" phone={phone}>
+      {scope === "all" ? <Section title="专家" phone={phone}>
         <Entry phone={phone} label="变更" onClick={openChanges} />
         <Entry phone={phone} label="文件" onClick={openFiles} />
         <Entry phone={phone} label="终端" onClick={() => go("terminal")} />
