@@ -630,3 +630,20 @@ input:focus-visible {
    */
   .gh-mermaid img { max-width: none; }
 }
+
+/* Each full-screen surface owns its insets; embedded previews inherit their host. */
+:root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+}
+.safe-area-page {
+  padding: var(--safe-area-top) var(--safe-area-right) var(--safe-area-bottom) var(--safe-area-left);
+}
+.workbench-navigation {
+  padding-bottom: max(0.25rem, var(--safe-area-bottom));
+}
+@media (min-width: 768px) {
+  .workbench-navigation { padding-top: max(1rem, var(--safe-area-top)); padding-bottom: 1rem; }
+}

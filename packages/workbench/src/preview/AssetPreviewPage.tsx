@@ -212,7 +212,7 @@ export function AssetPreviewPage({
     onRuntimeArtifact ?? (runtimeSessionId ? submitStandaloneArtifact : undefined);
 
   return (
-    <main className="flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg">
+    <main className={`${chrome === "page" ? "safe-area-page" : ""} flex h-full min-h-0 flex-col overflow-hidden bg-bg text-fg`}>
       {chrome === "page" ? (
         <header className="flex min-h-11 shrink-0 items-center gap-2 border-b border-line px-4 py-2">
           <button
