@@ -81,7 +81,7 @@ export function AgentList({
       deviceName={deviceName}
       onToggle={() => onPick(node.workspace.id)}
       onPick={() => onPick(node.workspace.id)}
-      onRename={(name) => void wb.renameWorkspace(node.workspace.id, name)}
+      onRename={(name) => void wb.renameWorkspace(node.workspace.id, name).catch(() => { /* Store already displays the request failure. */ })}
       onRemove={() => wb.removeWorkspace(node.workspace.id)}
       density={density}
       actions={actions}

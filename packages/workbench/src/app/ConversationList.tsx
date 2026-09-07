@@ -7,6 +7,7 @@ import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { localValue, saveLocalValue } from "../session/localConversation";
 import { RecentSessions } from "../shell/ConversationRows";
 import { OpenProject } from "../workspace/OpenProject";
+import { ExpertPickerDialog } from "../workspace/ExpertPicker";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 
 type Props = {
@@ -35,6 +36,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
   const [searchOpen, setSearchOpen] = useState(false);
   const [listMenuOpen, setListMenuOpen] = useState(false);
   const [agentId, setAgentId] = useState("");
+  const [choosingAgent, setChoosingAgent] = useState(false);
   const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("primary");
   const [state, setState] = useState("all");
   const [advanced, setAdvanced] = useState(false);
@@ -114,7 +116,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
         <div aria-label="会话导航工具栏" className="flex min-h-11 min-w-0 items-center gap-2">
           <button type="button" aria-label="搜索会话" aria-expanded={searchOpen} className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => { setSearchOpen(!searchOpen); if (searchOpen) setQuery(""); }}><Search size={18} /></button>
           <select aria-label="按专家分组" value={group?.id ?? ""} onChange={(e) => { setGroupId(e.target.value); setAgentId(""); }} className="min-h-11 min-w-0 flex-1 truncate rounded-lg bg-transparent text-sm font-semibold text-fg">
-            <option value="">全部专家</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+            <option value="">全部会话</option>{groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
           <button type="button" aria-label="新建会话" className="flex min-h-11 shrink-0 items-center gap-1 rounded-lg bg-accent px-3 text-sm font-medium text-white" onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={18} />新建</button>
         </div>
@@ -158,7 +160,8 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
 
     </footer>}
         {advanced && <WorkspaceDetailsDialog title="筛选会话" onClose={() => setAdvanced(false)}><div className="grid gap-3">
-          <label className="flex items-center gap-2 text-xs text-muted">专家<select aria-label="按专家筛选" value={agentId} onChange={(e) => setAgentId(e.target.value)} className={`${input} flex-1`}><option value="">所有专家</option>{wb.workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
+          <div className="flex items-center gap-2 text-xs text-muted">专家<button type="button" aria-label="按专家筛选" className={`${input} min-w-0 flex-1 truncate text-left`} onClick={() => setChoosingAgent(true)}>{wb.workspaces.find(w => w.id === agentId)?.name ?? "所有专家"}</button></div>
+          {choosingAgent && <ExpertPickerDialog title="按专家筛选" selectedId={agentId} allowNone onClose={() => setChoosingAgent(false)} onPick={id => { setAgentId(id); setChoosingAgent(false); }} />}
           {!group && !agentId && <label className="flex items-center gap-2 text-xs text-muted">范围<select aria-label="会话范围" value={ownership} onChange={(e) => setOwnership(e.target.value as ConversationFilter["ownership"])} className={`${input} flex-1`}><option value="primary">主要会话</option><option value="children">子专家会话</option><option value="all">全部会话</option></select></label>}
           {(group || agentId) && <p className="text-xs text-muted">仅查看明确选定的会话，包含选中的子专家。</p>}
           <button className="min-h-9 text-xs text-accent" onClick={() => { setAgentId(""); setOwnership("primary"); setState("all"); setQuery(""); }}>清除筛选</button>
