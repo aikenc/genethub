@@ -1,9 +1,10 @@
+import type { SessionSummary } from "@genehub/proto";
 import { useMemo, useSyncExternalStore } from "react";
 import { useWorkbench } from "../session/store";
 
 type Client = NonNullable<ReturnType<typeof useWorkbench.getState>["client"]>;
 type Activity = { count: number; recent: number; status?: "waiting" | "running" };
-type Snapshot = { agents: Map<string, Activity> | null; error: boolean };
+type Snapshot = { sessions?: SessionSummary[]; agents: Map<string, Activity> | null; error: boolean };
 const empty: Snapshot = { agents: null, error: false };
 const offline: Snapshot = { agents: null, error: true };
 const noSessions: Activity = { count: 0, recent: 0 };
@@ -30,7 +31,7 @@ function createSource(client: Client) {
         else if (session.status === "running" && activity.status !== "waiting") activity.status = "running";
         agents.set(session.workspaceId, activity);
       }
-      snapshot = { agents, error: false };
+      snapshot = { agents, sessions: reply.data, error: false };
     } catch {
       snapshot = { agents: null, error: true };
     } finally {

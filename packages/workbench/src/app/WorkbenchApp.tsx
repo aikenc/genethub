@@ -45,7 +45,8 @@ import { defaultAgent, useWorkbench } from "../session/store";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
-import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
+import { AgentDetailsEnvironment } from "../workspace/AgentDetails";
+import { draftIdentities, readLocalDraft } from "../session/localConversation";
 import { Info } from "lucide-react";
 import { WorkspaceBrowser } from "../workspace/WorkspaceBrowser";
 import type { ExtraTab } from "../shell/tabs";
@@ -172,10 +173,25 @@ export function App({
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage} = usePageNavigation();
   const [spaceDetail, setSpaceDetail] = useState(false);
-  const [agentDetailsOpen, setAgentDetailsOpen] = useState(false);
+  const [overviewSurface, setOverviewSurfaceState] = useState("sessions");
+  const overviewEntry = useRef<{id: string; surface: string} | null>(null);
+  const setOverviewSurface = (surface: string) => {
+    const workspaceId = useWorkbench.getState().draft?.workspaceId;
+    window.history.replaceState({...window.history.state, genehubOverview: {workspaceId, surface: overviewSurface}}, "");
+    window.history.pushState({...window.history.state, genehubOverview: {workspaceId, surface}}, "");
+    setOverviewSurfaceState(surface);
+  };
+  useEffect(() => {
+    const restore = () => {
+      const page = window.history.state?.genehubOverview;
+      if (page && page.workspaceId === useWorkbench.getState().draft?.workspaceId) setOverviewSurfaceState(page.surface ?? "sessions");
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
   const [spacesVisited, setSpacesVisited] = useState(false);
-  const [browserNavigationKey, setBrowserNavigationKey] = useState(0);
-  const [browserWorkspaceId, setBrowserWorkspaceId] = useState<string | null>(null);
+  const [browserNavigationKey] = useState(0);
+  const [browserWorkspaceId] = useState<string | null>(null);
   const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
@@ -234,6 +250,12 @@ export function App({
   // A draft is a conversation with nothing in it yet, so the composer answers to
   // the choices held on the draft until there is a session to hold them.
   const draft = workbench.draft;
+  useEffect(() => {
+    const entry = overviewEntry.current;
+    const saved = window.history.state?.genehubOverview;
+    setOverviewSurfaceState(entry && entry.id === draft?.localId ? entry.surface : saved && saved.workspaceId === draft?.workspaceId ? saved.surface : "sessions");
+    overviewEntry.current = null;
+  }, [draft?.localId]);
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
@@ -586,7 +608,7 @@ export function App({
             client.call({ type: "workspace.list" }),
           ]);
           if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-            throw new Error("目标机器没有返回可用的执行引擎和 Agent 列表。");
+            throw new Error("目标机器没有返回可用的执行引擎和专家列表。");
           }
           return { agents: agents.data, workspaces: workspaces.data };
         });
@@ -765,8 +787,17 @@ export function App({
     workbench.workspaces.find((entry) => entry.id === workbench.activeWorkspaceId) ??
     workbench.workspaces[0];
 
+  const openOverview = (id: string, surface = "sessions", localId?: string) => {
+    const state = useWorkbench.getState();
+    const machine = state.client?.identity?.machineId ?? "";
+    const existing = draftIdentities(machine).find(d => d.workspaceId === id && Boolean(readLocalDraft(`${machine}:${d.localId}`).text || readLocalDraft(`${machine}:${d.localId}`).attachments.length || readLocalDraft(`${machine}:${d.localId}`).missingAttachments));
+    const draftId = localId ?? (state.draft?.workspaceId === id ? state.draft.localId : existing?.localId);
+    if (state.draft?.workspaceId !== id || state.activeSessionId || (localId && localId !== state.draft?.localId)) state.newSession(id, null, { localId: draftId, addressScope: "workspace" });
+    overviewEntry.current = {id: useWorkbench.getState().draft?.localId ?? "", surface};
+    setOverviewSurfaceState(surface); setSessionsOpen(false); setSection("sessions");
+  };
   return (
-    <AgentDetailsEnvironment.Provider value={{ host, endpoint }}>
+    <AgentDetailsEnvironment.Provider value={{ host, endpoint, onOverview: openOverview, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
     <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
       <TitleBar
         host={host}
@@ -799,12 +830,12 @@ export function App({
         {spacesVisited && workbench.client?.identity?.machineId ? <div className={section === "spaces" ? "min-h-0 min-w-0 flex-1" : "hidden"}>
           <WorkspaceBrowser onDepthChange={setSpaceDetail} host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={workbench.client?.identity?.machineId ?? deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
             onSession={(id) => { void workbench.selectSession(id); setSessionsOpen(false); setSection("sessions"); }}
-            onNewSession={(id, localId) => { workbench.newSession(id, null, {localId, addressScope: id ? "workspace" : "machine"}); setSessionsOpen(false); setSection("sessions"); }}
+            onNewSession={(id, localId) => { if (id) openOverview(id, "sessions", localId); }}
             onExtra={(tab, id) => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
         </div> : null}
-        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备 Agent 列表…</p>}
-        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个Agent的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一Agent，请 Agent 基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览Agent</button></div></section> : null}
-        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属Agent。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
+        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备专家列表…</p>}
+        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个专家的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一专家，请专家基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览专家</button></div></section> : null}
+        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属专家。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
         <main className={section === "sessions" ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
@@ -823,7 +854,7 @@ export function App({
             >
               <span aria-hidden>‹</span>
             </button>
-            <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-base font-medium">{showChat ? workspace?.name ?? "会话" : activeTab?.title}</h1><p className="truncate text-xs text-muted">{showChat ? session?.title ?? "新会话" : endpoint.label}</p></div>
+            <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-base font-medium">{showChat ? starting ? "专家概要" : workspace?.name ?? "会话" : activeTab?.title}</h1><p className="truncate text-xs text-muted">{showChat ? session?.title ?? "新会话" : endpoint.label}</p></div>
             {/* Only when it is not what it should be. A green tick on every
                 screen is one more thing to read past, and this bar has room
                 for exactly three things — but a phone that has quietly lost
@@ -840,10 +871,9 @@ export function App({
               </span>
             )}
             <BackgroundBadge />
-            {workspace && <button type="button" aria-label="当前 Agent 详情" title="Agent 详情" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setAgentDetailsOpen(true)}><Info size={20} /></button>}
+            {workspace && !starting && <button type="button" aria-label="当前专家概要" title="专家概要" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => openOverview(workspace.id)}><Info size={20} /></button>}
           </header>
 
-          {agentDetailsOpen && workspace && <AgentDetailsDialog key={workspace.id} workspace={workspace} deviceName={endpoint.label} onClose={() => setAgentDetailsOpen(false)} onBrowse={() => { setAgentDetailsOpen(false); setBrowserWorkspaceId(workspace.id); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }} />}
           {workbench.notice ? (
             <p
               role="alert"
@@ -920,21 +950,13 @@ export function App({
               {showChat ? (
                 composing ? (
                   <>
-                    <div className="hidden items-center justify-end gap-2 border-b border-line px-3 py-1 md:flex">
-                      <button type="button" className="mr-auto min-h-9 rounded px-2 text-xs text-muted hover:bg-raised" onClick={() => { setBrowserWorkspaceId(workbench.activeWorkspaceId); setBrowserNavigationKey((value) => value + 1); setSpacesVisited(true); setSection("spaces"); }}>{workspace?.name ?? "Agent"} · 浏览Agent</button>
-                      <BackgroundBadge />
-                      <ConnectionBadge
-                        state={workbench.connection}
-                        endpoint={endpoint}
-                      />
-                    </div>
                     <div className="min-h-0 flex-1 overflow-hidden">
                       {/* A draft has no transcript to show, and the room it
                           leaves is where the two decisions a new conversation
                           still needs — which workspace, which Agent — are least
                           hidden. */}
                       {starting ? (
-                        <NewSessionPanel host={host} endpoint={endpoint} />
+                        <NewSessionPanel host={host} endpoint={endpoint} surface={overviewSurface} onSurface={setOverviewSurface} />
                       ) : (
                         // Anchors the transcript's own furniture — the fade at
                         // its cut edge, the way back to the newest message — to
@@ -993,8 +1015,9 @@ export function App({
                         </div>
                       </div>
                     ) : null}
-                    {!workbench.timeline.pendingPermission ? (
+                    {!workbench.timeline.pendingPermission && (!starting || overviewSurface === "sessions") ? (
                       <Composer
+                        layout={starting ? "inline" : "overlay"}
                         key={`${workbench.client?.identity?.machineId ?? endpoint.label}:${session?.id ?? draft?.localId ?? "empty"}`}
                         persistenceKey={`${workbench.client?.identity?.machineId ?? endpoint.label}:${session?.id ?? draft?.localId ?? "empty"}`}
                         phase={phase}
@@ -1004,7 +1027,7 @@ export function App({
                           managedReadOnly
                             ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
                             : importedReadOnly
-                            ? "这是只读导入历史：原 Agent 没有提供可恢复会话。"
+                            ? "这是只读导入历史：原专家没有提供可恢复会话。"
                             : undefined
                         }
                         agents={workbench.agents}
@@ -1182,8 +1205,8 @@ function importCoverageLabel(coverage: HistoryCoverage): string {
   const source = coverage.sourceItemCount ?? coverage.retainedItemCount + coverage.omittedItemCount;
   const recovery = {
     genehub: "可在 GeneHub 继续检索",
-    external: "需从原 Agent 继续检索",
-    nativeOnly: "仅原 Agent 原生会话可找回",
+    external: "需从原专家继续检索",
+    nativeOnly: "仅原专家原生会话可找回",
     unavailable: "省略部分不可找回",
   }[coverage.retrieval];
   return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
@@ -1300,9 +1323,9 @@ function FirstRun({
   if (!workspace) {
     return (
       <Splash>
-        <p className="text-sm">先打开一个Agent。</p>
+        <p className="text-sm">先打开一个专家。</p>
         <p className="mb-3 text-xs text-muted">
-          为 Agent 选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
+          为专家选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
         </p>
         <OpenProject host={host} endpoint={endpoint} />
       </Splash>
@@ -1342,33 +1365,6 @@ function FirstRun({
         新建会话
       </button>
     </Splash>
-  );
-}
-
-function ConnectionBadge({
-  state,
-  endpoint,
-}: {
-  state: string;
-  endpoint: Endpoint;
-}) {
-  const label =
-    state === "ready"
-      ? endpoint.via === "loopback"
-        ? "本机"
-        : endpoint.via === "lan"
-          ? "已停用的局域网连接"
-          : "中转"
-      : state === "reconnecting"
-        ? "重连中"
-        : state === "closed"
-          ? "已断开"
-          : "连接中";
-
-  return (
-    <span className="ml-auto truncate text-[11px] text-faint" role="status">
-      {label} · {endpoint.label}
-    </span>
   );
 }
 

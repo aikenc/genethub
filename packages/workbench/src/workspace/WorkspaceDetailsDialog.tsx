@@ -2,7 +2,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 /** Workspace management belongs to the whole window, including on phones. */
-export function WorkspaceDetailsDialog({ children, onClose, title = "Agent详情", fullScreenOnMobile = false }: {
+export function WorkspaceDetailsDialog({ children, onClose, title = "专家详情", fullScreenOnMobile = false }: {
   title?: string;
   fullScreenOnMobile?: boolean;
   children: ReactNode;

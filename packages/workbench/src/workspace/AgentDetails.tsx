@@ -8,7 +8,7 @@ import { useAgentGroups } from "./agentGroups";
 import { AgentAvatar, AgentAvatarPicker } from "./AgentAvatar";
 import { WorkspaceDetailsDialog } from "./WorkspaceDetailsDialog";
 
-export const AgentDetailsEnvironment = createContext<{ host: Host; endpoint: Endpoint } | null>(null);
+export const AgentDetailsEnvironment = createContext<{ host: Host; endpoint: Endpoint; onOverview?(id: string, surface?: string): void; workspaceTools?(id: string): ReactNode } | null>(null);
 
 /** Shared facts for contact details, the desktop inspector and the chat header. */
 export function AgentDetails({ workspace, deviceName, compact = false }: { workspace: WorkspaceInfo; deviceName: string; compact?: boolean }) {
@@ -35,13 +35,13 @@ export function AgentDetails({ workspace, deviceName, compact = false }: { works
   const components = workspace.agentSpace?.components.filter((c) => c.enabled).map((c) => c.role ? `${c.componentId} · ${c.role}` : c.componentId) ?? [];
   const parent = workspaces.find((w) => w.id === workspace.agentSpace?.parentWorkspaceId);
   return <section aria-label={`${workspace.name} 的资料`} className="min-w-0 space-y-4">
-    {!compact && <div className="flex items-center gap-3"><AgentAvatar id={workspace.id} name={workspace.name} /><div className="min-w-0"><h2 className="break-words text-lg font-semibold">{workspace.name}</h2><p className="text-xs text-muted">{components.join(" / ") || (workspace.workspaceFile ? "多目录代码工作区" : "目录 Agent")}</p></div></div>}
+    {!compact && <div className="flex items-center gap-3"><AgentAvatar id={workspace.id} name={workspace.name} /><div className="min-w-0"><h2 className="break-words text-lg font-semibold">{workspace.name}</h2><p className="text-xs text-muted">{components.join(" / ") || (workspace.workspaceFile ? "多目录代码工作区" : "目录专家")}</p></div></div>}
     <dl className="space-y-3 text-sm">
       <Fact label="分组">{groups.filter((g) => g.workspaceIds.includes(workspace.id)).map((g) => g.name).join("、") || "未分组"}</Fact>
       <Fact label="所属设备">{deviceName || "当前设备"}</Fact>
       <Fact label="主路径">{workspace.root}</Fact>
       {workspace.workspaceFile && <Fact label="工作区文件">{workspace.workspaceFile}</Fact>}
-      {parent && <Fact label="上级 Agent">{parent.name}</Fact>}
+      {parent && <Fact label="上级专家">{parent.name}</Fact>}
       <Fact label="会话数量">
         {rows ? <span>{rows.length} 个 · 未归档 {rows.filter((s) => !s.archived).length} · 已归档 {rows.filter((s) => s.archived).length}</span> : <span>{connection !== "ready" ? "设备未连接，暂时无法读取" : result?.error ? "读取失败" : "正在读取…"}</span>}
         <button type="button" disabled={connection !== "ready"} className="ml-2 min-h-8 text-xs text-accent disabled:opacity-40" onClick={() => setReload((n) => n + 1)}>刷新数量</button>
@@ -66,6 +66,6 @@ export function AgentDetailsDialog({ workspace, deviceName, onClose, onBrowse }:
   return <WorkspaceDetailsDialog title="资料与配置" fullScreenOnMobile onClose={onClose}>
     <AgentDetails key={workspace.id} workspace={workspace} deviceName={deviceName} />
     <AgentAdvancedSettings key={workspace.id + ":advanced"} workspace={workspace} />
-    {onBrowse && <button type="button" className="mt-4 min-h-11 w-full rounded-lg bg-accent text-white" onClick={onBrowse}>打开 Agent 面板</button>}
+    {onBrowse && <button type="button" className="mt-4 min-h-11 w-full rounded-lg bg-accent text-white" onClick={onBrowse}>打开专家面板</button>}
   </WorkspaceDetailsDialog>;
 }

@@ -2,7 +2,7 @@ import type {
   SessionSummary,
   WorkspaceInfo,
 } from "@genehub/proto";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { readLocalDraft } from "../session/localConversation";
 import { useWorkbench } from "../session/store";
@@ -11,7 +11,7 @@ import { Info } from "lucide-react";
 import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
-import { AgentDetailsDialog } from "../workspace/AgentDetails";
+import { AgentDetailsDialog, AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { AgentAvatar } from "../workspace/AgentAvatar";
 import { SessionStatusIcon } from "./SessionStatusIcon";
 
@@ -68,6 +68,8 @@ export function WorkspaceRow({
   onNewSession?(): void;
   children: ReactNode;
 }) {
+  const environment = useContext(AgentDetailsEnvironment);
+  const openDetails = () => environment?.onOverview ? environment.onOverview(workspace.id, "details") : setDetails(true);
   const activity = useAgentActivity(workspace.id);
   const [editing, setEditing] = useState(false);
   const [menu, setMenu] = useState(false);
@@ -79,7 +81,7 @@ export function WorkspaceRow({
       {editing ? (
         <Rename
           initial={workspace.name}
-          label="Agent 名称"
+          label="专家名称"
           onCommit={(name) => {
             setEditing(false);
             onRename(name);
@@ -134,7 +136,7 @@ export function WorkspaceRow({
           {childCount > 0 && onExpand && (
             <button
               type="button"
-              aria-label={`${expanded ? "收起" : "展开"} ${workspace.name} 的子 Agent`}
+              aria-label={`${expanded ? "收起" : "展开"} ${workspace.name} 的子专家`}
               aria-expanded={expanded}
               onClick={onExpand}
               className="entity-expand flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised"
@@ -142,11 +144,11 @@ export function WorkspaceRow({
               <span aria-hidden>{expanded ? "⌃" : "⌄"}</span>
             </button>
           )}
-          {!actions && <button type="button" aria-label={`${workspace.name} 的详情`} title="Agent 详情" className="flex h-10 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setDetails(true)}><Info size={17} /></button>}
+          {!actions && !environment?.onOverview && <button type="button" aria-label={`${workspace.name} 的详情`} title="专家详情" className="flex h-10 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={openDetails}><Info size={17} /></button>}
           {actions && (
             <button
               type="button"
-              aria-label={`${workspace.name} 的 Agent 操作`}
+              aria-label={`${workspace.name} 的专家操作`}
               aria-expanded={menu}
               className="entity-more flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-sidebar-hover hover:text-fg"
               onClick={() => setMenu((open) => !open)}
@@ -161,7 +163,7 @@ export function WorkspaceRow({
         <>
           <button
             type="button"
-            aria-label="收起 Agent 操作"
+            aria-label="收起专家操作"
             className="fixed inset-0 z-40 cursor-default"
             onClick={() => setMenu(false)}
           />
@@ -175,7 +177,7 @@ export function WorkspaceRow({
               className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised md:min-h-0 md:py-1.5 md:text-xs"
               onClick={() => {
                 setMenu(false);
-                setDetails(true);
+                openDetails();
               }}
             >
               详情
@@ -197,7 +199,7 @@ export function WorkspaceRow({
               disabled={running > 0}
               title={
                 running > 0
-                  ? "先停止这个 Agent中正在运行或等待的会话"
+                  ? "先停止这个专家中正在运行或等待的会话"
                   : undefined
               }
               className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
@@ -218,7 +220,7 @@ export function WorkspaceRow({
             从列表移除「{workspace.name}」？
           </p>
           <p className="mt-1 leading-relaxed text-muted">
-            文件和会话不会删除；以后重新打开同一Agent即可继续。
+            文件和会话不会删除；以后重新打开同一专家即可继续。
           </p>
           <div className="mt-3 flex justify-end gap-2">
             <button
@@ -358,14 +360,14 @@ function SessionRow({
         onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
       >
         <span className="relative shrink-0">
-          <AgentAvatar id={session.workspaceId} name={project?.name ?? "Agent"} />
+          <AgentAvatar id={session.workspaceId} name={project?.name ?? "专家"} />
           {["waiting", "running", "failed"].includes(session.status) && <span className="absolute -top-1 -right-1 rounded-full bg-sidebar p-0.5"><SessionStateIcon session={session} /></span>}
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium text-fg">{title(session)}</span>
-          <span className="entity-secondary mt-1 flex min-w-0 items-center gap-1 text-xs text-muted" title={`${messageDate.toLocaleString()} · ${project?.name ?? "Agent"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+          <span className="entity-secondary mt-1 flex min-w-0 items-center gap-1 text-xs text-muted" title={`${messageDate.toLocaleString()} · ${project?.name ?? "专家"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
             <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
-            <span className="truncate">· {project?.name ?? "Agent"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{unsupported ? " · 需升级" : ""}</span>
+            <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{unsupported ? " · 需升级" : ""}</span>
           </span>
         </span>
       </button>
