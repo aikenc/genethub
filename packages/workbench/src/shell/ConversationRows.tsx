@@ -7,7 +7,6 @@ import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { readLocalDraft } from "../session/localConversation";
 import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
-import { Info } from "lucide-react";
 import { relativeTime } from "../ui/relativeTime";
 import { useAgentActivity } from "../workspace/useAgentActivity";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
@@ -144,7 +143,6 @@ export function WorkspaceRow({
               <span aria-hidden>{expanded ? "⌃" : "⌄"}</span>
             </button>
           )}
-          {!actions && !environment?.onOverview && <button type="button" aria-label={`${workspace.name} 的详情`} title="专家详情" className="flex h-10 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={openDetails}><Info size={17} /></button>}
           {actions && (
             <button
               type="button"

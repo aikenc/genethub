@@ -896,19 +896,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async configureAgentSpace(workspaceId, expectedRevision, operation) {
-    const reply = await asked(set, () =>
-      require_(get().client).call({
+    const reply = await require_(get().client).call({
         type: "agentSpace.configure",
         payload: { workspaceId, expectedRevision, operation },
-      }),
-    );
-    if (reply?.type !== "workspace") return;
+      });
+    if (reply?.type !== "workspace") throw new Error("未收到专家配置更新结果");
     await get().refreshWorkspaces();
   },
 
   async inspectAgentSpaceBuild(projectWorkspaceId, targetWorkspaceId, operation) {
-    const reply = await asked(set, () =>
-      require_(get().client).call({
+    const reply = await require_(get().client).call({
         type: "agentSpace.builder",
         payload: {
           workspaceId: projectWorkspaceId,
@@ -916,9 +913,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           spaceName: "existing",
           operation,
         },
-      }),
-    );
-    return reply?.type === "agentSpaceBuilder" ? reply.data : null;
+      });
+    if (reply?.type !== "agentSpaceBuilder") throw new Error("未收到构建配置结果");
+    return reply.data;
   },
 
   newSession(workspaceId, agentId, options) {
