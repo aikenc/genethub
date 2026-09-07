@@ -1,6 +1,7 @@
 import type { AgentSpaceBuilderOperation, WorkspaceInfo } from "@genehub/proto";
 import { useEffect, useState, Fragment } from "react";
 import { useWorkbench } from "../session/store";
+import { ExpertPickerDialog } from "./ExpertPicker";
 import { buildAgentSpaceTree, isDescendant } from "./agent-space-tree";
 
 /** Shared configuration, independent of the row or dialog that opened it. */
@@ -10,6 +11,7 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
   const projectWorkspaceId = tree.projectRootById[workspace.id] ?? workspace.id;
   const breadcrumb = workspace.name;
   const [spaceBusy, setSpaceBusy] = useState(false);
+  const [choosingParent, setChoosingParent] = useState(false);
   const [componentId, setComponentId] = useState("worker");
   const [workerRole, setWorkerRole] = useState("tester");
   const [parentId, setParentId] = useState(
@@ -194,19 +196,8 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
             </button></>}
 
             {section !== "components" && <div className="mt-3 flex gap-1">
-              <select
-                aria-label="上级专家"
-                value={parentId}
-                onChange={(event) => setParentId(event.target.value)}
-                className="min-w-0 flex-1 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"
-              >
-                <option value="">无 Parent（项目根）</option>
-                {parentChoices.map((candidate) => (
-                  <option key={candidate.id} value={candidate.id}>
-                    {candidate.name}
-                  </option>
-                ))}
-              </select>
+              <button type="button" aria-label="选择上级专家" disabled={spaceBusy} className="min-h-11 min-w-0 flex-1 truncate rounded-lg border border-line px-3 text-left text-sm" onClick={() => setChoosingParent(true)}>{workspaces.find(w => w.id === parentId)?.name ?? "无上级专家"}</button>
+              {choosingParent && <ExpertPickerDialog title="选择上级专家" selectedId={parentId} allowedIds={parentChoices.map(w => w.id)} allowNone noneLabel="无上级专家" onClose={() => setChoosingParent(false)} onPick={id => { setParentId(id); setChoosingParent(false); }} />}
               <button
                 type="button"
                 disabled={spaceBusy || !workspace.agentSpace}

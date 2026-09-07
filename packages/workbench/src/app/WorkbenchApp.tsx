@@ -171,7 +171,6 @@ export function App({
     "idle" | "working" | { error: string }
   >(() => (host.pendingPairing?.() ? "working" : "idle"));
   const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage, replaceNextPage} = usePageNavigation();
-  const [spaceDetail, setSpaceDetail] = useState(false);
   const [overviewSurface, setOverviewSurfaceState] = useState("sessions");
   const overviewEntry = useRef<{id: string; surface: string} | null>(null);
   const setOverviewSurface = (surface: string) => {
@@ -205,18 +204,20 @@ export function App({
   // reveal their destination (for example Preview feedback or a deep link).
   const previousSession = useRef(workbench.activeSessionId);
   const firstSessionSeen = useRef(false);
+  const previousDraft = useRef(workbench.draft?.localId);
   useEffect(() => {
     const tab = workbench.tabs.find((item) => item.id === workbench.activeTabId);
     if (workbench.activeSessionId && !firstSessionSeen.current) {
       firstSessionSeen.current = true;
-      if (!readWorkbenchLocation()?.sessionId) { previousSession.current = workbench.activeSessionId; return; }
+      if (!previousDraft.current && !readWorkbenchLocation()?.sessionId) { previousSession.current = workbench.activeSessionId; return; }
     }
     if ((workbench.activeSessionId && workbench.activeSessionId !== previousSession.current) || (tab && tab.kind !== "chat")) {
       setSection("sessions");
       setSessionsOpen(false);
     }
     previousSession.current = workbench.activeSessionId;
-  }, [workbench.activeTabId, workbench.activeSessionId]);
+    previousDraft.current = workbench.draft?.localId;
+  }, [workbench.activeTabId, workbench.activeSessionId, workbench.draft?.localId]);
   const theme = useTheme((state) => state.resolved);
   const pairing = workbench.hub?.state === "pairing";
   const activeTab = workbench.tabs.find(
@@ -792,12 +793,13 @@ export function App({
     const draftId = localId ?? (state.draft?.workspaceId === id ? state.draft.localId : existing?.localId);
     if (state.draft?.workspaceId !== id || state.activeSessionId || (localId && localId !== state.draft?.localId)) state.newSession(id, null, { localId: draftId, addressScope: "workspace" });
     overviewEntry.current = {id: useWorkbench.getState().draft?.localId ?? "", surface};
-    setOverviewSurfaceState(surface); setSessionsOpen(false); setSection("sessions");
+    setOverviewSurfaceState(surface); setSessionsOpen(false); setSection("spaces");
     queueMicrotask(() => window.history.replaceState({...window.history.state, genehubOverview: {workspaceId: id, surface}}, ""));
   };
   return (
     <AgentDetailsEnvironment.Provider value={{ host, endpoint, onOverview: (id, surface, child) => { if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
     <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
+      <OpenProject host={host} endpoint={endpoint} variant="none" driveUrl onOpened={() => { const id = useWorkbench.getState().draft?.workspaceId; if (id) openOverview(id); }} />
       <TitleBar
         host={host}
         endpoint={endpoint}
@@ -806,8 +808,8 @@ export function App({
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-        <WorkbenchNavigation detail={(section === "sessions" && !sessionsOpen) || (section === "spaces" && spaceDetail)} section={section === "sessions" && !showChat ? "tools" : section} needsAttention={workbench.sessions.some((item) => ["waiting", "failed"].includes(item.status))} onChange={(next) => {
-          setSessionsOpen(next === "sessions");
+        <WorkbenchNavigation detail={(section === "sessions" && !sessionsOpen) || (section === "spaces" && !sessionsOpen)} section={section === "sessions" && !showChat ? "tools" : section} needsAttention={workbench.sessions.some((item) => ["waiting", "failed"].includes(item.status))} onChange={(next) => {
+          setSessionsOpen(next === "sessions" || next === "spaces");
           if (next === "sessions" && !showChat) {
             const chat = [...workbench.tabs].reverse().find((tab) => tab.kind === "chat");
             if (chat) workbench.activateTab(chat.id);
@@ -823,20 +825,20 @@ export function App({
           hidden={sidebarHidden || section !== "sessions" || !showChat}
           endpoint={endpoint}
           onPickTarget={pickTarget}
-          onNavigate={() => { setSessionsOpen(false); setSection("sessions"); }}
+          onNavigate={() => { setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }}
         />
 
-        {spacesVisited && workbench.client?.identity?.machineId ? <div className={section === "spaces" ? "min-h-0 min-w-0 flex-1" : "hidden"}>
-          <WorkspaceBrowser onDepthChange={setSpaceDetail} host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={workbench.client?.identity?.machineId ?? deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
+        {spacesVisited && workbench.client?.identity?.machineId ? <div className={section === "spaces" && sessionsOpen ? "min-h-0 min-w-0 flex-1" : "hidden"}>
+          <WorkspaceBrowser host={host} endpoint={endpoint} navigationKey={browserNavigationKey} key={workbench.client?.identity?.machineId ?? deviceHandle ?? endpoint.label} deviceName={endpoint.label} initialWorkspaceId={browserWorkspaceId} extraTabs={extraTabs}
             onSession={(id) => { void workbench.selectSession(id); setSessionsOpen(false); setSection("sessions"); }}
             onNewSession={(id, localId) => { if (id) openOverview(id, "sessions", localId); }}
             onExtra={(tab, id) => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); setSection("sessions"); }} />
         </div> : null}
         {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备专家列表…</p>}
-        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个专家的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一专家，请专家基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSection("spaces"); }}>浏览专家</button></div></section> : null}
+        {section === "discover" ? <section className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个专家的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一专家，请专家基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览专家</button></div></section> : null}
         {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属专家。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
-        <main className={section === "sessions" ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
+        <main className={section === "sessions" || (section === "spaces" && !sessionsOpen) ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
               two 44px targets — the session list and the tools drawer.
               The title in the middle is where the open tabs live: one

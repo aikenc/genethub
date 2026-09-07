@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useWorkbench } from "../session/store";
 import { AgentList } from "./AgentList";
+import { WorkspaceDetailsDialog } from "./WorkspaceDetailsDialog";
 import { useAgentGroups } from "./agentGroups";
 
 /** Shared expert selection: directory rows, personal group filters, no management actions. */
-export function ExpertPicker({ selectedId, onPick, onClose }: {
-  selectedId?: string; onPick(id: string): void; onClose?(): void;
+export function ExpertPicker({ selectedId, onPick, onClose, allowedIds, allowNone = false, noneLabel = "不限专家" }: {
+  selectedId?: string; onPick(id: string): void; onClose?(): void; allowedIds?: string[]; allowNone?: boolean; noneLabel?: string;
 }) {
   const { workspaces, sessions, client } = useWorkbench();
   const { groups, error } = useAgentGroups(client?.identity?.machineId ?? "");
@@ -21,6 +22,15 @@ export function ExpertPicker({ selectedId, onPick, onClose }: {
       <option value="">全部专家</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
     </select>
     {error && <p role="alert" className="text-sm text-danger">{error}</p>}
-    <div className="max-h-64 min-h-0 overflow-y-auto"><AgentList workspaces={workspaces} sessions={sessions} memberIds={group?.workspaceIds ?? workspaces.map(w => w.id)} selectedId={selectedId} density="comfortable" actions={false} query={query} onPick={onPick} /></div>
+    {allowNone && <button type="button" className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => onPick("")}>{noneLabel}</button>}
+    <div className="max-h-64 min-h-0 overflow-y-auto"><AgentList workspaces={workspaces} sessions={sessions} memberIds={(group?.workspaceIds ?? workspaces.map(w => w.id)).filter(id => !allowedIds || allowedIds.includes(id))} selectedId={selectedId} density="comfortable" actions={false} query={query} onPick={onPick} /></div>
   </section>;
+}
+
+/** Every expert choice uses the same modal, row presentation and group semantics. */
+export function ExpertPickerDialog({ onClose, title = "选择专家", ...props }: {
+  selectedId?: string; onPick(id: string): void; onClose(): void;
+  allowedIds?: string[]; allowNone?: boolean; noneLabel?: string; title?: string;
+}) {
+  return <WorkspaceDetailsDialog title={title} onClose={onClose}><ExpertPicker {...props} /></WorkspaceDetailsDialog>;
 }

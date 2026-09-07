@@ -75,6 +75,7 @@ export function WorkspaceRow({
   const [details, setDetails] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState("");
   return (
     <li data-density={density} className="entity-row group relative mb-1">
       {editing ? (
@@ -215,11 +216,12 @@ export function WorkspaceRow({
       {removing ? (
         <div className="mx-1 mb-2 rounded-lg border border-line-strong bg-surface p-3 text-xs">
           <p className="font-medium text-fg">
-            从列表移除「{workspace.name}」？
+            从列表移除「{workspace.name}」及其成员？
           </p>
           <p className="mt-1 leading-relaxed text-muted">
-            文件和会话不会删除；以后重新打开同一专家即可继续。
+            同时移除其下全部成员的列表登记。文件和历史会话不会删除；运行中或等待交互时会阻止移除。
           </p>
+          {removeError && <p role="alert" className="mt-2 text-danger">{removeError}</p>}
           <div className="mt-3 flex justify-end gap-2">
             <button
               type="button"
@@ -235,10 +237,10 @@ export function WorkspaceRow({
               className="rounded bg-danger px-2 py-1 text-white disabled:opacity-40"
               onClick={() => {
                 setRemoveBusy(true);
-                void onRemove().finally(() => {
-                  setRemoveBusy(false);
-                  setRemoving(false);
-                });
+                setRemoveError("");
+                void onRemove().then(() => setRemoving(false)).catch(e => {
+                  setRemoveError(e instanceof Error ? e.message : "移除失败，请重试");
+                }).finally(() => setRemoveBusy(false));
               }}
             >
               {removeBusy ? "移除中…" : "确认移除"}

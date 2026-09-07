@@ -2,10 +2,11 @@ import { useContext, useEffect, useMemo, useState } from "react";
 import type { Host, Endpoint } from "../host";
 import { useWorkbench } from "./store";
 import { pickPromptSuggestions } from "./prompt-suggestions";
-import { ExpertPicker } from "../workspace/ExpertPicker";
+import { ExpertPickerDialog } from "../workspace/ExpertPicker";
 import { ExpertSquad } from "../workspace/ExpertSquad";
+import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { ArrowLeft, MoreHorizontal } from "lucide-react";
-import { AgentAvatar } from "../workspace/AgentAvatar";
+import { AgentAvatar, AgentAvatarPicker } from "../workspace/AgentAvatar";
 import { AgentDetails, ExpertDirectories, AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { AgentAdvancedSettings } from "../workspace/AgentAdvancedSettings";
 import { RecentSessions } from "../shell/ConversationRows";
@@ -28,6 +29,11 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   const workspace = wb.workspaces.find((w) => w.id === wb.draft?.workspaceId);
   const [choosing, setChoosing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState("");
   const [historyQuery, setHistoryQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [archived, setArchived] = useState(false);
@@ -50,23 +56,22 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
     <header className="shrink-0 border-b border-line px-3 py-3 md:px-6" style={{ paddingTop: "calc(0.75rem + env(safe-area-inset-top))" }}>
       <div className="mx-auto flex max-w-4xl items-center gap-2">
         <button type="button" aria-label="返回" className="flex min-h-12 w-10 shrink-0 items-center justify-center rounded-lg hover:bg-raised" onClick={onBack}><ArrowLeft size={20} /></button>
-        <AgentAvatar id={workspace.id} name={workspace.name} />
-        <div className="min-w-0 flex-1"><h1 className="truncate text-lg font-semibold" title={workspace.name}>{workspace.name}</h1>
+        <button type="button" aria-label="更换专家头像" className="shrink-0 rounded-lg" onClick={() => setAvatarOpen(true)}><AgentAvatar id={workspace.id} name={workspace.name} /></button>
+        <div className="min-w-0 flex-1"><h1 className="truncate text-lg font-semibold"><button type="button" aria-label="重命名专家" title="点击修改专家名称" className="max-w-full truncate text-left hover:text-accent" onClick={() => { setName(workspace.name); setRenameError(""); setRenameOpen(true); }}>{workspace.name}</button></h1>
           <p className="mt-1 truncate text-xs text-muted">{workspace.agentSpace?.components.filter(c => c.enabled).map(c => c.role ? `${c.componentId} · ${c.role}` : c.componentId).join(" / ") || (workspace.workspaceFile ? "多目录专家" : "目录专家")}</p>
         </div>
         <button type="button" className="min-h-12 shrink-0 rounded-lg px-3 text-sm text-accent hover:bg-raised" onClick={() => setChoosing(v => !v)} aria-label="切换专家" aria-expanded={choosing}>切换</button>
       </div>
-      {choosing && <div className="mx-auto mt-3 max-w-4xl"><ExpertPicker selectedId={workspace.id} onPick={id => navigate(id)} onClose={() => setChoosing(false)} /></div>}
+      {choosing && <ExpertPickerDialog title="切换专家" selectedId={workspace.id} onPick={id => navigate(id)} onClose={() => setChoosing(false)} />}
       <nav className="relative mx-auto mt-2 flex max-w-4xl items-center gap-1" aria-label="专家页签">
         {[["sessions", "会话"], ["components", "组件"], ["directories", "目录"], ["children", "小队"]].map(([id,label]) => <button key={id} type="button" aria-pressed={surface === id} className={`min-h-11 min-w-0 flex-1 rounded-lg px-1 text-sm ${surface === id ? "bg-raised font-medium text-accent" : "text-muted hover:bg-raised"}`} onClick={() => { setMenuOpen(false); setSurface(id!); }}>{label}</button>)}
         <button type="button" aria-label="专家菜单" aria-expanded={menuOpen} className="flex min-h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setMenuOpen(v => !v)}><MoreHorizontal size={20} /></button>
-        {menuOpen && <><button type="button" aria-label="关闭专家菜单" className="fixed inset-0 z-20 cursor-default" onClick={() => setMenuOpen(false)} /><div role="menu" className="absolute right-0 top-full z-30 min-w-40 rounded-xl border border-line bg-bg p-1 shadow-lg">{[["import","导入会话"],["details","资料与头像"],["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button key={id} type="button" role="menuitem" className="block min-h-11 w-full rounded-lg px-4 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); if(id === "import") setImportOpen(true); else setSurface(id!); }}>{label}</button>)}</div></>}
+        {menuOpen && <><button type="button" aria-label="关闭专家菜单" className="fixed inset-0 z-20 cursor-default" onClick={() => setMenuOpen(false)} /><div role="menu" className="absolute right-0 top-full z-30 min-w-40 rounded-xl border border-line bg-bg p-1 shadow-lg">{[["history",showAll ? "最近会话" : "查看全部会话"],["import","导入会话"],["details","资料与头像"],["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button key={id} type="button" role="menuitem" className="block min-h-11 w-full rounded-lg px-4 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); if(id === "import") setImportOpen(true); else if (id === "history") { setShowAll(v => !v); setArchived(false); setHistoryQuery(""); setSurface("sessions"); } else setSurface(id!); }}>{label}</button>)}</div></>}
       </nav>
     </header>
     <div className={surface === "terminal" ? "hidden" : ["files", "changes"].includes(surface) ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6"} key={`${workspace.id}:${surface}`}>
       <div className="mx-auto max-w-4xl">
         {surface === "sessions" && <>
-          <div className="mb-2 flex items-center gap-2"><p className="mr-auto text-xs text-muted">继续已有话题</p><button type="button" className="min-h-10 shrink-0 whitespace-nowrap px-2 text-sm text-accent" onClick={() => { setShowAll(v => !v); setArchived(false); setHistoryQuery(""); }}>{showAll ? "收起历史" : "查看全部"}</button></div>
           {showAll && <div className="mb-3 flex gap-2"><input aria-label="搜索当前专家会话" placeholder="搜索会话" value={historyQuery} onChange={e => setHistoryQuery(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-raised px-3 text-sm"/><button type="button" aria-pressed={archived} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => setArchived(v => !v)}>{archived ? "返回未归档" : "已归档"}</button></div>}
           {!activity.sessions ? <p role="status" className="py-6 text-sm text-muted">{activity.error ? "会话暂时无法读取，请检查连接后重试。" : "正在读取会话…"}</p> : <>
             <RecentSessions sessions={(showAll ? rows : rows.slice(0,10)).map(s => ({...s, unread: Boolean(s.messagePreview && localValue(`read:${machine}:${s.id}`) !== s.messagePreview.itemId)}))} workspaces={wb.workspaces} activeSessionId={null} onPickSession={id => void wb.selectSession(id)} onRename={(id,title) => void wb.renameSession(id,title)} onDelete={id => void wb.deleteSession(id)} />
@@ -84,6 +89,12 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
     </div>
     {terminalIds.filter(id => wb.workspaces.some(w => w.id === id)).map(id => <div key={id} className={surface === "terminal" && workspace.id === id ? "min-h-0 flex-1" : "hidden"}><TerminalPanel workspaceId={id} /></div>)}
     {surface === "sessions" && <div className="shrink-0 px-4 pb-2"><div className="mx-auto flex max-w-chat gap-2 overflow-x-auto">{suggestions.map(s => <button type="button" key={s} className="min-h-9 shrink-0 rounded-full border border-line px-3 text-xs text-muted hover:text-fg" onClick={() => wb.appendComposerDraftLine(null, s)}>{s}</button>)}</div></div>}
+    {avatarOpen && <WorkspaceDetailsDialog title="更换头像" onClose={() => setAvatarOpen(false)}><AgentAvatarPicker id={workspace.id} /></WorkspaceDetailsDialog>}
+    {renameOpen && <WorkspaceDetailsDialog title="修改专家名称" onClose={() => { if (!renameBusy) setRenameOpen(false); }}>
+      <label className="block text-sm">专家名称<input autoFocus aria-label="专家名称" maxLength={80} value={name} disabled={renameBusy} onChange={e => setName(e.target.value)} className="mt-2 min-h-11 w-full rounded-lg border border-line bg-raised px-3" /></label>
+      {renameError && <p role="alert" className="mt-2 text-sm text-danger">{renameError}</p>}
+      <button type="button" disabled={renameBusy || !name.trim()} className="mt-4 min-h-11 w-full rounded-lg bg-accent text-sm text-white disabled:opacity-40" onClick={async () => { setRenameBusy(true); setRenameError(""); try { await wb.renameWorkspace(workspace.id, name); setRenameOpen(false); } catch(e) { setRenameError(e instanceof Error ? e.message : "重命名失败"); } finally { setRenameBusy(false); } }}>{renameBusy ? "保存中…" : "保存名称"}</button>
+    </WorkspaceDetailsDialog>}
     {importOpen && wb.client && <ImportSessionsDialog workspaceId={workspace.id} onClose={() => setImportOpen(false)} />}
   </section>;
 }
