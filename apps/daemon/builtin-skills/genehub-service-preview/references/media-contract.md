@@ -6,13 +6,14 @@
 工作区入口/阶段文件 → Asset Preview 沙箱
 沙箱 /api/.../ 或可信面板信令
     → 授权服务客户端 → GeneHub 加密数据面
-    → daemon → 身份校验后的本地 runner → 声明的 loopback 后端
+    → daemon → 身份校验后的本地应用适配程序
+                              → 自身业务或声明的 loopback 后端
 可信 Workbench 媒体面板 ↔ WebRTC 音视频 ↔ 应用媒体端
                                  ↕
                          可选的 Channel TURN 中继
 ```
 
-daemon 按规范化 HTML 路径关联登记。每次运行有新身份和秘密，daemon/runner 双向证明运行身份，避免端口复用继承旧授权。页面拿不到私有登记材料或 daemon Client。runner 负责可信应用编排，不提供针对恶意后端的 OS 隔离。
+daemon 按规范化 HTML 路径关联登记。每次运行有新身份和秘密，daemon/适配程序双向证明运行身份，避免端口复用继承旧授权。页面拿不到私有登记材料或 daemon Client。适配程序可直接实现业务，也可连接外部后端；Node runner 只是可选的多后端示例，GeneHub 不要求它或特定语言运行时。登记、认证与控制细节见[语言无关接入协议](registration-contract.md)。适配程序不提供针对恶意后端的 OS 隔离。
 
 静态沙箱保持不透明源，不能采集设备或嵌套其他应用页面。HTTP/WS 桥不会自动兼容 cookie、OAuth 导航、自定义头或任意软件网站。媒体在沙箱与 Fabric Relay 之外传输；信令和业务仍走既有加密数据面。TURN 转发加密媒体包，GeneHub 不负责应用媒体转码，也不自动采集源机器的桌面或 DCC 视口。
 
