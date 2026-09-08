@@ -160,7 +160,9 @@ impl Link {
             Stage::Paired { enrollment, .. } => enrollment.clone(),
             _ => anyhow::bail!("No paired Channel ICE provider"),
         };
-        hub::Client::new(&enrollment.hub_url).rtc_config(&enrollment,run_id).await
+        hub::Client::new(&enrollment.hub_url)
+            .rtc_config(&enrollment, run_id)
+            .await
     }
 
     pub async fn machines(&self) -> Result<Vec<HubMachine>> {

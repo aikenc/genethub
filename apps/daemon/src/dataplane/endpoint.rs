@@ -825,7 +825,9 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         StreamMethod::Events => handle_events(stream, services).await,
         StreamMethod::ProtocolIdentity => handle_protocol_identity(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
-        StreamMethod::ServicePreview => crate::dataplane::service_preview::handle(stream, services).await,
+        StreamMethod::ServicePreview => {
+            crate::dataplane::service_preview::handle(stream, services).await
+        }
         StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
         StreamMethod::RtcConfig => crate::dataplane::rtc::config_handle(stream, services).await,

@@ -1203,12 +1203,9 @@ fn cursor_launch_model(acp_id: &str, listed: &[ModelInfo]) -> Option<String> {
     } else {
         format!("{base}-{}", suffixes.join("-"))
     };
-    for candidate in [slug.clone(), format!("cursor-{slug}")] {
-        if listed.iter().any(|model| model.id == candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    [slug.clone(), format!("cursor-{slug}")]
+        .into_iter()
+        .find(|candidate| listed.iter().any(|model| model.id == *candidate))
 }
 
 fn parse_opaque_model_id(id: &str) -> (&str, Vec<(String, String)>) {
