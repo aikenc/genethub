@@ -31,6 +31,7 @@ use crate::config::ProviderConfig;
 /// Everything an adapter needs to start a session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
+    pub evidence_scope: Option<genehub_proto::SessionEvidenceScope>,
     pub session_id: String,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
@@ -680,6 +681,7 @@ mod tests {
     fn every_agent_process_receives_the_exact_front_door_binding() {
         let mut command = crate::os_process::Command::new("agent");
         let config = SessionConfig {
+            evidence_scope: None,
             session_id: "s-bound".into(),
             cwd: PathBuf::from("/workspace"),
             model_id: None,

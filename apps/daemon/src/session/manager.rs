@@ -2496,6 +2496,14 @@ impl SessionManager {
             return Ok(());
         }
         let mut meta = live.meta.lock().await.clone();
+        if meta
+            .managed
+            .as_ref()
+            .is_some_and(|managed| managed.evidence_scope.is_some())
+            && meta.agent_id != "genet"
+        {
+            anyhow::bail!("evidence-only sessions currently require the built-in GeneHub Agent");
+        }
         let adapter = self.registry.require(&meta.agent_id)?;
         let offered = adapter.catalog(providers).await;
         if normalize_runtime_selection(&mut meta, &offered) {
@@ -2563,6 +2571,10 @@ impl SessionManager {
                     Some(guidance)
                 });
         let config = |resume: Option<PersistHandle>| SessionConfig {
+            evidence_scope: meta
+                .managed
+                .as_ref()
+                .and_then(|managed| managed.evidence_scope.clone()),
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),

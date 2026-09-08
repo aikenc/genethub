@@ -46,6 +46,15 @@ struct PackManifest {
     #[serde(default)]
     intent_matches: Vec<String>,
     spaces: Vec<SpaceSpec>,
+    #[serde(default)]
+    upgrade_from: Option<UpgradeSource>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpgradeSource {
+    version: u32,
+    file_digests: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,12 +83,16 @@ struct LoadedPack {
 }
 
 struct RenderedFile {
+    previous_digest: Option<String>,
+    changed_from_previous: bool,
     target: PathBuf,
     relative: String,
     body: Vec<u8>,
 }
 
 pub(crate) struct Prepared {
+    upgrading: bool,
+    activation_revision: Option<u64>,
     pack: LoadedPack,
     project_workspace_id: String,
     project_root: PathBuf,
@@ -108,9 +121,9 @@ impl Prepared {
             expected_revision: self.report.expected_revision,
             git_head: self.git_state.head.clone(),
             status_digest: self.git_state.status_digest.clone(),
-            title: format!("将「{}」交给 PM 团队管理？", self.project_root.file_name().and_then(|name| name.to_str()).unwrap_or("当前项目")),
+            title: format!("{}「{}」{}", if self.upgrading { "升级" } else { "将" }, self.project_root.file_name().and_then(|name| name.to_str()).unwrap_or("当前项目"), if self.upgrading { "的 PM 专家团队？" } else { "交给 PM 团队管理？" }),
             detail: format!(
-                "将应用 {} v{}，{}当前目录的独立 Git，并以 {} 创建精确 bootstrap commit，再建立 PM → Executor → WorkflowManager/Coder/Reviewer 树。只会提交计划列出的项目资产。\nplan: {}",
+                "将应用 {} v{}，{}当前目录的独立 Git，并以 {} 创建精确 bootstrap commit，再建立 PM、Executor 执行小队及 WorkflowManager/WorkflowReviewer 专家。只会提交计划列出的项目资产。\nplan: {}",
                 self.pack.manifest.id,
                 self.pack.manifest.version,
                 if self.git_state.direct { "复用" } else { "创建" },
@@ -157,22 +170,57 @@ pub(crate) async fn prepare(
 ) -> Result<Prepared> {
     let project = state.workspaces.project_entry(project_workspace_id).await?;
     let pack = load(pack_id)?;
-    let rendered = render(&pack, &project.root, agent_id, model_id)?;
-    let files_current = rendered
-        .iter()
-        .all(|file| fs::read(&file.target).ok().as_deref() == Some(file.body.as_slice()));
+    let registration = state.workspaces.agent_space(project_workspace_id).await?;
+    let upgrading = pack.manifest.upgrade_from.as_ref().is_some_and(|previous| {
+        registration
+            .bootstrap_pack
+            .as_ref()
+            .is_some_and(|installed| {
+                installed.id == pack_id && installed.version == previous.version
+            })
+    });
+    let mut rendered = render(&pack, &project.root, agent_id, model_id)?;
+    if upgrading {
+        rendered.retain(|file| file.changed_from_previous);
+    }
+    let activation_revision = if upgrading {
+        if !crate::workflow::project_active_run_ids(
+            &state.paths.root,
+            project_workspace_id,
+            &project.root,
+        )?
+        .is_empty()
+        {
+            bail!("activeRunConflict: finish the project's Runs before upgrading its expert Pack");
+        }
+        let runtime = crate::workflow::RuntimeStore::new(
+            &state.paths.root,
+            project_workspace_id,
+            &project.root,
+        )?;
+        let status = crate::workflow::inspect(&project.root, &runtime)?;
+        if status.source_changed || status.candidate_error.is_some() {
+            bail!("inactiveCandidateConflict: preserve and resolve the current inactive Candidate before Pack upgrade");
+        }
+        Some(status.activation_revision)
+    } else {
+        None
+    };
+    let files_present = rendered.iter().all(|file| file.target.is_file());
     let receipt_current = receipt_matches(&project.root, &pack);
     let team_current = if receipt_current {
         installed_team_current(state, project_workspace_id, &project.root, &pack).await
     } else {
         false
     };
-    let current = files_current && receipt_current && team_current;
+    let current = files_present && receipt_current && team_current;
     let files = rendered
         .iter()
         .map(|file| file.relative.clone())
         .collect::<Vec<_>>();
-    preflight_targets(&project.root, &rendered)?;
+    if !current {
+        preflight_targets(&project.root, &rendered, upgrading)?;
+    }
     let git_state = crate::git::bootstrap_state(&project.root).await?;
     if git_state.direct && !git_state.changes.is_empty() {
         bail!(
@@ -191,7 +239,7 @@ pub(crate) async fn prepare(
         .root
         .join("workflow-runtime")
         .join(project_workspace_id);
-    if !current && runtime_path.exists() {
+    if !current && !upgrading && runtime_path.exists() {
         bail!(
             "packConflict: this Workspace already has daemon workflow runtime state; archive or migrate it before PM takeover"
         );
@@ -201,7 +249,7 @@ pub(crate) async fn prepare(
         .agent_space(project_workspace_id)
         .await?
         .revision;
-    let plan_digest = plan_digest(
+    let mut plan_digest = plan_digest(
         &pack,
         project_workspace_id,
         &project.root,
@@ -211,6 +259,12 @@ pub(crate) async fn prepare(
         agent_id,
         model_id,
     );
+    if let Some(revision) = activation_revision {
+        plan_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(format!("{plan_digest}:activation:{revision}"))
+        );
+    }
     let report = BootstrapPackReport {
         schema: REPORT_SCHEMA.into(),
         status: "planned".into(),
@@ -235,6 +289,8 @@ pub(crate) async fn prepare(
         project_control_bound: false,
     };
     Ok(Prepared {
+        upgrading,
+        activation_revision,
         pack,
         project_workspace_id: project_workspace_id.into(),
         project_root: project.root,
@@ -259,6 +315,8 @@ async fn apply_inner(
     failure_stage: Option<&str>,
 ) -> Result<BootstrapPackReport> {
     let Prepared {
+        upgrading,
+        activation_revision,
         pack,
         project_workspace_id,
         project_root,
@@ -281,6 +339,21 @@ async fn apply_inner(
     }
 
     let file_snapshot = snapshot_paths(&project_root)?;
+    let replaced_files = if upgrading {
+        upgrade_file_checkpoint(&project_root, &rendered, &pack)?
+    } else {
+        BTreeMap::new()
+    };
+    let runtime_checkpoint_store = crate::workflow::RuntimeStore::new(
+        &state.paths.root,
+        &project_workspace_id,
+        &project_root,
+    )?;
+    let activation_checkpoint = if upgrading {
+        crate::workflow::activation_checkpoint(&runtime_checkpoint_store)?
+    } else {
+        None
+    };
     let config_snapshot = state.workspaces.config_snapshot().await;
     let binding_snapshot = state
         .project_control
@@ -302,6 +375,7 @@ async fn apply_inner(
     )?;
     let created_git = !git_state.direct;
     let mut created_commit = None;
+    let mut upgraded_activation_digest = None;
     let transaction: Result<(Vec<WorkspaceInfo>, String)> = async {
         if created_git {
             crate::git::init(&project_root).await?;
@@ -310,7 +384,23 @@ async fn apply_inner(
         }
         inject_test_failure(failure_stage, "git")?;
         for file in &rendered {
-            write_new_or_same(&project_root, file)?;
+            if upgrading && file.target.exists() && fs::read(&file.target)? != file.body {
+                let expected = file.previous_digest.as_deref().ok_or_else(|| {
+                    anyhow!(
+                        "upgradeConflict: new Pack path already exists: {}",
+                        file.relative
+                    )
+                })?;
+                if format!("sha256:{:x}", Sha256::digest(fs::read(&file.target)?)) != expected {
+                    bail!(
+                        "upgradeConflict: project customization changed after planning: {}",
+                        file.relative
+                    );
+                }
+                crate::config::save_private(&file.target, &file.body)?;
+            } else {
+                write_new_or_same(&project_root, file)?;
+            }
         }
         crate::workflow::ensure_source_visible(&project_root.join(".genethub"))?;
         inject_test_failure(failure_stage, "assets")?;
@@ -369,6 +459,14 @@ async fn apply_inner(
                 pack: Some(pack_entry()),
             });
         }
+        if upgrading {
+            for desired in &mut registrations {
+                let current = state.workspaces.agent_space(&desired.workspace_id).await?;
+                if current.revision > 0 {
+                    desired.lifecycle = current.lifecycle;
+                }
+            }
+        }
         let configured = state
             .workspaces
             .apply_bootstrap_space_plan(
@@ -396,8 +494,19 @@ async fn apply_inner(
             &project_workspace_id,
             &project_root,
         )?;
-        crate::workflow::activate_bootstrap_source(&project_root, &runtime, pack.digest.clone())
+        if let Some(revision) = activation_revision {
+            upgraded_activation_digest =
+                crate::workflow::activate_project(&project_root, &runtime, None, revision)
+                    .map_err(|error| anyhow!("activationFailed: {error:#}"))?
+                    .active_digest;
+        } else {
+            crate::workflow::activate_bootstrap_source(
+                &project_root,
+                &runtime,
+                pack.digest.clone(),
+            )
             .map_err(|error| anyhow!("activationFailed: {error:#}"))?;
+        }
         inject_test_failure(failure_stage, "activation")?;
         state.project_control.bind(
             &project_workspace_id,
@@ -469,6 +578,21 @@ async fn apply_inner(
             if let Err(rollback) = rollback_files(&project_root, &file_snapshot, created_git) {
                 rollback_errors.push(format!("project files: {rollback:#}"));
             }
+            for (relative, bytes) in &replaced_files {
+                if let Err(error) = crate::config::save_private(&project_root.join(relative), bytes)
+                {
+                    rollback_errors.push(format!("restore {}: {error:#}", relative.display()));
+                }
+            }
+            if upgrading {
+                if let Err(error) = crate::workflow::restore_activation_checkpoint(
+                    &runtime_checkpoint_store,
+                    activation_checkpoint.as_deref(),
+                    upgraded_activation_digest.as_deref(),
+                ) {
+                    rollback_errors.push(format!("restore activation: {error:#}"));
+                }
+            }
             let rolled_back = rollback_errors.is_empty();
             let rollback_detail = if rolled_back {
                 None
@@ -524,6 +648,13 @@ fn load(pack_id: &str) -> Result<LoadedPack> {
         .with_context(|| format!("parsing Bootstrap Pack {pack_id}"))?;
     if manifest.schema != PACK_SCHEMA || manifest.id != pack_id || manifest.version == 0 {
         bail!("invalid Bootstrap Pack identity: {pack_id}");
+    }
+    if manifest
+        .upgrade_from
+        .as_ref()
+        .is_some_and(|source| source.version == 0 || source.version >= manifest.version)
+    {
+        bail!("invalid Bootstrap Pack upgrade source: {pack_id}");
     }
     if manifest.description.trim().is_empty() {
         bail!("Bootstrap Pack {pack_id} has no description");
@@ -648,7 +779,17 @@ fn render(
         if body.windows(2).any(|window| window == b"{{") {
             bail!("Bootstrap Pack has an unresolved template token: {inside}");
         }
+        let previous_digest = pack
+            .manifest
+            .upgrade_from
+            .as_ref()
+            .and_then(|previous| previous.file_digests.get(inside))
+            .cloned();
+        let source_digest = format!("sha256:{:x}", Sha256::digest(file.contents));
+        let changed_from_previous = previous_digest.as_deref() != Some(source_digest.as_str());
         rendered.push(RenderedFile {
+            previous_digest,
+            changed_from_previous,
             target: project_root.join(&relative),
             relative,
             body,
@@ -658,11 +799,23 @@ fn render(
     Ok(rendered)
 }
 
-fn preflight_targets(project_root: &Path, rendered: &[RenderedFile]) -> Result<()> {
+fn preflight_targets(
+    project_root: &Path,
+    rendered: &[RenderedFile],
+    upgrading: bool,
+) -> Result<()> {
     for file in rendered {
         if let Ok(metadata) = crate::config::sensitive_metadata(&file.target) {
             crate::config::reject_link_or_reparse(&file.target, &metadata)?;
-            if !metadata.is_file() || fs::read(&file.target)? != file.body {
+            let content = if metadata.is_file() {
+                fs::read(&file.target)?
+            } else {
+                Vec::new()
+            };
+            let matches_previous = upgrading
+                && file.previous_digest.as_deref()
+                    == Some(format!("sha256:{:x}", Sha256::digest(&content)).as_str());
+            if !metadata.is_file() || (content != file.body && !matches_previous) {
                 bail!(
                     "Bootstrap Pack refuses to overwrite project file: {}",
                     file.relative
@@ -1009,6 +1162,60 @@ fn validate_commit_paths(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn upgrade_file_checkpoint(
+    root: &Path,
+    rendered: &[RenderedFile],
+    pack: &LoadedPack,
+) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut paths = rendered
+        .iter()
+        .map(|file| PathBuf::from(&file.relative))
+        .collect::<BTreeSet<_>>();
+    for space in std::iter::once(PathBuf::new()).chain(
+        pack.manifest
+            .spaces
+            .iter()
+            .map(|space| PathBuf::from("spaces").join(&space.name)),
+    ) {
+        let lock = space.join(".pipebuilder/lock.json");
+        if let Ok(bytes) = fs::read(root.join(&lock)) {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            for artifact in value
+                .get("artifacts")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(target) = artifact.get("target").and_then(serde_json::Value::as_str) {
+                    safe_relative(target)?;
+                    paths.insert(space.join(target));
+                }
+            }
+            paths.insert(lock);
+        }
+    }
+    paths.insert(PathBuf::from(format!(
+        ".genethub/bootstrap-packs/{}.json",
+        pack.manifest.id
+    )));
+    let mut out = BTreeMap::new();
+    let mut total = 0;
+    for relative in paths {
+        let target = root.join(&relative);
+        if !target.exists() {
+            continue;
+        }
+        crate::config::reject_link_or_reparse(&target, &fs::symlink_metadata(&target)?)?;
+        let bytes = fs::read(&target)?;
+        total += bytes.len();
+        if total > MAX_PACK_BYTES * 4 {
+            bail!("upgrade checkpoint exceeds the bounded Pack transaction");
+        }
+        out.insert(relative, bytes);
+    }
+    Ok(out)
+}
+
 fn snapshot_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
     fn visit(root: &Path, current: &Path, found: &mut BTreeSet<PathBuf>) -> Result<()> {
         for entry in fs::read_dir(current)? {
@@ -1125,7 +1332,7 @@ mod tests {
     #[test]
     fn embedded_game_pack_is_complete_and_renders_without_business_code() {
         let pack = load("game-delivery-v1").expect("embedded pack");
-        assert_eq!(pack.manifest.spaces.len(), 4);
+        assert_eq!(pack.manifest.spaces.len(), 5);
         assert_eq!(
             pack.manifest.entry_skill,
             ".pipebuilder/skills/project-manager/SKILL.md"

@@ -4,6 +4,7 @@
 
 mod bash;
 mod diff;
+pub(crate) mod evidence;
 mod fs_tools;
 mod search;
 
@@ -105,7 +106,7 @@ impl ToolResult {
 /// JSON Schema definitions handed to the model. Anthropic and OpenAI both
 /// accept plain JSON Schema, so one description serves both.
 pub fn definitions() -> Vec<Value> {
-    vec![
+    let mut definitions = vec![
         json!({
             "name": "read",
             "description": format!("Read the contents of a file. Output is truncated to {DEFAULT_MAX_LINES} lines or {}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.", DEFAULT_MAX_BYTES / 1024),
@@ -244,10 +245,26 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["questions"]
             }
         }),
-    ]
+    ];
+    if evidence::enabled() {
+        definitions.retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls")));
+        definitions.push(evidence::definition());
+    }
+    definitions
 }
 
 pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
+    if evidence::enabled() {
+        match name {
+            "genet" => return evidence::run(args, cwd).await,
+            "read" | "ls" => {
+                if let Err(error) = evidence::check_path(args, cwd) {
+                    return ToolResult::error(error);
+                }
+            }
+            _ => return ToolResult::error("tool is unavailable to evidence-only analysis"),
+        }
+    }
     match name {
         "read" => fs_tools::read(args, cwd),
         "write" => fs_tools::write(args, cwd),

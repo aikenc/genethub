@@ -1,2 +1,5 @@
 schema: genehub.workflow.project.v1
 defaultWorkflow: game-project
+execution:
+  executorPath: spaces/executor
+  root: .

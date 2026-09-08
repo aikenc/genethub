@@ -28,6 +28,7 @@ enum Command {
         workspace_id: Option<String>,
     },
     Dispatch {
+        candidate_digest: Option<String>,
         workspace_id: Option<String>,
         workflow_id: Option<String>,
         kind: Option<String>,
@@ -141,6 +142,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             Ok(EXIT_OK)
         }
         Command::Dispatch {
+            candidate_digest,
             workspace_id,
             workflow_id,
             kind,
@@ -165,6 +167,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             let workflow_id = select_workflow(&project, workflow_id, kind, complexity)?;
             let Reply::WorkflowRun(started) = rpc
                 .call(Request::WorkflowDispatch {
+                    candidate_digest,
                     workspace_id: workspace_id.clone(),
                     workflow_id,
                     task_id,
@@ -587,6 +590,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 ));
             }
             Ok(Command::Dispatch {
+                candidate_digest: values.candidate.take(),
                 workspace_id: values.workspace.take(),
                 workflow_id: values.workflow.take(),
                 kind: values.kind.take(),
@@ -849,6 +853,8 @@ mod tests {
     #[test]
     fn wait_projection_keeps_every_distinct_running_session() {
         let run = WorkflowRunStatus {
+            execution_root: None,
+            experimental: None,
             id: "wr_test".into(),
             workspace_id: "ws_test".into(),
             executor_workspace_id: None,
