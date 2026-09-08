@@ -1,30 +1,30 @@
-# Media architecture and adapter contract
+# 媒体架构与适配契约
 
-## Three separate paths
+## 三条独立路径
 
 ```text
-Workspace entry/assets -> Asset Preview sandbox
-Sandbox /api/.../ or trusted panel signaling
-    -> authorized service client -> encrypted GeneHub data plane
-    -> daemon -> authenticated local runner -> declared loopback backend
-Trusted Workbench media panel <-> WebRTC audio/video <-> application media peer
-                                     |
-                           optional Channel TURN relay
+工作区入口/阶段文件 → Asset Preview 沙箱
+沙箱 /api/.../ 或可信面板信令
+    → 授权服务客户端 → GeneHub 加密数据面
+    → daemon → 身份校验后的本地 runner → 声明的 loopback 后端
+可信 Workbench 媒体面板 ↔ WebRTC 音视频 ↔ 应用媒体端
+                                 ↕
+                         可选的 Channel TURN 中继
 ```
 
-The daemon associates registration with a canonical HTML entry. A fresh run identity and secret authenticate daemon/runner communication, preventing a reused port from inheriting an old run. The page receives neither private registry material nor a daemon Client. The runner is trusted application orchestration, not isolation against malicious backend code.
+daemon 按规范化 HTML 路径关联登记。每次运行有新身份和秘密，daemon/runner 双向证明运行身份，避免端口复用继承旧授权。页面拿不到私有登记材料或 daemon Client。runner 负责可信应用编排，不提供针对恶意后端的 OS 隔离。
 
-The static sandbox stays opaque. It cannot capture devices or host another application iframe. HTTP/WS bridging does not make cookies, OAuth navigation, arbitrary headers, or an arbitrary website compatible. Media stays outside the sandbox and Fabric Relay; signaling/business data still uses the existing encrypted data plane. TURN relays encrypted media packets; GeneHub does not transcode the application's media.
+静态沙箱保持不透明源，不能采集设备或嵌套其他应用页面。HTTP/WS 桥不会自动兼容 cookie、OAuth 导航、自定义头或任意软件网站。媒体在沙箱与 Fabric Relay 之外传输；信令和业务仍走既有加密数据面。TURN 转发加密媒体包，GeneHub 不负责应用媒体转码，也不自动采集源机器的桌面或 DCC 视口。
 
-## HTTP/WS surface
+## HTTP/WS 接口
 
-Use the declared `/api/.../` paths with normal fetch / supported WebSocket calls. Only registered routes are forwarded to loopback; paths cannot escape and redirects are not followed. HTTP request bodies are limited to 8 MiB; individual bridge packets to 256 KiB. Allowed request headers are `accept`, `content-type`, `range`, `if-none-match`, and `last-event-id`; cookies, Authorization, and arbitrary custom headers are not forwarded. Keep backend credentials server-side in the application adapter.
+用普通 fetch / 支持范围内的 WebSocket 调用声明的 `/api/.../` 路径。只转发登记的 loopback 路由，不能逃逸路径，不跟随重定向。HTTP 请求体最多 8 MiB，单个桥包最多 256 KiB。允许的请求头是 `accept`、`content-type`、`range`、`if-none-match`、`last-event-id`；不转发 cookie、Authorization 或任意自定义头。软件后端需要的凭证保留在应用适配器一侧。
 
-Streaming responses follow consumer progress and cancellation. WS supports text and ArrayBuffer with bounded buffering and normal close, not Blob send or subprotocol negotiation. A bridge connection has a maximum one-hour lifetime; applications must surface closure rather than assume an indefinite session or replay writes. A WS PCM stream is application data, not a native audio track.
+流式响应支持背压和取消。WS 支持文本、ArrayBuffer、有界缓冲和正常关闭，不支持 Blob send 或子协议协商。桥连接最长一小时；应用需呈现关闭状态，不能假设无限会话或自动重放写操作。WS PCM 属于应用数据，不会自动成为原生音轨。
 
-## Offer and stop
+## offer 与 stop
 
-The trusted panel creates a browser PeerConnection, receives video/audio, and optionally adds a microphone audio track after a user click. It gathers candidates until complete or a 12-second gathering deadline, then sends a single request:
+可信面板创建浏览器 PeerConnection 接收音视频；用户点击时可加入麦克风音轨。候选收集完成或达到 12 秒期限后，发送一次请求：
 
 ```text
 POST <media.offerPath>
@@ -32,34 +32,34 @@ Content-Type: application/json
 {"type":"offer","sdp":"...","iceServers":[...]}
 
 200 application/json
-{"type":"answer","sdp":"...","sessionId":"application-session-id"}
+{"type":"answer","sdp":"...","sessionId":"本次应用会话ID"}
 
 POST <media.stopPath>
 Content-Type: application/json
-{"sessionId":"application-session-id"}
+{"sessionId":"本次应用会话ID"}
 ```
 
-There is no separate trickle-ICE endpoint in this contract. The backend must accept the browser's offer, apply the received ICE configuration to its own PeerConnection, negotiate compatible codecs/directions, and return a complete usable answer. Adapting an engine's different signaling roles or trickle flow may require more than renaming an endpoint.
+当前契约没有独立的 trickle-ICE 端点。后端接收浏览器 offer，把传入 ICE 配置用于自己的 PeerConnection，协商兼容编解码和方向并返回可用 answer。创作软件若使用不同信令角色或逐步候选交换，适配不一定只需改端点名称。
 
-Answer SDP must be a string at most 256 KiB; account for HTTP/bridge limits as well. `sessionId` is optional in the wire shape, but the current panel only invokes `stopPath` when it has a string session ID of at most 128 characters. Real model/UE adapters should supply both a nonempty ID and a stop endpoint. Make stop idempotent and session-scoped; release tracks, inference tasks, queues and GPU allocations owned by that session.
+answer 的 SDP 字符串最多 256 KiB，同时要遵守 HTTP/桥限制。线上形状中 `sessionId` 可选，但当前面板仅在取得不超过 128 字符的字符串 ID 时调用 `stopPath`。实际应用应同时提供非空 ID 与停止端点。停止应幂等且只作用于该会话，释放所属音轨、编码、推理、队列与 GPU 资源。
 
-Stop delivery is best effort. Also reclaim abandoned/failed peers on the backend, including offers whose answer never reaches the browser. Do not depend solely on the client stop request for resource cleanup. The reference backend has bounded session count/lifetime; actual applications must choose and test their own limits.
+停止通知只能尽力送达。后端还需回收失败或遗弃的连接，包括 answer 未送达查看端的 offer。不能只依靠客户端 stop 回收资源。参考后端限制会话数和期限，实际应用应选择并验证自己的上限；共享创作软件进程与每位查看者的媒体会话需分开管理。
 
-## ICE and relay
+## ICE 与中继
 
-By default the panel uses STUN/host candidates and disallows relay candidates. It obtains Channel configuration (or private self-hosted STUN config); if unavailable, host-only candidates remain. Do not silently substitute public third-party STUN servers.
+默认使用 STUN/host 候选并拒绝 relay 候选。配置来自所属 Channel 或私有自托管 STUN；配置不可达时保留 host 候选，不偷偷改用第三方公共 STUN。
 
-The user can select “允许媒体中继” before connecting. Only then does the paired Channel issue short-lived TURN credentials. Both peers must consume that ICE configuration. Opt-in permits relay but does not force it: verify the selected candidate pair before claiming TURN was used. If no TURN credentials are available, the panel reports failure. Do not bypass it with hard-coded credentials or public relay infrastructure.
+用户可以在连接前勾选“允许媒体中继”，然后从配对 Channel 获取短期 TURN 凭证。双方实际媒体端都要消费该 ICE 配置。勾选允许中继并不强制走中继，只有选中候选对才能证明使用了 TURN。没有可用凭证时面板报错，不用硬编码凭证或另找公共中继绕过。
 
-`dataPolicy: "direct-only"` rejects this service's Fabric data route; `auto` uses normal data routing. Neither selects the media path nor changes other features' data policy. Successful GeneHub chat or offer exchange is not evidence that the application's media ports are reachable. The current documented Channel deployment uses UDP STUN/TURN; do not promise TURN/TLS on 443 or enterprise-network reachability.
+`dataPolicy: "direct-only"` 拒绝本服务的 Fabric 数据路径，`auto` 使用通常数据选路；二者都不决定媒体路径，也不改变其他功能。聊天正常或 offer 成功不能证明应用媒体端口可达。当前文档描述的是 UDP STUN/TURN，不能承诺 TURN/TLS 443 或企业网必通。
 
-## Verify and recover
+## 验证与恢复
 
-1. Prove backend readiness and signal exchange independently of media.
-2. Observe real moving frames and expected audio; a connected PeerConnection is insufficient. Test the browser's playback gesture if audio is muted by autoplay policy.
-3. Record the selected direct/relay candidate types, observed RTT, first-frame time and sustained playback. Do not log raw SDP, credentials, or user audio.
-4. If microphone is requested, use the trusted panel's microphone action and prove the application actually consumes it. A mic indicator alone does not prove model input.
-5. Stop, switch entry, and reconnect. Verify capture indicators disappear and backend session resources are reclaimed. Persistent disconnection is closed by the panel; backend cleanup still needs independent handling.
-6. Test the requested remote network separately. A LAN result does not prove cellular or enterprise reachability. A direct-only cross-network failure is a reported limitation, not grounds for silently enabling relay.
+1. 先证明后端就绪和信令交换，再检查媒体。
+2. 看见真实持续变化的帧和预期音频，PeerConnection 连接状态不够。自动播放策略限制声音时检查用户播放操作。
+3. 记录实际直连/中继候选类型、RTT、首帧与持续播放，不记录原始 SDP、凭证或用户音视频。
+4. 需要麦克风时由用户操作可信面板，并证明应用实际消费输入；麦克风指示灯不能代替内容处理结果。
+5. 停止、切换入口、重连，确认采集状态消失且后端会话回收。面板会关闭持续断连的连接，后端仍需独立处理失联。
+6. 单独验证所需远程网络。本机/局域网成功不证明蜂窝或企业网可达；仅直连失败应明确报告，不能偷偷启用 TURN。
 
-For maintainers with the product source, existing `testctl` cases are `specialty.preview.registered-service-http-ws`, `specialty.preview.channel-ice-credentials`, and `specialty.preview.native-browser-media`. Use the workspace's test workflow. The browser case needs Playwright Chromium and the actual aiortc environment; missing dependencies are blocked, not passing. These cases prove reference behavior, not a user's digital-human model or UE input implementation.
+有产品源码的维护者通过工作区测试流程使用 `testctl`：`specialty.preview.registered-service-http-ws`、`specialty.preview.channel-ice-credentials`、`specialty.preview.native-browser-media`。浏览器用例需要 Playwright Chromium 和真实 aiortc 环境；依赖缺失是 blocked。这些用例验证参考行为，不代替实际影视/DCC/引擎或数字人任务验收。

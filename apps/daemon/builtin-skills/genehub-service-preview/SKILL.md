@@ -1,36 +1,37 @@
 ---
 name: genehub-service-preview
-description: Build, register, diagnose, and share a GeneHub service or native WebRTC media preview. Use for local HTTP/WS backends, digital-human or avatar pipelines, remote Unreal Engine (UE) viewing, Pixel Streaming, and PIE/cloud-play requests. Guides runner setup, service permission, offer/stop adaptation, ICE/TURN, and verified experience delivery; identifies UE input and model adapters still needed. For static H5 games, galleries, and file previews use genehub-html-preview.
+description: 为内容工作者搭建、登记、诊断和分享创作过程预览。用于影视剪辑与合成、DCC 建模/材质/动画/仿真、游戏引擎运行与交互、数字人制作和实时驱动，以及这些流程需要的本地 HTTP/WS 服务和原生 WebRTC。引导选择阶段产物、进度面板、实时音视频或操作回传，接入 runner、服务授权、媒体契约和 ICE/TURN，并验证体验入口。纯静态 H5、相册和文件预览使用 genehub-html-preview。
 ---
 
-# GeneHub Service Preview
+# GeneHub 创作过程与服务预览
 
-Deliver a running application through a registered workspace entry and GeneHub's trusted controls. Static files use Asset Preview; declared HTTP/WS routes use the service bridge; live audio/video uses the trusted media panel's native WebRTC connection.
+面向内容工作者，交付能观察当前创作状态、检查阶段产物或操作运行中工具的真实入口。影视软件、DCC 工具、游戏引擎是主要应用类别；数字人属于其中跨建模、动画、渲染和实时驱动的一类工作流，不是这项能力的总称。
 
-## Choose the path
+## 按预览需求选择路径
 
-- Static H5, gallery, or prerecorded video: use `genehub-html-preview`.
-- Application backend or first service connection: read [getting-started.md](references/getting-started.md).
-- Native media or connectivity failure: also read [media-contract.md](references/media-contract.md) for the architecture, exact offer/stop contract, ICE, and cleanup.
-- Digital human: read [digital-human.md](references/digital-human.md) before selecting or adapting a model pipeline.
-- UE remote viewing, Pixel Streaming, or PIE cloud play: read [unreal-engine.md](references/unreal-engine.md). The current panel has no Pixel Streaming input protocol; receiving video alone does not deliver playable UE.
+- 先读[创作过程接入](references/creative-workflows.md)，区分阶段文件、任务状态、实时画面和交互控制。已有文件就能满足需求时使用 `genehub-html-preview`，不必搭建媒体服务。
+- 需要应用后端或首次登记：读[启动与分享](references/getting-started.md)。
+- 需要实时音视频或诊断连通性：再读[媒体架构与契约](references/media-contract.md)。
+- 数字人制作与实时驱动：按需读[数字人接入](references/digital-human.md)。
+- Unreal Engine、Pixel Streaming 或 PIE：按需读[UE 接入](references/unreal-engine.md)。当前媒体面板没有 UE 输入协议，收到画面不等于能云游玩。
 
-## Workflow
+## 工作流程
 
-1. Establish the source machine, workspace entry, viewer, target GeneHub Channel/version, and whether the task needs viewing, microphone interaction, or game input. Inspect existing software and available hardware before choosing dependencies. Preserve the user's chosen engine/model and existing authorization.
-2. Locate the actual target daemon data directory and a compatible runner. These are different from the workspace and this Skill's directory. Follow the getting-started reference when the product source is absent; do not invent a CLI registration command or an installed runner path.
-3. Build the smallest application adapter that implements the requested behavior. The runner owns one foreground run and checks readiness; it is neither permanent hosting nor an OS sandbox. Only configure backend commands and routes needed for the application.
-4. Start the runner and verify registration, service permission, and HTTP/WS behavior. For media, verify real frames/audio and the selected ICE pair through the trusted panel. A health response, SDP answer, or test pattern proves only its own layer.
-5. Exercise stop and reconnect, check backend session cleanup, then deliver the existing entry HTML as a workspace-relative file link. Explain how the viewer selects the source machine, opens that workspace/entry, authorizes services, and connects. Use only an observed or configured remote GeneHub address, with required pairing/access; never invent a public URL.
+1. 确认源机器、创作软件和版本、工程/镜头/场景、当前阶段、查看端及目标 GeneHub Channel。明确用户要看产物、看进度、看实时画面还是远程操作；保留用户选定的工具和已有授权。
+2. 检查已有输出、插件/API、运行环境和硬件。选择满足需求的最小接入；软件名称或“支持 WebRTC”不构成兼容证明。需要后端时确认实际 daemon 数据目录及兼容 runner，它们与工作区、Skill 目录不同。
+3. 实现应用适配，把产物和状态关联到真实工程与本次运行。阶段文件走 Asset Preview；声明的 HTTP/WS 路由走服务桥；音视频由可信媒体面板建立原生 WebRTC。交互回传需要单独验证。
+4. 启动应用并检查就绪状态、登记和服务授权。验证用户关心的画面/进度/操作结果；健康响应、SDP answer 或测试图案只证明对应的一层。
+5. 验证停止、重连与资源回收，分享真实存在的入口文件。说明源机器选择、工作区/入口、授权步骤及运行期限。远程地址只能采用实际配置或验证过的 GeneHub 入口，不编造公网链接。
 
-## Boundaries that affect the implementation
+## 影响实现的边界
 
-- The entry remains a sandboxed static page. Use declared `/api/.../` routes for backend calls; do not point a remote viewer at `127.0.0.1`, embed another site in an iframe, add GeneHub loader scripts, or put a PeerConnection or microphone capture in the entry.
-- The user enables service access in the trusted toolbar. `files` permission alone is insufficient. Microphone capture and optional media relay require the trusted panel's user actions; the Agent does not manufacture those gestures or copy credentials into the page.
-- `dataPolicy: "direct-only"` governs this service's Fabric data path. It does not mean TURN is enabled or govern other GeneHub features. Media relay remains a separate opt-in.
-- An authorized setup request allows necessary local work. Obtain missing authorization for public hosting, paid resources, uploading user media, or changing drivers/system security before those actions; do not add a new approval round for work already authorized.
-- Do not edit private registration records to impersonate the runner. Stop normally; clean a stale record only after verifying its owner/run is gone. Keep private records, TURN credentials, and user audio out of shared artifacts.
+- 入口仍是沙箱静态页面。后端使用声明的 `/api/.../` 路由；不要把查看端指向源机器的 `127.0.0.1`，嵌套软件网页，注入 GeneHub 加载器，或在入口里创建 PeerConnection、采集设备。
+- 用户在可信工具栏开启服务访问；`files` 权限不能代替 `services`。麦克风与可选媒体中继由用户在可信面板操作，Agent 不伪造手势或向页面复制凭证。
+- `dataPolicy: "direct-only"` 约束本服务的 Fabric 数据路径；媒体是否允许 TURN 是另一项选择，不影响其他 GeneHub 功能。
+- runner 托管一次前台运行，不是常驻服务管理器或 OS 沙箱。不要假定能接管用户已经打开的 DCC/编辑器；对已有应用的连接、停止及未保存内容分别处理。
+- 已授权的搭建任务可以继续必要的本地工作。公网托管、付费资源、上传用户媒体或修改驱动/系统安全设置需要相应授权；不要对已经授权的工作重复要求确认。
+- 不手改私有登记来冒充 runner。先正常停止；确认旧运行及其进程已退出后才能清理陈旧登记。私有记录、TURN 凭证和用户音视频不进入共享产物。
 
-## Completion evidence
+## 交付说明
 
-Report the entry link, source machine and target Channel, backend/version and launch/stop instructions, what was actually tested, and the current run lifetime. For media include real content, mic behavior if requested, direct/TURN path and observed RTT, stop cleanup, and tested viewer/network. Separate reference-pattern success from real model inference, UE viewing from game input, and local success from cross-network success. State any missing adapter or runtime plainly and continue the authorized work needed to resolve it; never label a placeholder “ready.”
+给出入口链接、源机器/Channel、软件与适配器版本、启动/停止方式、关联工程和阶段、已验证行为及当前运行期限。实时媒体补充实际内容、所需麦克风行为、直连/TURN 路径、RTT 和回收情况；交互补充真实操作结果。区分阶段产物与实时画面、参考图案与实际内容、观看与操作、本机与跨网结果。缺少适配时继续完成已授权工作，不能把占位页标成可用体验。

@@ -4,9 +4,31 @@
 
 ## Agent 引导
 
-内置 [genehub-service-preview](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 提供随产品分发的任务入口，按需读取启动与分享、媒体契约、数字人和 UE 参考。静态页面仍由 `genehub-html-preview` 引导。安装包中的 Skill 不包含 Node runner、Python 环境或模型权重；源码与启动前提见其 [启动参考](../apps/daemon/builtin-skills/genehub-service-preview/references/getting-started.md)。
+内置 [genehub-service-preview](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 提供随产品分发的任务入口，按需读取创作过程接入、启动与分享、媒体契约、数字人和 UE 参考。静态页面仍由 `genehub-html-preview` 引导。安装包中的 Skill 不包含 Node runner、Python 环境或模型权重；源码与启动前提见其 [启动参考](../apps/daemon/builtin-skills/genehub-service-preview/references/getting-started.md)。
 
 UE 接入需要版本匹配的信令适配；当前可信媒体面板没有 Pixel Streaming 的键鼠/触摸/手柄输入协议，也没有内置 UE 适配器。远程观看、交互云游玩及特定 Editor/PIE 模式必须分别验证，详见 [UE 参考](../apps/daemon/builtin-skills/genehub-service-preview/references/unreal-engine.md)。
+
+## 服务基础能力与前端现状
+
+当前实现足以接入受控的一次应用预览，但还不是完整的创作服务管理层。
+
+| 层次 | 已有实现 | 尚缺的通用能力 |
+|---|---|---|
+| 登记与访问 | 按规范化 HTML 入口定位运行，运行身份校验，独立 services 授权，有限 loopback 路由 | 授权范围内统一枚举服务、稳定服务身份与多次运行的关联 |
+| 数据与媒体 | HTTP/流式响应/WS 的有限桥接，可信面板原生音视频，Channel ICE 与可选 TURN | 各影视/DCC/引擎的实际采集与操作适配、通用远程输入协议 |
+| 运行生命周期 | 外置 runner 启动 1–8 个后端、初始就绪检查、任一退出撤销整次运行、正常停止回收 | daemon 统一启动/停止/重启、持续健康状态、持久托管、自动恢复及依赖编排 |
+| 观察与管理 | 单入口服务名称/数据策略/授权按钮、媒体状态与 RTT；后端输出留在启动终端 | 服务日志和退出原因的统一查询、进度/产物/工程关联、服务状态事件和列表 UI |
+
+代码依据：daemon 的 [service_preview.rs](../apps/daemon/src/dataplane/service_preview.rs) 当前只接受 `describe`、`connect`、`ice`，均要求已知工作区及入口；它不是全局服务管理 API。进程启动和登记写入由 [runner](../packages/service-preview/run.mjs) 完成。注册记录中的秘密也不能直接扫描后发给前端作为“服务列表”。
+
+前端可见的入口有两种：
+
+1. 打开已登记 HTML，在 [AssetPreviewPage](../packages/workbench/src/preview/AssetPreviewPage.tsx) 的可信工具栏看到服务名称、数据策略、“允许本次预览访问登记服务/暂停服务访问”；授权后显示音视频面板。“暂停”只暂停页面访问，媒体“停止”只停止该媒体会话，均不终止 runner。
+2. “工具 → 全局 → 此电脑的后台进程”，以及会话菜单的“后台进程”和有进程时的会话数量标记。入口位于 [ToolsMenu](../packages/workbench/src/shell/ToolsMenu.tsx)，[ProcessesPanel](../packages/workbench/src/processes/ProcessesPanel.tsx) 展示所属会话、命令、PID/父 PID、运行时间及结束操作。它面向可归属于 Agent 会话的进程，不是已登记服务目录，也不是 OS 全部进程列表。
+
+进程列表还有实际平台缺口：[processes.rs](../apps/daemon/src/processes.rs) 的枚举仅在 `cfg(unix)` 下执行 `ps`，`cfg(not(unix))` 返回 `None`，查询再转为空列表。当前 `wasm32-wasip2` 的 `target_family` 是 `wasm`，不具备 `unix` 配置，因此当前 WASM daemon 使用空枚举分支；原生 Windows 同样没有该枚举实现。界面显示“没有留下运行中的进程”不能作为这两种环境已无后台服务的证据。这是进程观察能力的缺口，不能靠新增 Skill 文字补齐。
+
+若要成为内容工作者可依赖的通用服务层，建议先补“可发现、可找回、可停止”：在现有工作区和设备授权边界内提供脱敏列表与状态，再加运行控制/诊断、前端服务面板和实际应用适配。服务入口、运行状态、所属工程/会话、查看入口和停止对象必须明确；实现前不要把此建议当成已上线功能。常驻托管、自动恢复和远程输入则需要各自的生命周期及权限契约。
 
 ## 开始使用
 
@@ -34,9 +56,11 @@ runner 运行在源机器，前台托管多个后端，逐一检查 readiness；
 - 媒体默认只给 STUN，不使用 TURN；勾选“允许媒体中继”才申请短期凭证。数据与媒体是独立路径，DataChannel 失败不会自动把媒体塞进 Fabric。
 - 麦克风只能由用户点击可信面板启用。iframe 继续是 opaque sandbox，不增加 `allow-same-origin`，也不向它开放设备权限。停止、卸载、建连失败及持续断连会释放采集轨道。
 
-## 接入实际数字人
+## 接入影视、DCC、引擎等创作软件的实时媒体
 
-应用适配为以下契约即可复用媒体基础设施：
+内容工作者的过程预览包括阶段产物、任务状态、实时画面和操作回传。影视剪辑/合成、DCC 建模/材质/动画/仿真、游戏引擎是主要场景，数字人制作与实时驱动包含在这些流程中。已有产物优先使用静态预览，应用状态使用登记 HTTP/WS，实时媒体才接入以下契约。软件连接器、状态采集、画面采集和控制回传仍由实际应用适配，不能把这些软件类别宣传为内置兼容清单。通用工作流见 [创作过程接入](../apps/daemon/builtin-skills/genehub-service-preview/references/creative-workflows.md)。
+
+应用适配为以下契约可复用媒体基础设施：
 
 ```text
 POST offerPath  {type:"offer", sdp, iceServers}

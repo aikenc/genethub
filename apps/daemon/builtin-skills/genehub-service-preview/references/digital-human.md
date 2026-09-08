@@ -1,32 +1,32 @@
-# Digital-human pipeline
+# 数字人制作与实时驱动
 
-Read getting-started and media-contract before implementing the application adapter. GeneHub supplies registration, authorized application transport, trusted microphone controls and media playback. It does not ship an avatar model, ASR/LLM/TTS backend, lip-sync engine, or GPU environment.
+数字人包含在[内容创作过程](creative-workflows.md)中。先判断用户正在制作角色资产、绑定/动画/口型、渲染镜头，还是搭建实时驱动/对话应用；前几类未必需要语音或实时媒体服务。需要应用后端时先读[启动与分享](getting-started.md)和[媒体契约](media-contract.md)。
 
-## Select from the real task
+GeneHub 提供登记、授权传输、可信麦克风控制与媒体播放，不附带角色模型、语音/对话模型、口型引擎或 GPU 环境。
 
-Establish the requested avatar source, text versus spoken interaction, model/backend already selected, local versus explicitly chosen remote inference, target latency, and source-machine resources. Inspect actual GPU/VRAM/runtime, RAM, disk and existing environments before choosing models. Use the chosen project's official installation and version-specific API documentation; record versions and sources instead of inventing an environment or promising a performance figure.
+## 按实际工作选择方案
 
-A typical application owns:
+确认角色来源、创作阶段、文字或语音交互、已有模型/软件、本地或明确选择的远程推理、延迟需求和源机器资源。依据实际 GPU/显存/驱动、内存、磁盘与已有环境选择方案，保留用户选定的管线。安装与 API 依据对应项目的官方版本文档，记录版本和来源，不编造环境或性能数字。
+
+实时对话型数字人可能采用以下应用责任划分，并非所有数字人的必选架构：
 
 ```text
-trusted microphone -> backend WebRTC audio track -> optional ASR
-text / transcript -> conversation engine -> TTS -> avatar/lip-sync renderer
-renderer audio/video tracks -> trusted GeneHub media panel
+可信麦克风 → 后端 WebRTC 音轨 → 可选语音识别
+文字/转写 → 对话引擎 → 语音合成 → 角色/口型渲染
+渲染音视频轨 → GeneHub 可信媒体面板
 ```
 
-This is a mapping of responsibilities, not a required model stack. Preserve an existing pipeline wherever its real interfaces can be adapted.
+## 分层接入
 
-## Prove each layer
+1. 制作阶段优先验证真实转台、动画预演、镜头或渲染进度；仅在需要实时驱动时进入媒体链路。
+2. 连通性不确定时先运行无模型参考后端。它输出移动图案与测试音，丢弃输入麦克风音频而不识别语音；这不能证明角色或模型推理成功。
+3. 独立证明所选实际管线产生正确帧和音频，检查模型、渲染与音频时序，再接入 GeneHub 信令。
+4. 实现 offer/answer 与按会话 stop，将传入 ICE 配置用于实际媒体端，连接生成轨道，限制队列/并发并回收遗弃会话。
+5. 需要麦克风时消费输入 WebRTC 音轨，完成应用要求的采样率/声道转换。已有管线只接受 WS PCM 时需后端音频适配，`microphone: "webrtc"` 本身不会实现它。
+6. 文字/控制走声明的 HTTP/WS 路由；自定义认证头或专有端点在后端适配，不在入口放秘密。验证真实内容响应、音画同步、停止/取消、第二次连接和目标网络。
 
-1. Run the no-model reference media backend first when connectivity is uncertain. It produces a moving test picture and a tone. It sinks incoming microphone audio without recognizing speech; successful playback or mic transport does not prove digital-human inference.
-2. Verify the chosen model pipeline independently produces real frames and audio from an allowed sample. Confirm model weights, inference, renderer and audio timing before changing GeneHub signaling.
-3. Implement the offer/answer and session-scoped stop contract. Feed the provided ICE servers into the actual media peer, connect generated tracks, bound queues and concurrent sessions, and clean abandoned offers.
-4. For a microphone-enabled application, consume the incoming WebRTC audio track and perform the model's actual sample-rate/channel conversion. If the existing pipeline accepts only WS PCM, implement a backend audio adapter. `microphone: "webrtc"` alone does not create that adapter.
-5. Keep text/control requests on declared HTTP/WS routes. Adapt custom authentication headers or proprietary endpoints on the backend; never place service/model secrets in entry HTML or private registration data in the workspace.
-6. Verify a real user-visible response, audio/video timing, stop/cancel behavior, a second connection, and the requested viewing network. Label untested parts separately.
+GeneHub Composer 听写使用另一套机器级语音识别契约。只有任务也要求安装/配置该功能时才使用 `genehub-speech-runtime`；注册听写 runtime 不会自动把它接到数字人的媒体后端。
 
-GeneHub Composer dictation is a separate machine-level ASR contract. Use `genehub-speech-runtime` only when the task also asks to install or configure that feature. Registering a Composer ASR runtime does not wire it into the avatar's media backend.
+## 交付
 
-## Deliver accurately
-
-Provide the registered entry and viewer steps, exact launch/stop commands, model/adapter versions, current process lifetime, measured evidence and unresolved limitations. If only the reference picture works, report “media baseline passed; model pipeline still pending.” If the model works but cannot consume WebRTC input, identify the missing audio adapter and complete that authorized work before claiming voice interaction. Do not turn a request for a local experience into public hosting, remote data upload, training, or permanent GPU service installation.
+给出真实入口、查看步骤、启动/停止命令、模型/软件/适配器版本、运行期限、测量结果与剩余限制。只看到参考图案就报告“媒体基线通过，实际内容管线待接入”；模型可用但未消费实时输入，就继续完成已授权音频适配，不能宣称语音交互已就绪。本地预览任务不自动扩大为公网托管、上传数据、训练或永久 GPU 服务。
