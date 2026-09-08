@@ -2049,11 +2049,22 @@ async fn dispatch(
                     "AgentSpace name must be lowercase kebab-case",
                 );
             }
-            let project = match state.workspaces.project_entry(&workspace_id).await {
-                Ok(project) => project,
-                Err(error) => {
-                    return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
+            // Builder repairs source/projection drift. Verify project ownership
+            // here, not the old projection that this operation must rebuild.
+            // Workflow execution/activation still requires project_entry().
+            match state.workspaces.project_root(&workspace_id).await {
+                Ok(project_id) if project_id == workspace_id => {}
+                Ok(_) => {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "Builder must be called from the project root",
+                    )
                 }
+                Err(error) => return failed(error),
+            }
+            let project = match state.workspaces.get(&workspace_id).await {
+                Ok(project) => project,
+                Err(error) => return failed(error),
             };
             let space_root = match target_workspace_id {
                 Some(target_workspace_id) => {

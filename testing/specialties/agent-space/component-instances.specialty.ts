@@ -171,6 +171,36 @@ defineSpecialty(
         "disabling a responsibility destroyed what it had written at Space scope",
       );
 
+      // A user can improve the registered Space's Skill source and ask
+      // Builder to repair its projection without first removing the Space.
+      const skill = "---\nname: recovery\ndescription: Guide source recovery.\n---\nUse the rebuilt source.\n";
+      const skillRoot = path.join(root, ".pipebuilder", "skills", "recovery");
+      mkdirSync(skillRoot, { recursive: true });
+      writeFileSync(path.join(skillRoot, "SKILL.md"), skill);
+      const manifestPath = path.join(root, "pipespace.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.skills = ["recovery"];
+      writeFileSync(manifestPath, JSON.stringify(manifest));
+      const builder = (operation: "build" | "verify") => opened.client.call({
+        type: "agentSpace.builder",
+        payload: {
+          workspaceId: spaceId,
+          targetWorkspaceId: spaceId,
+          spaceName: "team",
+          operation: operation === "build"
+            ? { kind: "build", dryRun: false, requireNoPostCommands: true }
+            : { kind: "verify" },
+        },
+      });
+      let driftRejected = false;
+      try { await builder("verify"); } catch { driftRejected = true; }
+      t.assertions.assert(driftRejected, "verification accepted stale generated Skills");
+      const repaired = await builder("build");
+      t.assertions.assert(repaired?.type === "agentSpaceBuilder" && repaired.data.status === "ok", "Builder could not repair registered source drift");
+      const verified = await builder("verify");
+      t.assertions.assert(verified?.type === "agentSpaceBuilder" && verified.data.status === "ok", "rebuilt Skills did not verify");
+      t.assertions.assert(readFileSync(path.join(root, ".agents", "skills", "recovery", "SKILL.md"), "utf8") === skill, "Builder did not materialize the user's updated Skill");
+
       t.note(
         `${spaceId} session ${sessionId}: worker→reviewer,worker→reviewer with space scope at ${path.basename(worker.spaceDir)}`,
       );
