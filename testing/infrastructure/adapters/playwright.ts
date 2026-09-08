@@ -40,5 +40,5 @@ export function playwrightImported(): boolean {
  * Browser acquisition belongs to its context; launch alone is never a case pass. */
 export async function runPlaywrightUnit(unit: WorkUnit, extraEnv: Record<string,string> = {}): Promise<UnitResult> {
   const { runNodeUnit } = await import('./node.ts');
-  return runNodeUnit(unit,{...extraEnv,TESTCTL_BROWSER_REQUIRED:'1'});
+  return runNodeUnit(unit,{...extraEnv,TESTCTL_BROWSER_REQUIRED:'1',TESTCTL_BROWSER_SELECTED:'1'});
 }

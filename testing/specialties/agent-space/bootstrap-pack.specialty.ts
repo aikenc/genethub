@@ -130,26 +130,27 @@ defineSpecialty(
 
       const stages = new Map<string, number>();
       let upgradeStage = 0;
+      let blockerStage = 0;
       let bypassAttempted = false;
       let bypassRefused = false;
       let bypassDiagnostic = "";
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
+        if (body.includes("你是小游戏项目的 Coder")) return { hang: true as const };
         if (body.includes("UPGRADE_BOOTSTRAP")) {
           const stage = upgradeStage++;
           if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
           if (stage === 1) {
-            const challenge = fieldFromRequest(request, "challengeId");
-            if (typeof challenge !== "string") throw new Error("upgrade omitted its Human challenge");
-            return { tool: { name: "request_user_input", arguments: { questions: [{ id: challenge, header: "升级专家", question: "Review the daemon plan", options: [{ label: "approve", description: "upgrade" }] }] } } };
-          }
-          if (stage === 2) {
             const digest = fieldFromRequest(request, "planDigest");
             const revision = fieldFromRequest(request, "expectedRevision");
-            if (typeof digest !== "string" || typeof revision !== "number") throw new Error("upgrade lost approved plan facts");
-            return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(digest)} --expected-revision ${revision} --action-id upgrade-approved` } } };
+            if (typeof digest !== "string" || typeof revision !== "number") throw new Error("upgrade lost its bound management plan facts");
+            return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(digest)} --expected-revision ${revision} --action-id upgrade-authorized` } } };
           }
           return { text: "升级结果已回到原 PM。" };
+        }
+        if (body.includes("UPGRADE_BLOCKING_RUN")) {
+          if (blockerStage++ === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow dispatch --workflow game-feature --task upgrade-conflict --message "等待母工作流升级" --no-wait' } } };
+          return { text: "旧工作流仍在执行，由框架提供升级冲突和终止入口。" };
         }
         if (body.includes("AGENT_COMPONENT_BYPASS")) {
           if (bypassAttempted) {
@@ -495,14 +496,42 @@ defineSpecialty(
       git(approved.root, ["commit", "-m", "resolve PM upgrade conflict"], opened.daemon.env);
       const upgradePlan = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1", ...rendererArgs]);
       t.assertions.assert(upgradePlan.status === 0 && upgradePlan.data.current === false, `legacy upgrade preflight failed: ${upgradePlan.text}`);
+      const blockerEvents = await t.flows.main.attachEventLog(opened.client, approved.sessionId);
+      await t.flows.main.sendPrompt(opened.client, approved.sessionId, "UPGRADE_BLOCKING_RUN: 启动旧版本任务，然后等待我的升级要求。");
+      await t.tools.waitUntil(() => blockerEvents.some(event => event.type === "turnCompleted" || event.type === "turnFailed"), 40_000);
+      const oldRuns = await opened.client.call({ type: "workflow.history", payload: { workspaceId: approveProject.id, limit: 50 } });
+      const conflictingRun = oldRuns?.type === "workflowRuns" ? oldRuns.data.find(run => run.status === "running") : undefined;
+      t.assertions.assert(Boolean(conflictingRun), "legacy task did not start before upgrade");
+      const blockedPlan = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1", ...rendererArgs]);
+      t.assertions.assert(blockedPlan.status === 0 && (blockedPlan.data.conflictRuns as string[]).includes(conflictingRun!.id)
+        && (blockedPlan.data.recoveryActions as string[]).some(action => action.includes("workflow cancel")), "upgrade preparation hid its conflict and recovery action");
+      const blockedApply = cli(["space", "bootstrap", "apply", "--workspace", approveProject.id, "--pack", "game-delivery-v1", ...rendererArgs,
+        "--plan-digest", String(blockedPlan.data.planDigest), "--expected-revision", String(blockedPlan.data.expectedRevision), "--action-id", "blocked-upgrade"]);
+      t.assertions.assert(blockedApply.status !== 0 && blockedApply.text.includes("activeRunConflict"), `upgrade apply did not report the active conflict: ${blockedApply.text}`);
+      const cancelled = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id, expectedRevision: conflictingRun!.revision } });
+      t.assertions.assert(cancelled?.type === "workflowRun" && cancelled.data.status === "cancelling", "old Pack could not use the framework cancellation entry");
+      await t.tools.waitUntil(async () => {
+        const reply = await opened.client.call({ type: "workflow.get", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id } });
+        return reply?.type === "workflowRun" && reply.data.status === "cancelled";
+      }, 35_000);
       const upgradeEvents = await t.flows.main.attachEventLog(opened.client, approved.sessionId);
-      await t.flows.main.sendPrompt(opened.client, approved.sessionId, "UPGRADE_BOOTSTRAP: 升级内置专家，保留我的项目定制。" );
-      await t.tools.waitUntil(() => upgradeEvents.some((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested" || event.type === "turnCompleted"), 90_000);
-      t.assertions.assert(upgradeEvents.some((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested"), "upgrade turn ended without requesting its approval");
-      const question = upgradeEvents.map((event) => t.flows.main.sessionEventOf(event)).find((event) => event?.type === "permissionRequested")?.request as { id: string; title: string };
-      t.assertions.assert(question.title.includes("升级"), "upgrade was presented as a fresh takeover");
-      await opened.client.call({ type: "session.respondPermission", payload: { sessionId: approved.sessionId, requestId: question.id, outcome: { outcome: "selected", optionId: "approve-once" } } });
-      await t.tools.waitUntil(() => upgradeEvents.some((event) => event.type === "turnCompleted"), 90_000);
+      // A cancellation notice can start a PM turn after any idle snapshot.
+      // Use the same durable admission as the UI, then observe this input's
+      // responsibility instead of mistaking an earlier notice for its answer.
+      const upgradeInput = await opened.client.call({ type: "session.send", payload: {
+        sessionId: approved.sessionId, messageId: "u_upgrade_after_cancel",
+        text: "UPGRADE_BOOTSTRAP: 升级内置专家，保留我的项目定制。", attachments: [],
+        artifactPreviewBaseUrl: null, continuesRound: null,
+      } });
+      t.assertions.assert(upgradeInput?.type === "ack", "upgrade input was not accepted alongside the cancellation notice");
+      await t.tools.waitUntil(async () => {
+        const reply = await opened.client.call({ type: "session.get", payload: { sessionId: approved.sessionId } });
+        if (reply?.type !== "snapshot") return false;
+        if (reply.data.summary.inputSummary?.error) throw new Error(reply.data.summary.inputSummary.error);
+        return upgradeStage >= 3 && !reply.data.summary.inputSummary?.pendingMessageIds.includes("u_upgrade_after_cancel");
+      }, 90_000);
+      t.assertions.assert(!upgradeEvents.some(event => t.flows.main.sessionEventOf(event)?.type === "permissionRequested"), "project-bound PM was asked to authorize its own routine upgrade again");
+      t.assertions.assert(!upgradeEvents.some(event => event.type === "turnFailed"), "authorized upgrade turn failed");
       const upgraded = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1"]);
       t.assertions.assert(upgraded.status === 0 && upgraded.data.current === true, `upgraded project was not idempotent: ${upgraded.text}`);
       t.assertions.assert(readFileSync(coderPrompt, "utf8") === customized, "upgrade changed a user-owned workflow prompt");

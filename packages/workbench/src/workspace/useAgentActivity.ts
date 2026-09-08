@@ -28,10 +28,20 @@ function createSource(client: Client) {
         activity.count++;
         activity.recent = Math.max(activity.recent, session.messagePreview?.atMs ?? session.updatedAtMs);
         if (session.status === "waiting") activity.status = "waiting";
-        else if (session.status === "running" && activity.status !== "waiting") activity.status = "running";
+        else if ((session.status === "running" || (session.workSummary?.running ?? 0) > 0 || (session.workSummary?.stopping ?? 0) > 0) && activity.status !== "waiting") activity.status = "running";
+        else if ((session.workSummary?.blocked ?? 0) > 0 && !activity.status) activity.status = "waiting";
         agents.set(session.workspaceId, activity);
       }
       snapshot = { agents, sessions: reply.data, error: false };
+      // Merge only task facts. A list reply must never overwrite a newer PM
+      // turn event, nor update a different machine after navigation.
+      if (useWorkbench.getState().client === client) {
+        const summaries = new Map(reply.data.map((session) => [session.id, session]));
+        useWorkbench.setState((state) => ({
+          sessions: state.sessions.map((session) => summaries.has(session.id)
+            ? { ...session, workSummary: summaries.get(session.id)?.workSummary, inputSummary: summaries.get(session.id)?.inputSummary } : session),
+        }));
+      }
     } catch {
       snapshot = { agents: null, error: true };
     } finally {
@@ -40,6 +50,7 @@ function createSource(client: Client) {
     }
   };
   return {
+    refresh,
     getSnapshot: () => snapshot,
     subscribe(listener: () => void) {
       listeners.add(listener);
@@ -56,6 +67,10 @@ function createSource(client: Client) {
 }
 const sources = new WeakMap<Client, ReturnType<typeof createSource>>();
 const disconnected = { getSnapshot: () => offline, subscribe: (_listener: () => void) => () => {} };
+
+export async function refreshAgentActivities(client: Client) {
+  await sources.get(client)?.refresh();
+}
 
 export function useAgentActivities() {
   const client = useWorkbench((s) => s.client);

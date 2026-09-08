@@ -26,6 +26,7 @@ export {
 } from "./drivers/cli.ts";
 
 export type { CaseContext } from "./context.ts";
+export { openBrowser, openWorkbenchPage } from "./drivers/browser.ts";
 export { assertions } from "./assertions/index.ts";
 export { connectProductClient } from "./drivers/client.ts";
 export type { ClientDiagnosticEvent } from "@genehub/workbench/client";

@@ -242,7 +242,7 @@ intentMatches: Array<string>, };
 /**
  * Result of planning or applying one versioned project Bootstrap Pack.
  */
-export type BootstrapPackReport = { schema: string, status: string, packId: string, packVersion: number, packDigest: string, projectWorkspaceId: string, 
+export type BootstrapPackReport = { conflictRuns: Array<string>, recoveryActions: Array<string>, schema: string, status: string, packId: string, packVersion: number, packDigest: string, projectWorkspaceId: string, 
 /**
  * Project-relative Skill the initiating Agent reads immediately after
  * apply. This keeps bootstrap discovery generic while the Pack owns the
@@ -925,7 +925,7 @@ export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { 
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "bootstrapPack", "data": BootstrapPackReport } | { "type": "bootstrapPacks", "data": Array<BootstrapPackInfo> } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "bootstrapPack", "data": BootstrapPackReport } | { "type": "bootstrapPacks", "data": Array<BootstrapPackInfo> } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -945,7 +945,11 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+/**
+ * Absent retains the existing successful-completion contract.
+ */
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -975,7 +979,12 @@ expectedRevision: number | null, } } | { "type": "project.bootstrap.list" } | { 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
-itemId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.rounds", "payload": { sessionId: string, throughRoundId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.context", "payload": { sessionId: string, throughRoundId: string | null, tokenBudget: number, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "round.trunk.batchGet", "payload": { sessionId: string, refs: Array<TrunkLocator>, } } | { "type": "blob.batchGet", "payload": { sessionId: string, blobs: Array<BlobRef>, } } | { "type": "session.send", "payload": { sessionId: string, text: string, attachments: Array<Attachment>, 
+itemId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.rounds", "payload": { sessionId: string, throughRoundId: string | null, cursor: string | null, limit: number | null, } } | { "type": "session.context", "payload": { sessionId: string, throughRoundId: string | null, tokenBudget: number, } } | { "type": "round.trunk.list", "payload": { sessionId: string, roundId: string, cursor: string | null, limit: number | null, } } | { "type": "round.trunk.get", "payload": { sessionId: string, roundId: string, trunkIndex: number, } } | { "type": "blob.get", "payload": { sessionId: string, blob: BlobRef, } } | { "type": "round.trunk.batchGet", "payload": { sessionId: string, refs: Array<TrunkLocator>, } } | { "type": "blob.batchGet", "payload": { sessionId: string, blobs: Array<BlobRef>, } } | { "type": "session.send", "payload": { 
+/**
+ * Opts into durable receipt before Agent delivery. Retries must reuse
+ * the same ID and exact payload; absence keeps legacy send semantics.
+ */
+messageId?: string, taskRunId?: string, sessionId: string, text: string, attachments: Array<Attachment>, 
 /**
  * Deprecated wire field. Current clients always send `null`; Preview
  * locators are rebound in the workbench from relative/absolute paths.
@@ -1229,6 +1238,8 @@ coverage?: HistoryCoverage, };
  */
 export type SessionImportSource = { agentId: string, label: string, supported: boolean, candidates: Array<SessionImportCandidate>, error?: string, };
 
+export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: boolean, error?: string, };
+
 /**
  * A small structural entry point. It deliberately contains no free-form
  * transcript text; callers choose a bounded narrative page explicitly.
@@ -1300,7 +1311,11 @@ export type SessionSourceRef = { id: string, sessionId: string, itemId?: string,
 
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
-export type SessionSummary = { 
+export type SessionSummary = { inputSummary?: SessionInputSummary, 
+/**
+ * Workflow facts are independent of this Session's active Agent turn.
+ */
+workSummary?: SessionWorkSummary, 
 /**
  * Last durably stored visible message; absent for records not yet projected.
  */
@@ -1350,6 +1365,12 @@ lastActivityAtMs?: number, };
  * Whether human-facing clients may mutate a managed Session directly.
  */
 export type SessionUserInteraction = "normal" | "readOnly";
+
+/**
+ * Bounded cards plus counts from every associated Run, not recent-history
+ * pagination. Detailed evidence remains available through workflow.get.
+ */
+export type SessionWorkSummary = { running: number, stopping: number, blocked: number, tasks: Array<WorkflowTaskSummary>, more: number, checkedAtMs: number, error?: string, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -1815,7 +1836,23 @@ export type WorkflowActivationStatus = { revision: number, digest: string, previ
 
 export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: string, matchKind: string | null, matchComplexity: string | null, };
 
-export type WorkflowNodeRunStatus = { id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
+export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, };
+
+/**
+ * Finishing a review is distinct from approving its subject.
+ */
+export type WorkflowDiagnosticStatus = { sessionId: string, status: string, createdAtMs: number, error?: string, };
+
+export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
+
+export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
+
+/**
+ * Finishing a review is distinct from approving its subject.
+ */
+export type WorkflowNodeOutcome = "completed" | "changesRequested" | "failed" | "blocked";
+
+export type WorkflowNodeRunStatus = { assignedAtMs?: number, lastActivityAtMs?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
 
 /**
  * Project-owned Workflow catalog projected by the daemon after validation.
@@ -1856,7 +1893,15 @@ activationHistory: Array<WorkflowActivationStatus>, };
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { executionRoot?: string, experimental?: boolean, id: string, workspaceId: string, 
+export type WorkflowRunStatus = { diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, 
+/**
+ * Why execution is blocked, stopping or cancelled.
+ */
+reason?: string, 
+/**
+ * Cleanup has not yet succeeded; a terminal success must not hide it.
+ */
+cleanupError?: string, executionRoot?: string, experimental?: boolean, id: string, workspaceId: string, 
 /**
  * Existing reusable Workflow Executor WorkerSpace selected for this Run.
  * Absent only for directory projects created before the PipeSpace model.
@@ -1881,6 +1926,8 @@ activationRevision?: number, bundleDigest: string, taskId: string, status: strin
  * simple graphs remain zero.
  */
 executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
+
+export type WorkflowTaskSummary = { waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

@@ -8,10 +8,14 @@ const labels: Record<string, string> = {
   "node.assigned": "派发节点",
   "node.completed": "节点完成",
   "run.completed": "流程完成",
+  "run.cancelled": "任务已取消",
+  "run.blocked": "任务受阻",
+  "run.failed": "任务失败",
 };
 const statuses: Record<string, string> = {
   pending: "待执行", ready: "就绪", running: "执行中", waiting: "等待中",
   completed: "已完成", failed: "失败", blocked: "受阻", cancelled: "已取消",
+  stopping: "正在收尾", cancelling: "取消中", changesRequested: "需要修改",
   skipped: "已跳过",
 };
 const labelStatus = (status: string) => statuses[status] ?? status;
@@ -51,7 +55,7 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         }
         setSnapshot({ owner: client, data: reply.data });
         setError(null);
-        completed = reply.data.run.status === "completed";
+        completed = ["completed", "cancelled", "blocked", "failed"].includes(reply.data.run.status);
       } catch (cause) {
         if (disposed) return;
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -75,6 +79,8 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         </div>
         {flow ? <>
           <p className="mt-1 text-sm">{flow.run.workflowId} · {labelStatus(flow.run.status)}</p>
+          {flow.run.reason ? <p className="mt-1 text-sm">{flow.run.reason}</p> : null}
+          {flow.run.cleanupError ? <p role="alert" className="mt-1 text-sm text-danger">收尾待处理：{flow.run.cleanupError}</p> : null}
           <p className="mt-1 text-xs text-muted">最后更新：{new Date(flow.run.updatedAtMs).toLocaleString()}</p>
           <button type="button" className="mt-2 min-h-11 text-xs text-accent md:min-h-0"
             onClick={() => void selectSession(flow.run.parentSessionId)}>返回发起会话</button>
@@ -90,10 +96,11 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         <h3 className="text-sm font-medium">当前节点状态</h3>
         {(flow.run.nodes ?? []).map((node) => <div key={node.id} className="mt-3 border-t border-line pt-3 text-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="break-words">{node.id} · {node.uses} · {labelStatus(node.status)}</span>
+            <span className="break-words">{node.id} · {node.uses} · {labelStatus(node.outcome ?? node.status)}</span>
             {node.sessionId ? <button type="button" className="min-h-11 text-xs text-accent md:min-h-0"
               onClick={() => void selectSession(node.sessionId!)}>查看工作会话</button> : null}
           </div>
+          {node.reason ? <p className="mt-1 text-sm">{node.reason}</p> : null}
           {Object.keys(node.evidence ?? {}).length ? <details className="mt-2">
             <summary className="cursor-pointer text-xs text-muted">结果与证据</summary>
             <dl className="mt-2 space-y-1 text-xs">{Object.entries(node.evidence).map(([key, value]) =>

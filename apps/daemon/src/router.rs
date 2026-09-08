@@ -130,12 +130,9 @@ async fn start_workflow_sessions(
     run_id: &str,
     sessions: Vec<(genehub_proto::SessionSummary, String)>,
 ) -> anyhow::Result<()> {
-    let providers = state.providers().await;
     for (session, message) in sessions {
-        if let Err(error) = state
-            .sessions
-            .send(&session.id, message, Vec::new(), &providers, None, None)
-            .await
+        if let Err(error) =
+            crate::workflow::start_assigned(state, workspace_id, run_id, &session, message).await
         {
             let launch = anyhow::anyhow!("启动 Workflow 子会话 {}：{error:#}", session.id);
             return match crate::workflow::abort_launch(state, workspace_id, run_id).await {
@@ -151,59 +148,7 @@ async fn start_workflow_sessions(
 
 /// Delivers the terminal Executor event back to the ordinary PM Session.
 ///
-/// `workflow dispatch --no-wait` is the normal Agent-facing path: a shell
-/// command should not have to stay attached for the whole Coder/Reviewer
-/// run. The Executor already records `run.completed` in its durable outbox;
-/// this folded notification is the semantic wake-up that lets the PM turn
-/// that terminal fact into a user-facing report. A PM that is still running
-/// is deliberately left alone because it may be attached to the synchronous
-/// `--wait` path and SessionManager must never interleave two turns.
-async fn notify_workflow_parent_if_completed(
-    state: &Shared,
-    run: &genehub_proto::WorkflowRunStatus,
-) {
-    let Some(message) = workflow_parent_completion_message(run) else {
-        return;
-    };
-    let parent = match state.sessions.summary(&run.parent_session_id).await {
-        Ok(parent) => parent,
-        Err(error) => {
-            tracing::warn!(
-                run = %run.id,
-                parent = %run.parent_session_id,
-                %error,
-                "could not find the PM Session for a terminal Workflow event"
-            );
-            return;
-        }
-    };
-    if parent.managed.is_some() || parent.status != genehub_proto::SessionStatus::Idle {
-        return;
-    }
-    let providers = state.providers().await;
-    if let Err(error) = state
-        .sessions
-        .send(
-            &run.parent_session_id,
-            message,
-            Vec::new(),
-            &providers,
-            None,
-            None,
-        )
-        .await
-    {
-        // The Run is already durably terminal. Notification failure must not
-        // roll it back or make the completing Worker report a false failure.
-        tracing::warn!(
-            run = %run.id,
-            parent = %run.parent_session_id,
-            %error,
-            "could not wake the PM Session for a terminal Workflow event"
-        );
-    }
-}
-
+#[cfg(test)]
 fn workflow_parent_completion_message(run: &genehub_proto::WorkflowRunStatus) -> Option<String> {
     if run.status != "completed" {
         return None;
@@ -322,6 +267,11 @@ async fn authorize_project_workflow_mutation(
     match caller {
         crate::authz::Principal::LocalUser => Ok(()),
         crate::authz::Principal::SessionController { session_id } => {
+            if state.sessions.consulting(session_id).await {
+                return Err(
+                    "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),
+                );
+            }
             let summary = state
                 .sessions
                 .summary(session_id)
@@ -332,6 +282,18 @@ async fn authorize_project_workflow_mutation(
             }
             if summary.workspace_id != workspace_id {
                 return Err("入口会话不属于请求的项目 Workspace".into());
+            }
+            let space = state
+                .workspaces
+                .agent_space(workspace_id)
+                .await
+                .map_err(|error| format!("无法确认项目管理授权：{error:#}"))?;
+            if agent_space_requires_project_control(&space)
+                && !state.project_control.is_bound(workspace_id, session_id)
+            {
+                return Err(
+                    "当前 Session 没有这个项目的 ProjectControlBinding；请先完成 PM 接管".into(),
+                );
             }
             Ok(())
         }
@@ -352,6 +314,11 @@ async fn authorize_agent_space_change(
     match caller {
         crate::authz::Principal::LocalUser => Ok(()),
         crate::authz::Principal::SessionController { session_id } => {
+            if state.sessions.consulting(session_id).await {
+                return Err(
+                    "PM 正在咨询未决 Human 请求；不能以项目管理权替代该请求的正式决定".into(),
+                );
+            }
             let summary = state
                 .sessions
                 .summary(session_id)
@@ -567,6 +534,8 @@ async fn dispatch(
             features: Some(vec![
                 "service.preview.v1".to_string(),
                 "process.services.v1".to_string(),
+                "workflow.control.v1".to_string(),
+                "session.input.v1".to_string(),
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                 genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
@@ -585,17 +554,24 @@ async fn dispatch(
             .subscribe_window(&session_id, since_seq, expand_last_round, recent_rounds)
             .await
         {
-            Ok((snapshot, replayed, reset, receiver)) => Handled {
-                reply: Ok(Reply::Subscribed {
-                    snapshot,
-                    replayed,
-                    reset,
-                }),
-                effect: SideEffect::Subscribe {
-                    session_id,
-                    receiver,
-                },
-            },
+            Ok((mut snapshot, replayed, reset, receiver)) => {
+                crate::workflow::summarize_sessions(
+                    state,
+                    std::slice::from_mut(&mut snapshot.summary),
+                )
+                .await;
+                Handled {
+                    reply: Ok(Reply::Subscribed {
+                        snapshot,
+                        replayed,
+                        reset,
+                    }),
+                    effect: SideEffect::Subscribe {
+                        session_id,
+                        receiver,
+                    },
+                }
+            }
             Err(error) => failed(error),
         },
 
@@ -710,6 +686,8 @@ async fn dispatch(
         }
 
         Request::WorkflowDispatch {
+            retry_of,
+            resume_cancelled,
             candidate_digest,
             workspace_id,
             workflow_id,
@@ -751,6 +729,8 @@ async fn dispatch(
                 &task_id,
                 &prompt,
                 candidate_digest.as_deref(),
+                retry_of.as_deref(),
+                resume_cancelled.unwrap_or(false),
             )
             .await
             {
@@ -767,9 +747,16 @@ async fn dispatch(
             {
                 return failed(error);
             }
-            notify_workflow_parent_if_completed(state, &transition.status).await;
             Handled::ok(Reply::WorkflowRun(transition.status))
         }
+
+        Request::WorkflowCheck {
+            workspace_id,
+            run_id,
+        } => match crate::workflow::check(state, &workspace_id, run_id.as_deref()).await {
+            Ok(report) => Handled::ok(Reply::WorkflowCheck(report)),
+            Err(error) => failed(error),
+        },
 
         Request::WorkflowGet {
             workspace_id,
@@ -821,6 +808,8 @@ async fn dispatch(
             node_id,
             expected_revision,
             evidence,
+            outcome,
+            reason,
         } => {
             let Some(caller_session_id) = caller.session_controller_id() else {
                 return Handled::err(
@@ -836,6 +825,8 @@ async fn dispatch(
                 &node_id,
                 expected_revision,
                 evidence,
+                outcome.unwrap_or_default(),
+                reason,
             )
             .await
             {
@@ -852,8 +843,27 @@ async fn dispatch(
             {
                 return failed(error);
             }
-            notify_workflow_parent_if_completed(state, &transition.status).await;
             Handled::ok(Reply::WorkflowRun(transition.status))
+        }
+
+        Request::WorkflowCancel {
+            workspace_id,
+            run_id,
+            expected_revision,
+        } => {
+            // Device/channel Session grants were checked by the common entry.
+            // Agent-bound callers additionally prove project ownership.
+            if caller.session_controller_id().is_some() {
+                if let Err(error) =
+                    authorize_project_workflow_mutation(state, caller, &workspace_id).await
+                {
+                    return Handled::err(ErrorCode::Forbidden, error);
+                }
+            }
+            match crate::workflow::cancel(state, &workspace_id, &run_id, expected_revision).await {
+                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
+                Err(error) => failed(error),
+            }
         }
 
         Request::SessionCreate {
@@ -937,7 +947,10 @@ async fn dispatch(
             .list(workspace_id.as_deref(), include_archived)
             .await
         {
-            Ok(sessions) => Handled::ok(Reply::Sessions(sessions)),
+            Ok(mut sessions) => {
+                crate::workflow::summarize_sessions(state, &mut sessions).await;
+                Handled::ok(Reply::Sessions(sessions))
+            }
             Err(error) => failed(error),
         },
 
@@ -954,7 +967,14 @@ async fn dispatch(
             }
             None => state.sessions.snapshot(&session_id).await,
         } {
-            Ok(snapshot) => Handled::ok(Reply::Snapshot(snapshot)),
+            Ok(mut snapshot) => {
+                crate::workflow::summarize_sessions(
+                    state,
+                    std::slice::from_mut(&mut snapshot.summary),
+                )
+                .await;
+                Handled::ok(Reply::Snapshot(snapshot))
+            }
             Err(error) => failed(error),
         },
 
@@ -1086,6 +1106,8 @@ async fn dispatch(
         }
 
         Request::SessionSend {
+            message_id,
+            task_run_id,
             session_id,
             text,
             attachments,
@@ -1094,6 +1116,36 @@ async fn dispatch(
         } => {
             if text.trim().is_empty() && attachments.is_empty() {
                 return Handled::err(ErrorCode::BadRequest, "there is nothing to send");
+            }
+            if let Some(message_id) = message_id {
+                if let Some(run_id) = task_run_id.as_deref() {
+                    if let Err(error) =
+                        crate::workflow::validate_input_target(state, &session_id, run_id).await
+                    {
+                        return failed(error);
+                    }
+                }
+                return match state
+                    .sessions
+                    .accept_input(
+                        &session_id,
+                        message_id,
+                        text,
+                        attachments,
+                        task_run_id,
+                        "user",
+                    )
+                    .await
+                {
+                    Ok(()) => Handled::ok(Reply::Ack),
+                    Err(error) => failed(error),
+                };
+            }
+            if task_run_id.is_some() {
+                return Handled::err(
+                    ErrorCode::BadRequest,
+                    "taskRunId requires a stable messageId",
+                );
             }
             let providers = state.providers().await;
             match state
@@ -1825,7 +1877,11 @@ async fn dispatch(
             let approval = if let Some(session_id) = caller.session_controller_id() {
                 let detail = serde_json::to_string_pretty(&operation)
                     .unwrap_or_else(|_| format!("{operation:?}"));
-                Some(match state.project_control.issue(crate::project_control::ChallengeSpec {
+                let project_id = match state.workspaces.project_root(&workspace_id).await {
+                    Ok(id) => id,
+                    Err(error) => return failed(error),
+                };
+                match state.project_control.issue_management(crate::project_control::ChallengeSpec {
                             controller_session_id: session_id.into(),
                             workspace_id: workspace_id.clone(),
                             canonical_root,
@@ -1840,8 +1896,8 @@ async fn dispatch(
                             detail: format!(
                                 "只对 Workspace {workspace_id} 执行一次 revision {expected_revision} CAS：\n{detail}\nplan: {plan_digest}"
                             ),
-                        })
-                        .await { Ok(challenge) => challenge, Err(error) => return failed(error) })
+                        }, &project_id)
+                        .await { Ok(challenge) => challenge, Err(error) => return failed(error) }
             } else {
                 None
             };
@@ -2195,16 +2251,19 @@ async fn dispatch(
                         let mut report = prepared.report();
                         if !report.current {
                             if let Some(session_id) = caller.session_controller_id() {
-                                report.approval = Some(
-                                    match state
+                                if report.conflict_runs.is_empty() {
+                                    report.approval = match state
                                         .project_control
-                                        .issue(prepared.challenge_spec(session_id))
+                                        .issue_management(
+                                            prepared.challenge_spec(session_id),
+                                            &workspace_id,
+                                        )
                                         .await
                                     {
-                                        Ok(challenge) => challenge,
+                                        Ok(approval) => approval,
                                         Err(error) => return failed(error),
-                                    },
-                                );
+                                    };
+                                }
                             }
                         }
                         Handled::ok(Reply::BootstrapPack(report))
@@ -2233,6 +2292,11 @@ async fn dispatch(
                         Ok(report) => Handled::ok(Reply::BootstrapPack(report)),
                         Err(error) => failed(error),
                     };
+                }
+                if !prepared.report().conflict_runs.is_empty() {
+                    return Handled::err(ErrorCode::Conflict, format!(
+                        "activeRunConflict: cancel or finish these executions before shared Pack changes: {}",
+                        prepared.report().conflict_runs.join(", ")));
                 }
                 let Some(session_id) = caller.session_controller_id() else {
                     return Handled::err(
@@ -2720,6 +2784,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowActivate { .. } => Some("workflow.activate"),
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
+        Request::WorkflowCancel { .. } => Some("workflow.cancel"),
         Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::ProjectBootstrap { .. } => Some("project.bootstrap"),
@@ -2814,6 +2879,11 @@ mod tests {
 
     fn workflow_run(status: &str) -> genehub_proto::WorkflowRunStatus {
         genehub_proto::WorkflowRunStatus {
+            diagnostics: None,
+            request_run_id: None,
+            report_pending: None,
+            reason: None,
+            cleanup_error: None,
             execution_root: None,
             experimental: None,
             id: "wr_terminal".into(),

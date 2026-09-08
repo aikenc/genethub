@@ -48,6 +48,8 @@ enum Outcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
+    pub message_id: Option<String>,
+    pub task_run_id: Option<String>,
     pub agent_id: Option<String>,
     pub prompt: String,
     pub session_id: Option<String>,
@@ -179,6 +181,8 @@ fn parse_session(args: &[String], selection: &Selection) -> Result<Command, CliF
 /// `genet <agentId>` and `genet session send` cannot drift apart.
 #[derive(Debug, Default)]
 struct Options {
+    message_id: Option<String>,
+    task_run_id: Option<String>,
     positional: Vec<String>,
     agent: Option<String>,
     session: Option<String>,
@@ -216,6 +220,8 @@ impl Options {
                     })
             };
             match argument {
+                "--message-id" => options.message_id = Some(value()?),
+                "--task-run" => options.task_run_id = Some(value()?),
                 "--agent" => options.agent = Some(value()?),
                 "--session" => options.session = Some(value()?),
                 "--workspace" => options.workspace = Some(value()?),
@@ -254,7 +260,16 @@ impl Options {
                 "nothing to say; pass the prompt as an argument or with --message",
             ));
         }
+        if self.message_id.is_some() && self.wait == Some(true) {
+            return Err(CliFailure::invalid_args("durable --message-id returns acceptance; use --no-wait and inspect the Session for answers"));
+        }
+        if self.task_run_id.is_some() && self.message_id.is_none() {
+            return Err(CliFailure::invalid_args("--task-run requires --message-id"));
+        }
+        let wait = self.wait.unwrap_or(self.message_id.is_none());
         Ok(Run {
+            message_id: self.message_id,
+            task_run_id: self.task_run_id,
             agent_id,
             prompt,
             session_id: self.session,
@@ -264,7 +279,7 @@ impl Options {
             mode_id: self.mode,
             effort_id: self.effort,
             title: self.title,
-            wait: self.wait.unwrap_or(true),
+            wait,
             since_seq: self.since_seq,
             auto_approve: self.auto_approve,
             open_workspace: self.open_workspace,
@@ -439,7 +454,20 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
         .map_err(query::rpc_error)?;
     }
 
+    if run.message_id.is_some()
+        && !rpc
+            .hello()
+            .features
+            .as_ref()
+            .is_some_and(|features| features.iter().any(|feature| feature == "session.input.v1"))
+    {
+        return Err(CliFailure::invalid_args(
+            "this daemon does not support durable Session input",
+        ));
+    }
     rpc.call(Request::SessionSend {
+        message_id: run.message_id.clone(),
+        task_run_id: run.task_run_id.clone(),
         session_id: session.id.clone(),
         text: run.prompt.clone(),
         attachments: Vec::new(),
@@ -452,7 +480,7 @@ async fn run_conversation(rpc: &Rpc, run: Run, here: bool) -> Result<i32, CliFai
     if !run.wait {
         emit(
             "session.result",
-            json!({"sessionId": session.id, "status": "running", "waited": false}),
+            json!({"sessionId": session.id, "messageId": run.message_id, "status": if run.message_id.is_some() { "accepted" } else { "running" }, "waited": false}),
         );
         return Ok(EXIT_OK);
     }

@@ -98,7 +98,9 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     human write into a Workflow-owned child Session.
 /// 8 — durable Human decision delivery. Older builds would discard an
 ///     acknowledged continuation when rewriting metadata.
-pub const SESSION_FORMAT: u32 = 8;
+/// 9 — durable input, execution fences and cleanup receipts. Older writers
+///     would discard acknowledged messages or unfinished cancellation.
+pub const SESSION_FORMAT: u32 = 9;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -145,9 +147,57 @@ pub struct HumanContinuation {
     pub completed: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionActivity {
+    pub last_at_ms: i64,
+    pub llm_rounds: u64,
+    pub tokens: Option<u64>,
+    pub turn_id: Option<String>,
+    pub turn_rounds: u64,
+    pub turn_tokens: u64,
+}
+
+/// Control records reference the one original UserMessage in chat.jsonl.
+/// `receiving` reserves delivery responsibility before appending that body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInbox {
+    #[serde(default)]
+    pub entries: Vec<InboxEntry>,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub has_delivered: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxEntry {
+    pub message_id: String,
+    #[serde(default)]
+    pub received_at_ms: i64,
+    pub digest: String,
+    pub source: String,
+    pub task_run_id: Option<String>,
+    /// receiving / queued / sent / handled; errors pause automatic processing.
+    pub state: String,
+    pub turn_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
+    #[serde(default)]
+    pub activity: ExecutionActivity,
+    #[serde(default)]
+    pub execution_retired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_cleanup: Option<crate::processes::CleanupReceipt>,
+    #[serde(default)]
+    pub inbox: SessionInbox,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_preview: Option<genehub_proto::SessionMessagePreview>,
     pub id: String,
@@ -256,6 +306,10 @@ impl SessionMeta {
     /// does not know what the rest of it means.
     fn unopenable(id: String, workspace_id: String, cwd: PathBuf, header: MetaHeader) -> Self {
         SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
             message_preview: None,
             id,
             workspace_id,
@@ -303,6 +357,20 @@ impl SessionMeta {
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
         SessionSummary {
+            input_summary: (!self.inbox.entries.is_empty()).then(|| {
+                genehub_proto::SessionInputSummary {
+                    pending_message_ids: self
+                        .inbox
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.state != "handled")
+                        .map(|entry| entry.message_id.clone())
+                        .collect(),
+                    paused: self.inbox.paused,
+                    error: self.inbox.error.clone(),
+                }
+            }),
+            work_summary: None,
             message_preview: self.message_preview.clone(),
             last_activity_at_ms,
             id: self.id.clone(),
@@ -1946,6 +2014,10 @@ mod project_home_tests {
 
     fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
         SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
             message_preview: None,
             id: id.into(),
             workspace_id: workspace_id.into(),

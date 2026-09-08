@@ -392,6 +392,10 @@ pub struct AgentSpaceBuilderReport {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct BootstrapPackReport {
+    #[serde(default)]
+    pub conflict_runs: Vec<String>,
+    #[serde(default)]
+    pub recovery_actions: Vec<String>,
     pub schema: String,
     pub status: String,
     pub pack_id: String,
@@ -788,6 +792,13 @@ pub struct SessionContext {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_summary: Option<SessionInputSummary>,
+    /// Workflow facts are independent of this Session's active Agent turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub work_summary: Option<SessionWorkSummary>,
     /// Last durably stored visible message; absent for records not yet projected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -863,6 +874,79 @@ pub struct SessionMessagePreview {
     pub at_ms: i64,
 }
 
+/// Bounded cards plus counts from every associated Run, not recent-history
+/// pagination. Detailed evidence remains available through workflow.get.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionWorkSummary {
+    pub running: u32,
+    pub stopping: u32,
+    pub blocked: u32,
+    pub tasks: Vec<WorkflowTaskSummary>,
+    pub more: u32,
+    #[ts(type = "number")]
+    pub checked_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionInputSummary {
+    pub pending_message_ids: Vec<String>,
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowTaskSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub waiting: Option<Vec<WorkflowHumanWait>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub request_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub report_pending: Option<bool>,
+
+    pub run_id: String,
+    pub task_id: String,
+    pub workflow_id: String,
+    pub status: String,
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub active_nodes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cleanup_error: Option<String>,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowHumanWait {
+    pub node_id: String,
+    pub session_id: String,
+    pub request_id: String,
+    pub title: String,
+}
+
 /// Durable parent/role binding for a Workflow-managed ordinary Session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -898,6 +982,27 @@ pub enum SessionUserInteraction {
     Normal,
     #[default]
     ReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowFinding {
+    pub run_id: String,
+    pub node_id: Option<String>,
+    pub code: String,
+    pub severity: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowCheckReport {
+    #[ts(type = "number")]
+    pub checked_at_ms: i64,
+    pub findings: Vec<WorkflowFinding>,
+    pub runs: Vec<WorkflowRunStatus>,
 }
 
 /// Project-owned Workflow catalog projected by the daemon after validation.
@@ -972,6 +1077,24 @@ pub struct WorkflowCatalogEntryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diagnostics: Option<Vec<WorkflowDiagnosticStatus>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub request_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub report_pending: Option<bool>,
+
+    /// Why execution is blocked, stopping or cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
+    /// Cleanup has not yet succeeded; a terminal success must not hide it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cleanup_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub execution_root: Option<String>,
@@ -1065,6 +1188,18 @@ pub struct ExecutorFlowStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowNodeRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub assigned_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub last_activity_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<WorkflowNodeOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reason: Option<String>,
     pub id: String,
     pub uses: String,
     pub status: String,
@@ -1073,6 +1208,32 @@ pub struct WorkflowNodeRunStatus {
     pub session_id: Option<String>,
     #[serde(default)]
     pub evidence: std::collections::BTreeMap<String, String>,
+}
+
+/// Finishing a review is distinct from approving its subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowDiagnosticStatus {
+    pub session_id: String,
+    pub status: String,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// Finishing a review is distinct from approving its subject.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum WorkflowNodeOutcome {
+    #[default]
+    Completed,
+    ChangesRequested,
+    Failed,
+    Blocked,
 }
 
 /// A session written by a newer build than this one.

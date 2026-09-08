@@ -3,3 +3,4 @@ defaultWorkflow: game-project
 execution:
   executorPath: spaces/executor
   root: .
+diagnosticRole: workflow-reviewer

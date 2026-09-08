@@ -117,6 +117,7 @@ export function Composer({
   layout = "overlay",
   persistenceKey,
   phase,
+  durableInput = false,
   disabled,
   disabledReason,
   agents,
@@ -152,6 +153,7 @@ export function Composer({
   layout?: "overlay" | "inline";
   persistenceKey?: string;
   phase: ComposerPhase;
+  durableInput?: boolean;
   disabled?: boolean;
   /** Why this transcript cannot accept a new turn, when the state is durable. */
   disabledReason?: string;
@@ -327,7 +329,7 @@ export function Composer({
     // used to reach the daemon mid-turn and come back as "a turn is already
     // running in this session", which describes our own key handler rather than
     // anything the reader did wrong.
-    if (phase !== "idle" || disabled || speechInput.busy) return;
+    if ((!durableInput && phase !== "idle") || disabled || speechInput.busy) return;
     const text = draft.trim();
     if (!text && attachments.length === 0 && !forwardDraft) return;
     // The parked capsule travels ahead of the user's own words, inside the
@@ -794,7 +796,7 @@ export function Composer({
                   type="button"
                   aria-label="语音输入"
                   title="语音转文字"
-                  disabled={disabled || phase !== "idle"}
+                  disabled={disabled || (!durableInput && phase !== "idle")}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
                     setDismissed(true);
@@ -826,7 +828,7 @@ export function Composer({
                   : "添加文件（当前 Agent 不支持附件）"
               }
               title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
-              disabled={disabled || phase !== "idle" || speechInput.busy || !attachmentsSupported}
+              disabled={disabled || (!durableInput && phase !== "idle") || speechInput.busy || !attachmentsSupported}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
@@ -836,7 +838,8 @@ export function Composer({
             >
               <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
-            {phase === "sending" ? (
+            {durableInput && phase === "running" && <button type="button" aria-label="停止 PM 本轮" title="停止 PM 本轮" onClick={onInterrupt} className="min-h-9 px-2 text-muted hover:text-danger">停止 PM 本轮</button>}
+            {!durableInput && phase === "sending" ? (
               // Still a button, and still focusable: `disabled` would throw the
               // focus of whoever just clicked it back to the document. It is
               // `aria-disabled` with nothing behind the click instead, so the
@@ -852,7 +855,7 @@ export function Composer({
               >
                 <Loader2 className="h-6 w-6 animate-spin md:h-4 md:w-4" aria-hidden />
               </button>
-            ) : phase === "running" ? (
+            ) : !durableInput && phase === "running" ? (
               <div className="flex shrink-0 items-center gap-1.5">
                 {quiet ? (
                   // Next to Stop, because that is the decision it informs.

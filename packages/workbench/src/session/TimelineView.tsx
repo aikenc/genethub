@@ -690,6 +690,7 @@ export function TimelineView({
           )
           .map((round) => <RoundProgress key={round.roundId} round={round} />)}
 
+        {state.inputOutbox?.map(input => <PendingBubble key={input.messageId} pending={input} agentLabel={agentLabel} />)}
         {state.pending ? (
           <PendingBubble pending={state.pending} agentLabel={agentLabel} />
         ) : null}
@@ -902,17 +903,17 @@ function PendingBubble({
           className="flex max-w-[80%] flex-wrap items-baseline justify-end gap-x-2 text-xs text-danger"
           role="alert"
         >
-          <span className="min-w-0">发送失败：{pending.error}</span>
-          <button type="button" className="text-accent" onClick={() => void retry()}>
+          <span className="min-w-0">{pending.messageId ? "接收待核对：" : "发送失败："}{pending.error}</span>
+          <button type="button" className="text-accent" onClick={() => void retry(pending.messageId)}>
             重试
           </button>
-          <button type="button" className="text-accent" onClick={edit}>
+          <button type="button" className="text-accent" onClick={() => edit(pending.messageId)}>
             编辑
           </button>
         </div>
       ) : slow ? (
         <p className="text-xs text-muted" role="status">
-          {agentLabel ? `正在启动 ${agentLabel}…` : "正在启动 Agent…"}
+          {pending.messageId ? "正在确认消息接收…" : agentLabel ? `正在启动 ${agentLabel}…` : "正在启动 Agent…"}
         </p>
       ) : null}
     </div>

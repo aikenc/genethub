@@ -28,6 +28,8 @@ enum Command {
         workspace_id: Option<String>,
     },
     Dispatch {
+        retry_of: Option<String>,
+        resume_cancelled: bool,
         candidate_digest: Option<String>,
         workspace_id: Option<String>,
         workflow_id: Option<String>,
@@ -37,6 +39,10 @@ enum Command {
         prompt: String,
         wait: bool,
         timeout: Option<u64>,
+    },
+    Check {
+        workspace_id: Option<String>,
+        run_id: Option<String>,
     },
     Get {
         workspace_id: Option<String>,
@@ -52,6 +58,13 @@ enum Command {
         node_id: Option<String>,
         revision: Option<u64>,
         evidence: BTreeMap<String, String>,
+        outcome: Option<genehub_proto::WorkflowNodeOutcome>,
+        reason: Option<String>,
+    },
+    Cancel {
+        workspace_id: Option<String>,
+        run_id: String,
+        revision: u64,
     },
 }
 
@@ -142,6 +155,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             Ok(EXIT_OK)
         }
         Command::Dispatch {
+            retry_of,
+            resume_cancelled,
             candidate_digest,
             workspace_id,
             workflow_id,
@@ -167,6 +182,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             let workflow_id = select_workflow(&project, workflow_id, kind, complexity)?;
             let Reply::WorkflowRun(started) = rpc
                 .call(Request::WorkflowDispatch {
+                    retry_of,
+                    resume_cancelled: Some(resume_cancelled),
                     candidate_digest,
                     workspace_id: workspace_id.clone(),
                     workflow_id,
@@ -191,6 +208,26 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             } else {
                 EXIT_FAILED
             })
+        }
+        Command::Check {
+            workspace_id,
+            run_id,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowCheck(report) = rpc
+                .call(Request::WorkflowCheck {
+                    workspace_id,
+                    run_id,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.check with the wrong reply",
+                ));
+            };
+            output::succeed("workflow.check", serde_json::to_value(report).unwrap());
+            Ok(EXIT_OK)
         }
         Command::Get {
             workspace_id,
@@ -249,6 +286,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             node_id,
             revision,
             evidence,
+            outcome,
+            reason,
         } => {
             let binding = binding_for_missing(
                 workspace_id.is_none() || run_id.is_none() || node_id.is_none(),
@@ -290,6 +329,8 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                     node_id,
                     expected_revision: revision,
                     evidence,
+                    outcome,
+                    reason,
                 })
                 .await
                 .map_err(query::rpc_error)?
@@ -299,6 +340,28 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 ));
             };
             output::succeed("workflow.completed", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Cancel {
+            workspace_id,
+            run_id,
+            revision,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc
+                .call(Request::WorkflowCancel {
+                    workspace_id,
+                    run_id,
+                    expected_revision: revision,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.cancel with the wrong reply",
+                ));
+            };
+            output::succeed("workflow.cancelling", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
     }
@@ -590,6 +653,8 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 ));
             }
             Ok(Command::Dispatch {
+                retry_of: values.retry_of.take(),
+                resume_cancelled: values.resume_cancelled,
                 candidate_digest: values.candidate.take(),
                 workspace_id: values.workspace.take(),
                 workflow_id: values.workflow.take(),
@@ -604,6 +669,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 timeout: values.timeout,
             })
         }
+        "check" => Ok(Command::Check { workspace_id: values.workspace.take(), run_id: values.run.take() }),
         "get" => Ok(Command::Get {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -618,15 +684,26 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             node_id: values.node.take(),
             revision: values.revision,
             evidence: values.evidence,
+            outcome: values.outcome,
+            reason: values.reason,
+        }),
+        "cancel" => Ok(Command::Cancel {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --run <id>"))?,
+            revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --revision <current>"))?,
         }),
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|activate|dispatch|get|history|complete ...",
+            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel ...",
         )),
     }
 }
 
 #[derive(Default)]
 struct Values {
+    retry_of: Option<String>,
+    resume_cancelled: bool,
+    outcome: Option<genehub_proto::WorkflowNodeOutcome>,
+    reason: Option<String>,
     positionals: Vec<String>,
     agent: Option<String>,
     model: Option<String>,
@@ -659,6 +736,18 @@ impl Values {
                     .ok_or_else(|| CliFailure::invalid_args(format!("{flag} 需要非空值")))
             };
             match flag {
+                "--retry-of" => values.retry_of = Some(next(&mut index)?),
+                "--resume-cancelled" => values.resume_cancelled = true,
+                "--outcome" => {
+                    values.outcome = Some(
+                        serde_json::from_value(json!(next(&mut index)?)).map_err(|_| {
+                            CliFailure::invalid_args(
+                                "--outcome 使用 completed|changesRequested|failed|blocked",
+                            )
+                        })?,
+                    );
+                }
+                "--reason" => values.reason = Some(next(&mut index)?),
                 "--agent" => values.agent = Some(next(&mut index)?),
                 "--model" => values.model = Some(next(&mut index)?),
                 "--workspace" => values.workspace = Some(next(&mut index)?),
@@ -853,6 +942,11 @@ mod tests {
     #[test]
     fn wait_projection_keeps_every_distinct_running_session() {
         let run = WorkflowRunStatus {
+            diagnostics: None,
+            request_run_id: None,
+            report_pending: None,
+            reason: None,
+            cleanup_error: None,
             execution_root: None,
             experimental: None,
             id: "wr_test".into(),
@@ -871,6 +965,10 @@ mod tests {
             active_nodes: vec!["one".into(), "two".into()],
             nodes: vec![
                 genehub_proto::WorkflowNodeRunStatus {
+                    assigned_at_ms: None,
+                    last_activity_at_ms: None,
+                    outcome: None,
+                    reason: None,
                     id: "one".into(),
                     uses: "agent.session".into(),
                     status: "running".into(),
@@ -878,6 +976,10 @@ mod tests {
                     evidence: BTreeMap::new(),
                 },
                 genehub_proto::WorkflowNodeRunStatus {
+                    assigned_at_ms: None,
+                    last_activity_at_ms: None,
+                    outcome: None,
+                    reason: None,
                     id: "two".into(),
                     uses: "agent.session".into(),
                     status: "running".into(),

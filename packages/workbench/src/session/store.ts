@@ -1,4 +1,4 @@
-import { rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue } from "./localConversation";
+import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue } from "./localConversation";
 import type {
   AgentSpaceBuilderOperation,
   AgentSpaceBuilderReport,
@@ -415,9 +415,9 @@ interface WorkbenchState {
   closePreviewFloat(): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
-  retryPending(): Promise<void>;
+  retryPending(messageId?: string): Promise<void>;
   /** Takes a failed message back into the composer instead of resending it. */
-  editPending(): void;
+  editPending(messageId?: string): void;
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
   /**
@@ -1136,7 +1136,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
     if (get().client !== client) return;
     const typedSnapshot = snapshot as SessionSnapshot;
-    const previous = timelineOf(get(), sessionId);
+    const current = timelineOf(get(), sessionId);
+    const saved = client.identity?.features?.includes("session.input.v1") ? savedInputReceipts(client.identity.machineId, sessionId) : [];
+    const previous = { ...current, inputOutbox: [...(current.inputOutbox ?? []), ...saved.filter(input => !current.inputOutbox?.some(existing => existing.messageId === input.messageId))] };
+    for (const input of previous.inputOutbox) {
+      if (typedSnapshot.items.some(item => item.id === input.messageId) && client.identity) saveInputReceipt(client.identity.machineId, sessionId, input, true);
+    }
     const base = fromSnapshot(typedSnapshot, previous.pending, previous);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
@@ -1470,6 +1475,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async send(text, attachments = []) {
+    if (get().client?.identity?.features?.includes("session.input.v1")) {
+      await sendDurableInput(get, set, text, attachments);
+      return;
+    }
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
     set({ notice: null });
@@ -1575,7 +1584,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
   },
 
-  async retryPending() {
+  async retryPending(messageId) {
+    if (messageId) {
+      const sessionId = get().activeSessionId;
+      const input = sessionId ? timelineOf(get(), sessionId).inputOutbox?.find(input => input.messageId === messageId) : null;
+      if (input) await sendDurableInput(get, set, input.text, input.attachments, input);
+      return;
+    }
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
     const pending = timelineOf(get(), sessionId).pending;
@@ -1585,7 +1600,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await get().send(pending.text, pending.attachments);
   },
 
-  editPending() {
+  editPending(messageId) {
+    if (messageId) {
+      // Unknown delivery must be reconciled with its original identity first.
+      set({ notice: "这条消息的接收结果尚未确认；请先重试核对，再发送修改要求。" });
+      return;
+    }
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
     const pending = timelineOf(get(), sessionId).pending;
@@ -2328,6 +2348,41 @@ function openLandingPreview(get: () => WorkbenchState, intent: LandingIntent | n
  * is a caller that should quietly do nothing: `asked` has already said why if a
  * request was made and refused.
  */
+async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: string, attachments: Attachment[], retry?: PendingMessage): Promise<void> {
+  const client = get().client;
+  const machine = client?.identity?.machineId;
+  if (!client || !machine) { set({ notice: "连接恢复后再发送。", restoreDraft: { text, attachments } }); return; }
+  const origin = get().activeSessionId;
+  if (!origin && get().timeline.pending) { set({ restoreDraft: { text, attachments } }); return; }
+  // A Session can receive a new independent request while its squad works.
+  // Do not silently bind arbitrary chat to the sole existing task. Explicit
+  // task references and retries retain the target captured at admission.
+  const input: PendingMessage = retry ?? { messageId: `u_${crypto.randomUUID().replaceAll("-", "")}`, text, attachments, sentAtMs: Date.now(), error: null };
+  if (!origin) set(state => ({ timeline: { ...state.timeline, pending: input } }));
+  const sessionId = origin ?? await start(get, set, input);
+  if (!sessionId || get().client !== client) { if (get().client === client) set({ restoreDraft: { text, attachments } }); return; }
+  patchTimeline(sessionId, set, timeline => ({ pending: timeline.pending?.messageId === input.messageId ? null : timeline.pending,
+    inputOutbox: [...(timeline.inputOutbox ?? []).filter(item => item.messageId !== input.messageId), { ...input, error: null }] }));
+  saveInputReceipt(machine, sessionId, input);
+  try {
+    if (retry) {
+      const lookup = await client.call({ type: "session.narrative", payload: { sessionId, itemId: input.messageId ?? null, throughRoundId: null, cursor: null, limit: null } });
+      if (lookup?.type === "sessionNarrative" && lookup.data.items?.some(item => item.id === input.messageId)) {
+        saveInputReceipt(machine, sessionId, input, true);
+        if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.filter(item => item.messageId !== input.messageId) }));
+        return;
+      }
+      if (input.missingAttachments) throw new Error("本地附件已失效，原消息仍待核对；请检查服务端记录并重新附加图片。");
+    }
+    await client.call({ type: "session.send", payload: { sessionId, messageId: input.messageId, taskRunId: input.taskRunId, text: input.text, attachments: input.attachments, artifactPreviewBaseUrl: null, continuesRound: null } });
+    saveInputReceipt(machine, sessionId, input, true);
+    if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.filter(item => item.messageId !== input.messageId) }));
+  } catch (error) {
+    const message = error instanceof ConnectionOutcomeUnknownError ? "接收结果待核对；重试会使用原消息 ID。" : error instanceof Error ? error.message : String(error);
+    if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...item, error: message } : item) }));
+  }
+}
+
 async function start(
   get: () => WorkbenchState,
   set: Setter,
@@ -2540,7 +2595,7 @@ function withSnapshotStatus(previous: TimelineState, snapshot: SessionSnapshot):
   // An approval still waiting outranks it, the same way it does when a snapshot
   // is applied whole: there is a card on screen the user has to answer.
   const waiting = (snapshot.pendingPermissions?.length ?? 0) > 0;
-  return { ...previous, status: waiting ? "waiting" : status };
+  return { ...previous, status: waiting && !snapshot.summary.inputSummary ? "waiting" : status };
 }
 
 function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
