@@ -260,9 +260,9 @@ pub fn make_thumb(bytes: &[u8], mime: &str, target_width: u32) -> Option<ImageTh
 /// resolve against the session cwd; anything that escapes the workspace root
 /// is not a preview target.
 fn workspace_relative(path: &str, cwd: &Path, workspace_root: &Path) -> Option<String> {
-    let raw = Path::new(path);
+    let raw = crate::guest_paths::guest_path(Path::new(path));
     let absolute: PathBuf = if raw.is_absolute() {
-        raw.to_path_buf()
+        raw
     } else {
         cwd.join(raw)
     };

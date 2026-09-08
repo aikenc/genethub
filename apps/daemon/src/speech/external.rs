@@ -121,11 +121,11 @@ pub(super) fn validate_registration(
     {
         anyhow::bail!("runtime 命令必须是有效的绝对路径");
     }
-    let path = Path::new(&command);
+    let path = crate::guest_paths::guest_path(Path::new(&command));
     if !path.is_absolute() {
         anyhow::bail!("runtime 命令必须使用绝对路径；不会从项目目录或 PATH 查找");
     }
-    let canonical = std::fs::canonicalize(path)
+    let canonical = std::fs::canonicalize(&path)
         .map_err(|error| anyhow::anyhow!("无法读取 runtime 命令 {}：{error}", path.display()))?;
     let metadata = std::fs::metadata(&canonical)?;
     if !metadata.is_file() {
