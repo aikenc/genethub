@@ -117,6 +117,9 @@ pub enum Request {
     /// from the authenticated session-bound CLI identity, never this payload.
     #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
     WorkflowDispatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        candidate_digest: Option<String>,
         workspace_id: String,
         workflow_id: String,
         task_id: String,

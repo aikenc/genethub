@@ -1,6 +1,6 @@
 ---
 name: pm-project-bootstrap
-description: Detect when a user wants GeneHub to take over an ordinary Workspace as a PM-managed project, safely request Human approval, apply a Bootstrap Pack, and continue the original goal. Use for project setup, team/AgentSpace setup, workflow/pipeline setup, a new game, a complex game feature, or requests for a PM-managed delivery team.
+description: Detect when a user wants GeneHub to take over an ordinary Workspace as a PM-managed project, safely request Human approval, apply a Bootstrap Pack, and continue the original goal. Use for project setup, team/AgentSpace setup, workflow/pipeline setup, a new game, a complex game feature, requests for a PM-managed delivery team, or upgrading its built-in expert Pack.
 ---
 
 # PM project bootstrap
@@ -16,7 +16,7 @@ First inspect the current Space and discover packs:
 "$GENEHUB_CLI" space bootstrap list
 ```
 
-If the Space is already a healthy PM project with a Bootstrap Pack, read the installed Pack's `entrySkill` and continue the user's original goal. Do not bootstrap again.
+If the Space is already a healthy PM project with the current Bootstrap Pack version, read the installed Pack's `entrySkill` and continue the user's original goal. Do not bootstrap again.
 
 If it is an ordinary Workspace and a discovered Pack clearly matches the intent, create a read-only plan. For a small game, larger game feature, or game workflow request, use the discovered `game-delivery-v1` Pack:
 
@@ -25,6 +25,8 @@ If it is an ordinary Workspace and a discovered Pack clearly matches the intent,
 ```
 
 If the user has not supplied enough information to choose a Pack or identify the main deliverable, ask only the single most important clarification. The request “搭建一套管线，用于开发小游戏。你会这么做？” is a PM-project intent: inspect and plan or ask one focused gameplay question; never answer it with only generic CI advice.
+
+For an existing project whose installed Pack version is older than the discovered Pack, use the same `space bootstrap plan` / approved apply path. The plan lists the exact upgrade files; it preserves unchanged project assets and refuses to overwrite customized files that conflict with a changed upstream asset. Finish active Runs and resolve any inactive Candidate before upgrading. Never replay initial setup, delete history, or replace custom files to bypass a conflict. An already-current Pack is a no-op, including when its project Workflow has been customized.
 
 For a non-current plan, parse its JSON result and find `approval.challengeId`. Present that exact daemon-authored challenge through the session-bound CLI:
 
@@ -44,7 +46,7 @@ After the authenticated Human answers, GeneHub resumes this same Session in a ne
 
 Do not pass or search for a grant token. The CLI has none; the daemon finds the one-use Human grant from this authenticated Session and rejects stale, copied, forged, or replayed applies.
 
-On success, report the Pack identity, bootstrap commit, Project → Executor → WorkflowManager/Coder/Reviewer tree, and health. Read the returned `entrySkill` immediately and continue the original user goal in this same Session. If the goal is sufficient, dispatch it; otherwise ask one blocking question. Do not implement, review, use `git add -A`, manually copy Pack files, guess a Pack id, or recreate the team yourself.
+On success, report the Pack identity, bootstrap commit, PM, Executor execution squad, and peer WorkflowManager/WorkflowReviewer experts, and health. Read the returned `entrySkill` immediately and continue the original user goal in this same Session. If the goal is sufficient, dispatch it; otherwise ask one blocking question. Do not implement, review, use `git add -A`, manually copy Pack files, guess a Pack id, or recreate the team yourself.
 
 On rejection or cancellation, state that nothing changed. On failure, preserve the daemon's stable error code and recovery action; never claim takeover succeeded when the report or tree is incomplete.
 

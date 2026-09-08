@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
-import { defineSpecialty } from "../../framework/public.ts";
+import { connectProductClient, daemonEndpoint, defineSpecialty } from "../../framework/public.ts";
 
 interface CliResult {
   status: number;
@@ -62,14 +62,14 @@ defineSpecialty(
     id: "specialty.agent-space.bootstrap-pack",
     title: "A Human-approved Bootstrap Pack atomically takes over an ordinary folder",
     oracle:
-      "a normal Agent Session can only apply the daemon-issued PM takeover plan after the Human approves its native PlanApproval; rejection and direct CLI replay leave zero mutation, approval creates an independent Git repository and exactly four Builder-verified AgentSpaces, and the same Pack then returns an identity-preserving no-op",
+      "a normal Agent Session can only apply the daemon-issued PM takeover plan after the Human approves its native PlanApproval; rejection and direct CLI replay leave zero mutation, approval creates an independent Git repository and exactly five Builder-verified AgentSpaces, and the same Pack then returns an identity-preserving no-op",
     catches: [
       "the old specialty bypasses the Human and calls bootstrap apply as LocalUser",
       "ordinary chat or a copied CLI command is accepted as project-mutation authority",
       "rejecting the plan still initializes Git or leaves a partial AgentSpace tree",
       "a nested empty folder inherits or stages into the outer repository",
       "the Pack is a daemon business constant rather than a versioned resource bundle",
-      "the four AgentSpaces are written but never Builder-verified or registered",
+      "the five AgentSpaces are written but never Builder-verified or registered",
       "a repeated PM request creates duplicate Spaces or increments revisions",
       "bootstrap silently replaces the user's Git commit identity",
     ],
@@ -129,21 +129,43 @@ defineSpecialty(
       }
 
       const stages = new Map<string, number>();
+      let upgradeStage = 0;
+      let bypassAttempted = false;
+      let bypassRefused = false;
+      let bypassDiagnostic = "";
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
-        if (body.includes("AGENT_COMPONENT_BYPASS")) {
-          if (
-            body.includes("approvalRequired") ||
-            body.includes("必须先使用 --plan") ||
-            body.includes('"code":"forbidden"')
-          ) {
-            return { text: "直接修改已被内核拒绝；必须先向用户展示变更计划。" };
+        if (body.includes("UPGRADE_BOOTSTRAP")) {
+          const stage = upgradeStage++;
+          if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
+          if (stage === 1) {
+            const challenge = fieldFromRequest(request, "challengeId");
+            if (typeof challenge !== "string") throw new Error("upgrade omitted its Human challenge");
+            return { tool: { name: "request_user_input", arguments: { questions: [{ id: challenge, header: "升级专家", question: "Review the daemon plan", options: [{ label: "approve", description: "upgrade" }] }] } } };
           }
+          if (stage === 2) {
+            const digest = fieldFromRequest(request, "planDigest");
+            const revision = fieldFromRequest(request, "expectedRevision");
+            if (typeof digest !== "string" || typeof revision !== "number") throw new Error("upgrade lost approved plan facts");
+            return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(digest)} --expected-revision ${revision} --action-id upgrade-approved` } } };
+          }
+          return { text: "升级结果已回到原 PM。" };
+        }
+        if (body.includes("AGENT_COMPONENT_BYPASS")) {
+          if (bypassAttempted) {
+            const code = fieldFromRequest(request, "code");
+            const message = fieldFromRequest(request, "message");
+            bypassDiagnostic = JSON.stringify({ code, message });
+            bypassRefused = code === "forbidden" || (code === "unauthenticated" && message === "caller lacks the settings capability")
+              || body.includes("approvalRequired");
+            return { text: "直接修改结果已返回。" };
+          }
+          bypassAttempted = true;
           return {
             tool: {
               name: "bash",
               arguments: {
-                command: '"$GENEHUB_CLI" space component set --component reviewer',
+                command: '"$GENEHUB_CLI" space component set --component reviewer --revision 1',
               },
             },
           };
@@ -291,10 +313,10 @@ defineSpecialty(
       };
 
       const available = cli(["space", "bootstrap", "list"]);
-      const packs = (available.data.packs ?? []) as Array<{ id: string; description: string }>;
+      const packs = (available.data.packs ?? []) as Array<{ id: string; intentMatches: string[] }>;
       t.assertions.assert(
         available.status === 0 &&
-          packs.some((pack) => pack.id === "game-delivery-v1" && pack.description.includes("WorkflowManager")),
+          packs.some((pack) => pack.id === "game-delivery-v1" && pack.intentMatches.includes("game-workflow-review")),
         `Pack is not discoverable: ${available.text}`,
       );
       const terminalPlan = cli([
@@ -326,12 +348,12 @@ defineSpecialty(
       t.assertions.assert(listed?.type === "workspaces", "workspace.list failed after bootstrap");
       const allSpaces = listed?.type === "workspaces" ? listed.data : [];
       const spaces = allSpaces.filter((space) =>
-        ["executor", "coder", "reviewer", "workflow-manager"].includes(space.name),
+        ["executor", "coder", "reviewer", "workflow-manager", "workflow-reviewer"].includes(space.name),
       );
-      t.assertions.assert(spaces.length === 4, `bootstrap did not create exactly four team Spaces`);
+      t.assertions.assert(spaces.length === 5, `bootstrap did not create exactly five team Spaces`);
       const byName = new Map(spaces.map((space) => [space.name, space]));
       const executor = byName.get("executor")!;
-      for (const name of ["executor", "coder", "reviewer", "workflow-manager"]) {
+      for (const name of ["executor", "coder", "reviewer", "workflow-manager", "workflow-reviewer"]) {
         t.assertions.assert(
           existsSync(path.join(approved.root, "spaces", name, ".pipebuilder", "lock.json")),
           `${name} was not Builder-verified`,
@@ -342,7 +364,7 @@ defineSpecialty(
           executor.agentSpace.components.some((component) => component.componentId === "executor"),
         "Executor is not the project scheduling boundary",
       );
-      for (const name of ["coder", "reviewer", "workflow-manager"]) {
+      for (const name of ["coder", "reviewer", "workflow-manager", "workflow-reviewer"]) {
         t.assertions.assert(
           byName.get(name)?.agentSpace?.parentWorkspaceId === executor.id,
           `${name} is not a direct Executor child`,
@@ -403,6 +425,7 @@ defineSpecialty(
         () => approved.events.filter((event) => event.type === "turnCompleted").length > completedBefore,
         120_000,
       );
+      t.assertions.assert(bypassAttempted && bypassRefused, `direct Component probe did not reach the approval boundary: ${bypassDiagnostic}`);
       const afterBypass = await opened.client.call({ type: "workspace.list" });
       const projectAfterBypass = afterBypass?.type === "workspaces"
         ? afterBypass.data.find((workspace) => workspace.id === approveProject.id)
@@ -420,6 +443,71 @@ defineSpecialty(
         ),
         "Pack did not install the game delivery DCG",
       );
+      // Historical source + persisted Pack identity fixture, installed only
+      // while the daemon is stopped; all upgrade actions use production APIs.
+      const legacy = JSON.parse(readFileSync(path.join(t.openRoot, "testing/fixtures/bootstrap/game-delivery-v1.json"), "utf8")) as { packDigest: string; files: Record<string, string>; absentFiles: string[] };
+      const removed = await opened.client.call({ type: "workspace.remove", payload: { workspaceId: byName.get("workflow-reviewer")!.id } });
+      t.assertions.assert(removed?.type === "workspaces" && !removed.data.some((space) => space.id === byName.get("workflow-reviewer")!.id), "could not prepare the legacy four-Space fixture");
+      for (const relative of legacy.absentFiles) rmSync(path.join(approved.root, relative), { force: true });
+      rmSync(path.join(approved.root, "spaces", "workflow-reviewer"), { recursive: true, force: true });
+      for (const [relative, content] of Object.entries(legacy.files)) writeFileSync(path.join(approved.root, relative), content);
+      const coderPrompt = path.join(approved.root, ".genethub/workflow/prompts/coder.md");
+      writeFileSync(coderPrompt, "\nUser customization: retain accessible keyboard controls.\n", { flag: "a" });
+      const customized = readFileSync(coderPrompt, "utf8");
+      for (const member of [projectAfterBypass!, ...spaces.filter((space) => space.name !== "workflow-reviewer")]) {
+        const built = await opened.client.call({ type: "agentSpace.builder", payload: { workspaceId: approveProject.id, targetWorkspaceId: member.id, spaceName: member.name, operation: { kind: "build", dryRun: false, requireNoPostCommands: true } } });
+        t.assertions.assert(built?.type === "agentSpaceBuilder" && built.data.status === "ok", "legacy source fixture did not build");
+        const component = member.agentSpace!.components[0]!;
+        await opened.client.call({ type: "agentSpace.configure", payload: { workspaceId: member.id, expectedRevision: member.agentSpace!.revision, operation: { kind: "setComponent", componentId: component.componentId, enabled: component.enabled, role: component.role ?? null } } });
+      }
+      git(approved.root, ["add", ".pipebuilder", ".agents", ".claude", ".cursor", ".codebuddy", "AGENTS.md", ".genethub/workflow", "spaces"], opened.daemon.env);
+      git(approved.root, ["commit", "-m", "historical v1 fixture with user customization"], opened.daemon.env);
+      const currentStatus = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: approveProject.id } });
+      if (currentStatus?.type !== "workflowProject") throw new Error("legacy candidate did not compile");
+      const legacyActivation = await opened.client.call({ type: "workflow.activate", payload: { workspaceId: approveProject.id, candidateDigest: null, expectedRevision: currentStatus.data.activationRevision } });
+      if (legacyActivation?.type !== "workflowProject") throw new Error("legacy candidate did not activate");
+      opened.client.close();
+      opened.daemon.stop();
+      const configPath = path.join(t.env.data, "config.json");
+      const config = JSON.parse(readFileSync(configPath, "utf8"));
+      const legacyIds = new Set([approveProject.id, ...spaces.filter((space) => space.name !== "workflow-reviewer").map((space) => space.id)]);
+      for (const space of config.agentSpaces) if (legacyIds.has(space.workspaceId)) {
+        space.bootstrapPack.version = 1;
+        space.bootstrapPack.digest = legacy.packDigest;
+      }
+      writeFileSync(configPath, JSON.stringify(config));
+      const receiptPath = path.join(approved.root, ".genethub/bootstrap-packs/game-delivery-v1.json");
+      const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+      receipt.packVersion = 1; receipt.packDigest = legacy.packDigest;
+      receipt.spaces = receipt.spaces.filter((space: { name: string }) => space.name !== "workflow-reviewer");
+      writeFileSync(receiptPath, JSON.stringify(receipt));
+      cli(["daemon", "start"]);
+      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+      const pmSkill = path.join(approved.root, ".pipebuilder/skills/project-manager/SKILL.md");
+      const originalPm = readFileSync(pmSkill, "utf8");
+      writeFileSync(pmSkill, originalPm + "\nCustom PM decision policy.\n");
+      git(approved.root, ["add", ".pipebuilder/skills/project-manager/SKILL.md"], opened.daemon.env);
+      git(approved.root, ["commit", "-m", "custom PM conflict"], opened.daemon.env);
+      const conflict = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1"]);
+      t.assertions.assert(conflict.status !== 0 && readFileSync(pmSkill, "utf8").includes("Custom PM decision policy."), "upgrade overwrote a conflicting customization");
+      writeFileSync(pmSkill, originalPm);
+      git(approved.root, ["add", ".pipebuilder/skills/project-manager/SKILL.md"], opened.daemon.env);
+      git(approved.root, ["commit", "-m", "resolve PM upgrade conflict"], opened.daemon.env);
+      const upgradePlan = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1", ...rendererArgs]);
+      t.assertions.assert(upgradePlan.status === 0 && upgradePlan.data.current === false, `legacy upgrade preflight failed: ${upgradePlan.text}`);
+      const upgradeEvents = await t.flows.main.attachEventLog(opened.client, approved.sessionId);
+      await t.flows.main.sendPrompt(opened.client, approved.sessionId, "UPGRADE_BOOTSTRAP: 升级内置专家，保留我的项目定制。" );
+      await t.tools.waitUntil(() => upgradeEvents.some((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested" || event.type === "turnCompleted"), 90_000);
+      t.assertions.assert(upgradeEvents.some((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested"), "upgrade turn ended without requesting its approval");
+      const question = upgradeEvents.map((event) => t.flows.main.sessionEventOf(event)).find((event) => event?.type === "permissionRequested")?.request as { id: string; title: string };
+      t.assertions.assert(question.title.includes("升级"), "upgrade was presented as a fresh takeover");
+      await opened.client.call({ type: "session.respondPermission", payload: { sessionId: approved.sessionId, requestId: question.id, outcome: { outcome: "selected", optionId: "approve-once" } } });
+      await t.tools.waitUntil(() => upgradeEvents.some((event) => event.type === "turnCompleted"), 90_000);
+      const upgraded = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1"]);
+      t.assertions.assert(upgraded.status === 0 && upgraded.data.current === true, `upgraded project was not idempotent: ${upgraded.text}`);
+      t.assertions.assert(readFileSync(coderPrompt, "utf8") === customized, "upgrade changed a user-owned workflow prompt");
+      const afterUpgrade = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: approveProject.id } });
+      t.assertions.assert(afterUpgrade?.type === "workflowProject" && afterUpgrade.data.workflows.some((workflow) => workflow.id === "workflow-review") && afterUpgrade.data.activationRevision === legacyActivation.data.activationRevision + 1, "upgrade omitted reviewer routing or lost activation history");
       t.note(`project=${approveProject.id} executor=${executor.id} commit=${projectCommit.slice(0, 12)}`);
     } finally {
       opened.client.close();

@@ -777,7 +777,7 @@ export type ManagedSessionInfo = { parentSessionId: string, workflowRunId: strin
  * Project-defined label such as `worker`, `reviewer` or a domain role.
  * The kernel never derives behavior from this value.
  */
-role: string, userInteraction: SessionUserInteraction, };
+role: string, userInteraction: SessionUserInteraction, evidenceScope?: SessionEvidenceScope, };
 
 export type ModeInfo = { id: string, label: string, description?: string, };
 
@@ -945,7 +945,7 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1190,6 +1190,11 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * with its own wall clock before the event reaches a client.
  */
 startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+
+/**
+ * Immutable evidence access granted to a managed analysis session.
+ */
+export type SessionEvidenceScope = { root: string, sessions: { [key in string]?: string | null }, };
 
 /**
  * One lightweight external conversation returned by the discovery pass.
@@ -1851,7 +1856,7 @@ activationHistory: Array<WorkflowActivationStatus>, };
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { id: string, workspaceId: string, 
+export type WorkflowRunStatus = { executionRoot?: string, experimental?: boolean, id: string, workspaceId: string, 
 /**
  * Existing reusable Workflow Executor WorkerSpace selected for this Run.
  * Absent only for directory projects created before the PipeSpace model.

@@ -1,0 +1,5 @@
+schema: genehub.workflow.role.v1
+id: workflow-manager
+agentId: {{AGENT_ID}}
+{{MODEL_ID_YAML}}userInteraction: readOnly
+prompt: prompts/workflow-manager.md

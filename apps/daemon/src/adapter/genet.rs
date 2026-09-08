@@ -246,6 +246,11 @@ impl AgentAdapter for GenetAdapter {
             .current_dir(&config.cwd)
             .env(crate::channel::ENV_AGENT_HOME, &home);
         super::apply_session_environment(&mut command, &config);
+        command.env_remove("GENEHUB_EVIDENCE_SCOPE");
+        if let Some(scope) = &config.evidence_scope {
+            command.env("GENEHUB_EVIDENCE_SCOPE", serde_json::to_string(scope)?);
+        }
+
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
         }

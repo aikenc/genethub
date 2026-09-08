@@ -694,18 +694,23 @@ async fn dispatch(
                 Ok(runtime) => runtime,
                 Err(error) => return failed(error),
             };
-            match crate::workflow::activate_project(
+            match crate::workflow::activate_bound_project(
+                state,
+                &workspace_id,
                 &workspace.root,
                 &runtime,
                 candidate_digest.as_deref(),
                 expected_revision,
-            ) {
+            )
+            .await
+            {
                 Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
                 Err(error) => failed(error),
             }
         }
 
         Request::WorkflowDispatch {
+            candidate_digest,
             workspace_id,
             workflow_id,
             task_id,
@@ -745,6 +750,7 @@ async fn dispatch(
                 &workflow_id,
                 &task_id,
                 &prompt,
+                candidate_digest.as_deref(),
             )
             .await
             {
@@ -2808,6 +2814,8 @@ mod tests {
 
     fn workflow_run(status: &str) -> genehub_proto::WorkflowRunStatus {
         genehub_proto::WorkflowRunStatus {
+            execution_root: None,
+            experimental: None,
             id: "wr_terminal".into(),
             workspace_id: "w_project".into(),
             executor_workspace_id: Some("w_executor".into()),

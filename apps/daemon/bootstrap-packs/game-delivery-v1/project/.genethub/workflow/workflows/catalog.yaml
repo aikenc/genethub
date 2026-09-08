@@ -10,3 +10,13 @@ workflows:
     match:
       kind: feature
       complexity: complex
+  - id: workflow-improvement
+    path: workflow-improvement.yaml
+    match:
+      kind: workflow
+      complexity: improvement
+  - id: workflow-review
+    path: workflow-review.yaml
+    match:
+      kind: workflow
+      complexity: review

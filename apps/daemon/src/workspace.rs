@@ -591,7 +591,11 @@ impl Workspaces {
                 .get(&desired.workspace_id)
                 .expect("every planned Space was verified")
                 .clone();
-            proposed.guidance = desired.guidance.clone();
+            for prompt in &desired.guidance {
+                if !proposed.guidance.contains(prompt) {
+                    proposed.guidance.push(prompt.clone());
+                }
+            }
             proposed.bootstrap_pack = desired.pack.clone();
             if proposed != current {
                 proposed.revision = current.revision.saturating_add(1);
@@ -635,6 +639,16 @@ impl Workspaces {
         project_workspace_id: &str,
         component_id: &str,
     ) -> Result<Option<WorkspaceEntry>> {
+        self.reusable_component_space_at(project_workspace_id, component_id, None)
+            .await
+    }
+
+    pub async fn reusable_component_space_at(
+        &self,
+        project_workspace_id: &str,
+        component_id: &str,
+        selected_root: Option<&Path>,
+    ) -> Result<Option<WorkspaceEntry>> {
         // Workspace mutations consistently acquire entries before config.
         // Preserve that order here so an open/remove cannot deadlock against
         // a concurrent Workflow dispatch.
@@ -656,6 +670,11 @@ impl Workspaces {
                 space.parent_workspace_id.as_deref() == Some(project_workspace_id)
                     && crate::agent_space::has_enabled_component(space, component_id)
                     && space.lifecycle != "ephemeral"
+                    && selected_root.is_none_or(|root| {
+                        entries.get(&space.workspace_id).is_some_and(|entry| {
+                            entry.root.canonicalize().ok().as_deref() == Some(root)
+                        })
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
