@@ -2,6 +2,12 @@
 
 这份实现保留静态 Asset Preview，在用户授权后将 `/api/.../` 的有限 HTTP、流式 fetch 和 WebSocket 请求转给登记后端。音视频由可信 Workbench 面板建立原生 RTCPeerConnection，直接连接应用媒体后端；允许媒体中继时使用所属 Channel 的短期 TURN 凭证。官方 Fabric Relay 继续承载原有业务数据，不承担音视频转码。
 
+## Agent 引导
+
+内置 [genehub-service-preview](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 提供随产品分发的任务入口，按需读取启动与分享、媒体契约、数字人和 UE 参考。静态页面仍由 `genehub-html-preview` 引导。安装包中的 Skill 不包含 Node runner、Python 环境或模型权重；源码与启动前提见其 [启动参考](../apps/daemon/builtin-skills/genehub-service-preview/references/getting-started.md)。
+
+UE 接入需要版本匹配的信令适配；当前可信媒体面板没有 Pixel Streaming 的键鼠/触摸/手柄输入协议，也没有内置 UE 适配器。远程观看、交互云游玩及特定 Editor/PIE 模式必须分别验证，详见 [UE 参考](../apps/daemon/builtin-skills/genehub-service-preview/references/unreal-engine.md)。
+
 ## 开始使用
 
 需要 Node.js 22+，目标 daemon、host 与 Workbench 均更新到本功能对应版本。运行源码中的适配器：

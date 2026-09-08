@@ -9,13 +9,19 @@ Preview opens the workspace file the user clicks. Write a **regular static site*
 
 GeneHub injects its own Preview loader. The page must not depend on that loader to run.
 
+## Services and live media
+
+For a local HTTP/WS backend, digital-human pipeline, native WebRTC, remote UE viewing, or PIE/cloud play, use the built-in `genehub-service-preview` Skill and its references. Keep the entry and assets static; the registered-service bridge and trusted media panel provide the dynamic capabilities after user authorization. Do not implement microphone capture or a PeerConnection in the sandbox.
+
+The ordinary static-file path below needs no backend registration.
+
 ## Authoring
 
 1. Emit an entry HTML file (usually `index.html`) plus assets next to it.
 2. Use **relative paths** (`assets/photo.png`, `./app.js`, `../shared/style.css`). Site-root paths (`/assets/...`) and invented Preview URLs do not map back to the workspace.
 3. Share the **entry file**, not a folder: `[相册](gallery/index.html)` or a bare `gallery/index.html`.
 4. Keep each previewed file ≤ 64 MiB. A site may have many files; the entry HTML, each image, and each script is fetched on its own.
-5. Default to static files. A local HTTP server is not required for ES modules, `fetch`, images, or WASM-from-bytes, and Preview does **not** currently proxy `127.0.0.1`.
+5. Default to static files. A local HTTP server is not required for ES modules, `fetch`, images, or WASM-from-bytes, and direct `127.0.0.1` URLs do not identify registered services. Use `genehub-service-preview` for declared backend routes.
 
 ## What works
 
@@ -38,7 +44,7 @@ GeneHub injects its own Preview loader. The page must not depend on that loader 
 - **Absolute workspace paths, `file://`, `http://127.0.0.1`** — they are not the workspace.
 - **`new Worker("w.js")` from a relative URL** — not rewritten; inline or blob workers only.
 - **Non-literal dynamic `import(variable)`** — only string-literal specifiers are rewritten.
-- A backend (Express / Flask / WebSocket server). Tell the user Preview is static-only; do not bind `0.0.0.0`.
+- Arbitrary local backend URLs. For Express / Flask / WebSocket applications, use `genehub-service-preview` to register declared loopback routes and obtain service access through the trusted toolbar.
 
 ## Sharing
 
