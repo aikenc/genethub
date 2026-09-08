@@ -157,6 +157,7 @@ async fn dispatch(
             rtc_supported: crate::dataplane::rtc::SUPPORTED,
             features: Some(vec![
                 "service.preview.v1".to_string(),
+                "process.services.v1".to_string(),
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                 genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
@@ -1304,7 +1305,44 @@ async fn dispatch(
             Err(error) => failed(error),
         },
 
-        Request::ProcessList => Handled::ok(Reply::Processes(state.processes.list().await)),
+        Request::ProcessList => {
+            match crate::dataplane::service_preview::process_snapshot(state, caller, None).await {
+                Ok(rows) => Handled::ok(Reply::Processes(rows)),
+                Err(e) => failed(e),
+            }
+        }
+        Request::ProcessWorkspaceList { workspace_id } => {
+            match crate::dataplane::service_preview::process_snapshot(
+                state,
+                caller,
+                Some(&workspace_id),
+            )
+            .await
+            {
+                Ok(rows) => Handled::ok(Reply::Processes(rows)),
+                Err(e) => failed(e),
+            }
+        }
+        Request::ProcessServiceStop {
+            workspace_id,
+            entry_path,
+            run_id,
+        } => {
+            if !caller.allows(crate::authz::Capability::Services) {
+                return Handled::err(ErrorCode::Forbidden, "需要 services 授权");
+            }
+            match crate::dataplane::service_preview::stop_registered(
+                state,
+                &workspace_id,
+                &entry_path,
+                &run_id,
+            )
+            .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(e) => failed(e),
+            }
+        }
         Request::ProcessKill { session_id, pid } => {
             match state.processes.stop(&session_id, pid).await {
                 crate::processes::Stopped::Yes => Handled::ok(Reply::Ack),

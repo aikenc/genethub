@@ -390,9 +390,11 @@ pub fn required(request: &Request) -> Capability {
         // driving that session, not a separate power: whoever may send a turn
         // may already start these processes, so withholding the ability to
         // stop them would only mean they accumulate.
-        Request::ProcessList | Request::ProcessKill { .. } | Request::ProcessKillAll { .. } => {
-            Capability::Session
-        }
+        Request::ProcessList
+        | Request::ProcessWorkspaceList { .. }
+        | Request::ProcessServiceStop { .. }
+        | Request::ProcessKill { .. }
+        | Request::ProcessKillAll { .. } => Capability::Session,
 
         // Opening or removing a workspace changes what this machine exposes at
         // all, so it sits with the other configuration changes rather than with

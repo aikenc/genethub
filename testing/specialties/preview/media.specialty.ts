@@ -45,7 +45,7 @@ defineSpecialty(
     const python = process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
     if (!python)
       throw new BlockedError(
-        "set GENEHUB_PREVIEW_MEDIA_PYTHON to Python with examples/service-preview/requirements.txt",
+        "set GENEHUB_PREVIEW_MEDIA_PYTHON to Python with apps/daemon/builtin-skills/genehub-service-preview/assets/demo/requirements.txt",
       );
     const opened = await t.flows.main.openWorkspace({
       openRoot: t.openRoot,
@@ -55,7 +55,7 @@ defineSpecialty(
     const demoPort = await allocatePort();
     const config = join(t.env.workspace, "media.json");
     await copyFile(
-      join(t.openRoot, "examples/service-preview/index.html"),
+      join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/demo/index.html"),
       join(t.env.workspace, "index.html"),
     );
     await writeFile(
@@ -66,7 +66,7 @@ defineSpecialty(
           {
             command: [
               process.execPath,
-              join(t.openRoot, "examples/service-preview/backend.mjs"),
+              join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/demo/backend.mjs"),
             ],
             origin: `http://127.0.0.1:${demoPort}`,
             env: { PREVIEW_DEMO_PORT: String(demoPort) },
@@ -76,7 +76,7 @@ defineSpecialty(
           {
             command: [
               python,
-              join(t.openRoot, "examples/service-preview/media.py"),
+              join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/demo/media.py"),
             ],
             origin: `http://127.0.0.1:${port}`,
             env: { PREVIEW_MEDIA_PORT: String(port) },
@@ -94,7 +94,7 @@ defineSpecialty(
     const runner = spawn(
       process.execPath,
       [
-        join(t.openRoot, "packages/service-preview/run.mjs"),
+        join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/node-adapter/run.mjs"),
         "--config",
         config,
         "--daemon-root",

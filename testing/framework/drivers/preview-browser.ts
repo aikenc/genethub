@@ -15,6 +15,7 @@ export async function openPreviewBrowser(input: {
   endpoint: DaemonEndpoint;
   workspaceId: string;
   entryPath: string;
+  surface?: "preview" | "processes";
 }) {
   const errors: string[] = [];
   input.page.on("pageerror", (error) => {
@@ -41,11 +42,19 @@ export async function openPreviewBrowser(input: {
     join(root, "consumer.tsx"),
     `import React from 'react';
 import {createRoot} from 'react-dom/client';
-import {AssetPreviewPage,Client} from '@genehub/workbench';
+import {App,AssetPreviewPage,Client,browserHost,useWorkbench} from '@genehub/workbench';
 const input=await window.previewInput();
-const client=new Client({...input.endpoint,rtcEnabled:false});client.connect();
-while(client.connectionState!=='ready'){document.getElementById('root').textContent='Client: '+client.connectionState+' '+(client.failure?.message??'');if(client.connectionState==='closed')throw new Error('Client closed');await new Promise(r=>setTimeout(r,50));}
-createRoot(document.getElementById('root')).render(<AssetPreviewPage client={client} source={{deviceHandle:client.identity.machineId,workspaceHandle:input.workspaceId,path:input.entryPath}}/>);
+if(input.surface==='processes'){
+ const host={...browserHost(),endpoint:async()=>({...input.endpoint,via:'lan'})};
+ createRoot(document.getElementById('root')).render(<App host={host}/>);
+ while(useWorkbench.getState().connection!=='ready'||!useWorkbench.getState().workspaces.length)await new Promise(r=>setTimeout(r,50));
+ await useWorkbench.getState().selectWorkspace(input.workspaceId);
+ useWorkbench.getState().openTab('processes');
+}else{
+ const client=new Client({...input.endpoint,rtcEnabled:false});client.connect();
+ while(client.connectionState!=='ready'){document.getElementById('root').textContent='Client: '+client.connectionState+' '+(client.failure?.message??'');if(client.connectionState==='closed')throw new Error('Client closed');await new Promise(r=>setTimeout(r,50));}
+ createRoot(document.getElementById('root')).render(<AssetPreviewPage client={client} source={{deviceHandle:client.identity.machineId,workspaceHandle:input.workspaceId,path:input.entryPath}}/>);
+}
 `,
   );
   const server = await vite.createServer({
@@ -94,6 +103,7 @@ createRoot(document.getElementById('root')).render(<AssetPreviewPage client={cli
     endpoint: input.endpoint,
     workspaceId: input.workspaceId,
     entryPath: input.entryPath,
+    surface: input.surface,
   }));
   await input.page.goto(server.resolvedUrls.local[0]);
   return { errors, close: () => server.close() };

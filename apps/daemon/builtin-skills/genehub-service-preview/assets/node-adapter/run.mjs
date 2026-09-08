@@ -351,6 +351,11 @@ wss.on("connection", (socket, request) => {
           return;
         }
         if (phase === "open") {
+          if (message?.kind === "shutdown") {
+            await send(socket, packet({kind:"stopping"}));
+            void stop();
+            return;
+          }
           const { route, url } = safePath(message?.path);
           if (message.kind === "ws") {
             if (!route.websocket) throw new Error("WS route not allowed");
@@ -517,6 +522,8 @@ if (media) {
 }
 const record = {
   version: 1,
+  pid: process.pid,
+  control: true,
   entry,
   runId,
   secret,

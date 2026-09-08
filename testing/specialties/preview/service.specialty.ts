@@ -58,7 +58,7 @@ defineSpecialty(
           {
             command: [
               process.execPath,
-              join(t.openRoot, "examples/service-preview/backend.mjs"),
+              join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/demo/backend.mjs"),
             ],
             origin: `http://127.0.0.1:${port}`,
             env: { PREVIEW_DEMO_PORT: String(port) },
@@ -71,7 +71,7 @@ defineSpecialty(
     const runner = spawn(
       process.execPath,
       [
-        join(t.openRoot, "packages/service-preview/run.mjs"),
+        join(t.openRoot, "apps/daemon/builtin-skills/genehub-service-preview/assets/node-adapter/run.mjs"),
         "--config",
         config,
         "--daemon-root",
@@ -99,6 +99,12 @@ defineSpecialty(
         return service !== null;
       }, 20000);
       const active = service as unknown as ServicePreviewClient;
+      const inventory = await opened.client.call({type:"process.workspaceList",payload:{workspaceId:opened.workspaceId}});
+      t.assertions.assert(inventory?.type === "processes", "missing workspace process tree");
+      if(inventory?.type === "processes") {
+        t.assertions.assert(inventory.data.some(p=>p.pid===runner.pid&&p.service?.runId===active.descriptor.runId), "runner missing service metadata");
+        t.assertions.assert(inventory.data.some(p=>p.parentPid===runner.pid), "backend missing from runner process tree");
+      }
       const narrow = await t.flows.main.pairDevice(
         opened.client,
         opened.daemon,
@@ -186,7 +192,8 @@ defineSpecialty(
         denied = true;
       }
       t.assertions.assert(denied, "undeclared route accepted");
-      runner.kill("SIGTERM");
+      await opened.client.call({type:"process.serviceStop",payload:{workspaceId:opened.workspaceId,entryPath:`${opened.rootHandle}/index.html`,runId:active.descriptor.runId}});
+      await t.tools.waitUntil(() => runner.exitCode !== null,10000);
       await t.tools.waitUntil(async () => {
         try {
           const remaining=await ServicePreviewClient.discover(opened.client,opened.workspaceId,`${opened.rootHandle}/index.html`);

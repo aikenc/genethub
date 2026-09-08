@@ -709,7 +709,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
-    client.onBackgroundProcesses((backgroundProcesses) => set({ backgroundProcesses }));
+    client.onBackgroundProcesses(() => {
+      void get().refreshBackgroundProcesses();
+    });
     try {
       // Hub status and the download prompt do not read anything the catalog
       // loads, so they fly alongside it instead of queueing behind two relay
@@ -1923,7 +1925,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async refreshBackgroundProcesses() {
     const client = require_(get().client);
     const reply = await client
-      .call({ type: "process.list" })
+      .call(get().activeWorkspaceId && client.identity?.features?.includes("process.services.v1")
+        ? { type: "process.workspaceList", payload: {workspaceId: get().activeWorkspaceId!} }
+        : { type: "process.list" })
       .catch(unattended(client, get, set));
     if (reply?.type === "processes") set({ backgroundProcesses: reply.data });
   },

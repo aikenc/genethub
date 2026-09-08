@@ -445,6 +445,7 @@ pub async fn serve(
     // Decided once, at connection: grants are fixed when a device is paired,
     // and revoking one drops its connections rather than editing them.
     let watcher = Principal::of(&state, &access);
+    let scoped_processes = access.workspace_id.is_some();
     state
         .diagnostics
         .record("stream", "data.endpoint", "online", None);
@@ -460,6 +461,16 @@ pub async fn serve(
                         {
                             continue;
                         }
+                        let frame = if scoped_processes
+                            && matches!(frame, ServerFrame::BackgroundProcesses { .. })
+                        {
+                            // A notification only; the client refetches its scoped snapshot.
+                            ServerFrame::BackgroundProcesses {
+                                processes: Vec::new(),
+                            }
+                        } else {
+                            frame
+                        };
                         if events.send(frame).await.is_err() {
                             return;
                         }
@@ -921,6 +932,35 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     };
     stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
+        if matches!(request, Request::ProcessList) {
+            return send_error(
+                stream,
+                403,
+                ErrorCode::Forbidden,
+                "use workspace-scoped process listing",
+            )
+            .await;
+        }
+        if let Request::ProcessKill { session_id, .. } | Request::ProcessKillAll { session_id } =
+            &request
+        {
+            let allowed = services
+                .state
+                .sessions
+                .list(Some(scope), true)
+                .await?
+                .iter()
+                .any(|session| &session.id == session_id);
+            if !allowed {
+                return send_error(
+                    stream,
+                    403,
+                    ErrorCode::Forbidden,
+                    "session outside workspace capability",
+                )
+                .await;
+            }
+        }
         if let Some(requested) = request_workspace(&request) {
             if requested != scope {
                 return send_error(
@@ -1033,6 +1073,7 @@ fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
 fn support_stream_operation(method: &str) -> Option<&'static str> {
     match method {
         "asset.preview" => Some("asset.preview"),
+        "service.preview" => Some("service.preview"),
         "rtc.negotiate" => Some("rtc.negotiate"),
         "shell.run" => Some("shell.run"),
         _ => None,
@@ -1188,7 +1229,9 @@ fn request_workspace(request: &Request) -> Option<&str> {
             ..
         }
         | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
-        Request::SessionCreate { workspace_id, .. }
+        Request::ProcessWorkspaceList { workspace_id }
+        | Request::ProcessServiceStop { workspace_id, .. }
+        | Request::SessionCreate { workspace_id, .. }
         | Request::SessionImportList { workspace_id, .. }
         | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }

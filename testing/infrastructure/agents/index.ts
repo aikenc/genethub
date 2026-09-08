@@ -35,6 +35,8 @@ export type ControlledAgentProfile =
 
 export interface ControlledAgentOptions {
   profile: ControlledAgentProfile;
+  /** Spawn an observable child/grandchild and independent sibling on the first prompt. */
+  processTree?: boolean;
   /** The `agents.custom` key. The daemon exposes it as `acp:<id>`. */
   id?: string;
   /** Visible chunks before the profile's fault fires. */
@@ -84,6 +86,7 @@ export function registerControlledAgent(
     "--journal",
     journalPath,
   ];
+  if (options.processTree) command.push("--process-tree", "1");
   if (options.chunks !== undefined) command.push("--chunks", String(options.chunks));
   if (options.delayMs !== undefined) command.push("--delay-ms", String(options.delayMs));
   if (options.floods !== undefined) command.push("--floods", String(options.floods));

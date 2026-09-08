@@ -396,14 +396,20 @@ function BlobDocument({
 
 function ServiceHtmlDocument(props: React.ComponentProps<typeof HtmlDocument> & {client:Client;workspaceHandle:string}) {
   const [candidate,setCandidate]=useState<ServicePreviewClient|null>(null);
+  const [generation,setGeneration]=useState(0);
+  useEffect(() => props.client.onStateChange(state => {
+    setEnabled(false);
+    if (state === "ready") setGeneration(n => n + 1);
+    else { setCandidate(null); setProblem("源电脑连接已断开，请重连后重新检查服务。"); }
+  }), [props.client]);
   const [enabled,setEnabled]=useState(false);
   const [problem,setProblem]=useState("");
   useEffect(()=>{let cancelled=false;let loaded:ServicePreviewClient|null=null;setCandidate(null);setEnabled(false);setProblem("");
     if(!props.client.identity?.features?.includes("service.preview.v1"))return;
-    void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled)value?.close();else setCandidate(value);}).catch(()=>{if(!cancelled)setProblem("服务登记不可用，请检查运行状态与 services 授权。");});
+    void ServicePreviewClient.discover(props.client,props.workspaceHandle,props.entryPath).then(value=>{loaded=value;if(cancelled || props.client.connectionState!=="ready")value?.close();else setCandidate(value);}).catch(()=>{if(!cancelled)setProblem("服务登记不可用，请检查运行状态与 services 授权。");});
     return()=>{cancelled=true;loaded?.close();};
-  },[props.client,props.workspaceHandle,props.entryPath]);
-  return <>{candidate?<section className="shrink-0 border-b border-line p-2 text-xs" aria-label="本地服务访问">
+  },[props.client,props.workspaceHandle,props.entryPath,generation]);
+  return <><button type="button" className="shrink-0 border-b border-line p-2 text-xs text-left" onClick={() => setGeneration(n => n + 1)}>重新检查服务</button>{candidate?<section className="shrink-0 border-b border-line p-2 text-xs" aria-label="本地服务访问">
     <span>{candidate.descriptor.name} · {candidate.descriptor.dataPolicy==='direct-only'?'业务仅直连':'允许 GeneHub 数据中继'}</span>
     <button className="ml-3 rounded border border-line px-2 py-1" onClick={()=>{setEnabled(!enabled);}}>{enabled?'暂停服务访问':'允许本次预览访问登记服务'}</button>
   </section>:null}

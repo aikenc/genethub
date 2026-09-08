@@ -32,14 +32,7 @@ export type Attachment = { name: string, mime: string, path?: string,
  */
 dataBase64?: string, };
 
-/**
- * A process an agent started and did not stop.
- *
- * Assembled from what the operating system says rather than from what was
- * recorded when it started, because we did not start it — the agent did, and
- * what it started is only visible from the outside.
- */
-export type BackgroundProcess = { 
+export type BackgroundProcess = { workspaceId?: string, service?: BackgroundService, 
 /**
  * The conversation whose agent is answerable for this.
  */
@@ -48,6 +41,11 @@ sessionId: string, pid: number, parentPid: number,
  * The full command line, as the operating system reports it.
  */
 command: string, runningForSeconds: number, };
+
+/**
+ * Public preview capability attached to a running application. Contains no credentials.
+ */
+export type BackgroundService = { name: string, runId: string, entryPath: string, reachable: boolean, canStop: boolean, };
 
 export type BlobKind = "reasoning" | "toolCall" | "image";
 
@@ -739,7 +737,7 @@ name: string | null, } } | { "type": "diagnostics.snapshot" } | { "type": "updat
 /**
  * Empty means "everything currently changed".
  */
-paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
+paths: Array<string>, } } | { "type": "pty.open", "payload": { workspaceId: string, cols: number | null, rows: number | null, } } | { "type": "pty.write", "payload": { ptyId: string, data: string, } } | { "type": "pty.resize", "payload": { ptyId: string, cols: number, rows: number, } } | { "type": "pty.close", "payload": { ptyId: string, } } | { "type": "process.list" } | { "type": "process.workspaceList", "payload": { workspaceId: string, } } | { "type": "process.serviceStop", "payload": { workspaceId: string, entryPath: string, runId: string, } } | { "type": "process.kill", "payload": { sessionId: string, pid: number, } } | { "type": "process.killAll", "payload": { sessionId: string, } };
 
 /**
  * Whether text outside the retained GeneHub window can be read again.

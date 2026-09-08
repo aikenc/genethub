@@ -30,6 +30,10 @@ struct Request {
 #[serde(rename_all = "camelCase")]
 struct Run {
     version: u32,
+    #[serde(default)]
+    pid: u32,
+    #[serde(default)]
+    control: bool,
     entry: String,
     run_id: String,
     secret: String,
@@ -121,11 +125,14 @@ async fn load(services: &PeerServices, req: &Request) -> Result<Option<Run>> {
         }
         None => &req.workspace_handle,
     };
-    let resolved = services
-        .state
-        .workspaces
-        .resolve(workspace_id, &req.entry_path)
-        .await?;
+    load_entry(&services.state, workspace_id, &req.entry_path).await
+}
+async fn load_entry(
+    state: &crate::state::Shared,
+    workspace_id: &str,
+    entry_path: &str,
+) -> Result<Option<Run>> {
+    let resolved = state.workspaces.resolve(workspace_id, entry_path).await?;
     let entry = std::fs::canonicalize(resolved.absolute)?;
     let native = crate::guest_paths::host_form(&entry.to_string_lossy()).into_owned();
     let entry_identity = if crate::guest_paths::windows_host() {
@@ -137,7 +144,7 @@ async fn load(services: &PeerServices, req: &Request) -> Result<Option<Run>> {
         native.clone()
     };
     let key = hex(&Sha256::digest(entry_identity.as_bytes()));
-    let directory = services.state.paths.root.join("service-previews");
+    let directory = state.paths.root.join("service-previews");
     if !directory.exists() {
         return Ok(None);
     }
@@ -298,4 +305,179 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
             }
         }
     }
+}
+
+/// Enrich the existing process snapshot. Private registration material never leaves the daemon.
+pub(crate) async fn process_snapshot(
+    state: &crate::state::Shared,
+    caller: &crate::authz::Principal,
+    workspace: Option<&str>,
+) -> Result<Vec<genehub_proto::BackgroundProcess>> {
+    if let Some(id) = workspace {
+        state.workspaces.get(id).await?;
+    }
+    let mut rows = state.processes.list().await;
+    let sessions = state.sessions.list(None, true).await?;
+    for row in &mut rows {
+        row.workspace_id = sessions
+            .iter()
+            .find(|s| s.id == row.session_id)
+            .map(|s| s.workspace_id.clone());
+    }
+    rows.retain(|r| workspace.is_none_or(|w| r.workspace_id.as_deref() == Some(w)));
+    if !caller.allows(crate::authz::Capability::Services) {
+        return Ok(rows);
+    }
+    let directory = state.paths.root.join("service-previews");
+    if !directory.exists() {
+        return Ok(rows);
+    }
+    crate::config::reject_link_or_reparse(
+        &directory,
+        &crate::config::sensitive_metadata(&directory)?,
+    )?;
+    crate::config::restrict_dir_to_owner(&directory)?;
+    let mut registrations = Vec::new();
+    for item in std::fs::read_dir(&directory)?.take(128) {
+        let path = item?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(metadata) = crate::config::sensitive_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file()
+            || metadata.len() > 16384
+            || crate::config::reject_link_or_reparse(&path, &metadata).is_err()
+        {
+            continue;
+        }
+        crate::config::restrict_to_owner(&path)?;
+        let Ok(run) = serde_json::from_slice::<Run>(&std::fs::read(path)?) else {
+            continue;
+        };
+        if run.pid > 0 {
+            registrations.push(run);
+        }
+    }
+    let mut candidates = Vec::new();
+    for info in state.workspaces.list().await {
+        if workspace.is_some_and(|w| w != info.id) {
+            continue;
+        }
+        let entry = state.workspaces.get(&info.id).await?;
+        for run in &registrations {
+            let Ok(absolute) = std::fs::canonicalize(crate::guest_paths::guest_path(
+                std::path::Path::new(&run.entry),
+            )) else {
+                continue;
+            };
+            for folder in &entry.folders {
+                let Ok(root) = std::fs::canonicalize(&folder.root) else {
+                    continue;
+                };
+                let Ok(relative) = absolute.strip_prefix(root) else {
+                    continue;
+                };
+                let path = format!(
+                    "{}/{}",
+                    folder.root_handle,
+                    relative.to_string_lossy().replace('\\', "/")
+                );
+                if let Ok(Some(verified)) = load_entry(state, &info.id, &path).await {
+                    candidates.push((info.id.clone(), path, verified));
+                }
+                break;
+            }
+        }
+    }
+    let mut probes = futures_util::stream::iter(candidates.into_iter().map(
+        |(workspace_id, entry_path, run)| async move {
+            let reachable = tokio::time::timeout(Duration::from_secs(1), async {
+                let mut socket = connect(&run).await?;
+                socket.close(None).await?;
+                anyhow::Ok(())
+            })
+            .await
+            .is_ok_and(|r| r.is_ok());
+            (workspace_id, entry_path, run, reachable)
+        },
+    ))
+    .buffer_unordered(8);
+    let mut completed = Vec::new();
+    while let Some(result) = probes.next().await {
+        completed.push(result);
+    }
+    let roots: Vec<u32> = completed.iter().filter(|r| r.3).map(|r| r.2.pid).collect();
+    let trees = crate::processes::registered_trees(&roots).await;
+    for (workspace_id, entry_path, run, reachable) in completed {
+        if reachable {
+            for process in trees.get(&run.pid).into_iter().flatten() {
+                if !rows.iter().any(|r| {
+                    r.pid == process.pid && r.workspace_id.as_deref() == Some(&workspace_id)
+                }) {
+                    let mut process = process.clone();
+                    process.workspace_id = Some(workspace_id.clone());
+                    rows.push(process);
+                }
+            }
+        }
+        let service = genehub_proto::BackgroundService {
+            name: run.name.chars().take(120).collect(),
+            run_id: run.run_id,
+            entry_path,
+            reachable,
+            can_stop: run.control && reachable,
+        };
+        if let Some(row) = rows.iter_mut().find(|r| {
+            r.pid == run.pid
+                && r.workspace_id.as_deref() == Some(&workspace_id)
+                && r.service.is_none()
+        }) {
+            row.service = Some(service);
+        } else {
+            rows.push(genehub_proto::BackgroundProcess {
+                workspace_id: Some(workspace_id),
+                service: Some(service),
+                session_id: String::new(),
+                pid: run.pid,
+                parent_pid: 0,
+                command: String::new(),
+                running_for_seconds: 0,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+pub(crate) async fn stop_registered(
+    state: &crate::state::Shared,
+    workspace: &str,
+    entry: &str,
+    run_id: &str,
+) -> Result<()> {
+    let run = load_entry(state, workspace, entry)
+        .await?
+        .context("服务登记不存在")?;
+    if run.run_id != run_id {
+        anyhow::bail!("运行已经变化，请刷新后重试");
+    }
+    if !run.control {
+        anyhow::bail!("该服务不允许停止应用");
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut socket = connect(&run).await?;
+        socket
+            .send(Message::Binary(control(json!({"kind":"shutdown"}))))
+            .await?;
+        let response = recv(&mut socket).await?;
+        if response[0] != 0
+            || serde_json::from_slice::<Value>(&response[1..])?["kind"] != "stopping"
+        {
+            anyhow::bail!("应用未确认停止");
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
 }

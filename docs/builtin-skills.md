@@ -32,7 +32,7 @@ frontmatter 必须包含与目录名完全相同的 `name` 和非空 `descriptio
 | `genehub-session-history` | 使用绑定 CLI 查阅会话历史 |
 | `genehub-speech-runtime` | Composer 的本机语音识别 runtime 接入 |
 
-[Service Preview Skill](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。runner 和模型/UE 环境不随该 Skill 打包；启动参考说明如何取得兼容产品源码及确认目标 Channel。当前媒体面板没有 UE 输入协议，Skill 必须区分远程观看、交互云游玩和不同 PIE 模式，不能把适配引导宣传为已实现的 UE 功能。
+[Service Preview Skill](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。Skill 携带可复制的 Python 直接接入与可选 Node 多后端示例，不携带依赖、模型或 UE 环境；启动参考无需获取产品源码。GeneHub 本体不依赖示例的语言运行时。当前媒体面板没有 UE 输入协议，Skill 必须区分远程观看、交互云游玩和不同 PIE 模式，不能把适配引导宣传为已实现的 UE 功能。
 
 ## 构建与分发
 

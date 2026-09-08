@@ -1,7 +1,7 @@
 /** Small real HTTP/WS service for exercising the service bridge without a model. */
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
-const { WebSocketServer } = createRequire(new URL('../../packages/service-preview/package.json', import.meta.url))('ws');
+const { WebSocketServer } = createRequire(new URL('../node-adapter/package.json', import.meta.url))('ws');
 const port=Number(process.env.PREVIEW_DEMO_PORT??18010);
 const server=createServer(async(req,res)=>{
   if(req.url==='/health'){res.end('ready');return;}

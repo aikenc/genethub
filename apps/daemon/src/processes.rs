@@ -139,6 +139,8 @@ impl Processes {
         for (session_id, agent) in agents {
             for row in claimed_by(&census, agent, agent.watched_at.elapsed().as_secs()) {
                 found.push(BackgroundProcess {
+                    workspace_id: None,
+                    service: None,
                     session_id: session_id.clone(),
                     pid: row.pid,
                     parent_pid: row.parent,
@@ -179,8 +181,28 @@ impl Processes {
             return Stopped::NotThisSession;
         };
         tracing::info!(session = %session_id, pid, command = %row.command, "ending a process left running");
-        crate::process::end_tree(pid).await;
-        Stopped::Yes
+        let mut ids = HashSet::from([row.pid]);
+        loop {
+            let before = ids.len();
+            for child in &claimed {
+                if ids.contains(&child.parent) {
+                    ids.insert(child.pid);
+                }
+            }
+            if ids.len() == before {
+                break;
+            }
+        }
+        let owned: Vec<Row> = claimed
+            .into_iter()
+            .filter(|p| ids.contains(&p.pid))
+            .cloned()
+            .collect();
+        if terminate_snapshot(&owned).await {
+            Stopped::Yes
+        } else {
+            Stopped::Unknown
+        }
     }
 
     /// Ends everything a session left running, but not the agent itself.
@@ -193,17 +215,12 @@ impl Processes {
             return 0;
         };
         let claimed = claimed_by(&census, agent, agent.watched_at.elapsed().as_secs());
-        // All at once. Each one is given time to finish on its own, and taking
-        // those grace periods one after another would turn closing a session
-        // with four stragglers into four times the wait for no benefit —
-        // nothing here is ordered with respect to anything else.
-        let mut ending = tokio::task::JoinSet::new();
-        for row in &claimed {
-            tracing::info!(session = %session_id, pid = row.pid, command = %row.command, "ending a process left running");
-            ending.spawn(crate::process::end_tree(row.pid));
+        let owned: Vec<Row> = claimed.into_iter().cloned().collect();
+        if terminate_snapshot(&owned).await {
+            owned.len()
+        } else {
+            0
         }
-        ending.join_all().await;
-        claimed.len()
     }
 }
 
@@ -276,8 +293,10 @@ fn claimed_by(census: &[Row], agent: Agent, watched_for: u64) -> Vec<&Row> {
 /// only one is ever run by a test. The fields chosen are the portable ones:
 /// `etime` rather than `lstart`, and `args` last because it is the only one
 /// that contains spaces.
-#[cfg(unix)]
 async fn census() -> Option<Vec<Row>> {
+    if crate::guest_paths::windows_host() {
+        return windows_census().await;
+    }
     let mut command = crate::os_process::Command::new("ps");
     command
         .args(["-eo", "pid=,ppid=,pgid=,etime=,args="])
@@ -307,13 +326,6 @@ async fn census() -> Option<Vec<Row>> {
         return None;
     }
     Some(parse_census(&String::from_utf8_lossy(&output.stdout)))
-}
-
-#[cfg(not(unix))]
-async fn census() -> Option<Vec<Row>> {
-    // Windows has no process groups to ask about. Reporting nothing is honest;
-    // reporting the wrong thing would be worse than the silence.
-    None
 }
 
 fn parse_census(text: &str) -> Vec<Row> {
@@ -375,3 +387,143 @@ fn parse_elapsed(field: &str) -> Option<u64> {
 #[cfg(test)]
 #[path = "processes_tests.rs"]
 mod tests;
+
+/// OS queries run through the existing host process import on WASM too.
+async fn windows_census() -> Option<Vec<Row>> {
+    let script = "$ErrorActionPreference='Stop'; $now=Get-Date; @(Get-CimInstance Win32_Process | ForEach-Object { @{pid=$_.ProcessId;parent=$_.ParentProcessId;group=0;running_for_seconds=[uint64][Math]::Max(0,($now-$_.CreationDate).TotalSeconds);command=[string]$_.Name} }) | ConvertTo-Json -Compress";
+    let mut command = crate::os_process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(CENSUS_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct WindowsRow {
+        pid: u32,
+        parent: u32,
+        group: u32,
+        running_for_seconds: u64,
+        command: String,
+    }
+    let rows: Vec<WindowsRow> = serde_json::from_slice(&output.stdout).ok()?;
+    Some(
+        rows.into_iter()
+            .map(|r| Row {
+                pid: r.pid,
+                parent: r.parent,
+                group: r.group,
+                running_for_seconds: r.running_for_seconds,
+                command: r.command,
+            })
+            .collect(),
+    )
+}
+
+/// Only terminate members observed in an owned subtree; never kill the agent's whole group.
+/// Recheck age and command before each signal so a recycled PID is not adopted.
+async fn terminate_snapshot(owned: &[Row]) -> bool {
+    let started = std::time::Instant::now();
+    for force in [false, true] {
+        let Some(current) = census().await else {
+            return false;
+        };
+        for row in owned.iter().rev() {
+            let matches = current.iter().any(|p| {
+                p.pid == row.pid
+                    && p.command == row.command
+                    && p.running_for_seconds + CLOCK_SLACK
+                        >= row.running_for_seconds + started.elapsed().as_secs()
+                    && p.running_for_seconds
+                        <= row.running_for_seconds + started.elapsed().as_secs() + CLOCK_SLACK
+            });
+            if !matches {
+                continue;
+            }
+            let mut command = if crate::guest_paths::windows_host() {
+                let mut c = crate::os_process::Command::new("taskkill.exe");
+                c.args(["/PID", &row.pid.to_string()]);
+                if force {
+                    c.arg("/F");
+                }
+                c
+            } else {
+                let mut c = crate::os_process::Command::new("kill");
+                c.args([
+                    if force { "-KILL" } else { "-TERM" },
+                    "--",
+                    &row.pid.to_string(),
+                ]);
+                c
+            };
+            command.kill_on_drop(true);
+            if tokio::time::timeout(CENSUS_TIMEOUT, command.output())
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+        if !force {
+            tokio::time::sleep(crate::process::GRACE).await;
+        }
+    }
+    let Some(current) = census().await else {
+        return false;
+    };
+    !owned.iter().any(|row| {
+        current.iter().any(|p| {
+            p.pid == row.pid
+                && p.command == row.command
+                && p.running_for_seconds + CLOCK_SLACK
+                    >= row.running_for_seconds + started.elapsed().as_secs()
+        })
+    })
+}
+
+/// Diagnostic ancestry for explicitly authenticated application roots. These rows
+/// confer no PID termination rights; application control remains authenticated.
+pub(crate) async fn registered_trees(
+    roots: &[u32],
+) -> HashMap<u32, Vec<genehub_proto::BackgroundProcess>> {
+    let Some(current) = census().await else {
+        return HashMap::new();
+    };
+    roots
+        .iter()
+        .map(|&root| {
+            let mut ids = HashSet::from([root]);
+            loop {
+                let before = ids.len();
+                for row in &current {
+                    if ids.contains(&row.parent) {
+                        ids.insert(row.pid);
+                    }
+                }
+                if before == ids.len() {
+                    break;
+                }
+            }
+            (
+                root,
+                current
+                    .iter()
+                    .filter(|r| ids.contains(&r.pid))
+                    .map(|row| genehub_proto::BackgroundProcess {
+                        workspace_id: None,
+                        service: None,
+                        session_id: String::new(),
+                        pid: row.pid,
+                        parent_pid: if row.pid == root { 0 } else { row.parent },
+                        command: row.command.clone(),
+                        running_for_seconds: row.running_for_seconds,
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}

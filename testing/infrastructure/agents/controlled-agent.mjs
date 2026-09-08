@@ -29,6 +29,7 @@ function parseArgs(argv) {
     else if (key === "--journal") args.journal = String(value);
     else if (key === "--chunks") args.chunks = Number(value);
     else if (key === "--delay-ms") args.delayMs = Number(value);
+    else if (key === "--process-tree") args.processTree = value === "1";
     else if (key === "--floods") args.floods = Number(value);
   }
   return args;
@@ -118,7 +119,20 @@ let currentSessionId = null;
 let pendingPrompt = null;
 let draining = true;
 
+let treeStarted = false;
 async function onPrompt(id, params) {
+  if (args.processTree && !treeStarted) {
+    treeStarted = true;
+    const sibling = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {stdio:"ignore"});
+    const root = spawn(process.execPath, ["-e", `const {spawn}=require('node:child_process');const leaf=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});leaf.once('spawn',()=>process.send({leafPid:leaf.pid}));setInterval(()=>{},1000);`], {stdio:["ignore","ignore","ignore","ipc"]});
+    await new Promise((resolve, reject) => {
+      root.once("error", reject);
+      root.once("message", message => {
+        journal("tree-created", {rootPid:root.pid,leafPid:message.leafPid,siblingPid:sibling.pid});
+        resolve();
+      });
+    });
+  }
   const sessionId = params?.sessionId ?? currentSessionId;
   pendingPrompt = { id, sessionId };
   journal("prompt", { id });

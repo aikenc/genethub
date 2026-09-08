@@ -628,6 +628,15 @@ pub enum Request {
     /// navigated away from is the one most worth showing.
     #[serde(rename = "process.list")]
     ProcessList,
+    #[serde(rename = "process.workspaceList", rename_all = "camelCase")]
+    ProcessWorkspaceList { workspace_id: String },
+    /// Authenticated application shutdown; never signals a caller-supplied PID.
+    #[serde(rename = "process.serviceStop", rename_all = "camelCase")]
+    ProcessServiceStop {
+        workspace_id: String,
+        entry_path: String,
+        run_id: String,
+    },
     /// Ends one process and everything below it.
     ///
     /// The session is part of the request rather than looked up from the pid,
@@ -774,15 +783,28 @@ pub struct SessionArtifactBundle {
     pub files: Vec<SessionArtifactStoredFile>,
 }
 
-/// A process an agent started and did not stop.
-///
-/// Assembled from what the operating system says rather than from what was
-/// recorded when it started, because we did not start it — the agent did, and
-/// what it started is only visible from the outside.
+/// Public preview capability attached to a running application. Contains no credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BackgroundService {
+    pub name: String,
+    pub run_id: String,
+    pub entry_path: String,
+    pub reachable: bool,
+    pub can_stop: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct BackgroundProcess {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service: Option<BackgroundService>,
     /// The conversation whose agent is answerable for this.
     pub session_id: String,
     pub pid: u32,
