@@ -344,6 +344,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionRounds { .. }
         | Request::SessionContext { .. }
         | Request::WorkflowInspect { .. }
+        | Request::WorkflowCheck { .. }
         | Request::WorkflowGet { .. }
         | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
@@ -387,6 +388,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }
         | Request::WorkflowComplete { .. }
+        | Request::WorkflowCancel { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }

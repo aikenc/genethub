@@ -68,6 +68,8 @@ pub struct Daemon {
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
     human_continuations: tokio::task::JoinHandle<()>,
+    input_continuations: tokio::task::JoinHandle<()>,
+    workflow_control: tokio::task::JoinHandle<()>,
 }
 
 impl Daemon {
@@ -109,7 +111,35 @@ impl Daemon {
                 }
             }
         });
+        // A native Human handover can take its whole bounded startup budget.
+        // Accepted user inputs in other Sessions must still be delivered.
+        let input_continuations = tokio::spawn({
+            let state = state.clone();
+            async move {
+                if let Err(error) = state.sessions.recover_inputs().await {
+                    tracing::error!(%error, "recovering accepted messages failed");
+                }
+                let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
+                loop {
+                    ticks.tick().await;
+                    state.sessions.dispatch_inputs(&state).await;
+                }
+            }
+        });
+        let workflow_control = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticks.tick().await;
+                    workflow::maintain(&state).await;
+                }
+            }
+        });
         Ok(Daemon {
+            input_continuations,
+            workflow_control,
             human_continuations,
             state,
             port: listener.port,
@@ -136,6 +166,11 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
+        self.input_continuations.abort();
+        let _ = self.input_continuations.await;
+        self.workflow_control.abort();
+        let _ = self.workflow_control.await;
+        self.state.workflow_tasks.stop().await;
         self.human_continuations.abort();
         let _ = self.human_continuations.await;
         self.state.sessions.shutdown().await;

@@ -48,6 +48,8 @@ struct PackManifest {
     spaces: Vec<SpaceSpec>,
     #[serde(default)]
     upgrade_from: Option<UpgradeSource>,
+    #[serde(default)]
+    upgrade_sources: Vec<UpgradeSource>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,8 +171,19 @@ pub(crate) async fn prepare(
     model_id: Option<&str>,
 ) -> Result<Prepared> {
     let project = state.workspaces.project_entry(project_workspace_id).await?;
-    let pack = load(pack_id)?;
+    let mut pack = load(pack_id)?;
     let registration = state.workspaces.agent_space(project_workspace_id).await?;
+    if let Some(installed) = &registration.bootstrap_pack {
+        if let Some(source) = pack
+            .manifest
+            .upgrade_sources
+            .iter()
+            .find(|source| source.version == installed.version)
+            .cloned()
+        {
+            pack.manifest.upgrade_from = Some(source);
+        }
+    }
     let upgrading = pack.manifest.upgrade_from.as_ref().is_some_and(|previous| {
         registration
             .bootstrap_pack
@@ -184,15 +197,6 @@ pub(crate) async fn prepare(
         rendered.retain(|file| file.changed_from_previous);
     }
     let activation_revision = if upgrading {
-        if !crate::workflow::project_active_run_ids(
-            &state.paths.root,
-            project_workspace_id,
-            &project.root,
-        )?
-        .is_empty()
-        {
-            bail!("activeRunConflict: finish the project's Runs before upgrading its expert Pack");
-        }
         let runtime = crate::workflow::RuntimeStore::new(
             &state.paths.root,
             project_workspace_id,
@@ -265,7 +269,19 @@ pub(crate) async fn prepare(
             Sha256::digest(format!("{plan_digest}:activation:{revision}"))
         );
     }
+    let conflict_runs = if upgrading {
+        crate::workflow::project_active_run_ids(
+            &state.paths.root,
+            project_workspace_id,
+            &project.root,
+        )?
+    } else {
+        Vec::new()
+    };
+    let recovery_actions = conflict_runs.iter().map(|run| format!("workflow get --run {run}; then workflow cancel --run {run} --revision <current>; wait for cancelled and create a fresh upgrade plan")).collect();
     let report = BootstrapPackReport {
+        conflict_runs,
+        recovery_actions,
         schema: REPORT_SCHEMA.into(),
         status: "planned".into(),
         pack_id: pack.manifest.id.clone(),
@@ -338,6 +354,23 @@ async fn apply_inner(
         ));
     }
 
+    let execution_runtime = crate::workflow::RuntimeStore::new(
+        &state.paths.root,
+        &project_workspace_id,
+        &project_root,
+    )?;
+    let _execution_guard = crate::workflow::lock_project_execution(&execution_runtime)?;
+    let conflicts = crate::workflow::project_active_run_ids(
+        &state.paths.root,
+        &project_workspace_id,
+        &project_root,
+    )?;
+    if !conflicts.is_empty() {
+        bail!(
+            "activeRunConflict: cancel or finish these executions before shared Pack changes: {}",
+            conflicts.join(", ")
+        );
+    }
     let file_snapshot = snapshot_paths(&project_root)?;
     let replaced_files = if upgrading {
         upgrade_file_checkpoint(&project_root, &rendered, &pack)?
@@ -650,9 +683,10 @@ fn load(pack_id: &str) -> Result<LoadedPack> {
         bail!("invalid Bootstrap Pack identity: {pack_id}");
     }
     if manifest
-        .upgrade_from
-        .as_ref()
-        .is_some_and(|source| source.version == 0 || source.version >= manifest.version)
+        .upgrade_sources
+        .iter()
+        .chain(manifest.upgrade_from.iter())
+        .any(|source| source.version == 0 || source.version >= manifest.version)
     {
         bail!("invalid Bootstrap Pack upgrade source: {pack_id}");
     }

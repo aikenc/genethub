@@ -35,6 +35,7 @@ import { Composer, resolveComposerPhase } from "../session/Composer";
 import { NewSessionPanel } from "../session/NewSessionPanel";
 import { PermissionCard } from "../session/Permission";
 import { TimelineView } from "../session/TimelineView";
+import { TaskProgress } from "../session/TaskProgress";
 import type {
   ForkController,
   ForwardController,
@@ -238,6 +239,7 @@ export function App({
   // `activeTurn` is safe to consult here, unlike on its own, because it is only
   // asked about while this client is holding a message: a reconnect into a
   // running session has no pending message and still resolves to `running`.
+  const durableInput = !!workbench.client?.identity?.features?.includes("session.input.v1") && !session?.managed;
   const pending = workbench.timeline.pending;
   const phase = resolveComposerPhase({
     pending,
@@ -939,6 +941,7 @@ export function App({
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
+              {showChat && session && !session.managed ? <TaskProgress key={`${workbench.client?.identity?.machineId}:${session.id}`} session={session} /> : null}
               {showChat ? (
                 composing ? (
                   <>
@@ -962,7 +965,7 @@ export function App({
                             {...(forkController ? { forkController } : {})}
                             {...(forwardController ? { forwardController } : {})}
                             bottomInset={
-                              workbench.timeline.pendingPermission ? 0 : composerHeight
+                              workbench.timeline.pendingPermission || workbench.timeline.permissionProgress ? 0 : composerHeight
                             }
                             onScrollBack={() => setComposerMinimized(true)}
                             onReturnToBottom={() => setComposerMinimized(false)}
@@ -980,7 +983,7 @@ export function App({
                         </div>
                       </div>
                     ) : workbench.timeline.pendingPermission ? (
-                      <div className="z-20 shrink-0 px-4 pb-4 pt-2">
+                      <div className="z-20 min-h-0 shrink overflow-y-auto px-4 pb-4 pt-2">
                         <div className="mx-auto max-w-chat">
                           <PermissionCard
                             request={workbench.timeline.pendingPermission}
@@ -1007,12 +1010,13 @@ export function App({
                         </div>
                       </div>
                     ) : null}
-                    {!workbench.timeline.pendingPermission && (!starting || overviewSurface === "sessions") ? (
+                    {(!workbench.timeline.pendingPermission || durableInput) && (!starting || overviewSurface === "sessions") ? (
                       <Composer
-                        layout={starting ? "inline" : "overlay"}
+                        layout={starting || workbench.timeline.pendingPermission || workbench.timeline.permissionProgress ? "inline" : "overlay"}
                         key={`${workbench.client?.identity?.machineId ?? endpoint.label}:${session?.id ?? draft?.localId ?? "empty"}`}
                         persistenceKey={`${workbench.client?.identity?.machineId ?? endpoint.label}:${session?.id ?? draft?.localId ?? "empty"}`}
                         phase={phase}
+                        durableInput={durableInput}
                         lastActivityAtMs={session?.lastActivityAtMs ?? null}
                         disabled={sessionReadOnly}
                         disabledReason={

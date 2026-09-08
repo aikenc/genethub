@@ -571,7 +571,7 @@ function Rename({
 }
 
 function SessionStateIcon({ session }: { session: ListedSession }) {
-  return <SessionStatusIcon status={session.status} unread={session.unread} />;
+  return <SessionStatusIcon status={session.status} workSummary={session.workSummary} unread={session.unread} />;
 }
 
 /** The daemon names a session from its first message; until then this stands in. */

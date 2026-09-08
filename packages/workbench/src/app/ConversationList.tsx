@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ListFilter, MoreHorizontal, Plus } from "lucide-react";
 import type { Host, Endpoint, Target } from "../host";
 import { useWorkbench } from "../session/store";
+import { useAgentActivities } from "../workspace/useAgentActivity";
 import { matchesConversation, defaultConversationFilter, type ConversationFilter } from "../session/conversationFilters";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
 import { localValue, saveLocalValue } from "../session/localConversation";
@@ -28,6 +29,7 @@ export function ConversationList(props: Props) {
 
 function ConversationListContent({ host, endpoint, open, hidden, onNavigate, machine }: Props & { machine: string }) {
   const wb = useWorkbench();
+  useAgentActivities();
   const [, refreshLocal] = useState(0);
   const { groups, error: groupError } = useAgentGroups(machine);
   const [groupId, setGroupId] = useState(() => localValue<string>(`agent-group-view:${machine}`) ?? "");
@@ -74,7 +76,9 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
     if (agentId && s.workspaceId !== agentId) return false;
     if (!`${s.title} ${wb.workspaces.find((w) => w.id === s.workspaceId)?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
     const unread = Boolean(s.messagePreview && localValue(`read:${machine}:${s.id}`) !== s.messagePreview.itemId);
-    return state === "all" || (state === "unread" ? unread : state === "blocked" ? ["waiting", "failed"].includes(s.status) : s.status === "running");
+    return state === "all" || (state === "unread" ? unread : state === "blocked"
+      ? ["waiting", "failed"].includes(s.status) || (s.workSummary?.blocked ?? 0) > 0 || !!s.workSummary?.error
+      : s.status === "running" || (s.workSummary?.running ?? 0) + (s.workSummary?.stopping ?? 0) > 0);
   }).map((s) => ({ ...s, unread: Boolean(s.messagePreview && localValue(`read:${machine}:${s.id}`) !== s.messagePreview.itemId) }));
   const visibleIds = new Set(rows.map((s) => s.id));
   const selection = new Set([...selected].filter((id) => visibleIds.has(id)));

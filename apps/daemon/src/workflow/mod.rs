@@ -23,6 +23,15 @@ use sha2::{Digest, Sha256};
 
 use crate::state::Shared;
 
+mod check;
+mod control;
+mod request;
+mod supervision;
+pub(crate) use check::check;
+pub(crate) use control::{
+    cancel, maintain, start_assigned, summarize_sessions, validate_input_target,
+};
+
 const SOURCE_DIR: &str = ".genethub/workflow";
 const PROJECT_FILE: &str = "project.yaml";
 const CATALOG_FILE: &str = "workflows/catalog.yaml";
@@ -35,7 +44,9 @@ const MAX_CANDIDATE_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ACTIVATION_HISTORY: usize = 4_096;
 const MAX_ACTIVATION_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_RECORD_BYTES: u64 = 64 * 1024 * 1024;
-const RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
+const RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v2";
+const LEGACY_RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
+const RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v2";
 const FLOW_MESSAGE_SCHEMA: &str = "genehub.flow-message.v1";
 const FLOW_MANIFEST_SCHEMA: &str = "genehub.executor-flow.v1";
 const MAX_FLOW_LOG_BYTES: u64 = 16 * 1024 * 1024;
@@ -54,6 +65,8 @@ const BOOTSTRAP_PACK_ID: &str = "genehub.workflow.bootstrap.direct.v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProjectDefinition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diagnostic_role: Option<String>,
     schema: String,
     default_workflow: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,7 +296,7 @@ impl Drop for LocalWorkflowLock {
 /// native daemon and the WASM Guest. The WASM frontdoor keeps the real host
 /// lock in a path-keyed handle map, so dropping the guest `File` alone does not
 /// release it; every Workflow lock must call the shared unlock API explicitly.
-struct ExclusiveFileLock {
+pub(crate) struct ExclusiveFileLock {
     _local: LocalWorkflowLock,
     file: File,
     path: PathBuf,
@@ -443,6 +456,12 @@ impl RuntimeStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RunRecord {
+    #[serde(default)]
+    request: Option<request::RequestLink>,
+    #[serde(default)]
+    supervision: supervision::Supervision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop: Option<control::StopRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     execution_root: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -520,6 +539,14 @@ struct FlowMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NodeRecord {
+    #[serde(default)]
+    activity: crate::session::store::ExecutionActivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    outcome: Option<genehub_proto::WorkflowNodeOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(default)]
+    assigned_at_ms: i64,
     uses: String,
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -904,6 +931,8 @@ pub async fn dispatch(
     task_id: &str,
     task_prompt: &str,
     candidate_digest: Option<&str>,
+    retry_of: Option<&str>,
+    resume_cancelled: bool,
 ) -> Result<Transition> {
     validate_id(task_id, "taskId")?;
     let parent = state.sessions.summary(parent_session_id).await?;
@@ -936,6 +965,19 @@ pub async fn dispatch(
             sessions: Vec::new(),
         });
     }
+    let _parent_dispatch = lock_run(&runtime, &format!("pm-dispatch-{parent_session_id}"))?;
+    let request =
+        request::association(state, &runtime, parent_session_id, &run_id, retry_of).await?;
+    let _request_lock = request::request_lock(&runtime, &request.root_run_id)?;
+    request::admit(
+        state,
+        &runtime,
+        parent_session_id,
+        &request,
+        resume_cancelled,
+    )
+    .await?;
+    let _execution_guard = lock_project_execution(&runtime)?;
     let (active, activation_revision) = dispatch_candidate(&workspace.root, &runtime)?;
     let candidate = match candidate_digest {
         Some(digest) => capture_candidate(&workspace.root, &runtime, digest)?,
@@ -976,6 +1018,18 @@ pub async fn dispatch(
         .get(&entry.id)
         .cloned()
         .ok_or_else(|| anyhow!("活动 DCG Candidate 缺少 Workflow：{}", entry.id))?;
+    let diagnostic_role = candidate
+        .project
+        .diagnostic_role
+        .as_ref()
+        .and_then(|id| {
+            candidate
+                .workflows
+                .values()
+                .flat_map(|bundle| bundle.roles.values())
+                .find(|role| &role.id == id)
+        })
+        .cloned();
     let now = now_ms();
     let executor_session = match executor_workspace.as_ref() {
         Some(executor) => Some(
@@ -1007,6 +1061,12 @@ pub async fn dispatch(
         None => None,
     };
     let mut run = RunRecord {
+        stop: None,
+        request: Some(request),
+        supervision: supervision::Supervision {
+            diagnostic_role,
+            ..Default::default()
+        },
         execution_root: candidate
             .project
             .execution
@@ -1044,6 +1104,10 @@ pub async fn dispatch(
         run.nodes.insert(
             node.id.clone(),
             NodeRecord {
+                activity: Default::default(),
+                outcome: None,
+                reason: None,
+                assigned_at_ms: 0,
                 uses: node.uses.clone(),
                 status: "pending".into(),
                 session_id: None,
@@ -1104,41 +1168,15 @@ pub async fn abort_launch(state: &Shared, root_workspace_id: &str, run_id: &str)
     if run.status != "running" {
         return Ok(());
     }
-    let session_ids = run
-        .nodes
-        .values()
-        .filter_map(|node| node.session_id.clone())
-        .collect::<Vec<_>>();
-    let executor_session_id = run.executor_session_id.clone();
-    for node in run.nodes.values_mut() {
-        match node.status.as_str() {
-            "running" => node.status = "failed".into(),
-            "pending" => node.status = "unreached".into(),
-            _ => {}
-        }
-    }
-    run.status = "failed".into();
+    control::request_stop(
+        &mut run,
+        "failed",
+        "Worker 启动失败；等待资源回收后由 PM 恢复".into(),
+    );
     run.revision = run.revision.saturating_add(1);
     run.updated_at_ms = now_ms();
     save_run(&runtime, &run)?;
 
-    let mut cleanup_errors = Vec::new();
-    if let Err(error) = release_leases(&runtime, &run).await {
-        cleanup_errors.push(format!("释放 Workflow Run 租约：{error:#}"));
-    }
-    for session_id in session_ids {
-        if let Err(error) = state.sessions.delete(&session_id).await {
-            cleanup_errors.push(format!("删除受管 Session {session_id}：{error:#}"));
-        }
-    }
-    if let Some(session_id) = executor_session_id {
-        if let Err(error) = state.sessions.delete(&session_id).await {
-            cleanup_errors.push(format!("删除 Executor Session {session_id}：{error:#}"));
-        }
-    }
-    if !cleanup_errors.is_empty() {
-        bail!(cleanup_errors.join("；"));
-    }
     Ok(())
 }
 
@@ -1149,6 +1187,18 @@ pub(crate) fn get(runtime: &RuntimeStore, run_id: &str) -> Result<WorkflowRunSta
 
 pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<WorkflowRunStatus>> {
     let limit = usize::try_from(limit.clamp(1, 256)).unwrap_or(256);
+    let mut runs = all_runs(runtime)?;
+    runs.sort_by(|left, right| {
+        right
+            .created_at_ms
+            .cmp(&left.created_at_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    runs.truncate(limit);
+    Ok(runs.iter().map(run_status).collect())
+}
+
+fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
     let directory = runtime.directory(Path::new("runs"), false)?;
     let listing = match fs::read_dir(&directory) {
         Ok(listing) => listing,
@@ -1169,14 +1219,7 @@ pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<Workflow
         };
         runs.push(load_run(runtime, run_id)?);
     }
-    runs.sort_by(|left, right| {
-        right
-            .created_at_ms
-            .cmp(&left.created_at_ms)
-            .then_with(|| right.id.cmp(&left.id))
-    });
-    runs.truncate(limit);
-    Ok(runs.iter().map(run_status).collect())
+    Ok(runs)
 }
 
 pub async fn executor_flow(
@@ -1235,7 +1278,7 @@ pub async fn executor_flow(
         metadata.len(),
         MAX_RUN_RECORD_BYTES,
     )?;
-    let run: RunRecord = serde_json::from_slice(&fs::read(&snapshot)?)
+    let run = decode_run_record(&fs::read(&snapshot)?)
         .with_context(|| format!("读取 Executor Run snapshot：{}", snapshot.display()))?;
     if run.executor_session_id.as_deref() != Some(executor_session_id)
         || run.executor_workspace_id.as_deref() != Some(workspace_id.as_str())
@@ -1259,6 +1302,8 @@ pub async fn complete(
     node_id: &str,
     expected_revision: u64,
     evidence: BTreeMap<String, String>,
+    outcome: genehub_proto::WorkflowNodeOutcome,
+    reason: Option<String>,
 ) -> Result<Transition> {
     validate_id(run_id, "runId")?;
     validate_id(node_id, "nodeId")?;
@@ -1266,6 +1311,8 @@ pub async fn complete(
     let runtime = RuntimeStore::new(&state.paths.root, root_workspace_id, &workspace.root)?;
     let _lock = lock_run(&runtime, run_id)?;
     let mut run = load_run(&runtime, run_id)?;
+    let _request_lock = request::request_lock(&runtime, request::group_id(&run))?;
+    request::ensure_open(&runtime, &run)?;
     if run.workspace_id != root_workspace_id {
         bail!("Workflow Run 不属于请求的 Workspace");
     }
@@ -1294,12 +1341,29 @@ pub async fn complete(
     if record.status != "running" || record.session_id.as_deref() != Some(caller_session_id) {
         bail!("当前 Session 不是节点 {node_id} 的执行者");
     }
-    verify_evidence(&workspace.root, &run, &node, &evidence).await?;
+    let event = control::outcome_event(outcome);
+    if outcome == genehub_proto::WorkflowNodeOutcome::Completed {
+        verify_evidence(&workspace.root, &run, &node, &evidence).await?;
+    } else {
+        control::validate_negative_result(reason.as_deref(), &evidence)?;
+    }
     let record = run.nodes.get_mut(node_id).expect("validated node record");
     record.status = "completed".into();
     record.evidence = evidence;
-    let targets = node.on.get("completed").cloned().unwrap_or_default();
-    let sessions = activate(state, &workspace.root, &runtime, &mut run, targets).await?;
+    record.outcome = Some(outcome);
+    record.reason = reason.clone();
+    let targets = node.on.get(event).cloned().unwrap_or_default();
+    let sessions = if outcome != genehub_proto::WorkflowNodeOutcome::Completed && targets.is_empty()
+    {
+        control::request_stop(
+            &mut run,
+            "blocked",
+            format!("{node_id}: {}", reason.as_deref().unwrap_or(event)),
+        );
+        Vec::new()
+    } else {
+        activate(state, &workspace.root, &runtime, &mut run, targets).await?
+    };
     settle_if_terminal(&mut run);
     run.revision = run.revision.saturating_add(1);
     run.updated_at_ms = now_ms();
@@ -1473,6 +1537,7 @@ async fn activate(
                     let record = run.nodes.get_mut(&node.id).expect("validated node");
                     record.status = "running".into();
                     record.session_id = Some(summary.id.clone());
+                    record.assigned_at_ms = now_ms();
                     sessions.push((summary, task_message(run, &node)));
                 }
                 other => bail!("未注册的 Workflow capability：{other}"),
@@ -1607,6 +1672,8 @@ fn managed_prompt(
 `verify` 名称只描述 daemon 如何校验，不是 value 的前缀：例如提交证据使用 `--evidence commit=<40位提交哈希>`，\
 普通检查使用 `--evidence checks=<实际检查摘要>`。\
 只上报真实证据；缺少证据时继续执行或明确失败。\n\
+评审不通过或无法继续时，使用 `workflow complete --outcome changesRequested|failed|blocked --reason <具体原因>`，\
+可以附带已有证据；不要伪造 approved，也不要只在聊天中报告后留下 running 节点。\n\
 </genehub_managed_session>",
         role.prompt_text,
         run.workflow_id,
@@ -1625,6 +1692,31 @@ fn task_message(run: &RunRecord, node: &NodeDefinition) -> String {
 }
 
 fn settle_if_terminal(run: &mut RunRecord) {
+    if run.status != "running" {
+        return;
+    }
+    // Pending nodes on an unselected outcome are unreachable. Keep only the
+    // descendants that a currently executing node can still activate.
+    let mut reachable = BTreeSet::new();
+    let mut queue: VecDeque<_> = run
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.status == "running")
+        .map(|(id, _)| id.clone())
+        .collect();
+    while let Some(id) = queue.pop_front() {
+        if !reachable.insert(id.clone()) {
+            continue;
+        }
+        if let Some(node) = run.definition.nodes.iter().find(|node| node.id == id) {
+            queue.extend(node.on.values().flatten().cloned());
+        }
+    }
+    for (id, node) in &mut run.nodes {
+        if node.status == "pending" && !reachable.contains(id) {
+            node.status = "unreached".into();
+        }
+    }
     if !run.nodes.values().any(|node| node.status == "running")
         && run
             .nodes
@@ -2471,10 +2563,24 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
             }
         }
         for (event, targets) in &node.on {
-            if event != "completed" {
+            if !matches!(
+                event.as_str(),
+                "completed" | "changesRequested" | "failed" | "blocked"
+            ) {
                 bail!("当前内核尚未注册节点事件：{event}");
             }
+            if node.uses == "result.publish" && event != "completed" {
+                bail!("result.publish cannot emit {event}");
+            }
             for target in targets {
+                if event != "completed"
+                    && definition
+                        .nodes
+                        .iter()
+                        .any(|node| node.id == *target && node.uses == "result.publish")
+                {
+                    bail!("negative outcome {event} cannot directly publish a result");
+                }
                 *incoming.entry(target.clone()).or_default() += 1;
             }
         }
@@ -2897,7 +3003,7 @@ fn active_run_records(
             continue;
         };
         let run = load_run(&runtime, run_id)?;
-        if run.status == "running" {
+        if matches!(run.status.as_str(), "running" | "stopping" | "cancelling") {
             active.push(run);
         }
     }
@@ -2905,7 +3011,30 @@ fn active_run_records(
 }
 
 fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
-    let body = encode_private_record("Workflow Run", run, MAX_RUN_RECORD_BYTES)?;
+    let mut stored = run.clone();
+    if matches!(
+        stored.status.as_str(),
+        "completed" | "blocked" | "failed" | "cancelled"
+    ) {
+        let kind = stored.status.clone();
+        supervision::prepare_notice(&mut stored, &kind);
+    }
+    let run = &stored;
+    // The envelope deliberately lacks the legacy top-level Run fields. An
+    // older daemon must refuse it, rather than discard durable stop obligations.
+    #[derive(Serialize)]
+    struct Record<'a> {
+        schema: &'static str,
+        run: &'a RunRecord,
+    }
+    let body = encode_private_record(
+        "Workflow Run",
+        &Record {
+            schema: RUN_RECORD_SCHEMA,
+            run,
+        },
+        MAX_RUN_RECORD_BYTES,
+    )?;
     let Some(snapshot_relative) = run.snapshot_relative.as_deref() else {
         let path = run_path(runtime, &run.id, true)?;
         return crate::config::save_private(&path, &body);
@@ -2953,8 +3082,11 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
     let bytes = fs::read(&path)?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
-    if value.get("schema").and_then(serde_json::Value::as_str) != Some(RUN_INDEX_SCHEMA) {
-        let mut run: RunRecord = serde_json::from_value(value)
+    if !matches!(
+        value.get("schema").and_then(serde_json::Value::as_str),
+        Some(RUN_INDEX_SCHEMA | LEGACY_RUN_INDEX_SCHEMA)
+    ) {
+        let mut run = decode_run_record(&bytes)
             .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
         run.snapshot_relative = None;
         return Ok(run);
@@ -2976,18 +3108,41 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
         metadata.len(),
         MAX_RUN_RECORD_BYTES,
     )?;
-    let mut run: RunRecord = serde_json::from_slice(&fs::read(&snapshot)?)
+    let mut run = decode_run_record(&fs::read(&snapshot)?)
         .with_context(|| format!("读取 Executor Session Run snapshot：{}", snapshot.display()))?;
     if run.id != index.run_id
-        || run.status != index.status
-        || run.revision != index.revision
+        || run.revision < index.revision
         || run.executor_workspace_id != index.executor_workspace_id
         || run.executor_session_id.as_deref() != Some(index.executor_session_id.as_str())
     {
         bail!("Workflow Run index does not match its Executor Session snapshot");
     }
+    // The snapshot commits first. A crash before the locator write must not
+    // strand a saved cancellation or node result. Identity cannot change;
+    // only a lagging status/revision projection is repaired from the snapshot.
+    if run.revision != index.revision || run.status != index.status {
+        let repaired = RunIndex {
+            schema: RUN_INDEX_SCHEMA.into(),
+            status: run.status.clone(),
+            revision: run.revision,
+            ..index.clone()
+        };
+        crate::config::save_private(
+            &path,
+            &encode_private_record("Workflow Run index", &repaired, MAX_RUN_RECORD_BYTES)?,
+        )?;
+    }
     run.snapshot_relative = Some(index.snapshot_relative);
     Ok(run)
+}
+
+fn decode_run_record(bytes: &[u8]) -> Result<RunRecord> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
+    match value.get("schema").and_then(serde_json::Value::as_str) {
+        Some(RUN_RECORD_SCHEMA) => serde_json::from_value(value.get_mut("run").ok_or_else(|| anyhow!("Workflow Run record has no payload"))?.take()).context("读取 Workflow Run record"),
+        None => serde_json::from_value(value).context("读取 legacy Workflow Run"),
+        Some(schema) => bail!("unsupported Workflow Run storage format {schema}; upgrade the daemon before writing this project"),
+    }
 }
 
 fn flow_root(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
@@ -3187,7 +3342,7 @@ fn record_flow_completion(
         worker_session_id,
         &executor_session_id,
         Some(expected_revision),
-        serde_json::json!({"accepted": true}),
+        serde_json::json!({"accepted": true, "outcome": run.nodes[node_id].outcome, "reason": run.nodes[node_id].reason}),
     )?;
     push_flow_message(run, completed);
     record_assigned_messages(run, sessions)?;
@@ -3206,6 +3361,10 @@ fn record_flow_completion(
     Ok(())
 }
 
+pub(crate) fn lock_project_execution(runtime: &RuntimeStore) -> Result<ExclusiveFileLock> {
+    lock_run(runtime, "shared-project-execution")
+}
+
 fn lock_run(runtime: &RuntimeStore, run_id: &str) -> Result<ExclusiveFileLock> {
     let path = runtime
         .directory(Path::new("locks"), true)?
@@ -3215,6 +3374,25 @@ fn lock_run(runtime: &RuntimeStore, run_id: &str) -> Result<ExclusiveFileLock> {
 
 fn run_status(run: &RunRecord) -> WorkflowRunStatus {
     WorkflowRunStatus {
+        diagnostics: Some(
+            run.supervision
+                .diagnostics
+                .iter()
+                .map(|diagnostic| genehub_proto::WorkflowDiagnosticStatus {
+                    session_id: diagnostic.session_id.clone(),
+                    status: diagnostic.state.clone(),
+                    created_at_ms: diagnostic.created_at_ms,
+                    error: diagnostic.error.clone(),
+                })
+                .collect(),
+        ),
+        request_run_id: Some(request::group_id(run).into()),
+        report_pending: Some(run.supervision.notices.iter().any(|notice| !notice.handled)),
+        reason: run.stop.as_ref().map(|stop| stop.reason.clone()),
+        cleanup_error: run
+            .stop
+            .as_ref()
+            .and_then(|stop| stop.cleanup_error.clone()),
         execution_root: run.execution_root.clone(),
         experimental: run.experimental.then_some(true),
         id: run.id.clone(),
@@ -3244,6 +3422,10 @@ fn run_status(run: &RunRecord) -> WorkflowRunStatus {
             .nodes
             .iter()
             .map(|(id, node)| WorkflowNodeRunStatus {
+                assigned_at_ms: Some(node.assigned_at_ms),
+                last_activity_at_ms: Some(node.activity.last_at_ms),
+                outcome: node.outcome,
+                reason: node.reason.clone(),
                 id: id.clone(),
                 uses: node.uses.clone(),
                 status: node.status.clone(),
@@ -3979,6 +4161,9 @@ mod tests {
             }],
         };
         let mut run = RunRecord {
+            stop: None,
+            request: None,
+            supervision: Default::default(),
             execution_root: None,
             experimental: false,
             id: "wr_test".into(),
@@ -4000,6 +4185,10 @@ mod tests {
             nodes: BTreeMap::from([(
                 "publish".into(),
                 NodeRecord {
+                    activity: Default::default(),
+                    outcome: None,
+                    reason: None,
+                    assigned_at_ms: 0,
                     uses: "result.publish".into(),
                     status: "completed".into(),
                     session_id: None,
@@ -4023,6 +4212,9 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
         let carrier = |status: &str, executor: Option<&str>| RunRecord {
+            stop: None,
+            request: None,
+            supervision: Default::default(),
             execution_root: None,
             experimental: false,
             id: format!("wr_{status}"),

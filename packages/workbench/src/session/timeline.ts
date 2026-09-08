@@ -24,6 +24,9 @@ import type {
  * meant the text left the composer and nothing took its place.
  */
 export interface PendingMessage {
+  messageId?: string;
+  taskRunId?: string;
+  missingAttachments?: number;
   text: string;
   attachments: Attachment[];
   /** When it left the composer, so a slow agent start can be named. */
@@ -49,6 +52,7 @@ export interface TimelineState {
   permissionProgress: PermissionProgress | null;
   /** The message this client has sent and not seen come back, if any. */
   pending: PendingMessage | null;
+  inputOutbox?: PendingMessage[];
   lastError: TurnError | null;
   usage: Usage | null;
   modelId: string | null;
@@ -115,6 +119,7 @@ export function fromSnapshot(
   return {
     ...emptyTimeline(),
     pending,
+    inputOutbox: previous?.inputOutbox?.filter(input => !snapshot.items.some(item => item.id === input.messageId)),
     items: snapshot.historyWindowed && previous
       ? mergeHistoryItems(previous.items, items)
       : items,
@@ -123,7 +128,7 @@ export function fromSnapshot(
     historyExcerptIds: retainedExcerpts,
     // Old daemon snapshots may still say `running`; the durable interaction is
     // authoritative because there is deliberately no live turn behind it.
-    status: pendingPermission ? "waiting" : snapshot.summary.status,
+    status: pendingPermission && !snapshot.summary.inputSummary ? "waiting" : snapshot.summary.status,
     // The request the agent is waiting on. Dropping it was a hang the user could
     // not get out of: after a reconnect too old to replay, the snapshot is all
     // there is, so a session paused for approval came back with no card to
@@ -206,20 +211,11 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
       return {
         ...state,
         items: upsert(state.items, event.item),
-        // The echo of our own message is what the placeholder was standing in
-        // for. Keeping both would show the message twice. The daemon runs one
-        // turn per session, so a user message arriving while we are waiting on
-        // ours is ours; the reply to `session.send` clears it too, and whichever
-        // arrives first is enough. Clearing pending used to put Send back on
-        // the composer until `turnStarted`; the turn has already left, so the
-        // durable status becomes running here.
-        pending: event.item.type === "userMessage" ? null : state.pending,
-        status:
-          event.item.type === "userMessage" && state.status === "idle"
-            ? "running"
-            : state.status,
-        permissionProgress:
-          event.item.type === "userMessage" ? null : state.permissionProgress,
+        pending: event.item.type === "userMessage" && (!state.pending?.messageId || state.pending.messageId === event.item.id) ? null : state.pending,
+        inputOutbox: event.item.type === "userMessage" ? state.inputOutbox?.filter(input => input.messageId !== event.item.id) : state.inputOutbox,
+        // A durable admission is a session item, with no adapter turn yet.
+        status: event.item.type === "userMessage" && event.turnId && state.status === "idle" ? "running" : state.status,
+        permissionProgress: state.permissionProgress,
       };
 
     case "itemDelta":

@@ -42,6 +42,8 @@ pub struct ChallengeSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Challenge {
+    #[serde(default)]
+    management_binding: Option<String>,
     spec: ChallengeSpec,
     id: String,
     expires_at_ms: i64,
@@ -122,10 +124,34 @@ impl Broker {
         self.mutation.lock().await
     }
 
+    /// A previously granted project binding is a distinct authority source;
+    /// it never masquerades as a Human answer to a pending approval.
+    pub(crate) async fn issue_management(
+        &self,
+        spec: ChallengeSpec,
+        project_workspace_id: &str,
+    ) -> Result<Option<BootstrapApprovalChallenge>> {
+        let controller = spec.controller_session_id.clone();
+        let challenge = self.issue(spec).await?;
+        if !self.is_bound(project_workspace_id, &controller) {
+            return Ok(Some(challenge));
+        }
+        let mut guard = self.state.lock().await;
+        let mut state = guard.clone();
+        let record = state
+            .challenges
+            .get_mut(&challenge.challenge_id)
+            .ok_or_else(|| anyhow!("management plan disappeared"))?;
+        record.management_binding = Some(project_workspace_id.into());
+        self.save(&mut guard, state)?;
+        Ok(None)
+    }
+
     pub async fn issue(&self, spec: ChallengeSpec) -> Result<BootstrapApprovalChallenge> {
         let now = now_ms();
         let id = format!("pm-bootstrap-{}", uuid::Uuid::new_v4().simple());
         let challenge = Challenge {
+            management_binding: None,
             spec: spec.clone(),
             id: id.clone(),
             expires_at_ms: now.saturating_add(CHALLENGE_TTL_MS),
@@ -385,7 +411,11 @@ impl Broker {
             .challenges
             .values_mut()
             .find(|challenge| {
-                challenge.approved
+                (challenge.approved
+                    || challenge
+                        .management_binding
+                        .as_ref()
+                        .is_some_and(|project| self.is_bound(project, controller_session_id)))
                     && !challenge.rejected
                     && !challenge.consumed
                     && challenge.spec.controller_session_id == controller_session_id

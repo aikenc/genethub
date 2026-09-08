@@ -119,11 +119,22 @@ pub enum Request {
     WorkflowDispatch {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
+        retry_of: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        resume_cancelled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
         candidate_digest: Option<String>,
         workspace_id: String,
         workflow_id: String,
         task_id: String,
         prompt: String,
+    },
+    #[serde(rename = "workflow.check", rename_all = "camelCase")]
+    WorkflowCheck {
+        workspace_id: String,
+        run_id: Option<String>,
     },
     #[serde(rename = "workflow.get", rename_all = "camelCase")]
     WorkflowGet {
@@ -148,6 +159,22 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
         evidence: std::collections::BTreeMap<String, String>,
+        /// Absent retains the existing successful-completion contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        outcome: Option<WorkflowNodeOutcome>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        reason: Option<String>,
+    },
+    /// Persist the stop decision before reclaiming Executor/Worker resources.
+    /// Repeating cancellation is safe; completion is observed through the Run.
+    #[serde(rename = "workflow.cancel", rename_all = "camelCase")]
+    WorkflowCancel {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
     },
     /// Mounts, configures or removes one responsibility on an already-open,
     /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
@@ -331,6 +358,14 @@ pub enum Request {
     },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
+        /// Opts into durable receipt before Agent delivery. Retries must reuse
+        /// the same ID and exact payload; absence keeps legacy send semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        task_run_id: Option<String>,
         session_id: String,
         text: String,
         #[serde(default)]
@@ -882,6 +917,7 @@ pub enum Reply {
     SessionArtifact(SessionArtifactBundle),
     WorkflowProject(WorkflowProjectStatus),
     WorkflowRun(WorkflowRunStatus),
+    WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),
     AgentSpaceChangePlan(AgentSpaceChangePlan),

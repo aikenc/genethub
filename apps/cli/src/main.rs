@@ -158,6 +158,8 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
+  genet session send <id> --message-id <stable-id> [--task-run <run-id>] \"<text>\"
+                                    durably accept PM input; inspect the session for its answer
   genet session inspect <id>        inspect session structure and coverage
   genet session narrative <id>      read a bounded narrative page
   genet session rounds <id>         read a bounded round-summary page
@@ -197,10 +199,18 @@ pub fn usage() -> i32 {
   genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
                                     route through the project workflow catalog
   genet workflow get --run <id>    read one durable workflow run
+  genet workflow check [--run <id>]
+                                    inspect graph exits, execution and evidence without an LLM
+  genet workflow cancel --run <id> --revision <n>
+                                    fence the original request, then stop its squad
+  genet workflow dispatch ... --retry-of <run> [--resume-cancelled]
+                                    share the original request bounds; recovery needs new user input
   genet workflow history [--limit <n>]
                                     list recent Runs for Workflow analysis
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
+                              [--outcome changesRequested|failed|blocked --reason <text>]
+                                    finish a negative review through its explicit or default exit
   genet space inspect              which responsibilities this AgentSpace carries
   genet space children             the direct Workers this Executor may dispatch to
   genet space component set --component <pm|executor|worker|reviewer> [--role <r>]
