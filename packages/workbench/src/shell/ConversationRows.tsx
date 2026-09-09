@@ -92,7 +92,7 @@ export function WorkspaceRow({
         />
       ) : (
         <div
-          className={`agent-row-body relative flex min-h-14 w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "bg-raised text-fg" : "text-fg"}`}
+          className={`agent-row-body relative flex ${activity.pending || activity.tasks ? "min-h-24" : "min-h-14"} w-full items-center gap-1 rounded-md pr-1 text-sm ${active ? "bg-raised text-fg" : "text-fg"}`}
         >
           {!browse && (
             <button
@@ -124,12 +124,12 @@ export function WorkspaceRow({
             </EntityText>
           </button>
           {!!activity.pending && <button type="button" aria-label={`查看 ${workspace.name} 的 ${activity.pending} 项待办`} title="打开完整待办列表"
-            className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-accent hover:bg-raised"
+            className="inline-flex min-h-11 shrink-0 self-start items-center gap-1 rounded-lg px-2 text-xs text-accent hover:bg-raised"
             onClick={() => environment?.onOverview ? environment.onOverview(workspace.id, "attention") : onPick()}>
             <Hand size={14} aria-hidden />{activity.pending}
           </button>}
           {!activity.pending && activity.tasks && <button type="button" aria-label={`查看 ${workspace.name} 的进行中会话`}
-            className="min-h-11 shrink-0 rounded-lg px-2 text-xs text-accent hover:bg-raised"
+            className="min-h-11 shrink-0 self-start rounded-lg px-2 text-xs text-accent hover:bg-raised"
             onClick={() => environment?.onOverview ? environment.onOverview(workspace.id, "activity") : onPick()}>进行中</button>}
           <div className="agent-row-actions" data-open={menu || undefined}>
             {onNewSession && <button type="button" aria-label={`与 ${workspace.name} 新建会话`} title="新建会话" className="agent-new min-h-11 rounded-lg px-2 text-xs font-medium text-accent hover:bg-raised" onClick={onNewSession}>＋ 新会话</button>}
