@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 import { refreshAgentActivities, useAgentActivities } from "../workspace/useAgentActivity";
 import { useWorkbench } from "./store";
-import { canHandleInteraction, sessionAttention } from "./attention";
+import { canHandleInteraction } from "./attention";
 
 const labels: Record<string, string> = {
   running: "进行中", stopping: "停止中", cancelling: "停止中",
@@ -21,27 +21,21 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
   const summary = current.workSummary;
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [keepResultOpen, setKeepResultOpen] = useState(false);
   useEffect(() => {
     if (client && connection === "ready") void refreshAgentActivities(client);
   }, [client, connection, session.id, session.status]);
   if (!summary || session.managed) return null;
   const active = summary.running + summary.stopping > 0;
   const pendingReport = summary.tasks.some(task => task.reportPending);
-  const input = current.inputSummary;
-  const facts = sessionAttention(current, activity.sessions);
-  const heading = facts.label || (pendingReport ? "执行完成 · 待 PM 核对与汇报" : "任务执行记录");
+  const heading = active ? "小队任务 · 进行中" : summary.blocked > 0 ? "小队任务 · 受阻" : "小队任务记录";
   const ready = connection === "ready" && !activity.error && !summary.error;
   const canCancel = ready && client?.identity?.features?.includes("workflow.control.v1");
   return <section aria-label="任务进度" className="max-h-56 shrink-0 overflow-y-auto border-b border-line bg-raised px-4 py-3 text-sm">
-    <details open={active || pendingReport || summary.blocked > 0 || !!summary.error}>
+    <details open={active || pendingReport || summary.blocked > 0 || !!summary.error || keepResultOpen}>
       <summary className="cursor-pointer font-medium">{heading}</summary>
-      <p className="mt-2 text-xs text-muted" aria-label="PM 本轮状态">
-        PM 本轮：{current.status === "running" ? "处理中" : current.status === "failed" ? "运行异常" : (current.interactionSummary?.count ?? 0) > 0 ? "有待回答问题" : current.status === "waiting" ? "等待继续执行" : "待命"}。可通过下方输入框向 PM 提问或补充要求。
-      </p>
       {!ready && <p role="status" className="mt-2 text-muted">{summary.error ?? "任务状态待核对，连接恢复后更新。"}</p>}
       {!ready && summary.checkedAtMs > 0 && <p className="mt-1 text-xs text-muted">最近核对：{new Date(summary.checkedAtMs).toLocaleTimeString()}。</p>}
-      {input?.pendingMessageIds.length ? <p role="status" className="mt-2 text-xs text-muted">{input.pendingMessageIds.length} 条消息已接收，{input.paused ? "PM 续接已暂停，发送新消息后继续" : "待 PM 处理"}。</p> : null}
-      {input?.error && <p role="alert" className="mt-2 text-xs text-danger">{input.error}</p>}
       {error && <p role="alert" className="mt-2 text-danger">{error}</p>}
       <ul className="mt-2 space-y-3">
         {summary.tasks.map((task) => <li key={task.runId} className="border-t border-line pt-2">
@@ -53,7 +47,7 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
               onClick={() => {
                 if (!client) return;
                 const owner = client;
-                setBusy(task.runId); setError(null);
+                setBusy(task.runId); setError(null); setKeepResultOpen(true);
                 void owner.call({ type: "workflow.cancel", payload: { workspaceId: session.workspaceId, runId: task.runId, expectedRevision: task.revision } })
                   .then(async (reply) => {
                     if (reply?.type !== "workflowRun") throw new Error("未收到任务终止结果，请核对后重试。");

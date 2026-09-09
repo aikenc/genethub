@@ -12,7 +12,7 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
     title: `Project workflow recovery across ${scenario}`,
     oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics",
     catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
-    tags: ["core", "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention"] : [])],
+    tags: ["core", "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
@@ -196,9 +196,15 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
           await t.tools.waitUntil(() => staleResponseAt > 0, 15_000);
         }
         run = await get(original);
+        const pmCallsBeforeCancel = pmCalls;
         const cancel = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: original, expectedRevision: run.revision } });
         t.assertions.assert(cancel?.type === "workflowRun" && cancel.data.status === "cancelling", "cancel did not persist a fence before cleanup");
         await t.tools.waitUntil(async () => (await get(original)).status === "cancelled", 35_000);
+        if (scenario === "cancel") {
+          await new Promise(resolve => setTimeout(resolve, 4_000));
+          t.assertions.assert(pmCalls === pmCallsBeforeCancel && !(await get(original)).reportPending,
+            "direct task cancellation created a PM LLM/report obligation");
+        }
         if (scenario === "late-resume") {
           t.assertions.assert(Date.now() < staleResponseAt, "cancellation did not settle before the delayed old PM response; race prerequisite was not reached");
           await t.tools.waitUntil(async () => !(await snapshot()).summary.inputSummary?.pendingMessageIds.includes("u_stale_recovery"), 30_000);

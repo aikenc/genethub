@@ -15,7 +15,7 @@ const labels: Record<string, string> = {
 const statuses: Record<string, string> = {
   pending: "待执行", ready: "就绪", running: "执行中", waiting: "等待中",
   completed: "已完成", failed: "失败", blocked: "受阻", cancelled: "已取消",
-  stopping: "正在收尾", cancelling: "取消中", changesRequested: "需要修改",
+  finishing: "节点收尾中", unreached: "未选择的分支", stopping: "正在收尾", cancelling: "取消中", changesRequested: "需要修改",
   skipped: "已跳过",
 };
 const labelStatus = (status: string) => statuses[status] ?? status;
@@ -96,7 +96,7 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         <h3 className="text-sm font-medium">当前节点状态</h3>
         {(flow.run.nodes ?? []).map((node) => <div key={node.id} className="mt-3 border-t border-line pt-3 text-sm">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="break-words">{node.id} · {node.uses} · {labelStatus(node.outcome ?? node.status)}</span>
+            <span className="break-words">{node.id} · {node.uses} · {labelStatus(node.status === "finishing" ? node.status : node.outcome ?? node.status)}</span>
             {node.sessionId ? <button type="button" className="min-h-11 text-xs text-accent md:min-h-0"
               onClick={() => void selectSession(node.sessionId!)}>查看工作会话</button> : null}
           </div>

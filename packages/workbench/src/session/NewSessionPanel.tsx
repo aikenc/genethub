@@ -1,5 +1,6 @@
+import { usePageViewState } from "../app/usePageNavigation";
 import { DetailBackButton } from "../ui/ListLayout";
-import { useContext, useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Host, Endpoint } from "../host";
 import { useWorkbench } from "./store";
 import { pickPromptSuggestions } from "./prompt-suggestions";
@@ -23,8 +24,8 @@ export const NEW_SESSION_WORKSPACE_PREVIEW_LIMIT = 4;
 export const NEW_SESSION_PROJECT_PREVIEW_LIMIT = NEW_SESSION_WORKSPACE_PREVIEW_LIMIT;
 
 /** The single expert home. The existing Composer remains owned by WorkbenchApp. */
-export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onBack }: {
-  host?: Host; endpoint?: Endpoint | null; surface?: string; onSurface?(value: string): void; onBack?(): void;
+export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onBack, nested = false }: {
+  host?: Host; endpoint?: Endpoint | null; surface?: string; onSurface?(value: string, nested?: boolean): void; onBack?(): void; nested?: boolean;
 } = {}) {
   const wb = useWorkbench();
   const environment = useContext(AgentDetailsEnvironment);
@@ -36,10 +37,16 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   const [name, setName] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState("");
-  const [historyQuery, setHistoryQuery] = useState("");
-  const [showAll, setShowAll] = useState(false);
-  const [archived, setArchived] = useState(false);
-  const [filter, setFilter] = useState<AttentionFilter>("all");
+  const viewKey = `expert:${wb.client?.identity?.machineId ?? ""}:${workspace?.id ?? ""}`;
+  const [view, setView] = usePageViewState(viewKey, {historyQuery: "", showAll: false, archived: false, filter: "all" as AttentionFilter});
+  const {historyQuery, showAll, archived, filter} = view;
+  const setHistoryQuery = (historyQuery: string) => setView(old => ({...old, historyQuery}));
+  const setShowAll = (next: boolean | ((value: boolean) => boolean)) => setView(old => ({...old, showAll: typeof next === "function" ? next(old.showAll) : next}));
+  const setArchived = (next: boolean | ((value: boolean) => boolean)) => setView(old => ({...old, archived: typeof next === "function" ? next(old.archived) : next}));
+  const setFilter = (filter: AttentionFilter) => setView(old => ({...old, filter}));
+  const [scrollTop, setScrollTop] = usePageViewState(`${viewKey}:scroll:${surface}`, 0, 500);
+  const scroller = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => { if (scroller.current) scroller.current.scrollTop = scrollTop; }, [workspace?.id, surface, scrollTop]);
   useConversationLocalChanges();
   const [terminalIds, setTerminalIds] = useState<string[]>([]);
   useEffect(() => { if (surface === "terminal" && workspace) setTerminalIds(ids => ids.includes(workspace.id) ? ids : [...ids.slice(-3), workspace.id]); }, [surface, workspace?.id]);
@@ -50,8 +57,10 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   const suggestions = useMemo(() => pickPromptSuggestions(3, Math.random,
     guidanceKey ? guidanceKey.split("\n") : undefined), [workspace?.id, guidanceKey]);
   const sessionSurface = surface === "sessions" || surface === "attention" || surface === "activity";
-  useEffect(() => { setShowAll(false); setArchived(false); setHistoryQuery(""); setFilter("all"); }, [workspace?.id]);
-  useEffect(() => { if (surface === "attention" || surface === "activity") { setShowAll(true); setArchived(false); setHistoryQuery(""); setFilter(surface === "attention" ? "pending" : "running"); } }, [surface, workspace?.id]);
+  useEffect(() => {
+    const filter = surface === "attention" ? "pending" : surface === "activity" ? "running" : null;
+    if (filter && view.filter !== filter) setView(old => ({...old, showAll: true, archived: false, historyQuery: "", filter}));
+  }, [surface, workspace?.id]);
   const owned = (activity.sessions ?? []).filter(s => s.workspaceId === workspace?.id);
   const candidates = filter === "pending" ? pendingSessions(owned, activity.sessions ?? []) : owned;
   const rows = candidates.filter((s) =>
@@ -61,11 +70,11 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
     .sort((a, b) => (b.messagePreview?.atMs ?? b.updatedAtMs) - (a.messagePreview?.atMs ?? a.updatedAtMs) || a.id.localeCompare(b.id));
   const navigate = (id: string, child = false) => { setChoosing(false); environment?.onOverview?.(id, "sessions", child); };
   if (!workspace) return <p className="p-4 text-sm text-muted">请选择可用专家后开始会话。</p>;
-  const setSurface = (value: string) => onSurface?.(value);
+  const setSurface = (value: string, nested = false) => onSurface?.(value, nested);
   return <section className="flex h-full min-h-0 flex-col" aria-label="专家页面">
     <header className="shrink-0 border-b border-line px-3 py-3 md:px-6" style={{ paddingTop: "calc(0.75rem + env(safe-area-inset-top))" }}>
       <div className="mx-auto flex max-w-4xl items-center gap-2">
-        <DetailBackButton onClick={onBack}/>
+        <DetailBackButton onClick={onBack} listVisible={!nested}/>
         <button type="button" aria-label="更换专家头像" className="shrink-0 rounded-lg" onClick={() => setAvatarOpen(true)}><AgentAvatar id={workspace.id} name={workspace.name} /></button>
         <div className="min-w-0 flex-1"><h1 className="truncate text-lg font-semibold"><button type="button" aria-label="重命名专家" title="点击修改专家名称" className="max-w-full truncate text-left hover:text-accent" onClick={() => { setName(workspace.name); setRenameError(""); setRenameOpen(true); }}>{workspace.name}</button></h1>
           <p className="mt-1 truncate text-xs text-muted">{workspace.agentSpace?.components.filter(c => c.enabled).map(c => c.role ? `${c.componentId} · ${c.role}` : c.componentId).join(" / ") || (workspace.workspaceFile ? "多目录专家" : "目录专家")}</p>
@@ -76,10 +85,10 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
       <nav className="relative mx-auto mt-2 flex max-w-4xl items-center gap-1" aria-label="专家页签">
         {[["sessions", "会话"], ["components", "组件"], ["directories", "目录"], ["children", "小队"]].map(([id,label]) => <button key={id} type="button" aria-pressed={(surface === id || id === "sessions" && sessionSurface)} className={`min-h-11 min-w-0 flex-1 rounded-lg px-1 text-sm ${(surface === id || id === "sessions" && sessionSurface) ? "bg-raised font-medium text-accent" : "text-muted hover:bg-raised"}`} onClick={() => { setMenuOpen(false); setSurface(id!); }}>{label}</button>)}
         <button type="button" aria-label="专家菜单" aria-expanded={menuOpen} className="flex min-h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setMenuOpen(v => !v)}><MoreHorizontal size={20} /></button>
-        {menuOpen && <><button type="button" aria-label="关闭专家菜单" className="fixed inset-0 z-20 cursor-default" onClick={() => setMenuOpen(false)} /><div role="menu" className="absolute right-0 top-full z-30 min-w-40 rounded-xl border border-line bg-bg p-1 shadow-lg">{[["history",showAll ? "最近会话" : "查看全部会话"],["import","导入会话"],["details","资料与头像"],["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button key={id} type="button" role="menuitem" className="block min-h-11 w-full rounded-lg px-4 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); if(id === "import") setImportOpen(true); else if (id === "history") { setShowAll(v => !v); setArchived(false); setHistoryQuery(""); setSurface("sessions"); } else setSurface(id!); }}>{label}</button>)}</div></>}
+        {menuOpen && <><button type="button" aria-label="关闭专家菜单" className="fixed inset-0 z-20 cursor-default" onClick={() => setMenuOpen(false)} /><div role="menu" className="absolute right-0 top-full z-30 min-w-40 rounded-xl border border-line bg-bg p-1 shadow-lg">{[["history",showAll ? "最近会话" : "查看全部会话"],["import","导入会话"],["details","资料与头像"],["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button key={id} type="button" role="menuitem" className="block min-h-11 w-full rounded-lg px-4 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); if(id === "import") setImportOpen(true); else if (id === "history") { setShowAll(v => !v); setArchived(false); setHistoryQuery(""); setSurface("sessions"); } else setSurface(id!, true); }}>{label}</button>)}</div></>}
       </nav>
     </header>
-    <div className={surface === "terminal" ? "hidden" : ["files", "changes"].includes(surface) ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6"} key={`${workspace.id}:${surface}`}>
+    <div ref={scroller} onScroll={event => setScrollTop(event.currentTarget.scrollTop)} className={surface === "terminal" ? "hidden" : ["files", "changes"].includes(surface) ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6"} key={`${workspace.id}:${surface}`}>
       <div className="mx-auto max-w-4xl">
         {sessionSurface && <>
           <div aria-label="当前专家会话状态" className="mb-2 flex gap-1 text-xs">
@@ -96,7 +105,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
           </>}
         </>}
         {surface === "components" && <AgentAdvancedSettings key={workspace.id} workspace={workspace} section="components" inline />}
-        {surface === "directories" && <><ExpertDirectories workspace={workspace} /><div className="mt-4 flex flex-wrap gap-2">{[["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button type="button" key={id} className="min-h-11 rounded-lg border border-line px-4 text-sm" onClick={() => setSurface(id!)}>{label}</button>)}</div>{environment?.workspaceTools?.(workspace.id)}</>}
+        {surface === "directories" && <><ExpertDirectories workspace={workspace} /><div className="mt-4 flex flex-wrap gap-2">{[["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button type="button" key={id} className="min-h-11 rounded-lg border border-line px-4 text-sm" onClick={() => setSurface(id!, true)}>{label}</button>)}</div>{environment?.workspaceTools?.(workspace.id)}</>}
         {surface === "children" && <ExpertSquad key={workspace.id} workspace={workspace} onOpen={id => navigate(id, true)} />}
         {surface === "details" && <AgentDetails workspace={workspace} deviceName={endpoint?.label ?? "当前设备"} compact />}
       </div>
