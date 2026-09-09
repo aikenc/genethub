@@ -12,7 +12,7 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
     title: `Project workflow recovery across ${scenario}`,
     oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics",
     catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
-    tags: ["core", "workflow-control", "workflow-recovery"],
+    tags: ["core", "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
@@ -142,13 +142,19 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
           const requestId = (await snapshot(workerId)).pendingPermissions[0]!.id;
           await t.tools.waitUntil(async () => (await snapshot()).summary.workSummary?.tasks[0]?.waiting?.some(request => request.requestId === requestId) === true, 15_000);
           await t.tools.waitUntil(async () => (await snapshot()).items.some(item => item.type === "userMessage" && item.id.startsWith("flow_") && item.text.includes(requestId)), 15_000);
-          t.assertions.assert((await snapshot()).summary.workSummary?.tasks[0]?.reason?.includes("等待用户"), "task projection hid the Human waiting reason");
+          t.assertions.assert((await snapshot(workerId)).summary.interactionSummary?.requests.some(request => request.requestId === requestId), "worker summary omitted the real request reference");
         }
+        await t.tools.waitUntil(async () => {
+          const summary = (await snapshot()).summary;
+          return summary.workSummary?.executing === (scenario === "silence-human" ? 0 : 1)
+            && summary.workSummary.tasks[0]?.executing === (scenario !== "silence-human");
+        }, 15_000);
         const before = await snapshot(workerId);
         const callsBefore = workerCalls;
         t.assertions.assert((await snapshot()).summary.workSummary?.running === 1, "idle PM lost the active task");
         const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: opened.workspaceId, includeArchived: false } });
         t.assertions.assert(listed?.type === "sessions" && listed.data.find(s => s.id === pm)?.workSummary?.running === 1, "list and detail disagree on task state");
+        t.assertions.assert(listed?.type === "sessions" && listed.data.find(s => s.id === pm)?.workSummary?.executing === (scenario === "silence-human" ? 0 : 1), "list confused an idle PM or a waiting Worker with live squad execution");
         await send("u_question", "现在进行到哪里了？只回答我的问题。", original);
         await t.tools.waitUntil(async () => { const s = await snapshot(); return s.summary.status === "idle" && !s.summary.inputSummary?.pendingMessageIds.includes("u_question"); }, 30_000);
         const after = await snapshot(workerId);
