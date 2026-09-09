@@ -250,7 +250,7 @@ async def main():
                 loop.add_signal_handler(sig, stopped.set)
             except NotImplementedError:
                 signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stopped.set))
-        print('已登记，请在 GeneHub 后台运行中刷新并打开预览。', flush=True)
+        print('已登记。在聊天里给出入口 HTML 链接，用户点开即预览。', flush=True)
         await stopped.wait()
     finally:
         for sid in list(media):
