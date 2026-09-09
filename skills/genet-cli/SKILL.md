@@ -252,3 +252,8 @@ Agent 的**提问**和**方案确认**不一样：它们没有「拒绝」这个
 `capabilities` 与 `schema client.list`；`clientId` 是具体文档、`--machine` 是联调控制机器，不能与设备或
 Agent 会话 ID 混用。attach 需要目标页面本地限时授权，命令结果须通过 result 领取且 complete 只消费一次。
 这套能力不等同于 session 历史查询、任意网站自动化或原生桌面控制。
+
+## daemon 生命周期
+
+启动、停止、重启或应用 daemon 环境配置前，读取内置 genehub-daemon-management 的标准 SOP。
+已有管理者就通过它操作；依赖目标 daemon 的会话必须先验证独立恢复连接。通用产品介绍见内置 genehub。

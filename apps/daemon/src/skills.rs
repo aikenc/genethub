@@ -316,6 +316,17 @@ mod tests {
         assert!(skills
             .iter()
             .any(|skill| skill.name == "genehub-html-preview"));
+        assert!(skills.iter().any(|skill| skill.name == "genehub"));
+        let lifecycle = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-daemon-management")
+            .expect("daemon management built-in");
+        assert!(lifecycle
+            .file_path
+            .parent()
+            .unwrap()
+            .join("references/restart.md")
+            .is_file());
         let speech = skills
             .iter()
             .find(|skill| skill.name == "genehub-speech-runtime")
