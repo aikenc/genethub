@@ -28,7 +28,6 @@ defineSpecialty({
       return { ...fresh, url: proxy.urlFor(fresh.url) };
     };
     browser = await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page, endpoint: refreshedEndpoint(), refreshEndpoint: refreshedEndpoint, workspaceId: "", entryPath: "", surface: "client-debug" });
-    await page.getByRole("button", { name: "客户端联调", exact: true }).click();
     await page.getByRole("button", { name: "选择控制机器", exact: true }).click();
     await page.getByRole("button", { name: "连接", exact: true }).click();
     await page.getByText("已连接控制机器", { exact: false }).waitFor();

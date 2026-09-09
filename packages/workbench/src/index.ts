@@ -62,4 +62,4 @@ export type {
 } from "@genehub/proto";
 export type { ExtraTab } from "./shell/tabs";
 
-export { configureClientDebugHost, disconnectClientDebug } from "./client-debug";
+export { configureClientDebugHost, disconnectClientDebug, openClientDebug } from "./client-debug";

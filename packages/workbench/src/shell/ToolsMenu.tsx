@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import { useWorkbench } from "../session/store";
 import { stepUiScale, UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
+import { openClientDebug } from "../client-debug";
 import type { ExtraTab } from "./tabs";
 
 /**
@@ -56,6 +57,7 @@ export function ToolsMenu({
       <Section title="全局" phone={phone}>
         <Entry phone={phone} label="此电脑的后台进程" onClick={() => go("processes")} />
         <Entry phone={phone} label="设备" onClick={() => go("devices")} />
+        <Entry phone={phone} label="联调" onClick={() => { openClientDebug(); onNavigate(); }} />
         <Entry phone={phone} label="设置" onClick={() => go("settings")} />
         {children ? (
           <div

@@ -13,7 +13,7 @@ description: 通过 GeneHub client CLI 实时调试已接入联调的 PC/手机�
 使用当前环境绑定的 `GENEHUB_CLI` 绝对路径，不猜渠道二进制；缺绑定立即报告。
 读取 `capabilities` 和 `schema client.list` / `schema client.attach` / `schema client.result`。
 若安装的 CLI 没有 client 命令，停止联调并说明需要更新当前渠道 CLI；控制机器不支持协议时需要更新
-控制机器，页面没有“联调”入口时需要更新前端。主干已合入不代表三端已部署，不擅自更新或发布。
+控制机器，页面工具菜单没有“联调”入口时需要更新前端。主干已合入不代表三端已部署，不擅自更新或发布。
 
 三个标识不能混用：
 
@@ -21,7 +21,7 @@ description: 通过 GeneHub client CLI 实时调试已接入联调的 PC/手机�
 - `clientId` 是该控制机器上登记的一个文档实例，不是电脑 ID、workspace ID 或 Agent session ID。
 - `attach` 返回的 `session` 是这次操作方的秘密能力令牌，仅用于这个客户端的联调命令。
 
-只连接用户已有权限访问的控制机器。让用户在目标页面右上角“联调”中选择该机器并连接，然后
+只连接用户已有权限访问的控制机器。让用户在目标工作台「工具 → 联调」中选择该机器并连接，然后
 `client list`，按 clientId、页面标题/URL、设备信息确认目标。多个标签页/窗口分别登记；有歧义时询问，
 不能自动挑第一项。调试工位的 RTC、WASM 或 Host 时优先选择另一台已授权服务器作为控制机器，
 避免重启被测电脑切断联调；该联调连接禁用 RTC 升级，因此它可用并不证明被测 RTC 直连可用。

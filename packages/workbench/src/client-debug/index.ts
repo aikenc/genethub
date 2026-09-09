@@ -5,10 +5,17 @@ import { CLIENT_DIAGNOSTIC_EVENT, activeDiagnosticClient } from "../diagnostics"
 
 let host: Host | undefined;
 let disconnect = () => {};
+let showPanel = () => {};
 /** Ends this document's grant immediately, including while the network is down. */
 export function disconnectClientDebug(): void { disconnect(); }
 /** A host supplies only machine discovery/dialing, never native window powers. */
 export function configureClientDebugHost(value: Host): void { host = value; }
+/** Opens the consent panel. The workbench Tools menu is the user-facing entry. */
+export function openClientDebug(): void {
+  if (!globalThis.document) return;
+  if (!document.querySelector("[data-genehub-client-debug]")) installClientDebug();
+  showPanel();
+}
 
 interface Grant { session: string; wall: number; monotonic: number }
 const durations = [["30 分钟", 1800], ["1 小时", 3600], ["5 小时", 18000], ["1 天", 86400]] as const;
@@ -19,14 +26,19 @@ export function installClientDebug(): void {
   if (!globalThis.document || document.querySelector("[data-genehub-client-debug]")) return;
   const mount = document.createElement("div");
   mount.dataset.genehubClientDebug = "";
-  mount.style.cssText = "position:fixed;right:12px;top:max(12px,env(safe-area-inset-top));z-index:2147483646;font:14px system-ui;color:#eef2ff";
+  mount.style.cssText = "position:fixed;right:12px;top:max(56px,calc(env(safe-area-inset-top) + 44px));z-index:40;font:14px system-ui;color:#eef2ff;pointer-events:none";
   const shadow = mount.attachShadow({ mode: "open" });
   const style = document.createElement("style");
-  style.textContent = `button,select{font:inherit;padding:8px;border:1px solid #64748b;border-radius:8px;background:#1e293b;color:#eef2ff;cursor:pointer}section{background:#0f172a;border:1px solid #64748b;border-radius:12px;padding:14px;max-width:min(340px,85vw);max-height:75vh;overflow:auto;box-shadow:0 8px 30px #0007}p{line-height:1.5;overflow-wrap:anywhere}nav{display:flex;gap:8px;flex-wrap:wrap}select{max-width:100%} [hidden]{display:none!important}`;
+  style.textContent = `button,select{font:inherit;padding:8px;border:1px solid #64748b;border-radius:8px;background:#1e293b;color:#eef2ff;cursor:pointer}section{background:#0f172a;border:1px solid #64748b;border-radius:12px;padding:14px;max-width:min(340px,85vw);max-height:75vh;overflow:auto;box-shadow:0 8px 30px #0007;pointer-events:auto}p{line-height:1.5;overflow-wrap:anywhere}nav{display:flex;gap:8px;flex-wrap:wrap}select{max-width:100%} [hidden]{display:none!important}`;
   shadow.append(style);
-  const toggle = document.createElement("button"); toggle.textContent = "联调"; toggle.setAttribute("aria-label", "客户端联调");
   const panel = document.createElement("section"); panel.hidden = true; panel.setAttribute("aria-label", "客户端联调");
-  shadow.append(toggle, panel); document.body.append(mount);
+  shadow.append(panel); document.body.append(mount);
+  const reveal = () => {
+    panel.hidden = false;
+    mount.style.pointerEvents = "auto";
+    render();
+  };
+  showPanel = reveal;
   let connection: Client | null = null;
   let identity: { clientId: string; owner: string } | null = null;
   let grant: Grant | null = null;
@@ -82,8 +94,14 @@ export function installClientDebug(): void {
     return element;
   }
   function paragraph(text: string): void { const p = document.createElement("p"); p.textContent = text; panel.append(p); }
+  function hidePanel(): void {
+    panel.hidden = true;
+    mount.style.pointerEvents = "none";
+  }
   function render(): void {
-    panel.replaceChildren(); paragraph(message);
+    panel.replaceChildren();
+    panel.append(button("关闭面板", hidePanel));
+    paragraph(message);
     if (connectionMessage) paragraph(connectionMessage);
     if (identity) {
       paragraph(`客户端：${identity.clientId}`);
@@ -184,7 +202,6 @@ export function installClientDebug(): void {
     // The old document cannot execute again, and its broker lease expires.
     if (!reloading) disconnectClientDebug();
   });
-  toggle.onclick = () => { panel.hidden = !panel.hidden; if (!pending) render(); };
   render();
   setInterval(() => {
     if (grant && !valid()) { void revoke(); }
@@ -207,7 +224,7 @@ export function installClientDebug(): void {
       if (!response.grant) { if (grant || pending) { grant = null; pending = null; message = "授权已结束"; render(); } return; }
       if (!response.grant.approved) {
         if (pending !== response.grant.session) {
-          pending = response.grant.session; pendingLabel = response.grant.label; panel.hidden = false; render();
+          pending = response.grant.session; pendingLabel = response.grant.label; reveal();
         }
         return;
       }
