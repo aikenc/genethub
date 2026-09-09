@@ -8,7 +8,13 @@ GeneHub 本体不要求 Node 或 Python。外部程序可按[语言无关接入�
 - [Node 多后端适配示例](../assets/node-adapter/run.mjs)：可选启动器，适合现有 Node 工作流，读取 application.json，前台管理多个后端。需要 Node 22+；其 ws 依赖仅属于该示例。
 - [入口 HTML](../assets/demo/index.html)：复制到工作区，演示 HTTP、流式进度与 WS。真实程序替换相应业务输出。
 
-首先从实际安装/启动配置确认目标 Channel 的 daemon 私有数据目录；CLI 只使用系统提供的准确绑定，先看帮助，不猜子命令或数据路径。
+用系统提供的 `GENEHUB_CLI` 取目标 Channel 的数据目录，不要猜路径或子命令：
+
+```text
+"<GENEHUB_CLI>" daemon status
+```
+
+返回 JSON 里的 `dataDir` 就是 `--daemon-root`（其下的 `service-previews/` 由适配器写入，不要手改，也不要在聊天里贴登记内容）。
 
 ## Python 路径：无需 Node 或产品源码
 
