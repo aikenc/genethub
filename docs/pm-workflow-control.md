@@ -34,17 +34,30 @@ An unanswered Human request remains a separate request with the same ID. A
 consultation cannot replace, answer or approve it, or use project authority to
 bypass its decision. An explicitly submitted decision is persisted and can join
 the next input batch; completion is bound to the execution that carried it.
-“停止 PM 本轮” pauses automatic continuation until new user input. It leaves the
-squad running. Workflow notices use the same durable queue and never preempt
-user input. A terminal Run retains its notice until PM handling is recorded.
+The composer keeps its own send/sending/stop states. Stop pauses this Agent's automatic continuation until new user input and leaves the squad running. While busy, entering text exposes Send supplement; receipts remain beside the conversation. The header panel owns squad progress and cancellation. Workflow notices use the same durable queue and never preempt
+user input. Completion and decision-needed notices remain until handled. Cancellation never creates a PM wakeup; obsolete workflow receipts are retired without dropping user input or interrupting an existing PM turn.
 
 ## Results, cancellation and recovery
 
 `workflow.control.v1` adds `workflow.cancel` and read-only `workflow.check`.
 A Reviewer can finish with `changesRequested`, `failed` or `blocked`, a reason
 and bounded evidence. Missing negative edges use a default blocked exit.
-Positive completion still validates the graph's evidence. DAG validation
-remains; repair creates a related Run instead of an unbounded back edge.
+Positive completion still validates the graph's evidence. The default game
+DAGs explicitly unroll one repair: implement → review; approval → publish,
+changesRequested → repair → review-after-repair → publish-repaired. A second
+rejection uses the blocked exit. Unselected branches become unreached, and
+separate publish nodes avoid introducing joins. Projects may edit these paths;
+the daemon does not recognize repair node names or prescribe another PM Run.
+
+Accepted node results enter finishing. The executor reconciler fences and
+closes that node, verifies known process cleanup, then activates its declared
+successors. This is durable across restart; cancellation wins before successor
+activation. Ref reservation stays with the Run throughout review. Each serial
+writer gets a fresh commit baseline after previous writers close. Activation
+rollback cannot release the existing Run reservation; concurrent writers are
+refused. If a crash occurs after an assignment is stored but before its initial
+send, the existing orphan check yields a blocked exit instead of replaying a
+possibly executed assignment.
 
 The task button calls cancellation directly. PM can invoke the same command.
 The original-request fence is persisted first; dispatch, completion and recovery
@@ -57,7 +70,7 @@ facts, the adapter is still stopped and cleanup remains explicitly unconfirmed.
 Cancelled Session execution cannot reopen after reload. Artifact and evidence
 history remains accessible, including for older/broken Pack installations.
 
-`taskId` is still the dispatch idempotency key. `--retry-of` associates repair
+`taskId` is still the dispatch idempotency key. `--retry-of` associates an explicit recovery
 with the original user request. Its Runs share a maximum of three attempts,
 two hours excluding recorded Human waits, and 256 **observed** LLM calls,
 including diagnosis. Changing dispatch keys does not reset these bounds.
@@ -99,11 +112,11 @@ project. Exact plan digest, action ID, revision and scope checks still apply;
 initial takeover requires its original Human decision. Bootstrap plans expose
 conflicting Runs and cancellation actions. Applying shared Pack resources
 rechecks quiescence under the same project lock used by dispatch. Pure DCG
-activation affects new Runs; older Runs retain immutable snapshots. Pack v3
-recognizes both v1 and v2 upgrade sources and retains the existing rollback
+activation affects new Runs; older Runs retain immutable snapshots. Pack v4
+recognizes v1, v2 and v3 upgrade sources and retains the existing rollback
 path and user customization checks.
 
-Session format 9 and Run/index envelopes v2 protect new durable obligations.
+Session format 9, Run envelope v3 and index envelope v2 protect durable obligations. The current reader accepts v2 Runs; older daemons reject v3 before they can discard node retirement.
 Older readers/writers must fail closed instead of dropping input or
 cancellation responsibility. No new Task CRUD service, Hub scheduler, native
 steering protocol or in-place workflow mutation is introduced.

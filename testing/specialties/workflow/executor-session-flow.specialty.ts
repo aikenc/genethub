@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
-import { defineSpecialty } from "../../framework/public.ts";
+import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 function git(root: string, args: string[]): string {
   const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
@@ -50,9 +50,9 @@ function fieldFromRequest(value: unknown, field: string): unknown {
   return numeric ? Number(numeric[1]) : undefined;
 }
 
-defineSpecialty(
+for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "restart-handoff"] as const) defineSpecialty(
   {
-    id: "specialty.workflow.executor-session-flow",
+    id: outcome === "approved" ? "specialty.workflow.executor-session-flow" : `specialty.workflow.executor-session-flow.${outcome}`,
     title: "Executor Session drives Coder and Reviewer with structured messages",
     oracle:
       "one ordinary PM turn discovers and applies the game Bootstrap Pack, commits its project assets, and dispatches the project DCG; one non-LLM Executor Session owns the Run snapshot and structured timeline while Coder and Reviewer execute in their attached AgentSpaces",
@@ -66,7 +66,7 @@ defineSpecialty(
       "mechanical DCG transitions consume Executor LLM turns",
       "FlowMessages are chat text or omit the Coder-to-Reviewer transition",
     ],
-    tags: ["core", "workflow", "executor", "flow-message", "agent-space", "bootstrap-pack"],
+    tags: ["core", "workflow", "executor", "flow-message", "agent-space", "bootstrap-pack", "session-control-fixes", ...(outcome === "restart-handoff" ? ["workflow-restart-handoff"] : [])],
     llm: { default: "mock" },
     expectedDurationMs: 55_000,
     timeoutMs: 150_000,
@@ -77,6 +77,7 @@ defineSpecialty(
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
+      const repairs = outcome === "repaired" || outcome === "exhausted";
       const projectRoot = path.join(opened.workspaceRoot, "asteroid-garden");
       mkdirSync(projectRoot, { recursive: true });
       t.data.git.init(projectRoot);
@@ -94,17 +95,24 @@ defineSpecialty(
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
       const gameHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Asteroid Garden</title><style>body{margin:0;background:#08152b;color:#fff;font:16px sans-serif;text-align:center}canvas{background:#10264c;border:2px solid #79e8ff;margin:20px}</style></head><body><h1>Asteroid Garden</h1><p>方向键移动，收集星种</p><canvas id="game" width="640" height="360"></canvas><script>const c=document.querySelector('#game'),x=c.getContext('2d');let px=320,score=0;addEventListener('keydown',e=>{px+=e.key==='ArrowLeft'?-20:e.key==='ArrowRight'?20:0;score++;draw()});function draw(){x.fillStyle='#10264c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#79e8ff';x.fillRect(px,300,28,28);x.fillStyle='#fff';x.fillText('星种 '+score,20,30)}draw()</script></body></html>`;
       let pmStage = 0;
-      let coderStage = 0;
-      let reviewerStage = 0;
+      const coderStages = { implement: 0, repair: 0 };
+      const reviewerStages = { review: 0, after: 0 };
+      let pmAtReview: number | undefined;
+      let repairedFromFinding = false;
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
         if (body.includes("你是小游戏项目的 Coder")) {
-          const stage = coderStage++;
+          const repairing = body.includes("当前节点：repair");
+          const stage = coderStages[repairing ? "repair" : "implement"]++;
+          if (repairing && stage === 0) {
+            repairedFromFinding = body.includes("startup-ready-defect") && body.includes("runtime-start-failed");
+            t.assertions.assert(pmStage === pmAtReview, "ordinary rework woke PM instead of following the DAG");
+          }
           if (stage === 0) {
             return {
               tool: {
                 name: "write",
-                arguments: { path: path.join(projectRoot, "index.html"), content: gameHtml },
+                arguments: { path: path.join(projectRoot, "index.html"), content: gameHtml + (repairing ? "<!-- startup-fixed -->" : "") },
               },
             };
           }
@@ -121,7 +129,13 @@ defineSpecialty(
           return { text: "实现节点已完成。" };
         }
         if (body.includes("你是小游戏项目的 Reviewer")) {
-          const stage = reviewerStage++;
+          const afterRepair = body.includes("当前节点：review-after-repair");
+          const stage = reviewerStages[afterRepair ? "after" : "review"]++;
+          if (!afterRepair && stage === 0) pmAtReview = pmStage;
+          if (afterRepair && stage === 0) t.assertions.assert(pmStage === pmAtReview, "rereview consumed a PM turn");
+          if (stage === 0 && repairs && (!afterRepair || outcome === "exhausted")) return {
+            tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --outcome changesRequested --reason startup-ready-defect --evidence checks=runtime-start-failed' } }
+          };
           if (stage === 0) {
             return {
               tool: {
@@ -227,8 +241,11 @@ defineSpecialty(
       });
       t.assertions.assert(approval?.type === "ack", `Human approval failed: ${JSON.stringify(approval)}`);
       await t.tools.waitUntil(
-        () => pmEvents.filter((event) => event.type === "turnCompleted").length >= 2,
-        140_000,
+        async () => {
+          const reply = await opened.client.call({type: "session.get", payload: {sessionId: pmSessionId}});
+          return reply?.type === "snapshot" && reply.data.summary.status === "idle" && !reply.data.pendingPermissions?.length;
+        },
+        40_000,
       );
       t.assertions.assert(
         pmEvents.some((event) => event.type === "turnCompleted") &&
@@ -236,12 +253,43 @@ defineSpecialty(
         `PM turn failed: ${JSON.stringify(pmEvents.slice(-10).map((event) => event.raw)).slice(-6000)}`,
       );
 
+      if (outcome === "cancel-handoff" || outcome === "restart-handoff") {
+        let accepted: import("@genehub/proto").WorkflowRunStatus | undefined;
+        await t.tools.waitUntil(async () => {
+          const result = await opened.client.call({type: "workflow.history", payload: {workspaceId: projectId, limit: 10}});
+          accepted = result?.type === "workflowRuns" ? result.data[0] : undefined;
+          return accepted?.nodes.some(node => node.status === "finishing") === true;
+        }, 35_000);
+        if (outcome === "cancel-handoff") {
+          const callsBefore = pmStage;
+          await opened.client.call({type: "workflow.cancel", payload: {workspaceId: projectId, runId: accepted!.id, expectedRevision: accepted!.revision}});
+          await t.tools.waitUntil(async () => {
+            const result = await opened.client.call({type: "workflow.get", payload: {workspaceId: projectId, runId: accepted!.id}});
+            if (result?.type !== "workflowRun" || result.data.status !== "cancelled") return false;
+            t.assertions.assert(result.data.nodes.filter(node => node.sessionId).length === 1 && !result.data.reportPending,
+              "cancellation during handoff launched a successor or PM report");
+            return true;
+          }, 35_000);
+          await new Promise(resolve => setTimeout(resolve, 3_000));
+          t.assertions.assert(pmStage === callsBefore, "handoff cancellation woke PM");
+          t.note("Accepted node result retained; direct cancellation prevented successor activation.");
+          return;
+        }
+        opened.client.close();
+        // Keep the external mock HTTP server responsive while the real daemon
+        // stops/starts; a synchronous child command blocks this Node event loop.
+        const stopped = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
+        t.assertions.assert(stopped.code === 0, `daemon stop failed: ${stopped.stderr}`);
+        const started = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], opened.daemon.env);
+        t.assertions.assert(started.code === 0, `daemon restart failed: ${started.stderr}`);
+        opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+      }
       await t.tools.waitUntil(async () => {
         const history = await opened.client.call({
           type: "workflow.history",
           payload: { workspaceId: projectId, limit: 10 },
         });
-        return history?.type === "workflowRuns" && history.data.some((run) => run.status === "completed");
+        return history?.type === "workflowRuns" && history.data.length === 1 && history.data.some((run) => run.status === (outcome === "exhausted" ? "blocked" : "completed"));
       }, 140_000);
       const listed = await opened.client.call({
         type: "session.list",
@@ -251,7 +299,7 @@ defineSpecialty(
       const sessions = listed?.type === "sessions" ? listed.data : [];
       const workers = sessions.filter((session) => session.managed?.workflowRunId);
       t.assertions.assert(
-        workers.length === 2,
+        workers.length === (repairs ? 4 : 2),
         `expected Coder and Reviewer, got ${JSON.stringify(workers)}; PM events=${JSON.stringify(
           pmEvents.map((event) => event.raw),
         ).slice(-12000)}; requests=${JSON.stringify(opened.mock.requests).slice(-8000)}`,
@@ -268,7 +316,7 @@ defineSpecialty(
       t.assertions.assert(runReply?.type === "workflowRun", `workflow.get returned ${runReply?.type}`);
       const run = runReply?.type === "workflowRun" ? runReply.data : undefined;
       t.assertions.assert(
-        run?.status === "completed",
+        run?.status === (outcome === "exhausted" ? "blocked" : "completed"),
         `Run ended as ${run?.status}; run=${JSON.stringify(run)}; sessions=${JSON.stringify(sessions)}; PM=${JSON.stringify(
           pmEvents.map((event) => event.raw),
         ).slice(-12000)}`,
@@ -331,12 +379,25 @@ defineSpecialty(
       t.assertions.assert(flowReply?.type === "sessionFlow", `session.flow returned ${flowReply?.type}`);
       const flow = flowReply?.type === "sessionFlow" ? flowReply.data : undefined;
       const kinds = flow?.messages.map((message) => message.kind) ?? [];
-      t.assertions.assert(
-        kinds.join(",") ===
-          "run.requested,node.assigned,node.completed,node.assigned,node.completed,run.completed",
-        `unexpected FlowMessage timeline: ${JSON.stringify(kinds)}`,
-      );
-      t.assertions.assert(flow?.run.status === "completed", "Executor flow snapshot is not terminal");
+      const terminal = outcome === "exhausted" ? "run.blocked" : "run.completed";
+      const expected = ["run.requested", "node.assigned", "node.completed", "node.assigned", "node.completed"];
+      if (repairs) expected.push("node.assigned", "node.completed", "node.assigned", "node.completed");
+      expected.push(terminal);
+      t.assertions.assert(kinds.join(",") === expected.join(","), `unexpected FlowMessage timeline: ${JSON.stringify(kinds)}`);
+      t.assertions.assert(flow?.run.status === run?.status, "Executor flow snapshot disagrees with Run");
+      const implementation = run?.nodes.find(node => node.id === "implement");
+      const repair = run?.nodes.find(node => node.id === "repair");
+      if (!repairs) {
+        t.assertions.assert(repair?.status === "unreached" && !repair.sessionId, "approval unnecessarily launched repair");
+      } else {
+        t.assertions.assert(repairedFromFinding, "repair assignment omitted the review reason and evidence");
+        t.assertions.assert(repair?.evidence.commit && repair.evidence.commit !== implementation?.evidence.commit,
+          "repair reused the first commit instead of acquiring a fresh baseline");
+        t.assertions.assert(git(projectRoot, ["rev-parse", "HEAD"]) === repair?.evidence.commit, "repair evidence does not name the actual target commit");
+        t.assertions.assert(run?.nodes.find(node => node.id === "publish")?.status === "unreached", "rejection took the first publish branch");
+        t.assertions.assert(run?.nodes.find(node => node.id === "publish-repaired")?.status === (outcome === "exhausted" ? "unreached" : "completed"), "repair publication ignored final review");
+      }
+      t.assertions.assert(workers.every(worker => worker.status === "closed"), "terminal nodes left live execution owners");
 
       const executorRoot = path.join(projectRoot, "spaces", "executor");
       const flowRoot = path.join(
@@ -351,7 +412,7 @@ defineSpecialty(
         t.assertions.assert(existsSync(path.join(flowRoot, file)), `Executor flow omitted ${file}`);
       }
       t.assertions.assert(
-        readFileSync(path.join(flowRoot, "journal.jsonl"), "utf8").includes("run.completed"),
+        readFileSync(path.join(flowRoot, "journal.jsonl"), "utf8").includes(terminal),
         "the on-disk Executor journal is incomplete",
       );
       t.assertions.assert(existsSync(path.join(projectRoot, "index.html")), "game entry was not produced");

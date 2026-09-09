@@ -242,6 +242,11 @@ pub(super) async fn observe(
 }
 
 pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
+    // Cancellation is a control-plane result shown by task summaries. It does
+    // not create a new conversation obligation (including legacy notices).
+    if cancellation_requested(run) {
+        return;
+    }
     if kind.starts_with("human:")
         && run.supervision.notices.len() >= request::MAX_LLM_ROUNDS as usize + 8
     {
@@ -284,13 +289,22 @@ pub(super) async fn deliver_notice(
     runtime: &RuntimeStore,
     run_id: &str,
 ) -> Result<()> {
-    let run = load_run(runtime, run_id)?;
-    for notice in run
-        .supervision
-        .notices
-        .iter()
-        .filter(|notice| !notice.handled)
-    {
+    let ids = load_run(runtime, run_id)?.supervision.notices.into_iter()
+        .filter(|notice| !notice.handled).map(|notice| notice.id).collect::<Vec<_>>();
+    for id in ids {
+        let _lock = lock_run(runtime, run_id)?;
+        let mut run = load_run(runtime, run_id)?;
+        let _request = request::request_lock(runtime, request::group_id(&run))?;
+        let root = load_run(runtime, request::group_id(&run))?;
+        let cancelled = cancellation_requested(&run) || cancellation_requested(&root);
+        let notice = run.supervision.notices.iter().find(|notice| notice.id == id)
+            .ok_or_else(|| anyhow!("Workflow notice disappeared"))?.clone();
+        if cancelled {
+            state.sessions.discard_workflow_inputs(&run.parent_session_id, &run.id).await?;
+            for notice in &mut run.supervision.notices { notice.handled = true; }
+            save_run(runtime, &run)?;
+            return Ok(());
+        }
         state
             .sessions
             .accept_input(
@@ -307,10 +321,7 @@ pub(super) async fn deliver_notice(
             .input_handled(&run.parent_session_id, &notice.id)
             .await?
             == Some(true);
-        let _lock = lock_run(runtime, run_id)?;
-        let _request = request::request_lock(runtime, request::group_id(&run))?;
-        let mut current = load_run(runtime, run_id)?;
-        if let Some(current_notice) = current
+        if let Some(current_notice) = run
             .supervision
             .notices
             .iter_mut()
@@ -319,11 +330,20 @@ pub(super) async fn deliver_notice(
             if !current_notice.accepted || current_notice.handled != handled {
                 current_notice.accepted = true;
                 current_notice.handled = handled;
-                save_run(runtime, &current)?;
+                save_run(runtime, &run)?;
             }
         }
     }
     Ok(())
+}
+
+pub(super) fn cancellation_requested(run: &RunRecord) -> bool {
+    matches!(run.status.as_str(), "cancelling" | "cancelled")
+        || run.request.as_ref().is_some_and(|request| request.cancelled)
+}
+
+pub(super) fn report_pending(run: &RunRecord) -> bool {
+    !cancellation_requested(run) && run.supervision.notices.iter().any(|notice| !notice.handled)
 }
 
 pub(super) async fn diagnostics(

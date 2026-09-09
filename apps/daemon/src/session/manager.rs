@@ -1579,6 +1579,7 @@ impl SessionManager {
                     let status = *live.status.lock().await;
                     (status, live.activity_of(status))
                 }
+                None if meta.execution_retired => (SessionStatus::Closed, None),
                 None if meta.pending_permission.is_some()
                     || meta
                         .human_continuation

@@ -44,7 +44,7 @@ pub(crate) async fn check(
                     "defaultBlockedExit",
                     "info",
                     format!(
-                        "{} 未配置业务后续边；框架提供默认受阻出口，PM 使用关联返工 Run 恢复",
+                        "{} 未配置业务后续边；框架提供默认受阻出口；后续处理由项目工作流与任务负责人决定",
                         fallback.join(", ")
                     ),
                 );
@@ -58,6 +58,10 @@ pub(crate) async fn check(
                 );
                 continue;
             };
+            if record.status == "finishing" {
+                finding(Some(node.id.clone()), "nodeFinishing", "info",
+                    "节点结果已持久化，正在确认执行及进程收尾；成功后按定义激活后续节点。".into());
+            }
             if record.status == "running" {
                 match &record.session_id {
                     None => finding(

@@ -7,6 +7,25 @@ const MAX_PENDING: usize = 32;
 const MAX_RECEIPTS: usize = 4096;
 
 impl SessionManager {
+    /// Retire obsolete workflow wakeups without stopping an existing Agent
+    /// turn or discarding any user input, even when it targets the same task.
+    pub(crate) async fn discard_workflow_inputs(&self, session_id: &str, run_id: &str) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        let _admission = live.inbox_lock.lock().await;
+        let mut meta = live.meta.lock().await;
+        let mut next = meta.clone();
+        let mut changed = false;
+        for entry in &mut next.inbox.entries {
+            if entry.source == "workflow" && entry.task_run_id.as_deref() == Some(run_id)
+                && entry.state != "handled" {
+                entry.state = "handled".into();
+                changed = true;
+            }
+        }
+        if changed { self.store.save_meta(&next)?; *meta = next; }
+        Ok(())
+    }
     /// The ACK covers the original chat item and its delivery obligation.
     pub(crate) async fn accept_input(
         &self,
@@ -61,7 +80,7 @@ impl SessionManager {
         {
             let mut meta = live.meta.lock().await;
             if meta.managed.is_some() {
-                bail!("durable consultation is available on ordinary PM sessions");
+                bail!("durable consultation is available on ordinary sessions");
             }
             if meta
                 .imported
@@ -225,7 +244,7 @@ impl SessionManager {
                 if let Err(error) = state.sessions.deliver_inputs(&state, &task_live).await {
                     let mut meta = task_live.meta.lock().await;
                     let mut next = meta.clone();
-                    let message = format!("消息已保存，PM 续接待处理：{error:#}");
+                    let message = format!("消息已保存，Agent 续接待处理：{error:#}");
                     next.inbox.error = Some(message.chars().take(2048).collect());
                     next.inbox.paused = true;
                     if let Err(error) = state.sessions.store.save_meta(&next) {
@@ -321,6 +340,15 @@ impl SessionManager {
                 self.interrupt_execution(live).await?;
             }
             return Ok(());
+        }
+        // Recheck the durable task fence before acquiring the delivery lock.
+        // This also retires queued notices left by older daemon versions.
+        for entry in meta.inbox.entries.iter().filter(|entry| entry.source == "workflow" && entry.state != "handled") {
+            if let Some(run_id) = &entry.task_run_id {
+                if !crate::workflow::workflow_notice_current(state, &meta.id, run_id).await? {
+                    self.discard_workflow_inputs(&meta.id, run_id).await?;
+                }
+            }
         }
         let _interaction = live.interaction_lock.lock().await;
         if live.execution.lock().await.is_some() || live.meta.lock().await.inbox.paused {
@@ -428,7 +456,7 @@ pub(super) async fn settle_inputs(
         }
     } else {
         next.inbox.paused = true;
-        next.inbox.error = Some("PM 本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
+        next.inbox.error = Some("本轮失败，已接收消息保留；发送新消息后核对并继续。".into());
     }
     live.store.save_meta(&next)?;
     *meta = next;

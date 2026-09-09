@@ -90,7 +90,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             report_pending: Some(grouped.get(request::group_id(run)).is_some_and(
                                 |group| {
                                     group.iter().any(|run| {
-                                        run.supervision.notices.iter().any(|notice| !notice.handled)
+                                        supervision::report_pending(run)
                                     })
                                 },
                             )),
@@ -102,7 +102,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             active_nodes: run
                                 .nodes
                                 .iter()
-                                .filter(|(_, node)| node.status == "running")
+                                .filter(|(_, node)| matches!(node.status.as_str(), "running" | "finishing"))
                                 .map(|(id, _)| id.clone())
                                 .collect(),
                             executor_session_id: run.executor_session_id.clone(),
@@ -272,6 +272,7 @@ pub(crate) async fn cancel(
     root.revision += 1;
     save_run(&runtime, &root)?; // The request fence survives a partial cascade.
     for previous in group {
+        state.sessions.discard_workflow_inputs(&previous.parent_session_id, &previous.id).await?;
         let mut current = load_run(&runtime, &previous.id)?;
         if matches!(current.status.as_str(), "completed" | "cancelled") {
             continue;
@@ -358,6 +359,7 @@ pub(crate) async fn maintain(state: &Shared) {
             state.workflow_tasks.spawn(async move {
                 let _job = job;
                 let result: Result<()> = async {
+                    finish_nodes(&owner, &runtime, &run.id).await?;
                     reconcile(&owner, &runtime, &run.id).await?;
                     supervision::diagnostics(&owner, &runtime, &run.id).await?;
                     supervision::deliver_notice(&owner, &runtime, &run.id).await?;
@@ -367,6 +369,79 @@ pub(crate) async fn maintain(state: &Shared) {
             });
         }
     }
+}
+
+/// Result acceptance and process retirement are separate durable steps. Never
+/// hold a Run lock while shutting down the Worker that just called complete.
+async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<()> {
+    let snapshot = load_run(runtime, run_id)?;
+    if snapshot.status != "running" { return Ok(()); }
+    for (node_id, node) in &snapshot.nodes {
+        if node.status != "finishing" { continue; }
+        let activity = if let Some(id) = &node.session_id {
+            state.sessions.execution_activity(id).await.ok()
+        } else { None };
+        let cleanup: Result<()> = async {
+            if let Some(id) = &node.session_id {
+                state.sessions.fence_execution(id).await?;
+                state.sessions.close(id).await?;
+            }
+            Ok(())
+        }.await;
+        let sessions = {
+            let _guard = lock_run(runtime, run_id)?;
+            let mut run = load_run(runtime, run_id)?;
+            let _request = request::request_lock(runtime, request::group_id(&run))?;
+            if run.status != "running" || request::ensure_open(runtime, &run).is_err() {
+                return Ok(());
+            }
+            if run.nodes[node_id].status != "finishing" { continue; }
+            if let Err(error) = cleanup {
+                request_stop(&mut run, "blocked", format!("节点 {node_id} 收尾失败：{error:#}"));
+                run.revision += 1;
+                save_run(runtime, &run)?;
+                return Ok(());
+            }
+            if let Some(activity) = activity { run.nodes.get_mut(node_id).expect("node").activity = activity; }
+            let outcome = run.nodes[node_id].outcome.unwrap_or_default();
+            run.nodes.get_mut(node_id).expect("node").status = "completed".into();
+            let definition = run.definition.nodes.iter().find(|node| &node.id == node_id).expect("definition");
+            let targets = definition.on.get(outcome_event(outcome)).cloned().unwrap_or_default();
+            let leases_before = run.leases.clone();
+            let sessions = match activate(state, &runtime.project_root, runtime, &mut run, targets).await {
+                Ok(sessions) => sessions,
+                Err(error) => {
+                    request_stop(&mut run, "blocked", format!("节点 {node_id} 后续派发失败：{error:#}"));
+                    Vec::new()
+                }
+            };
+            settle_if_terminal(&mut run);
+            run.revision += 1;
+            run.updated_at_ms = now_ms();
+            record_assigned_messages(&mut run, &sessions)?;
+            if run.status == "completed" {
+                if let Some(executor) = run.executor_session_id.clone() {
+                    let event = flow_message(&run, "run.completed", None, &executor,
+                        &run.parent_session_id, Some(run.revision), serde_json::json!({"status": run.status}))?;
+                    push_flow_message(&mut run, event);
+                }
+            }
+            if let Err(error) = save_run(runtime, &run) {
+                let leases = run.leases.iter().filter(|(id, _)| !leases_before.contains_key(*id))
+                    .map(|(_, lease)| lease.clone()).collect::<Vec<_>>();
+                return Err(with_activation_cleanup(state, runtime, &sessions, &leases, error).await);
+            }
+            if run.status == "completed" { release_leases(runtime, &run).await?; }
+            sessions
+        };
+        for (session, message) in sessions {
+            if let Err(error) = start_assigned(state, &snapshot.workspace_id, run_id, &session, message).await {
+                abort_launch(state, &snapshot.workspace_id, run_id).await?;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<()> {
@@ -485,7 +560,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
     if errors.is_empty() {
         for node in current.nodes.values_mut() {
             match node.status.as_str() {
-                "running" => {
+                "running" | "finishing" => {
                     node.status = if stop.target == "cancelled" {
                         "cancelled"
                     } else {

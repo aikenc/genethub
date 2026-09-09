@@ -329,7 +329,7 @@ export function Composer({
     // used to reach the daemon mid-turn and come back as "a turn is already
     // running in this session", which describes our own key handler rather than
     // anything the reader did wrong.
-    if ((!durableInput && phase !== "idle") || disabled || speechInput.busy) return;
+    if (phase === "sending" || (!durableInput && phase !== "idle") || disabled || speechInput.busy) return;
     const text = draft.trim();
     if (!text && attachments.length === 0 && !forwardDraft) return;
     // The parked capsule travels ahead of the user's own words, inside the
@@ -838,8 +838,7 @@ export function Composer({
             >
               <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
-            {durableInput && phase === "running" && <button type="button" aria-label="停止 PM 本轮" title="停止 PM 本轮" onClick={onInterrupt} className="min-h-9 px-2 text-muted hover:text-danger">停止 PM 本轮</button>}
-            {!durableInput && phase === "sending" ? (
+            {phase === "sending" ? (
               // Still a button, and still focusable: `disabled` would throw the
               // focus of whoever just clicked it back to the document. It is
               // `aria-disabled` with nothing behind the click instead, so the
@@ -855,8 +854,12 @@ export function Composer({
               >
                 <Loader2 className="h-6 w-6 animate-spin md:h-4 md:w-4" aria-hidden />
               </button>
-            ) : !durableInput && phase === "running" ? (
+            ) : phase === "running" ? (
               <div className="flex shrink-0 items-center gap-1.5">
+                {durableInput && (draft.trim() || attachments.length || forwardDraft) ? <button
+                  type="button" aria-label="发送补充消息" title="发送提问或新要求，由当前 Agent 接续处理"
+                  disabled={disabled || speechInput.busy} onMouseDown={event => event.preventDefault()}
+                  onClick={() => send()} className="min-h-9 rounded-full px-3 text-xs text-accent disabled:opacity-30">发送补充</button> : null}
                 {quiet ? (
                   // Next to Stop, because that is the decision it informs.
                   <span className="whitespace-nowrap text-[10px] leading-none text-muted" title="智能体已接受这一轮，但有一段时间没有新内容了。这不代表它出了问题——长任务本来就会安静很久。">
@@ -866,6 +869,7 @@ export function Composer({
                 <button
                   type="button"
                   aria-label="停止"
+                  title="停止当前 Agent 本轮回复"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={onInterrupt}
                   className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"

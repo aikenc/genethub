@@ -7,7 +7,7 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
     title: `Expert and session attention stays actionable across ${scenario}`,
     oracle: "The real Workbench opens every counted Human request, including archived sessions beyond recent history; only new assistant replies become unread, and viewing them clears both browser tabs",
     catches: ["expert hand opens an empty recent list", "viewing a question clears unresolved work", "old history or own input creates unread", "read state does not reach another tab", "session status bubbles into navigation"],
-    tags: ["page-experience", "session-attention"], runner: "playwright", llm: { default: "mock" },
+    tags: ["page-experience", "session-attention", "session-control-fixes"], runner: "playwright", llm: { default: "mock" },
     expectedDurationMs: 45_000, timeoutMs: 180_000,
     resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
     surfaces: ["workbench-ui", "daemon", "agent"],
@@ -56,10 +56,18 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
         await page.getByRole("button", { name: "查看 提示验收专家 的 1 项待办", exact: true }).click();
         const panel = page.getByRole("region", { name: "专家页面" });
         await panel.getByRole("button", { name: "待你处理", exact: true }).waitFor();
+        await panel.getByRole("button", { name: "专家菜单", exact: true }).click();
+        await page.getByRole("menuitem", { name: "资料与头像", exact: true }).click();
+        await panel.getByRole("button", { name: "返回", exact: true }).click();
+        await panel.getByRole("button", { name: "待你处理", exact: true }).waitFor();
         const row = panel.locator(".conversation-row").filter({ hasText: "需要关注的会话" });
         await row.getByText(/已归档/).waitFor();
         await row.getByRole("button").first().click();
         const question = page.getByRole("group", { name: "选择验收范围", exact: true });
+        await question.waitFor();
+        await page.getByRole("button", { name: "返回", exact: true }).click();
+        await row.waitFor();
+        await page.goForward();
         await question.waitFor();
         t.assertions.assert((await snapshot()).summary.interactionSummary?.count === 1, "opening a question cleared the real pending request");
         await page.setViewportSize({ width: 390, height: 844 });
