@@ -1183,7 +1183,10 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
-        "machine.list" => ("genet machine list", false, object_input(json!({}), &[])),
+        "machine.list" => ("genet machine list [--reachable]", false, object_input(json!({
+            "reachable": {"type":"boolean", "default":false,
+                "description":"Include this machine and the current identity's Hub directory; errors rather than returning a partial directory"}
+        }), &[])),
         "machine.show" => (
             "genet machine show <machineId>",
             false,
