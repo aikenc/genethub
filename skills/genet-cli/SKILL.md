@@ -3,9 +3,13 @@ name: genet-cli
 description: 用 genet CLI 查询 GeneHub 机器上的工作区与会话、直接与 Agent 对话、以 JSON Lines 消费流式结果。用于需要以机器可读方式驱动本机或已配对远端 daemon 的任何场景；不用于人类交互式终端操作，也不替代工作台 UI。
 ---
 
-# genet CLI
+# GeneHub CLI
 
-`genet` 是 GeneHub daemon 的命令行客户端。它的第一读者是 Agent，不是人：stdout 只出 JSON，
+所有调用使用 `GENEHUB_CLI` 绑定的绝对路径，沿用当前渠道。变量缺失或不可执行时停止并报告，
+不要使用 PATH 中的裸命令，也不要自行切换 Beta/Stable/Dev。以下 Bash 示例统一写 `"$GENEHUB_CLI"`；
+PowerShell 对应写法为 `& $env:GENEHUB_CLI`。
+
+GeneHub CLI 是 daemon 的命令行客户端。它的第一读者是 Agent，不是人：stdout 只出 JSON，
 人话一律走 stderr。
 
 ## 先问，再动手
@@ -13,13 +17,13 @@ description: 用 genet CLI 查询 GeneHub 机器上的工作区与会话、直�
 命令面会变，能力面不会说谎。**不要凭记忆拼命令**，先问：
 
 ```bash
-genet schema          # 每条命令的 synopsis、输入输出 JSON Schema、是否可远程、是否流式
-genet capabilities    # 这个二进制能做什么（不需要 daemon）
-genet context         # 这次调用实际连到了哪台机器（需要 daemon）
+"$GENEHUB_CLI" schema          # 每条命令的 synopsis、输入输出 JSON Schema、是否可远程、是否流式
+"$GENEHUB_CLI" capabilities    # 这个二进制能做什么（不需要 daemon）
+"$GENEHUB_CLI" context         # 这次调用实际连到了哪台机器（需要 daemon）
 ```
 
 `schema` 与 `capabilities` 是静态的，daemon 没起也能回答。本文档**不重复**它们的内容——
-命令清单以 `genet schema` 为准，两处各写一份，改参数时必然对不上。
+命令清单以 `"$GENEHUB_CLI" schema` 为准，两处各写一份，改参数时必然对不上。
 
 ## 输出契约
 
@@ -51,15 +55,15 @@ genet context         # 这次调用实际连到了哪台机器（需要 daemon�
 ## 与 Agent 对话
 
 ```bash
-genet codex "把 CI 修绿" --cwd /srv/app
+"$GENEHUB_CLI" codex "把 CI 修绿" --cwd /srv/app
 ```
 
 第一个 token 只要不是保留子命令，就被当作 agent id 原样交给 daemon 去认。规范写法是
-`genet agent run --agent codex "…"`，上面那行是它的糖。
+`"$GENEHUB_CLI" agent run --agent codex "…"`，上面那行是它的糖。
 
 保留子命令（`schema` `context` `capabilities` `workspace` `session` `agent` `machine`
 `device` `daemon` `hub` `status` `update` `shell` `client`）永远优先。装了一个叫 `session` 的 agent
-也改变不了 `genet session list` 的含义——那种情况只能用规范写法。
+也改变不了 `"$GENEHUB_CLI" session list` 的含义——那种情况只能用规范写法。
 
 这条命令开的是**真会话**：落盘、出现在工作台里、别的设备能接管、断线能重放。没有「一次性
 无状态对话」这种捷径。
@@ -67,10 +71,10 @@ genet codex "把 CI 修绿" --cwd /srv/app
 继续、恢复、中断是三件不同的事：
 
 ```bash
-genet session send <sessionId> "接着上面那个思路"        # 继续说话
-genet session respond <sessionId> --request <rid> --choose <optionId>   # 回答暂停点
-genet <agentId> --session <sessionId> --since-seq <n> "…"               # 断线后补事件
-genet session interrupt <sessionId>                                      # 停掉当前 turn
+"$GENEHUB_CLI" session send "<sessionId>" "接着上面那个思路"        # 继续说话
+"$GENEHUB_CLI" session respond "<sessionId>" --request "<rid>" --choose "<optionId>"   # 回答暂停点
+"$GENEHUB_CLI" "<agentId>" --session "<sessionId>" --since-seq "<n>" "…"               # 断线后补事件
+"$GENEHUB_CLI" session interrupt "<sessionId>"                                      # 停掉当前 turn
 ```
 
 ## 工作目录永远显式
@@ -89,7 +93,7 @@ genet session interrupt <sessionId>                                      # 停�
 
 ## 流式输出怎么读
 
-`agent.run` 和 `session.send` 是流式的（`genet schema` 里 `streaming: true`）。仍然是每行
+`agent.run` 和 `session.send` 是流式的（`"$GENEHUB_CLI" schema` 里 `streaming: true`）。仍然是每行
 一个同样的信封，只是 `type` 不同：
 
 | `type` | 含义 |
@@ -117,8 +121,8 @@ genet session interrupt <sessionId>                                      # 停�
 ## 跑一条命令
 
 ```bash
-genet shell --cwd /srv/app -- cargo test --release
-genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
+"$GENEHUB_CLI" shell --cwd /srv/app -- cargo test --release
+"$GENEHUB_CLI" shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
 ```
 
 `--` 之后的一切原样构成 **argv 数组**，不经过任何 shell 解析——所以参数里的 `;`、`|`、
@@ -133,10 +137,10 @@ genet shell --machine srv-1 --cwd /srv/app -- /bin/sh -c 'make 2>&1 | tail -5'
 | `shell.output` | `data.stream` 是 `"stdout"` 或 `"stderr"`，`data.data` 是这一段文本 |
 | `shell.exit` | **终止行**，`data.exitCode` 是命令自己的退出码（被信号杀死时为 `null`，`data.signal` 有值） |
 
-两条流从头到尾分开，**不要**把它们拼回一起再解析：能把诊断和结果分开，正是 `genet shell`
+两条流从头到尾分开，**不要**把它们拼回一起再解析：能把诊断和结果分开，正是 `"$GENEHUB_CLI" shell`
 与终端的区别。
 
-**`genet shell` 自己的退出码不是命令的退出码。** 命令跑完了就退 0，哪怕它自己返回 7；命令
+**`"$GENEHUB_CLI" shell` 自己的退出码不是命令的退出码。** 命令跑完了就退 0，哪怕它自己返回 7；命令
 的成败在 `shell.exit.data.exitCode` 里。CLI 的退出码是冻结的、说的是 CLI 有没有把事办成，
 如果把命令的 4 也变成进程的 4，就再也分不清「构建失败」和「那台机器拒绝了我」。
 
@@ -199,7 +203,7 @@ Agent 的**提问**和**方案确认**不一样：它们没有「拒绝」这个
 `--machine <machineId>` 选目标机，**只认精确 id**：不做前缀匹配、不记忆上次用过的、没有
 隐式默认。
 
-不是所有命令都能远程。`genet schema` 里每条命令都有 `routable`：`daemon start|stop` 操作的
+不是所有命令都能远程。`"$GENEHUB_CLI" schema` 里每条命令都有 `routable`：`daemon start|stop` 操作的
 是本机 daemon 进程本身，`machine *` 读写的是**这台**机器的凭据库，远端做不到，会报
 `commandNotRoutable`。能力没就位时会明确报错，**不会**悄悄在本地跑。
 
@@ -207,15 +211,15 @@ Agent 的**提问**和**方案确认**不一样：它们没有「拒绝」这个
 
 ```bash
 # 目标机上（可用 --grant 收窄，缺省是全集）
-genet device invite --grant read,session
+"$GENEHUB_CLI" device invite --grant read,session
 # 本机上，用上面输出的 code 与 endpoint
-genet machine pair <code> --endpoint <url> --name laptop
-genet machine list
+"$GENEHUB_CLI" machine pair "<code>" --endpoint "<url>" --name laptop
+"$GENEHUB_CLI" machine list
 ```
 
 配对结果存在本机的 `machines.json`（0600）。`--machine` 先按精确 id 查它，没命中才回落到
 问本机 daemon 要一张 Hub 票——所以托管这条路**需要本机跑着一个已入网 Hub 的 daemon**，
-`genet capabilities` 的 `remote.hostedHubRequires` 写着这句。
+`"$GENEHUB_CLI" capabilities` 的 `remote.hostedHubRequires` 写着这句。
 
 中间的 relay 只负责把两条连接接在一起。它不知道、也无法知道这台设备是否被允许进去：授权
 名单在目标机上，凭据在这条端到端加密的连接**里面**被证明。所以 relay 能给的答复只有「接不
@@ -225,7 +229,7 @@ genet machine list
 
 | `error.code` | `retryable` | 该做什么 |
 |--------------|-------------|---------|
-| `machineNotPaired` | false | 没这条记录。`genet machine list` 核对 id，或重新配对 |
+| `machineNotPaired` | false | 没这条记录。`"$GENEHUB_CLI" machine list` 核对 id，或重新配对 |
 | `machineOffline` | true | 那台机器没连着 relay，或 relay 认不出这个会合点。退避后重试，别重新配对 |
 | `credentialRevoked` | false | 对面吊销了这台设备。**重试永远不会好**，要新邀请 |
 | `relayUnavailable` | true | 中转不通，通常是网络 |
@@ -235,12 +239,12 @@ genet machine list
 ## 不要做的事
 
 - 不要解析人类可读的 `message` 做控制流。
-- 不要因为看不到沙箱就假设有沙箱。`genet capabilities` 里 `isolation.engine` 是 `null`，意思
+- 不要因为看不到沙箱就假设有沙箱。`"$GENEHUB_CLI" capabilities` 里 `isolation.engine` 是 `null`，意思
   是**这个二进制答不了**这个问题，不是「没有沙箱」；某台机器实际能强制什么，只有那台机器自己
-  知道，读 `genet context --machine <id>` 的 `daemon.isolation`：`enforced: false` 表示**没有**
+  知道，读 `"$GENEHUB_CLI" context --machine <id>` 的 `daemon.isolation`：`enforced: false` 表示**没有**
   隔离，`null` 表示那台 daemon 老到还不回答这个问题——两者都不是「默认安全」。
 - 不要在 `--wait` 前台进程被杀掉后就以为任务停了。会话跑在 daemon 里，CLI 只是观察者。
-- 不要为了省事重复 `genet schema` 的内容到别的地方。
+- 不要为了省事重复 `"$GENEHUB_CLI" schema` 的内容到别的地方。
 
 ## 客户端页面联调
 

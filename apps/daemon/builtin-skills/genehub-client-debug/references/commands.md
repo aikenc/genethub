@@ -1,17 +1,18 @@
 # 命令与结果
 
 以下尖括号是需替换的参数，不是可原样执行的 shell 文本。`GENEHUB_CLI` 由 GeneHub 注入，
-`--machine` 始终指向用户在联调面板选择的控制机器。控制机器就在当前机器时省略该参数。
+`--machine` 始终指向用户在联调面板选择的控制机器。控制机器就在当前机器时省略该参数。所有示例均为 Bash；PowerShell 的可执行入口写
+`& $env:GENEHUB_CLI`，不直接写固定渠道命令。环境绑定缺失立即停止，不能从 PATH 兜底。
 
 ```sh
-"$GENEHUB_CLI" client list --machine <coordinator-id>
-"$GENEHUB_CLI" client attach <client-id> --label '页面布局诊断' --machine <coordinator-id>
-"$GENEHUB_CLI" client status <client-id> --session <capability> --machine <coordinator-id>
-"$GENEHUB_CLI" client inspect <client-id> --session <capability> --machine <coordinator-id>
-"$GENEHUB_CLI" client events <client-id> --session <capability> --machine <coordinator-id>
-"$GENEHUB_CLI" client screenshot <client-id> --session <capability> --machine <coordinator-id>
-"$GENEHUB_CLI" client result <client-id> --session <capability> --command <command-id> --machine <coordinator-id>
-"$GENEHUB_CLI" client revoke <client-id> --session <capability> --machine <coordinator-id>
+"$GENEHUB_CLI" client list --machine "<coordinator-id>"
+"$GENEHUB_CLI" client attach "<client-id>" --label '页面布局诊断' --machine "<coordinator-id>"
+"$GENEHUB_CLI" client status "<client-id>" --session "<capability>" --machine "<coordinator-id>"
+"$GENEHUB_CLI" client inspect "<client-id>" --session "<capability>" --machine "<coordinator-id>"
+"$GENEHUB_CLI" client events "<client-id>" --session "<capability>" --machine "<coordinator-id>"
+"$GENEHUB_CLI" client screenshot "<client-id>" --session "<capability>" --machine "<coordinator-id>"
+"$GENEHUB_CLI" client result "<client-id>" --session "<capability>" --command "<command-id>" --machine "<coordinator-id>"
+"$GENEHUB_CLI" client revoke "<client-id>" --session "<capability>" --machine "<coordinator-id>"
 ```
 
 CLI stdout 为 `genet.cli/v1` 信封，成功时 `type: "client.debug"`，业务数据在 `data` 中：
@@ -28,6 +29,21 @@ CLI stdout 为 `genet.cli/v1` 信封，成功时 `type: "client.debug"`，业务
 `type: "error"` 时读信封 `error.code` / `message`，与页面返回的 `result.ok=false` 区分。
 等待结果约 35 秒仍无结论时停止轮询并核对在线/授权状态和是否可能已执行，不无限等待或盲目重放。
 每客户端最多积压 8 条命令及结果；一般逐条领取，别并发灌入整套检查。
+
+## 操作命令
+
+以下每条命令各返回自己的 commandId，均按前述 result 流程领取，不要一次性全执行。
+act/reload 仅在用户要求的操作范围内使用。
+
+```sh
+"$GENEHUB_CLI" client eval "<clientId>" --session "<session>" --script 'document.title' --machine "<控制机器ID>"
+# 恰好匹配一个控件：带 value 设置输入值，不带 value 点击。
+"$GENEHUB_CLI" client act "<clientId>" --session "<session>" --selector '#message' --value '测试输入' --machine "<控制机器ID>"
+"$GENEHUB_CLI" client act "<clientId>" --session "<session>" --selector '#expand-panel' --machine "<控制机器ID>"
+"$GENEHUB_CLI" client events "<clientId>" --session "<session>" --machine "<控制机器ID>"
+"$GENEHUB_CLI" client screenshot "<clientId>" --session "<session>" --machine "<控制机器ID>"
+"$GENEHUB_CLI" client reload "<clientId>" --session "<session>" --machine "<控制机器ID>"
+```
 
 ## DOM 与页面脚本
 

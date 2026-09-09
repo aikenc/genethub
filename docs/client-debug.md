@@ -35,31 +35,31 @@ iframe 是文档内的上下文，`inspect` 列出它们。同源子框架可由
 
 ## CLI
 
-下面的 `genet` 表示当前安装渠道提供的 CLI；Agent 应使用环境中的 `GENEHUB_CLI` 绝对路径。
+所有命令使用环境中的 `GENEHUB_CLI` 绝对路径，沿用当前渠道绑定；缺失即停止，不从 PATH 猜二进制。
 `--machine` 始终指定联调控制机器，`clientId` 始终指定具体客户端，不能用设备 ID 代替。
 
 ```sh
-genet client list --machine <控制机器>
-genet client attach <clientId> --label '本次操作方名称' --machine <控制机器>
+"$GENEHUB_CLI" client list --machine "<控制机器>"
+"$GENEHUB_CLI" client attach "<clientId>" --label '本次操作方名称' --machine "<控制机器>"
 ```
 
 `attach` 返回 `session` 能力令牌和 `pending` 状态。令牌只交给这次操作方；不要写入项目、日志或公开消息。
 等待用户在客户端授权后：
 
 ```sh
-genet client status <clientId> --session <session> --machine <控制机器>
-genet client inspect <clientId> --session <session> --machine <控制机器>
-genet client eval <clientId> --session <session> --script 'document.title' --machine <控制机器>
-genet client act <clientId> --session <session> --selector '#message' --value 'hello' --machine <控制机器>
-genet client screenshot <clientId> --session <session> --machine <控制机器>
-genet client events <clientId> --session <session> --machine <控制机器>
+"$GENEHUB_CLI" client status "<clientId>" --session "<session>" --machine "<控制机器>"
+"$GENEHUB_CLI" client inspect "<clientId>" --session "<session>" --machine "<控制机器>"
+"$GENEHUB_CLI" client eval "<clientId>" --session "<session>" --script 'document.title' --machine "<控制机器>"
+"$GENEHUB_CLI" client act "<clientId>" --session "<session>" --selector '#message' --value 'hello' --machine "<控制机器>"
+"$GENEHUB_CLI" client screenshot "<clientId>" --session "<session>" --machine "<控制机器>"
+"$GENEHUB_CLI" client events "<clientId>" --session "<session>" --machine "<控制机器>"
 ```
 
 执行命令立即返回 `commandId`，随后领取结果；`pending` 时稍后再查，`complete` 时结果只领取一次：
 
 ```sh
-genet client result <clientId> --session <session> --command <commandId> --machine <控制机器>
-genet client revoke <clientId> --session <session> --machine <控制机器>
+"$GENEHUB_CLI" client result "<clientId>" --session "<session>" --command "<commandId>" --machine "<控制机器>"
+"$GENEHUB_CLI" client revoke "<clientId>" --session "<session>" --machine "<控制机器>"
 ```
 
 结果包含 `ok` 和 `value` 或 `error`。`eval` 使用全局 JavaScript 表达式，支持 Promise；等待超过 20 秒返回错误，
@@ -79,5 +79,5 @@ genet client revoke <clientId> --session <session> --machine <控制机器>
 ## 首次启用
 
 老客户端没有这个运行时，必须先更新前端；老控制机器也需要更新。首次更新仍走现有部署和
-`genet shell`/WASM 更新机制。这个通道用于调试已加载了运行时的客户端，不能凭空控制尚未安装它的页面，
+`"$GENEHUB_CLI" shell`/WASM 更新机制。这个通道用于调试已加载了运行时的客户端，不能凭空控制尚未安装它的页面，
 也不能在浏览器主线程完全卡死时恢复运行。

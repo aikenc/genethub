@@ -26,6 +26,31 @@ description: 通过 GeneHub client CLI 实时调试已接入联调的 PC/手机�
 不能自动挑第一项。调试工位的 RTC、WASM 或 Host 时优先选择另一台已授权服务器作为控制机器，
 避免重启被测电脑切断联调；该联调连接禁用 RTC 升级，因此它可用并不证明被测 RTC 直连可用。
 
+## CLI 最短流程
+
+以下为 Bash 语法。尖括号参数替换为实际值；不要把秘密 session 贴到聊天或写入项目。
+PowerShell 使用 `& $env:GENEHUB_CLI` 调用同一渠道绑定，参数相同。
+
+```sh
+# 先核对安装能力；缺绑定即停止，不猜命令名称。
+"${GENEHUB_CLI:?当前会话未绑定渠道 CLI}" capabilities
+"$GENEHUB_CLI" schema client.attach
+"$GENEHUB_CLI" schema client.result
+"$GENEHUB_CLI" client list --machine "<控制机器ID>"
+"$GENEHUB_CLI" client attach "<clientId>" --label "本次页面诊断" --machine "<控制机器ID>"
+# 私有保存 attach 返回的 data.session，等待用户在目标页面授权。
+"$GENEHUB_CLI" client status "<clientId>" --session "<session>" --machine "<控制机器ID>"
+# authorized 且在线后执行；inspect 返回 data.commandId，不是检查结果。
+"$GENEHUB_CLI" client inspect "<clientId>" --session "<session>" --machine "<控制机器ID>"
+"$GENEHUB_CLI" client result "<clientId>" --session "<session>" --command "<commandId>" --machine "<控制机器ID>"
+# 收尾时撤销本次授权。
+"$GENEHUB_CLI" client revoke "<clientId>" --session "<session>" --machine "<控制机器ID>"
+```
+
+result 的 `data.status=pending` 时稍后查询同一个 commandId；`complete` 时先保存一次性结果，
+再检查 `data.result.ok`。更多 eval、act、events、screenshot、reload 用法见
+[命令与结果](references/commands.md)，不要把排队成功当成执行成功。
+
 ## 授权后执行
 
 1. 对明确目标发起一次 `attach --label <真实操作方/任务说明>`。返回 `pending` 不表示已授权。
