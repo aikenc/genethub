@@ -932,6 +932,15 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     };
     stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
+        if matches!(request, Request::ClientDebug(_)) {
+            return send_error(
+                stream,
+                403,
+                ErrorCode::Forbidden,
+                "client debugging requires a machine capability, not a workspace capability",
+            )
+            .await;
+        }
         if matches!(request, Request::ProcessList) {
             return send_error(
                 stream,

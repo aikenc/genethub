@@ -312,6 +312,7 @@ impl StreamMethod {
 /// authority it needs, which is the one moment when the answer is obvious.
 pub fn required(request: &Request) -> Capability {
     match request {
+        Request::ClientDebug(_) => Capability::Settings,
         Request::ConnectionIdentity | Request::DeviceClaim { .. } => Capability::Handshake,
 
         // Listing tells you what exists; contents tell you what is in it. Those

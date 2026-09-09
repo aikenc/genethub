@@ -8,6 +8,7 @@ pub mod authz;
 pub(crate) mod blocking;
 pub mod channel_auth;
 pub mod cli_front;
+pub mod client_debug;
 pub mod config;
 pub mod dataplane;
 pub mod devices;

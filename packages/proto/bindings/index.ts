@@ -140,6 +140,22 @@ export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, comman
  */
 runtimeAxes?: Array<RuntimeAxisInfo>, defaultModel?: string, defaultMode?: string, defaultEffort?: string, };
 
+export type ClientDebugAction = { "kind": "inspect" } | { "kind": "eval", script: string, } | { "kind": "screenshot" } | { "kind": "act", selector: string, value: string | null, } | { "kind": "events" } | { "kind": "reload" };
+
+export type ClientDebugCommand = { commandId: string, action: ClientDebugAction, };
+
+export type ClientDebugGrant = { session: string, label: string, approved: boolean, remainingMs: number, };
+
+export type ClientDebugInfo = { clientId: string, label: string, url: string, userAgent: string, authorized: boolean, };
+
+export type ClientDebugPoll = { grant: ClientDebugGrant | null, command: ClientDebugCommand | null, };
+
+export type ClientDebugRequest = { "op": "register", label: string, url: string, userAgent: string, } | { "op": "list" } | { "op": "poll", clientId: string, owner: string, } | { "op": "decide", clientId: string, owner: string, session: string, seconds: number, } | { "op": "complete", clientId: string, owner: string, commandId: string, result: JsonValue, } | { "op": "attach", clientId: string, label: string, } | { "op": "status", clientId: string, session: string, } | { "op": "execute", clientId: string, session: string, action: ClientDebugAction, } | { "op": "result", clientId: string, session: string, commandId: string, } | { "op": "revoke", clientId: string, key: string, };
+
+export type ClientDebugResponse = { value: ClientDebugValue, };
+
+export type ClientDebugValue = { clientId: string, owner: string, } | Array<ClientDebugInfo> | ClientDebugPoll | { session: string, status: string, authorizationTimeoutSeconds: number, } | { commandId: string, } | { status: string, result: JsonValue, } | { status: string, remainingMs?: number, seconds?: number, };
+
 /**
  * A slash command the agent understands.
  *
@@ -654,14 +670,14 @@ rendezvousUrl?: string, online: boolean, };
 /**
  * Successful payloads, one per request that returns something.
  */
-export type Reply = { "type": "hello", "data": HelloResult } | { "type": "subscribed", "data": { snapshot: SessionSnapshot, replayed: Array<SequencedEvent>, 
+export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { "type": "hello", "data": HelloResult } | { "type": "subscribed", "data": { snapshot: SessionSnapshot, replayed: Array<SequencedEvent>, 
 /**
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
 reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
-export type Request = { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
+export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
  * Prefetches the last round's trunk index and final trunk details in
  * the subscription response.

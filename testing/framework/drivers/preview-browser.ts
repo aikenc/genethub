@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { writeFile, mkdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -15,7 +16,7 @@ export async function openPreviewBrowser(input: {
   endpoint: DaemonEndpoint;
   workspaceId: string;
   entryPath: string;
-  surface?: "preview" | "processes";
+  surface?: "preview" | "processes" | "client-debug";
 }) {
   const errors: string[] = [];
   input.page.on("pageerror", (error) => {
@@ -32,7 +33,7 @@ export async function openPreviewBrowser(input: {
     join(input.openRoot, "testing/package.json"),
   );
   const vite = await import(pathToFileURL(require.resolve("vite")).href);
-  const root = join(input.lease.root, "browser-consumer");
+  const root = join(input.lease.root, `browser-consumer-${randomUUID()}`);
   await mkdir(root, { recursive: true });
   await writeFile(
     join(root, "index.html"),
@@ -42,9 +43,12 @@ export async function openPreviewBrowser(input: {
     join(root, "consumer.tsx"),
     `import React from 'react';
 import {createRoot} from 'react-dom/client';
-import {App,AssetPreviewPage,Client,browserHost,useWorkbench} from '@genehub/workbench';
+import {App,AssetPreviewPage,Client,browserHost,useWorkbench,configureClientDebugHost} from '@genehub/workbench';
 const input=await window.previewInput();
-if(input.surface==='processes'){
+if(input.surface==='client-debug'){
+ configureClientDebugHost({...browserHost(),targets:async()=>[{id:'coordinator',label:'Test coordinator',kind:'local'}],openTarget:async()=>({...input.endpoint,via:'loopback',label:'Test coordinator'})});
+ document.getElementById('root').innerHTML='<h1>Client debug consumer</h1><input aria-label="Debug input"><p id="marker">original</p>';
+}else if(input.surface==='processes'){
  const host={...browserHost(),endpoint:async()=>({...input.endpoint,via:'lan'})};
  createRoot(document.getElementById('root')).render(<App host={host}/>);
  while(useWorkbench.getState().connection!=='ready'||!useWorkbench.getState().workspaces.length)await new Promise(r=>setTimeout(r,50));
