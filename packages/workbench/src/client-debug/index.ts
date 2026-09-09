@@ -1,5 +1,5 @@
 import type { ClientDebugAction, ClientDebugRequest, ClientDebugValue } from "@genehub/proto";
-import { Client } from "../protocol/client";
+import { Client, ProtocolError_ } from "../protocol/client";
 import { browserHost, type Host } from "../host";
 import { CLIENT_DIAGNOSTIC_EVENT, activeDiagnosticClient } from "../diagnostics";
 
@@ -37,6 +37,7 @@ export function installClientDebug(): void {
   let dialing = false;
   let reloading = false;
   let decisionPending = false;
+  let connectionMessage = "";
   let message = "选择一台联调控制机器。调试工位电脑时，可选择服务器，避免工位重启切断联调。";
   const events: unknown[] = [];
   const record = (value: unknown) => { events.push(value); if (events.length > 100) events.shift(); };
@@ -49,6 +50,24 @@ export function installClientDebug(): void {
     const reply = await connection.call({ type: "client.debug", payload: request });
     if (reply?.type !== "client.debug") throw new Error("控制机器尚不支持客户端联调，请更新控制机器");
     return reply.data.value;
+  }
+  async function register(): Promise<{ clientId: string; owner: string }> {
+    const url = new URL(location.href); url.search = ""; url.hash = "";
+    const registered = await call({ op: "register", label: document.title.slice(0, 128) || "GeneHub", url: url.href.slice(0, 2048), userAgent: navigator.userAgent.slice(0, 1024) });
+    if (!("clientId" in registered)) throw new Error("控制机器返回了无效的客户端登记");
+    return registered;
+  }
+  async function recoverRegistration(): Promise<void> {
+    // A missing broker record may follow a restart or revocation while offline.
+    // Never reconstruct authority from stale local consent in this case.
+    grant = null; pending = null; generation++;
+    const run = generation; const active = connection;
+    message = "控制机器上的客户端登记已失效，正在自动重新登记；恢复后需要重新授权。"; render();
+    const registered = await register();
+    if (run !== generation || connection !== active) return;
+    identity = registered;
+    connectionMessage = "";
+    message = "联调已自动重新连接。请操作方重新发起授权请求。"; render();
   }
   async function revoke(): Promise<void> {
     grant = null; pending = null; generation++;
@@ -65,6 +84,7 @@ export function installClientDebug(): void {
   function paragraph(text: string): void { const p = document.createElement("p"); p.textContent = text; panel.append(p); }
   function render(): void {
     panel.replaceChildren(); paragraph(message);
+    if (connectionMessage) paragraph(connectionMessage);
     if (identity) {
       paragraph(`客户端：${identity.clientId}`);
       paragraph(valid() ? `已授权至 ${new Date(grant!.wall).toLocaleTimeString()}。脚本可读取和修改当前页面及同源账户数据。` : "未授权执行远程操作。授权请求将在这里显示。");
@@ -95,9 +115,7 @@ export function installClientDebug(): void {
           connection = active;
           active.connect();
           try {
-            const url = new URL(location.href); url.search = ""; url.hash = "";
-            const registered = await call({ op: "register", label: document.title.slice(0, 128) || "GeneHub", url: url.href.slice(0, 2048), userAgent: navigator.userAgent.slice(0, 1024) });
-            if (!("clientId" in registered)) throw new Error("控制机器返回了无效的客户端登记");
+            const registered = await register();
             if (connection !== active || connectingGeneration !== generation) { active.close(); return; }
             identity = registered;
             message = `已连接控制机器：${targets.find((target) => target.id === id)?.label ?? id}`; render();
@@ -155,7 +173,7 @@ export function installClientDebug(): void {
     const previous = identity;
     grant = null; pending = null; generation++;
     connection = null; identity = null;
-    message = "联调已断开"; render();
+    connectionMessage = ""; message = "联调已断开"; render();
     if (active && previous) {
       void active.call({ type: "client.debug", payload: { op: "revoke", clientId: previous.clientId, key: previous.owner } })
         .catch(() => {}).finally(() => active.close());
@@ -174,9 +192,18 @@ export function installClientDebug(): void {
     busy = true;
     const run = generation;
     void (async () => {
-      const response = await call({ op: "poll", ...identity! });
+      let response: ClientDebugValue;
+      try { response = await call({ op: "poll", ...identity! }); }
+      catch (error) {
+        if (run !== generation) return;
+        if (error instanceof ProtocolError_ && error.detail.code === "notFound") {
+          await recoverRegistration(); return;
+        }
+        throw error;
+      }
       if (!("grant" in response)) throw new Error("控制机器返回了无效的联调消息");
       if (run !== generation) return;
+      if (connectionMessage) { connectionMessage = ""; render(); }
       if (!response.grant) { if (grant || pending) { grant = null; pending = null; message = "授权已结束"; render(); } return; }
       if (!response.grant.approved) {
         if (pending !== response.grant.session) {
@@ -201,6 +228,10 @@ export function installClientDebug(): void {
       if (!valid(response.grant.session) || run !== generation) return;
       await call({ op: "complete", ...identity!, commandId: command.commandId, result: result as any });
       if (command.action.kind === "reload") { grant = null; reloading = true; connection?.close(); location.reload(); }
-    })().catch((error) => { message = `联调连接：${String(error)}`; if (!pending) render(); }).finally(() => { busy = false; });
+    })().catch((error) => {
+      if (run !== generation || !connection) return;
+      connectionMessage = `联调暂时不可用，正在自动恢复。原授权截止时间不变。${String(error)}`;
+      if (!pending) render();
+    }).finally(() => { busy = false; });
   }, 1000);
 }

@@ -122,6 +122,10 @@ pub struct ClientDebugInfo {
     pub url: String,
     pub user_agent: String,
     pub authorized: bool,
+    /// Heartbeat presence is independent of the authorization deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub online: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

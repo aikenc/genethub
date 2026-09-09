@@ -146,7 +146,11 @@ export type ClientDebugCommand = { commandId: string, action: ClientDebugAction,
 
 export type ClientDebugGrant = { session: string, label: string, approved: boolean, remainingMs: number, };
 
-export type ClientDebugInfo = { clientId: string, label: string, url: string, userAgent: string, authorized: boolean, };
+export type ClientDebugInfo = { clientId: string, label: string, url: string, userAgent: string, authorized: boolean, 
+/**
+ * Heartbeat presence is independent of the authorization deadline.
+ */
+online?: boolean, };
 
 export type ClientDebugPoll = { grant: ClientDebugGrant | null, command: ClientDebugCommand | null, };
 

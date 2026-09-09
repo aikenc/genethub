@@ -20,7 +20,7 @@ struct Entry {
     user_agent: String,
     seen: Instant,
     grant: Option<Grant>,
-    queue: VecDeque<ClientDebugCommand>,
+    queue: VecDeque<(ClientDebugCommand, Instant)>,
     running: Option<(String, Instant)>,
     results: HashMap<String, Value>,
     result_bytes: usize,
@@ -79,10 +79,20 @@ impl Broker {
     pub async fn handle(&self, request: R) -> Result<ClientDebugResponse, ProtocolError> {
         let mut clients = self.0.lock().await;
         let now = Instant::now();
-        clients.retain(|_, e| now.duration_since(e.seen) < Duration::from_secs(90));
+        // Presence is not consent: a suspended phone keeps its original grant.
+        clients.retain(|_, e| {
+            now.duration_since(e.seen) < Duration::from_secs(90)
+                || e.grant.as_ref().is_some_and(|g| g.approved && g.until > now)
+        });
         for e in clients.values_mut() {
             if e.grant.as_ref().is_some_and(|g| g.until <= now) {
                 e.clear();
+            }
+            while e.queue.front().is_some_and(|(_, until)| *until <= now) {
+                let (command, _) = e.queue.pop_front().expect("checked queued command");
+                let result = serde_json::json!({"ok":false,"error":"Client command expired before delivery; it was not executed. Submit a new operation if still needed."});
+                e.result_bytes += result.to_string().len();
+                e.results.insert(command.command_id, result);
             }
             if e.running.as_ref().is_some_and(|(_, until)| *until <= now) {
                 let (id, _) = e.running.take().expect("checked running command");
@@ -92,7 +102,7 @@ impl Broker {
             }
         }
         let result_budget =
-            15_980_000usize.saturating_sub(clients.values().map(|e| e.result_bytes).sum());
+            15_800_000usize.saturating_sub(clients.values().map(|e| e.result_bytes).sum());
         let value = match request {
             R::Register {
                 label,
@@ -140,6 +150,7 @@ impl Broker {
                         url: e.url.clone(),
                         user_agent: e.user_agent.clone(),
                         authorized: e.grant.as_ref().is_some_and(|g| g.approved),
+                        online: Some(now.duration_since(e.seen) < Duration::from_secs(45)),
                     })
                     .collect(),
             ),
@@ -168,11 +179,12 @@ impl Broker {
                         let command = if e.grant.as_ref().is_some_and(|g| g.approved)
                             && e.running.is_none()
                         {
-                            e.queue.pop_front().inspect(|command| {
+                            e.queue.pop_front().map(|(command, _)| {
                                 e.running = Some((
                                     command.command_id.clone(),
                                     now + Duration::from_secs(30),
-                                ))
+                                ));
+                                command
                             })
                         } else {
                             None
@@ -260,6 +272,9 @@ impl Broker {
                         if !e.session(&session)?.approved {
                             return Err(denied());
                         }
+                        if now.duration_since(e.seen) >= Duration::from_secs(45) {
+                            return Err(error(ErrorCode::Conflict, "Client offline; authorization is retained until its original deadline. Wait for reconnection before submitting an operation."));
+                        }
                         if e.queue.len() + e.results.len() + usize::from(e.running.is_some()) >= 8 {
                             return Err(error(
                                 ErrorCode::Conflict,
@@ -273,10 +288,10 @@ impl Broker {
                             ));
                         }
                         let id = key();
-                        e.queue.push_back(ClientDebugCommand {
+                        e.queue.push_back((ClientDebugCommand {
                             command_id: id.clone(),
                             action,
-                        });
+                        }, now + Duration::from_secs(30)));
                         V::Queued { command_id: id }
                     }
                     R::Complete {
@@ -319,7 +334,7 @@ impl Broker {
                         } else if e.running.as_ref().map(|(id, _)| id) == Some(&command_id)
                             || e.queue
                                 .iter()
-                                .any(|command| command.command_id == command_id)
+                                .any(|(command, _)| command.command_id == command_id)
                         {
                             status("pending")
                         } else {

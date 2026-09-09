@@ -14,6 +14,7 @@ export async function openPreviewBrowser(input: {
   lease: EnvironmentLease;
   page: Page;
   endpoint: DaemonEndpoint;
+  refreshEndpoint?: () => DaemonEndpoint;
   workspaceId: string;
   entryPath: string;
   surface?: "preview" | "processes" | "client-debug";
@@ -46,7 +47,7 @@ import {createRoot} from 'react-dom/client';
 import {App,AssetPreviewPage,Client,browserHost,useWorkbench,configureClientDebugHost} from '@genehub/workbench';
 const input=await window.previewInput();
 if(input.surface==='client-debug'){
- configureClientDebugHost({...browserHost(),targets:async()=>[{id:'coordinator',label:'Test coordinator',kind:'local'}],openTarget:async()=>({...input.endpoint,via:'loopback',label:'Test coordinator'})});
+ configureClientDebugHost({...browserHost(),targets:async()=>[{id:'coordinator',label:'Test coordinator',kind:'local'}],openTarget:async()=>({...((await window.previewInput()).endpoint),via:'loopback',label:'Test coordinator'})});
  document.getElementById('root').innerHTML='<h1>Client debug consumer</h1><input aria-label="Debug input"><p id="marker">original</p>';
 }else if(input.surface==='processes'){
  const host={...browserHost(),endpoint:async()=>({...input.endpoint,via:'lan'})};
@@ -104,7 +105,7 @@ if(input.surface==='client-debug'){
         .catch(() => {});
   });
   await input.page.exposeFunction("previewInput", () => ({
-    endpoint: input.endpoint,
+    endpoint: input.refreshEndpoint?.() ?? input.endpoint,
     workspaceId: input.workspaceId,
     entryPath: input.entryPath,
     surface: input.surface,
