@@ -300,8 +300,10 @@ impl Drop for ReconcileJob {
 }
 
 pub(crate) async fn maintain(state: &Shared) {
-    for summary in state.workspaces.list().await {
-        let Ok(workspace) = state.workspaces.get(&summary.id).await else {
+    // Maintenance only needs registered identities. The presentation list
+    // verifies every AgentSpace on disk and would block the guest on each tick.
+    for summary in state.workspaces.catalog().await.workspaces {
+        let Ok(workspace) = state.workspaces.get(&summary.local_workspace_id).await else {
             continue;
         };
         let runtime = match RuntimeStore::new(&state.paths.root, &workspace.id, &workspace.root) {
