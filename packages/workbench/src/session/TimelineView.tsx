@@ -252,9 +252,17 @@ export function TimelineView({
   useEffect(() => {
     const timer = setInterval(() => {
       persistReading();
-      if (!visibleRef.current || document.visibilityState !== "visible" || !pinnedRef.current || !scroller.current?.clientHeight) return;
+      if (!visibleRef.current || document.visibilityState !== "visible" || !scroller.current?.clientHeight) return;
       const wb = useWorkbench.getState(); const summary = wb.sessions.find(s => s.id === wb.activeSessionId);
-      if (summary?.messagePreview && wb.timeline.items.some(item => item.id === summary.messagePreview!.itemId) && wb.client?.identity) markContentRead(wb.client.identity.machineId, summary.id, summary.messagePreview.itemId);
+      if (!summary?.latestReply || !wb.client?.identity) return;
+      const node = [...scroller.current.querySelectorAll<HTMLElement>("[data-message-id]")]
+        .find(item => item.dataset.messageId === summary.latestReply!.itemId);
+      if (!node) return;
+      const viewport = scroller.current.getBoundingClientRect();
+      const message = node.getBoundingClientRect();
+      if (message.height > 0 && message.bottom > viewport.top && message.bottom <= viewport.bottom + 2) {
+        markContentRead(wb.client.identity.machineId, summary.id, summary.latestReply);
+      }
     }, 500);
     return () => clearInterval(timer);
   }, [readingKey]);

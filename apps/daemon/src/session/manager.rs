@@ -508,6 +508,7 @@ impl SessionManager {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             effort_id: None,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -627,6 +628,7 @@ impl SessionManager {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             effort_id: None,
             runtime_values,
             id: stable_id.unwrap_or_else(|| format!("s_{}", uuid::Uuid::new_v4().simple())),
@@ -835,6 +837,7 @@ impl SessionManager {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
@@ -1038,6 +1041,7 @@ impl SessionManager {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -1253,6 +1257,7 @@ impl SessionManager {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
@@ -1443,12 +1448,36 @@ impl SessionManager {
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
-        let summary = live
+        let mut summary = live
             .meta
             .lock()
             .await
             .summary_with_activity(status, live.activity_of(status));
+        summary.interaction_summary = Some(super::store::interaction_summary(
+            live.pending_permissions.lock().await.iter(),
+        ));
         Ok(summary)
+    }
+
+    /// A snapshot of live member turns; reading it never starts an Agent.
+    pub(crate) async fn executing_workflow_runs(&self) -> HashSet<String> {
+        let lives = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut runs = HashSet::new();
+        for live in lives {
+            let status = *live.status.lock().await;
+            if status == SessionStatus::Running {
+                if let Some(managed) = &live.meta.lock().await.managed {
+                    runs.insert(managed.workflow_run_id.clone());
+                }
+            }
+        }
+        runs
     }
 
     /// Execution ownership, including startup and cleanup, is stronger than a
@@ -1560,7 +1589,13 @@ impl SessionManager {
                 }
                 None => (SessionStatus::Idle, None),
             };
-            out.push(meta.summary_with_activity(status, activity));
+            let mut summary = meta.summary_with_activity(status, activity);
+            if let Some(live) = self.sessions.read().await.get(&meta.id) {
+                summary.interaction_summary = Some(super::store::interaction_summary(
+                    live.pending_permissions.lock().await.iter(),
+                ));
+            }
+            out.push(summary);
         }
         Ok(out)
     }
@@ -4148,15 +4183,18 @@ impl Live {
 
     async fn snapshot_unlocked(&self) -> Result<SessionSnapshot> {
         let status = *self.status.lock().await;
+        let pending_permissions = self.pending_permissions.lock().await.clone();
+        let mut summary = self
+            .meta
+            .lock()
+            .await
+            .summary_with_activity(status, self.activity_of(status));
+        summary.interaction_summary = Some(super::store::interaction_summary(&pending_permissions));
         Ok(SessionSnapshot {
-            summary: self
-                .meta
-                .lock()
-                .await
-                .summary_with_activity(status, self.activity_of(status)),
+            summary,
             items: self.items.lock().await.clone(),
             seq: self.seq.load(Ordering::SeqCst),
-            pending_permissions: self.pending_permissions.lock().await.clone(),
+            pending_permissions,
             rounds: None,
             expanded_round: None,
             history_before: None,
@@ -6118,6 +6156,18 @@ fn visible_message_preview(items: &[TimelineItem]) -> Option<genehub_proto::Sess
     })
 }
 
+fn latest_reply(items: &[TimelineItem]) -> Option<genehub_proto::SessionReplyCursor> {
+    items.iter().rev().find_map(|item| match item {
+        TimelineItem::AssistantMessage { id, text, .. } if !text.trim().is_empty() => {
+            Some(genehub_proto::SessionReplyCursor {
+                item_id: id.clone(),
+                at_ms: now_ms(),
+            })
+        }
+        _ => None,
+    })
+}
+
 /// Writes what this turn produced, once, when the turn ends: narrative to the
 /// chat layer, work to the open trunk.
 async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
@@ -6156,6 +6206,9 @@ async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
     meta.updated_at_ms = now_ms();
     if let Some(preview) = visible_message_preview(&settled) {
         meta.message_preview = Some(preview);
+    }
+    if let Some(reply) = latest_reply(&settled) {
+        meta.latest_reply = Some(reply);
     }
     store.save_meta(&meta)?;
     Ok(())
@@ -6268,6 +6321,7 @@ mod tests {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
@@ -7591,6 +7645,7 @@ mod tests {
                 execution_cleanup: None,
                 activity: Default::default(),
                 message_preview: None,
+                latest_reply: None,
                 agent_id: "amnesiac".into(),
                 persist: Some(stale),
                 ..meta()
@@ -7639,6 +7694,7 @@ mod tests {
                 execution_cleanup: None,
                 activity: Default::default(),
                 message_preview: None,
+                latest_reply: None,
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -7695,6 +7751,7 @@ mod tests {
                 execution_cleanup: None,
                 activity: Default::default(),
                 message_preview: None,
+                latest_reply: None,
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -7772,6 +7829,7 @@ mod tests {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             title: Some("Fix the login redirect".into()),
             ..meta()
         });
@@ -7857,6 +7915,7 @@ mod tests {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             title: Some("生成三张风景画，简笔风".into()),
             ..meta()
         });

@@ -1,42 +1,25 @@
 import type { SessionSummary } from "@genehub/proto";
-import { Loader2 } from "lucide-react";
+import { Circle, Hand, Loader2, TriangleAlert } from "lucide-react";
+import { sessionAttention } from "../session/attention";
 
-/** A compact, readable status mark shared by tabs and every session list. */
-export function SessionStatusIcon({
-  status,
-  workSummary,
-  unread: _unread = false,
-}: {
-  status: SessionSummary["status"] | undefined;
-  workSummary?: SessionSummary["workSummary"];
+/** State and unread are separate marks; an activity never hides a Human request. */
+export function SessionStatusIcon({ session, sessions, showLabel = false, unread = false, stale = false }: {
+  session: SessionSummary;
+  sessions?: readonly SessionSummary[];
+  showLabel?: boolean;
   unread?: boolean;
+  stale?: boolean;
 }) {
-  if (workSummary?.error) {
-    return <span role="img" aria-label="任务状态待核对" title={workSummary.error} className="text-danger">⚠</span>;
-  }
-  if ((workSummary?.running ?? 0) + (workSummary?.stopping ?? 0) > 0) {
-    return <span role="img" aria-label="任务进行中" title={status === "running" ? "任务进行中 · PM 处理中" : "任务进行中 · PM 待命"}
-      className="inline-flex w-3.5 shrink-0 justify-center text-ok"><Loader2 className="h-3 w-3 animate-spin" aria-hidden /></span>;
-  }
-  if ((workSummary?.blocked ?? 0) > 0 && status !== "running") {
-    return <span role="img" aria-label="任务受阻" title="任务受阻，待处理" className="text-danger">⚠</span>;
-  }
-  if (status !== "failed" && status !== "waiting" && status !== "running") return null;
-  const state =
-    status === "failed"
-      ? { icon: "⚠", label: "运行异常", tone: "text-danger" }
-      : status === "waiting"
-        ? { icon: "✋", label: "等待交互", tone: "text-accent" }
-        : { icon: null, label: "运行中", tone: "text-ok" };
-
-  return (
-    <span
-      className={`inline-flex w-3.5 shrink-0 items-center justify-center text-[11px] leading-none ${state.tone}`}
-      role="img"
-      aria-label={state.label}
-      title={state.label}
-    >
-      {status === "running" ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : state.icon}
-    </span>
-  );
+  const facts = sessionAttention(session, sessions);
+  const kind = stale ? "unknown" : facts.kind;
+  const label = stale ? `状态待同步${facts.pending ? ` · 上次有 ${facts.pending} 项待办` : ""}` : facts.label;
+  const Icon = kind === "pending" ? Hand : kind === "blocked" ? TriangleAlert : kind === "running" ? Loader2 : Circle;
+  const tone = kind === "pending" ? "text-accent" : kind === "blocked" ? "text-danger" : kind === "running" ? "text-ok" : "text-muted";
+  return <span className="inline-flex min-w-0 items-center gap-1">
+    {kind && <span role="img" aria-label={label} title={stale ? `最近已知：${facts.label || "空闲"}` : label} className={`inline-flex min-w-0 items-center gap-1 ${tone}`}>
+      <Icon className={`h-3 w-3 shrink-0 ${kind === "running" ? "animate-spin" : ""}`} aria-hidden />
+      {showLabel && <span className="truncate">{label}</span>}
+    </span>}
+    {unread && <span role="img" aria-label="有未读新回复" title="有未读新回复" className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />}
+  </span>;
 }

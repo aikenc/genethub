@@ -1,4 +1,4 @@
-import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue } from "./localConversation";
+import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
   AgentSpaceBuilderOperation,
   AgentSpaceBuilderReport,
@@ -209,6 +209,8 @@ interface WorkbenchState {
   workspaces: WorkspaceInfo[];
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
+  sessionsLoaded: boolean;
+  sessionsError: boolean;
   includeArchived: boolean;
   activeSessionId: string | null;
   /** Set while an unstarted conversation is on screen. See `Draft`. */
@@ -552,12 +554,7 @@ function changesTheRoundLayer(event: SequencedEvent): boolean {
 
 function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
   if (!summary || summary.status === "running" || summary.status === "waiting") return true;
-  try {
-    const readAt = Number(localStorage.getItem(`genehub:session-read:${summary.id}`) ?? "0");
-    return !Number.isFinite(readAt) || readAt < summary.updatedAtMs;
-  } catch {
-    return true;
-  }
+  return !summary.latestReply || hasUnreadReply(useWorkbench.getState().client?.identity?.machineId ?? "", summary);
 }
 
 /** The reconnect sentence this store put on screen, while it is still true. */
@@ -678,6 +675,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
   sessions: [],
+  sessionsLoaded: false,
+  sessionsError: false,
   includeArchived: false,
   activeSessionId: null,
   draft: null,
@@ -712,13 +711,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   download: { state: "idle" },
 
   async attach(client) {
+    sessionSummaryEpoch++;
     reconnectNotice = null;
     connectionLossNotice = null;
     // Subscriptions belong to the client that made them. This one has never
     // subscribed to anything, and saying otherwise is how a session opened
     // before a machine switch ends up with no live stream at all.
-    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null });
+    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
+      sessions: [], sessionsLoaded: false, sessionsError: false });
     client.onStateChange((connection) => {
+      if (get().client !== client) return;
+      sessionSummaryEpoch++;
       set({ connection });
       // A connection that was refused knows why — wrong credential, revoked
       // device, protocol mismatch — and none of those are fixed by waiting. Say
@@ -1085,6 +1088,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           void get().refreshAgents();
         }
         if (endsATurn(event.event.type)) void get().refreshWorkspaces();
+        if (endsATurn(event.event.type) || event.event.type === "permissionRequested" || event.event.type === "permissionResolved") void get().refreshSessions();
         set((state) => {
           const timeline = applySequenced(
             state.sessionTimelines[sessionId] ?? emptyTimeline(),
@@ -2196,6 +2200,7 @@ async function refreshCatalog(client: Client, set: Setter, mayLand: () => boolea
     client.call({ type: "agent.list" }),
     client.call({ type: "workspace.list" }),
   ]);
+  if (useWorkbench.getState().client !== client) return;
   if (agents?.type === "agents") set({ agents: agents.data });
   if (workspaces?.type === "workspaces") {
     set({ workspaces: workspaces.data });
@@ -2215,6 +2220,7 @@ async function refreshCatalog(client: Client, set: Setter, mayLand: () => boolea
 
 async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {
   const reply = await client.call({ type: "workspace.list" });
+  if (useWorkbench.getState().client !== client) return [];
   const workspaces = reply?.type === "workspaces" ? reply.data : [];
   if (reply?.type === "workspaces") set({ workspaces });
   return workspaces;
@@ -2537,19 +2543,49 @@ function remember(state: WorkbenchState, axes: AgentRuntimeMemory): void {
  * per workspace would mean one round trip per row, and a tree that fills in
  * raggedly as the answers arrive.
  */
+let sessionSummaryEpoch = 0;
+const sessionSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
-  const reply = await client.call({
-    type: "session.list",
-    payload: { workspaceId: null, includeArchived: useWorkbench.getState().includeArchived },
-  });
-  if (reply?.type !== "sessions") return [];
-  set({ sessions: reply.data });
-  return reply.data;
+  const epoch = sessionSummaryEpoch;
+  const existing = sessionSummaryLoads.get(client);
+  if (existing?.epoch === epoch) return existing.promise;
+  const before = new Map(useWorkbench.getState().sessions.map(session => [session.id, session]));
+  const promise = (async () => {
+    try {
+      const reply = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
+      if (useWorkbench.getState().client !== client || epoch !== sessionSummaryEpoch) return [];
+      if (reply?.type !== "sessions") throw new Error("会话摘要暂不可用");
+      initializeReplyReads(client.identity?.machineId ?? "", reply.data);
+      set(state => {
+        const current = new Map(state.sessions.map(session => [session.id, session]));
+        const ids = new Set(reply.data.map(session => session.id));
+        const sessions = reply.data.filter(session => !before.has(session.id) || current.has(session.id)).map(session => {
+          const previous = before.get(session.id);
+          const live = current.get(session.id);
+          if (!live || live === previous) return session;
+          // Preserve only fields changed while this request was in flight.
+          // Status/title/permission events cannot be undone by a slow list.
+          const old = new Map(Object.entries(previous ?? {}));
+          const newer = Object.fromEntries(Object.entries(live).filter(([key, value]) => old.get(key) !== value));
+          return { ...session, ...newer };
+        });
+        sessions.push(...state.sessions.filter(session => !before.has(session.id) && !ids.has(session.id)));
+        return { sessions, sessionsLoaded: true, sessionsError: false };
+      });
+      return useWorkbench.getState().sessions;
+    } catch (error) {
+      if (useWorkbench.getState().client === client && epoch === sessionSummaryEpoch) set({ sessionsError: true });
+      throw error;
+    }
+  })();
+  sessionSummaryLoads.set(client, { epoch, promise });
+  try { return await promise; }
+  finally { if (sessionSummaryLoads.get(client)?.promise === promise) sessionSummaryLoads.delete(client); }
 }
 
 /** The most recently touched of a set, or null. */
 function newest(sessions: SessionSummary[]): SessionSummary | null {
-  return sessions.reduce<SessionSummary | null>(
+  return sessions.filter(session => !session.archived).reduce<SessionSummary | null>(
     (best, session) => (!best || session.updatedAtMs > best.updatedAtMs ? session : best),
     null,
   );
@@ -2603,7 +2639,11 @@ function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: 
   if (!status) return;
   set((state) => ({
     sessions: state.sessions.map((session) =>
-      session.id === sessionId && session.status !== status ? { ...session, status } : session,
+      session.id === sessionId ? { ...session, ...snapshot.summary,
+        interactionSummary: {
+          count: (snapshot.pendingPermissions ?? []).length,
+          requests: (snapshot.pendingPermissions ?? []).slice(0, 16).map(request => ({ requestId: request.id, kind: request.kind, title: request.title.slice(0, 160) })),
+        } } : session,
     ),
   }));
 }
@@ -2614,7 +2654,7 @@ function applySessionStatus(
   set: Setter,
 ): void {
   const status =
-    event.type === "turnStarted" || event.type === "permissionResolved"
+    event.type === "turnStarted"
       ? "running"
       : event.type === "permissionRequested"
         ? "waiting"
@@ -2625,11 +2665,21 @@ function applySessionStatus(
             : event.type === "sessionStatusChanged"
               ? event.status
               : null;
-  if (!status) return;
+  if (!status && event.type !== "permissionResolved") return;
   set((state) => ({
-    sessions: state.sessions.map((session) =>
-      session.id === sessionId ? { ...session, status } : session,
-    ),
+    sessions: state.sessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      const interactionSummary = event.type === "permissionRequested"
+        ? { count: (session.interactionSummary?.count ?? 0) + Number(!session.interactionSummary?.requests.some(request => request.requestId === event.request.id)),
+            requests: [{ requestId: event.request.id, kind: event.request.kind, title: event.request.title.slice(0, 160) }, ...(session.interactionSummary?.requests.filter(request => request.requestId !== event.request.id) ?? [])].slice(0, 16) }
+        : event.type === "permissionResolved" && session.interactionSummary
+          ? { count: Math.max(0, session.interactionSummary.count - Number(session.interactionSummary.requests.some(request => request.requestId === event.requestId))),
+            requests: session.interactionSummary.requests.filter(request => request.requestId !== event.requestId) }
+          : session.interactionSummary;
+      const next = event.type === "permissionResolved" ? (session.status === "waiting" && !interactionSummary?.count ? "idle" : session.status)
+        : status === "idle" && interactionSummary?.count ? "waiting" : status ?? session.status;
+      return { ...session, status: next, interactionSummary };
+    }),
   }));
 }
 

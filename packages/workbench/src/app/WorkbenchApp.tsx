@@ -36,6 +36,7 @@ import { NewSessionPanel } from "../session/NewSessionPanel";
 import { PermissionCard } from "../session/Permission";
 import { TimelineView } from "../session/TimelineView";
 import { TaskProgress } from "../session/TaskProgress";
+import { humanController } from "../session/attention";
 import type {
   ForkController,
   ForwardController,
@@ -226,6 +227,7 @@ export function App({
   const session = workbench.sessions.find(
     (item) => item.id === workbench.activeSessionId,
   );
+  const interactionController = session ? humanController(session, workbench.sessions) : undefined;
   // `activeTurn` is learned from the live `turnStarted` event and deliberately
   // is not part of a snapshot. The durable session status is: after leaving a
   // chat and coming back while either the built-in agent or a third-party
@@ -809,7 +811,7 @@ export function App({
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-        <WorkbenchNavigation detail={(section === "sessions" && !sessionsOpen) || (section === "spaces" && !sessionsOpen)} section={section === "sessions" && !showChat ? "tools" : section} needsAttention={workbench.sessions.some((item) => ["waiting", "failed"].includes(item.status))} onChange={(next) => {
+        <WorkbenchNavigation detail={(section === "sessions" && !sessionsOpen) || (section === "spaces" && !sessionsOpen)} section={section === "sessions" && !showChat ? "tools" : section} onChange={(next) => {
           setSessionsOpen(next === "sessions" || next === "spaces");
           if (next === "sessions" && !showChat) {
             const chat = [...workbench.tabs].reverse().find((tab) => tab.kind === "chat");
@@ -935,7 +937,7 @@ export function App({
           ) : null}
           {session?.managed ? (
             <div className="shrink-0 border-b border-line bg-raised px-3 py-1.5 text-xs text-muted">
-              Workflow 受管会话 · {session.managed.role} · 人类只读
+              Workflow 受管会话 · {session.managed.role} · {managedReadOnly ? "人类只读" : "可直接交互"}
             </div>
           ) : null}
 
@@ -979,7 +981,9 @@ export function App({
                           role="status"
                           className="mx-auto max-w-chat rounded-xl border border-line bg-raised px-3 py-2 text-xs text-muted"
                         >
-                          Worker 正在等待根会话处理权限请求；这个受管子会话对人类只读。
+                          工作节点有待处理问题，由上级 Agent 跟进；此会话只读。
+                          {interactionController && interactionController.id !== session?.id && <button type="button"
+                            className="ml-2 min-h-9 text-accent" onClick={() => void workbench.selectSession(interactionController.id)}>前往可交互会话</button>}
                         </div>
                       </div>
                     ) : workbench.timeline.pendingPermission ? (
