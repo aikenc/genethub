@@ -27,7 +27,7 @@ defineSpecialty(
       "a failed Run is exposed as a successful dispatch",
       "recovery depends on deleting private runtime files",
     ],
-    tags: ["core", "workflow", "root-chat", "session", "authorization", "git"],
+    tags: ["core", "workflow", "root-chat", "session", "authorization", "git", "session-control-fixes"],
     llm: { default: "mock" },
     expectedDurationMs: 45_000,
     timeoutMs: 120_000,
@@ -281,15 +281,20 @@ defineSpecialty(
             )
           : undefined;
       t.assertions.assert(Boolean(recoveredWorker), "corrected dispatch did not create its Worker");
-      const recoveredRunReply = await opened.client.call({
-        type: "workflow.get",
-        payload: {
-          workspaceId: opened.workspaceId,
-          runId: recoveredWorker?.managed?.workflowRunId ?? "missing",
-        },
-      });
-      const recoveredRun =
-        recoveredRunReply?.type === "workflowRun" ? recoveredRunReply.data : undefined;
+      // Result acceptance precedes verified Worker retirement. Observe the Run
+      // terminal before asserting its immutable activation and cleanup facts.
+      let recoveredRun: import("@genehub/proto").WorkflowRunStatus | undefined;
+      await t.tools.waitUntil(async () => {
+        const reply = await opened.client.call({
+          type: "workflow.get",
+          payload: {
+            workspaceId: opened.workspaceId,
+            runId: recoveredWorker?.managed?.workflowRunId ?? "missing",
+          },
+        });
+        recoveredRun = reply?.type === "workflowRun" ? reply.data : undefined;
+        return Boolean(recoveredRun && ["completed", "blocked", "failed", "cancelled"].includes(recoveredRun.status));
+      }, 30_000);
       t.assertions.assert(
         recoveredRun?.status === "completed" &&
           recoveredRun.dcgDigest === initialDigest &&
@@ -297,6 +302,9 @@ defineSpecialty(
           recoveredRun.executorTurns === 0,
         `recovered Run did not pin the rolled-back DCG: ${JSON.stringify(recoveredRun)}`,
       );
+      const closedWorker = await opened.client.call({ type: "session.get", payload: { sessionId: recoveredWorker!.id } });
+      t.assertions.assert(closedWorker?.type === "snapshot" && closedWorker.data.summary.status === "closed",
+        "recovered Run completed before its Worker retired");
       t.assertions.fileEquals(opened.workspaceRoot, "recovered.txt", "recovered\n");
       t.assertions.assert(
         git(opened.workspaceRoot, ["branch", "--show-current"]) === initialBranch,
