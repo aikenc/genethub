@@ -29,7 +29,7 @@ defineSpecialty(
       "the direct flow creates a branch or accepts fabricated commit evidence",
       ".genehub and .genethub split project configuration",
     ],
-    tags: ["core", "workflow", "root-chat", "session", "authorization", "git"],
+    tags: ["core", "workflow", "root-chat", "session", "authorization", "git", "session-control-fixes"],
     llm: { default: "mock" },
     expectedDurationMs: 45_000,
     timeoutMs: 120_000,
@@ -213,12 +213,16 @@ defineSpecialty(
       t.assertions.assert(ordinary?.managed === undefined, "ordinary Session inherited managed state");
 
       const runId = managed?.managed?.workflowRunId ?? "missing";
-      const runReply = await opened.client.call({
-        type: "workflow.get",
-        payload: { workspaceId: opened.workspaceId, runId },
-      });
-      t.assertions.assert(runReply?.type === "workflowRun", `workflow.get returned ${runReply?.type}`);
-      const run = runReply?.type === "workflowRun" ? runReply.data : undefined;
+      let run: import("@genehub/proto").WorkflowRunStatus | undefined;
+      await t.tools.waitUntil(async () => {
+        const reply = await opened.client.call({
+          type: "workflow.get",
+          payload: { workspaceId: opened.workspaceId, runId },
+        });
+        t.assertions.assert(reply?.type === "workflowRun", `workflow.get returned ${reply?.type}`);
+        run = reply?.type === "workflowRun" ? reply.data : undefined;
+        return Boolean(run && ["completed", "blocked", "failed", "cancelled"].includes(run.status));
+      }, 30_000);
       t.assertions.assert(run?.status === "completed", `Workflow status is ${run?.status}`);
       t.assertions.assert(
         run?.nodes.map((node) => `${node.id}:${node.status}`).join(",") ===
