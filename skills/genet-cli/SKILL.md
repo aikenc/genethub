@@ -58,7 +58,7 @@ genet codex "把 CI 修绿" --cwd /srv/app
 `genet agent run --agent codex "…"`，上面那行是它的糖。
 
 保留子命令（`schema` `context` `capabilities` `workspace` `session` `agent` `machine`
-`device` `daemon` `hub` `status` `update` `shell`）永远优先。装了一个叫 `session` 的 agent
+`device` `daemon` `hub` `status` `update` `shell` `client`）永远优先。装了一个叫 `session` 的 agent
 也改变不了 `genet session list` 的含义——那种情况只能用规范写法。
 
 这条命令开的是**真会话**：落盘、出现在工作台里、别的设备能接管、断线能重放。没有「一次性
@@ -241,3 +241,10 @@ genet machine list
   隔离，`null` 表示那台 daemon 老到还不回答这个问题——两者都不是「默认安全」。
 - 不要在 `--wait` 前台进程被杀掉后就以为任务停了。会话跑在 daemon 里，CLI 只是观察者。
 - 不要为了省事重复 `genet schema` 的内容到别的地方。
+
+## 客户端页面联调
+
+需要实时 inspect、DOM/eval、交互或截图时读取产品内置 `genehub-client-debug` Skill。先核对绑定 CLI 的
+`capabilities` 与 `schema client.list`；`clientId` 是具体文档、`--machine` 是联调控制机器，不能与设备或
+Agent 会话 ID 混用。attach 需要目标页面本地限时授权，命令结果须通过 result 领取且 complete 只消费一次。
+这套能力不等同于 session 历史查询、任意网站自动化或原生桌面控制。

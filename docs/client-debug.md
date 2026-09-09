@@ -1,5 +1,8 @@
 # 客户端联调
 
+Agent 操作入口是产品内置 [genehub-client-debug Skill](../apps/daemon/builtin-skills/genehub-client-debug/SKILL.md)，
+随 daemon 自动收录到内置目录。它适用于 dev/Beta/Stable，独立于反馈取证与发布流程。
+
 浏览器、手机和桌面 App 的客户端使用同一套联调运行时，不按 Stable/Beta 分支隐藏。
 在页面右上角点“联调”，选择一台自己有权限连接的控制机器，点击连接。控制机器需要包含
 `client.debug` 协议的新版本。旧版本会明确拒绝，不会降级为不受授权控制的脚本执行。
