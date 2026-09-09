@@ -6,7 +6,7 @@ defineSpecialty({
   title: "An idle PM remains available beside its active task and pending Human card",
   oracle: "The real Workbench renders active Run facts, accepts PM input beside a Human card and during PM execution, and the task button cancels the Worker directly",
   catches: ["PM idle hides task progress", "input is disabled by a Human request", "PM interruption reaches a Worker", "task cancellation requires an LLM reply", "refresh loses the pending card or task state"],
-  tags: ["page-experience", "workflow-control"], runner: "playwright", llm: { default: "mock" },
+  tags: ["page-experience", "workflow-control", "session-attention"], runner: "playwright", llm: { default: "mock" },
   expectedDurationMs: 60_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 1536, io: 1, browser: 1, pool: "browser" },
   surfaces: ["workbench-ui", "daemon", "agent"], productInterfaces: ["@genehub/workbench", "session.send", "workflow.cancel"],
@@ -50,8 +50,10 @@ defineSpecialty({
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, pm);
     const page = browser.page;
     const task = page.getByRole("region", { name: "任务进度" });
-    await task.getByText("任务进行中 · PM 待命", { exact: true }).waitFor();
-    await task.getByText("工作节点正在等待用户处理。", { exact: true }).waitFor();
+    await task.getByText("任务等待处理", { exact: true }).waitFor();
+    await task.getByLabel("PM 本轮状态").filter({ hasText: "待命" }).waitFor();
+    await task.getByText(/由上级 Agent 处理。/).waitFor();
+    t.assertions.assert(!(await snapshot()).summary.interactionSummary?.count, "readonly Worker question became a Human obligation on PM");
     await task.getByRole("button", { name: /查看 .* 待处理问题/ }).waitFor();
     const input = page.getByRole("textbox", { name: "任务描述" });
     const send = async (text: string) => { await input.fill(text); await page.getByRole("button", { name: "发送", exact: true }).click(); };
@@ -61,6 +63,9 @@ defineSpecialty({
     await send("BROWSER_CONSULT：先解释两个颜色的区别，保留原问题。");
     await page.getByRole("button", { name: "停止 PM 本轮", exact: true }).waitFor();
     t.assertions.assert(await input.isEnabled(), "active PM turn disabled the shared composer");
+    await task.getByText("待你处理 · 任务等待处理 · PM 处理中", { exact: true }).waitFor();
+    const listed = await opened.client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
+    t.assertions.assert(listed?.type === "sessions" && listed.data.find(item => item.id === pm)?.interactionSummary?.requests.some(request => request.requestId === requestId), "list summary lost the real Human card while PM was busy");
     t.assertions.assert((await snapshot()).pendingPermissions?.[0]?.id === requestId, "consultation replaced the Human card");
     await page.setViewportSize({ width: 390, height: 844 });
     await send("BROWSER_STEER：现在先回答我的这条补充。");
