@@ -200,6 +200,8 @@ pub struct SessionMeta {
     pub inbox: SessionInbox,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_preview: Option<genehub_proto::SessionMessagePreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_reply: Option<genehub_proto::SessionReplyCursor>,
     pub id: String,
     /// Which workspace this conversation belongs to.
     ///
@@ -298,6 +300,23 @@ pub struct ContextSeed {
     pub text: String,
 }
 
+pub(super) fn interaction_summary<'a>(
+    requests: impl IntoIterator<Item = &'a PermissionRequest>,
+) -> genehub_proto::SessionInteractionSummary {
+    let mut summary = genehub_proto::SessionInteractionSummary::default();
+    for request in requests {
+        summary.count = summary.count.saturating_add(1);
+        if summary.requests.len() < 16 {
+            summary.requests.push(genehub_proto::SessionInteractionRef {
+                request_id: request.id.clone(),
+                kind: request.kind,
+                title: request.title.chars().take(160).collect(),
+            });
+        }
+    }
+    summary
+}
+
 impl SessionMeta {
     /// A session written by a build from the future, described from its
     /// location and its file's frozen header alone.
@@ -311,6 +330,7 @@ impl SessionMeta {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             id,
             workspace_id,
             format: header.format,
@@ -357,6 +377,10 @@ impl SessionMeta {
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
         SessionSummary {
+            interaction_summary: self
+                .openable()
+                .then(|| interaction_summary(self.pending_permission.iter())),
+            latest_reply: self.latest_reply.clone(),
             input_summary: (!self.inbox.entries.is_empty()).then(|| {
                 genehub_proto::SessionInputSummary {
                     pending_message_ids: self
@@ -2019,6 +2043,7 @@ mod project_home_tests {
             execution_cleanup: None,
             activity: Default::default(),
             message_preview: None,
+            latest_reply: None,
             id: id.into(),
             workspace_id: workspace_id.into(),
             format: SESSION_FORMAT,

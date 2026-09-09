@@ -3,9 +3,10 @@ import { ListFilter, MoreHorizontal, Plus } from "lucide-react";
 import type { Host, Endpoint, Target } from "../host";
 import { useWorkbench } from "../session/store";
 import { useAgentActivities } from "../workspace/useAgentActivity";
+import { attentionFilters, hasCurrentWork, matchesAttention, pendingSessions, type AttentionFilter } from "../session/attention";
 import { matchesConversation, defaultConversationFilter, type ConversationFilter } from "../session/conversationFilters";
 import { inAgentGroup, useAgentGroups } from "../workspace/agentGroups";
-import { localValue, saveLocalValue } from "../session/localConversation";
+import { localValue, saveLocalValue, hasUnreadReply, useConversationLocalChanges } from "../session/localConversation";
 import { RecentSessions } from "../shell/ConversationRows";
 import { ListPane, ListHeader, ListScroll, ListToolbar, ListGroupSelect, ListSearch, listPrimaryAction } from "../ui/ListLayout";
 import { OpenProject } from "../workspace/OpenProject";
@@ -29,8 +30,8 @@ export function ConversationList(props: Props) {
 
 function ConversationListContent({ host, endpoint, open, hidden, onNavigate, machine }: Props & { machine: string }) {
   const wb = useWorkbench();
-  useAgentActivities();
-  const [, refreshLocal] = useState(0);
+  const activity = useAgentActivities();
+  useConversationLocalChanges();
   const { groups, error: groupError } = useAgentGroups(machine);
   const [groupId, setGroupId] = useState(() => localValue<string>(`agent-group-view:${machine}`) ?? "");
   useEffect(() => { if (machine) saveLocalValue(`agent-group-view:${machine}`, groupId); }, [machine, groupId]);
@@ -41,7 +42,7 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
   const [agentId, setAgentId] = useState("");
   const [choosingAgent, setChoosingAgent] = useState(false);
   const [ownership, setOwnership] = useState<ConversationFilter["ownership"]>("primary");
-  const [state, setState] = useState("all");
+  const [state, setState] = useState<AttentionFilter>("all");
   const [advanced, setAdvanced] = useState(false);
   const [managing, setManaging] = useState(false);
   const selectionScope = JSON.stringify([query, agentId, ownership, state, groupId, wb.includeArchived]);
@@ -57,29 +58,22 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
   const batchLock = useRef(false);
   useEffect(() => {
     mounted.current = true;
-    const refresh = () => refreshLocal((n) => n + 1);
-    window.addEventListener("genehub-conversation-local", refresh);
-    return () => { mounted.current = false; window.removeEventListener("genehub-conversation-local", refresh); };
+    return () => { mounted.current = false; };
   }, []);
-  useEffect(() => {
-    if (wb.connection !== "ready" || busy) return;
-    const timer = setInterval(() => void wb.refreshSessions(), 5000);
-    return () => clearInterval(timer);
-  }, [wb.connection, wb.refreshSessions, busy]);
   // A changed query is a new selection scope: hidden rows cannot stay selected.
   useEffect(() => { setConfirmArchive(false); }, [selectionScope]);
-  const rows = wb.sessions.filter((s) => {
+  const sources = wb.sessions.filter(s => (!group || inAgentGroup(s, group)) && (!agentId || s.workspaceId === agentId));
+  const candidates = state === "pending" ? pendingSessions(sources, wb.sessions) : sources;
+  const rows = candidates.filter((s) => {
     // Explicit Agent/group membership may reveal an internal conversation; the default inbox never does.
     const explicit = Boolean(group || agentId);
-    if (!matchesConversation(s, wb.workspaces, { ...defaultConversationFilter, ownership: explicit ? "all" : ownership, archived: wb.includeArchived })) return false;
-    if (group && !inAgentGroup(s, group)) return false;
-    if (agentId && s.workspaceId !== agentId) return false;
+    const currentView = state === "pending" || state === "running";
+    if (!matchesConversation(s, wb.workspaces, { ...defaultConversationFilter,
+      ownership: explicit || state === "pending" ? "all" : ownership,
+      archived: currentView && hasCurrentWork(s, wb.sessions) ? s.archived : wb.includeArchived })) return false;
     if (!`${s.title} ${wb.workspaces.find((w) => w.id === s.workspaceId)?.name ?? ""}`.toLowerCase().includes(query.trim().toLowerCase())) return false;
-    const unread = Boolean(s.messagePreview && localValue(`read:${machine}:${s.id}`) !== s.messagePreview.itemId);
-    return state === "all" || (state === "unread" ? unread : state === "blocked"
-      ? ["waiting", "failed"].includes(s.status) || (s.workSummary?.blocked ?? 0) > 0 || !!s.workSummary?.error
-      : s.status === "running" || (s.workSummary?.running ?? 0) + (s.workSummary?.stopping ?? 0) > 0);
-  }).map((s) => ({ ...s, unread: Boolean(s.messagePreview && localValue(`read:${machine}:${s.id}`) !== s.messagePreview.itemId) }));
+    return matchesAttention(s, state, hasUnreadReply(machine, s), wb.sessions);
+  }).map((s) => ({ ...s, unread: hasUnreadReply(machine, s) }));
   const visibleIds = new Set(rows.map((s) => s.id));
   const selection = new Set([...selected].filter((id) => visibleIds.has(id)));
   const toggle = (id: string) => setSelected((old) => { const next = new Set(old); next.has(id) ? next.delete(id) : next.add(id); return next; });
@@ -123,12 +117,12 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
           <button type="button" aria-label="新建会话" className={listPrimaryAction} onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={18} />新建</button>
         </ListToolbar>
         <div aria-label="会话状态工具栏" className="flex min-w-0 items-center gap-1 text-xs">
-          {([["all", "全部"], ["blocked", "受阻"], ["unread", "未读"], ["running", "运行"]] as const).map(([id, label]) => <button key={id} aria-pressed={state === id} onClick={() => setState(id)} className={`min-h-9 flex-1 rounded-lg px-1 ${state === id ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-raised"}`}>{label}</button>)}
+          {attentionFilters.map(([id, label]) => <button key={id} aria-pressed={state === id} onClick={() => setState(id)} className={`min-h-9 flex-1 rounded-lg px-1 ${state === id ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-raised"}`}>{label}</button>)}
           <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "primary" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
           <button type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
         </div>
         {searchOpen && <ListSearch label="搜索会话" value={query} onChange={setQuery} onClose={() => { setSearchOpen(false); setQuery(""); }}/>}
-        {wb.includeArchived && <div className="flex items-center justify-between text-xs text-muted"><span>已归档会话</span><button className="min-h-9 px-2 text-accent" onClick={() => { useWorkbench.setState({includeArchived: false}); void wb.refreshSessions(); }}>返回当前会话</button></div>}
+        {wb.includeArchived && state !== "pending" && state !== "running" && <div className="flex items-center justify-between text-xs text-muted"><span>已归档会话</span><button className="min-h-9 px-2 text-accent" onClick={() => { useWorkbench.setState({includeArchived: false}); void wb.refreshSessions(); }}>返回当前会话</button></div>}
 
       </fieldset>
       {listMenuOpen && <>
@@ -136,11 +130,13 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
         <div role="menu" aria-label="会话列表选项" className="absolute right-3 top-full z-50 w-40 rounded-xl border border-line bg-surface p-1 shadow-xl" onKeyDown={(e) => { if (e.key === "Escape") setListMenuOpen(false); }}>
           <button type="button" role="menuitem" className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); setSearchOpen(true); }}>搜索会话</button>
           <button type="button" role="menuitem" disabled={busy} className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); setManaging(!managing); setSelected(new Set()); }}>{managing ? "结束管理" : "管理列表"}</button>
-          <button type="button" role="menuitem" disabled={busy} className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); useWorkbench.setState({includeArchived: !wb.includeArchived}); void wb.refreshSessions(); }}>{wb.includeArchived ? "当前会话" : "已归档列表"}</button>
+          <button type="button" role="menuitem" disabled={busy} className="min-h-11 w-full rounded-lg px-3 text-left text-sm hover:bg-raised" onClick={() => { setListMenuOpen(false); setState("all"); useWorkbench.setState({includeArchived: !wb.includeArchived}); void wb.refreshSessions(); }}>{wb.includeArchived ? "当前会话" : "已归档列表"}</button>
         </div>
       </>}
     </ListHeader>
     {groupError && <p role="alert" className="shrink-0 px-3 py-2 text-xs text-danger">{groupError}</p>}
+    {activity.error && <p role="status" className="px-3 py-2 text-xs text-muted">会话状态待同步，当前显示最近已知记录。</p>}
+    {state === "pending" && <p className="px-3 py-1 text-xs text-muted">包含可处理的内部及归档会话；每项可进入具体问题。</p>}
     {notice && <div role="status" className="flex max-h-[10%] shrink-0 gap-2 overflow-y-auto border-b border-line px-3 py-2 text-xs leading-5"><p className="min-w-0 flex-1 break-words">{notice}</p><button aria-label="关闭操作结果" className="h-8 w-8 shrink-0" onClick={() => setNotice("")}>×</button></div>}
     <ListScroll label="会话滚动区域">
       <RecentSessions sessions={rows} workspaces={wb.workspaces} activeSessionId={wb.activeSessionId}

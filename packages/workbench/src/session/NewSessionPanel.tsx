@@ -12,7 +12,8 @@ import { AgentDetails, ExpertDirectories, AgentDetailsEnvironment } from "../wor
 import { AgentAdvancedSettings } from "../workspace/AgentAdvancedSettings";
 import { RecentSessions } from "../shell/ConversationRows";
 import { useAgentActivities } from "../workspace/useAgentActivity";
-import { localValue } from "./localConversation";
+import { hasUnreadReply, useConversationLocalChanges } from "./localConversation";
+import { attentionFilters, hasCurrentWork, matchesAttention, pendingSessions, type AttentionFilter } from "./attention";
 import { ImportSessionsDialog } from "./ImportSessionsDialog";
 import { FilesPanel } from "../files/FilesPanel";
 import { ChangesPanel } from "../changes/ChangesPanel";
@@ -38,6 +39,8 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   const [historyQuery, setHistoryQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [archived, setArchived] = useState(false);
+  const [filter, setFilter] = useState<AttentionFilter>("all");
+  useConversationLocalChanges();
   const [terminalIds, setTerminalIds] = useState<string[]>([]);
   useEffect(() => { if (surface === "terminal" && workspace) setTerminalIds(ids => ids.includes(workspace.id) ? ids : [...ids.slice(-3), workspace.id]); }, [surface, workspace?.id]);
   const [importOpen, setImportOpen] = useState(false);
@@ -46,8 +49,14 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
   const guidanceKey = workspace?.agentSpace?.guidance?.join("\n") ?? "";
   const suggestions = useMemo(() => pickPromptSuggestions(3, Math.random,
     guidanceKey ? guidanceKey.split("\n") : undefined), [workspace?.id, guidanceKey]);
-  useEffect(() => { setShowAll(false); setArchived(false); setHistoryQuery(""); }, [workspace?.id]);
-  const rows = (activity.sessions ?? []).filter((s) => s.workspaceId === workspace?.id && s.archived === archived && !s.unsupported &&
+  const sessionSurface = surface === "sessions" || surface === "attention" || surface === "activity";
+  useEffect(() => { setShowAll(false); setArchived(false); setHistoryQuery(""); setFilter("all"); }, [workspace?.id]);
+  useEffect(() => { if (surface === "attention" || surface === "activity") { setShowAll(true); setArchived(false); setHistoryQuery(""); setFilter(surface === "attention" ? "pending" : "running"); } }, [surface, workspace?.id]);
+  const owned = (activity.sessions ?? []).filter(s => s.workspaceId === workspace?.id);
+  const candidates = filter === "pending" ? pendingSessions(owned, activity.sessions ?? []) : owned;
+  const rows = candidates.filter((s) =>
+    ((filter === "pending" || filter === "running") && hasCurrentWork(s, activity.sessions) || s.archived === archived) &&
+    matchesAttention(s, filter, hasUnreadReply(machine, s), activity.sessions) &&
     `${s.title ?? ""} ${s.messagePreview?.text ?? ""}`.toLowerCase().includes(historyQuery.toLowerCase()))
     .sort((a, b) => (b.messagePreview?.atMs ?? b.updatedAtMs) - (a.messagePreview?.atMs ?? a.updatedAtMs) || a.id.localeCompare(b.id));
   const navigate = (id: string, child = false) => { setChoosing(false); environment?.onOverview?.(id, "sessions", child); };
@@ -65,18 +74,25 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
       </div>
       {choosing && <ExpertPickerDialog title="切换专家" selectedId={workspace.id} onPick={id => navigate(id)} onClose={() => setChoosing(false)} />}
       <nav className="relative mx-auto mt-2 flex max-w-4xl items-center gap-1" aria-label="专家页签">
-        {[["sessions", "会话"], ["components", "组件"], ["directories", "目录"], ["children", "小队"]].map(([id,label]) => <button key={id} type="button" aria-pressed={surface === id} className={`min-h-11 min-w-0 flex-1 rounded-lg px-1 text-sm ${surface === id ? "bg-raised font-medium text-accent" : "text-muted hover:bg-raised"}`} onClick={() => { setMenuOpen(false); setSurface(id!); }}>{label}</button>)}
+        {[["sessions", "会话"], ["components", "组件"], ["directories", "目录"], ["children", "小队"]].map(([id,label]) => <button key={id} type="button" aria-pressed={(surface === id || id === "sessions" && sessionSurface)} className={`min-h-11 min-w-0 flex-1 rounded-lg px-1 text-sm ${(surface === id || id === "sessions" && sessionSurface) ? "bg-raised font-medium text-accent" : "text-muted hover:bg-raised"}`} onClick={() => { setMenuOpen(false); setSurface(id!); }}>{label}</button>)}
         <button type="button" aria-label="专家菜单" aria-expanded={menuOpen} className="flex min-h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setMenuOpen(v => !v)}><MoreHorizontal size={20} /></button>
         {menuOpen && <><button type="button" aria-label="关闭专家菜单" className="fixed inset-0 z-20 cursor-default" onClick={() => setMenuOpen(false)} /><div role="menu" className="absolute right-0 top-full z-30 min-w-40 rounded-xl border border-line bg-bg p-1 shadow-lg">{[["history",showAll ? "最近会话" : "查看全部会话"],["import","导入会话"],["details","资料与头像"],["files","文件"],["changes","变更"],["terminal","终端"]].map(([id,label]) => <button key={id} type="button" role="menuitem" className="block min-h-11 w-full rounded-lg px-4 text-left text-sm hover:bg-raised" onClick={() => { setMenuOpen(false); if(id === "import") setImportOpen(true); else if (id === "history") { setShowAll(v => !v); setArchived(false); setHistoryQuery(""); setSurface("sessions"); } else setSurface(id!); }}>{label}</button>)}</div></>}
       </nav>
     </header>
     <div className={surface === "terminal" ? "hidden" : ["files", "changes"].includes(surface) ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto px-4 py-4 md:px-6"} key={`${workspace.id}:${surface}`}>
       <div className="mx-auto max-w-4xl">
-        {surface === "sessions" && <>
-          {showAll && <div className="mb-3 flex gap-2"><input aria-label="搜索当前专家会话" placeholder="搜索会话" value={historyQuery} onChange={e => setHistoryQuery(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-raised px-3 text-sm"/><button type="button" aria-pressed={archived} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => setArchived(v => !v)}>{archived ? "返回未归档" : "已归档"}</button></div>}
+        {sessionSurface && <>
+          <div aria-label="当前专家会话状态" className="mb-2 flex gap-1 text-xs">
+            {attentionFilters.map(([id, label]) => <button key={id} type="button" aria-pressed={filter === id}
+              className={`min-h-10 min-w-0 flex-1 rounded-lg px-1 ${filter === id ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-raised"}`}
+              onClick={() => { if (surface !== "sessions") setSurface("sessions"); setFilter(id); setShowAll(id !== "all"); setHistoryQuery(""); }}>{label}</button>)}
+          </div>
+          {filter === "pending" && <p className="mb-2 text-xs text-muted">完整待办列表，包含仍有待办的归档会话；打开会话处理具体问题。</p>}
+          {activity.error && activity.sessions && <p role="status" className="mb-2 text-xs text-muted">会话状态待同步，当前显示最近已知记录。</p>}
+          {showAll && <div className="mb-3 flex gap-2"><input aria-label="搜索当前专家会话" placeholder="搜索会话" value={historyQuery} onChange={e => setHistoryQuery(e.target.value)} className="min-h-11 min-w-0 flex-1 rounded-lg bg-raised px-3 text-sm"/>{filter !== "pending" && filter !== "running" && <button type="button" aria-pressed={archived} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => setArchived(v => !v)}>{archived ? "返回未归档" : "已归档"}</button>}</div>}
           {!activity.sessions ? <p role="status" className="py-6 text-sm text-muted">{activity.error ? "会话暂时无法读取，请检查连接后重试。" : "正在读取会话…"}</p> : <>
-            <RecentSessions sessions={(showAll ? rows : rows.slice(0,10)).map(s => ({...s, unread: Boolean(s.messagePreview && localValue(`read:${machine}:${s.id}`) !== s.messagePreview.itemId)}))} workspaces={wb.workspaces} activeSessionId={null} onPickSession={id => void wb.selectSession(id)} onRename={(id,title) => void wb.renameSession(id,title)} onDelete={id => void wb.deleteSession(id)} />
-            {!rows.length && <p className="py-6 text-center text-sm text-muted">{archived || historyQuery ? "没有匹配的会话" : "还没有会话，从下面开始吧"}</p>}
+            <RecentSessions sessions={(showAll || filter !== "all" ? rows : rows.slice(0,10)).map(s => ({...s, unread: hasUnreadReply(machine, s)}))} workspaces={wb.workspaces} activeSessionId={null} onPickSession={id => void wb.selectSession(id)} onRename={(id,title) => void wb.renameSession(id,title)} onDelete={id => void wb.deleteSession(id)} />
+            {!rows.length && <p className="py-6 text-center text-sm text-muted">{archived || historyQuery || filter !== "all" ? "没有匹配的会话" : "还没有会话，从下面开始吧"}</p>}
           </>}
         </>}
         {surface === "components" && <AgentAdvancedSettings key={workspace.id} workspace={workspace} section="components" inline />}

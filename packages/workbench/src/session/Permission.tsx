@@ -37,10 +37,10 @@ export function PermissionCard({
         : "需要你的授权";
   const paused =
     request.kind === "question"
-      ? "任务已暂停；回答后会从原会话继续。"
+      ? "等待你的回答；提交后会继续处理原问题。"
       : request.kind === "planApproval"
-        ? "任务已暂停；确认计划后会从原会话继续。"
-        : "任务已暂停；授权后会以最高权限从原会话继续。";
+        ? "等待你确认计划；确认后会从原会话继续。"
+        : "等待你的授权；授权后会以最高权限从原会话继续。";
 
   return (
     <div
@@ -130,7 +130,7 @@ export function PermissionCard({
               className="min-h-11 rounded-lg border border-line-strong px-4 py-2.5 text-sm font-medium text-muted hover:text-fg"
               onClick={() => onAnswer({ outcome: "canceled" })}
             >
-              取消任务
+              取消本次提问
             </button>
           </div>
         </form>

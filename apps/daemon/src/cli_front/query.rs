@@ -2065,9 +2065,11 @@ mod tests {
         assert!(mismatch.message.contains("returned sessions"));
 
         let summary = SessionSummary {
+            interaction_summary: None,
             work_summary: None,
             input_summary: None,
             message_preview: None,
+            latest_reply: None,
             id: "s_1".into(),
             workspace_id: "w_1".into(),
             agent_id: "genet".into(),

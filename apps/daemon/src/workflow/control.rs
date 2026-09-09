@@ -5,6 +5,7 @@ use super::*;
 use genehub_proto::{SessionStatus, WorkflowNodeOutcome};
 
 pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSummary]) {
+    let executing_runs = state.sessions.executing_workflow_runs().await;
     let workspace_ids = sessions
         .iter()
         .filter(|session| session.managed.is_none())
@@ -21,6 +22,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
             .filter(|session| session.workspace_id == workspace_id && session.managed.is_none())
         {
             let mut summary = genehub_proto::SessionWorkSummary {
+                executing: Some(0),
                 checked_at_ms: now_ms(),
                 ..Default::default()
             };
@@ -50,6 +52,9 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                     if owned.is_empty() {
                         continue;
                     }
+                    summary.executing = Some(
+                        owned.iter().filter(|run| executing_runs.contains(&run.id)).count() as u32,
+                    );
                     for run in &owned {
                         match run.status.as_str() {
                             "running" => summary.running += 1,
@@ -70,6 +75,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         .into_iter()
                         .take(16)
                         .map(|run| genehub_proto::WorkflowTaskSummary {
+                            executing: Some(executing_runs.contains(&run.id)),
                             waiting: (run.status == "running"
                                 && !run.supervision.waiting_requests.is_empty())
                             .then(|| {
@@ -106,7 +112,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                                 .map(|stop| stop.reason.chars().take(512).collect())
                                 .or_else(|| {
                                     (run.status == "running" && run.supervision.waiting)
-                                        .then(|| "工作节点正在等待用户处理。".into())
+                                        .then(|| "工作节点正在等待用户或上级 Agent 处理。".into())
                                 }),
                             cleanup_error: run.stop.as_ref().and_then(|stop| {
                                 stop.cleanup_error

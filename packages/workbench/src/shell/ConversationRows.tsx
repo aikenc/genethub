@@ -5,7 +5,9 @@ import type {
 } from "@genehub/proto";
 import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { readLocalDraft } from "../session/localConversation";
+import { readLocalDraft, markContentRead } from "../session/localConversation";
+import { sessionAttention } from "../session/attention";
+import { Hand, Loader2 } from "lucide-react";
 import { useWorkbench } from "../session/store";
 import { SessionProcessesDialog } from "../processes/SessionProcessesDialog";
 import { relativeTime } from "../ui/relativeTime";
@@ -116,11 +118,19 @@ export function WorkspaceRow({
             title={`${breadcrumb}\n${workspace.root}`}
             onClick={onPick}
           >
-            <EntityAvatar id={workspace.id} name={workspace.name} badge={activity.status ? <SessionStatusIcon status={activity.status}/> : undefined}/>
-            <EntityText title={workspace.name} hint={activity.count === undefined ? "完整会话摘要尚未加载" : "会话数量包含已归档；时间为最近一条会话记录"}>
-              <span className="truncate">{activity.count === undefined ? (activity.error ? "会话信息暂不可用" : "正在读取会话…") : `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
+            <EntityAvatar id={workspace.id} name={workspace.name} badge={!activity.error && activity.running && !activity.pending ? <Loader2 aria-label="有执行活动" className="h-3 w-3 animate-spin text-ok" /> : undefined}/>
+            <EntityText title={workspace.name} hint="当前会话及仍有活动的归档会话；待办可进入具体处理位置">
+              <span className="truncate">{activity.error ? "会话状态待同步" : activity.count === undefined ? "正在读取会话…" : activity.label || `${relativeTime(activity.recent ?? 0)} · ${activity.count} 个会话`}</span>
             </EntityText>
           </button>
+          {!!activity.pending && <button type="button" aria-label={`查看 ${workspace.name} 的 ${activity.pending} 项待办`} title="打开完整待办列表"
+            className="inline-flex min-h-11 shrink-0 items-center gap-1 rounded-lg px-2 text-xs text-accent hover:bg-raised"
+            onClick={() => environment?.onOverview ? environment.onOverview(workspace.id, "attention") : onPick()}>
+            <Hand size={14} aria-hidden />{activity.pending}
+          </button>}
+          {!activity.pending && activity.tasks && <button type="button" aria-label={`查看 ${workspace.name} 的进行中会话`}
+            className="min-h-11 shrink-0 rounded-lg px-2 text-xs text-accent hover:bg-raised"
+            onClick={() => environment?.onOverview ? environment.onOverview(workspace.id, "activity") : onPick()}>进行中</button>}
           <div className="agent-row-actions" data-open={menu || undefined}>
             {onNewSession && <button type="button" aria-label={`与 ${workspace.name} 新建会话`} title="新建会话" className="agent-new min-h-11 rounded-lg px-2 text-xs font-medium text-accent hover:bg-raised" onClick={onNewSession}>＋ 新会话</button>}
           {relationAnomaly ? (
@@ -312,6 +322,9 @@ function SessionRow({
   const [menu, setMenu] = useState<"shut" | "open" | "confirming">("shut");
   const [editing, setEditing] = useState(false);
   const [processesOpen, setProcessesOpen] = useState(false);
+  const summaries = useWorkbench(state => state.sessions);
+  const stale = useWorkbench(state => state.sessionsError || state.connection !== "ready");
+  const facts = sessionAttention(session, summaries);
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
   const draftText = readLocalDraft(
@@ -354,10 +367,14 @@ function SessionRow({
         }`}
         onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
       >
-        <EntityAvatar id={session.workspaceId} name={project?.name ?? "专家"} badge={["waiting", "running", "failed"].includes(session.status) ? <SessionStateIcon session={session}/> : undefined}/>
+        <EntityAvatar id={session.workspaceId} name={project?.name ?? "专家"} badge={session.unread ? <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 rounded-full bg-accent" /> : undefined}/>
         <EntityText title={title(session)} hint={`${messageDate.toLocaleString()} · ${project?.name ?? "专家"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+          <span className="min-w-0 flex-1">
+          {(facts.label || stale) && <span className="block"><SessionStatusIcon session={session} sessions={summaries} showLabel stale={stale} /></span>}
+          <span className="flex min-w-0 items-center gap-1">
           <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
-          <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{unsupported ? " · 需升级" : ""}</span>
+          <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+          </span></span>
         </EntityText>
       </button>
 
@@ -376,6 +393,10 @@ function SessionRow({
 
       {menu === "shut" || selection ? null : (
         <Menu
+          onMarkRead={session.latestReply ? () => {
+            markContentRead(useWorkbench.getState().client?.identity?.machineId ?? "", session.id, session.latestReply!);
+            setMenu("shut");
+          } : undefined}
           confirming={menu === "confirming"}
           readOnly={managedReadOnly}
           archived={session.archived}
@@ -420,6 +441,7 @@ function SessionRow({
  * an app that otherwise never shows one.
  */
 function Menu({
+  onMarkRead,
   archived,
   onArchive,
   confirming,
@@ -430,6 +452,7 @@ function Menu({
   onDelete,
   onDismiss,
 }: {
+  onMarkRead?(): void;
   archived: boolean;
   onArchive(): void;
   confirming: boolean;
@@ -486,6 +509,7 @@ function Menu({
                 {archived ? "恢复会话" : "归档会话"}
               </button>
             )}
+            {onMarkRead && <button type="button" role="menuitem" className="flex min-h-10 w-full items-center px-3 text-left text-sm text-fg hover:bg-raised" onClick={onMarkRead}>标为已读</button>}
             {!readOnly ? (
               <button
                 type="button"
@@ -568,10 +592,6 @@ function Rename({
       }}
     />
   );
-}
-
-function SessionStateIcon({ session }: { session: ListedSession }) {
-  return <SessionStatusIcon status={session.status} workSummary={session.workSummary} unread={session.unread} />;
 }
 
 /** The daemon names a session from its first message; until then this stands in. */

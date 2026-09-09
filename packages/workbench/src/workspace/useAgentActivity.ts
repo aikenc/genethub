@@ -1,91 +1,79 @@
 import type { SessionSummary } from "@genehub/proto";
-import { useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo } from "react";
 import { useWorkbench } from "../session/store";
+import { hasCurrentWork, pendingOwners, sessionAttention } from "../session/attention";
 
 type Client = NonNullable<ReturnType<typeof useWorkbench.getState>["client"]>;
-type Activity = { count: number; recent: number; status?: "waiting" | "running" };
-type Snapshot = { sessions?: SessionSummary[]; agents: Map<string, Activity> | null; error: boolean };
-const empty: Snapshot = { agents: null, error: false };
-const offline: Snapshot = { agents: null, error: true };
-const noSessions: Activity = { count: 0, recent: 0 };
+type Activity = { count: number; recent: number; pending: number; running: boolean; ownRunning: boolean; teamRunning: boolean; tasks: boolean; blocked: boolean; label: string };
+const noSessions: Activity = { count: 0, recent: 0, pending: 0, running: false, ownRunning: false, teamRunning: false, tasks: false, blocked: false, label: "" };
+const polls = new WeakMap<Client, { users: number; timer: ReturnType<typeof setInterval> }>();
+const aggregates = new WeakMap<SessionSummary[], Map<string, Activity>>();
 
-/** One summary query per connected client, shared by every visible Agent row.
- * Independent of inbox filters/archives. Never fetches conversation histories. */
-function createSource(client: Client) {
-  let snapshot = empty;
-  let pending = false;
-  let timer: ReturnType<typeof setInterval> | undefined;
-  const listeners = new Set<() => void>();
-  const refresh = async () => {
-    if (pending) return;
-    pending = true;
-    try {
-      const reply = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
-      if (reply?.type !== "sessions") throw new Error("Missing session summary");
-      const agents = new Map<string, Activity>();
-      for (const session of reply.data) {
-        const activity = agents.get(session.workspaceId) ?? { count: 0, recent: 0 };
-        activity.count++;
-        activity.recent = Math.max(activity.recent, session.messagePreview?.atMs ?? session.updatedAtMs);
-        if (session.status === "waiting") activity.status = "waiting";
-        else if ((session.status === "running" || (session.workSummary?.running ?? 0) > 0 || (session.workSummary?.stopping ?? 0) > 0) && activity.status !== "waiting") activity.status = "running";
-        else if ((session.workSummary?.blocked ?? 0) > 0 && !activity.status) activity.status = "waiting";
-        agents.set(session.workspaceId, activity);
-      }
-      snapshot = { agents, sessions: reply.data, error: false };
-      // Merge only task facts. A list reply must never overwrite a newer PM
-      // turn event, nor update a different machine after navigation.
-      if (useWorkbench.getState().client === client) {
-        const summaries = new Map(reply.data.map((session) => [session.id, session]));
-        useWorkbench.setState((state) => ({
-          sessions: state.sessions.map((session) => summaries.has(session.id)
-            ? { ...session, workSummary: summaries.get(session.id)?.workSummary, inputSummary: summaries.get(session.id)?.inputSummary } : session),
-        }));
-      }
-    } catch {
-      snapshot = { agents: null, error: true };
-    } finally {
-      pending = false;
-      listeners.forEach((listener) => listener());
-    }
-  };
-  return {
-    refresh,
-    getSnapshot: () => snapshot,
-    subscribe(listener: () => void) {
-      listeners.add(listener);
-      if (listeners.size === 1) {
-        void refresh();
-        timer = setInterval(() => void refresh(), 10_000);
-      }
-      return () => {
-        listeners.delete(listener);
-        if (!listeners.size) clearInterval(timer);
-      };
-    },
+/** The store owns the only summary snapshot. All mounted consumers share one
+ * lightweight poll; live events and explicit mutations refresh that same store. */
+function subscribe(client: Client) {
+  let poll = polls.get(client);
+  if (!poll) {
+    const refresh = () => {
+      const wb = useWorkbench.getState();
+      if (wb.client === client && wb.connection === "ready") void wb.refreshSessions();
+    };
+    refresh();
+    poll = { users: 0, timer: setInterval(refresh, 5000) };
+    polls.set(client, poll);
+  }
+  poll.users++;
+  return () => {
+    if (--poll.users === 0) { clearInterval(poll.timer); polls.delete(client); }
   };
 }
-const sources = new WeakMap<Client, ReturnType<typeof createSource>>();
-const disconnected = { getSnapshot: () => offline, subscribe: (_listener: () => void) => () => {} };
+
+function summarize(sessions: SessionSummary[]) {
+  const cached = aggregates.get(sessions);
+  if (cached) return cached;
+  const agents = new Map<string, Activity>();
+  const owners = new Map<string, Map<string, SessionSummary>>();
+  for (const session of sessions) {
+    if (session.archived && !hasCurrentWork(session, sessions)) continue;
+    const activity = agents.get(session.workspaceId) ?? { ...noSessions };
+    activity.count++;
+    activity.recent = Math.max(activity.recent, session.messagePreview?.atMs ?? session.updatedAtMs);
+    const facts = sessionAttention(session, sessions);
+    activity.running ||= facts.pmRunning || facts.teamRunning;
+    activity.ownRunning ||= facts.pmRunning && !session.managed;
+    activity.teamRunning ||= facts.teamRunning || facts.pmRunning && !!session.managed;
+    activity.blocked ||= (session.workSummary?.blocked ?? 0) > 0;
+    activity.tasks ||= facts.inProgress;
+    const pending = owners.get(session.workspaceId) ?? new Map<string, SessionSummary>();
+    for (const owner of pendingOwners(session, sessions)) pending.set(owner.id, owner);
+    owners.set(session.workspaceId, pending);
+    agents.set(session.workspaceId, activity);
+  }
+  for (const [workspaceId, activity] of agents) {
+    activity.pending = [...(owners.get(workspaceId)?.values() ?? [])].reduce((count, owner) => count + (owner.interactionSummary?.count ?? 0), 0);
+    activity.label = [activity.pending ? `待你处理 ${activity.pending}` : "", activity.ownRunning && activity.teamRunning ? "会话与小队执行中" : activity.teamRunning ? "小队执行中" : activity.ownRunning ? "Agent 处理中" : activity.blocked ? "有任务受阻" : activity.tasks ? "有任务进行中" : ""].filter(Boolean).join(" · ");
+  }
+  aggregates.set(sessions, agents);
+  return agents;
+}
 
 export async function refreshAgentActivities(client: Client) {
-  await sources.get(client)?.refresh();
+  const wb = useWorkbench.getState();
+  if (wb.client === client && wb.connection === "ready") await wb.refreshSessions();
 }
 
 export function useAgentActivities() {
-  const client = useWorkbench((s) => s.client);
-  const ready = useWorkbench((s) => s.connection === "ready");
-  const source = useMemo(() => {
-    if (!client || !ready) return disconnected;
-    let source = sources.get(client);
-    if (!source) { source = createSource(client); sources.set(client, source); }
-    return source;
-  }, [client, ready]);
-  return useSyncExternalStore(source.subscribe, source.getSnapshot, source.getSnapshot);
+  const client = useWorkbench(s => s.client);
+  const ready = useWorkbench(s => s.connection === "ready");
+  const sessions = useWorkbench(s => s.sessions);
+  const loaded = useWorkbench(s => s.sessionsLoaded);
+  const error = useWorkbench(s => s.sessionsError);
+  useEffect(() => client && ready ? subscribe(client) : undefined, [client, ready]);
+  return useMemo(() => ({ sessions: loaded ? sessions : undefined, agents: loaded ? summarize(sessions) : null, error: error || !ready }), [sessions, loaded, error, ready]);
 }
 
 export function useAgentActivity(workspaceId: string) {
   const snapshot = useAgentActivities();
-  const activity = snapshot.agents ? snapshot.agents.get(workspaceId) ?? noSessions : undefined;
-  return { count: activity?.count, recent: activity?.recent, status: activity?.status, error: snapshot.error };
+  const activity = snapshot.agents?.get(workspaceId) ?? (snapshot.agents ? noSessions : undefined);
+  return { ...activity, error: snapshot.error };
 }

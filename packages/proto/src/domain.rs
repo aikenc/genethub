@@ -792,6 +792,15 @@ pub struct SessionContext {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionSummary {
+    /// Independent of turn status: a PM may process input while a question remains.
+    /// Absent on older peers; an empty summary means there is no pending request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub interaction_summary: Option<SessionInteractionSummary>,
+    /// Last durably stored Assistant reply, independent of the message preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_reply: Option<SessionReplyCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub input_summary: Option<SessionInputSummary>,
@@ -874,12 +883,44 @@ pub struct SessionMessagePreview {
     pub at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionReplyCursor {
+    pub item_id: String,
+    #[ts(type = "number")]
+    pub at_ms: i64,
+}
+
+/// Titles and references only. Full questions and decisions use the existing
+/// session snapshot and permission response interfaces.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionInteractionSummary {
+    pub count: u32,
+    pub requests: Vec<SessionInteractionRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionInteractionRef {
+    pub request_id: String,
+    pub kind: crate::event::PermissionRequestKind,
+    pub title: String,
+}
+
 /// Bounded cards plus counts from every associated Run, not recent-history
 /// pagination. Detailed evidence remains available through workflow.get.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionWorkSummary {
+    /// Runs with a live member turn actually executing, rather than just open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executing: Option<u32>,
     pub running: u32,
     pub stopping: u32,
     pub blocked: u32,
@@ -907,6 +948,9 @@ pub struct SessionInputSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowTaskSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executing: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub waiting: Option<Vec<WorkflowHumanWait>>,

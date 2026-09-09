@@ -1,4 +1,5 @@
-import type { Attachment } from "@genehub/proto";
+import type { Attachment, SessionReplyCursor, SessionSummary } from "@genehub/proto";
+import { useEffect, useReducer } from "react";
 
 /** Local UI state only. Neither navigation nor persistence sends a message. */
 export interface LocalDraft { text: string; attachments: Attachment[]; missingAttachments: number; recoveryNotice?: string }
@@ -29,11 +30,46 @@ export function saveLocalDraft(key: string, draft: LocalDraft): void {
 export interface ReadingPosition { anchor: string; offset: number; bottom: boolean }
 export function localValue<T>(key: string): T | null { try { return JSON.parse(localStorage.getItem(prefix + key) ?? "null"); } catch { return null; } }
 export function saveLocalValue(key: string, value: unknown): void { try { localStorage.setItem(prefix + key, JSON.stringify(value)); } catch { /* optional local preferences */ } }
-export function markContentRead(machine: string, session: string, cursor: string): void {
- const key = `read:${machine}:${session}`;
- if (localValue(key) === cursor) return;
+export function markContentRead(machine: string, session: string, cursor: SessionReplyCursor): void {
+ const key = `reply-read:${machine}:${session}`;
+ const previous = localValue<SessionReplyCursor>(key);
+ if (previous?.itemId === cursor.itemId || (previous?.atMs ?? 0) > cursor.atMs) return;
  saveLocalValue(key, cursor);
  window.dispatchEvent(new Event("genehub-conversation-local"));
+}
+
+/** One migration for the complete machine list, never one baseline per visit.
+ * New sessions/replies after migration remain unread until actually seen. */
+export function initializeReplyReads(machine: string, sessions: readonly SessionSummary[]): void {
+  if (!machine || localValue(`reply-baseline:${machine}`)) return;
+  if (sessions.length && !sessions.some(session => session.interactionSummary)) return;
+  for (const session of sessions) {
+    if (session.latestReply && !localValue(`reply-read:${machine}:${session.id}`)) {
+      saveLocalValue(`reply-read:${machine}:${session.id}`, session.latestReply);
+    }
+  }
+  saveLocalValue(`reply-baseline:${machine}`, true);
+}
+
+export function hasUnreadReply(machine: string, session: SessionSummary): boolean {
+  const reply = session.latestReply;
+  if (!machine || !reply || !localValue(`reply-baseline:${machine}`)) return false;
+  const read = localValue<SessionReplyCursor>(`reply-read:${machine}:${session.id}`);
+  return read?.itemId !== reply.itemId && (read?.atMs ?? 0) <= reply.atMs;
+}
+
+/** Same-browser tabs observe the same local read and draft facts. */
+export function useConversationLocalChanges(): void {
+  const [, refresh] = useReducer((value: number) => value + 1, 0);
+  useEffect(() => {
+    const storage = (event: StorageEvent) => { if (event.key === null || event.key.startsWith(prefix)) refresh(); };
+    window.addEventListener("genehub-conversation-local", refresh);
+    window.addEventListener("storage", storage);
+    return () => {
+      window.removeEventListener("genehub-conversation-local", refresh);
+      window.removeEventListener("storage", storage);
+    };
+  }, []);
 }
 
 export interface DraftIdentity { localId: string; workspaceId: string; agentId: string | null; title: string; modelId?: string | null; modeId?: string | null; effortId?: string | null; runtimeValues?: Record<string,string> }

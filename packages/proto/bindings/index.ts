@@ -1246,6 +1246,14 @@ export type SessionInputSummary = { pendingMessageIds: Array<string>, paused: bo
  */
 export type SessionInspection = { summary: SessionSummary, source: SessionReadSource, narrativeItemCount: number, roundCount: number, latestRoundId?: string, coverage: HistoryCoverage, layers: Array<string>, };
 
+export type SessionInteractionRef = { requestId: string, kind: PermissionRequestKind, title: string, };
+
+/**
+ * Titles and references only. Full questions and decisions use the existing
+ * session snapshot and permission response interfaces.
+ */
+export type SessionInteractionSummary = { count: number, requests: Array<SessionInteractionRef>, };
+
 /**
  * Durable ancestry for a forked conversation.
  */
@@ -1265,6 +1273,8 @@ export type SessionNarrativePage = { source: SessionReadSource, items: Array<Tim
  * Stable identity and waterline shared by every read-only session page.
  */
 export type SessionReadSource = { sessionId: string, throughRoundId?: string, digest: string, untrusted: boolean, };
+
+export type SessionReplyCursor = { itemId: string, atMs: number, };
 
 /**
  * A recent-first page of round summaries, returned in chronological order.
@@ -1311,7 +1321,16 @@ export type SessionSourceRef = { id: string, sessionId: string, itemId?: string,
 
 export type SessionStatus = "idle" | "running" | "waiting" | "readOnly" | "failed" | "closed";
 
-export type SessionSummary = { inputSummary?: SessionInputSummary, 
+export type SessionSummary = { 
+/**
+ * Independent of turn status: a PM may process input while a question remains.
+ * Absent on older peers; an empty summary means there is no pending request.
+ */
+interactionSummary?: SessionInteractionSummary, 
+/**
+ * Last durably stored Assistant reply, independent of the message preview.
+ */
+latestReply?: SessionReplyCursor, inputSummary?: SessionInputSummary, 
 /**
  * Workflow facts are independent of this Session's active Agent turn.
  */
@@ -1370,7 +1389,11 @@ export type SessionUserInteraction = "normal" | "readOnly";
  * Bounded cards plus counts from every associated Run, not recent-history
  * pagination. Detailed evidence remains available through workflow.get.
  */
-export type SessionWorkSummary = { running: number, stopping: number, blocked: number, tasks: Array<WorkflowTaskSummary>, more: number, checkedAtMs: number, error?: string, };
+export type SessionWorkSummary = { 
+/**
+ * Runs with a live member turn actually executing, rather than just open.
+ */
+executing?: number, running: number, stopping: number, blocked: number, tasks: Array<WorkflowTaskSummary>, more: number, checkedAtMs: number, error?: string, };
 
 /**
  * The machine-level settings a client may see and change.
@@ -1927,7 +1950,7 @@ activationRevision?: number, bundleDigest: string, taskId: string, status: strin
  */
 executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
 
-export type WorkflowTaskSummary = { waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 
