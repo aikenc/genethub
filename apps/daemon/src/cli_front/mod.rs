@@ -16,6 +16,7 @@ mod rpc;
 // The local CLI now calls the router in-process. Keep the loopback dialer in
 // the shared wire client for native compatibility without treating that
 // intentionally dormant entry point as a release-blocking lint.
+mod client;
 #[allow(dead_code)]
 mod rpc_wire;
 mod shell;
@@ -190,6 +191,7 @@ async fn dispatch(args: Vec<String>) -> i32 {
         },
         Some("agent") => Box::pin(converse::agent(&args[1..], &selection)).await,
         Some("shell") => Box::pin(shell::shell(&args[1..], &selection)).await,
+        Some("client") => Box::pin(client::run(&args[1..], &selection)).await,
         Some("speech") => Box::pin(speech::speech(&args[1..], &selection)).await,
         Some("process") => Box::pin(process::process(&args[1..], &selection)).await,
         Some("machine") => Box::pin(machine::machine(&args[1..])).await,

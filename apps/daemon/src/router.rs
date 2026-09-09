@@ -147,6 +147,13 @@ async fn dispatch(
     request: Request,
 ) -> Handled {
     match request {
+        Request::ClientDebug(request) => match state.client_debug.handle(request).await {
+            Ok(reply) => Handled::ok(Reply::ClientDebug(reply)),
+            Err(error) => Handled {
+                reply: Err(error),
+                effect: SideEffect::None,
+            },
+        },
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
             web_protocol: WEB_PROTOCOL_VERSION,

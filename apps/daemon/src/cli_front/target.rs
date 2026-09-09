@@ -34,7 +34,7 @@ pub enum Routing {
 /// `machine`, `device` and `shell` are reserved before they are implemented,
 /// which is the point: reserving them later would be a breaking change for
 /// anyone who had shipped an agent under one of those names.
-pub const RESERVED: [&str; 15] = [
+pub const RESERVED: [&str; 16] = [
     "schema",
     "context",
     "capabilities",
@@ -50,9 +50,10 @@ pub const RESERVED: [&str; 15] = [
     "update",
     "shell",
     "speech",
+    "client",
 ];
 
-const ROUTABLE: [&str; 22] = [
+const ROUTABLE: [&str; 33] = [
     "context",
     "shell",
     "workspace.list",
@@ -75,6 +76,17 @@ const ROUTABLE: [&str; 22] = [
     "device.list",
     "device.invite",
     "device.revoke",
+    "client.list",
+    "client.attach",
+    "client.status",
+    "client.result",
+    "client.inspect",
+    "client.eval",
+    "client.act",
+    "client.events",
+    "client.screenshot",
+    "client.reload",
+    "client.revoke",
 ];
 
 const STATIC: [&str; 2] = ["schema", "capabilities"];

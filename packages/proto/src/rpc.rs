@@ -30,6 +30,8 @@ pub struct ProtocolIdentity {
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Request {
+    #[serde(rename = "client.debug")]
+    ClientDebug(crate::ClientDebugRequest),
     /// Returns machine metadata only after the channel key is active, so a
     /// forwarding service cannot read a user's alias or fingerprint.
     #[serde(rename = "connection.identity")]
@@ -655,6 +657,8 @@ pub enum Request {
 #[serde(tag = "type", content = "data", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Reply {
+    #[serde(rename = "client.debug")]
+    ClientDebug(crate::ClientDebugResponse),
     Hello(HelloResult),
     /// A subscribe always answers with a snapshot plus any replayed events, so
     /// the client has exactly one code path for "catch up".

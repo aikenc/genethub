@@ -18,6 +18,7 @@ use crate::session::{SessionManager, Store, WorkspaceHomes};
 use crate::workspace::Workspaces;
 
 pub struct AppState {
+    pub client_debug: crate::client_debug::Broker,
     pub paths: Paths,
     pub config: Arc<RwLock<Config>>,
     pub machine: MachineState,
@@ -171,6 +172,7 @@ impl AppState {
             terminals,
             processes,
             diagnostics,
+            client_debug: crate::client_debug::Broker::default(),
             version: crate::version::product_version(),
             token: uuid::Uuid::new_v4().simple().to_string(),
             devices,
