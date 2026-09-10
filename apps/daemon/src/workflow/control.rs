@@ -616,7 +616,8 @@ pub(crate) async fn validate_input_target(
     let workspace = state.workspaces.get(&session.workspace_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, &session.workspace_id, &workspace.root)?;
     let run = load_run(&runtime, run_id)?;
-    if run.parent_session_id != session_id {
+    if run.parent_session_id != session_id
+        && !exception_authority(state, &run.workspace_id, session_id).await? {
         bail!("the task belongs to a different PM session");
     }
     Ok(())

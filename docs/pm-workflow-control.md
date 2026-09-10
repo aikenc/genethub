@@ -72,7 +72,8 @@ history remains accessible, including for older/broken Pack installations.
 
 `taskId` is still the dispatch idempotency key. `--retry-of` associates an explicit recovery
 with the original user request. Its Runs share a maximum of three attempts,
-two hours excluding recorded Human waits, and 256 **observed** LLM calls,
+two hours of accumulated execution excluding recorded Human waits and time in
+terminal states, and 256 **observed** LLM calls,
 including diagnosis. Changing dispatch keys does not reset these bounds.
 Unavailable token accounting stays unknown. Explicit recovery of a cancelled
 request requires both user input received after the cancellation fence and
@@ -106,6 +107,30 @@ also has `check-playability.mjs`: an entry digest plus a read-only
 `gameTestSnapshot()` contract lets Chromium check start, movement and firing.
 Level/Boss/item progression needs project-specific behavioral evidence.
 Unavailable observation is explicitly unverifiable.
+
+Exception recovery is derived from daemon-owned Run facts, never from an Agent
+claim that something failed. An unresolved request with a blocked/failed Run,
+cleanup error, missing WR after a detected stall, or failed/limited/unknown WR diagnostic grants ordinary PM Sessions
+in that project recovery authority. It remains available while a successor is
+repairing the request; a completed or cancelled latest Run removes that exception.
+Unrelated projects, managed Workers and consultation around a pending Human
+request do not gain this authority.
+
+During that exception, a project PM can activate workflows, manage project
+experts through exact change plans, control the project's managed Sessions,
+cancel work and retry a Run owned by another PM. The original request lineage,
+cancellation fence, execution budget and Human approval boundary remain in force.
+The execution deadline accumulates actual Run execution/cleanup time, subtracting
+Human waiting. Time after a Run is blocked or otherwise terminal does not spend
+that budget; retry still shares the original Run and LLM-call limits.
+A recovery or Pack upgrade does not transfer the persistent PM binding. Routine
+permissions return after resolution, without a second permission store or timer.
+
+WR automatic diagnosis has its own read-only instructions and supplied mechanical
+facts; it is not a graph node and does not submit `workflow complete`. A failed or
+budget-exhausted diagnosis is reported as such, with partial records clearly
+separated from a completed reply. OpenAI-compatible streams retain the initial
+nonempty tool ID when later argument chunks contain an empty ID.
 
 An existing ProjectControlBinding permits routine PM management in that
 project. Exact plan digest, action ID, revision and scope checks still apply;

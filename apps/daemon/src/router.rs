@@ -162,7 +162,18 @@ pub async fn handle(
     request: Request,
 ) -> Handled {
     let needed = crate::authz::required(&request);
-    if !caller.allows(needed) {
+    let recovery_configuration = if !caller.allows(needed) {
+        match (&request, caller.session_controller_id()) {
+            (Request::AgentSpaceConfigure { workspace_id, .. }, Some(session_id)) => {
+                match state.workspaces.project_root(workspace_id).await {
+                    Ok(project) => crate::workflow::exception_authority(state, &project, session_id).await.unwrap_or(false),
+                    Err(_) => false,
+                }
+            }
+            _ => false,
+        }
+    } else { false };
+    if !caller.allows(needed) && !recovery_configuration {
         return Handled::err(
             ErrorCode::Unauthorized,
             format!("caller lacks the {} capability", needed.as_str()),
@@ -234,6 +245,15 @@ async fn authorize_session_request(
         .map_err(|error| format!("{error:#}"))?;
     match (caller.session_controller_id(), summary.managed) {
         (Some(controller), Some(managed)) if managed.parent_session_id == controller => Ok(()),
+        (Some(controller), Some(_)) if !matches!(request, Request::SessionRespondPermission { .. }) => {
+            let project = state.workspaces.project_root(&summary.workspace_id).await
+                .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
+            if crate::workflow::exception_authority(state, &project, controller).await.unwrap_or(false) {
+                Ok(())
+            } else {
+                Err("受会话绑定的 Agent 只能控制由自己委托的受管子会话".into())
+            }
+        }
         (Some(_), _) => Err("受会话绑定的 Agent 只能控制由自己委托的受管子会话".into()),
         (None, Some(managed))
             if managed.user_interaction == genehub_proto::SessionUserInteraction::ReadOnly =>
@@ -275,6 +295,7 @@ async fn authorize_project_workflow_mutation(
                 .map_err(|error| format!("无法确认项目管理授权：{error:#}"))?;
             if agent_space_requires_project_control(&space)
                 && !state.project_control.is_bound(workspace_id, session_id)
+                && !crate::workflow::exception_authority(state, workspace_id, session_id).await.unwrap_or(false)
             {
                 return Err(
                     "当前 Session 没有这个项目的 ProjectControlBinding；请先完成 PM 接管".into(),
@@ -319,6 +340,7 @@ async fn authorize_agent_space_change(
                 .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
             if summary.workspace_id == workspace_id
                 || state.project_control.is_bound(&project_id, session_id)
+                || crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false)
             {
                 Ok(())
             } else {
@@ -700,6 +722,7 @@ async fn dispatch(
                 && !state
                     .project_control
                     .is_bound(&workspace_id, parent_session_id)
+                && !crate::workflow::exception_authority(state, &workspace_id, parent_session_id).await.unwrap_or(false)
             {
                 return Handled::err(
                     ErrorCode::Forbidden,
@@ -1850,6 +1873,11 @@ async fn dispatch(
             if let Err(message) = authorize_agent_space_change(state, caller, &workspace_id).await {
                 return Handled::err(ErrorCode::Forbidden, message);
             }
+            if let genehub_proto::AgentSpaceOperation::SetParent { parent_workspace_id: Some(parent) } = &operation {
+                if let Err(message) = authorize_agent_space_change(state, caller, parent).await {
+                    return Handled::err(ErrorCode::Forbidden, message);
+                }
+            }
             let (current, canonical_root, plan_digest) =
                 match agent_space_change_facts(state, &workspace_id, expected_revision, &operation)
                     .await
@@ -1881,7 +1909,7 @@ async fn dispatch(
                             detail: format!(
                                 "只对 Workspace {workspace_id} 执行一次 revision {expected_revision} CAS：\n{detail}\nplan: {plan_digest}"
                             ),
-                        }, &project_id)
+                        }, &project_id, crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false))
                         .await { Ok(challenge) => challenge, Err(error) => return failed(error) }
             } else {
                 None
@@ -1907,6 +1935,11 @@ async fn dispatch(
         } => {
             if let Err(message) = authorize_agent_space_change(state, caller, &workspace_id).await {
                 return Handled::err(ErrorCode::Forbidden, message);
+            }
+            if let genehub_proto::AgentSpaceOperation::SetParent { parent_workspace_id: Some(parent) } = &operation {
+                if let Err(message) = authorize_agent_space_change(state, caller, parent).await {
+                    return Handled::err(ErrorCode::Forbidden, message);
+                }
             }
             if let (Some(session_id), Some(plan_digest), Some(action_id)) = (
                 caller.session_controller_id(),
@@ -1974,6 +2007,7 @@ async fn dispatch(
                         None,
                         &current.builder_lock_digest,
                         action_id,
+                        crate::workflow::exception_authority(state, &state.workspaces.project_root(&workspace_id).await.unwrap_or_else(|_| workspace_id.clone()), session_id).await.unwrap_or(false),
                     )
                     .await
                 {
@@ -2079,11 +2113,13 @@ async fn dispatch(
             space_name,
             operation,
         } => {
-            if caller.session_controller_id().is_some() {
-                return Handled::err(
-                    ErrorCode::Forbidden,
-                    "AgentSpaceBuilder 写操作由 Bootstrap transaction 或用户界面调用，Agent 不能直接执行",
-                );
+            if let Some(session_id) = caller.session_controller_id() {
+                if !crate::workflow::exception_authority(state, &workspace_id, session_id).await.unwrap_or(false) {
+                    return Handled::err(
+                        ErrorCode::Forbidden,
+                        "AgentSpaceBuilder 写操作由 Bootstrap transaction、用户界面或异常处置中的项目 PM 调用",
+                    );
+                }
             }
             if let Err(message) =
                 authorize_project_workflow_mutation(state, caller, &workspace_id).await
@@ -2242,6 +2278,7 @@ async fn dispatch(
                                         .issue_management(
                                             prepared.challenge_spec(session_id),
                                             &workspace_id,
+                                            crate::workflow::exception_authority(state, &workspace_id, session_id).await.unwrap_or(false),
                                         )
                                         .await
                                     {
@@ -2325,6 +2362,7 @@ async fn dispatch(
                         current.git.head.as_deref(),
                         &current.git.status_digest,
                         action_id,
+                        crate::workflow::exception_authority(state, &state.workspaces.project_root(&workspace_id).await.unwrap_or_else(|_| workspace_id.clone()), session_id).await.unwrap_or(false),
                     )
                     .await
                 {

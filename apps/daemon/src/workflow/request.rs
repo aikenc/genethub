@@ -26,6 +26,19 @@ pub(super) fn group_id(run: &RunRecord) -> &str {
         .unwrap_or(&run.id)
 }
 
+/// Charge execution and cleanup, not the time a terminal Run awaits a new request.
+/// The stored terminal timestamp is stable across notice delivery and restart.
+pub(super) fn execution_ms(run: &RunRecord, now: i64) -> i64 {
+    let end = if matches!(run.status.as_str(), "running" | "stopping" | "cancelling") {
+        now
+    } else {
+        run.updated_at_ms
+    };
+    end.saturating_sub(run.created_at_ms)
+        .saturating_sub(run.supervision.human_wait_ms)
+        .max(0)
+}
+
 pub(super) fn activities(
     run: &RunRecord,
 ) -> impl Iterator<Item = &crate::session::store::ExecutionActivity> {
@@ -68,7 +81,8 @@ pub(super) async fn association(
     let previous = match retry_of.or(task_run.as_deref()) {
         Some(id) => {
             let run = load_run(runtime, id)?;
-            if run.parent_session_id != parent {
+            if run.parent_session_id != parent
+                && !exception_authority(state, &run.workspace_id, parent).await? {
                 bail!("retry target belongs to another PM session");
             }
             Some(run)
@@ -124,13 +138,7 @@ pub(super) async fn admit(
     if group.len() >= MAX_REQUEST_RUNS {
         bail!("requestBudgetExceeded: the original request has reached its {MAX_REQUEST_RUNS} Run limit");
     }
-    if now_ms()
-        - root.created_at_ms
-        - group
-            .iter()
-            .map(|run| run.supervision.human_wait_ms)
-            .sum::<i64>()
-        >= REQUEST_DEADLINE_MS
+    if group.iter().map(|run| execution_ms(run, now_ms())).sum::<i64>() >= REQUEST_DEADLINE_MS
     {
         bail!("requestBudgetExceeded: the original request has exceeded its execution deadline");
     }

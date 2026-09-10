@@ -391,6 +391,10 @@ async fn apply_inner(
         ));
     }
 
+    // Recovery is temporary authority, not a new permanent PM takeover.
+    let preserve_controller = !state.project_control.is_bound(&project_workspace_id, controller_session_id)
+        && crate::workflow::exception_authority(state, &project_workspace_id, controller_session_id).await.unwrap_or(false);
+
     let execution_runtime = crate::workflow::RuntimeStore::new(
         &state.paths.root,
         &project_workspace_id,
@@ -578,12 +582,14 @@ async fn apply_inner(
             .map_err(|error| anyhow!("activationFailed: {error:#}"))?;
         }
         inject_test_failure(failure_stage, "activation")?;
-        state.project_control.bind(
-            &project_workspace_id,
-            controller_session_id,
-            &pack.manifest.id,
-            &pack.digest,
-        )?;
+        if !preserve_controller {
+            state.project_control.bind(
+                &project_workspace_id,
+                controller_session_id,
+                &pack.manifest.id,
+                &pack.digest,
+            )?;
+        }
         inject_test_failure(failure_stage, "binding")?;
 
         let commit_paths = crate::git::bootstrap_paths(&project_root).await?;
@@ -693,7 +699,7 @@ async fn apply_inner(
         "applied",
         spaces,
         Some(bootstrap_commit),
-        true,
+        state.project_control.is_bound(&project_workspace_id, controller_session_id),
     ))
 }
 

@@ -130,10 +130,11 @@ impl Broker {
         &self,
         spec: ChallengeSpec,
         project_workspace_id: &str,
+        recovery_authorized: bool,
     ) -> Result<Option<BootstrapApprovalChallenge>> {
         let controller = spec.controller_session_id.clone();
         let challenge = self.issue(spec).await?;
-        if !self.is_bound(project_workspace_id, &controller) {
+        if !self.is_bound(project_workspace_id, &controller) && !recovery_authorized {
             return Ok(Some(challenge));
         }
         let mut guard = self.state.lock().await;
@@ -403,6 +404,7 @@ impl Broker {
         git_head: Option<&str>,
         status_digest: &str,
         action_id: &str,
+        recovery_authorized: bool,
     ) -> Result<String> {
         validate_action_id(action_id)?;
         let mut guard = self.state.lock().await;
@@ -415,7 +417,7 @@ impl Broker {
                     || challenge
                         .management_binding
                         .as_ref()
-                        .is_some_and(|project| self.is_bound(project, controller_session_id)))
+                        .is_some_and(|project| self.is_bound(project, controller_session_id) || recovery_authorized))
                     && !challenge.rejected
                     && !challenge.consumed
                     && challenge.spec.controller_session_id == controller_session_id
@@ -880,6 +882,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap-before-human",
+                false,
             )
             .await
             .is_err());
@@ -926,6 +929,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_1",
+                false,
             )
             .await
             .unwrap();
@@ -942,6 +946,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
             )
             .await
             .is_err());
@@ -959,6 +964,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
             )
             .await
             .is_err());
@@ -998,6 +1004,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_after_remove",
+                false,
             )
             .await
             .is_err());
@@ -1061,6 +1068,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "rejected_action",
+                false,
             )
             .await
             .is_err());
@@ -1093,6 +1101,7 @@ mod tests {
                 None,
                 "sha256:changed",
                 "stale_action",
+                false,
             )
             .await
             .unwrap_err();
@@ -1162,6 +1171,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_1",
+                false,
             )
             .await
             .unwrap();
@@ -1182,6 +1192,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
             )
             .await
             .is_err());
@@ -1199,6 +1210,7 @@ mod tests {
                     None,
                     "sha256:clean",
                     "bootstrap_1",
+                    false,
                 )
                 .await
                 .unwrap(),
