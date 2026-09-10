@@ -77,3 +77,5 @@ export { registerScriptedCodex } from "./builders/codex.ts";
 
 export { allocatePort } from "../infrastructure/public.ts";
 export { openPreviewBrowser } from './drivers/preview-browser.ts';
+
+export { selectForGate } from "../policies/gates.ts";

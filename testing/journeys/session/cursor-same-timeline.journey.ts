@@ -9,6 +9,8 @@ defineJourney(
     oracle: "a cursor session turn completes with a reply after cursor-agent is on PATH and logged in",
     catches: ["ACP handshake never becomes a turn"],
     tags: ["third-party", "session", "parity"],
+    llm: { default: "real" },
+    resources: { pool: "real-llm" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
