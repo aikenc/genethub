@@ -140,6 +140,43 @@ impl Prepared {
     }
 }
 
+/// Compatibility workflow assets share the Pack installer, without taking
+/// over a project or creating the PM team. Asset order preserves its v1 digest.
+pub(crate) fn direct_workflow_files(agent_id: &str, model_id: Option<&str>) -> Vec<(String, Vec<u8>)> {
+    let model = model_id
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("modelId: {value}\n"))
+        .unwrap_or_default();
+    [
+        ("project.yaml", include_str!("../workflow-templates/direct-change/project.yaml")),
+        ("workflows/catalog.yaml", include_str!("../workflow-templates/direct-change/workflows/catalog.yaml")),
+        ("workflows/direct-change.yaml", include_str!("../workflow-templates/direct-change/workflows/direct-change.yaml")),
+        ("roles/worker.yaml", include_str!("../workflow-templates/direct-change/roles/worker.yaml")),
+        ("prompts/direct-worker.md", include_str!("../workflow-templates/direct-change/prompts/direct-worker.md")),
+    ]
+    .into_iter()
+    .map(|(path, body)| {
+        (path.to_string(), body.replace("{{AGENT_ID}}", agent_id)
+            .replace("{{MODEL_ID_YAML}}", &model).into_bytes())
+    })
+    .collect()
+}
+
+const BOOTSTRAP_PACK_ID: &str = "genehub.workflow.bootstrap.direct.v1";
+
+pub(crate) fn direct_workflow_digest(agent_id: &str, model_id: Option<&str>) -> String {
+    let mut digest = Sha256::new();
+    digest.update((BOOTSTRAP_PACK_ID.len() as u64).to_le_bytes());
+    digest.update(BOOTSTRAP_PACK_ID.as_bytes());
+    for (path, bytes) in direct_workflow_files(agent_id, model_id) {
+        digest.update((path.len() as u64).to_le_bytes());
+        digest.update(path.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
 pub fn list() -> Result<Vec<BootstrapPackInfo>> {
     let mut ids = BOOTSTRAP_FILES
         .iter()
@@ -866,14 +903,30 @@ fn preflight_targets(
 }
 
 fn write_new_or_same(project_root: &Path, file: &RenderedFile) -> Result<()> {
-    if fs::read(&file.target).ok().as_deref() == Some(file.body.as_slice()) {
-        return Ok(());
+    write_asset(project_root, Path::new(&file.relative), &file.body)
+}
+
+pub(crate) fn write_asset(root: &Path, relative: &Path, body: &[u8]) -> Result<()> {
+    let parent = relative.parent().ok_or_else(|| anyhow!("asset has no parent"))?;
+    ensure_directory_tree(root, parent, true)?;
+    let path = &root.join(relative);
+    match crate::config::sensitive_metadata(path) {
+        Ok(metadata) => {
+            crate::config::reject_link_or_reparse(path, &metadata)?;
+            if !metadata.is_file() {
+                bail!("项目资产不是普通文件：{}", path.display());
+            }
+            let existing = fs::read(path)?;
+            if existing == body {
+                return Ok(());
+            }
+            bail!("拒绝覆盖已有项目资产：{}", path.display());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("检查项目资产：{}", path.display()))
+        }
     }
-    let parent = file.target.parent().expect("Pack files have parents");
-    let relative_parent = parent
-        .strip_prefix(project_root)
-        .map_err(|_| anyhow!("Bootstrap target escaped the project"))?;
-    ensure_directory_tree(project_root, relative_parent, true)?;
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -881,11 +934,20 @@ fn write_new_or_same(project_root: &Path, file: &RenderedFile) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o644);
     }
-    let mut target = options
-        .open(&file.target)
-        .with_context(|| format!("creating Bootstrap file {}", file.relative))?;
-    target.write_all(&file.body)?;
-    target.sync_all()?;
+    let mut file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata = crate::config::sensitive_metadata(path)?;
+            crate::config::reject_link_or_reparse(path, &metadata)?;
+            if !metadata.is_file() || fs::read(path)? != body {
+                bail!("拒绝覆盖已有项目资产：{}", path.display());
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error).with_context(|| format!("创建 {}", path.display())),
+    };
+    file.write_all(body)?;
+    file.sync_all()?;
     Ok(())
 }
 

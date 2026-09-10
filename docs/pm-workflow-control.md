@@ -120,3 +120,24 @@ Session format 9, Run envelope v3 and index envelope v2 protect durable obligati
 Older readers/writers must fail closed instead of dropping input or
 cancellation responsibility. No new Task CRUD service, Hub scheduler, native
 steering protocol or in-place workflow mutation is introduced.
+
+## Shared implementation boundaries
+
+The Session dispatcher owns both accepted chat input and durable Human decisions.
+It scans persisted metadata once at startup and schedules independent per-Session
+handoffs; a slow adapter does not block another Session. Input admission, the
+interaction lock, explicit-stop fence and recorded Human authority remain distinct.
+
+The Run snapshot is the authority for node state and FlowMessages. `session.flow`
+reads that snapshot directly. The daemon no longer rewrites component-local
+`manifest.json`, `inbox.jsonl`, `outbox.jsonl` or `journal.jsonl` on every Run save.
+Older observation files are left untouched and are not recovery inputs. Use
+`session flow` or `workflow get` for current facts; the private Run index remains
+only a locator. CLI waiting follows the Run through cleanup until a terminal state
+or its explicit timeout, rather than inferring completion from a Worker turn.
+
+The legacy direct-workflow initializer and team Bootstrap Packs share the same
+no-overwrite asset writer. The legacy source lives in
+`apps/daemon/workflow-templates/direct-change/`; its file order, bytes and digest
+remain compatible. It still initializes a direct workflow without taking over the
+project or creating a PM team. Team topology and Pack upgrades remain explicit.

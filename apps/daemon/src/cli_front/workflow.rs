@@ -1,7 +1,7 @@
 //! Project Workflow commands exposed through the same production `genet` CLI
 //! every Agent session receives.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use genehub_proto::{Reply, Request, WorkflowRunStatus};
@@ -10,7 +10,7 @@ use serde_json::json;
 use super::output::{self, CliFailure};
 use super::rpc::Rpc;
 use super::target::Selection;
-use super::{converse, query, EXIT_FAILED, EXIT_OK};
+use super::{query, EXIT_FAILED, EXIT_OK};
 
 #[derive(Debug)]
 enum Command {
@@ -409,28 +409,6 @@ async fn binding_for_missing(needed: bool) -> Result<Option<ManagedBinding>, Cli
     }))
 }
 
-fn active_sessions(run: &WorkflowRunStatus) -> Result<Vec<String>, CliFailure> {
-    let sessions = run
-        .nodes
-        .iter()
-        .filter(|node| node.status == "running")
-        .filter_map(|node| node.session_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if sessions.is_empty() {
-        Err({
-            CliFailure::business(
-                "workflowHasNoActiveSession",
-                "Workflow 没有可等待的 Agent Session",
-                Some(json!({"runId": run.id, "status": run.status})),
-            )
-        })
-    } else {
-        Ok(sessions)
-    }
-}
-
 fn select_workflow(
     project: &genehub_proto::WorkflowProjectStatus,
     explicit: Option<String>,
@@ -497,35 +475,15 @@ async fn wait_for_run(
     let deadline =
         timeout_seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
     let mut current = started;
-    let mut waited = BTreeSet::new();
-    let mut workers_ok = true;
-    while current.status == "running" {
-        let active = active_sessions(&current)?;
-        let mut found_new = false;
-        for session_id in active {
-            if !waited.insert(session_id.clone()) {
-                continue;
-            }
-            found_new = true;
-            let remaining = remaining_timeout(deadline)?;
-            if converse::wait_for_existing(rpc, &session_id, remaining).await? != EXIT_OK {
-                workers_ok = false;
-                break;
-            }
-        }
+    // A Worker turn may finish before its Run commits cleanup or dispatches
+    // the next node. Only the Run can decide its terminal outcome.
+    while matches!(current.status.as_str(), "running" | "stopping" | "cancelling") {
+        remaining_timeout(deadline)?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
         current = read_run(rpc, workspace_id, &current.id).await?;
-        if !workers_ok || current.status != "running" {
-            break;
-        }
-        if !found_new {
-            return Err(CliFailure::business(
-                "workflowNodeDidNotComplete",
-                "Agent Session 已终态，但对应 Workflow 节点仍在运行；检查节点完成证据",
-                Some(json!({"runId": current.id, "activeNodes": current.active_nodes})),
-            ));
-        }
     }
-    Ok((current, workers_ok))
+    let completed = current.status == "completed";
+    Ok((current, completed))
 }
 
 fn remaining_timeout(deadline: Option<tokio::time::Instant>) -> Result<Option<u64>, CliFailure> {
@@ -937,61 +895,6 @@ mod tests {
         assert_eq!(workspace_id, None);
         assert_eq!(candidate_digest.as_deref(), Some("sha256:abc"));
         assert_eq!(revision, Some(7));
-    }
-
-    #[test]
-    fn wait_projection_keeps_every_distinct_running_session() {
-        let run = WorkflowRunStatus {
-            diagnostics: None,
-            request_run_id: None,
-            report_pending: None,
-            reason: None,
-            cleanup_error: None,
-            execution_root: None,
-            experimental: None,
-            id: "wr_test".into(),
-            workspace_id: "ws_test".into(),
-            executor_workspace_id: None,
-            executor_session_id: None,
-            parent_session_id: "s_root".into(),
-            workflow_id: "fanout".into(),
-            dcg_digest: "sha256:dcg".into(),
-            activation_revision: Some(1),
-            bundle_digest: "digest".into(),
-            task_id: "task".into(),
-            status: "running".into(),
-            revision: 1,
-            executor_turns: 0,
-            active_nodes: vec!["one".into(), "two".into()],
-            nodes: vec![
-                genehub_proto::WorkflowNodeRunStatus {
-                    assigned_at_ms: None,
-                    last_activity_at_ms: None,
-                    outcome: None,
-                    reason: None,
-                    id: "one".into(),
-                    uses: "agent.session".into(),
-                    status: "running".into(),
-                    session_id: Some("s_one".into()),
-                    evidence: BTreeMap::new(),
-                },
-                genehub_proto::WorkflowNodeRunStatus {
-                    assigned_at_ms: None,
-                    last_activity_at_ms: None,
-                    outcome: None,
-                    reason: None,
-                    id: "two".into(),
-                    uses: "agent.session".into(),
-                    status: "running".into(),
-                    session_id: Some("s_two".into()),
-                    evidence: BTreeMap::new(),
-                },
-            ],
-            created_at_ms: 1,
-            updated_at_ms: 1,
-        };
-
-        assert_eq!(active_sessions(&run).unwrap(), vec!["s_one", "s_two"]);
     }
 
     #[test]

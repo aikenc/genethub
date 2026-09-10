@@ -135,7 +135,7 @@ struct Live {
     execution: Mutex<Option<Execution>>,
     next_execution: AtomicU64,
     inbox_lock: Mutex<()>,
-    inbox_dispatching: AtomicBool,
+    delivery_dispatching: AtomicBool,
     closing: AtomicBool,
     retirement: Mutex<()>,
     cleanup: crate::adapter::SessionTasks,
@@ -3391,21 +3391,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Discover pending deliveries once after startup. Subsequent ticks only
-    /// inspect loaded sessions, avoiding repeated scans of historical chat.
-    pub async fn recover_human_continuations(&self) -> Result<()> {
-        for meta in self.store.list_meta()? {
-            if meta
-                .human_continuation
-                .as_ref()
-                .is_some_and(|c| !c.completed)
-            {
-                self.live(&meta.id).await?;
-            }
-        }
-        Ok(())
-    }
-
     /// Called under the interaction lock by either delivery path. Authority is
     /// recorded once; a chat input can carry an already accepted decision, but
     /// can never synthesize one from a pending card.
@@ -3466,82 +3451,80 @@ impl SessionManager {
         }
     }
 
-    pub async fn dispatch_human_continuations(&self, providers: &ProviderMap) {
-        let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
-        for live in lives {
-            let Ok(_interaction) = live.interaction_lock.try_lock() else {
-                continue;
-            };
-            if *live.status.lock().await == SessionStatus::Closed {
-                continue;
-            }
-            let Some(decision) = live
-                .meta
-                .lock()
-                .await
-                .human_continuation
-                .clone()
-                .filter(|c| !c.completed)
-            else {
-                continue;
-            };
-            if live.execution.lock().await.is_some() || live.meta.lock().await.inbox.paused {
-                continue;
-            }
-            // The common input batch includes the accepted decision. Starting
-            // a separate continuation here would starve or repeatedly preempt it.
-            if live
-                .meta
-                .lock()
-                .await
-                .inbox
-                .entries
-                .iter()
-                .any(|entry| matches!(entry.state.as_str(), "queued" | "sent"))
+    /// Called by the same per-Session dispatcher as accepted chat inputs.
+    async fn deliver_human_continuation(&self, live: &Arc<Live>, providers: &ProviderMap) {
+        let Ok(_interaction) = live.interaction_lock.try_lock() else {
+            return;
+        };
+        if *live.status.lock().await == SessionStatus::Closed {
+            return;
+        }
+        let Some(decision) = live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .clone()
+            .filter(|c| !c.completed)
+        else {
+            return;
+        };
+        if live.execution.lock().await.is_some() || live.meta.lock().await.inbox.paused {
+            return;
+        }
+        // The common input batch includes the accepted decision. Starting
+        // a separate continuation here would starve or repeatedly preempt it.
+        if live
+            .meta
+            .lock()
+            .await
+            .inbox
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.state.as_str(), "queued" | "sent"))
+        {
+            return;
+        }
+        if live.continuation_dispatched.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let result: Result<()> = async {
+            if let Some((request_id, continuation)) = self.prepare_human_delivery(&live).await?
             {
-                continue;
+                self.continue_after_human_response(
+                    &live,
+                    providers,
+                    continuation,
+                    Some(request_id),
+                )
+                .await?;
             }
-            if live.continuation_dispatched.swap(true, Ordering::SeqCst) {
-                continue;
-            }
-            let result: Result<()> = async {
-                if let Some((request_id, continuation)) = self.prepare_human_delivery(&live).await?
-                {
-                    self.continue_after_human_response(
-                        &live,
-                        providers,
-                        continuation,
-                        Some(request_id),
-                    )
-                    .await?;
-                }
-                Ok(())
-            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            let id = live.meta.lock().await.id.clone();
+            tracing::error!(event = "human_continuation_failed", session = %id, request = %decision.request.id, %error);
+            // No hot retry loop, no lost decision. A restart retries the
+            // durable obligation; the failure remains visible meanwhile.
+            *live.status.lock().await = SessionStatus::Failed;
+            live.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Failed,
+            })
             .await;
-            if let Err(error) = result {
-                let id = live.meta.lock().await.id.clone();
-                tracing::error!(event = "human_continuation_failed", session = %id, request = %decision.request.id, %error);
-                // No hot retry loop, no lost decision. A restart retries the
-                // durable obligation; the failure remains visible meanwhile.
-                *live.status.lock().await = SessionStatus::Failed;
-                live.publish(SessionEvent::SessionStatusChanged {
-                    status: SessionStatus::Failed,
-                })
-                .await;
-                let event = SessionEvent::Item {
-                    turn_id: String::new(),
-                    item: TimelineItem::Error {
-                        id: format!("approval-resume-{}", decision.request.id),
-                        message: format!(
-                            "授权结果已保存，继续执行失败：{error:#}。请重启 daemon 后重试恢复。"
-                        ),
-                    },
-                };
-                apply(&live, &event).await;
-                live.publish(event).await;
-                if let Err(save_error) = flush_turn(&live, &self.store).await {
-                    tracing::error!(%save_error, "could not persist continuation failure");
-                }
+            let event = SessionEvent::Item {
+                turn_id: String::new(),
+                item: TimelineItem::Error {
+                    id: format!("approval-resume-{}", decision.request.id),
+                    message: format!(
+                        "授权结果已保存，继续执行失败：{error:#}。请重启 daemon 后重试恢复。"
+                    ),
+                },
+            };
+            apply(&live, &event).await;
+            live.publish(event).await;
+            if let Err(save_error) = flush_turn(&live, &self.store).await {
+                tracing::error!(%save_error, "could not persist continuation failure");
             }
         }
     }
@@ -4124,7 +4107,7 @@ impl Live {
             execution: Mutex::new(None),
             next_execution: AtomicU64::new(1),
             inbox_lock: Mutex::new(()),
-            inbox_dispatching: AtomicBool::new(false),
+            delivery_dispatching: AtomicBool::new(false),
             closing: AtomicBool::new(meta.execution_retired),
             retirement: Mutex::new(()),
             cleanup: crate::adapter::SessionTasks::default(),
@@ -5050,7 +5033,6 @@ async fn stop_agent_for_interaction(
     live.round_blocked().await;
     // Set Waiting before interrupt so a terminal event cannot complete the
     // business round while its Human interaction is being installed.
-    *live.pending_permissions.lock().await = vec![request.clone()];
     *live.status.lock().await = SessionStatus::Waiting;
     if let Some(execution) = live.execution.lock().await.as_mut() {
         execution.phase = ExecutionPhase::Stopping;
@@ -5060,6 +5042,10 @@ async fn stop_agent_for_interaction(
         close_current_agent(live).await?;
     }
     cancel_open_tools(live).await;
+    // The durable request above fences the retiring turn. Expose its card
+    // only after the Agent process is gone, including to snapshot readers.
+    *live.pending_permissions.lock().await = vec![request.clone()];
+    *live.status.lock().await = SessionStatus::Waiting;
     tracing::info!(event = "human_interaction_stopped", request = %request.id);
     Ok(())
 }
@@ -5656,7 +5642,7 @@ async fn pump_events(
         let consultation = owner
             .as_ref()
             .is_some_and(|execution| execution.consultation);
-        if !consultation && !live.pending_permissions.lock().await.is_empty() {
+        if !consultation && live.meta.lock().await.pending_permission.is_some() {
             event = match event {
                 SessionEvent::TurnCompleted { turn_id, .. }
                 | SessionEvent::TurnFailed { turn_id, .. } => {
@@ -8444,10 +8430,10 @@ mod tests {
             .await
             .unwrap();
         sessions
-            .dispatch_human_continuations(&ProviderMap::new())
+            .deliver_human_continuation(&live, &ProviderMap::new())
             .await;
         sessions
-            .dispatch_human_continuations(&ProviderMap::new())
+            .deliver_human_continuation(&live, &ProviderMap::new())
             .await;
         assert_eq!(prompts.lock().unwrap().len(), 1);
         let round = live.active_round.lock().await.clone().unwrap();
@@ -10041,6 +10027,7 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
+            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         let turn2 = sessions

@@ -1,0 +1,7 @@
+schema: genehub.workflow.catalog.v1
+workflows:
+  - id: direct-change
+    path: direct-change.yaml
+    match:
+      kind: business
+      complexity: simple

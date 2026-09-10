@@ -873,9 +873,7 @@ async function assertDelivery(
     "components",
     "executor",
   );
-  for (const file of ["manifest.json", "inbox.jsonl", "journal.jsonl", "outbox.jsonl"]) {
-    t.assertions.assert(existsSync(path.join(flowRoot, file)), `Executor Session omitted ${file}`);
-  }
+  t.assertions.assert(existsSync(path.join(flowRoot, "snapshots", `run-${completed.id}.json`)), "Executor Run snapshot is missing");
   return { flow, run: completed, sessions, spaces, implementationMs };
 }
 

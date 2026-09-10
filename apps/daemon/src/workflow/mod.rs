@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::state::Shared;
+use crate::bootstrap_pack::direct_workflow_digest as bootstrap_pack_digest;
 
 mod check;
 mod control;
@@ -49,8 +50,6 @@ const LEGACY_RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
 const RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v3";
 const PREVIOUS_RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v2";
 const FLOW_MESSAGE_SCHEMA: &str = "genehub.flow-message.v1";
-const FLOW_MANIFEST_SCHEMA: &str = "genehub.executor-flow.v1";
-const MAX_FLOW_LOG_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LEASE_RECORD_BYTES: u64 = 64 * 1024;
 const DEFAULT_LEASE_SECONDS: u64 = 60 * 60;
 const MAX_LEASE_SECONDS: u64 = 24 * 60 * 60;
@@ -61,7 +60,6 @@ const DEFINITION_SCHEMA: &str = "genehub.workflow.definition.v1";
 const ROLE_SCHEMA: &str = "genehub.workflow.role.v1";
 const CANDIDATE_SCHEMA: &str = "genehub.workflow.candidate.v1";
 const ACTIVATION_SCHEMA: &str = "genehub.workflow.activation.v1";
-const BOOTSTRAP_PACK_ID: &str = "genehub.workflow.bootstrap.direct.v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -624,61 +622,6 @@ pub fn root_session_guidance(cwd: &Path) -> Option<String> {
     ))
 }
 
-fn bootstrap_files(agent_id: &str, model_id: Option<&str>) -> Vec<(String, Vec<u8>)> {
-    let model = model_id
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!("modelId: {value}\n"))
-        .unwrap_or_default();
-    vec![
-        (
-            PROJECT_FILE.into(),
-            format!("schema: {PROJECT_SCHEMA}\ndefaultWorkflow: direct-change\n").into_bytes(),
-        ),
-        (
-            CATALOG_FILE.into(),
-            format!(
-                "schema: {CATALOG_SCHEMA}\nworkflows:\n  - id: direct-change\n    path: direct-change.yaml\n    match:\n      kind: business\n      complexity: simple\n"
-            )
-            .into_bytes(),
-        ),
-        (
-            "workflows/direct-change.yaml".into(),
-            format!(
-                "schema: {DEFINITION_SCHEMA}\nid: direct-change\nversion: 1\nentry: implement\nnodes:\n  - id: implement\n    uses: agent.session\n    with:\n      role: worker\n      workspace: .\n      writeLease:\n        targetRef: current\n        ttlSeconds: 3600\n    completion:\n      all:\n        - key: commit\n          verify: git.commitOnTarget\n        - key: checks\n          verify: value.nonEmpty\n    on:\n      completed: [publish]\n  - id: publish\n    uses: result.publish\n"
-            )
-            .into_bytes(),
-        ),
-        (
-            "roles/worker.yaml".into(),
-            format!(
-                "schema: {ROLE_SCHEMA}\nid: worker\nagentId: {agent_id}\n{model}userInteraction: readOnly\nprompt: prompts/direct-worker.md\n"
-            )
-            .into_bytes(),
-        ),
-        (
-            "prompts/direct-worker.md".into(),
-            "你是当前项目直达流程中的实现 Worker。只处理根会话交付的精确目标，不扩大范围，不替用户改变流程。\n\
-先核对仓库与目标 ref，再完成实现和项目要求的检查。只有真实提交已经位于租约目标 ref、检查已经实际执行后，\
-才可按系统合同上报证据；不得编造 commit、测试或检查结果。\n"
-                .as_bytes()
-                .to_vec(),
-        ),
-    ]
-}
-
-fn bootstrap_pack_digest(agent_id: &str, model_id: Option<&str>) -> String {
-    let mut digest = Sha256::new();
-    digest.update((BOOTSTRAP_PACK_ID.len() as u64).to_le_bytes());
-    digest.update(BOOTSTRAP_PACK_ID.as_bytes());
-    for (path, bytes) in bootstrap_files(agent_id, model_id) {
-        digest.update((path.len() as u64).to_le_bytes());
-        digest.update(path.as_bytes());
-        digest.update((bytes.len() as u64).to_le_bytes());
-        digest.update(bytes);
-    }
-    format!("sha256:{:x}", digest.finalize())
-}
-
 pub fn initialize_project(root: &Path, agent_id: &str, model_id: Option<&str>) -> Result<PathBuf> {
     let root = root
         .canonicalize()
@@ -693,8 +636,8 @@ pub fn initialize_project(root: &Path, agent_id: &str, model_id: Option<&str>) -
     ensure_directory_tree(&root, Path::new(".genethub/workflow/prompts"))?;
     ensure_source_visible(&home)?;
 
-    for (relative, body) in bootstrap_files(agent_id, model_id) {
-        write_new_or_same(&source.join(relative), &body)?;
+    for (relative, body) in crate::bootstrap_pack::direct_workflow_files(agent_id, model_id) {
+        crate::bootstrap_pack::write_asset(&root, &Path::new(SOURCE_DIR).join(relative), &body)?;
     }
     Ok(source)
 }
@@ -2825,50 +2768,6 @@ fn ensure_source_visible_with(
     Ok(())
 }
 
-fn write_new_or_same(path: &Path, body: &[u8]) -> Result<()> {
-    match crate::config::sensitive_metadata(path) {
-        Ok(metadata) => {
-            crate::config::reject_link_or_reparse(path, &metadata)?;
-            if !metadata.is_file() {
-                bail!("项目 Workflow 源不是普通文件：{}", path.display());
-            }
-            let existing = fs::read(path)?;
-            if existing == body {
-                return Ok(());
-            }
-            bail!("拒绝覆盖已有项目 Workflow 源：{}", path.display());
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("检查 Workflow 源：{}", path.display()))
-        }
-    }
-    let parent = path.parent().expect("template file has a parent");
-    fs::create_dir_all(parent)?;
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o644);
-    }
-    let mut file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = crate::config::sensitive_metadata(path)?;
-            crate::config::reject_link_or_reparse(path, &metadata)?;
-            if !metadata.is_file() || fs::read(path)? != body {
-                bail!("拒绝覆盖已有项目 Workflow 源：{}", path.display());
-            }
-            return Ok(());
-        }
-        Err(error) => return Err(error).with_context(|| format!("创建 {}", path.display())),
-    };
-    file.write_all(body)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 fn validate_id(value: &str, label: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 96
@@ -3069,17 +2968,7 @@ fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
     };
     let index = encode_private_record("Workflow Run index", &index, MAX_RUN_RECORD_BYTES)?;
     crate::config::save_private(&run_path(runtime, &run.id, true)?, &index)?;
-    // The immutable Run snapshot above is authoritative. These files are
-    // component-local projections for delivery, recovery and observability;
-    // a projection failure must not turn a committed state transition into a
-    // caller-visible failure. The next load/read can regenerate them.
-    if let Err(error) = sync_flow_projection(runtime, run) {
-        tracing::warn!(
-            run_id = %run.id,
-            %error,
-            "could not refresh Executor flow projection"
-        );
-    }
+    // session.flow reads flow_messages from this authoritative snapshot.
     Ok(())
 }
 
@@ -3158,22 +3047,6 @@ fn decode_run_record(bytes: &[u8]) -> Result<RunRecord> {
     }
 }
 
-fn flow_root(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
-    let Some(snapshot) = run.snapshot_relative.as_deref() else {
-        return Ok(None);
-    };
-    let snapshots = Path::new(snapshot)
-        .parent()
-        .ok_or_else(|| anyhow!("Executor Run snapshot has no snapshots directory"))?;
-    let root = snapshots
-        .parent()
-        .ok_or_else(|| anyhow!("Executor Run snapshot has no Component directory"))?;
-    let relative = root
-        .to_str()
-        .ok_or_else(|| anyhow!("Executor flow path is not UTF-8"))?;
-    Ok(Some(runtime.project_file(relative)?))
-}
-
 fn flow_message_id(run_id: &str, kind: &str, node_id: Option<&str>, revision: u64) -> String {
     let source = format!(
         "{run_id}\0{kind}\0{}\0{revision}",
@@ -3225,66 +3098,6 @@ fn flow_message(
         payload,
         created_at_ms: now_ms(),
     })
-}
-
-fn flow_manifest(run: &RunRecord) -> serde_json::Value {
-    serde_json::json!({
-        "schema": FLOW_MANIFEST_SCHEMA,
-        "projectWorkspaceId": run.workspace_id,
-        "pmSessionId": run.parent_session_id,
-        "executorWorkspaceId": run.executor_workspace_id,
-        "executorSessionId": run.executor_session_id,
-        "runId": run.id,
-        "workflowId": run.workflow_id,
-        "dcgDigest": run.dcg_digest,
-        "activationRevision": run.activation_revision,
-        "createdAtMs": run.created_at_ms,
-    })
-}
-
-fn encode_flow_log<'a>(
-    label: &str,
-    messages: impl Iterator<Item = &'a FlowMessage>,
-) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    for message in messages {
-        serde_json::to_writer(&mut body, message)?;
-        body.push(b'\n');
-        ensure_record_size(
-            label,
-            u64::try_from(body.len()).unwrap_or(u64::MAX),
-            MAX_FLOW_LOG_BYTES,
-        )?;
-    }
-    Ok(body)
-}
-
-fn sync_flow_projection(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
-    let Some(root) = flow_root(runtime, run)? else {
-        return Ok(());
-    };
-    let executor_session_id = run
-        .executor_session_id
-        .as_deref()
-        .ok_or_else(|| anyhow!("Executor flow projection has no Executor Session"))?;
-    let manifest = serde_json::to_vec_pretty(&flow_manifest(run))?;
-    let journal = encode_flow_log("Executor flow journal", run.flow_messages.iter())?;
-    let inbox = encode_flow_log(
-        "Executor flow inbox",
-        run.flow_messages
-            .iter()
-            .filter(|message| message.recipient_session_id == executor_session_id),
-    )?;
-    let outbox = encode_flow_log(
-        "Executor flow outbox",
-        run.flow_messages
-            .iter()
-            .filter(|message| message.sender_session_id == executor_session_id),
-    )?;
-    crate::config::save_private(&root.join("manifest.json"), &manifest)?;
-    crate::config::save_private(&root.join("inbox.jsonl"), &inbox)?;
-    crate::config::save_private(&root.join("outbox.jsonl"), &outbox)?;
-    crate::config::save_private(&root.join("journal.jsonl"), &journal)
 }
 
 fn record_flow_start(run: &mut RunRecord, sessions: &[(SessionSummary, String)]) -> Result<()> {
