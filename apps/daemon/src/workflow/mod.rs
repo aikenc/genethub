@@ -582,6 +582,53 @@ pub(crate) async fn workflow_notice_current(state: &Shared, session_id: &str, ru
         && !supervision::cancellation_requested(&run) && !supervision::cancellation_requested(&root))
 }
 
+/// Temporary project recovery authority, derived from unresolved Run facts.
+/// No binding is changed: a successful successor removes the exception.
+pub(crate) async fn exception_authority(
+    state: &Shared,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<bool> {
+    let session = state.sessions.summary(session_id).await?;
+    if session.managed.is_some()
+        || session.workspace_id != workspace_id
+        || state.sessions.consulting(session_id).await
+    {
+        return Ok(false);
+    }
+    let space = state.workspaces.agent_space(workspace_id).await?;
+    if !crate::agent_space::has_enabled_component(&space, crate::agent_space::COMPONENT_PM) {
+        return Ok(false);
+    }
+    let workspace = state.workspaces.get(workspace_id).await?;
+    let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
+    let runs = all_runs(&runtime)?;
+    let mut groups = BTreeMap::<&str, Vec<&RunRecord>>::new();
+    for run in &runs {
+        groups.entry(request::group_id(run)).or_default().push(run);
+    }
+    Ok(groups.values().any(|group| {
+        let Some(latest) = group.iter().max_by_key(|run| run.created_at_ms) else {
+            return false;
+        };
+        if matches!(latest.status.as_str(), "completed" | "cancelled") {
+            return false;
+        }
+        group.iter().any(|run| {
+            matches!(run.status.as_str(), "blocked" | "failed")
+                || (run.supervision.episode_activity_ms.is_some()
+                    && run.supervision.diagnostic_role.is_none())
+                || run
+                    .stop
+                    .as_ref()
+                    .is_some_and(|stop| stop.cleanup_error.is_some())
+                || run.supervision.diagnostics.iter().any(|diagnostic| {
+                    matches!(diagnostic.state.as_str(), "failed" | "limited" | "unknown")
+                })
+        })
+    }))
+}
+
 /// Factual project-owned workflow pointers for an ordinary Session.
 ///
 /// PM method, Pack choice, budgeting and review policy belong to Skills and
@@ -612,7 +659,7 @@ pub fn root_session_guidance(cwd: &Path) -> Option<String> {
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!(
-        "<genehub_workflow_facts>\n项目 Workflow 源位于 `{}`。{}daemon 只提供类型化机械动作；项目方法、团队取舍与业务流程以项目 Skill 和 DCG 文件为准。\n</genehub_workflow_facts>",
+        "<genehub_workflow_facts>\n项目 Workflow 源位于 `{}`。{}daemon 只提供类型化机械动作；项目方法、团队取舍与业务流程以项目 Skill 和 DCG 文件为准。项目异常期间，本项目 PM 具有工作流、专家与受管执行的处置权限，可在当前会话恢复其他 PM 的受阻 Run；正常权限与持久控制绑定不变。权限按当前框架事实逐次检查，历史 forbidden 不能代表现在仍无权限；可通过 workflow get/check 和对应动作重新核对。\n</genehub_workflow_facts>",
         source.display(),
         if entry_skills.is_empty() {
             String::new()
