@@ -263,6 +263,7 @@ export class Client {
   private fabricLink: FabricDataLink | null = null;
   private dialingTransport = false;
   private endpoint: DataEndpoint | null = null;
+  private endpointLifecycleCleanup: (() => void) | null = null;
   private epoch: symbol | null = null;
   private activeChannelCredential: HostedChannelCredential | undefined;
   private activeLocalServerProof: LocalServerProof | undefined;
@@ -411,9 +412,9 @@ export class Client {
     this.dialingTransport = false;
     this.epoch = null;
     this.closeRtc();
-    endpoint?.close("client closed");
-    socket?.close(1000, "client closed");
-    fabricLink?.close();
+    this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
+    if (endpoint) endpoint.close("client closed");
+    else { socket?.close(1000, "client closed"); fabricLink?.close(); }
     this.rejectQueued(new Error("the connection was closed"));
     this.setState("closed");
   }
@@ -736,11 +737,12 @@ export class Client {
   private dial(dial: ProtocolDial): void {
     // Sequence numbers are scoped to a daemon lifetime. A reconnect cannot
     // infer that lifetime from numeric ordering, even if the ranges overlap.
-    for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
+    const resuming = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
+    if (!resuming) for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
     this.activeChannelCredential = dial.channelCredential;
     this.activeLocalServerProof = dial.localServerProof;
     this.activeFabricRouteTicket = dial.fabricRouteTicket;
-    this.connectionEpoch += 1;
+    if (!resuming) this.connectionEpoch += 1;
     this.connectionAttemptId = diagnosticId("conn");
     this.carrier = dial.fabricRouteTicket ? "fabric" : "websocket";
     this.diagnostic("transport", {
@@ -767,10 +769,10 @@ export class Client {
       return;
     }
     if ("binaryType" in socket) socket.binaryType = "arraybuffer";
-    const epoch = Symbol("data-plane-peer");
+    const epoch = resuming && this.epoch ? this.epoch : Symbol("data-plane-peer");
     this.socket = socket;
     this.epoch = epoch;
-    this.endpoint = null;
+    if (!resuming) this.endpoint = null;
     this.connectTimer = setTimeout(
       () => this.dropSocket(socket, epoch),
       this.options.connectTimeoutMs ?? 5_000,
@@ -793,9 +795,10 @@ export class Client {
   }
 
   private dialFabric(dial: ProtocolDial): void {
-    const epoch = Symbol("fabric-data-peer");
+    const previous = this.endpoint?.state === "open" && this.endpoint.logicalId ? this.endpoint : null;
+    const epoch = previous && this.epoch ? this.epoch : Symbol("fabric-data-peer");
     this.epoch = epoch;
-    this.endpoint = null;
+    if (!previous) this.endpoint = null;
     this.dialingTransport = true;
     let credential: PeerCredential;
     try {
@@ -811,6 +814,7 @@ export class Client {
       return;
     }
     void openFabricDataLink({
+      ...(previous ? { endpoint: previous } : {}),
       url: dial.url,
       routeTicket: dial.fabricRouteTicket!,
       credential,
@@ -829,13 +833,10 @@ export class Client {
         }
         this.fabricLink = link;
         this.endpoint = link.endpoint;
-        link.endpoint.onClose((reason) => {
-          if (this.fabricLink !== link || this.epoch !== epoch) return;
-          this.report(reason);
-          this.droppedTransport(epoch, this.lastClose);
-        });
+        this.bindEndpoint(link.endpoint, epoch);
         try {
-          await this.activateEndpoint(link.endpoint, epoch);
+          if (previous) this.resumedEndpoint(link.endpoint, epoch);
+          else await this.activateEndpoint(link.endpoint, epoch);
         } catch (error) {
           if (!this.isCurrentEpoch(epoch)) return;
           if (fatalConnectionError(error)) this.failClosed(error.message);
@@ -882,6 +883,12 @@ export class Client {
     if (!this.isCurrent(socket, epoch)) return;
 
     const carrier = new WebSocketRecordCarrier(socket);
+    if (this.endpoint?.state === "open" && this.endpoint.logicalId) {
+      const endpoint = this.endpoint;
+      await endpoint.attach(carrier, handshake.key);
+      if (this.isCurrent(socket, epoch)) this.resumedEndpoint(endpoint, epoch);
+      return;
+    }
     const endpoint = new DataEndpoint({
       role: "client",
       carrier,
@@ -891,13 +898,31 @@ export class Client {
       onError: (error) => this.report(error),
     });
     this.endpoint = endpoint;
-    endpoint.onClose((reason) => {
-      if (this.epoch !== epoch) return;
-      this.report(reason);
-      this.dropped(socket, epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
-    });
+    this.bindEndpoint(endpoint, epoch);
 
+    await endpoint.ready();
     await this.activateEndpoint(endpoint, epoch);
+  }
+
+  private bindEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
+    this.endpointLifecycleCleanup?.();
+    const stopRecovering = endpoint.onRecovering(() => {
+      if (this.endpoint === endpoint && this.epoch === epoch) this.droppedTransport(epoch);
+    });
+    const stopClose = endpoint.onClose((reason) => {
+      if (this.endpoint !== endpoint || this.epoch !== epoch) return;
+      this.report(reason);
+      this.droppedTransport(epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
+    });
+    this.endpointLifecycleCleanup = () => { stopRecovering(); stopClose(); };
+  }
+
+  private resumedEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
+    if (this.endpoint !== endpoint || this.epoch !== epoch || this.stopped) return;
+    this.failure = null;
+    this.setState("ready");
+    this.scheduleHeartbeat();
+    this.flushQueue(endpoint, epoch);
   }
 
   private async activateEndpoint(endpoint: DataEndpoint, epoch: symbol): Promise<void> {
@@ -1301,12 +1326,20 @@ export class Client {
     this.clearConnectTimer();
     this.clearStableTimer();
     this.clearHeartbeat();
-    this.endpoint = null;
+    const resumable = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
+    const socket = this.socket, fabric = this.fabricLink?.fabric;
     this.socket = null;
     this.fabricLink = null;
-    this.epoch = null;
-    this.closeRtc();
-    if (this.rtcEnabled) this.setRtcState("standby");
+    socket?.close();
+    fabric?.close();
+    if (!resumable) {
+      this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
+      this.endpoint?.close("logical admission or session ended");
+      this.endpoint = null;
+      this.epoch = null;
+      this.closeRtc();
+      if (this.rtcEnabled) this.setRtcState("standby");
+    }
     this.setState("reconnecting");
     this.scheduleReconnect();
   }
@@ -1417,9 +1450,9 @@ export class Client {
     if (this.heartbeatInFlight) return;
     if (this.stopped || this.state !== "ready") return;
     const epoch = this.epoch;
-    // Liveness belongs to the connection carrying events. A healthy RTC link
-    // must not conceal a stalled baseline and leave every subscription frozen.
-    const endpoint = this.eventEndpoint();
+    // Each v4 channel now probes itself independently. This application RPC
+    // checks responsiveness on the normal request path.
+    const endpoint = this.requestEndpoint();
     if (!epoch || !endpoint) return;
     this.heartbeatInFlight = true;
     try {
@@ -1505,7 +1538,7 @@ export class Client {
   }
 
   private requestEndpoint(): DataEndpoint | null {
-    if (this.rtcLink?.endpoint.state === "open") return this.rtcLink.endpoint;
+    if (this.rtcLink?.endpoint.state === "open" && !this.rtcLink.endpoint.recovering) return this.rtcLink.endpoint;
     return this.eventEndpoint();
   }
 
@@ -1591,6 +1624,12 @@ export class Client {
       }
       this.rtcFailure_ = null;
       this.rtcLink = link;
+      link.endpoint.onRecovering(() => {
+        if (this.rtcLink !== link) return;
+        this.rtcLink = null;
+        link.close();
+        this.setRtcState("failed");
+      });
       link.endpoint.onClose((reason) => {
         if (this.rtcLink !== link) return;
         this.rtcLink = null;

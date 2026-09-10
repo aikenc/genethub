@@ -2,10 +2,14 @@
 
 2026-09-10，dev-net。关联 [v1 总体设计](logical-connection-v1-plan.md)。
 
-这是一项可单独验证的协议核心里程碑。`packages/proto/src/resume.rs` 是 Rust 合同与日志实现；
-`packages/workbench/src/dataplane/resume.ts` 是浏览器对应实现；两端读取同一独立字节向量。
-生产握手仍声明数据面 v3，现有端点、业务客户端、admission 和 daemon 清理路径未切换。
-本候选不是阶段 1/2 全部完成，也不宣称真实连接、流或 handler 已能续接。
+当前候选已将日志接入 TS DataEndpoint、Rust daemon 与原生 ClientEndpoint。数据面握手、AEAD
+record 和 RTC channel label 为 v4；业务 WebProtocol 仍为 v3。浏览器重拨完成新通道认证后，
+通过 daemon registry 接回同一个流表、订阅和 handler；不会在恢复成功后重新调用业务或重新订阅。
+邀请 bootstrap 不进入 registry，继续使用同一个流引擎的不可恢复物理生命周期。
+
+真实 WASM / 公共 Client 故障测试已在 shell 运行期间 terminate WebSocket，验证原 DataStream
+完整返回、进程只启动一次，且恢复后可继续 RPC。这是单类通道恢复候选；普通 RTC 与 baseline
+仍是不同逻辑连接，跨通道切换和受限服务连接池不在此处冒充已经完成。
 
 ## 已落入代码的边界
 
@@ -36,12 +40,12 @@ RTC 故障时，受限连接等待合规通道或到期；普通连接仍可回�
 尝试跳过序号，这会使累计确认无法成立。此处允许一个标签页按安全策略拥有多条逻辑连接；不增加同一
 逻辑连接多活动通道，不引入业务 method 选路。连接发现/初始 RTC admission 仍须阶段 3 集成验证。
 
-## 字节合同（候选，未启用）
+## 已接入的 v4 字节合同
 
 所有整数为大端，无 JSON number 搬运 u64。Rust 定义为源，TS 实现必须通过
 `packages/proto/fixtures/resume-payload.json` 与 `resume-control.json`。
 
-通用头：offset 0 为候选世代 `4`；offset 1 为 opcode；offset 2..3 必须为零；offset 4..11 为
+通用头：offset 0 为世代 `4`；offset 1 为 opcode；offset 2..3 必须为零；offset 4..11 为
 非零 epoch；offset 12..19 为一个 u64。opcode 分配如下：
 
 | opcode | offset 12 的值 | 后续 | 总长 |
@@ -85,9 +89,17 @@ CREATE/ATTACH/ACTIVATE/SYNC、PING/PONG、CLOSE/ERROR 的正式 opcode、transcr
 双方向日志/接收、Map/Vec、等待写入、handler、carrier、加密副本必须在 actor/registry 准入时统一
 核算。128 MiB 不能被描述成已经验证的进程内存上限；32 连接是数量上限，不保证都能协商 4 MiB。
 
-流隔离集成要求：v4 首轮把单流未消费 DATA 限制为连接 data 容量的至多 1/16（默认 256 KiB），
-取消 v3 对 Preview 的大 bulk window 特例。单慢流不能占满连接；多个慢流耗尽全局资源时允许明确
-背压。小 RPC 的实际调度延迟、4 MiB 日志对吞吐的影响仍须真实流引擎压测，当前日志专项不证明它们。
+当前连接 data 容量为 4 MiB，progress 为 64 KiB，单流窗口统一为 3 MiB。撤销了 Preview 的
+64 MiB 特例。相对原提案的 256 KiB / 1⁄16，3 MiB 是根据真实 100 Mbps、100/200 ms RTT
+验收作出的调整：小窗口使中继吞吐只有同链路 TCP 的约 22%；3 MiB 版本通过原有直连/中继
+吞吐门槛与传输期间的小 RPC 延迟门槛。单个慢流仍不能占满 4 MiB data 桶，progress 独立。
+多个慢流耗尽剩余 data 时允许明确背压；不承诺无限慢消费者仍有无限吞吐。
+
+发送调度每条流最多一个在途接纳，跨流可独立推进。TS 在 await 前取得调用方 buffer 的副本，
+串行同一流的 write/finish，限制连接待写 4 MiB / 256 次、单流待写 3 MiB，并限制 body 为单消费者。
+Rust 接收 DATA 的 lease 随队列项持有，消费或丢弃才归还；原生 streaming client 同样在 next_chunk
+时归还。FIN/RESET 的发送完成等待 ACK（包含已验证激活水位），handler 超时包含断线时间，RESET 会中止对应 handler。
+已结束的 handler 从 JoinSet 及时回收；fanout 失去位置会显式终止连接，避免静默停更。
 
 ## 单线程事务与错误处理要求
 
@@ -100,42 +112,40 @@ CREATE/ATTACH/ACTIVATE/SYNC、PING/PONG、CLOSE/ERROR 的正式 opcode、transcr
 - `next` 返回的旧 epoch 字节不得被 writer 再发到新路径。新路径只发送重新编码且重新加密的记录。
 - ready 仅在双方 SYNC 已完成、重放可以推进时公布；认证成功或调用 activate 本身不构成网络续接证据。
 
-## 验证与下一道门
+## Registry 与恢复认证
 
-`specialty.connectivity.resume-core` 经 testctl 执行同文件附近的协议不变量测试。TS 和 Rust 都对照
-独立的 literal binary corpus，覆盖超过 2^53 的 u64、长度/reserved 篡改、ACK 丢失、旧 epoch、
-日志已释放后的状态丢失、预算伪造、双向 DATA 满载、三类进展帧、重复释放、direct-only 和 TTL。
-100 次交替丢帧/丢确认轨迹核对累计输出与缓冲回收。不是 RTC 模拟器，也不是产品端到端验收。
+CREATE / CREATED / ATTACH / ATTACHED / ACTIVATE / ACTIVATED / SYNC / SYNCED / PING / PONG /
+CLOSE / ERROR 使用加密的 `[4,16,0,0] + UTF-8 JSON`，总长最多 8 KiB，u64 为规范十进制字符串。
+未知字段、阶段错序和非法计数拒绝。恢复证明使用独立 HMAC 域，绑定逻辑 ID、daemon incarnation、
+从原通道双 nonce transcript 单独派生的 binding，以及新的 activation attempt。
 
-进入完整阶段 2 仍需：
+registry 比较新通道的 principal、device、workspace id / handle、transport 与 carrier kind；只在
+同一 actor 中验证水位并提交新 epoch。服务端内存持有恢复 secret，不写磁盘、URL 或诊断。
+跨 incarnation / 已清理 ID 返回 SessionLost；业务流失败后不自动重发。新认证失败不会继承旧授权。
+恢复失败不延长最初 60 秒期限；本地撤权清理 active 和 suspended owner。原生 CLI 当前未持有可供
+重拨的 endpoint，因此明确 CREATE resumable=false，断线即回收，不留下无人可恢复的 60 秒占位。
 
-- 拆出已有 DataEndpoint/daemon serve 的逻辑状态，接入此日志，验证同一个 stream/handler 存活。
-- registry 的全局准入、定时清理、撤权和 incarnation；head、事件、PTY 的真实配额与 Desync。
-- 完成认证 transcript、激活丢回复的事务状态表和控制编码，再验证真实加密单通道断开/续接。
-- 端点消费归还租约、终帧 ACK 与 stream retirement、write/finish/Abort/deadline 的联合语义。
+硬限制为 32 个 registry 项、128 MiB 传输字节预算。每项当前保守预留 20 MiB：收发日志、接收租约、
+待写帧、至多 256 个生产者帧以及有界物理队列。因此默认字节门会将并存项进一步限制为 **6 个**；
+32 是数量上限，不是默认可同时承载 32 个满额连接。此预留不等同于 allocator/RSS 上限。
+更高并存量需要协商配额或动态预留，不能绕过预算创建。direct-only 仅准许 RTC 或真正的 loopback，
+不能由客户端把任意 WebSocket 声称为本机来绕过。
 
-进入阶段 3/发布前还须真实 Fabric/RTC/WS、host/guest 权限与内存验收，以及 Web/CLI/App/guest
-混合版本与成套回滚。任何这些门未过都保留现有 v3 入口和订阅修复，不声称“聊天已经无感续接”。
+## 验证与后续边界
 
-## 续接接入前的生命周期拆分（2026-09-10）
+`specialty.connectivity.resume-core` 执行 TS/Rust 的字节、计数、去重、lease、通道取消不变量，
+以及真实加密的同流重接、调用方 buffer 所有权、write/FIN 顺序与明确 v3 拒绝。
+`specialty.connectivity.logical-resume` 使用真实 WASM、公共 Client、WebSocket terminate 和独立
+进程/磁盘事实，证明单通道断线恢复。原有 connectivity 与 neteff 继续 required，失败 run 不被覆盖。
 
-`AuthenticatedChannel`（TS）与 `authenticated_channel`（Rust）已经由真实 v3 端点使用：
-物理通道独占密钥、加密 record 序号及读写；原来的流调度和业务 API 保持在端点。
-TS 对异步加解密的迟到完成执行关闭检查，且加解密待处理队列分别限制为 4 MiB / 1024 条。
-Rust writer 先等待 carrier 容量，再分配 nonce 并同步提交 record；取消等待不会产生序号空洞。
-
-服务端 `PeerRuntime` 集中持有流表、handler、订阅、fanout 和 writer 的任务生命周期。
-协议错误和 serve future 被取消都清理任务与设备连接计数。此处仍是 v3：carrier 断开仍终止 peer；
-以后只有 registry 保留整个逻辑 owner，才能在物理通道损坏时继续同一 handler。
-当前拆分未接入 v4 Journal，没有恢复凭证、ATTACH/SYNC，也没有新增线上协议开关。
+后续仍需跨 Fabric / RTC 的同逻辑连接 ACTIVATE、direct-only 单独连接池、激活应答丢失的完整
+故障矩阵，以及更多并存客户端的预算与完整 Web/CLI/App 成套发布验收。当前阶段不发布 Beta/Stable。
 
 ### dev-net 临时修复核对
 
-| 槽位提交/内容 | 当前处理 | 撤除条件 |
+| 槽位提交/内容 | 当前处理 | 依据 |
 | --- | --- | --- |
-| `7031f68`：订阅登记/补拉/取消固定在 events 所在 baseline | 暂保留；主干未覆盖，v3 的不同 peer 仍各有订阅表 | 同一逻辑 peer 的订阅和 events 已跨通道存活，真实 RTC 故障回归通过后删除 method 选路 |
-| `7031f68`：心跳检查 events endpoint | 暂保留；健康 RTC 仍可能掩盖 baseline 失活 | 通道探活和逻辑连接恢复完整接管后删除这条 v3 特例 |
-| `8385317`：RTC 订阅故障复现与回归 | 保留行为与故障证据 | v4 集成时改掉固定 Fabric 路径断言，继续验证输出、完成事件、取消和恢复 |
-
-此次核对没有发现已经被当前运行代码替代、可以单独还原的槽位产品补丁。不能仅因新核心已编译通过，
-就认为这两处保护已经失去作用；只按提交名执行 revert 会重新引入已确认的空白/停更故障。
+| `7031f68`：订阅登记/补拉/取消固定在 events baseline | 保留到跨通道接管 | 当前普通 RTC 和 baseline 尚不是同一逻辑 peer，不能提前删掉归属保护 |
+| `7031f68`：心跳固定检查 events endpoint | 已撤除该固定选择，恢复普通 request 路径 | v4 所有物理通道都有独立 5 秒探活 / 15 秒失活判定，RTC 不再掩盖 baseline 故障 |
+| v3 Preview 大 bulk window | 已由统一 3 MiB 流窗口替换 | 有界连接接收租约已接管，并通过原有吞吐/公平性验证 |
+| `8385317`：RTC 订阅复现和回归 | 保留 | 后续只替换固定 Fabric 路径断言，继续检验输出、完成、取消和恢复 |

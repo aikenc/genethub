@@ -21,7 +21,7 @@ pub use genehub_identity::DATA_PLANE_VERSION;
 /// Complete GeneHub record, before the WebSocket or DataChannel wrapper.
 pub const MAX_DATA_FRAME_BYTES: usize = 16 * 1024;
 pub const MAX_EXCHANGE_HEAD_BYTES: usize = 8 * 1024;
-pub const INITIAL_STREAM_WINDOW_BYTES: u32 = 256 * 1024;
+pub const INITIAL_STREAM_WINDOW_BYTES: u32 = 3 * 1024 * 1024;
 /// Finite exchange bodies share the Preview source cap so a WASM/H5 game
 /// asset can arrive in one exact response. Indefinite event streams omit a
 /// body length and remain bounded by stream credit instead.
@@ -86,9 +86,8 @@ pub struct PeerHello {
     /// Capability advertisement only.  Signaling remains encrypted data-plane
     /// traffic and no RTC address is ever placed in this hello.
     pub rtc_supported: bool,
-    /// Optional for wire compatibility. A missing field identifies a peer
-    /// from the first finite-bulk rollout, whose largest understood lease is
-    /// [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+    /// Optional bounded stream-window advertisement. v4 uses
+    /// [`INITIAL_STREAM_WINDOW_BYTES`] when omitted and no Preview exception.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_bulk_stream_window_bytes: Option<u32>,
@@ -101,9 +100,8 @@ pub struct PeerWelcome {
     pub version: u32,
     pub server_nonce: String,
     pub proof: String,
-    /// Optional for wire compatibility. A missing field is the v3 256 KiB
-    /// receive lease; new clients use the larger value only for allowlisted
-    /// finite bulk methods.
+    /// Optional bounded stream-window advertisement. A missing field uses
+    /// the v4 default; all stream methods share the same maximum.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub max_bulk_stream_window_bytes: Option<u32>,

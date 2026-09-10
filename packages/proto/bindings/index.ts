@@ -579,17 +579,15 @@ export type PeerHello = { version: number, clientName: string, auth: PeerAuth,
  */
 rtcSupported: boolean, 
 /**
- * Optional for wire compatibility. A missing field identifies a peer
- * from the first finite-bulk rollout, whose largest understood lease is
- * [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+ * Optional bounded stream-window advertisement. v4 uses
+ * [`INITIAL_STREAM_WINDOW_BYTES`] when omitted and no Preview exception.
  */
 maxBulkStreamWindowBytes?: number, };
 
 export type PeerWelcome = { version: number, serverNonce: string, proof: string, 
 /**
- * Optional for wire compatibility. A missing field is the v3 256 KiB
- * receive lease; new clients use the larger value only for allowlisted
- * finite bulk methods.
+ * Optional bounded stream-window advertisement. A missing field uses
+ * the v4 default; all stream methods share the same maximum.
  */
 maxBulkStreamWindowBytes?: number, };
 

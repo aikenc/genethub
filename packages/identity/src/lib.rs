@@ -29,7 +29,7 @@ pub const WEB_PROTOCOL_VERSION: u32 = 3;
 ///
 /// Separate from [`WEB_PROTOCOL_VERSION`] for the same reason: a change to how
 /// bytes are framed is not a change to what the two sides say to each other.
-pub const DATA_PLANE_VERSION: u32 = 3;
+pub const DATA_PLANE_VERSION: u32 = 4;
 
 /// Lean carrier method that returns `{ webProtocol }` before the first
 /// business RPC. It is not a `Request` variant.
@@ -50,7 +50,7 @@ mod tests {
         // reader who assumes one implies the other bumps one and breaks the
         // other side.
         assert_eq!(WEB_PROTOCOL_VERSION, 3);
-        assert_eq!(DATA_PLANE_VERSION, 3);
+        assert_eq!(DATA_PLANE_VERSION, 4);
     }
 
     #[test]

@@ -15,6 +15,7 @@ export type ChannelDirection = "client-to-daemon" | "daemon-to-client";
 
 export interface ChannelSessionKey {
   readonly context: string;
+  readonly binding: string;
   readonly encryptionKey: CryptoKey;
 }
 
@@ -68,6 +69,7 @@ export async function deriveChannelSessionKey(
   ]);
   return {
     context,
+    binding: await channelHmac(secret, "genehub-channel-key-v1", ["binding", context, clientNonce, serverNonce]),
     encryptionKey: await subtle().importKey(
       "raw",
       arrayBuffer(encryption),
@@ -168,4 +170,9 @@ function subtle(): SubtleCrypto {
     throw new Error("配对需要 HTTPS（或 localhost）才能使用浏览器的加密接口");
   }
   return available;
+}
+
+/** Recovery possession is tied to the fresh authenticated channel transcript. */
+export function logicalAttachProof(key: ChannelSessionKey, secret: string, id: string, incarnation: string, attempt: string): Promise<string> {
+  return channelHmac(secret, "genehub-logical-attach-v1", [id, incarnation, key.binding, attempt]);
 }

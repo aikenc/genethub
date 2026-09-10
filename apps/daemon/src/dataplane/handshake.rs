@@ -36,10 +36,10 @@ pub fn accept(
         anyhow::bail!("invalid peer client name");
     }
     let bulk_stream_window = match hello.max_bulk_stream_window_bytes {
-        None => genehub_proto::LEGACY_BULK_STREAM_WINDOW_BYTES,
+        None => genehub_proto::INITIAL_STREAM_WINDOW_BYTES,
         Some(value)
             if (genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-                ..=genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES)
+                ..=genehub_proto::INITIAL_STREAM_WINDOW_BYTES)
                 .contains(&value) =>
         {
             value
@@ -193,7 +193,7 @@ mod tests {
                 proof: channel_auth::client_proof(secret, "loopback", nonce),
             },
             rtc_supported: true,
-            max_bulk_stream_window_bytes: Some(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES),
+            max_bulk_stream_window_bytes: Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES),
         };
         let accepted = accept(
             &state,
@@ -213,7 +213,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             accepted.welcome.max_bulk_stream_window_bytes,
-            Some(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES)
+            Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES)
         );
     }
 
@@ -256,7 +256,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             accepted.welcome.max_bulk_stream_window_bytes,
-            Some(genehub_proto::LEGACY_BULK_STREAM_WINDOW_BYTES)
+            Some(genehub_proto::INITIAL_STREAM_WINDOW_BYTES)
         );
         assert_eq!(accepted.access.bootstrap_invite.as_deref(), Some(invite_id));
     }

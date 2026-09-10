@@ -90,7 +90,7 @@ function recordHeader(sequence: number): Uint8Array {
 
 function recordNonce(direction: ChannelDirection, sequence: number): Uint8Array {
   const nonce = new Uint8Array(12);
-  nonce.set(encoder.encode(direction === "client-to-daemon" ? "G3CD" : "G3DC"));
+  nonce.set(encoder.encode(direction === "client-to-daemon" ? "G4CD" : "G4DC"));
   new DataView(nonce.buffer).setBigUint64(4, BigInt(sequence), false);
   return nonce;
 }

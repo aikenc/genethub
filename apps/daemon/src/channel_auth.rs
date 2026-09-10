@@ -21,6 +21,32 @@ const DATA_RECORD_HEADER_BYTES: usize = 12;
 pub struct SessionKey {
     encryption_key: [u8; 32],
     context: String,
+    binding: String,
+}
+
+impl SessionKey {
+    pub(crate) fn principal(&self) -> &str {
+        &self.context
+    }
+
+    pub(crate) fn resume_proof(
+        &self,
+        secret: &str,
+        id: &str,
+        incarnation: &str,
+        attempt: &str,
+    ) -> String {
+        authenticate(
+            secret.as_bytes(),
+            b"genehub-logical-attach-v1",
+            &[
+                id.as_bytes(),
+                incarnation.as_bytes(),
+                self.binding.as_bytes(),
+                attempt.as_bytes(),
+            ],
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +105,16 @@ pub fn derive_key(
             KEY_DOMAIN,
             &[
                 b"encryption",
+                context.as_bytes(),
+                client_nonce.as_bytes(),
+                server_nonce.as_bytes(),
+            ],
+        ),
+        binding: authenticate(
+            secret.as_bytes(),
+            KEY_DOMAIN,
+            &[
+                b"binding",
                 context.as_bytes(),
                 client_nonce.as_bytes(),
                 server_nonce.as_bytes(),
@@ -154,8 +190,8 @@ pub fn open_data_record(
 fn data_record_nonce(direction: Direction, sequence: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
     nonce[..4].copy_from_slice(match direction {
-        Direction::ClientToDaemon => b"G3CD",
-        Direction::DaemonToClient => b"G3DC",
+        Direction::ClientToDaemon => b"G4CD",
+        Direction::DaemonToClient => b"G4DC",
     });
     nonce[4..].copy_from_slice(&sequence.to_be_bytes());
     nonce

@@ -1,6 +1,6 @@
 /** Business-neutral logical-stream frames carried inside one E2EE peer link. */
 
-export const DATA_PLANE_VERSION = 3;
+export const DATA_PLANE_VERSION = 4;
 export const DATA_FRAME_HEADER_BYTES = 16;
 export const SECURE_RECORD_HEADER_BYTES = 12;
 export const SECURE_RECORD_TAG_BYTES = 16;
@@ -9,8 +9,8 @@ export const MAX_DATA_PAYLOAD_BYTES =
   MAX_DATA_FRAME_BYTES -
   SECURE_RECORD_HEADER_BYTES -
   SECURE_RECORD_TAG_BYTES -
-  DATA_FRAME_HEADER_BYTES;
-export const INITIAL_STREAM_WINDOW_BYTES = 256 * 1024;
+  36;
+export const INITIAL_STREAM_WINDOW_BYTES = 3 * 1024 * 1024;
 export const MAX_FINITE_EXCHANGE_BODY_BYTES = 64 * 1024 * 1024;
 export const LEGACY_BULK_STREAM_WINDOW_BYTES = 8 * 1024 * 1024;
 export const MAX_BULK_STREAM_WINDOW_BYTES = MAX_FINITE_EXCHANGE_BODY_BYTES;

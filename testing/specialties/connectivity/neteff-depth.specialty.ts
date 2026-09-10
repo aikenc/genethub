@@ -114,8 +114,11 @@ function seedImage(t: CaseContext, name: string, sizeBytes: number): FileFixture
 }
 
 class PreviewProbe {
+  private readonly errors: string[] = [];
+  summary(): string { return this.errors.join("; "); }
   private readonly durationsMs: number[] = [];
   readonly onDiagnostic = (event: ClientDiagnosticEvent): void => {
+    if (event.kind === "error") { this.errors.push(`${event.detail.name}: ${event.detail.message}`); if (this.errors.length > 8) this.errors.shift(); }
     if (
       event.kind === "operation" &&
       event.detail.operation === "asset.preview" &&
@@ -281,7 +284,7 @@ async function connectLinkedDaemon(
       const next = daemonEndpoint(opened.daemon);
       return { ...next, url: proxy.urlFor(next.url) };
     },
-  });
+  }).catch((error: unknown) => { throw new Error(`${error instanceof Error ? error.message : String(error)}; ${name}; ${probe.summary()}`); });
 }
 
 async function measureRawOneLeg(
@@ -535,7 +538,7 @@ defineSpecialty(
           name: `neteff-relay-${point.clientRttMs}-${point.daemonRttMs}`,
           onDiagnostic: probe.onDiagnostic,
           redial: async () => ({ url: routedRendezvous, credential }),
-        });
+        }).catch((error: unknown) => { throw new Error(`${error instanceof Error ? error.message : String(error)}; ${label}; ${probe.summary()}`); });
         try {
           const preview = measurePreview(t, { client, opened, file, probe });
           if (point.clientRttMs === 100 && point.daemonRttMs === 100) {

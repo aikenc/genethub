@@ -73,7 +73,7 @@ export async function openRtcDataLink(
   finally {configStream.reset(DataReset.Cancelled);}
   const peer = new RTCPeerConnection({ iceServers });
   if (onDiagnostic) watchPeer(peer, diagnosticId ?? null, onDiagnostic);
-  const channel = peer.createDataChannel("genehub-data-v3", { ordered: true });
+  const channel = peer.createDataChannel("genehub-data-v4", { ordered: true });
   channel.binaryType = "arraybuffer";
   // Created before signaling so ICE can progress while the offer is in
   // flight. If negotiation fails before either promise is awaited, the
@@ -174,8 +174,6 @@ export async function openRtcDataLink(
       peer,
       close() {
         endpoint.close("RTC provider closed");
-        channel.close();
-        peer.close();
       },
     };
   } catch (error) {

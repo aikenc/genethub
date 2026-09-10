@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { defineSpecialty, BlockedError } from "../../framework/public.ts";
 
 // Native-intrinsic binary/u64/lease accounting plus the independent TS shape.
-// This executes language-local property checks, not Rust business journeys or a
-// test-only product bridge. It cannot qualify authenticated transport recovery.
+// This executes language-local properties and TS binding projection, not Rust
+// business journeys. The separate logical-resume specialty qualifies the real artifact.
 defineSpecialty({
   id: "specialty.connectivity.resume-core",
   title: "Resume journals and physical channels preserve custody under loss and cancellation",
@@ -19,8 +19,9 @@ defineSpecialty({
 }, async (t) => {
   const run = promisify(execFile);
   const commands: Array<[string, string[], string]> = [
-    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "src/dataplane/resume.test.ts", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts"], join(t.openRoot, "packages/workbench")],
+    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "src/dataplane/resume.test.ts", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts", "src/dataplane/handshake.test.ts"], join(t.openRoot, "packages/workbench")],
     [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"], join(t.openRoot, "packages/workbench")],
+    ["cargo", ["test", "-p", "genehub-proto", "--lib", "export_bindings"], t.openRoot],
     ["cargo", ["test", "-p", "genehub-proto", "--lib", "resume::tests", "--", "--nocapture"], t.openRoot],
     ["cargo", ["test", "-p", "genet-daemon", "--lib", "dataplane::authenticated_channel::tests", "--", "--nocapture"], t.openRoot],
   ];
@@ -36,5 +37,5 @@ defineSpecialty({
       throw new Error(`${executable} property suite failed: ${(e.stdout ?? "").slice(-6000)}\n${(e.stderr ?? e.message).slice(-3000)}`);
     }
   }
-  t.note("Journal and physical-channel invariants only: no registry, authenticated resume, RTC handoff or production v4 qualification.");
+  t.note("Core properties and encrypted TS stream recovery; real daemon recovery is qualified separately by logical-resume. No cross-carrier RTC handoff or release qualification.");
 });

@@ -6,7 +6,7 @@ pub const SECURE_RECORD_TAG_BYTES: usize = 16;
 pub const MAX_PAYLOAD_BYTES: usize = genehub_proto::MAX_DATA_FRAME_BYTES
     - SECURE_RECORD_HEADER_BYTES
     - SECURE_RECORD_TAG_BYTES
-    - HEADER_BYTES;
+    - genehub_proto::resume::HEADER_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

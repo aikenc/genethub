@@ -16,6 +16,8 @@ import {
   MAX_FINITE_EXCHANGE_BODY_BYTES,
   type DataFrame,
 } from "./frame";
+import { LogicalConnection } from "./logical-connection";
+import type { ResumeFrame } from "./resume";
 import { AuthenticatedChannel, type RecordCarrier } from "./authenticated-channel";
 export type { RecordCarrier } from "./authenticated-channel";
 
@@ -58,6 +60,7 @@ interface PendingFrame {
 interface DataChunk {
   bytes: Uint8Array;
   credit: number;
+  release(): void;
 }
 
 function deferred<T>() {
@@ -77,6 +80,11 @@ export class DataStream {
   private outboundCredit = INITIAL_STREAM_WINDOW_BYTES;
   private outboundWindow = INITIAL_STREAM_WINDOW_BYTES;
   private localFin = false;
+  private localFinAcked = false;
+  private bodyClaimed = false;
+  private writeTail: Promise<void> = Promise.resolve();
+  private pendingWriteBytes = 0;
+  private finishPromise: Promise<void> | null = null;
   private remoteFin = false;
   private closed = false;
   private sentBytes = 0;
@@ -124,7 +132,18 @@ export class DataStream {
   }
 
   /** Writes bytes with stream-local credit and automatic bounded slicing. */
-  async write(bytes: Uint8Array): Promise<void> {
+  write(bytes: Uint8Array): Promise<void> {
+    if (this.closed || this.localFin || this.finishPromise) return Promise.reject(new DataPlaneError("stream write side is closed"));
+    if (this.pendingWriteBytes + bytes.length > INITIAL_STREAM_WINDOW_BYTES) return Promise.reject(new DataPlaneError("pending per-stream write capacity exhausted"));
+    let release: () => void;
+    try { release = this.endpoint.reserveWrite(bytes.length); } catch (error) { return Promise.reject(error); }
+    this.pendingWriteBytes += bytes.length;
+    const owned = bytes.slice();
+    const written = this.writeTail.then(() => this.writeOwned(owned)).finally(() => { this.pendingWriteBytes -= owned.length; release(); });
+    this.writeTail = written.catch(() => {});
+    return written;
+  }
+  private async writeOwned(bytes: Uint8Array): Promise<void> {
     if (
       this.localFin ||
       this.closed ||
@@ -154,7 +173,12 @@ export class DataStream {
     }
   }
 
-  async finish(): Promise<void> {
+  finish(): Promise<void> {
+    if (this.finishPromise) return this.finishPromise;
+    this.finishPromise = this.writeTail.then(() => this.finishOwned());
+    return this.finishPromise;
+  }
+  private async finishOwned(): Promise<void> {
     if (this.localFin || this.closed) return;
     const expected = this.localBodyLength();
     if (
@@ -170,6 +194,7 @@ export class DataStream {
       value: 0,
       payload: EMPTY,
     });
+    this.localFinAcked = true;
     this.maybeComplete();
   }
 
@@ -187,6 +212,8 @@ export class DataStream {
     const stream = this;
     return {
       [Symbol.asyncIterator]() {
+        if (stream.bodyClaimed) throw new DataPlaneError("stream body already has a consumer");
+        stream.bodyClaimed = true;
         return {
           next: () => stream.nextChunk(),
           return: async () => {
@@ -218,7 +245,7 @@ export class DataStream {
   }
 
   /** @internal */
-  receiveData(sequence: number, bytes: Uint8Array): boolean {
+  receiveData(sequence: number, bytes: Uint8Array, release: () => void = () => {}): boolean {
     if (
       this.closed ||
       this.remoteFin ||
@@ -235,10 +262,11 @@ export class DataStream {
     this.totalReceivedBytes += bytes.byteLength;
     const waiter = this.chunkWaiters.shift();
     if (waiter) {
+      release();
       this.returnCredit(bytes.byteLength);
-      waiter.resolve({ done: false, value: bytes.slice() });
+      waiter.resolve({ done: false, value: bytes });
     } else {
-      this.chunks.push({ bytes: bytes.slice(), credit: bytes.byteLength });
+      this.chunks.push({ bytes, credit: bytes.byteLength, release });
     }
     return true;
   }
@@ -282,6 +310,8 @@ export class DataStream {
     this.closed = true;
     this.responseHead_.reject(error);
     for (const waiter of this.chunkWaiters.splice(0)) waiter.reject(error);
+    for (const chunk of this.chunks.splice(0)) chunk.release();
+    this.receivedBytes = 0;
     this.completion.reject(error);
     this.wakeCredit();
     this.endpoint.retire(this);
@@ -290,6 +320,7 @@ export class DataStream {
   private async nextChunk(): Promise<IteratorResult<Uint8Array>> {
     const chunk = this.chunks.shift();
     if (chunk) {
+      chunk.release();
       this.returnCredit(chunk.credit);
       return { done: false, value: chunk.bytes };
     }
@@ -301,6 +332,7 @@ export class DataStream {
 
   private returnCredit(value: number): void {
     this.receivedBytes -= value;
+    if (this.closed) return;
     void this.endpoint
       .sendFrame(this, {
         kind: DataKind.WindowUpdate,
@@ -321,7 +353,7 @@ export class DataStream {
   }
 
   private maybeComplete(): void {
-    if (!this.localFin || !this.remoteFin || this.closed) return;
+    if (!this.localFinAcked || !this.remoteFin || this.closed) return;
     this.closed = true;
     if (!this.responseHeadSettled && this.direction === "outgoing") {
       this.responseHead_.reject(new DataPlaneError("stream finished without a response head"));
@@ -356,10 +388,14 @@ export class DataEndpoint {
   private readonly incomingHandlers = new Set<(stream: DataStream) => void>();
   private readonly closeHandlers = new Set<(reason?: unknown) => void>();
   private queuedBytes = 0;
+  private writeBytes = 0;
+  private writeCount = 0;
   private sending = false;
+  private readonly transmitting = new Set<number>();
   private nextStreamId: number;
   private state_: DataEndpointState = "open";
-  private readonly channel: AuthenticatedChannel;
+  private readonly channel: AuthenticatedChannel | LogicalConnection;
+  private readonly recoveringHandlers = new Set<() => void>();
 
   readonly maxReceiveBytesPerStream: number;
   readonly maxBulkStreamWindowBytes: number;
@@ -383,18 +419,37 @@ export class DataEndpoint {
     ) {
       throw new RangeError("invalid finite-bulk receive lease");
     }
-    this.channel = new AuthenticatedChannel({
-      role: options.role,
-      carrier: options.carrier,
-      key: options.key,
-      onPlaintext: (plaintext) => {
-        const frame = decodeDataFrame(plaintext);
-        if (!frame) throw new DataPlaneError("peer sent a malformed logical frame");
-        this.dispatch(frame);
-      },
-      onClose: (reason) => this.closeFromCarrier(reason),
-      onError: (error) => this.report(error),
-    });
+    if (options.key.context.startsWith("invite:")) {
+      this.channel = new AuthenticatedChannel({
+        role: options.role, carrier: options.carrier, key: options.key,
+        onPlaintext: (plaintext) => {
+          const frame = decodeDataFrame(plaintext);
+          if (!frame) throw new DataPlaneError("malformed bootstrap frame");
+          this.dispatch(frame);
+        },
+        onClose: (reason) => this.closeFromCarrier(reason),
+        onError: (error) => this.report(error),
+      });
+    } else {
+      this.maxReceiveBytesPerStream = INITIAL_STREAM_WINDOW_BYTES;
+      this.maxBulkStreamWindowBytes = INITIAL_STREAM_WINDOW_BYTES;
+      this.channel = new LogicalConnection({
+        role: options.role, carrier: options.carrier, key: options.key,
+        onFrame: (frame, release) => this.dispatch(frame, release),
+        onClose: (reason) => this.closeFromCarrier(reason),
+        onRecovering: () => { for (const handler of this.recoveringHandlers) handler(); },
+      });
+    }
+  }
+
+  get logicalId(): string | null { return this.channel instanceof LogicalConnection ? this.channel.id : null; }
+  get recovering(): boolean { return this.channel instanceof LogicalConnection && this.channel.state === "recovering"; }
+  ready(): Promise<void> { return this.channel instanceof LogicalConnection ? this.channel.ready() : Promise.resolve(); }
+  onRecovering(handler: () => void): () => void { this.recoveringHandlers.add(handler); return () => this.recoveringHandlers.delete(handler); }
+  async attach(carrier: RecordCarrier, key: ChannelSessionKey): Promise<void> {
+    if (!(this.channel instanceof LogicalConnection)) throw new DataPlaneError("bootstrap cannot resume");
+    this.channel.attach(carrier, key);
+    await this.channel.ready();
   }
 
   get state(): DataEndpointState {
@@ -442,6 +497,13 @@ export class DataEndpoint {
     if (this.state_ === "closed") return;
     this.closeInternal(new DataPlaneError(reason));
     this.channel.close(reason);
+  }
+
+  /** @internal Caller-buffer custody is bounded before an asynchronous write. */
+  reserveWrite(bytes: number): () => void {
+    if (this.state_ !== "open" || this.writeCount >= 256 || this.writeBytes + bytes > 4 * 1024 * 1024) throw new DataPlaneError("pending stream write capacity exhausted");
+    this.writeCount++; this.writeBytes += bytes;
+    return () => { this.writeCount--; this.writeBytes -= bytes; };
   }
 
   /** @internal */
@@ -496,7 +558,12 @@ export class DataEndpoint {
     }
   }
 
-  private dispatch(frame: DataFrame): void {
+  private dispatch(frame: DataFrame, release: () => void = () => {}): void {
+    let retained = false;
+    try { this.dispatchFrame(frame, () => { retained = true; }, release); }
+    finally { if (!retained) release(); }
+  }
+  private dispatchFrame(frame: DataFrame, retain: () => void, release: () => void): void {
     if (frame.kind === DataKind.Ping) {
       void this.sendControl(DataKind.Pong, frame.value).catch((error: unknown) =>
         this.report(error),
@@ -568,7 +635,8 @@ export class DataEndpoint {
         );
         break;
       case DataKind.Data:
-        valid = stream.receiveData(frame.value, frame.payload);
+        valid = stream.receiveData(frame.value, frame.payload, release);
+        if (valid) retain();
         break;
       case DataKind.WindowUpdate:
         valid = frame.payload.byteLength === 0 && stream.addCredit(frame.value);
@@ -595,31 +663,27 @@ export class DataEndpoint {
   private pump(): void {
     if (this.sending || this.state_ !== "open") return;
     this.sending = true;
-    void (async () => {
-      try {
-        while (this.runnable.length > 0 && this.state_ === "open") {
-          const id = this.runnable.shift()!;
-          const queue = this.queues.get(id);
-          if (!queue || queue.length === 0) continue;
-          const pending = queue.shift()!;
-          this.queuedBytes -= pending.bytes;
-          if (queue.length > 0) this.runnable.push(id);
-          else this.queues.delete(id);
-          try {
-            await this.transmit(pending.frame);
-            pending.resolve();
-          } catch (error) {
-            pending.reject(error);
-            throw error;
-          }
-        }
-      } catch (error) {
-        this.protocolFailure(error);
-      } finally {
-        this.sending = false;
-        if (this.runnable.length > 0 && this.state_ === "open") this.pump();
+    try {
+      // One in-flight custody operation per stream. A stalled DATA stream or
+      // terminal ACK cannot block another stream's progress reserve.
+      for (let turns = this.runnable.length; turns > 0; turns--) {
+        const id = this.runnable.shift()!;
+        if (this.transmitting.has(id)) { this.runnable.push(id); continue; }
+        const queue = this.queues.get(id);
+        if (!queue?.length) continue;
+        const pending = queue.shift()!;
+        if (queue.length) this.runnable.push(id);
+        else this.queues.delete(id);
+        this.transmitting.add(id);
+        void this.transmit(pending.frame).then(pending.resolve, (error: unknown) => {
+          pending.reject(error); this.protocolFailure(error);
+        }).finally(() => {
+          if (this.state_ === "open") this.queuedBytes -= pending.bytes;
+          this.transmitting.delete(id);
+          this.pump();
+        });
       }
-    })();
+    } finally { this.sending = false; }
   }
 
   private sendControl(kind: typeof DataKind.Ping | typeof DataKind.Pong, value: number) {
@@ -634,6 +698,10 @@ export class DataEndpoint {
   /** Physical crypto/counters belong to the channel; stream scheduling stays here. */
   private transmit(frame: DataFrame): Promise<void> {
     if (this.state_ !== "open") return Promise.reject(new DataPlaneError("data endpoint is closed"));
+    if (this.channel instanceof LogicalConnection) {
+      if (frame.kind > 6) return Promise.reject(new DataPlaneError("channel controls do not use stream frames"));
+      return this.channel.send(frame as ResumeFrame);
+    }
     return this.channel.send(encodeDataFrame(frame));
   }
 
@@ -659,7 +727,7 @@ export class DataEndpoint {
   private closeFromCarrier(reason?: unknown): void {
     if (this.state_ === "closed") return;
     this.closeInternal(
-      new DataPlaneError("the peer carrier closed", { cause: reason }),
+      reason instanceof Error ? reason : new DataPlaneError("the peer carrier closed", { cause: reason }),
     );
   }
 

@@ -18,6 +18,7 @@ use crate::session::{SessionManager, Store, WorkspaceHomes};
 use crate::workspace::Workspaces;
 
 pub struct AppState {
+    pub(crate) logical_connections: Arc<crate::dataplane::logical_registry::Registry>,
     pub client_debug: crate::client_debug::Broker,
     pub paths: Paths,
     pub config: Arc<RwLock<Config>>,
@@ -161,6 +162,7 @@ impl AppState {
         let updates_dir = paths.updates_dir();
 
         let state = Arc::new(AppState {
+            logical_connections: Arc::new(crate::dataplane::logical_registry::Registry::default()),
             paths,
             config,
             machine,

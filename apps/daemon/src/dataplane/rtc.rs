@@ -30,7 +30,7 @@ pub(crate) const RTC_CHANNEL_QUEUE: usize = 16;
 pub(crate) const MAX_RTC_PEERS: usize = 32;
 /// The one channel a peer may open. Ordered, binary, and named for the wire
 /// version it carries.
-pub(crate) const DATA_CHANNEL_LABEL: &str = "genehub-data-v3";
+pub(crate) const DATA_CHANNEL_LABEL: &str = "genehub-data-v4";
 
 /// How long a peer has to prove itself once its channel is open. ICE and
 /// DataChannel setup are waited for separately, up to [`RTC_ADMISSION_LIFETIME`].

@@ -32,7 +32,7 @@ export class AuthenticatedChannel {
     key: ChannelSessionKey;
     onPlaintext(plaintext: Uint8Array): void;
     onClose(reason?: unknown): void;
-    onError?(error: unknown): void;
+    onError?(error: unknown, source: "send" | "receive"): void;
   }) {
     this.stopRecord = options.carrier.onRecord((record) => this.receive(record));
     this.stopClose = options.carrier.onClose((reason) => this.close(reason));
@@ -47,7 +47,7 @@ export class AuthenticatedChannel {
     // outstanding writes; crypto sequencing must never retain a mutable view.
     if (this.sendBytes + plaintext.byteLength > 4 * 1024 * 1024 || this.sendCount >= 1024) {
       const error = new Error("authenticated channel write queue is full");
-      this.fail(error);
+      this.fail(error, "send");
       return Promise.reject(error);
     }
     this.sendBytes += plaintext.byteLength;
@@ -63,7 +63,7 @@ export class AuthenticatedChannel {
       await this.options.carrier.send(record);
       this.requireOpen();
     });
-    this.transmitTail = sent.catch((error: unknown) => this.fail(error)).finally(() => {
+    this.transmitTail = sent.catch((error: unknown) => this.fail(error, "send")).finally(() => {
       this.sendBytes -= owned.byteLength;
       this.sendCount--;
     });
@@ -109,9 +109,9 @@ export class AuthenticatedChannel {
     });
   }
 
-  private fail(error: unknown): void {
+  private fail(error: unknown, source: "send" | "receive" = "receive"): void {
     if (this.closed) return;
-    try { this.options.onError?.(error); } catch { /* Observers do not own channel state. */ }
+    try { this.options.onError?.(error, source); } catch { /* Observers do not own channel state. */ }
     this.close(error);
   }
 

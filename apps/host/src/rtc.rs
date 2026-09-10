@@ -364,7 +364,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_offer_is_answered_and_the_agreed_channel_carries_both_ways() {
-        let label = "genehub-data-v3";
+        let label = "genehub-data-v4";
         let (peer, channel, offer) = offering_peer(label).await;
         let (arrived_tx, mut arrived) = mpsc::channel::<Vec<u8>>(4);
         channel.on_message(Box::new(move |message: DataChannelMessage| {
@@ -408,7 +408,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_channel_by_another_name_is_closed_unread() {
         let (peer, channel, offer) = offering_peer("something-else").await;
-        let session = RtcSession::accept(&offer, &config("genehub-data-v3"))
+        let session = RtcSession::accept(&offer, &config("genehub-data-v4"))
             .await
             .expect("the offer is answered");
         let answer = wait_for(|| session.shared.lock().unwrap().answer.clone()).await;

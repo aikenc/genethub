@@ -24,6 +24,7 @@ export async function openFabricDataLink(options: {
   url: string;
   routeTicket: string;
   credential: PeerCredential;
+  endpoint?: DataEndpoint;
   clientName?: string;
   rtcSupported: boolean;
   socketFactory?: (url: string) => FabricSocketLike;
@@ -53,7 +54,7 @@ export async function openFabricDataLink(options: {
     const welcome = JSON.parse(decoder.decode(welcomeBytes)) as PeerWelcome;
     const handshake = await prepared.complete(welcome);
     const carrier = new FabricRecordCarrier(fabric, stream);
-    const endpoint = new DataEndpoint({
+    const endpoint = options.endpoint ?? new DataEndpoint({
       role: "client",
       carrier,
       key: handshake.key,
@@ -61,12 +62,13 @@ export async function openFabricDataLink(options: {
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       ...(options.onError ? { onError: options.onError } : {}),
     });
+    if (options.endpoint) await endpoint.attach(carrier, handshake.key);
+    else await endpoint.ready();
     return {
       endpoint,
       fabric,
       close() {
         endpoint.close("Fabric peer link closed");
-        fabric.close();
       },
     };
   } catch (error) {

@@ -19,7 +19,7 @@ use crate::router::{self, SideEffect};
 use crate::state::Shared;
 
 const WRITER_COMMAND_QUEUE: usize = 1024;
-const STREAM_CHUNK_QUEUE: usize = 32;
+const STREAM_CHUNK_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
 const MAX_RPC_BODY_BYTES: usize = 3 * 1024 * 1024;
 const MAX_SUBSCRIPTIONS: usize = 64;
@@ -63,6 +63,7 @@ pub struct PeerAccess {
 struct IncomingChunk {
     bytes: Vec<u8>,
     _permit: OwnedSemaphorePermit,
+    _lease: Option<super::logical_connection::Lease>,
 }
 
 enum Incoming {
@@ -72,6 +73,7 @@ enum Incoming {
 }
 
 struct StreamState {
+    handler: Option<tokio::task::AbortHandle>,
     inbound: mpsc::Sender<Incoming>,
     inbound_budget: Arc<Semaphore>,
     remote_sequence: u32,
@@ -143,22 +145,39 @@ struct WriterCommand {
     stream_id: u32,
     frame: Frame,
     complete: oneshot::Sender<Result<()>>,
+    _budget: OwnedSemaphorePermit,
+    _count: OwnedSemaphorePermit,
 }
 
 #[derive(Clone)]
 struct Writer {
     commands: mpsc::Sender<WriterCommand>,
+    budget: Arc<Semaphore>,
+    progress: Arc<Semaphore>,
+    count: Arc<Semaphore>,
 }
 
 impl Writer {
     async fn send(&self, frame: Frame) -> Result<()> {
         let stream_id = frame.stream_id;
         let (complete, answer) = oneshot::channel();
+        let budget = if frame.kind as u8 >= 4 {
+            &self.progress
+        } else {
+            &self.budget
+        };
+        let budget = budget
+            .clone()
+            .acquire_many_owned((frame.payload.len() + 36) as u32)
+            .await?;
+        let count = self.count.clone().acquire_owned().await?;
         self.commands
             .send(WriterCommand {
                 stream_id,
                 frame,
                 complete,
+                _budget: budget,
+                _count: count,
             })
             .await
             .map_err(|_| anyhow!("the data-plane writer stopped"))?;
@@ -171,11 +190,22 @@ impl Writer {
     fn try_send(&self, frame: Frame) -> Result<()> {
         let stream_id = frame.stream_id;
         let (complete, _answer) = oneshot::channel();
+        let budget = if frame.kind as u8 >= 4 {
+            &self.progress
+        } else {
+            &self.budget
+        };
+        let budget = budget
+            .clone()
+            .try_acquire_many_owned((frame.payload.len() + 36) as u32)?;
+        let count = self.count.clone().try_acquire_owned()?;
         self.commands
             .try_send(WriterCommand {
                 stream_id,
                 frame,
                 complete,
+                _budget: budget,
+                _count: count,
             })
             .map_err(|_| anyhow!("the data-plane writer queue is full"))
     }
@@ -214,7 +244,12 @@ impl ServerStream {
     pub(crate) async fn next_input(&mut self) -> Result<StreamInput> {
         match self.inbound.recv().await {
             Some(Incoming::Chunk(chunk)) => {
-                let IncomingChunk { bytes, _permit } = chunk;
+                let IncomingChunk {
+                    bytes,
+                    _permit,
+                    _lease,
+                } = chunk;
+                drop(_lease);
                 let credit = bytes.len() as u32;
                 drop(_permit);
                 self.writer
@@ -435,6 +470,40 @@ impl Drop for PeerRuntime {
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
+pub(crate) enum PeerReader {
+    Physical(super::authenticated_channel::AuthenticatedReader),
+    Logical(super::logical_connection::Reader),
+}
+impl PeerReader {
+    pub(crate) async fn receive(
+        &mut self,
+    ) -> Result<Option<(Frame, Option<super::logical_connection::Lease>)>> {
+        match self {
+            Self::Physical(reader) => reader
+                .receive()
+                .await?
+                .map(|bytes| Frame::decode(&bytes).map(|frame| (frame, None)))
+                .transpose(),
+            Self::Logical(reader) => Ok(reader
+                .receive()
+                .await
+                .map(|received| (received.frame, Some(received.lease)))),
+        }
+    }
+}
+pub(crate) enum PeerWriter {
+    Physical(AuthenticatedWriter),
+    Logical(super::logical_connection::Writer),
+}
+impl PeerWriter {
+    pub(crate) async fn send(&mut self, frame: Frame) -> Result<()> {
+        match self {
+            Self::Physical(writer) => writer.send(&frame.encode()?).await,
+            Self::Logical(writer) => writer.send(frame).await,
+        }
+    }
+}
+
 pub async fn serve(
     state: Shared,
     key: SessionKey,
@@ -442,10 +511,58 @@ pub async fn serve(
     carrier: Carrier,
     carrier_kind: CarrierKind,
 ) -> Result<()> {
-    let (mut channel_reader, channel_writer) = authenticated_channel(key, carrier, Role::Server);
+    // Bootstrap is intentionally non-resumable and retains the same stream
+    // engine with physical lifetime; it cannot create registry credentials.
+    if access.bootstrap_invite.is_some() {
+        let (reader, writer) = authenticated_channel(key, carrier, Role::Server);
+        return serve_streams(
+            state,
+            access,
+            PeerReader::Physical(reader),
+            PeerWriter::Physical(writer),
+            carrier_kind,
+        )
+        .await;
+    }
+    super::logical_connection::serve(state, key, access, carrier, carrier_kind).await
+}
+pub(crate) async fn serve_logical(
+    state: Shared,
+    access: PeerAccess,
+    reader: super::logical_connection::Reader,
+    writer: super::logical_connection::Writer,
+    carrier_kind: CarrierKind,
+) -> Result<()> {
+    serve_streams(
+        state,
+        access,
+        PeerReader::Logical(reader),
+        PeerWriter::Logical(writer),
+        carrier_kind,
+    )
+    .await
+}
+async fn serve_streams(
+    state: Shared,
+    access: PeerAccess,
+    mut channel_reader: PeerReader,
+    channel_writer: PeerWriter,
+    carrier_kind: CarrierKind,
+) -> Result<()> {
+    let mut revocations = state.devices.subscribe_revocations();
+    if access
+        .device_id
+        .as_ref()
+        .is_some_and(|id| state.devices.grants(id).is_none())
+    {
+        anyhow::bail!("the peer device was revoked");
+    }
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
         commands: writer_tx,
+        budget: Arc::new(Semaphore::new(4 * 1024 * 1024)),
+        progress: Arc::new(Semaphore::new(64 * 1024)),
+        count: Arc::new(Semaphore::new(256)),
     };
     let (writer_failed_tx, mut writer_failed) = oneshot::channel();
     let writer_task = tokio::spawn(run_writer(channel_writer, writer_rx, writer_failed_tx));
@@ -507,7 +624,6 @@ pub async fn serve(
         })
     });
 
-    let mut revocations = state.devices.subscribe_revocations();
     if let Some(device_id) = &access.device_id {
         state.devices.mark_connected(device_id);
     }
@@ -523,16 +639,20 @@ pub async fn serve(
         loop {
             tokio::select! {
                 plaintext = channel_reader.receive() => {
-                    let Some(plaintext) = plaintext? else { break Ok(()); };
-                    let frame = Frame::decode(&plaintext)?;
+                    let Some((frame, lease)) = plaintext? else { break Ok(()); };
                     dispatch(
                         frame,
+                        lease,
                         &mut peer.streams,
                         &writer,
                         &commands_tx,
                         &peer.services,
                         &mut peer.handlers,
                     )?;
+                }
+                _ = peer.handlers.join_next(), if !peer.handlers.is_empty() => {}
+                _ = async { peer.fanout_task.as_mut().unwrap().await }, if peer.fanout_task.is_some() => {
+                    break Err(anyhow!("event fanout closed or lost its delivery position"));
                 }
                 command = commands.recv() => {
                     match command {
@@ -546,6 +666,7 @@ pub async fn serve(
                 revoked = revocations.recv(), if access.device_id.is_some() => {
                     match revoked {
                         Ok(id) if access.device_id.as_ref() == Some(&id) => {
+                            state.logical_connections.revoke_device(&id);
                             break Err(anyhow!("the peer device was revoked"));
                         }
                         Ok(_) => {}
@@ -575,6 +696,7 @@ pub async fn serve(
 
 fn dispatch(
     frame: Frame,
+    lease: Option<super::logical_connection::Lease>,
     streams: &mut HashMap<u32, StreamState>,
     writer: &Writer,
     commands: &mpsc::Sender<EndpointCommand>,
@@ -631,11 +753,7 @@ fn dispatch(
             })?;
             return Ok(());
         }
-        let maximum_window = if head.method == "asset.preview" {
-            genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES
-        } else {
-            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
-        };
+        let maximum_window = genehub_proto::INITIAL_STREAM_WINDOW_BYTES;
         if frame.value == 0 || frame.value > maximum_window {
             writer.try_send(Frame {
                 kind: Kind::Reset,
@@ -653,6 +771,7 @@ fn dispatch(
         streams.insert(
             frame.stream_id,
             StreamState {
+                handler: None,
                 inbound,
                 inbound_budget,
                 remote_sequence: 0,
@@ -678,11 +797,12 @@ fn dispatch(
             local_finished: false,
         };
         let services = services.clone();
-        handlers.spawn(async move {
+        let handler = handlers.spawn(async move {
             if let Err(error) = handle_stream(stream, services).await {
                 tracing::debug!(%error, "data-plane stream ended");
             }
         });
+        streams.get_mut(&frame.stream_id).unwrap().handler = Some(handler);
         return Ok(());
     }
 
@@ -727,6 +847,7 @@ fn dispatch(
                 .try_send(Incoming::Chunk(IncomingChunk {
                     bytes: frame.payload,
                     _permit: permit,
+                    _lease: lease,
                 }))
                 .map_err(|_| anyhow!("stream handler receive queue is full"))?;
             stream.remote_sequence = expected;
@@ -757,6 +878,9 @@ fn dispatch(
             if frame.value == 0 || !frame.payload.is_empty() {
                 anyhow::bail!("malformed stream RESET");
             }
+            if let Some(handler) = &stream.handler {
+                handler.abort();
+            }
             let _ = stream.inbound.try_send(Incoming::Reset(frame.value));
             streams.remove(&frame.stream_id);
         }
@@ -772,7 +896,23 @@ async fn handle_stream(mut stream: ServerStream, services: Arc<PeerServices>) ->
     let request_id = diagnostic_id(&stream.head.metadata);
     let exchange_method = stream.head.method.clone();
     let request_bytes = stream.head.body_length;
-    let result = serve_stream(&mut stream, &services).await;
+    let result = if let Some(timeout_ms) = stream.head.timeout_ms {
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(started)
+                + std::time::Duration::from_millis(timeout_ms as u64),
+            serve_stream(&mut stream, &services),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                stream.reset(RESET_TIMEOUT).await;
+                Err(anyhow!("stream deadline expired"))
+            }
+        }
+    } else {
+        serve_stream(&mut stream, &services).await
+    };
     if result.is_err() {
         stream.reset(RESET_PROTOCOL).await;
     }
@@ -1281,10 +1421,14 @@ fn request_workspace(request: &Request) -> Option<&str> {
 }
 
 async fn run_writer(
-    mut channel: AuthenticatedWriter,
+    mut channel: PeerWriter,
     mut commands: mpsc::Receiver<WriterCommand>,
     failed: oneshot::Sender<anyhow::Error>,
 ) {
+    if let PeerWriter::Logical(writer) = channel {
+        run_logical_writer(writer, commands, failed).await;
+        return;
+    }
     let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
     let mut runnable = VecDeque::<u32>::new();
     let outcome: Result<()> = async {
@@ -1313,8 +1457,7 @@ async fn run_writer(
             } else {
                 queues.remove(&stream_id);
             }
-            let plaintext = command.frame.encode()?;
-            match channel.send(&plaintext).await {
+            match channel.send(command.frame).await {
                 Ok(()) => {
                     let _ = command.complete.send(Ok(()));
                 }
@@ -1336,6 +1479,64 @@ async fn run_writer(
         }
     }
     let _ = failed.send(error);
+}
+
+async fn run_logical_writer(
+    writer: super::logical_connection::Writer,
+    mut commands: mpsc::Receiver<WriterCommand>,
+    failed: oneshot::Sender<anyhow::Error>,
+) {
+    let mut active = std::collections::HashSet::new();
+    let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
+    let mut tasks = JoinSet::new();
+    let outcome: Result<()> = async {
+        loop {
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some(command) = command else { return Ok(()); };
+                    queues.entry(command.stream_id).or_default().push_back(command);
+                }
+                done = tasks.join_next(), if !tasks.is_empty() => {
+                    let (id, result) = done.ok_or_else(|| anyhow!("logical writer stopped"))??;
+                    active.remove(&id);
+                    result?;
+                }
+            }
+            let runnable: Vec<_> = queues
+                .keys()
+                .filter(|id| !active.contains(*id))
+                .copied()
+                .collect();
+            for id in runnable {
+                let queue = queues.get_mut(&id).unwrap();
+                let Some(command) = queue.pop_front() else {
+                    continue;
+                };
+                if queue.is_empty() {
+                    queues.remove(&id);
+                }
+                active.insert(id);
+                let mut writer = writer.clone();
+                tasks.spawn(async move {
+                    let result = writer.send(command.frame).await;
+                    let report = result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e| anyhow!(e.to_string()));
+                    let _ = command.complete.send(report);
+                    drop(command._budget);
+                    drop(command._count);
+                    (id, result)
+                });
+            }
+        }
+    }
+    .await;
+    let _ = failed.send(
+        outcome
+            .err()
+            .unwrap_or_else(|| anyhow!("logical writer stopped")),
+    );
 }
 
 fn enqueue_writer(
@@ -1376,6 +1577,8 @@ mod tests {
                 payload: vec![1],
             },
             complete: oneshot::channel().0,
+            _budget: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
+            _count: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         };
         let mut queues = HashMap::new();
         let mut runnable = VecDeque::new();
