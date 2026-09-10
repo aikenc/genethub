@@ -10,16 +10,14 @@ use genehub_proto::{
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
+use super::authenticated_channel::{authenticated_channel, AuthenticatedWriter, Role};
+pub use super::authenticated_channel::{carrier_channels, Carrier};
 use crate::authz::{self, Capability, Principal, StreamMethod};
-use crate::channel_auth::{self, Direction, SessionKey};
+use crate::channel_auth::SessionKey;
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 use crate::router::{self, SideEffect};
 use crate::state::Shared;
 
-// At the largest legal record this queue is exactly one 256 KiB stream
-// window. Carrier readers therefore cannot acknowledge unbounded bytes merely
-// by moving them out of a socket callback while a business handler is slow.
-const CARRIER_QUEUE: usize = 16;
 const WRITER_COMMAND_QUEUE: usize = 1024;
 const STREAM_CHUNK_QUEUE: usize = 32;
 const EVENT_QUEUE: usize = 256;
@@ -48,19 +46,6 @@ impl CarrierKind {
             Self::Rtc => "rtc",
         }
     }
-}
-
-/// Message-preserving records supplied by local WebSocket, Relay Fabric, or
-/// WebRTC.  No business handler receives these channels directly.
-pub struct Carrier {
-    pub inbound: mpsc::Receiver<Vec<u8>>,
-    pub outbound: mpsc::Sender<Vec<u8>>,
-}
-
-pub fn carrier_channels() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>, Carrier) {
-    let (inbound_tx, inbound) = mpsc::channel(CARRIER_QUEUE);
-    let (outbound, outbound_rx) = mpsc::channel(CARRIER_QUEUE);
-    (inbound_tx, outbound_rx, Carrier { inbound, outbound })
 }
 
 #[derive(Clone)]
@@ -396,13 +381,57 @@ impl ServerStream {
     }
 }
 
+#[derive(Default)]
+struct SubscriptionTasks {
+    stopped: bool,
+    tasks: HashMap<String, tokio::task::JoinHandle<()>>,
+}
+
 pub(crate) struct PeerServices {
     pub(crate) state: Shared,
     pub(crate) access: PeerAccess,
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
-    subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    subscriptions: Mutex<SubscriptionTasks>,
     pub(crate) carrier_kind: CarrierKind,
+}
+
+/// Logical peer state has one lifetime owner, independent of record crypto.
+/// In v3 the serve task still ends at carrier loss. A future resumable actor must
+/// retain this owner across detach and destroy it only at logical termination.
+struct PeerRuntime {
+    streams: HashMap<u32, StreamState>,
+    handlers: JoinSet<()>,
+    services: Arc<PeerServices>,
+    writer_task: tokio::task::JoinHandle<()>,
+    fanout_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for PeerRuntime {
+    fn drop(&mut self) {
+        // This also runs when the serve future is cancelled (e.g. RTC teardown),
+        // not just on the normal/error return paths below. No await in teardown.
+        self.handlers.abort_all();
+        let mut subscriptions = self
+            .services
+            .subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // abort() does not preempt a handler currently being polled elsewhere.
+        // Fence its final registration under this same lock before draining.
+        subscriptions.stopped = true;
+        for (_, task) in subscriptions.tasks.drain() {
+            task.abort();
+        }
+        drop(subscriptions);
+        if let Some(task) = &self.fanout_task {
+            task.abort();
+        }
+        self.writer_task.abort();
+        if let Some(device_id) = &self.services.access.device_id {
+            self.services.state.devices.mark_disconnected(device_id);
+        }
+    }
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -410,20 +439,16 @@ pub async fn serve(
     state: Shared,
     key: SessionKey,
     access: PeerAccess,
-    mut carrier: Carrier,
+    carrier: Carrier,
     carrier_kind: CarrierKind,
 ) -> Result<()> {
+    let (mut channel_reader, channel_writer) = authenticated_channel(key, carrier, Role::Server);
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_COMMAND_QUEUE);
     let writer = Writer {
         commands: writer_tx,
     };
     let (writer_failed_tx, mut writer_failed) = oneshot::channel();
-    let writer_task = tokio::spawn(run_writer(
-        key.clone(),
-        carrier.outbound.clone(),
-        writer_rx,
-        writer_failed_tx,
-    ));
+    let writer_task = tokio::spawn(run_writer(channel_writer, writer_rx, writer_failed_tx));
     let (commands_tx, mut commands) = mpsc::channel::<EndpointCommand>(WRITER_COMMAND_QUEUE);
     let (event_sender, event_receiver) = mpsc::channel(EVENT_QUEUE);
     let services = Arc::new(PeerServices {
@@ -431,7 +456,7 @@ pub async fn serve(
         access: access.clone(),
         event_sender,
         event_receiver: tokio::sync::Mutex::new(Some(event_receiver)),
-        subscriptions: tokio::sync::Mutex::new(HashMap::new()),
+        subscriptions: Mutex::new(SubscriptionTasks::default()),
         carrier_kind,
     });
 
@@ -486,65 +511,55 @@ pub async fn serve(
     if let Some(device_id) = &access.device_id {
         state.devices.mark_connected(device_id);
     }
-    let mut streams = HashMap::<u32, StreamState>::new();
-    let mut handlers = JoinSet::new();
-    let mut receive_sequence = 0u64;
+    let mut peer = PeerRuntime {
+        streams: HashMap::new(),
+        handlers: JoinSet::new(),
+        services,
+        writer_task,
+        fanout_task,
+    };
 
-    let outcome = loop {
-        tokio::select! {
-            record = carrier.inbound.recv() => {
-                let Some(record) = record else { break Ok(()); };
-                receive_sequence = receive_sequence.checked_add(1)
-                    .ok_or_else(|| anyhow!("data record sequence exhausted"))?;
-                let plaintext = channel_auth::open_data_record(
-                    &key,
-                    Direction::ClientToDaemon,
-                    receive_sequence,
-                    &record,
-                )?;
-                let frame = Frame::decode(&plaintext)?;
-                dispatch(
-                    frame,
-                    &mut streams,
-                    &writer,
-                    &commands_tx,
-                    &services,
-                    &mut handlers,
-                )?;
-            }
-            command = commands.recv() => {
-                match command {
-                    Some(EndpointCommand::Retire(stream_id)) => { streams.remove(&stream_id); }
-                    None => break Ok(()),
+    let outcome = async {
+        loop {
+            tokio::select! {
+                plaintext = channel_reader.receive() => {
+                    let Some(plaintext) = plaintext? else { break Ok(()); };
+                    let frame = Frame::decode(&plaintext)?;
+                    dispatch(
+                        frame,
+                        &mut peer.streams,
+                        &writer,
+                        &commands_tx,
+                        &peer.services,
+                        &mut peer.handlers,
+                    )?;
                 }
-            }
-            failed = &mut writer_failed => {
-                break Err(failed.unwrap_or_else(|_| anyhow!("data-plane writer stopped")));
-            }
-            revoked = revocations.recv(), if access.device_id.is_some() => {
-                match revoked {
-                    Ok(id) if access.device_id.as_ref() == Some(&id) => {
-                        break Err(anyhow!("the peer device was revoked"));
+                command = commands.recv() => {
+                    match command {
+                        Some(EndpointCommand::Retire(stream_id)) => { peer.streams.remove(&stream_id); }
+                        None => break Ok(()),
                     }
-                    Ok(_) => {}
-                    Err(_) => break Err(anyhow!("device revocation state was lost")),
+                }
+                failed = &mut writer_failed => {
+                    break Err(failed.unwrap_or_else(|_| anyhow!("data-plane writer stopped")));
+                }
+                revoked = revocations.recv(), if access.device_id.is_some() => {
+                    match revoked {
+                        Ok(id) if access.device_id.as_ref() == Some(&id) => {
+                            break Err(anyhow!("the peer device was revoked"));
+                        }
+                        Ok(_) => {}
+                        Err(_) => break Err(anyhow!("device revocation state was lost")),
+                    }
                 }
             }
         }
-    };
+    }
+    .await;
 
-    handlers.abort_all();
-    while handlers.join_next().await.is_some() {}
-    for (_, task) in services.subscriptions.lock().await.drain() {
-        task.abort();
-    }
-    if let Some(task) = fanout_task {
-        task.abort();
-    }
-    writer_task.abort();
-    if let Some(device_id) = &access.device_id {
-        state.devices.mark_disconnected(device_id);
-    }
+    peer.handlers.abort_all();
+    while peer.handlers.join_next().await.is_some() {}
+    drop(peer);
     state.diagnostics.record(
         "stream",
         "data.endpoint",
@@ -1162,10 +1177,14 @@ pub(crate) async fn send_error(
 }
 
 async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
+    let mut subscriptions = services.subscriptions.lock().unwrap();
+    if subscriptions.stopped {
+        return;
+    }
     match effect {
         SideEffect::None => {}
         SideEffect::Unsubscribe { session_id } => {
-            if let Some(task) = services.subscriptions.lock().await.remove(&session_id) {
+            if let Some(task) = subscriptions.tasks.remove(&session_id) {
                 task.abort();
             }
         }
@@ -1173,12 +1192,12 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
             session_id,
             mut receiver,
         } => {
-            let mut subscriptions = services.subscriptions.lock().await;
-            if !subscriptions.contains_key(&session_id) && subscriptions.len() >= MAX_SUBSCRIPTIONS
+            if !subscriptions.tasks.contains_key(&session_id)
+                && subscriptions.tasks.len() >= MAX_SUBSCRIPTIONS
             {
                 return;
             }
-            if let Some(previous) = subscriptions.remove(&session_id) {
+            if let Some(previous) = subscriptions.tasks.remove(&session_id) {
                 previous.abort();
             }
             let events = services.event_sender.clone();
@@ -1198,7 +1217,7 @@ async fn apply_side_effect(services: &PeerServices, effect: SideEffect) {
                     }
                 }
             });
-            subscriptions.insert(session_id, task);
+            subscriptions.tasks.insert(session_id, task);
         }
     }
 }
@@ -1262,14 +1281,12 @@ fn request_workspace(request: &Request) -> Option<&str> {
 }
 
 async fn run_writer(
-    key: SessionKey,
-    outbound: mpsc::Sender<Vec<u8>>,
+    mut channel: AuthenticatedWriter,
     mut commands: mpsc::Receiver<WriterCommand>,
     failed: oneshot::Sender<anyhow::Error>,
 ) {
     let mut queues = HashMap::<u32, VecDeque<WriterCommand>>::new();
     let mut runnable = VecDeque::<u32>::new();
-    let mut sequence = 0u64;
     let outcome: Result<()> = async {
         loop {
             if runnable.is_empty() {
@@ -1296,17 +1313,8 @@ async fn run_writer(
             } else {
                 queues.remove(&stream_id);
             }
-            sequence = sequence
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("data record sequence exhausted"))?;
             let plaintext = command.frame.encode()?;
-            let record = channel_auth::seal_data_record(
-                &key,
-                Direction::DaemonToClient,
-                sequence,
-                &plaintext,
-            )?;
-            match outbound.send(record).await {
+            match channel.send(&plaintext).await {
                 Ok(()) => {
                     let _ = command.complete.send(Ok(()));
                 }

@@ -11,7 +11,8 @@ use genehub_proto::{ExchangeRequestHead, ExchangeResponseHead};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::channel_auth::{self, Direction, SessionKey};
+use super::authenticated_channel::{authenticated_channel, AuthenticatedWriter, Role};
+use crate::channel_auth::SessionKey;
 use crate::dataplane::endpoint::Carrier;
 use crate::dataplane::frame::{Frame, Kind, MAX_PAYLOAD_BYTES};
 
@@ -183,17 +184,12 @@ impl ClientEndpoint {
     }
 }
 
-async fn run(
-    key: SessionKey,
-    mut carrier: Carrier,
-    mut commands: mpsc::Receiver<Call>,
-) -> Result<()> {
+async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Call>) -> Result<()> {
     let mut streams = HashMap::<u32, Stream>::new();
     let mut next_stream_id = 1u32;
-    let mut send_sequence = 0u64;
-    let mut receive_sequence = 0u64;
+    let (mut reader, mut writer) = authenticated_channel(key, carrier, Role::Client);
 
-    let outcome = loop {
+    let outcome = async { loop {
         tokio::select! {
             command = commands.recv() => {
                 let Some(mut call) = command else { break Ok(()); };
@@ -228,9 +224,7 @@ async fn run(
                     target: call.target,
                 });
                 send(
-                    &key,
-                    &carrier.outbound,
-                    &mut send_sequence,
+                    &mut writer,
                     Frame {
                         kind: Kind::Open,
                         stream_id,
@@ -239,29 +233,17 @@ async fn run(
                     },
                 ).await?;
                 pump_request(
-                    &key,
-                    &carrier.outbound,
-                    &mut send_sequence,
+                    &mut writer,
                     stream_id,
                     streams.get_mut(&stream_id).expect("inserted stream"),
                 ).await?;
             }
-            record = carrier.inbound.recv() => {
-                let Some(record) = record else { break Ok(()); };
-                receive_sequence = receive_sequence.checked_add(1)
-                    .ok_or_else(|| anyhow!("secure record sequence exhausted"))?;
-                let plaintext = channel_auth::open_data_record(
-                    &key,
-                    Direction::DaemonToClient,
-                    receive_sequence,
-                    &record,
-                )?;
+            plaintext = reader.receive() => {
+                let Some(plaintext) = plaintext? else { break Ok(()); };
                 let frame = Frame::decode(&plaintext)?;
                 if frame.kind == Kind::Ping {
                     send(
-                        &key,
-                        &carrier.outbound,
-                        &mut send_sequence,
+                        &mut writer,
                         Frame { kind: Kind::Pong, ..frame },
                     ).await?;
                     continue;
@@ -272,9 +254,7 @@ async fn run(
                 let Some(mut stream) = streams.remove(&frame.stream_id) else {
                     if frame.kind != Kind::Reset {
                         send_reset(
-                            &key,
-                            &carrier.outbound,
-                            &mut send_sequence,
+                            &mut writer,
                             frame.stream_id,
                             crate::dataplane::endpoint::RESET_PROTOCOL,
                         ).await?;
@@ -298,9 +278,7 @@ async fn run(
                             length > stream.maximum_response_bytes as u64
                         }) {
                             send_reset(
-                                &key,
-                                &carrier.outbound,
-                                &mut send_sequence,
+                                &mut writer,
                                 frame.stream_id,
                                 crate::dataplane::endpoint::RESET_TOO_LARGE,
                             ).await?;
@@ -328,9 +306,7 @@ async fn run(
                         let credit = u32::try_from(frame.payload.len())?;
                         if !stream.target.push(&frame.payload) {
                             send_reset(
-                                &key,
-                                &carrier.outbound,
-                                &mut send_sequence,
+                                &mut writer,
                                 frame.stream_id,
                                 crate::dataplane::endpoint::RESET_CANCELLED,
                             ).await?;
@@ -340,9 +316,7 @@ async fn run(
                         }
                         if keep {
                             send(
-                                &key,
-                                &carrier.outbound,
-                                &mut send_sequence,
+                                &mut writer,
                                 Frame {
                                     kind: Kind::WindowUpdate,
                                     stream_id: frame.stream_id,
@@ -388,9 +362,7 @@ async fn run(
                 }
                 if keep {
                     pump_request(
-                        &key,
-                        &carrier.outbound,
-                        &mut send_sequence,
+                        &mut writer,
                         frame.stream_id,
                         &mut stream,
                     ).await?;
@@ -398,7 +370,7 @@ async fn run(
                 }
             }
         }
-    };
+    }}.await;
 
     let message = outcome
         .as_ref()
@@ -462,9 +434,7 @@ impl ResponseTarget {
 }
 
 async fn pump_request(
-    key: &SessionKey,
-    outbound: &mpsc::Sender<Vec<u8>>,
-    send_sequence: &mut u64,
+    writer: &mut AuthenticatedWriter,
     stream_id: u32,
     stream: &mut Stream,
 ) -> Result<()> {
@@ -477,9 +447,7 @@ async fn pump_request(
             .checked_add(1)
             .ok_or_else(|| anyhow!("stream sequence exhausted"))?;
         send(
-            key,
-            outbound,
-            send_sequence,
+            writer,
             Frame {
                 kind: Kind::Data,
                 stream_id,
@@ -495,9 +463,7 @@ async fn pump_request(
     if stream.request_offset == stream.request.len() && !stream.local_finished {
         stream.local_finished = true;
         send(
-            key,
-            outbound,
-            send_sequence,
+            writer,
             Frame {
                 kind: Kind::Fin,
                 stream_id,
@@ -510,17 +476,9 @@ async fn pump_request(
     Ok(())
 }
 
-async fn send_reset(
-    key: &SessionKey,
-    outbound: &mpsc::Sender<Vec<u8>>,
-    send_sequence: &mut u64,
-    stream_id: u32,
-    code: u32,
-) -> Result<()> {
+async fn send_reset(writer: &mut AuthenticatedWriter, stream_id: u32, code: u32) -> Result<()> {
     send(
-        key,
-        outbound,
-        send_sequence,
+        writer,
         Frame {
             kind: Kind::Reset,
             stream_id,
@@ -531,20 +489,6 @@ async fn send_reset(
     .await
 }
 
-async fn send(
-    key: &SessionKey,
-    outbound: &mpsc::Sender<Vec<u8>>,
-    send_sequence: &mut u64,
-    frame: Frame,
-) -> Result<()> {
-    *send_sequence = send_sequence
-        .checked_add(1)
-        .ok_or_else(|| anyhow!("secure record sequence exhausted"))?;
-    let plaintext = frame.encode()?;
-    let record =
-        channel_auth::seal_data_record(key, Direction::ClientToDaemon, *send_sequence, &plaintext)?;
-    outbound
-        .send(record)
-        .await
-        .map_err(|_| anyhow!("peer carrier closed"))
+async fn send(writer: &mut AuthenticatedWriter, frame: Frame) -> Result<()> {
+    writer.send(&frame.encode()?).await
 }

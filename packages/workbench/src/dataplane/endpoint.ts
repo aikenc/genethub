@@ -3,7 +3,7 @@ import type {
   ExchangeResponseHead,
 } from "@genehub/proto";
 
-import type { ChannelDirection, ChannelSessionKey } from "../devices/proof";
+import type { ChannelSessionKey } from "../devices/proof";
 import {
   DATA_PLANE_VERSION,
   DataKind,
@@ -16,14 +16,8 @@ import {
   MAX_FINITE_EXCHANGE_BODY_BYTES,
   type DataFrame,
 } from "./frame";
-import { openDataRecord, sealDataRecord } from "./secure";
-
-export interface RecordCarrier {
-  send(record: Uint8Array): void | Promise<void>;
-  onRecord(handler: (record: Uint8Array) => void): () => void;
-  onClose(handler: (reason?: unknown) => void): () => void;
-  close(reason?: string): void;
-}
+import { AuthenticatedChannel, type RecordCarrier } from "./authenticated-channel";
+export type { RecordCarrier } from "./authenticated-channel";
 
 export type DataEndpointRole = "client" | "server";
 export type DataEndpointState = "open" | "closed";
@@ -363,14 +357,9 @@ export class DataEndpoint {
   private readonly closeHandlers = new Set<(reason?: unknown) => void>();
   private queuedBytes = 0;
   private sending = false;
-  private sendSequence = 0;
-  private receiveSequence = 0;
   private nextStreamId: number;
   private state_: DataEndpointState = "open";
-  private receiveTail: Promise<void> = Promise.resolve();
-  private transmitTail: Promise<void> = Promise.resolve();
-  private readonly stopRecord: () => void;
-  private readonly stopClose: () => void;
+  private readonly channel: AuthenticatedChannel;
 
   readonly maxReceiveBytesPerStream: number;
   readonly maxBulkStreamWindowBytes: number;
@@ -394,8 +383,18 @@ export class DataEndpoint {
     ) {
       throw new RangeError("invalid finite-bulk receive lease");
     }
-    this.stopRecord = options.carrier.onRecord((record) => this.receive(record));
-    this.stopClose = options.carrier.onClose((reason) => this.closeFromCarrier(reason));
+    this.channel = new AuthenticatedChannel({
+      role: options.role,
+      carrier: options.carrier,
+      key: options.key,
+      onPlaintext: (plaintext) => {
+        const frame = decodeDataFrame(plaintext);
+        if (!frame) throw new DataPlaneError("peer sent a malformed logical frame");
+        this.dispatch(frame);
+      },
+      onClose: (reason) => this.closeFromCarrier(reason),
+      onError: (error) => this.report(error),
+    });
   }
 
   get state(): DataEndpointState {
@@ -442,7 +441,7 @@ export class DataEndpoint {
   close(reason = "endpoint closed"): void {
     if (this.state_ === "closed") return;
     this.closeInternal(new DataPlaneError(reason));
-    this.options.carrier.close(reason);
+    this.channel.close(reason);
   }
 
   /** @internal */
@@ -495,27 +494,6 @@ export class DataEndpoint {
       this.queuedBytes -= pending.bytes;
       pending.reject(new DataPlaneError("logical stream ended before its frame was sent"));
     }
-  }
-
-  private receive(record: Uint8Array): void {
-    if (this.state_ !== "open") return;
-    // Ordered carriers and a single promise chain make authentication order
-    // explicit without ever awaiting a business handler in this callback.
-    const sequence = this.receiveSequence + 1;
-    this.receiveSequence = sequence;
-    this.receiveTail = this.receiveTail
-      .then(async () => {
-        const plaintext = await openDataRecord(
-          this.options.key,
-          this.inboundDirection(),
-          sequence,
-          record,
-        );
-        const frame = decodeDataFrame(plaintext);
-        if (!frame) throw new DataPlaneError("peer sent a malformed logical frame");
-        this.dispatch(frame);
-      })
-      .catch((error: unknown) => this.protocolFailure(error));
   }
 
   private dispatch(frame: DataFrame): void {
@@ -653,23 +631,10 @@ export class DataEndpoint {
     await this.transmit(frame);
   }
 
-  /** One crypto/write chain also covers control frames emitted by the reader. */
+  /** Physical crypto/counters belong to the channel; stream scheduling stays here. */
   private transmit(frame: DataFrame): Promise<void> {
-    const sent = this.transmitTail.then(async () => {
-      if (this.state_ !== "open") throw new DataPlaneError("data endpoint is closed");
-      this.sendSequence += 1;
-      const record = await sealDataRecord(
-        this.options.key,
-        this.outboundDirection(),
-        this.sendSequence,
-        encodeDataFrame(frame),
-      );
-      await this.options.carrier.send(record);
-    });
-    // Keep the chain usable for teardown diagnostics; the returned promise
-    // still carries the original failure to the responsible stream/control.
-    this.transmitTail = sent.catch(() => {});
-    return sent;
+    if (this.state_ !== "open") return Promise.reject(new DataPlaneError("data endpoint is closed"));
+    return this.channel.send(encodeDataFrame(frame));
   }
 
   private allocateStreamId(): number {
@@ -683,14 +648,6 @@ export class DataEndpoint {
 
   private isRemoteStreamId(id: number): boolean {
     return id > 0 && id % 2 !== (this.options.role === "client" ? 1 : 0);
-  }
-
-  private outboundDirection(): ChannelDirection {
-    return this.options.role === "client" ? "client-to-daemon" : "daemon-to-client";
-  }
-
-  private inboundDirection(): ChannelDirection {
-    return this.options.role === "client" ? "daemon-to-client" : "client-to-daemon";
   }
 
   private removeRunnable(id: number): void {
@@ -714,13 +671,12 @@ export class DataEndpoint {
         ? error
         : new DataPlaneError("data-plane protocol failure", { cause: error }),
     );
-    this.options.carrier.close("data-plane protocol failure");
+    this.channel.close("data-plane protocol failure");
   }
 
   private closeInternal(error: unknown): void {
     this.state_ = "closed";
-    this.stopRecord();
-    this.stopClose();
+    this.channel.close(error);
     for (const stream of [...this.streams.values()]) stream.fail(error);
     for (const queue of this.queues.values()) {
       for (const pending of queue) pending.reject(error);

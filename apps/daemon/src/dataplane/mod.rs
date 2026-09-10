@@ -1,5 +1,6 @@
 //! Endpoint-neutral E2EE logical streams.
 
+mod authenticated_channel;
 pub mod client;
 pub mod endpoint;
 pub mod exec;

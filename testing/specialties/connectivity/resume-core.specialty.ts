@@ -8,9 +8,9 @@ import { defineSpecialty, BlockedError } from "../../framework/public.ts";
 // test-only product bridge. It cannot qualify authenticated transport recovery.
 defineSpecialty({
   id: "specialty.connectivity.resume-core",
-  title: "Both resume journals preserve ordered custody and progress under loss",
-  oracle: "Independent literal binary corpus, exact byte/lease accounting, at-most-once delivery and immutable path policy across 100 handoffs",
-  catches: ["u64 rounded through JS number", "ACK treated as consumption", "duplicate OPEN delivery", "data exhausts progress reserve", "direct-only falls back to Fabric", "failed attach extends TTL"],
+  title: "Resume journals and physical channels preserve custody under loss and cancellation",
+  oracle: "Independent literal binary corpus, exact byte/lease accounting, at-most-once delivery and immutable path policy across 100 handoffs; channel nonce ordering and closure fencing",
+  catches: ["u64 rounded through JS number", "ACK treated as consumption", "duplicate OPEN delivery", "data exhausts progress reserve", "direct-only falls back to Fabric", "failed attach extends TTL", "cancelled write consumes nonce", "closed channel delivers late crypto"],
   tags: ["core", "contract", "connectivity", "resume-core"],
   llm: { default: "none" },
   expectedDurationMs: 60000, timeoutMs: 300000,
@@ -19,9 +19,10 @@ defineSpecialty({
 }, async (t) => {
   const run = promisify(execFile);
   const commands: Array<[string, string[], string]> = [
-    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "src/dataplane/resume.test.ts"], join(t.openRoot, "packages/workbench")],
+    [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/vitest/vitest.mjs"), "run", "src/dataplane/resume.test.ts", "src/dataplane/authenticated-channel.test.ts", "src/dataplane/endpoint.test.ts"], join(t.openRoot, "packages/workbench")],
     [process.execPath, [join(t.openRoot, "packages/workbench/node_modules/typescript/bin/tsc"), "-p", "tsconfig.json", "--noEmit"], join(t.openRoot, "packages/workbench")],
     ["cargo", ["test", "-p", "genehub-proto", "--lib", "resume::tests", "--", "--nocapture"], t.openRoot],
+    ["cargo", ["test", "-p", "genet-daemon", "--lib", "dataplane::authenticated_channel::tests", "--", "--nocapture"], t.openRoot],
   ];
   for (const [executable, args, cwd] of commands) {
     try {
@@ -35,5 +36,5 @@ defineSpecialty({
       throw new Error(`${executable} property suite failed: ${(e.stdout ?? "").slice(-6000)}\n${(e.stderr ?? e.message).slice(-3000)}`);
     }
   }
-  t.note("Candidate journal only: no daemon registry, admission, encrypted channel, RTC or production v4 claim.");
+  t.note("Journal and physical-channel invariants only: no registry, authenticated resume, RTC handoff or production v4 qualification.");
 });

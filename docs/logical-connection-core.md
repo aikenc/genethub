@@ -116,3 +116,26 @@ CREATE/ATTACH/ACTIVATE/SYNC、PING/PONG、CLOSE/ERROR 的正式 opcode、transcr
 
 进入阶段 3/发布前还须真实 Fabric/RTC/WS、host/guest 权限与内存验收，以及 Web/CLI/App/guest
 混合版本与成套回滚。任何这些门未过都保留现有 v3 入口和订阅修复，不声称“聊天已经无感续接”。
+
+## 续接接入前的生命周期拆分（2026-09-10）
+
+`AuthenticatedChannel`（TS）与 `authenticated_channel`（Rust）已经由真实 v3 端点使用：
+物理通道独占密钥、加密 record 序号及读写；原来的流调度和业务 API 保持在端点。
+TS 对异步加解密的迟到完成执行关闭检查，且加解密待处理队列分别限制为 4 MiB / 1024 条。
+Rust writer 先等待 carrier 容量，再分配 nonce 并同步提交 record；取消等待不会产生序号空洞。
+
+服务端 `PeerRuntime` 集中持有流表、handler、订阅、fanout 和 writer 的任务生命周期。
+协议错误和 serve future 被取消都清理任务与设备连接计数。此处仍是 v3：carrier 断开仍终止 peer；
+以后只有 registry 保留整个逻辑 owner，才能在物理通道损坏时继续同一 handler。
+当前拆分未接入 v4 Journal，没有恢复凭证、ATTACH/SYNC，也没有新增线上协议开关。
+
+### dev-net 临时修复核对
+
+| 槽位提交/内容 | 当前处理 | 撤除条件 |
+| --- | --- | --- |
+| `7031f68`：订阅登记/补拉/取消固定在 events 所在 baseline | 暂保留；主干未覆盖，v3 的不同 peer 仍各有订阅表 | 同一逻辑 peer 的订阅和 events 已跨通道存活，真实 RTC 故障回归通过后删除 method 选路 |
+| `7031f68`：心跳检查 events endpoint | 暂保留；健康 RTC 仍可能掩盖 baseline 失活 | 通道探活和逻辑连接恢复完整接管后删除这条 v3 特例 |
+| `8385317`：RTC 订阅故障复现与回归 | 保留行为与故障证据 | v4 集成时改掉固定 Fabric 路径断言，继续验证输出、完成事件、取消和恢复 |
+
+此次核对没有发现已经被当前运行代码替代、可以单独还原的槽位产品补丁。不能仅因新核心已编译通过，
+就认为这两处保护已经失去作用；只按提交名执行 revert 会重新引入已确认的空白/停更故障。
