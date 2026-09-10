@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { acquirePublishLock, ensureStampedWorktree } from "./lib/publish-tree.mjs";
+import { betaLiveBaseline, readPublishedApps } from "./lib/live-baseline.mjs";
 
 const open = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const argumentsMap = parseArguments(process.argv.slice(2));
@@ -28,6 +29,8 @@ main().catch((error) => {
 async function main() {
   const started = Date.now();
   const commit = argumentsMap.has("commit");
+  const plan = argumentsMap.has("plan");
+  if (plan && commit) throw new Error("--plan and --commit are mutually exclusive");
   const channel = argumentsMap.get("channel") ?? "beta";
   if (!new Set(["stable", "beta", "dev"]).has(channel)) {
     throw new Error("--channel must be stable, beta or dev");
@@ -39,7 +42,8 @@ async function main() {
   );
   const { publishComponent } = await import(pathToFileURL(join(cloud, "publisher/component.mjs")).href);
   const { readCurrent } = await import(pathToFileURL(join(cloud, "publisher/store.mjs")).href);
-  const { nextLiveVersion } = await import(pathToFileURL(join(cloud, "publisher/version.mjs")).href);
+  const versions = await import(pathToFileURL(join(cloud, "publisher/version.mjs")).href);
+  const { nextLiveVersion } = versions;
   if (commit) {
     requireClean(open, "genethub");
     requireClean(cloud, "genethub-cloud");
@@ -50,9 +54,9 @@ async function main() {
     lockfileSha256: lockDigest(cloud),
   };
 
-  const temporary = mkdtempSync(join(tmpdir(), "genehub-guest-publish-"));
+  let temporary = commit || plan ? null : mkdtempSync(join(tmpdir(), "genehub-guest-publish-"));
   const stage = argumentsMap.has("stage") ? requiredAbsolute("--stage", argumentsMap.get("stage")) : undefined;
-  const root = commit
+  const root = commit || plan
     ? (argumentsMap.has("store")
       ? requiredAbsolute("--store", argumentsMap.get("store"))
       : stage
@@ -81,11 +85,30 @@ async function main() {
   let version = argumentsMap.has("version")
     ? required("--version", argumentsMap.get("version"))
     : undefined;
-  if (commit && !version) {
+  let baseline;
+  if ((commit || plan) && channel === "beta") {
+    const current = await readCurrent(root, "component", channel);
+    if (current && (current.value.schema !== "genehub.release-manifest.v2" || current.value.channel !== channel)) {
+      throw new Error("component baseline has an invalid schema or channel");
+    }
+    const stable = await readCurrent(root, "component", "stable");
+    ({ version, baseline } = betaLiveBaseline({
+      current: current?.value.releaseVersion ?? null,
+      stableLatest: stable?.value.releaseVersion,
+      metadata: await readPublishedApps(argumentsMap.get("app-releases")),
+      explicitVersion: version,
+      versions,
+    }));
+  } else if ((commit || plan) && !version) {
     const current = await readCurrent(root, "component", channel);
     if (!current) throw new Error("the channel's first component release requires an explicit version");
     version = nextLiveVersion(current.value.releaseVersion);
   }
+  if (plan) {
+    process.stdout.write(`${JSON.stringify({ mode: "plan", channel, version, baseline, source }, null, 2)}\n`);
+    return;
+  }
+  temporary ??= mkdtempSync(join(tmpdir(), "genehub-guest-publish-"));
   // One Live publish per channel at a time; held for the whole run because
   // the version computation and the store write race just as badly as the
   // worktree does.
@@ -164,7 +187,7 @@ async function main() {
     }
     const totalMs = Date.now() - started;
     process.stdout.write(`${JSON.stringify(
-      { mode: commit ? "committed" : "candidate", store: root, ...result,
+      { mode: commit ? "committed" : "candidate", store: root, ...result, ...(baseline ? { baseline } : {}),
         ...(webReceipt ? { web: webReceipt } : {}),
         timing: { buildMs: builtMs, totalMs } },
       null, 2,
@@ -302,7 +325,7 @@ function requiredHash(label, value) {
 
 function parseArguments(values) {
   const result = new Map();
-  const flags = new Set(["commit", "discard-candidate", "help", "web"]);
+  const flags = new Set(["commit", "plan", "discard-candidate", "help", "web"]);
   for (let index = 0; index < values.length; index += 1) {
     const raw = values[index];
     if (!raw.startsWith("--")) throw new Error(`unexpected argument ${raw}`);
@@ -324,12 +347,19 @@ function usage() {
   node scripts/publish-component.mjs --commit --channel beta --store DIR --public-origin URL
   node scripts/publish-component.mjs --commit --channel beta --stage DIR --public-origin URL --web
 
+  node scripts/publish-component.mjs --plan --channel beta --stage DIR [--app-releases FILE]
+
 The default uses an isolated candidate store. --commit additionally requires a
 clean paired checkout. --stage implies --store DIR/artifacts, and --web (commit
 only) additionally builds the console and activates the same Product Version
 on the website half, so one command lands a whole Live Release in seconds.
 Every channel signs with the one self-contained development root; the stable
 line reintroduces external keys when it graduates.
+Beta uses the newer of the published App and component identities as its base.
+App metadata comes from GitHub REST releases, or a reviewed response array in
+--app-releases FILE. Failed tags, drafts and incomplete assets are excluded.
+Lookup failure stops publication. --plan reads identities without building or
+activating anything; save its baseline and source fields in the release record.
 ABI hash changes additionally require --app-release VERSION --app-abi-hash HASH.
 Guest compile uses Cargo profile iterate unless --channel stable (then release).
 Cargo itself resolves as --cargo PATH, then $CARGO, then ~/.cargo/bin/cargo,

@@ -16,6 +16,8 @@ name: Release
 # Live chain's job (`scripts/publish-component.mjs --commit --web`), which
 # needs no runner, no secrets and no queue — and is where the Live digit
 # moves between App Releases.
+# A newer App already includes its new WASM; the next Beta Live plans from
+# published App metadata without reactivating old Live (docs/beta-live-baseline.md).
 on:
   push:
     tags: ["v*"]
@@ -706,4 +708,3 @@ jobs:
           name: ${{ needs.channel.outputs.name }}
           prerelease: true
           files: dist/*
-
