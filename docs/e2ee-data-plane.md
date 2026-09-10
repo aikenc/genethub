@@ -104,6 +104,10 @@ RTC 中断时，在途 RTC stream 明确失败；之后的新请求走仍然存�
 重新认证后由协议客户端重建订阅、采用快照并补齐事件；RTC 单独关闭不改变基线订阅。
 这不是任意字节流的无缝迁移，也不自动重试可能已执行的业务写请求。
 
+回归入口：`specialty.connectivity.rtc-subscription-ownership` 使用真实 Chromium、Relay 与
+WASM daemon，核对 RTC 普通 RPC、基线订阅、会话完成、重新打开、RTC 关闭后的事件接收，
+以及基线暂停时的失活检测和恢复。仅模型服务使用 mock。
+
 ## 3. Peer authentication 与 E2EE
 
 每个 peer carrier 的第一条应用消息是有界 JSON `PeerHello`：
