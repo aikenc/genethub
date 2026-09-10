@@ -58,6 +58,11 @@ defineSpecialty(
       });
       if (before?.type !== "workspace")
         throw new Error("open did not return saved workspace");
+      t.assertions.assert(before.data.id === opened.workspaceId, "saved file split its owning directory identity");
+      const plainRoot = path.join(opened.workspaceRoot, "plain-folder");
+      mkdirSync(plainRoot);
+      const plain = await opened.client.call({ type: "workspace.open", payload: { root: plainRoot } });
+      if (plain?.type !== "workspace") throw new Error("plain folder did not open");
       const id = before.data.id,
         firstHandle = before.data.folders[0]!.rootHandle;
       const observer = await t.flows.main.pairDevice(
@@ -121,7 +126,7 @@ defineSpecialty(
       for (const [workspaceId, root] of [
         [id, path.join(second, "missing")],
         [id, path.join(second, "proof.txt")],
-        [opened.workspaceId, second],
+        [plain.data.id, second],
       ]) {
         let rejected = false;
         try {
@@ -134,7 +139,7 @@ defineSpecialty(
         }
         t.assertions.assert(
           rejected && readFileSync(source, "utf8") === committed,
-          "invalid addition accepted or altered source",
+          `invalid addition ${root} to ${workspaceId} accepted or altered source`,
         );
       }
       const restart = runGenet(
