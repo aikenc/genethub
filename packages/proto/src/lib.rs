@@ -11,6 +11,7 @@ pub mod data;
 pub mod domain;
 pub mod event;
 pub mod rpc;
+pub mod resume;
 pub mod speech;
 pub mod timeline;
 
