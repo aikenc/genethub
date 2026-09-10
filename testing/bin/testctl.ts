@@ -195,7 +195,7 @@ async function main(): Promise<number> {
       if (unit.meta.runner === "playwright") {
         env.TESTCTL_BROWSER_ARTIFACTS = path.join(
           store.dir,
-          "failures",
+          unit.meta.retention ? "reports" : "failures",
           unit.caseId.replace(/[^\w.-]+/g, "_"),
         );
       }
@@ -203,10 +203,10 @@ async function main(): Promise<number> {
         completeUnit(scheduler, unit, result.durationMs);
         results.push(result);
         store.writeResult(result);
-        if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS) {
+        if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS && !unit.meta.retention) {
           rmSync(env.TESTCTL_BROWSER_ARTIFACTS, { recursive: true, force: true });
         }
-        if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
+        if (result.status === "failed" || result.status === "blocked" || result.status === "unstable" || result.status === "interrupted") {
           store.writeFailure(
             result,
             [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
@@ -434,4 +434,4 @@ async function main(): Promise<number> {
   return 2;
 }
 
-void main().then((code) => process.exit(code));
+void main().then((code) => { process.exitCode = code; });

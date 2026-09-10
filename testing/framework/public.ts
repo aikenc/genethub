@@ -90,3 +90,5 @@ export { runNodeUnit } from "../infrastructure/public.ts";
 export { registerControlledAgent, readControlledAgentJournal } from "../infrastructure/public.ts";
 
 export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "../infrastructure/public.ts";
+
+export { selectForGate } from "../policies/gates.ts";

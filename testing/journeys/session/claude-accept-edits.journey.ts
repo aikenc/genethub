@@ -11,6 +11,7 @@ defineJourney(
     catches: ["acceptEdits still blocks on permission", "Write never reaches disk"],
     tags: ["third-party", "session", "claude"],
     llm: { default: "real" },
+    resources: { pool: "real-llm" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],

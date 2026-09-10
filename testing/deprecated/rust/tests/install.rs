@@ -49,6 +49,17 @@ fn installing_puts_binaries_and_logic_where_the_path_can_find_them() {
             .expect("run the installed binary");
         assert!(ran.status.success(), "{binary} did not run");
     }
+    let component = bin.join("genehub_guest.wasm");
+    assert!(component.is_file(), "the guest component was not installed");
+    let mode = fs::metadata(&component)
+        .expect("stat guest component")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o111,
+        0,
+        "the guest component must not be executable"
+    );
 
     assert_eq!(fs::read(bin.join("genehub_guest.wasm")).expect("installed component"), b"fixture-component");
     let said = String::from_utf8_lossy(&output.stdout);
@@ -117,9 +128,10 @@ fn unsafe_download_bases_are_refused_before_fetching() {
 
 #[test]
 fn every_fetch_is_pinned_to_https_including_redirects() {
-    let script =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh"))
-            .expect("read install.sh");
+    let script = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh"),
+    )
+    .expect("read install.sh");
     assert!(script.contains("--proto '=https'"));
     assert!(script.contains("--proto-redir '=https'"));
     assert!(script.contains("--max-redirs 5"));
@@ -177,7 +189,7 @@ fn a_release_with_no_checksums_is_refused_rather_than_trusted() {
     );
 }
 
-/// The tree's own copy of the script claims channel `dev`, and a dev install
+/// The tree's own copy of the script claims channel `local`, and a local install
 /// has no artifacts to fetch. Without an explicit download base the script
 /// must refuse — the alternative is someone piping the source checkout into
 /// `sh` and quietly installing the stable line over their source checkout.
@@ -189,7 +201,7 @@ fn the_tree_installer_refuses_without_an_explicit_download_base() {
         .env_remove("GENEHUB_LOCAL_DOWNLOAD_BASE")
         .output()
         .expect("run install.sh");
-    assert!(!output.status.success(), "a dev install.sh ran anyway");
+    assert!(!output.status.success(), "a local install.sh ran anyway");
     assert!(
         stderr(&output).contains("channel: local"),
         "the refusal does not say why:\n{}",
