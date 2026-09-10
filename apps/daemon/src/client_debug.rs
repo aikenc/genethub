@@ -82,7 +82,9 @@ impl Broker {
         // Presence is not consent: a suspended phone keeps its original grant.
         clients.retain(|_, e| {
             now.duration_since(e.seen) < Duration::from_secs(90)
-                || e.grant.as_ref().is_some_and(|g| g.approved && g.until > now)
+                || e.grant
+                    .as_ref()
+                    .is_some_and(|g| g.approved && g.until > now)
         });
         for e in clients.values_mut() {
             if e.grant.as_ref().is_some_and(|g| g.until <= now) {
@@ -288,10 +290,13 @@ impl Broker {
                             ));
                         }
                         let id = key();
-                        e.queue.push_back((ClientDebugCommand {
-                            command_id: id.clone(),
-                            action,
-                        }, now + Duration::from_secs(30)));
+                        e.queue.push_back((
+                            ClientDebugCommand {
+                                command_id: id.clone(),
+                                action,
+                            },
+                            now + Duration::from_secs(30),
+                        ));
                         V::Queued { command_id: id }
                     }
                     R::Complete {
