@@ -258,7 +258,7 @@ interface FabricAuthority {
 
 ### 6.6 baseline 与 direct
 
-桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后新 logical streams 优先 direct；RTC 失败或关闭时 baseline 继续承载同一 v3 协议。没有 TURN、live migration 或自动重放。
+桌面壳内的 WebView 直连同一台机器的 `127.0.0.1`。跨设备先走 `/fabric/v2` baseline，再通过加密的 `rtc.negotiate` Exchange 协商 ordered reliable DataChannel。RTC connected 后普通新 logical streams 优先 direct；事件流及其订阅登记、补拉、取消始终属于同一个 baseline endpoint，心跳也检查该 endpoint。RTC 失败或关闭时 baseline 继续承载同一 v3 协议。已有流不迁移，业务写请求不自动重放；基线重连后的订阅恢复由协议客户端管理。
 
 完整数据面见 [e2ee-data-plane.md](./e2ee-data-plane.md)，Relay 实现边界见 [relay.md](./relay.md)。
 

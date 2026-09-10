@@ -35,7 +35,7 @@ MVP 的取舍如下：
 - 每个 browser/CLI peer 在一条 outer stream 内完成一次 E2EE handshake；随后在同一个 `DataEndpoint` 内复用多条业务 logical stream。
 - 每个客户端主动请求占一条独立 logical stream。一个大 Preview 不会占住其他请求的应用层队列。
 - 事件使用一条长期 logical stream；现有 PTY 控制仍是独立 RPC exchange，PTY 输出由事件流推送。MVP 不再为了形式统一增加一套公开 Duplex API。
-- 远端连接且双方支持时，在 E2EE 基线连接内协商一条 WebRTC DataChannel。RTC 连通后，新请求优先走 RTC；失败时基线 WebSocket 仍是正式 transport，不是旧协议 fallback。
+- 远端连接且双方支持时，在 E2EE 基线连接内协商一条 WebRTC DataChannel。RTC 连通后，普通新请求优先走 RTC；订阅生命周期与事件流保持在基线连接。失败时基线连接仍是正式 transport，不是旧协议 fallback。
 - 不实现多 WebSocket lane、TURN、trickle ICE、live stream migration、自动重放、业务 priority 或通用重试框架。
 
 这套设计的稳定抽象是 `DataEndpoint` 与 `Exchange`，不是 WebSocket。未来增加 WebRTC 配置、TURN 或其他 carrier 时，不改变业务 method 和 Preview 契约。
@@ -90,6 +90,20 @@ MVP 资源边界：daemon 同时最多保留 32 个 RTC peer，入口队列 16 �
 
 RTC 中断时，在途 RTC stream 明确失败；之后的新请求走仍然存活的基线 endpoint。系统不会把可能已执行的请求自动重放到另一 carrier。
 
+### 2.4 连接归属与订阅恢复
+
+每个 `DataEndpoint` 是一条独立的已认证连接，不是可随意替换的同一个 socket。已打开的
+`DataStream` 固定属于创建它的 endpoint；RTC 就绪只改变普通新请求的路径选择。
+
+协议客户端在基线 endpoint 上打开 `events`，因此 `subscribe`、断档补拉所用的 `subscribe`、
+以及 `unsubscribe` 都必须绑定这个 endpoint。daemon 的订阅表属于 peer，不能在 RTC peer 上
+登记订阅，却从 Fabric peer 等待事件。即时调用与连接恢复后排队请求使用同一条归属规则；聊天
+组件仅调用公共 Client，不判断 RTC/Fabric。
+
+心跳探测事件流所在的基线 endpoint，避免健康的 RTC 掩盖基线失活。基线失败走现有重连流程，
+重新认证后由协议客户端重建订阅、采用快照并补齐事件；RTC 单独关闭不改变基线订阅。
+这不是任意字节流的无缝迁移，也不自动重试可能已执行的业务写请求。
+
 ## 3. Peer authentication 与 E2EE
 
 每个 peer carrier 的第一条应用消息是有界 JSON `PeerHello`：
@@ -129,7 +143,7 @@ MVP 是**每个已认证 peer link 一套 E2EE session**，不是每条 logical 
 - 可见：来源 IP、endpoint/route/outer stream opaque handle、连接时间、record 长度与时序。
 - Fabric OPEN 中的 `PeerHello` 作为 opaque bytes 被原样转发；Relay 实现不解析它，但恶意 Relay 技术上可查看其中的版本、通用 client label、RTC capability、credential/capability 选择器、nonce 和 proof。
 - 不可见：握手 secret、派生 session key、内部 logical stream id、Exchange method/metadata/status、workspace/path/MIME、Preview bytes、RPC、事件和 PTY 内容。
-- RTC connected 后，业务 record 不经过 Relay；Relay 仍参与基线 signaling 和 presence。
+- RTC connected 后，选择 direct 的业务 record 不经过 Relay；基线事件流、订阅管理和 signaling 仍经过 Relay，内容继续端到端加密。
 
 托管 Control 负责发行或兑换 hosted secret，因此当前系统不是“平台整体零知识”，也没有前向保密。Relay 与 Control 仍是分离信任边界；只攻破 Relay 不能解密或伪造业务 record。
 

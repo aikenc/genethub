@@ -469,7 +469,7 @@ export class Client {
         started: false,
       };
       this.pendingBytes += bytes;
-      const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
+      const endpoint = this.state === "ready" ? this.rpcEndpoint(request) : null;
       const epoch = endpoint ? this.epoch : null;
       if (endpoint && epoch) {
         this.startCall(pending, endpoint, epoch);
@@ -1266,7 +1266,7 @@ export class Client {
 
   private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
     for (const pending of this.queue.splice(0)) {
-      const endpoint = this.requestEndpoint();
+      const endpoint = this.rpcEndpoint(pending.request);
       if (endpoint) this.startCall(pending, endpoint, epoch);
       else {
         this.release(pending);
@@ -1417,7 +1417,9 @@ export class Client {
     if (this.heartbeatInFlight) return;
     if (this.stopped || this.state !== "ready") return;
     const epoch = this.epoch;
-    const endpoint = this.requestEndpoint();
+    // Liveness belongs to the connection carrying events. A healthy RTC link
+    // must not conceal a stalled baseline and leave every subscription frozen.
+    const endpoint = this.eventEndpoint();
     if (!epoch || !endpoint) return;
     this.heartbeatInFlight = true;
     try {
@@ -1504,7 +1506,28 @@ export class Client {
 
   private requestEndpoint(): DataEndpoint | null {
     if (this.rtcLink?.endpoint.state === "open") return this.rtcLink.endpoint;
+    return this.eventEndpoint();
+  }
+
+  /** The baseline peer owns runEvents and all connection-scoped subscriptions. */
+  private eventEndpoint(): DataEndpoint | null {
     return this.endpoint?.state === "open" ? this.endpoint : null;
+  }
+
+  private rpcEndpoint(request: Request): DataEndpoint | null {
+    // These RPCs change the peer's event forwarding, not the durable session.
+    // Their initial snapshot, gap repair and cancellation must use the same
+    // endpoint as runEvents, even after RTC becomes the preferred data path.
+    // Select here AND when draining queued calls; business callers never need
+    // to know which carrier owns their subscription. Existing streams stay on
+    // their original endpoint and mutating requests are never auto-replayed.
+    switch (request.type) {
+      case "subscribe":
+      case "unsubscribe":
+        return this.eventEndpoint();
+      default:
+        return this.requestEndpoint();
+    }
   }
 
   private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
