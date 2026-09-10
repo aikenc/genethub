@@ -1,6 +1,4 @@
 import { ListPane, DetailBackButton } from "../ui/ListLayout";
-import "../ui/weui/controls.css";
-import "../ui/weui/theme.css";
 import "../ui/entity-lists.css";
 import { usePageNavigation } from "./usePageNavigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

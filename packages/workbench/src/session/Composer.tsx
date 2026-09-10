@@ -439,7 +439,7 @@ export function Composer({
       className={`pointer-events-none ${layout === "inline" ? "relative shrink-0" : "absolute inset-x-0 bottom-0"} z-10 px-3 pt-2 md:px-4 max-md:px-0`}
       style={{
         // Lift only for the on-screen keyboard (`shell/viewport.ts`: the
-        // shell is covered, not shrunk). The home-indicator inset lives
+        // remaining overlap after any viewport resize). The home-indicator inset lives
         // *inside* the card so the opaque surface reaches the window edge
         // on a phone; putting it on this transparent shell left a strip of
         // transcript showing under the rounded card.

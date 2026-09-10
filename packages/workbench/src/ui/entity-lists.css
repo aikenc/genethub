@@ -8,26 +8,12 @@
 .genehub-ui .conversation-row:hover > .entity-main { background: rgb(var(--sidebar-hover)); }
 .genehub-ui .entity-title { color: rgb(var(--fg)); }
 .genehub-ui .entity-secondary { padding-right: 0; }
-.genehub-ui .entity-row:has(.entity-more) .entity-secondary,
-.genehub-ui .conversation-row:has(.conversation-row-more) .entity-secondary { padding-right: 40px; }
-/* Rows without actions (pickers and squad browsing) can use their full width. */
-.genehub-ui .entity-row:not(:has(.entity-more)):not(:has(.agent-new)):not(:has(.entity-expand)) .entity-secondary { padding-right: 0; }
-.genehub-ui .agent-row-actions { position: absolute; right: 2px; bottom: 0; display: flex; align-items: center; border-radius: 8px; }
-.genehub-ui .conversation-row-more { position: absolute; right: 2px; bottom: 0; }
-.genehub-ui .agent-row-body:has(.agent-new) .entity-secondary { padding-right: 116px; }
-.genehub-ui .agent-row-body:has(.entity-expand) .entity-secondary { padding-right: 160px; }
-@media (hover: hover) and (pointer: fine) {
-  .genehub-ui .conversation-row-more,
-  .genehub-ui .agent-row-actions { opacity: 0; pointer-events: none; background: rgb(var(--sidebar)); }
-  .genehub-ui .conversation-row:hover > .conversation-row-more,
-  .genehub-ui .conversation-row:focus-within > .conversation-row-more,
-  .genehub-ui .conversation-row-more[aria-expanded="true"],
-  .genehub-ui .entity-row:hover .agent-row-actions,
-  .genehub-ui .entity-row:focus-within .agent-row-actions,
-  .genehub-ui .agent-row-actions[data-open="true"] { opacity: 1; pointer-events: auto; }
-  .genehub-ui .entity-row:has(.entity-more) .entity-secondary,
-  .genehub-ui .conversation-row:has(.conversation-row-more) .entity-secondary { padding-right: 0; }
-}
+/* Trailing actions take real space; text never flows underneath them. */
+.genehub-ui .agent-row-actions { display: flex; flex: 0 0 auto; align-items: center; border-radius: var(--gh-radius-control); }
+.genehub-ui .conversation-row-more { position: static; }
+.genehub-ui .agent-row-body { flex-wrap: wrap; }
+.genehub-ui .agent-row-body > .entity-main { flex-basis: 140px; }
+.genehub-ui .agent-row-actions { margin-left: auto; }
 .genehub-ui .entity-list[data-density="compact"] .entity-secondary { display: none; }
 .genehub-ui .entity-list[data-density="compact"] .entity-main { min-height: 48px; padding-block: 8px; }
 .genehub-ui .entity-list[data-density="compact"] .agent-row-actions { position: static; }
