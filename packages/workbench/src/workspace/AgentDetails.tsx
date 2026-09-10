@@ -8,7 +8,7 @@ import { useAgentGroups } from "./agentGroups";
 import { AgentAvatar, AgentAvatarPicker } from "./AgentAvatar";
 import { WorkspaceDetailsDialog } from "./WorkspaceDetailsDialog";
 
-export const AgentDetailsEnvironment = createContext<{ host: Host; endpoint: Endpoint; onOverview?(id: string, surface?: string, child?: boolean): void; workspaceTools?(id: string): ReactNode } | null>(null);
+export const AgentDetailsEnvironment = createContext<{ host: Host; endpoint: Endpoint; onCreateExpert?(): void; onOverview?(id: string, surface?: string, child?: boolean): void; workspaceTools?(id: string): ReactNode } | null>(null);
 
 /** Shared facts for contact details, the desktop inspector and the chat header. */
 export function AgentDetails({ workspace, deviceName, compact = false }: { workspace: WorkspaceInfo; deviceName: string; compact?: boolean }) {

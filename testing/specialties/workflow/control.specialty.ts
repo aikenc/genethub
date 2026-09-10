@@ -138,7 +138,10 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
         const workerId = run.nodes.find(node => node.id === "review")?.sessionId!;
         await t.tools.waitUntil(() => workerCalls > 0, 30_000);
         if (scenario === "silence-human") {
-          await t.tools.waitUntil(async () => (await snapshot(workerId)).summary.status === "waiting", 15_000);
+          await t.tools.waitUntil(async () => {
+            const waiting = await snapshot(workerId);
+            return waiting.summary.status === "waiting" && waiting.pendingPermissions.length > 0;
+          }, 15_000);
           const requestId = (await snapshot(workerId)).pendingPermissions[0]!.id;
           await t.tools.waitUntil(async () => (await snapshot()).summary.workSummary?.tasks[0]?.waiting?.some(request => request.requestId === requestId) === true, 15_000);
           await t.tools.waitUntil(async () => (await snapshot()).items.some(item => item.type === "userMessage" && item.id.startsWith("flow_") && item.text.includes(requestId)), 15_000);

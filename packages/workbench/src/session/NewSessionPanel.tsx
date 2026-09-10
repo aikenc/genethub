@@ -77,12 +77,12 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
       <div className="mx-auto flex max-w-4xl items-center gap-2">
         <DetailBackButton onClick={onBack} listVisible={!nested}/>
         <button type="button" aria-label="更换专家头像" className="shrink-0 rounded-lg" onClick={() => setAvatarOpen(true)}><AgentAvatar id={workspace.id} name={workspace.name} /></button>
-        <div className="min-w-0 flex-1"><h1 className="truncate text-lg font-semibold"><button type="button" aria-label="重命名专家" title="点击修改专家名称" className="max-w-full truncate text-left hover:text-accent" onClick={() => { setName(workspace.name); setRenameError(""); setRenameOpen(true); }}>{workspace.name}</button></h1>
+        <div className="min-w-0 flex-1"><h1 aria-label={workspace.name} className="truncate text-lg font-semibold"><button type="button" aria-label="重命名专家" title="点击修改专家名称" className="max-w-full truncate text-left hover:text-accent" onClick={() => { setName(workspace.name); setRenameError(""); setRenameOpen(true); }}>{workspace.name}</button></h1>
           <p className="mt-1 truncate text-xs text-muted">{workspace.agentSpace?.components.filter(c => c.enabled).map(c => c.role ? `${c.componentId} · ${c.role}` : c.componentId).join(" / ") || (workspace.workspaceFile ? "多目录专家" : "目录专家")}</p>
         </div>
         <button type="button" className="min-h-12 shrink-0 rounded-lg px-3 text-sm text-accent hover:bg-raised" onClick={() => setChoosing(v => !v)} aria-label="切换专家" aria-expanded={choosing}>切换</button>
       </div>
-      {choosing && <ExpertPickerDialog title="切换专家" selectedId={workspace.id} onPick={id => navigate(id)} onClose={() => setChoosing(false)} />}
+      {choosing && <ExpertPickerDialog title="切换专家" onCreate={environment?.onCreateExpert ? () => { setChoosing(false); environment.onCreateExpert?.(); } : undefined} selectedId={workspace.id} onPick={id => navigate(id)} onClose={() => setChoosing(false)} />}
       <nav className="relative mx-auto mt-2 max-w-4xl" aria-label="专家页签">
         <FilterBar navigation label="专家页面切换" options={[["sessions", "会话"], ["components", "组件"], ["directories", "目录"], ["children", "小队"]]}
           value={sessionSurface ? "sessions" : surface} onChange={id => { setMenuOpen(false); setSurface(id); }}
