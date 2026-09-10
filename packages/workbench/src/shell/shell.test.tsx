@@ -81,7 +81,7 @@ beforeEach(() => {
     selectWorkspace: vi.fn(async () => {}),
     newSession: vi.fn(),
     openTab: vi.fn(),
-    renameSession: vi.fn(async () => {}),
+    renameSession: vi.fn(async () => true),
     renameWorkspace: vi.fn(async () => {}),
     removeWorkspace: vi.fn(async () => {}),
     configureAgentSpace: vi.fn(async () => {}),

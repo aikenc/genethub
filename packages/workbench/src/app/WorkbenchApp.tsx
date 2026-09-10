@@ -49,14 +49,14 @@ import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
 import { AgentDetailsEnvironment } from "../workspace/AgentDetails";
 import { draftIdentities, readLocalDraft } from "../session/localConversation";
-import { Info } from "lucide-react";
+import { SessionHeading } from "../session/SessionHeading";
 import { WorkspaceBrowser } from "../workspace/WorkspaceBrowser";
 import type { ExtraTab } from "../shell/tabs";
 import { TitleBar } from "../shell/TitleBar";
 import { useTheme } from "../theme/store";
 import { TerminalPanel } from "../terminal/TerminalPanel";
 import { UpdateToast } from "../updates/UpdateToast";
-import { OpenProject } from "../workspace/OpenProject";
+import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import type { SpeechInputProblem } from "../speech/useSpeechInput";
@@ -176,6 +176,7 @@ export function App({
   const {sessionsOpen, setSessionsOpen, section, setSection, back: backPage, replaceNextPage,
     rootNextPage, nested, overviewSurface, setOverviewSurface} = usePageNavigation();
   const [spacesVisited, setSpacesVisited] = useState(false);
+  const expertCreator = useRef<OpenWorkspaceHandle>(null);
   const [composerHeight, setComposerHeight] = useState(128);
   const [composerMinimized, setComposerMinimized] = useState(false);
   // Two different questions. `sessionsOpen` is the phone's drawer, which starts
@@ -778,9 +779,9 @@ export function App({
     setSessionsOpen(false); setSection("spaces"); setOverviewSurface(surface, true);
   };
   return (
-    <AgentDetailsEnvironment.Provider value={{ host, endpoint, onOverview: (id, surface, child) => { if (sessionsOpen && section === "spaces") rootNextPage(); else if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
+    <AgentDetailsEnvironment.Provider value={{ host, endpoint, onCreateExpert: () => expertCreator.current?.open(), onOverview: (id, surface, child) => { if (sessionsOpen && section === "spaces") rootNextPage(); else if (useWorkbench.getState().draft && !useWorkbench.getState().activeSessionId && !child) replaceNextPage(); openOverview(id, surface); }, workspaceTools: (id) => <div className="mt-3 flex flex-wrap gap-2">{extraTabs.filter(tab => !tab.scope || tab.scope === "workspace").map(tab => <button type="button" key={tab.id} className="min-h-11 rounded-lg border border-line px-3 text-sm" onClick={() => { useWorkbench.setState({activeWorkspaceId: id}); workbench.openTab(`extra:${tab.id}`, tab.label); }}>{tab.label}</button>)}</div> }}>
     <div className="genehub-ui flex h-full min-h-0 max-w-full flex-col overflow-hidden bg-bg">
-      <OpenProject host={host} endpoint={endpoint} variant="none" driveUrl onOpened={() => { const id = useWorkbench.getState().draft?.workspaceId; if (id) openOverview(id); }} />
+      <OpenProject ref={expertCreator} host={host} endpoint={endpoint} variant="none" driveUrl onOpened={() => { const id = useWorkbench.getState().draft?.workspaceId; if (id) openOverview(id); }} />
       <TitleBar
         host={host}
         endpoint={endpoint}
@@ -829,7 +830,7 @@ export function App({
             style={{ paddingTop: "env(safe-area-inset-top)" }}
           >
             <DetailBackButton label={nested ? "返回" : showChat ? "会话列表" : "返回"} listVisible={!nested && showChat && !sidebarHidden} onClick={backPage}/>
-            <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-base font-medium">{showChat ? starting ? "专家概要" : workspace?.name ?? "会话" : activeTab?.title}</h1><p className="truncate text-xs text-muted">{showChat ? session?.title ?? "新会话" : endpoint.label}</p></div>
+            {showChat && session ? <SessionHeading key={session.id} session={session} workspace={workbench.workspaces.find(entry => entry.id === session.workspaceId)} onOpenExpert={openOverview} /> : <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-lg font-semibold">{activeTab?.title}</h1><p className="truncate text-xs text-muted">{endpoint.label}</p></div>}
             {/* Only when it is not what it should be. A green tick on every
                 screen is one more thing to read past, and this bar has room
                 for exactly three things — but a phone that has quietly lost
@@ -846,27 +847,8 @@ export function App({
               </span>
             )}
             <BackgroundBadge />
-            {workspace && !starting && <button type="button" aria-label="当前专家" title="专家页面" className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => openOverview(workspace.id)}><Info size={20} /></button>}
           </header>}
 
-          {workbench.notice ? (
-            <p
-              role="alert"
-              className="flex shrink-0 items-center gap-2 border-b border-line bg-raised px-3 py-1.5 text-xs text-danger"
-            >
-              <span className="min-w-0 flex-1">{workbench.notice}</span>
-              {/* Every error gets a way to the log. What a failure can say in one
-                  line is rarely the whole story, and the rest is already written
-                  down — it was just somewhere nobody could reach. */}
-              <button
-                type="button"
-                className="shrink-0 underline decoration-dotted hover:text-fg"
-                onClick={() => workbench.openTab("logs")}
-              >
-                查看日志
-              </button>
-            </p>
-          ) : null}
           {workbench.completionNotice ? (
             <p
               role="status"

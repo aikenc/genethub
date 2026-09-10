@@ -250,6 +250,8 @@ interface WorkbenchState {
   /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
   tabLimit: number;
   notice: string | null;
+  /** Bounded, memory-only UI diagnostics; never copied into automatic feedback. */
+  interfaceLogs: Array<{ at: number; machine: string; message: string }>;
   /**
    * Content on its way back to the composer, put there by `editPending`.
    *
@@ -403,7 +405,7 @@ interface WorkbenchState {
   loadTrunk(roundId: string, trunkIndex: number): Promise<void>;
   loadBlob(blob: BlobRef): Promise<void>;
   /** Gives a session the name the user typed, on the machine and here. */
-  renameSession(sessionId: string, title: string): Promise<void>;
+  renameSession(sessionId: string, title: string): Promise<boolean>;
   /** Erases a session. There is no undo; the caller does the asking. */
   deleteSession(sessionId: string): Promise<void>;
   openTab(kind: TabKind, title?: string): void;
@@ -691,6 +693,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   subscriptionOwner: null,
   tabLimit: 16,
   notice: null,
+  interfaceLogs: [],
   restoreDraft: null,
   composerDraftInserts: [],
   forwardDraft: null,
@@ -1835,14 +1838,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async renameSession(sessionId, title) {
     const wanted = title.trim();
-    if (!wanted) return;
+    if (!wanted) return false;
     const reply = await asked(set, () =>
       require_(get().client).call({ type: "session.rename", payload: { sessionId, title: wanted } }),
     );
-    if (reply?.type !== "session") return;
+    if (reply?.type !== "session") return false;
     // From the reply rather than from what was typed: the daemon trims and
     // caps, and the sidebar should show the name that was actually stored.
     applyTitle(sessionId, reply.data.title ?? wanted, set);
+    return true;
   },
 
   async archiveSession(sessionId, archived) {
@@ -2834,3 +2838,12 @@ async function batchOrSequentially<T>(
     return null;
   }
 }
+
+// Capture the shared notice channel once, including notices written by the shell.
+// Clearing an active notice does not erase history; no raw messages go to telemetry.
+useWorkbench.subscribe((state, previous) => {
+  if (!state.notice || state.notice === previous.notice) return;
+  useWorkbench.setState({ interfaceLogs: [...state.interfaceLogs.slice(-99), {
+    at: Date.now(), machine: state.client?.identity?.machineId ?? "", message: state.notice.slice(0, 2000),
+  }] });
+});
