@@ -5,14 +5,15 @@ import path from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-no-wr", "silence-human"] as const) {
+for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
   const silence = scenario.startsWith("silence");
+  const wr = scenario.startsWith("silence-wr");
   defineSpecialty({
     id: `specialty.workflow-control.${scenario}`,
     title: `Project workflow recovery across ${scenario}`,
     oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics",
     catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
-    tags: ["core", "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
+    tags: ["core", ...(wr ? ["pm-exception-recovery"] : []), "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
@@ -40,7 +41,7 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
         schema: schema?.split(": ")[1], id: "direct-change", version: 1, entry: "review",
         nodes: [node("review"), { id: "publish", uses: "result.publish" }],
       }));
-      if (scenario === "silence-wr") {
+      if (wr) {
         const roleFile = path.join(source, "roles/worker.yaml");
         const roleSchema = readFileSync(roleFile, "utf8").split("\n")[0]?.split(": ")[1];
         writeFileSync(path.join(source, "roles/wr.yaml"), JSON.stringify({ schema: roleSchema, id: "wr", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/wr.md" }));
@@ -58,9 +59,9 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
       let staleResponseAt = 0;
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
-        if (body.includes("WORKFLOW_CONTROL_WR")) {
+        if (body.includes("bounded, read-only Workflow diagnosis")) {
           diagnosticCalls++;
-          if (diagnosticCalls === 1) return { tool: { name: "genet", arguments: { args: ["workflow", "check"] } } };
+          if (diagnosticCalls === 1 || scenario === "silence-wr-limit") return { emptyToolIdDeltas: true, tool: { name: "genet", arguments: { args: ["workflow", "check"] } } };
           return { text: "静默诊断：Worker 仍有执行归属，先检查在途工具，不要自动取消。" };
         }
         if (body.includes("WORKFLOW_CONTROL_WORKER")) {
@@ -178,9 +179,15 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
               "one unchanged Human request repeatedly woke PM");
           } else {
             t.assertions.assert((await check(original)).findings.some(f => f.code === "silentAttempt"), "181-second silent attempt was missed");
-            await t.tools.waitUntil(async () => scenario === "silence-wr" ? (await get(original)).diagnostics?.[0]?.status === "finished" : (await check(original)).findings.some(f => f.code === "diagnosis"), 15_000);
+            await t.tools.waitUntil(async () => wr ? (await get(original)).diagnostics?.[0]?.status === (scenario === "silence-wr-limit" ? "limited" : "finished") : (await check(original)).findings.some(f => f.code === "diagnosis"), 15_000);
             const diagnosticIds = (await get(original)).diagnostics?.map(d => d.sessionId) ?? [];
-            t.assertions.assert(scenario === "silence-wr" ? diagnosticIds.length === 1 && diagnosticCalls === 2 : diagnosticIds.length === 0, "diagnostic count or restricted checker execution was wrong");
+            t.assertions.assert(wr ? diagnosticIds.length === 1 && (scenario === "silence-wr-limit" ? diagnosticCalls >= 8 : diagnosticCalls === 2) : diagnosticIds.length === 0, "diagnostic count or restricted checker execution was wrong");
+            if (wr) {
+              const calls = opened.mock.requests.filter(request => JSON.stringify(request).includes("bounded, read-only Workflow diagnosis"));
+              t.assertions.assert(!JSON.stringify(calls).includes("'args' is required"), "streamed tool arguments were lost");
+              const expected = scenario === "silence-wr-limit" ? "WR 诊断失败" : "已完成并有回复";
+              await t.tools.waitUntil(async () => JSON.stringify((await snapshot()).items).includes(expected), 15_000);
+            }
             await new Promise(resolve => setTimeout(resolve, 4_000));
             t.assertions.assert((await get(original)).diagnostics?.length === diagnosticIds.length && (await get(original)).status === "running", "same stall repeated diagnosis or cancelled a long execution");
           }
