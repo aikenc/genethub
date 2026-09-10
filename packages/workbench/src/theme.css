@@ -678,6 +678,13 @@ input:focus-visible {
 @media (pointer: coarse) {
   .genehub-ui button { min-height: var(--gh-touch-target); min-width: var(--gh-touch-target); }
 }
+/* Compact identity rows are inline actions, not standalone touch controls.
+ * Keep their typography and line boxes stable on coarse-pointer devices;
+ * the surrounding back/menu buttons retain the shared 44px target. */
+.gh-session-heading .gh-session-title { font-size: var(--gh-type-label); line-height: 20px; }
+.gh-session-heading .gh-session-expert { margin-top: 1px; font-size: var(--gh-type-navigation); line-height: 20px; }
+.genehub-ui .gh-session-heading button { min-height: 20px; min-width: 0; line-height: 20px; }
+
 /* Portalled dialogs use the same zoom-adjusted viewport as the shell. */
 .gh-dialog-frame { max-height: calc(88dvh / var(--gh-ui-scale)); }
 .gh-dialog-content { max-height: inherit; }
