@@ -22,9 +22,9 @@ function useEmoji(id: string) {
     return saved && agentEmojis.includes(saved) ? saved : defaultEmoji(id);
   }, () => defaultEmoji(id));
 }
-export function AgentAvatar({ id, name }: { id: string; name: string }) {
+export function AgentAvatar({ id, name, size = "normal" }: { id: string; name: string; size?: "normal" | "small" }) {
   const emoji = useEmoji(id);
-  return <span role="img" aria-label={`${name}的头像`} className="entity-avatar flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-2xl leading-none">{emoji}</span>;
+  return <span role="img" aria-label={`${name}的头像`} className={`entity-avatar flex shrink-0 items-center justify-center bg-accent/10 leading-none ${size === "small" ? "h-4 w-4 rounded text-xs" : "h-9 w-9 rounded-xl text-2xl"}`}>{emoji}</span>;
 }
 export function AgentAvatarPicker({ id }: { id: string }) {
   const selected = useEmoji(id);

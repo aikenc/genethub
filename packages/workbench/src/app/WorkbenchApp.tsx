@@ -124,6 +124,7 @@ export function App({
   desktopTools,
   sidebarMenu,
   onReportSpeechProblem,
+  onReportSession,
 }: {
   host?: Host;
   /**
@@ -157,6 +158,8 @@ export function App({
   sidebarMenu?: React.ReactNode;
   /** Opens the embedding product's feedback flow with content-free speech metadata. */
   onReportSpeechProblem?(problem: SpeechInputProblem): void;
+  /** Opens the embedding product feedback flow for this exact conversation. */
+  onReportSession?(sessionId: string): void;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -829,7 +832,7 @@ export function App({
             style={{ paddingTop: "env(safe-area-inset-top)" }}
           >
             <DetailBackButton label={nested ? "返回" : showChat ? "会话列表" : "返回"} listVisible={!nested && showChat && !sidebarHidden} onClick={backPage}/>
-            {showChat && session ? <SessionHeading key={session.id} session={session} workspace={workbench.workspaces.find(entry => entry.id === session.workspaceId)} onOpenExpert={openOverview} /> : <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-lg font-semibold">{activeTab?.title}</h1><p className="truncate text-xs text-muted">{endpoint.label}</p></div>}
+            {showChat && session ? <SessionHeading key={session.id} session={session} workspace={workbench.workspaces.find(entry => entry.id === session.workspaceId)} onOpenExpert={openOverview} onReportSession={onReportSession} /> : <div className="min-w-0 flex-1 px-2 py-2"><h1 className="truncate text-lg font-semibold">{activeTab?.title}</h1><p className="truncate text-xs text-muted">{endpoint.label}</p></div>}
             {/* Only when it is not what it should be. A green tick on every
                 screen is one more thing to read past, and this bar has room
                 for exactly three things — but a phone that has quietly lost

@@ -1,26 +1,49 @@
-import { useState } from "react";
+import { ChevronRight, MoreHorizontal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { AgentAvatar } from "../workspace/AgentAvatar";
 import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import { useWorkbench } from "./store";
 
-export function SessionHeading({ session, workspace, onOpenExpert }: {
-  session: SessionSummary; workspace?: WorkspaceInfo; onOpenExpert(id: string): void;
+export function SessionHeading({ session, workspace, onOpenExpert, onReportSession }: {
+  session: SessionSummary; workspace?: WorkspaceInfo; onOpenExpert(id: string): void; onReportSession?(id: string): void;
 }) {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menu = useRef<HTMLDivElement>(null);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const outside = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node)) setMenuOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setMenuOpen(false); menuButton.current?.focus(); } };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
+  }, [menuOpen]);
   return <>
-    {workspace && <button type="button" aria-label="当前专家" title={`进入专家：${workspace.name}`}
-      className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg hover:bg-raised"
-      onClick={() => onOpenExpert(workspace.id)}><AgentAvatar id={workspace.id} name={workspace.name} /></button>}
-    <div className="min-w-0 flex-1 px-2 py-2">
-      <h1 aria-label={session.title || "未命名会话"} className="truncate text-lg font-semibold"><button type="button" aria-label="修改会话标题"
-        title="点击修改会话标题" className="min-h-11 max-w-full truncate text-left hover:text-accent"
+    <div className="min-w-0 flex-1 px-2 py-1.5">
+      <h1 aria-label={session.title || "未命名会话"} className="truncate text-sm font-medium leading-5"><button type="button" aria-label="修改会话标题"
+        title="点击修改会话标题" className="block min-h-6 min-w-0 max-w-full truncate rounded text-left hover:text-accent focus-visible:outline-accent"
         onClick={() => { setTitle(session.title ?? ""); setError(""); setEditing(true); }}>{session.title || "未命名会话"}</button></h1>
-      <p className="truncate text-xs text-muted">{workspace?.name ?? "会话"}</p>
+      {workspace ? <button type="button" aria-label="当前专家" title={`进入专家：${workspace.name}`}
+        className="mt-0.5 flex min-h-6 min-w-0 max-w-full items-center gap-1 rounded text-xs leading-5 text-muted hover:bg-raised hover:text-accent focus-visible:outline-accent"
+        onClick={() => onOpenExpert(workspace.id)}>
+        <AgentAvatar id={workspace.id} name={workspace.name} size="small" />
+        <span className="truncate">{workspace.name}</span><ChevronRight size={12} className="shrink-0" />
+      </button> : <p className="text-xs leading-5 text-muted">会话</p>}
     </div>
+    {onReportSession && <div ref={menu} className="relative shrink-0">
+      <button ref={menuButton} type="button" aria-label="会话菜单" aria-expanded={menuOpen}
+        className="flex h-11 w-11 items-center justify-center rounded-lg text-muted hover:bg-raised"
+        onClick={() => setMenuOpen(open => !open)}><MoreHorizontal size={20} /></button>
+      {menuOpen && <div className="absolute right-0 top-full z-50 min-w-36 rounded-lg border border-line bg-surface p-1 shadow-lg">
+        <button type="button" className="min-h-11 w-full rounded px-3 text-left text-sm hover:bg-raised"
+          onClick={() => { setMenuOpen(false); onReportSession(session.id); }}>反馈问题</button>
+      </div>}
+    </div>}
     {editing && <WorkspaceDetailsDialog title="修改会话标题" onClose={() => { if (!busy) setEditing(false); }}>
       <form onSubmit={async event => {
         event.preventDefault();
