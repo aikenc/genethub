@@ -74,6 +74,7 @@
 
 html {
   height: 100%;
+  --gh-ui-scale: 1;
   /* Extra type size on top of `zoom`. 0 on medium; ±2px per step. Kept off
    * `<html>`'s own `font-size` so rem spacing (padding, gaps) does not move. */
   --gh-font-nudge: 0px;
@@ -87,21 +88,25 @@ html {
  */
 html[data-ui-scale="xsmall"] {
   zoom: 0.7;
+  --gh-ui-scale: 0.7;
   --gh-font-nudge: -4px;
 }
 
 html[data-ui-scale="small"] {
   zoom: 0.85;
+  --gh-ui-scale: 0.85;
   --gh-font-nudge: -2px;
 }
 
 html[data-ui-scale="large"] {
   zoom: 1.15;
+  --gh-ui-scale: 1.15;
   --gh-font-nudge: 2px;
 }
 
 html[data-ui-scale="xlarge"] {
   zoom: 1.3;
+  --gh-ui-scale: 1.3;
   --gh-font-nudge: 4px;
 }
 
@@ -145,7 +150,9 @@ html[data-ui-scale="xlarge"] {
  */
 body {
   position: fixed;
-  inset: 0;
+  inset: 0 0 auto;
+  height: 100%;
+  height: calc(100dvh / var(--gh-ui-scale));
   margin: 0;
   overflow: hidden;
   /* No rubber-band at the edges of a pane, in either direction. */
@@ -646,4 +653,37 @@ input:focus-visible {
 }
 @media (min-width: 768px) {
   .workbench-navigation { padding-top: max(1rem, var(--safe-area-top)); padding-bottom: 1rem; }
+}
+
+/* Shared primitives: page composition consumes these contracts. */
+:root {
+  --gh-space-1: 4px;
+  --gh-space-2: 8px;
+  --gh-space-3: 12px;
+  --gh-space-4: 16px;
+  --gh-touch-target: 44px;
+  --gh-radius-control: 8px;
+  --gh-radius-panel: 16px;
+  --gh-type-label: calc(14px + var(--gh-font-nudge));
+  --gh-type-navigation: calc(12px + var(--gh-font-nudge));
+}
+.gh-filter-bar { display: flex; min-width: 0; align-items: center; gap: var(--gh-space-1); }
+.gh-filter-options { display: flex; flex: 1; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; gap: var(--gh-space-1); padding-block: 4px; scrollbar-width: thin; }
+.gh-filter-option { flex: 0 0 auto; white-space: nowrap; min-height: var(--gh-touch-target); padding-inline: var(--gh-space-3); border-radius: var(--gh-radius-control); color: rgb(var(--muted)); font-size: var(--gh-type-label); }
+.gh-filter-option[aria-pressed="true"], .gh-filter-option[aria-current="page"] { color: rgb(var(--accent)); background: rgb(var(--accent) / 0.1); font-weight: 600; }
+.gh-filter-option:hover, .gh-filter-option:active { background: rgb(var(--raised)); }
+.gh-filter-actions { display: flex; flex: 0 0 auto; border-left: 1px solid rgb(var(--line)); }
+.gh-filter-actions > button { min-width: var(--gh-touch-target); min-height: var(--gh-touch-target); }
+.workbench-navigation button > span { font-size: var(--gh-type-navigation); }
+@media (pointer: coarse) {
+  .genehub-ui button { min-height: var(--gh-touch-target); min-width: var(--gh-touch-target); }
+}
+/* Portalled dialogs use the same zoom-adjusted viewport as the shell. */
+.gh-dialog-frame { max-height: calc(88dvh / var(--gh-ui-scale)); }
+.gh-dialog-content { max-height: inherit; }
+@media (max-width: 767px) {
+  .gh-dialog-full { height: calc(100dvh / var(--gh-ui-scale)); max-height: 100%; }
+  .gh-dialog-full .gh-dialog-content { height: 100%; }
+  .gh-dialog-full header { padding-top: max(12px, var(--safe-area-top)); }
+  .gh-dialog-full .gh-dialog-content > :last-child { padding-bottom: max(20px, var(--safe-area-bottom)); }
 }

@@ -1,3 +1,4 @@
+import { FilterBar } from "../ui/FilterBar";
 import { useEffect, useRef, useState } from "react";
 import { ListFilter, MoreHorizontal, Plus } from "lucide-react";
 import type { Host, Endpoint, Target } from "../host";
@@ -116,11 +117,10 @@ function ConversationListContent({ host, endpoint, open, hidden, onNavigate, mac
           <ListGroupSelect label="按专家分组" allLabel="全部会话" value={group?.id ?? ""} groups={groups} onChange={id => { setGroupId(id); setAgentId(""); }}/>
           <button type="button" aria-label="新建会话" className={listPrimaryAction} onClick={() => { wb.newSession(agentId || (group?.workspaceIds.length === 1 ? group.workspaceIds[0] : null), null); onNavigate(); }}><Plus size={18} />新建</button>
         </ListToolbar>
-        <div aria-label="会话状态工具栏" className="flex min-w-0 items-center gap-1 text-xs">
-          {attentionFilters.map(([id, label]) => <button key={id} aria-pressed={state === id} onClick={() => setState(id)} className={`min-h-9 flex-1 rounded-lg px-1 ${state === id ? "bg-accent/10 font-medium text-accent" : "text-muted hover:bg-raised"}`}>{label}</button>)}
+        <FilterBar<AttentionFilter> label="会话状态工具栏" options={attentionFilters} value={state} onChange={setState} actions={<>
           <button type="button" aria-label="会话筛选" aria-expanded={advanced} className={`flex h-9 w-8 shrink-0 items-center justify-center ${agentId || ownership !== "primary" ? "text-accent" : "text-muted"}`} onClick={() => setAdvanced(true)}><ListFilter size={16} /></button>
           <button type="button" aria-label="会话列表选项" aria-expanded={listMenuOpen} className="flex h-9 w-8 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised" onClick={() => setListMenuOpen(!listMenuOpen)}><MoreHorizontal size={20} /></button>
-        </div>
+        </>} />
         {searchOpen && <ListSearch label="搜索会话" value={query} onChange={setQuery} onClose={() => { setSearchOpen(false); setQuery(""); }}/>}
         {wb.includeArchived && state !== "pending" && state !== "running" && <div className="flex items-center justify-between text-xs text-muted"><span>已归档会话</span><button className="min-h-9 px-2 text-accent" onClick={() => { useWorkbench.setState({includeArchived: false}); void wb.refreshSessions(); }}>返回当前会话</button></div>}
 

@@ -1,3 +1,4 @@
+import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import type { SessionSummary } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
@@ -21,33 +22,39 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
   const summary = current.workSummary;
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [keepResultOpen, setKeepResultOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     if (client && connection === "ready") void refreshAgentActivities(client);
   }, [client, connection, session.id, session.status]);
   if (!summary || session.managed) return null;
-  const active = summary.running + summary.stopping > 0;
-  const pendingReport = summary.tasks.some(task => task.reportPending);
-  const heading = active ? "小队任务 · 进行中" : summary.blocked > 0 ? "小队任务 · 受阻" : "小队任务记录";
+  const stateLabel = summary.stopping ? "停止中" : summary.blocked ? "受阻"
+    : summary.tasks.some(task => task.waiting?.length) ? "等待处理"
+    : summary.tasks.some(task => task.executing) ? "小队执行中"
+    : summary.running ? "等待推进"
+    : summary.tasks.some(task => task.status === "failed") ? "失败"
+    : summary.tasks.length && summary.tasks.every(task => task.status === "cancelled") ? "已取消" : "执行记录";
   const ready = connection === "ready" && !activity.error && !summary.error;
+  const heading = `小队任务 · ${ready ? stateLabel : "待同步"} · ${summary.tasks.length + summary.more} 项`;
   const canCancel = ready && client?.identity?.features?.includes("workflow.control.v1");
-  return <section aria-label="任务进度" className="max-h-56 shrink-0 overflow-y-auto border-b border-line bg-raised px-4 py-3 text-sm">
-    <details open={active || pendingReport || summary.blocked > 0 || !!summary.error || keepResultOpen}>
-      <summary className="cursor-pointer font-medium">{heading}</summary>
+  return <section aria-label="任务进度" className="shrink-0 border-b border-line bg-raised px-4 text-sm">
+    <button type="button" aria-expanded={expanded} aria-haspopup="dialog" className="flex min-h-11 w-full items-center justify-between gap-2 text-left font-medium"
+      onClick={() => setExpanded(true)}><span className="min-w-0 truncate">{heading}</span><span aria-hidden>›</span></button>
+    {error && !expanded && <p role="alert" className="pb-2 text-danger">{error}</p>}
+    {expanded && <WorkspaceDetailsDialog title="小队任务" onClose={() => setExpanded(false)}>
       {!ready && <p role="status" className="mt-2 text-muted">{summary.error ?? "任务状态待核对，连接恢复后更新。"}</p>}
       {!ready && summary.checkedAtMs > 0 && <p className="mt-1 text-xs text-muted">最近核对：{new Date(summary.checkedAtMs).toLocaleTimeString()}。</p>}
       {error && <p role="alert" className="mt-2 text-danger">{error}</p>}
       <ul className="mt-2 space-y-3">
-        {summary.tasks.map((task) => <li key={task.runId} className="border-t border-line pt-2">
+        {summary.tasks.map((task, index) => <li key={task.runId} className="border-t border-line pt-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span>{task.taskId} · {task.executing ? "小队执行中" : task.status === "running" && task.waiting?.length ? "等待处理" : labels[task.status] ?? task.status}</span>
+            <span>{activity.sessions?.find(item => item.id === task.executorSessionId)?.title || `任务 ${index + 1}`} · {task.executing ? "小队执行中" : task.status === "running" && task.waiting?.length ? "等待处理" : labels[task.status] ?? task.status}</span>
             {canCancel && !["completed", "cancelled"].includes(task.status) && <button type="button"
               title={`终止 ${task.taskId} 及其小队；不影响 PM 本轮和其他任务`}
               className="min-h-9 px-2 text-danger disabled:opacity-50" disabled={!!busy || task.status === "cancelling"}
               onClick={() => {
                 if (!client) return;
                 const owner = client;
-                setBusy(task.runId); setError(null); setKeepResultOpen(true);
+                setBusy(task.runId); setError(null); setExpanded(true);
                 void owner.call({ type: "workflow.cancel", payload: { workspaceId: session.workspaceId, runId: task.runId, expectedRevision: task.revision } })
                   .then(async (reply) => {
                     if (reply?.type !== "workflowRun") throw new Error("未收到任务终止结果，请核对后重试。");
@@ -62,7 +69,7 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
           </div>
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}
           {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.join("、")}</p>}
-          {task.reason && <p className="mt-1 whitespace-pre-wrap text-xs">{task.reason}</p>}
+          {task.reason && <details className="mt-1 text-xs"><summary className="cursor-pointer truncate">{task.reason.split("\n")[0]}</summary><p className="mt-2 whitespace-pre-wrap break-words">{task.reason}</p></details>}
           {task.waiting?.map(waiting => {
             const owner = activity.sessions?.find(item => item.id === waiting.sessionId);
             const actionable = owner && canHandleInteraction(owner);
@@ -85,6 +92,6 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
         </li>)}
       </ul>
       {summary.more > 0 && <p className="mt-2 text-xs text-muted">另有 {summary.more} 项任务未在此展开；可向 PM 查询。</p>}
-    </details>
+    </WorkspaceDetailsDialog>}
   </section>;
 }

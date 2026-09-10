@@ -35,8 +35,8 @@ use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
     self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
-    normalize_session_title, now_ms, title_from, ChatLog, ContextSeedState, HumanContinuation, ImportedSessionMeta,
-    SessionMeta, Store, SESSION_FORMAT,
+    normalize_session_title, now_ms, title_from, ChatLog, ContextSeedState, HumanContinuation,
+    ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -2584,7 +2584,12 @@ impl SessionManager {
             // user locked the name with `rename`.
             let (workspace_id, needs_title) = {
                 let meta = live.meta.lock().await;
-                (meta.workspace_id.clone(), meta.title.is_none() || (!meta.title_locked && meta.title.as_deref().is_some_and(is_catalog_noise_title)))
+                (
+                    meta.workspace_id.clone(),
+                    meta.title.is_none()
+                        || (!meta.title_locked
+                            && meta.title.as_deref().is_some_and(is_catalog_noise_title)),
+                )
             };
             self.store
                 .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
@@ -2777,6 +2782,7 @@ impl SessionManager {
                     let mut guidance = crate::skills::session_guidance(
                         self.skills_dir.as_deref(),
                         self.front_door_cli.as_deref(),
+                        adapter.host_form_payloads(),
                     );
                     if let Some(managed) = meta.managed_system_prompt.as_deref() {
                         guidance.push_str("\n\n");
@@ -3296,7 +3302,7 @@ impl SessionManager {
             } else {
                 None
             };
-            self.ensure_started_in_mode(&live, providers, mode_override)
+            self.ensure_started_in_mode(live, providers, mode_override)
                 .await?;
             let agent = live
                 .agent()
@@ -3314,6 +3320,9 @@ impl SessionManager {
                 .filter(|current| current.id == execution.id)
                 .ok_or_else(|| anyhow!("this continuation no longer owns the session"))?;
             live.continue_round(&turn_id).await;
+            if let Some(round) = live.active_round.lock().await.clone() {
+                live.record_round(&round).await;
+            }
             current.turn_id = Some(turn_id);
             current.phase = ExecutionPhase::Running;
             current.ready.send_replace(true);
@@ -3326,17 +3335,11 @@ impl SessionManager {
                 result.unwrap_or_else(|_| Err(anyhow!("continuation handover timed out; delivery may be unknown"))),
         };
         if let Err(error) = sent {
-            retire_execution(&live, execution.id, Some(error.to_string()), false).await?;
+            retire_execution(live, execution.id, Some(error.to_string()), false).await?;
             ownership.complete = true;
-            settle_failed_continuation(live).await;
             return Err(error);
         }
         ownership.complete = true;
-        {
-            if let Some(round) = live.active_round.lock().await.clone() {
-                live.record_round(&round).await;
-            }
-        }
         Ok(true)
     }
 
@@ -3365,33 +3368,26 @@ impl SessionManager {
                 bail!("answer or cancel the pending Agent interaction first");
             }
         }
-        stop_agent_for_interaction(&live, &self.store, &request, true).await?;
-        // The old pump must finish before a Human can trigger the new one.
-        if let Some(mut pump) = live.pump.lock().await.take() {
-            if tokio::time::timeout(Duration::from_secs(5), &mut pump)
-                .await
-                .is_err()
-            {
-                pump.abort();
-                let _ = pump.await;
-            }
+        if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, true).await {
+            let message = format!("{error:#}");
+            fail_human_pause(&live, &self.store, error).await;
+            return Err(anyhow!(message));
         }
-        cancel_open_tools(&live).await;
-        let turn = live
-            .active_round
-            .lock()
-            .await
+        // Stop and drain the same writer before releasing this execution.
+        live.stop_pump().await?;
+        let mut owner = live.execution.lock().await;
+        let turn = owner
             .as_ref()
-            .and_then(|r| r.adapter_turn_ids.last().cloned());
+            .and_then(|execution| execution.turn_id.clone());
         if let Some(turn_id) = turn {
-            let canceled = SessionEvent::TurnCanceled { turn_id };
-            apply(&live, &canceled).await;
-            live.publish(canceled).await;
+            live.publish(SessionEvent::TurnCanceled { turn_id }).await;
         }
-        flush_turn(&live, &self.store).await;
-        let event = SessionEvent::PermissionRequested { request };
-        apply(&live, &event).await;
-        live.publish(event).await;
+        live.finish_execution(
+            &mut owner,
+            SessionEvent::PermissionRequested { request },
+            false,
+        )
+        .await?;
         Ok(())
     }
 
@@ -3543,7 +3539,9 @@ impl SessionManager {
                 };
                 apply(&live, &event).await;
                 live.publish(event).await;
-                flush_turn(&live, &self.store).await;
+                if let Err(save_error) = flush_turn(&live, &self.store).await {
+                    tracing::error!(%save_error, "could not persist continuation failure");
+                }
             }
         }
     }
@@ -5012,7 +5010,6 @@ async fn cancel_open_tools(live: &Arc<Live>) {
         apply(live, &event).await;
         live.publish(event).await;
     }
-    Ok(())
 }
 
 async fn stop_agent_for_interaction(
@@ -5055,7 +5052,9 @@ async fn stop_agent_for_interaction(
     // business round while its Human interaction is being installed.
     *live.pending_permissions.lock().await = vec![request.clone()];
     *live.status.lock().await = SessionStatus::Waiting;
-    live.persist_open_trunk().await;
+    if let Some(execution) = live.execution.lock().await.as_mut() {
+        execution.phase = ExecutionPhase::Stopping;
+    }
     if let Some(agent) = agent {
         let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
         close_current_agent(live).await?;
@@ -5089,34 +5088,28 @@ async fn cancel_human_continuation(live: &Arc<Live>, store: &Store) -> Result<()
     Ok(())
 }
 
-async fn fail_human_pause(live: &Arc<Live>, store: &Store, error: anyhow::Error) {
+async fn fail_human_pause(live: &Arc<Live>, _store: &Store, error: anyhow::Error) {
     tracing::error!(%error, "could not persist or stop Human interaction");
-    if let Some(agent) = live.agent.lock().await.take() {
-        let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
-        let _ = agent.close().await;
+    let _retirement = live.retirement.lock().await;
+    if close_current_agent(live).await.is_err() {
+        return;
     }
     cancel_open_tools(live).await;
-    let event = SessionEvent::Item {
-        turn_id: String::new(),
-        item: TimelineItem::Error {
-            id: format!("human-pause-failed-{}", uuid::Uuid::new_v4().simple()),
-            message: format!("无法安全保存待确认请求，Agent 已停止：{error:#}"),
+    let mut owner = live.execution.lock().await;
+    let turn_id = owner
+        .as_ref()
+        .and_then(|execution| execution.turn_id.clone())
+        .unwrap_or_default();
+    let event = SessionEvent::TurnFailed {
+        turn_id,
+        error: genehub_proto::TurnError {
+            code: TurnErrorCode::Internal,
+            message: format!("无法完成待确认暂停，请检查请求与恢复状态：{error:#}"),
         },
     };
-    apply(live, &event).await;
-    live.publish(event).await;
-    *live.status.lock().await = SessionStatus::Failed;
-    live.publish(SessionEvent::SessionStatusChanged {
-        status: SessionStatus::Failed,
-    })
-    .await;
-    if let Some(round) = live
-        .settle_round(Settling::Kernel, RoundOutcome::Failed)
-        .await
-    {
-        persist_round(live, round).await;
+    if let Err(save_error) = live.finish_execution(&mut owner, event, false).await {
+        tracing::error!(%save_error, "could not commit failed Human pause");
     }
-    flush_turn(live, store).await;
 }
 
 async fn finish_human_continuation(live: &Live, store: &Store, request_id: &str) -> Result<()> {
@@ -5132,15 +5125,6 @@ async fn finish_human_continuation(live: &Live, store: &Store, request_id: &str)
     store.save_meta(&next)?;
     *meta = next;
     Ok(())
-}
-
-/// Preserve the stopped request if a provider could not be resumed.
-async fn settle_failed_continuation(live: &Arc<Live>) {
-    *live.status.lock().await = SessionStatus::Waiting;
-    live.publish(SessionEvent::SessionStatusChanged {
-        status: SessionStatus::Waiting,
-    })
-    .await;
 }
 
 enum BlobWrite {
@@ -5607,6 +5591,7 @@ async fn pump_events(
             {
                 Ok(request) => event = SessionEvent::PermissionRequested { request },
                 Err(error) => {
+                    drop(owner);
                     fail_human_pause(&live, &store, error).await;
                     break;
                 }
@@ -5618,7 +5603,12 @@ async fn pump_events(
                 execution.phase = ExecutionPhase::Stopping;
             }
             drop(owner);
-            let _interaction = live.interaction_lock.lock().await;
+            // A CLI pause can retire this pump while holding interaction.
+            let _interaction = tokio::select! {
+                biased;
+                _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break 'events,
+                guard = live.interaction_lock.lock() => guard,
+            };
             let project_approval = match &project_control {
                 Some(broker) => broker.is_plan_request(&session_id, &request.id).await,
                 None => false,
@@ -5629,6 +5619,8 @@ async fn pump_events(
                 fail_human_pause(&live, &store, error).await;
                 break;
             }
+            flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+            flush_blob_writer(&blob_sender).await;
             let mut owner = live.execution.lock().await;
 
             // End the old turn before exposing the request. Approval later
@@ -6089,12 +6081,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
 /// A no-op unless there was an open round — ordinary shutdown (`Live::
 /// shutdown`) aborts the pump task outright rather than letting `recv` see
 /// `Closed`, and a round that already settled has nothing left to clean up.
-async fn finalize_after_channel_closed(live: &Arc<Live>, store: &Store) {
-    if live.meta.lock().await.pending_permission.is_some() {
-        flush_turn(live, store).await;
-        *live.status.lock().await = SessionStatus::Waiting;
-        return;
-    }
+async fn finalize_after_channel_closed(live: &Arc<Live>, _store: &Store) {
     let mut owner = live.execution.lock().await;
     let Some(execution) = owner.as_ref() else {
         return;
