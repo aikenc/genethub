@@ -7,6 +7,8 @@ export interface ScriptedTurn {
   status?: number;
   delayMs?: number;
   hang?: boolean;
+  /** OpenAI-compatible streams may repeat an empty id on argument deltas. */
+  emptyToolIdDeltas?: boolean;
   /**
    * Resolve a response from the exact model request that triggered it.
    *
@@ -55,9 +57,16 @@ function openaiChat(turn: ScriptedTurn): string[] {
         index,
         id: `call_${index + 1}`,
         type: "function",
-        function: { name: tool.name, arguments: JSON.stringify(tool.arguments) },
+        function: { name: tool.name, arguments: turn.emptyToolIdDeltas ? "" : JSON.stringify(tool.arguments) },
       })),
     });
+    if (turn.emptyToolIdDeltas) {
+      const argumentsByTool = tools.map(tool => JSON.stringify(tool.arguments));
+      for (let offset = 0; offset < Math.max(...argumentsByTool.map(args => args.length)); offset += 7) {
+        send({ tool_calls: argumentsByTool.flatMap((args, index) => offset < args.length
+          ? [{ index, id: "", function: { arguments: args.slice(offset, offset + 7) } }] : []) });
+      }
+    }
     send({}, "tool_calls");
   } else {
     const text = turn.text ?? "ok";
