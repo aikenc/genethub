@@ -27,7 +27,7 @@ export async function openBrowser(options: BrowserContextOptions = {}) {
 /** Mount the public embedding entry against the real authenticated endpoint.
  * Vite is the product build pipeline; no private store or UI implementation
  * is imported or replaced by a test double. */
-export async function openWorkbenchPage(openRoot: string, getEndpoint: () => DaemonEndpoint, workspaceId: string, sessionId: string) {
+export async function openWorkbenchPage(openRoot: string, getEndpoint: () => DaemonEndpoint, workspaceId: string, sessionId: string, options: BrowserContextOptions = {}) {
   const endpoint = getEndpoint();
   const require = createRequire(path.join(openRoot, "packages/workbench/package.json"));
   const vite = await import(pathToFileURL(require.resolve("vite")).href);
@@ -63,7 +63,7 @@ createRoot(document.getElementById('root')).render(React.createElement(App,{host
     await server.listen();
     const url = server.resolvedUrls?.local[0];
     if (!url) throw new Error("Vite did not expose the public Workbench");
-    const browser = await openBrowser();
+    const browser = await openBrowser(options);
     try {
       const route = `d/${encodeURIComponent(endpoint.localServerProof.machineId)}/w/${encodeURIComponent(workspaceId)}/s/${encodeURIComponent(sessionId)}`;
       await browser.page.goto(url + route);

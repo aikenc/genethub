@@ -24,16 +24,16 @@ export function SessionHeading({ session, workspace, onOpenExpert, onReportSessi
     return () => { document.removeEventListener("pointerdown", outside); document.removeEventListener("keydown", escape); };
   }, [menuOpen]);
   return <>
-    <div className="min-w-0 flex-1 px-2 py-1.5">
-      <h1 aria-label={session.title || "未命名会话"} className="truncate text-sm font-medium leading-5"><button type="button" aria-label="修改会话标题"
-        title="点击修改会话标题" className="block min-h-6 min-w-0 max-w-full truncate rounded text-left hover:text-accent focus-visible:outline-accent"
+    <div className="gh-session-heading min-w-0 flex-1 px-2 py-1.5">
+      <h1 aria-label={session.title || "未命名会话"} className="gh-session-title truncate font-medium"><button type="button" aria-label="修改会话标题"
+        title="点击修改会话标题" className="block min-w-0 max-w-full truncate rounded text-left hover:text-accent focus-visible:outline-accent"
         onClick={() => { setTitle(session.title ?? ""); setError(""); setEditing(true); }}>{session.title || "未命名会话"}</button></h1>
       {workspace ? <button type="button" aria-label="当前专家" title={`进入专家：${workspace.name}`}
-        className="mt-0.5 flex min-h-6 min-w-0 max-w-full items-center gap-1 rounded text-xs leading-5 text-muted hover:bg-raised hover:text-accent focus-visible:outline-accent"
+        className="gh-session-expert flex min-w-0 max-w-full items-center gap-1 rounded text-muted hover:bg-raised hover:text-accent focus-visible:outline-accent"
         onClick={() => onOpenExpert(workspace.id)}>
         <AgentAvatar id={workspace.id} name={workspace.name} size="small" />
         <span className="truncate">{workspace.name}</span><ChevronRight size={12} className="shrink-0" />
-      </button> : <p className="text-xs leading-5 text-muted">会话</p>}
+      </button> : <p className="gh-session-expert text-muted">会话</p>}
     </div>
     {onReportSession && <div ref={menu} className="relative shrink-0">
       <button ref={menuButton} type="button" aria-label="会话菜单" aria-expanded={menuOpen}

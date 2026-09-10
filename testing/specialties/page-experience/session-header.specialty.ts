@@ -20,10 +20,22 @@ for (const width of [390, 1280]) defineSpecialty({
     const id = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     await opened.client.call({type: "session.rename", payload: {sessionId: id, title: "会话标题验收"}});
     await opened.client.call({type: "workspace.rename", payload: {workspaceId: opened.workspaceId, name: "当前验收专家"}});
-    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, id);
+    browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, id, { hasTouch: width < 768, isMobile: width < 768, viewport: { width, height: 844 } });
     const page = browser.page;
     await page.setViewportSize({width, height: 844});
     await page.getByRole("heading", {name: "会话标题验收", exact: true}).waitFor();
+    const geometry = await page.getByRole("button", {name: "修改会话标题", exact: true}).evaluate(title => {
+      const expert = document.querySelector('[aria-label="当前专家"]')!;
+      const header = title.closest("header")!;
+      return { titleFont: parseFloat(getComputedStyle(title).fontSize), expertFont: parseFloat(getComputedStyle(expert).fontSize),
+        height: header.getBoundingClientRect().height - parseFloat(getComputedStyle(header).paddingTop),
+        gap: expert.getBoundingClientRect().top - title.getBoundingClientRect().bottom,
+        touch: matchMedia("(pointer: coarse)").matches };
+    });
+    t.assertions.assert(width >= 768 || geometry.touch, "phone did not exercise coarse-pointer styles");
+    t.assertions.assert(geometry.titleFont === 14 && geometry.expertFont === 12, `header typography: ${JSON.stringify(geometry)}`);
+    t.assertions.assert(geometry.height <= 56 && geometry.gap >= 0 && geometry.gap <= 2, `header spacing: ${JSON.stringify(geometry)}`);
+    t.note(`header geometry ${JSON.stringify(geometry)}`);
     await page.getByRole("button", {name: "修改会话标题", exact: true}).click();
     const dialog = page.getByRole("dialog", {name: "修改会话标题", exact: true});
     await dialog.getByRole("textbox", {name: "会话标题", exact: true}).fill("修改后的会话标题");
