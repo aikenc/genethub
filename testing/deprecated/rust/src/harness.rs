@@ -345,6 +345,8 @@ impl Journey {
     ) -> Result<()> {
         self.client
             .call(Request::SessionSend {
+                message_id: None,
+                task_run_id: None,
                 session_id: session_id.to_string(),
                 text: text.to_string(),
                 attachments: vec![],

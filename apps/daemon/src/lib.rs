@@ -67,8 +67,7 @@ pub struct Daemon {
     pub state: Shared,
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
-    human_continuations: tokio::task::JoinHandle<()>,
-    input_continuations: tokio::task::JoinHandle<()>,
+    session_deliveries: tokio::task::JoinHandle<()>,
     workflow_control: tokio::task::JoinHandle<()>,
 }
 
@@ -95,34 +94,18 @@ impl Daemon {
         remote.attach(&state).await;
         let _ = state.remote.set(remote);
 
-        let human_continuations = tokio::spawn({
+        // One per-Session dispatcher delivers chat and Human decisions. Slow
+        // native handovers run independently rather than blocking other Sessions.
+        let session_deliveries = tokio::spawn({
             let state = state.clone();
             async move {
-                if let Err(error) = state.sessions.recover_human_continuations().await {
-                    tracing::error!(%error, "recovering pending Human decisions failed");
-                }
-                let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
-                loop {
-                    ticks.tick().await;
-                    state
-                        .sessions
-                        .dispatch_human_continuations(&state.providers().await)
-                        .await;
-                }
-            }
-        });
-        // A native Human handover can take its whole bounded startup budget.
-        // Accepted user inputs in other Sessions must still be delivered.
-        let input_continuations = tokio::spawn({
-            let state = state.clone();
-            async move {
-                if let Err(error) = state.sessions.recover_inputs().await {
+                if let Err(error) = state.sessions.recover_deliveries().await {
                     tracing::error!(%error, "recovering accepted messages failed");
                 }
                 let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
                 loop {
                     ticks.tick().await;
-                    state.sessions.dispatch_inputs(&state).await;
+                    state.sessions.dispatch_deliveries(&state).await;
                 }
             }
         });
@@ -138,9 +121,8 @@ impl Daemon {
             }
         });
         Ok(Daemon {
-            input_continuations,
+            session_deliveries,
             workflow_control,
-            human_continuations,
             state,
             port: listener.port,
             listener: listener.handle,
@@ -166,13 +148,11 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
-        self.input_continuations.abort();
-        let _ = self.input_continuations.await;
+        self.session_deliveries.abort();
+        let _ = self.session_deliveries.await;
         self.workflow_control.abort();
         let _ = self.workflow_control.await;
         self.state.workflow_tasks.stop().await;
-        self.human_continuations.abort();
-        let _ = self.human_continuations.await;
         self.state.sessions.shutdown().await;
         self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {

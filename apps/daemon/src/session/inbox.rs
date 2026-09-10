@@ -189,14 +189,11 @@ impl SessionManager {
         Ok(())
     }
 
-    pub(crate) async fn recover_inputs(&self) -> Result<()> {
+    pub(crate) async fn recover_deliveries(&self) -> Result<()> {
         for meta in self.store.list_meta()? {
-            if !meta.openable()
-                || !meta
-                    .inbox
-                    .entries
-                    .iter()
-                    .any(|entry| entry.state != "handled")
+            let has_input = meta.inbox.entries.iter().any(|entry| entry.state != "handled");
+            let has_decision = meta.human_continuation.as_ref().is_some_and(|c| !c.completed);
+            if !meta.openable() || !(has_input || has_decision)
             {
                 continue;
             }
@@ -222,26 +219,35 @@ impl SessionManager {
     }
 
     /// Work is per Session: a slow adapter handover never blocks other inboxes.
-    pub(crate) async fn dispatch_inputs(&self, state: &Shared) {
+    pub(crate) async fn dispatch_deliveries(&self, state: &Shared) {
         let lives: Vec<_> = self.sessions.read().await.values().cloned().collect();
         for live in lives {
             let eligible = {
                 let meta = live.meta.lock().await;
                 !meta.inbox.paused
-                    && meta.inbox.entries.iter().any(|entry| {
+                    && (meta.inbox.entries.iter().any(|entry| {
                         matches!(entry.state.as_str(), "receiving" | "queued" | "sent")
-                    })
+                    }) || (meta.human_continuation.as_ref().is_some_and(|c| !c.completed)
+                        && !live.continuation_dispatched.load(Ordering::SeqCst)))
             };
             if !eligible
                 || live.closing.load(Ordering::SeqCst)
-                || live.inbox_dispatching.swap(true, Ordering::SeqCst)
+                || live.delivery_dispatching.swap(true, Ordering::SeqCst)
             {
                 continue;
             }
             let state = state.clone();
             let task_live = live.clone();
             live.cleanup.spawn(async move {
-                if let Err(error) = state.sessions.deliver_inputs(&state, &task_live).await {
+                let has_inputs = task_live.meta.lock().await.inbox.entries.iter().any(|entry|
+                    matches!(entry.state.as_str(), "receiving" | "queued" | "sent"));
+                let result = if has_inputs {
+                    state.sessions.deliver_inputs(&state, &task_live).await
+                } else {
+                    state.sessions.deliver_human_continuation(&task_live, &state.providers().await).await;
+                    Ok(())
+                };
+                if let Err(error) = result {
                     let mut meta = task_live.meta.lock().await;
                     let mut next = meta.clone();
                     let message = format!("消息已保存，Agent 续接待处理：{error:#}");
@@ -265,7 +271,7 @@ impl SessionManager {
                         tracing::error!(%error, "persisting input error");
                     }
                 }
-                task_live.inbox_dispatching.store(false, Ordering::SeqCst);
+                task_live.delivery_dispatching.store(false, Ordering::SeqCst);
             });
         }
     }

@@ -2107,6 +2107,8 @@ async fn an_empty_prompt_is_refused_before_it_reaches_the_model() {
     let error = journey
         .client
         .expect_error(Request::SessionSend {
+            message_id: None,
+            task_run_id: None,
             session_id: session,
             text: "   ".into(),
             attachments: vec![],

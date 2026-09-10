@@ -146,22 +146,7 @@ async fn start_workflow_sessions(
     Ok(())
 }
 
-/// Delivers the terminal Executor event back to the ordinary PM Session.
-///
-#[cfg(test)]
-fn workflow_parent_completion_message(run: &genehub_proto::WorkflowRunStatus) -> Option<String> {
-    if run.status != "completed" {
-        return None;
-    }
-    let payload = serde_json::to_string(run).expect("WorkflowRunStatus is serializable");
-    Some(format!(
-        "<genehub_flow_message kind=\"run.completed\" source=\"daemon\">\n\
-这是 Executor 发给 PM 的已认证终态流程消息，不是新的用户任务。Workflow Run 的固定事实如下：\n\
-{payload}\n\
-不要重新 bootstrap、dispatch、实现或评审。按项目 PM Skill 汇总这次 Run 的 Coder 提交、Reviewer 结论、检查、入口文件和总耗时，并向用户交付最终结果。\n\
-</genehub_flow_message>"
-    ))
-}
+
 
 /// Handles one request on behalf of `caller`.
 ///
@@ -2877,35 +2862,6 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
-    fn workflow_run(status: &str) -> genehub_proto::WorkflowRunStatus {
-        genehub_proto::WorkflowRunStatus {
-            diagnostics: None,
-            request_run_id: None,
-            report_pending: None,
-            reason: None,
-            cleanup_error: None,
-            execution_root: None,
-            experimental: None,
-            id: "wr_terminal".into(),
-            workspace_id: "w_project".into(),
-            executor_workspace_id: Some("w_executor".into()),
-            executor_session_id: Some("s_executor".into()),
-            parent_session_id: "s_pm".into(),
-            workflow_id: "game-project".into(),
-            dcg_digest: "sha256:dcg".into(),
-            activation_revision: Some(7),
-            bundle_digest: "sha256:bundle".into(),
-            task_id: "task_game".into(),
-            status: status.into(),
-            revision: 3,
-            executor_turns: 0,
-            active_nodes: Vec::new(),
-            nodes: Vec::new(),
-            created_at_ms: 10,
-            updated_at_ms: 20,
-        }
-    }
-
     fn unregistered_space() -> crate::config::AgentSpaceEntry {
         crate::config::AgentSpaceEntry {
             workspace_id: "w_project".into(),
@@ -2944,22 +2900,6 @@ mod tests {
         assert!(agent_space_requires_project_control(&packed));
     }
 
-    #[test]
-    fn only_a_completed_run_becomes_an_authenticated_pm_flow_message() {
-        assert!(workflow_parent_completion_message(&workflow_run("running")).is_none());
-        assert!(workflow_parent_completion_message(&workflow_run("failed")).is_none());
-
-        let message = workflow_parent_completion_message(&workflow_run("completed"))
-            .expect("completed Run should wake its PM");
-        assert!(
-            message.starts_with("<genehub_flow_message kind=\"run.completed\" source=\"daemon\">")
-        );
-        assert!(message.contains("\"id\":\"wr_terminal\""));
-        assert!(message.contains("\"parentSessionId\":\"s_pm\""));
-        assert!(message.contains("\"status\":\"completed\""));
-        assert!(message.contains("不要重新 bootstrap、dispatch、实现或评审"));
-        assert!(message.ends_with("</genehub_flow_message>"));
-    }
 
     #[test]
     fn loopback_and_lan_addresses_are_distinguished() {

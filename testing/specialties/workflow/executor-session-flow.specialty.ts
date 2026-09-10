@@ -408,13 +408,11 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         "components",
         "executor",
       );
-      for (const file of ["manifest.json", "inbox.jsonl", "journal.jsonl", "outbox.jsonl"]) {
-        t.assertions.assert(existsSync(path.join(flowRoot, file)), `Executor flow omitted ${file}`);
+      const snapshot = JSON.parse(readFileSync(path.join(flowRoot, "snapshots", `run-${runId}.json`), "utf8"));
+      t.assertions.assert(snapshot.run.flowMessages.some((message: {kind: string}) => message.kind === terminal), "the durable Run is missing its terminal flow message");
+      for (const obsolete of ["manifest.json", "inbox.jsonl", "journal.jsonl", "outbox.jsonl"]) {
+        t.assertions.assert(!existsSync(path.join(flowRoot, obsolete)), "Run writes redundant flow projections");
       }
-      t.assertions.assert(
-        readFileSync(path.join(flowRoot, "journal.jsonl"), "utf8").includes(terminal),
-        "the on-disk Executor journal is incomplete",
-      );
       t.assertions.assert(existsSync(path.join(projectRoot, "index.html")), "game entry was not produced");
       t.assertions.assert(git(projectRoot, ["status", "--porcelain"]) === "", "project is dirty");
       t.note(
