@@ -8,8 +8,8 @@ record 和 RTC channel label 为 v4；业务 WebProtocol 仍为 v3。浏览器�
 邀请 bootstrap 不进入 registry，继续使用同一个流引擎的不可恢复物理生命周期。
 
 真实 WASM / 公共 Client 故障测试已在 shell 运行期间 terminate WebSocket，验证原 DataStream
-完整返回、进程只启动一次，且恢复后可继续 RPC。这是单类通道恢复候选；普通 RTC 与 baseline
-仍是不同逻辑连接，跨通道切换和受限服务连接池不在此处冒充已经完成。
+完整返回、进程只启动一次，且恢复后可继续 RPC。普通 RTC 与 baseline 已共用同一个逻辑端点，真实 Chromium
+已验证准备期、Relay 暂停期间的事件和 RTC 关闭后的原连接恢复。受限服务使用独立 direct-only 连接。
 
 ## 已落入代码的边界
 
@@ -62,8 +62,7 @@ offset 32..35 为 payload 长度。保留现有 DataFrame 语义，不嵌入 v3 
 不超过 8,192 字节。进展类 WINDOW_UPDATE/FIN/RESET 必须为空 payload，具体 value 和 stream
 状态合法性仍由流状态机检查。长度、枚举、reserved、u64 和总长在有界解码时检查。
 
-CREATE/ATTACH/ACTIVATE/SYNC、PING/PONG、CLOSE/ERROR 的正式 opcode、transcript 和布局仍未冻结，
-不能根据本核心支持三个 opcode 就开始发布 v4。数据面正式版本常量仍为 3。
+其余连接控制使用下文定义的 opcode 16 有界 JSON。dev-net 数据面为 v4；WebProtocol 仍为 v3。
 
 ## 两种 PAYLOAD 预算
 
@@ -119,10 +118,19 @@ CLOSE / ERROR 使用加密的 `[4,16,0,0] + UTF-8 JSON`，总长最多 8 KiB，u
 未知字段、阶段错序和非法计数拒绝。恢复证明使用独立 HMAC 域，绑定逻辑 ID、daemon incarnation、
 从原通道双 nonce transcript 单独派生的 binding，以及新的 activation attempt。
 
-registry 比较新通道的 principal、device、workspace id / handle、transport 与 carrier kind；只在
-同一 actor 中验证水位并提交新 epoch。服务端内存持有恢复 secret，不写磁盘、URL 或诊断。
+registry 比较新通道的原认证主体、device 与 workspace id / handle；RTC 继承发起协商的认证主体，
+不把临时 RTC capability 当成新用户。Hub redemption 返回当前 source session / node 的稳定主体，
+同时复核 source 仍有效；旧 Hub 没有该字段时仍按 capability 限定，不能获得跨新 ticket 的恢复能力。
+path policy 独立验证新 carrier，只在同一 actor 中提交水位和 epoch。服务端内存持有恢复 secret，不写磁盘、URL 或诊断。
 跨 incarnation / 已清理 ID 返回 SessionLost；业务流失败后不自动重发。新认证失败不会继承旧授权。
-恢复失败不延长最初 60 秒期限；本地撤权清理 active 和 suspended owner。原生 CLI 当前未持有可供
+服务端 ATTACHED 还必须证明持有原恢复 secret：独立 HMAC 域绑定 ID、incarnation、新通道 binding、
+attempt 和 epoch。客户端验证成功才静止旧通道并发 ACTIVATE；此前候选失败不影响健康通道。
+ACTIVATE 发出后不再回到旧 epoch；ACTIVATED / SYNCED 丢失通过新 attempt 的水位恢复。
+公共 attempt / probe 为 32 位十六进制串，恢复 secret 保留 256 bit。FIN 也接受已验证激活水位的确认。
+
+恢复失败不延长最初 60 秒期限；本地撤权清理 active 和 suspended owner。Hosted 授权到期同样清理
+活动 RTC，不因切换而延长短期授权；新合法 admission 可续期。Hub 撤销的跨 RTC 即时推送尚未实现，
+当前按授权到期与重新 admission 拒绝处理，不能宣称即时跨 Hub 撤权。原生 CLI 当前未持有可供
 重拨的 endpoint，因此明确 CREATE resumable=false，断线即回收，不留下无人可恢复的 60 秒占位。
 
 硬限制为 32 个 registry 项、128 MiB 传输字节预算。每项当前保守预留 20 MiB：收发日志、接收租约、
@@ -138,14 +146,18 @@ registry 比较新通道的 principal、device、workspace id / handle、transpo
 `specialty.connectivity.logical-resume` 使用真实 WASM、公共 Client、WebSocket terminate 和独立
 进程/磁盘事实，证明单通道断线恢复。原有 connectivity 与 neteff 继续 required，失败 run 不被覆盖。
 
-后续仍需跨 Fabric / RTC 的同逻辑连接 ACTIVATE、direct-only 单独连接池、激活应答丢失的完整
-故障矩阵，以及更多并存客户端的预算与完整 Web/CLI/App 成套发布验收。当前阶段不发布 Beta/Stable。
+普通调用、事件与订阅不再按 method 选路。服务 Preview 根据 descriptor 的策略声明选择独立连接；
+描述和 ICE 控制可走普通连接，direct-only 内容只走受限连接，daemon 再次强制验证，不能由浏览器降级。
+受限 RTC 断开当前明确终止受限流，不把其日志回放到 Fabric；普通流按上述机制恢复。
+
+后续仍需更大并存量的可验证配额协商、受限服务的自动重接、Hosted 撤销即时通知、原生 CLI 的重拨
+owner，以及完整 Web/CLI/App 成套发布验收。当前候选不是完整发布资格，不发布 Beta/Stable。
 
 ### dev-net 临时修复核对
 
 | 槽位提交/内容 | 当前处理 | 依据 |
 | --- | --- | --- |
-| `7031f68`：订阅登记/补拉/取消固定在 events baseline | 保留到跨通道接管 | 当前普通 RTC 和 baseline 尚不是同一逻辑 peer，不能提前删掉归属保护 |
+| `7031f68`：订阅登记/补拉/取消固定在 events baseline | 已撤除 method 选择器 | RTC/Fabric 共用同一个普通逻辑 peer，真实浏览器验证事件、完成、取消、切换与无重订阅恢复 |
 | `7031f68`：心跳固定检查 events endpoint | 已撤除该固定选择，恢复普通 request 路径 | v4 所有物理通道都有独立 5 秒探活 / 15 秒失活判定，RTC 不再掩盖 baseline 故障 |
 | v3 Preview 大 bulk window | 已由统一 3 MiB 流窗口替换 | 有界连接接收租约已接管，并通过原有吞吐/公平性验证 |
-| `8385317`：RTC 订阅复现和回归 | 保留 | 后续只替换固定 Fabric 路径断言，继续检验输出、完成、取消和恢复 |
+| `8385317`：RTC 订阅复现和回归 | 保留并升级 | 用实际 RTC 订阅、稳定逻辑 ID、无重订阅、Relay 暂停和真实 RTC 关闭替代固定 Fabric 路径断言 |

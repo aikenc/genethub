@@ -95,7 +95,7 @@ export class ServicePreviewClient {
       operation: "ice",
       runId: this.descriptor.runId,
       allowTurn,
-    });
+    }, { policy: "relay-allowed" });
     this.streams.add(stream);
     try {
       await stream.finish();
@@ -128,7 +128,7 @@ export class ServicePreviewClient {
       entryPath: this.entryPath,
       operation: "connect",
       runId: this.descriptor.runId,
-    });
+    }, { policy: this.descriptor.dataPolicy === "direct-only" ? "direct-only" : "relay-allowed" });
     this.streams.add(stream);
     void stream.done.finally(() => this.streams.delete(stream)).catch(() => {});
     return stream;

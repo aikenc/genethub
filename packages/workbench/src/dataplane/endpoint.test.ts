@@ -11,6 +11,7 @@ import {
   MAX_BULK_STREAM_WINDOW_BYTES,
 } from "./frame";
 import { decodeResumePayload } from "./resume";
+import { AuthenticatedChannel } from "./authenticated-channel";
 import { openDataRecord } from "./secure";
 
 class MemoryCarrier implements RecordCarrier {
@@ -335,6 +336,117 @@ describe("the E2EE data endpoint", () => {
     expect(handlers).toBe(1);
   });
 
+  it("keeps the healthy carrier working until a differently authenticated RTC candidate activates", async () => {
+    const stack = await endpoints();
+    const received: number[] = [];
+    let handlers = 0;
+    stack.server.onIncoming((stream) => {
+      handlers++;
+      handlerTasks.push((async () => {
+        for await (const chunk of stream.body()) received.push(...chunk);
+        await stream.respond({ status: 200, metadata: null, bodyLength: 6 });
+        await stream.write(new Uint8Array(received)); await stream.finish();
+      })());
+    });
+    const stream = stack.client.open(head("handoff", 6));
+    await stream.write(new Uint8Array([1, 2, 3]));
+    await waitFor(() => received.length === 3);
+    const id = stack.client.logicalId;
+    const [clientCarrier, serverCarrier] = carriers();
+    const fresh = await deriveChannelSessionKey("rtc-admission-secret", "hosted:rtc-candidate", randomToken(1), randomToken(2));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    clientCarrier.beforeDelivery = async () => held;
+    const attached = Promise.all([stack.server.attach(serverCarrier, fresh, "rtc"), stack.client.attach(clientCarrier, fresh, "rtc")]);
+    try {
+      await stream.write(new Uint8Array([4]));
+      await waitFor(() => received.length === 4);
+      expect(stack.client.recovering).toBe(false);
+    } finally { release(); }
+    await attached;
+    expect(stack.client.logicalId).toBe(id);
+    expect(stack.client.activePath).toBe("rtc");
+    await stream.write(new Uint8Array([5, 6])); await stream.finish();
+    expect(await collectBody(stream.body(), 6)).toEqual(new Uint8Array([1, 2, 3, 4, 5, 6]));
+    await stream.done;
+    expect(handlers).toBe(1);
+  });
+
+  it("rejects a fresh authenticated peer without old-server possession and keeps the healthy connection", async () => {
+    const stack = await endpoints();
+    await Promise.all([stack.client.ready(), stack.server.ready()]);
+    const id = stack.client.logicalId;
+    const [clientCarrier, serverCarrier] = carriers();
+    const fresh = await deriveChannelSessionKey("different-peer-secret", "hosted:wrong-peer", randomToken(3), randomToken(4));
+    const forged = new AuthenticatedChannel({ role: "server", carrier: serverCarrier, key: fresh,
+      onPlaintext() {
+        const json = new TextEncoder().encode(JSON.stringify({ op: "attached", epoch: "1", proof: "0".repeat(64) }));
+        const bytes = new Uint8Array(4 + json.length); bytes.set([4, 16, 0, 0]); bytes.set(json, 4);
+        void forged.send(bytes).catch(() => {});
+      }, onClose() {},
+    });
+    try {
+      await expect(stack.client.attach(clientCarrier, fresh, "rtc")).rejects.toThrow("server possession");
+      expect(stack.client.logicalId).toBe(id);
+      expect(stack.client.recovering).toBe(false);
+      stack.server.onIncoming((stream) => handlerTasks.push((async () => {
+        await collectBody(stream.body(), 0);
+        await stream.respond({ status: 204, metadata: null, bodyLength: 0 }); await stream.finish();
+      })()));
+      const response = await exchange(stack.client, head("still-live", 0));
+      expect(response.head.status).toBe(204);
+      await response.stream.done;
+    } finally { forged.close(); }
+  });
+
+  it.each(["activated", "synced"])("recovers the committed epoch after losing %s without opening a second stream", async (lost) => {
+    const stack = await endpoints();
+    let handlers = 0;
+    stack.server.onIncoming((stream) => handlerTasks.push((async () => {
+      handlers++;
+      const bytes = await collectBody(stream.body(), 2);
+      await stream.respond({ status: 200, metadata: null, bodyLength: 2 });
+      await stream.write(bytes); await stream.finish();
+    })()));
+    const stream = stack.client.open(head("handoff-response-loss", 2));
+    await stream.write(new Uint8Array([1]));
+    await waitFor(() => handlers === 1);
+    const [clientCarrier, serverCarrier] = carriers();
+    const fresh = await deriveChannelSessionKey("rtc-admission-secret", "hosted:rtc-candidate", randomToken(5), randomToken(6));
+    let fault = false;
+    serverCarrier.beforeDelivery = async (record, sequence) => {
+      const bytes = await openDataRecord(fresh, "daemon-to-client", sequence, record);
+      if (bytes[1] === 16 && JSON.parse(new TextDecoder().decode(bytes.subarray(4))).op === lost) {
+        fault = true; serverCarrier.close("fault: activation response lost");
+      }
+    };
+    await Promise.allSettled([stack.server.attach(serverCarrier, fresh, "rtc"), stack.client.attach(clientCarrier, fresh, "rtc")]);
+    expect(fault).toBe(true);
+    await waitFor(() => stack.client.recovering && stack.server.recovering);
+    const [nextClient, nextServer] = carriers();
+    const nextKey = await deriveChannelSessionKey("baseline-admission-secret", "hosted:next-baseline", randomToken(7), randomToken(8));
+    await Promise.all([stack.server.attach(nextServer, nextKey, "fabric"), stack.client.attach(nextClient, nextKey, "fabric")]);
+    await stream.write(new Uint8Array([2])); await stream.finish();
+    expect(await collectBody(stream.body(), 2)).toEqual(new Uint8Array([1, 2]));
+    await stream.done;
+    expect(handlers).toBe(1);
+  });
+
+  it("refuses a Fabric candidate for an immutable direct-only stream owner", async () => {
+    const [clientCarrier, serverCarrier] = carriers();
+    const key = await deriveChannelSessionKey("direct-secret", "hosted:direct", randomToken(9), randomToken(10));
+    const client = new DataEndpoint({ role: "client", carrier: clientCarrier, key, policy: "direct-only", path: "rtc" });
+    const server = new DataEndpoint({ role: "server", carrier: serverCarrier, key, policy: "direct-only", path: "rtc" });
+    cleanup.push(client, server);
+    await Promise.all([client.ready(), server.ready()]);
+    const [candidate, other] = carriers();
+    try {
+      await expect(client.attach(candidate, key, "fabric")).rejects.toThrow("PolicyDenied");
+      expect(client.activePath).toBe("rtc");
+      expect(candidate.sent).toHaveLength(0);
+    } finally { candidate.close(); other.close(); }
+  });
+
   it("fails only a malformed stream transition before closing a hostile peer", async () => {
     const stack = await endpoints();
     const errors: unknown[] = [];
@@ -370,3 +482,5 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
+
+function randomToken(n: number): string { return n.toString(16).padStart(32, "0"); }

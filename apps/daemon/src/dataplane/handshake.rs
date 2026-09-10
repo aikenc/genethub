@@ -119,6 +119,7 @@ pub fn accept(
                 capability_id: expected,
                 secret,
                 expires_at,
+                ..
             },
         ) if capability_id == expected && std::time::Instant::now() < *expires_at => {
             let context = channel_auth::hosted_context(capability_id);
@@ -161,8 +162,20 @@ pub fn accept(
             proof,
             max_bulk_stream_window_bytes: Some(bulk_stream_window),
         },
-        key,
+        key: key.clone(),
         access: PeerAccess {
+            principal: match &admission {
+                Admission::Fabric {
+                    principal: Some(principal),
+                    ..
+                } => principal.clone(),
+                _ => key.principal().to_owned(),
+            },
+            direct_only: false,
+            authorization_expires_at: match &admission {
+                Admission::Fabric { expires_at, .. } => Some(*expires_at),
+                _ => None,
+            },
             transport,
             device_id,
             workspace_id,

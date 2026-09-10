@@ -58,6 +58,7 @@ pub(crate) enum Message {
     },
     Attached {
         epoch: String,
+        proof: String,
     },
     Activate {
         attempt: String,
@@ -104,4 +105,9 @@ impl Message {
 
 fn resumable_default() -> bool {
     true
+}
+
+/// Public attempt/probe nonce: 128 bits. Recovery credentials keep all 256 bits.
+pub(crate) fn nonce() -> String {
+    crate::devices::random_token()[..32].to_owned()
 }

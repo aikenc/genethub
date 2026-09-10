@@ -176,3 +176,8 @@ function subtle(): SubtleCrypto {
 export function logicalAttachProof(key: ChannelSessionKey, secret: string, id: string, incarnation: string, attempt: string): Promise<string> {
   return channelHmac(secret, "genehub-logical-attach-v1", [id, incarnation, key.binding, attempt]);
 }
+
+/** Server possession proves that a differently authenticated candidate owns the old logical peer. */
+export function logicalAttachedProof(key: ChannelSessionKey, secret: string, id: string, incarnation: string, attempt: string, epoch: bigint): Promise<string> {
+  return channelHmac(secret, "genehub-logical-attached-v1", [id, incarnation, key.binding, attempt, String(epoch)]);
+}

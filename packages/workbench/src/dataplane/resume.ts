@@ -1,4 +1,4 @@
-/** Candidate v4 journal. No transport authentication, RPC retry, or v3 activation.
+/** V4 journal. Authentication and channel activation belong to its owning actor.
  * Actor-owned: callers must serialize calls; accepted receive leases stay charged
  * until stream consumption/discard, not just until dispatch. See docs/logical-connection-core.md.
  */

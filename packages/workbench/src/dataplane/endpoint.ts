@@ -17,7 +17,7 @@ import {
   type DataFrame,
 } from "./frame";
 import { LogicalConnection } from "./logical-connection";
-import type { ResumeFrame } from "./resume";
+import type { ResumeFrame, ResumePath, ResumePolicy } from "./resume";
 import { AuthenticatedChannel, type RecordCarrier } from "./authenticated-channel";
 export type { RecordCarrier } from "./authenticated-channel";
 
@@ -28,6 +28,8 @@ export interface DataEndpointOptions {
   role: DataEndpointRole;
   carrier: RecordCarrier;
   key: ChannelSessionKey;
+  policy?: ResumePolicy;
+  path?: ResumePath;
   maxActiveStreams?: number;
   maxQueuedBytes?: number;
   maxReceiveBytesPerStream?: number;
@@ -434,6 +436,7 @@ export class DataEndpoint {
       this.maxReceiveBytesPerStream = INITIAL_STREAM_WINDOW_BYTES;
       this.maxBulkStreamWindowBytes = INITIAL_STREAM_WINDOW_BYTES;
       this.channel = new LogicalConnection({
+        policy: options.policy, path: options.path,
         role: options.role, carrier: options.carrier, key: options.key,
         onFrame: (frame, release) => this.dispatch(frame, release),
         onClose: (reason) => this.closeFromCarrier(reason),
@@ -442,14 +445,14 @@ export class DataEndpoint {
     }
   }
 
+  get activePath(): ResumePath | null { return this.channel instanceof LogicalConnection ? this.channel.path : null; }
   get logicalId(): string | null { return this.channel instanceof LogicalConnection ? this.channel.id : null; }
   get recovering(): boolean { return this.channel instanceof LogicalConnection && this.channel.state === "recovering"; }
   ready(): Promise<void> { return this.channel instanceof LogicalConnection ? this.channel.ready() : Promise.resolve(); }
   onRecovering(handler: () => void): () => void { this.recoveringHandlers.add(handler); return () => this.recoveringHandlers.delete(handler); }
-  async attach(carrier: RecordCarrier, key: ChannelSessionKey): Promise<void> {
+  async attach(carrier: RecordCarrier, key: ChannelSessionKey, path: ResumePath = "loopback"): Promise<void> {
     if (!(this.channel instanceof LogicalConnection)) throw new DataPlaneError("bootstrap cannot resume");
-    this.channel.attach(carrier, key);
-    await this.channel.ready();
+    await this.channel.attach(carrier, key, path);
   }
 
   get state(): DataEndpointState {

@@ -84,6 +84,7 @@ impl Writer {
     }
 }
 struct Attachment {
+    path: resume::Path,
     reader: AuthenticatedReader,
     writer: AuthenticatedWriter,
     attempt: String,
@@ -134,6 +135,13 @@ pub(crate) async fn serve(
     kind: CarrierKind,
 ) -> Result<()> {
     let (mut reader, mut writer) = authenticated_channel(key.clone(), carrier, Role::Server);
+    let path = match kind {
+        CarrierKind::Rtc => resume::Path::Rtc,
+        CarrierKind::WebSocket if access.transport == genehub_proto::TransportKind::Loopback => {
+            resume::Path::Loopback
+        }
+        _ => resume::Path::Fabric,
+    };
     let mut created_id = None;
     let admission: Result<_> = async {
         let first = read_control(&mut reader).await?;
@@ -179,7 +187,7 @@ pub(crate) async fn serve(
         else {
             bail!("expected logical ATTACH");
         };
-        let epoch = state.logical_connections.attach(
+        let (epoch, server_proof) = state.logical_connections.attach(
             &id,
             &incarnation,
             &key,
@@ -193,6 +201,7 @@ pub(crate) async fn serve(
             .send(
                 &Message::Attached {
                     epoch: epoch.to_string(),
+                    proof: server_proof,
                 }
                 .encode()?,
             )
@@ -242,6 +251,7 @@ pub(crate) async fn serve(
     handle
         .attach
         .send(Attachment {
+            path,
             reader,
             writer,
             attempt,
@@ -276,6 +286,8 @@ fn start(
         progress: Arc::new(Semaphore::new(PROGRESS_BYTES)),
     };
     let registry = state.logical_connections.clone();
+    let mut access = access;
+    access.direct_only = policy == Policy::DirectOnly;
     let task = tokio::spawn(async move {
         let business = tokio::spawn(super::endpoint::serve_logical(
             state,
@@ -297,7 +309,7 @@ fn start(
 }
 async fn run(
     lifetime: &Lifetime,
-    kind: CarrierKind,
+    _kind: CarrierKind,
     policy: Policy,
     mut attachments: mpsc::Receiver<Attachment>,
     mut writes: mpsc::Receiver<Write>,
@@ -315,11 +327,6 @@ async fn run(
         RESUME_TTL.as_millis() as u64,
     )
     .map_err(error)?;
-    let path = match kind {
-        CarrierKind::Fabric => resume::Path::Fabric,
-        CarrierKind::Rtc => resume::Path::Rtc,
-        CarrierKind::WebSocket => resume::Path::Loopback,
-    };
     let releases = Arc::new(Releases::default());
     let start = Instant::now();
     let now = || start.elapsed().as_millis() as u64;
@@ -440,7 +447,7 @@ async fn run(
                 // invalid peer watermark must not displace a healthy channel.
                 let next = attachment.expected.checked_add(1).ok_or_else(|| anyhow!("epoch exhausted"))?;
                 if attachment.expected != epoch { continue; }
-                if journal.activate(path, next, attachment.position, now()).is_err() { continue; }
+                if journal.activate(attachment.path, next, attachment.position, now()).is_err() { continue; }
                 acknowledge_terminals(&mut terminals, attachment.position.received);
                 epoch = if let Some(registry) = &lifetime.registry { registry.activate(&lifetime.id, &attachment.attempt, attachment.expected, Instant::now())? } else { next };
                 channel.take();
@@ -505,7 +512,7 @@ async fn run(
             _ = clock.tick() => {
                 if last_ping.elapsed() >= std::time::Duration::from_secs(5) {
                     if let Some(active) = channel.as_ref().filter(|c| c.synced) {
-                        let _ = active.outgoing.try_send(Message::Ping { nonce: crate::devices::random_token() }.encode()?);
+                        let _ = active.outgoing.try_send(Message::Ping { nonce: super::logical_wire::nonce() }.encode()?);
                     }
                     last_ping = Instant::now();
                 }
@@ -542,23 +549,27 @@ pub(crate) async fn client(
     else {
         bail!("expected CREATED");
     };
-    let attempt = crate::devices::random_token();
+    let attempt = super::logical_wire::nonce();
     let proof = key.resume_proof(&secret, &id, &incarnation, &attempt);
     writer
         .send(
             &Message::Attach {
-                id,
-                incarnation,
+                id: id.clone(),
+                incarnation: incarnation.clone(),
                 attempt: attempt.clone(),
                 proof,
             }
             .encode()?,
         )
         .await?;
-    let Message::Attached { epoch } = read_control(&mut reader).await? else {
+    let Message::Attached { epoch, proof } = read_control(&mut reader).await? else {
         bail!("expected ATTACHED");
     };
     let expected = decimal(&epoch)?;
+    crate::channel_auth::verify_proof(
+        &key.resume_server_proof(&secret, &id, &incarnation, &attempt, expected),
+        &proof,
+    )?;
     if expected != 0 {
         bail!("new native logical peer has a nonzero epoch");
     }
@@ -603,6 +614,7 @@ pub(crate) async fn client(
     let (closed, _) = oneshot::channel();
     attach
         .try_send(Attachment {
+            path: resume::Path::Loopback,
             reader,
             writer,
             attempt,

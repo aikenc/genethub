@@ -29,6 +29,27 @@ impl SessionKey {
         &self.context
     }
 
+    pub(crate) fn resume_server_proof(
+        &self,
+        secret: &str,
+        id: &str,
+        incarnation: &str,
+        attempt: &str,
+        epoch: u64,
+    ) -> String {
+        authenticate(
+            secret.as_bytes(),
+            b"genehub-logical-attached-v1",
+            &[
+                id.as_bytes(),
+                incarnation.as_bytes(),
+                self.binding.as_bytes(),
+                attempt.as_bytes(),
+                epoch.to_string().as_bytes(),
+            ],
+        )
+    }
+
     pub(crate) fn resume_proof(
         &self,
         secret: &str,

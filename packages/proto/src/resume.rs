@@ -1,4 +1,4 @@
-//! Candidate v4 ordered journal; not advertised by the production v3 handshake.
+//! V4 ordered journal used by the authenticated logical connection actor.
 //! Pure synchronous transactions, with explicit receive leases. Authentication,
 //! epoch arbitration, timers and stream dispatch belong to the connection actor.
 use std::collections::BTreeMap;

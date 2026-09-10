@@ -666,6 +666,9 @@ impl PeerAdmissionSource {
                 let expires_at = admitted.expires_at;
                 Ok(ResolvedPeerAdmission {
                     admission: Admission::Fabric {
+                        principal: admitted
+                            .principal
+                            .map(|p| format!("hosted:{}:{p}", enrollment.hub_url)),
                         capability_id,
                         secret: admitted.secret,
                         expires_at,

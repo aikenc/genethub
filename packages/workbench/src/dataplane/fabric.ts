@@ -56,13 +56,14 @@ export async function openFabricDataLink(options: {
     const carrier = new FabricRecordCarrier(fabric, stream);
     const endpoint = options.endpoint ?? new DataEndpoint({
       role: "client",
+      path: "fabric",
       carrier,
       key: handshake.key,
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
       ...(options.onError ? { onError: options.onError } : {}),
     });
-    if (options.endpoint) await endpoint.attach(carrier, handshake.key);
+    if (options.endpoint) await endpoint.attach(carrier, handshake.key, "fabric");
     else await endpoint.ready();
     return {
       endpoint,

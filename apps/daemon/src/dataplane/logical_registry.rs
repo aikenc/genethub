@@ -33,29 +33,19 @@ pub(crate) enum Policy {
 struct Admission {
     principal: String,
     device_id: Option<String>,
-    transport: genehub_proto::TransportKind,
     workspace_id: Option<String>,
     workspace_handle: Option<String>,
-    // Single-channel v1 deliberately keeps transport admission unchanged.
-    // Moving between carrier kinds needs explicit policy-aware convergence.
-    carrier: &'static str,
 }
 impl Admission {
-    fn new(key: &SessionKey, access: &PeerAccess, carrier: CarrierKind) -> Result<Self> {
+    fn new(_key: &SessionKey, access: &PeerAccess, _carrier: CarrierKind) -> Result<Self> {
         if access.bootstrap_invite.is_some() {
             bail!("bootstrap peers cannot resume");
         }
         Ok(Self {
-            principal: key.principal().to_owned(),
+            principal: access.principal.clone(),
             device_id: access.device_id.clone(),
-            transport: access.transport,
             workspace_id: access.workspace_id.clone(),
             workspace_handle: access.workspace_handle.clone(),
-            carrier: match carrier {
-                CarrierKind::WebSocket => "websocket",
-                CarrierKind::Fabric => "fabric",
-                CarrierKind::Rtc => "rtc",
-            },
         })
     }
 }
@@ -67,6 +57,7 @@ struct Entry {
     policy: Policy,
     secret: String,
     resumable: bool,
+    authorization_expires_at: Option<Instant>,
     suspended_at: Option<Instant>,
     epoch: u64,
     last_attempt: Option<String>,
@@ -138,6 +129,7 @@ impl Registry {
                 policy,
                 secret: secret.clone(),
                 resumable,
+                authorization_expires_at: access.authorization_expires_at,
                 suspended_at: Some(now),
                 epoch: 0,
                 last_attempt: None,
@@ -186,7 +178,7 @@ impl Registry {
         attempt: &str,
         proof: &str,
         now: Instant,
-    ) -> Result<u64> {
+    ) -> Result<(u64, String)> {
         if incarnation != self.incarnation {
             bail!("SessionLost");
         }
@@ -196,9 +188,15 @@ impl Registry {
         let admission = Admission::new(key, access, carrier)?;
         let mut entries = self.entries.lock().unwrap();
         Self::expire(&mut entries, now);
-        let entry = entries.get(id).ok_or_else(|| anyhow!("SessionLost"))?;
+        let entry = entries.get_mut(id).ok_or_else(|| anyhow!("SessionLost"))?;
         if entry.admission != admission
             || (entry.policy == Policy::DirectOnly && !direct_path(carrier, access.transport))
+        {
+            bail!("PolicyDenied");
+        }
+        if access.authorization_expires_at.is_some_and(|at| at <= now)
+            || (entry.authorization_expires_at.is_some()
+                && access.authorization_expires_at.is_none())
         {
             bail!("PolicyDenied");
         }
@@ -206,7 +204,11 @@ impl Registry {
             &key.resume_proof(&entry.secret, id, incarnation, attempt),
             proof,
         )?;
-        Ok(entry.epoch)
+        entry.authorization_expires_at = access.authorization_expires_at;
+        Ok((
+            entry.epoch,
+            key.resume_server_proof(&entry.secret, id, incarnation, attempt, entry.epoch),
+        ))
     }
 
     /// Called only by the connection actor after a successful ATTACH on this
@@ -279,9 +281,10 @@ impl Registry {
     }
     fn expire(entries: &mut HashMap<String, Entry>, now: Instant) {
         entries.retain(|_, entry| {
-            entry
-                .suspended_at
-                .is_none_or(|at| now.saturating_duration_since(at) < RESUME_TTL)
+            entry.authorization_expires_at.is_none_or(|at| now < at)
+                && entry
+                    .suspended_at
+                    .is_none_or(|at| now.saturating_duration_since(at) < RESUME_TTL)
         });
     }
 }

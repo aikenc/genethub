@@ -127,6 +127,7 @@ export interface ClientOptions {
     base: DataEndpoint,
     diagnosticId?: string,
     onDiagnostic?: (detail: ClientDiagnosticDetail) => void,
+    options?: import("../dataplane/rtc").RtcLinkOptions,
   ) => Promise<RtcDataLink>;
   socketFactory?: (url: string) => WebSocketLike;
   backoffMs?: (attempt: number) => number;
@@ -296,6 +297,7 @@ export class Client {
   private rtcState_: RtcState;
   private rtcFailure_: RtcFailure | null = null;
   private rtcLink: RtcDataLink | null = null;
+  private dataRtcLink: RtcDataLink | null = null;
   private rtcGeneration = 0;
   private connectionEpoch = 0;
   private connectionAttemptId: string | null = null;
@@ -316,6 +318,9 @@ export class Client {
   get connectionState(): ConnectionState {
     return this.state;
   }
+
+  /** Stable diagnostic identity across carrier changes; never a recovery credential. */
+  get logicalConnectionId(): string | null { return this.endpoint?.logicalId ?? null; }
 
   get lastCloseReason(): CloseReason | undefined {
     return this.lastClose;
@@ -470,7 +475,7 @@ export class Client {
         started: false,
       };
       this.pendingBytes += bytes;
-      const endpoint = this.state === "ready" ? this.rpcEndpoint(request) : null;
+      const endpoint = this.state === "ready" ? this.requestEndpoint() : null;
       const epoch = endpoint ? this.epoch : null;
       if (endpoint && epoch) {
         this.startCall(pending, endpoint, epoch);
@@ -650,8 +655,10 @@ export class Client {
    * RTC without exposing runtime-specific transport to the UI.
    */
   /** Public, permission-gated service Preview stream. Targets are daemon registrations. */
-  openServicePreview(request: { workspaceHandle: string; entryPath: string; operation: "describe" | "connect" | "ice"; runId?: string; allowTurn?: boolean }): DataStream {
-    return this.requireReadyEndpoint().open({
+  openServicePreview(request: { workspaceHandle: string; entryPath: string; operation: "describe" | "connect" | "ice"; runId?: string; allowTurn?: boolean }, options: { policy: "relay-allowed" | "direct-only" } = { policy: "direct-only" }): DataStream {
+    const direct = request.operation === "describe" || options.policy === "relay-allowed" || this.identity?.transport === "loopback" ? this.endpoint : this.rtcLink?.endpoint;
+    if (this.state !== "ready" || !direct || direct.state !== "open" || direct.recovering) throw new DataPlaneError("the service requires an available direct connection");
+    return direct.open({
       version: DATA_PLANE_VERSION,
       method: "service.preview",
       metadata: request,
@@ -923,6 +930,7 @@ export class Client {
     this.setState("ready");
     this.scheduleHeartbeat();
     this.flushQueue(endpoint, epoch);
+    if (this.rtcEnabled) void this.startRtc(endpoint, epoch);
   }
 
   private async activateEndpoint(endpoint: DataEndpoint, epoch: symbol): Promise<void> {
@@ -1291,7 +1299,7 @@ export class Client {
 
   private flushQueue(_endpoint: DataEndpoint, epoch: symbol): void {
     for (const pending of this.queue.splice(0)) {
-      const endpoint = this.rpcEndpoint(pending.request);
+      const endpoint = this.requestEndpoint();
       if (endpoint) this.startCall(pending, endpoint, epoch);
       else {
         this.release(pending);
@@ -1328,6 +1336,7 @@ export class Client {
     this.clearHeartbeat();
     const resumable = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
     const socket = this.socket, fabric = this.fabricLink?.fabric;
+    this.dataRtcLink = null;
     this.socket = null;
     this.fabricLink = null;
     socket?.close();
@@ -1538,29 +1547,7 @@ export class Client {
   }
 
   private requestEndpoint(): DataEndpoint | null {
-    if (this.rtcLink?.endpoint.state === "open" && !this.rtcLink.endpoint.recovering) return this.rtcLink.endpoint;
-    return this.eventEndpoint();
-  }
-
-  /** The baseline peer owns runEvents and all connection-scoped subscriptions. */
-  private eventEndpoint(): DataEndpoint | null {
     return this.endpoint?.state === "open" ? this.endpoint : null;
-  }
-
-  private rpcEndpoint(request: Request): DataEndpoint | null {
-    // These RPCs change the peer's event forwarding, not the durable session.
-    // Their initial snapshot, gap repair and cancellation must use the same
-    // endpoint as runEvents, even after RTC becomes the preferred data path.
-    // Select here AND when draining queued calls; business callers never need
-    // to know which carrier owns their subscription. Existing streams stay on
-    // their original endpoint and mutating requests are never auto-replayed.
-    switch (request.type) {
-      case "subscribe":
-      case "unsubscribe":
-        return this.eventEndpoint();
-      default:
-        return this.requestEndpoint();
-    }
   }
 
   private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
@@ -1597,6 +1584,7 @@ export class Client {
         base,
         requestId,
         (detail) => this.diagnostic("rtc", detail),
+        { policy: "direct-only" },
       );
       if (
         generation !== this.rtcGeneration ||
@@ -1628,13 +1616,13 @@ export class Client {
         if (this.rtcLink !== link) return;
         this.rtcLink = null;
         link.close();
-        this.setRtcState("failed");
+        if (!this.dataRtcLink) this.setRtcState("failed");
       });
       link.endpoint.onClose((reason) => {
         if (this.rtcLink !== link) return;
         this.rtcLink = null;
         this.report(reason);
-        if (this.rtcEnabled && this.state === "ready") {
+        if (this.rtcEnabled && this.state === "ready" && !this.dataRtcLink) {
           this.rtcFailure_ = {
             phase: "upgrade",
             message: reason instanceof Error ? reason.message : String(reason ?? "RTC closed"),
@@ -1643,6 +1631,20 @@ export class Client {
           this.setRtcState("failed");
         }
       });
+      // Restricted service bytes have their own immutable direct-only journal.
+      // The second channel activates the existing ordinary logical peer, including events.
+      const dataLink = await (this.options.rtcFactory ?? openRtcDataLink)(
+        base, requestId, (detail) => this.diagnostic("rtc", detail), { endpoint: base },
+      );
+      if (dataLink.endpoint !== base) {
+        dataLink.close();
+        throw new DataPlaneError("RTC provider did not retain the logical endpoint");
+      }
+      if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base || this.epoch !== epoch) {
+        dataLink.close();
+        return;
+      }
+      this.dataRtcLink = dataLink;
       this.setRtcState("connected");
       this.diagnostic("operation", {
         operation: "rtc.negotiate",
@@ -1675,9 +1677,10 @@ export class Client {
 
   private closeRtc(increment = true): void {
     if (increment) this.rtcGeneration += 1;
-    const link = this.rtcLink;
-    this.rtcLink = null;
+    const link = this.rtcLink, dataLink = this.dataRtcLink;
+    this.rtcLink = null; this.dataRtcLink = null;
     link?.close();
+    dataLink?.close();
   }
 
   private release(pending: PendingCall): void {
@@ -1763,7 +1766,7 @@ export class Client {
   }
 
   private transportFor(endpoint: DataEndpoint): "websocket" | "fabric" | "rtc" {
-    if (this.rtcLink?.endpoint === endpoint) return "rtc";
+    if (endpoint.activePath === "rtc" || this.rtcLink?.endpoint === endpoint) return "rtc";
     return this.carrier ?? "websocket";
   }
 

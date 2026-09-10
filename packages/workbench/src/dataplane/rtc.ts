@@ -4,6 +4,7 @@ import type {
   RtcNegotiationResponse,
 } from "@genehub/proto";
 
+import type { ResumePolicy } from "./resume";
 import { DataEndpoint, type RecordCarrier } from "./endpoint";
 import { collectBody } from "./exchange";
 import { DATA_PLANE_VERSION, DataReset, MAX_DATA_FRAME_BYTES } from "./frame";
@@ -51,11 +52,14 @@ export interface RtcDataLink {
   close(): void;
 }
 
+export interface RtcLinkOptions { endpoint?: DataEndpoint; policy?: ResumePolicy }
+
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
 export async function openRtcDataLink(
   base: DataEndpoint,
   diagnosticId?: string,
   onDiagnostic?: (detail: RtcDiagnostic) => void,
+  options: RtcLinkOptions = {},
 ): Promise<RtcDataLink> {
   if (typeof RTCPeerConnection !== "function") {
     throw new Error("this browser does not support WebRTC");
@@ -162,18 +166,23 @@ export async function openRtcDataLink(
     ) as PeerWelcome;
     const handshake = await prepared.complete(welcomeValue);
     const carrier = new RtcRecordCarrier(peer, channel);
-    const endpoint = new DataEndpoint({
+    const endpoint = options.endpoint ?? new DataEndpoint({
+      path: "rtc",
+      policy: options.policy ?? "direct-only",
       role: "client",
       carrier,
       key: handshake.key,
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
+    if (options.endpoint) await endpoint.attach(carrier, handshake.key, "rtc");
+    else await endpoint.ready();
     return {
       endpoint,
       peer,
       close() {
-        endpoint.close("RTC provider closed");
+        if (options.endpoint) { channel.close(); peer.close(); }
+        else endpoint.close("RTC provider closed");
       },
     };
   } catch (error) {

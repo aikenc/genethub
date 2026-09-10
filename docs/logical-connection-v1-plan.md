@@ -1,6 +1,6 @@
 # 逻辑连接 v1 落地设计
 
-状态：设计推进中。已建立 [续接核心候选与修订契约](logical-connection-core.md)，其已验证范围以该文和 testctl run 为准。dev-net 候选已接入 v4 单类通道恢复，跨通道接管和发布尚未完成。下文与修订契约冲突时，以修订契约为准。
+状态：设计推进中。已建立 [续接核心候选与修订契约](logical-connection-core.md)，其已验证范围以该文和 testctl run 为准。dev-net 候选已接入 v4 单类通道恢复与普通 RTC/Fabric 接管，受限恢复与完整发布尚未完成。下文与修订契约冲突时，以修订契约为准。
 日期：2026-09-10。落点：dev-net / genethub。
 源码基线：genethub `8385317bfe571e07fd3bea9eba8f3582ef3c555d`；genethub-cloud `baaa6518aba574875c2ffb135c02bd09a9e34093`。
 
@@ -351,3 +351,9 @@ registry 以 20 MiB/项保守预留传输资源，128 MiB 默认最多并存 6 �
 
 本校准不表示阶段 3 的 RTC/Fabric 同连接切换、策略池或整套发布已经验收。原生 CLI 暂不保存
 可重拨的逻辑 endpoint，明确声明不保留断线状态；浏览器是当前真实单通道重接消费者。
+
+跨通道接入校准（2026-09-11）：普通 RTC/Fabric 已共用一个逻辑连接并撤除订阅 method 选择器。
+ATTACHED 增加服务端恢复凭据持有证明；RTC 继承原主体，Hosted 原主体由 Control 稳定声明并在
+admission 时复核。真实浏览器保持连接 ID、事件和订阅，Relay 暂停不影响活动 RTC，RTC 关闭后恢复
+原基础通道流。direct-only 服务连接当前在 RTC 丢失时明确失败，禁止回放到 Fabric；其自动重接、
+Hosted 即时撤销推送和原生 CLI 重拨 owner 仍属后续边界，不能以本候选宣称全部 v1 目标已完成。

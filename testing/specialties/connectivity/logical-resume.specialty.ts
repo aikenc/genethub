@@ -29,10 +29,11 @@ defineSpecialty({
         return socket as unknown as WebSocketLike;
       },
     });
+    const logicalId = client.logicalConnectionId;
     const marker = join(opened.workspaceRoot, "logical-resume-once.txt");
     const operation = t.flows.main.startShell(client, {
       workspaceId: opened.workspaceId,
-      argv: ["python3", "-c", "import pathlib,time; p=pathlib.Path('logical-resume-once.txt'); f=p.open('a'); f.write('started\\n'); f.close(); print('before',flush=True); time.sleep(2); print('after',flush=True)"],
+      argv: ["python3", "-c", "import pathlib,time; p=pathlib.Path('logical-resume-once.txt'); f=p.open('a'); f.write('started\\n'); f.close(); print('before',flush=True); time.sleep(6); print('after',flush=True)"],
       cwd: opened.workspaceRoot,
       timeoutMs: 20000,
     });
@@ -43,7 +44,8 @@ defineSpecialty({
     sockets[0]!.terminate();
     const result = await operation.result;
     await t.tools.waitUntil(() => client!.connectionState === "ready", 15000);
-    t.assertions.assert(sockets.length >= 2, "no replacement authenticated socket was opened");
+    t.assertions.assert(sockets.length === 2, "unexpected redial beyond the injected socket loss and channel probe");
+    t.assertions.assert(client.logicalConnectionId === logicalId, "probe or recovery replaced the logical owner");
     t.assertions.assert(operation.stream.id === streamId, "the application stream was replaced");
     t.assertions.assert(t.flows.main.shellText(result.frames, "stdout") === "before\nafter\n", "stream bytes were lost or repeated across reconnect");
     t.assertions.assert(t.flows.main.shellExit(result.frames)?.code === 0, "the retained process did not exit successfully");

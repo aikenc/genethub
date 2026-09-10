@@ -80,6 +80,8 @@ pub struct FabricAdmission {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChannelAdmissionReply {
+    #[serde(default)]
+    principal: Option<String>,
     secret: String,
     #[serde(default)]
     expires_at: Option<String>,
@@ -92,6 +94,7 @@ struct ChannelAdmissionReply {
 /// One route-bound Fabric peer secret and its optional workspace scope.
 /// Deliberately no Debug: it contains E2EE key material.
 pub struct FabricPeerAdmission {
+    pub principal: Option<String>,
     pub secret: String,
     pub expires_at: Instant,
     pub workspace_handle: Option<String>,
@@ -414,6 +417,13 @@ impl Client {
         )
         .await?;
         validate_channel_secret(&reply.secret)?;
+        if reply
+            .principal
+            .as_ref()
+            .is_some_and(|p| p.is_empty() || p.len() > 256)
+        {
+            anyhow::bail!("invalid Fabric principal");
+        }
         let expires = reply
             .expires_at
             .ok_or_else(|| anyhow!("the Hub omitted the Fabric route expiry"))?;
@@ -432,6 +442,7 @@ impl Client {
             ));
         }
         Ok(Some(FabricPeerAdmission {
+            principal: reply.principal,
             secret: reply.secret,
             expires_at: Instant::now() + remaining,
             workspace_handle: reply.workspace_handle,

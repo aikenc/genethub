@@ -50,6 +50,10 @@ impl CarrierKind {
 
 #[derive(Clone)]
 pub struct PeerAccess {
+    /// Original authenticated authority, inherited by ephemeral RTC admissions.
+    pub principal: String,
+    pub(crate) direct_only: bool,
+    pub(crate) authorization_expires_at: Option<std::time::Instant>,
     pub transport: TransportKind,
     pub device_id: Option<String>,
     /// A resource-routed peer may operate only this daemon-local workspace.
@@ -432,8 +436,8 @@ pub(crate) struct PeerServices {
 }
 
 /// Logical peer state has one lifetime owner, independent of record crypto.
-/// In v3 the serve task still ends at carrier loss. A future resumable actor must
-/// retain this owner across detach and destroy it only at logical termination.
+/// The registry retains this owner across detach and destroys it at logical
+/// termination; invitation bootstrap deliberately retains physical lifetime.
 struct PeerRuntime {
     streams: HashMap<u32, StreamState>,
     handlers: JoinSet<()>,

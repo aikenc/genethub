@@ -254,7 +254,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         anyhow::bail!("run identity required");
     }
     if run.data_policy == "direct-only"
-        && !matches!(services.carrier_kind, super::endpoint::CarrierKind::Rtc)
+        && !services.access.direct_only
         && services.access.transport != genehub_proto::TransportKind::Loopback
     {
         anyhow::bail!("service requires direct transport");

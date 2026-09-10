@@ -11,6 +11,7 @@ pub enum Admission {
     DeviceRequired,
     /// Route-bound capability redeemed directly with hosted Control.
     Fabric {
+        principal: Option<String>,
         capability_id: String,
         secret: String,
         expires_at: Instant,
