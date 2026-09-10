@@ -77,9 +77,9 @@ pub async fn locate(
 /// there", so it is refused instead of resolved against the wrong filesystem.
 pub fn absolute_cwd(cwd: &str, here: bool) -> Result<PathBuf, CliFailure> {
     if here {
-        let path = std::path::Path::new(cwd);
+        let path = crate::guest_paths::guest_path(std::path::Path::new(cwd));
         let full = if path.is_absolute() {
-            path.to_path_buf()
+            path
         } else {
             super::caller_cwd().join(path)
         };

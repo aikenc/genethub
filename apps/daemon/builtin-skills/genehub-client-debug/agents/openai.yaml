@@ -1,0 +1,4 @@
+interface:
+  display_name: "GeneHub Client Debug"
+  short_description: "实时联调已授权的网页和 App 文档，检查 DOM、连接、交互与截图"
+  default_prompt: "Use $genehub-client-debug to inspect the selected GeneHub client through its authorized coordinator and diagnose this page issue."

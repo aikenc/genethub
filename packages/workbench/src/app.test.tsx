@@ -78,6 +78,8 @@ describe("the app as the browser loads it", () => {
     expect(within(tools).getByRole("button", { name: "文件" })).toBeInTheDocument();
     expect(within(tools).getByRole("button", { name: "设置" })).toBeInTheDocument();
     expect(within(tools).getByRole("button", { name: "设备" })).toBeInTheDocument();
+    expect(within(tools).getByRole("button", { name: "联调" })).toBeInTheDocument();
+    expect(document.querySelector("[data-genehub-client-debug] button")).toBeNull();
     expect(within(tools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
     expect(within(tools).getByText("工作区")).toBeInTheDocument();
     expect(within(tools).getByText("全局")).toBeInTheDocument();
@@ -92,6 +94,7 @@ describe("the app as the browser loads it", () => {
     expect(within(desktopTools).getByRole("button", { name: "变更" })).toBeInTheDocument();
     expect(within(desktopTools).getByRole("button", { name: "文件" })).toBeInTheDocument();
     expect(within(desktopTools).getByRole("button", { name: "设置" })).toBeInTheDocument();
+    expect(within(desktopTools).getByRole("button", { name: "联调" })).toBeInTheDocument();
     expect(within(desktopTools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
     within(desktopTools).getByRole("button", { name: "变更" }).click();
     expect(useWorkbench.getState().rightPanel).toBe("changes");

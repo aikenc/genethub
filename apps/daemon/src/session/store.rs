@@ -1861,8 +1861,9 @@ impl Store {
 }
 
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
+    let candidate = crate::guest_paths::guest_path(candidate);
     let joined = if candidate.is_absolute() {
-        candidate.to_path_buf()
+        candidate
     } else {
         root.join(candidate)
     };

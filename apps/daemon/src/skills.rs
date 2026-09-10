@@ -39,10 +39,8 @@ pub fn front_door_cli_from_env() -> Option<PathBuf> {
 }
 
 fn normalize_front_door_cli(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    value
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
+    let raw = value.filter(|value| !value.is_empty())?;
+    crate::guest_paths::inbound_absolute(PathBuf::from(raw))
 }
 
 /// Write built-in Skill files so Agents can `read` a real path.
@@ -318,6 +316,17 @@ mod tests {
         assert!(skills
             .iter()
             .any(|skill| skill.name == "genehub-html-preview"));
+        assert!(skills.iter().any(|skill| skill.name == "genehub"));
+        let lifecycle = skills
+            .iter()
+            .find(|skill| skill.name == "genehub-daemon-management")
+            .expect("daemon management built-in");
+        assert!(lifecycle
+            .file_path
+            .parent()
+            .unwrap()
+            .join("references/restart.md")
+            .is_file());
         let speech = skills
             .iter()
             .find(|skill| skill.name == "genehub-speech-runtime")
@@ -412,23 +421,14 @@ mod tests {
 
     #[test]
     fn channel_front_doors_must_be_absolute_and_are_never_renamed() {
-        // Absolute paths are platform-shaped: Unix takes /opt/..., Windows
-        // needs a drive letter. The contract is "absolute survives verbatim,
-        // bare names are rejected", not one OS's path syntax.
-        let paths: [&str; 3] = if cfg!(windows) {
-            [
-                r"C:\opt\genehub\dev\genet-dev.exe",
-                r"C:\opt\genehub\beta\genet-beta.exe",
-                r"C:\opt\genehub\stable\genet.exe",
-            ]
-        } else {
-            [
-                "/opt/genehub/dev/genet-dev",
-                "/opt/genehub/beta/genet-beta",
-                "/opt/genehub/stable/genet",
-            ]
-        };
-        for path in paths {
+        // Production daemon is wasm: Windows `C:\` / `\\?\C:\` are rewritten
+        // by inbound_absolute (see guest_paths). Bare channel names stay
+        // rejected so a PATH hit cannot pick another install.
+        for path in [
+            "/opt/genehub/dev/genet-dev",
+            "/opt/genehub/beta/genet-beta",
+            "/opt/genehub/stable/genet",
+        ] {
             assert_eq!(
                 normalize_front_door_cli(Some(path.into())),
                 Some(PathBuf::from(path))
@@ -436,6 +436,7 @@ mod tests {
         }
         assert_eq!(normalize_front_door_cli(Some("genet-dev".into())), None);
         assert_eq!(normalize_front_door_cli(Some("genet".into())), None);
+        assert_eq!(normalize_front_door_cli(Some("genet-beta".into())), None);
         assert_eq!(normalize_front_door_cli(None), None);
     }
 }

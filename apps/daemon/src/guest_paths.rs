@@ -9,7 +9,10 @@
 //! the native CLI front door, and text a user types into the picker's input
 //! instead of clicking through it.
 //!
-//! Everything inbound is normalized here, once, at the boundary. Outbound
+//! Everything inbound is normalized here, once, at the boundary. Ask
+//! “is this rooted?” only after that rewrite (`inbound_absolute`): wasm
+//! `Path::is_absolute` rejects `C:\` and `\\?\C:\`, which is how
+//! `GENEHUB_CLI` went missing on Windows (fb_WRY5Tw28C--x). Outbound
 //! payloads deliberately stay in guest form: `/f/dev/project` is what every
 //! later filesystem call needs, and translating each reply back would spread
 //! host knowledge across the wire protocol. One exception: a payload consumed
@@ -111,6 +114,14 @@ pub(crate) fn guest_path(raw: &Path) -> PathBuf {
         Cow::Borrowed(_) => raw.to_path_buf(),
         Cow::Owned(translated) => PathBuf::from(translated),
     }
+}
+
+/// Keep an inbound path only when it is rooted after Windows spellings
+/// are rewritten. In the wasm guest, `C:\Users\...` and
+/// `\\?\C:\Users\...` become `/c/Users/...`; bare names stay rejected.
+pub(crate) fn inbound_absolute(raw: impl AsRef<Path>) -> Option<PathBuf> {
+    let path = guest_path(raw.as_ref());
+    path.is_absolute().then_some(path)
 }
 
 /// One path spelled as a native child process must see it.
@@ -275,5 +286,20 @@ mod tests {
             guest_path(Path::new("/already/guest")),
             PathBuf::from("/already/guest")
         );
+    }
+
+    #[test]
+    fn windows_cli_spellings_are_rooted_after_rewrite() {
+        let exe = r"C:\Users\ronal\AppData\Local\GeneHub-beta\bin\genet-beta.exe";
+        let verbatim = r"\\?\C:\Users\ronal\AppData\Local\GeneHub-beta\bin\genet-beta.exe";
+        let guest = "/c/Users/ronal/AppData/Local/GeneHub-beta/bin/genet-beta.exe";
+        assert_eq!(guest_form(exe), guest);
+        assert_eq!(guest_form(verbatim), guest);
+        for raw in [exe, verbatim, guest] {
+            let path = PathBuf::from(guest_form(raw).as_ref());
+            assert!(path.is_absolute(), "{raw}");
+        }
+        assert!(!Path::new(guest_form("genet-beta").as_ref()).is_absolute());
+        assert!(!Path::new(guest_form("genet").as_ref()).is_absolute());
     }
 }

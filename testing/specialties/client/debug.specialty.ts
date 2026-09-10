@@ -20,7 +20,6 @@ defineSpecialty({
     await pages[0]!.setViewportSize({ width: 390, height: 844 });
     for (const page of pages) {
       browsers.push(await openPreviewBrowser({ openRoot: t.openRoot, lease: t.env, page, endpoint: daemonEndpoint(opened.daemon), workspaceId: "", entryPath: "", surface: "client-debug" }));
-      await page.getByRole("button", { name: "客户端联调", exact: true }).click();
       await page.getByRole("button", { name: "选择控制机器", exact: true }).click();
       await page.getByRole("button", { name: "连接", exact: true }).click();
       await page.getByText("已连接控制机器", { exact: false }).waitFor();
@@ -85,7 +84,6 @@ defineSpecialty({
       return response.code !== 0;
     }, 10000);
     await pages[0]!.reload();
-    await pages[0]!.getByRole("button", { name: "客户端联调", exact: true }).click();
     await pages[0]!.getByRole("button", { name: "选择控制机器", exact: true }).waitFor();
     t.note("Real guest and CLI: independent clients, pending refusal, authorized eval/act, mobile DOM JPEG, cross-client refusal, revoke refusal, refresh requires reconnect. No physical iOS/WebView claim.");
   } finally {

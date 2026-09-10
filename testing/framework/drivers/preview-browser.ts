@@ -44,11 +44,12 @@ export async function openPreviewBrowser(input: {
     join(root, "consumer.tsx"),
     `import React from 'react';
 import {createRoot} from 'react-dom/client';
-import {App,AssetPreviewPage,Client,browserHost,useWorkbench,configureClientDebugHost} from '@genehub/workbench';
+import {App,AssetPreviewPage,Client,browserHost,useWorkbench,configureClientDebugHost,openClientDebug} from '@genehub/workbench';
 const input=await window.previewInput();
 if(input.surface==='client-debug'){
  configureClientDebugHost({...browserHost(),targets:async()=>[{id:'coordinator',label:'Test coordinator',kind:'local'}],openTarget:async()=>({...((await window.previewInput()).endpoint),via:'loopback',label:'Test coordinator'})});
  document.getElementById('root').innerHTML='<h1>Client debug consumer</h1><input aria-label="Debug input"><p id="marker">original</p>';
+ openClientDebug();
 }else if(input.surface==='processes'){
  const host={...browserHost(),endpoint:async()=>({...input.endpoint,via:'lan'})};
  createRoot(document.getElementById('root')).render(<App host={host}/>);

@@ -207,10 +207,16 @@ pub fn usage() -> i32 {
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead
   genet update                      unsupported until releases are independently signed
-  genet daemon run                  run the daemon in the foreground (systemd)
+  genet daemon run                  run the daemon in the foreground
   genet daemon start                start the daemon in the background
-  genet daemon stop                 stop the daemon (by lock-file pid)
-  genet daemon restart              stop + start
+  genet daemon stop                 stop the verified local daemon instance
+  genet daemon restart              restart a manually started local daemon
+                                    managed daemon: use its existing manager
+                                    daemon-dependent session: verify independent
+                                    SSH/console recovery before restarting
+                                    do not wrap restart in a transient task
+                                    SOP: built-in genehub-daemon-management
+                                    use the channel-bound GENEHUB_CLI
   genet daemon status               whether the daemon is running
   genet daemon endpoint             one-use local wsUrl and process facts
   genet hub status                  Hub pairing state
