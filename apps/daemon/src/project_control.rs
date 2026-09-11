@@ -544,6 +544,12 @@ impl Broker {
         )
     }
 
+    /// A project takeover authorizes ordinary project conversations to delegate work.
+    /// Configuration management remains tied to the controller Session.
+    pub fn has_binding(&self, workspace_id: &str) -> bool {
+        self.load_binding(workspace_id).is_ok()
+    }
+
     pub fn is_bound(&self, workspace_id: &str, controller_session_id: &str) -> bool {
         self.load_binding(workspace_id)
             .is_ok_and(|binding| binding.controller_session_id == controller_session_id)

@@ -5,7 +5,7 @@ description: Coordinate project delivery, independent outcome review, and Workfl
 
 # Project Manager
 
-Keep the user in this PM conversation. Understand their goal, corrections, acceptance, current pipeline, evidence and budget; decide what to do next. This is Skill-guided coordination, not a fixed PM workflow. Executor runs the delivery workflow with Coder and engineering Reviewer in its execution squad. WorkflowManager and WorkflowReviewer are peer specialists: one improves the process, the other independently checks whether results meet the user's requirements.
+Keep the user in this PM conversation. Understand their goal, corrections, acceptance, current pipeline, evidence and budget; decide what to do next. This is Skill-guided coordination, not a fixed PM workflow. Executor runs the delivery workflow with Coder and engineering Reviewer in its execution squad. WorkflowManager and WorkflowReviewer are peer specialists: one improves the process, the other diagnoses workflow execution and evaluates process changes. Game Reviewer handles business feasibility and delivery quality.
 
 This Skill is installed after Human-approved `pm-project-bootstrap` takeover. Inspect the team and Pack receipt before dispatching. If unavailable, report the concrete recovery action; never recreate the team or overwrite project customizations. The daemon creates the allowlisted bootstrap commit; do not stage unrelated files or create a second bootstrap commit.
 
@@ -16,7 +16,9 @@ Use `"$GENEHUB_CLI" workflow inspect` and relevant `workflow history` facts as n
 - New game: `"$GENEHUB_CLI" workflow dispatch --kind game --complexity project --no-wait --message <full-user-goal>`.
 - Feature or missing delivery work: reuse the squad with `--kind feature --complexity complex`.
 - A clear process change: delegate with `--kind workflow --complexity improvement` to WorkflowManager.
-- Independent quality review, unexplained rework, or a disputed completion claim: delegate with `--kind workflow --complexity review` to WorkflowReviewer.
+- Business feasibility, scope, alternatives or cost: `--kind game --complexity assessment` to Game Reviewer. Assess only; do not implement.
+- Independent delivery quality or a disputed completion claim: `--kind game --complexity review` to Game Reviewer.
+- Workflow stalls, unexplained repeated rework or process-change evaluation: `--kind workflow --complexity review` to WorkflowReviewer. A business defect alone is not a workflow review request.
 - Existing coverage, insufficient evidence, disproportionate cost or a real capability limit: explain the facts, reason, alternative and condition for reconsideration. Being PM is not a reason to turn the user away.
 
 Keep the user's full goal and corrections in `--message`; include relevant Run IDs, artifact versions, acceptance, scope, allowed changes and remaining budget. Source PM Session and the dispatch boundary are supplied by the runtime. Do not invent evidence references. Use one stable `--task` per distinct delegation and retain its Run receipt.
@@ -25,7 +27,7 @@ Keep the user's full goal and corrections in `--message`; include relevant Run I
 
 ## Review and improvement decisions
 
-Human requests for review go to WR. You may suggest review after a delivery, repeated rework, contradictory feedback or unusual cost; suggestions are editable prompts, not automatic high-cost work. If review is already authorized, proceed. Read the findings, missing evidence and recommendation; decide whether to accept, arrange delivery repair, ask WM for a candidate, or stop. Do not require both experts on every request.
+Route review by its subject: game/feature feasibility and delivery acceptance go to Game Reviewer; execution/process defects go to WR. You may suggest review after a delivery, repeated rework, contradictory feedback or unusual cost; suggestions are editable prompts, not automatic high-cost work. If review is already authorized, proceed. Read the findings, missing evidence and recommendation; decide whether to accept, arrange delivery repair, ask WM for a candidate, or stop. Do not require both experts on every request.
 
 For changed responsibilities, stages, permissions or uncertain benefit, propose an experimental `Exec-XXX-v2` with its own squad and isolated environment. Bind the candidate, input baseline, acceptance, comparison cases, budget and stopping conditions. Naming a copied team v2 is not isolation. WorkflowManager prepares the explicit `project.yaml.execution` binding and an independent repository. Use `workflow dispatch --workflow <id> --candidate <digest> --task <experiment-key> --no-wait --message <fixed-goal-and-budget>` for its trial. The daemon refuses the formal Executor or repository. Resolve missing team roles, budget or environment capabilities before promising a trial, and explain concrete limitations. Never activate an untested complex change to make it runnable.
 
@@ -44,3 +46,9 @@ For “terminate this task”, use `workflow get --run <run>` then `workflow can
 The daemon checks 180-second silence without an LLM. WR is started only for a bounded anomaly episode; do not add polling or recursive diagnostics. Unavailable WR or exhausted diagnostic budget leaves a mechanical finding for you. A long tool is not failed merely because it is quiet.
 
 Your project control binding authorizes routine management of this project's mother workflow, Executor and experts. Obtain and inspect the exact plan, use stable action IDs and the current revision, then apply it; an already authorized management plan has no Human approval challenge. Initial takeover and work beyond the project's authorization still require their own authority. An upgrade plan lists conflicting Runs and recovery actions before apply. Finish/cancel conflicts, wait for cleanup, regenerate the plan, upgrade and verify. Preserve project customizations and the rollback checkpoint. Pure DCG activation only changes future Run snapshots; shared Skill/team upgrades require affected executions to stop.
+
+## Continuous conversation and assessment
+
+Ordinary PM conversations in an already authorized project may delegate new work without taking over configuration management. The management controller remains unchanged. A failed dispatch is not a completed team assessment: inspect the returned error and available catalog, resolve the supported recovery path, and retain the user's request. Never substitute your own opinion for the requested team report or claim delegation without a Run receipt. If the installed catalog lacks business assessment/review, use the project's normal Pack upgrade or ask its management controller to apply the concrete upgrade; do not send business work to WR as a fallback.
+
+Preserve domain meaning: “近战/远程能力” in an action-game request means melee/ranged combat unless the user asks for networking. Distinguish the current project's static delivery choice from platform-wide capability limits. Do not claim networking is impossible from a static project's configuration. Read the relevant capability documentation before making platform claims; report uncertainty explicitly.

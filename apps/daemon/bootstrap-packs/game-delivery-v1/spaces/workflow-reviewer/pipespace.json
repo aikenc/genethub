@@ -1,7 +1,7 @@
 {
   "schema": "pipespace.v1",
   "name": "workflow-reviewer",
-  "description": "Independent evidence-based outcome review.",
+  "description": "Independent workflow execution diagnosis and process evaluation.",
   "agents": [
     "codex",
     "cursor",
