@@ -811,17 +811,17 @@ async function assertDelivery(
   });
   if (flowReply?.type !== "sessionFlow") throw new Error(`session.flow returned ${flowReply?.type}`);
   const flow = flowReply.data;
-  const kinds = flow.messages.map((message) => message.kind);
+  const kinds = flow.messages.filter(message=>message.kind !== "structure.transition").map((message) => message.kind);
   t.assertions.assert(
     kinds.join(",") ===
       "run.requested,node.assigned,node.completed,node.assigned,node.completed,run.completed",
     `unexpected Executor timeline: ${JSON.stringify(kinds)}`,
   );
   const implementAssigned = flow.messages.find(
-    (message) => message.kind === "node.assigned" && message.nodeId === "implement",
+    (message) => message.kind === "node.assigned" && (message.payload as {role?:string})?.role === "coder",
   );
   const implementCompleted = flow.messages.find(
-    (message) => message.kind === "node.completed" && message.nodeId === "implement",
+    (message) => message.kind === "node.completed" && message.nodeId === implementAssigned?.nodeId,
   );
   const implementationMs =
     (implementCompleted?.createdAtMs ?? Number.POSITIVE_INFINITY) -
@@ -1188,7 +1188,7 @@ defineJourney(
         report.nodeDurations?.some(
           (duration) =>
             duration.runId === baseline.run.id &&
-            duration.nodeId === "implement" &&
+            duration.nodeId === baseline.flow.messages.find(message=>message.kind === "node.assigned" && (message.payload as {role?:string})?.role === "coder")?.nodeId &&
             duration.durationMs >= 0,
         ) &&
           report.finding?.code === "longest-node" &&

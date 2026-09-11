@@ -87,7 +87,7 @@ defineSpecialty({
     t.assertions.assert(installed?.type === "workspaces" && installed.data.find(space => space.id === opened.workspaceId)?.agentSpace?.components.some(component => component.componentId === "pm" && component.enabled), `bootstrap did not install PM: ${JSON.stringify(installed)}`);
     const source = path.join(opened.workspaceRoot, ".genethub/workflow");
     const workflowFile = path.join(source, "workflows/game-feature.yaml");
-    const schema = readFileSync(workflowFile, "utf8").split("\n")[0]?.split(": ")[1];
+    const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
     const roleSchema = readFileSync(roleFile, "utf8").split("\n")[0]?.split(": ")[1];
     writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));

@@ -13,6 +13,7 @@ description = "GeneHub daemon: session kernel, agent adapters and client transpo
 path = "src/lib.rs"
 
 [dependencies]
+workflow-engine = { path = "../../packages/workflow-engine" }
 genehub-proto = { path = "../../packages/proto" }
 genet-frontdoor = { path = "../../packages/frontdoor" }
 genet-native = { path = "../../packages/native" }

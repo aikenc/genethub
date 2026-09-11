@@ -1,7 +1,6 @@
-schema: genehub.workflow.definition.v1
+schema: genehub.workflow.definition.v2
 id: game-feature
-version: 2
-entry: implement
+version: 3
 nodes:
   - id: implement
     uses: agent.session
@@ -16,8 +15,6 @@ nodes:
           verify: git.commitOnTarget
         - key: checks
           verify: value.nonEmpty
-    on:
-      completed: [review]
   - id: review
     uses: agent.session
     with:
@@ -29,38 +26,53 @@ nodes:
           expected: approved
         - key: checks
           verify: value.nonEmpty
-    on:
-      completed: [publish]
-      changesRequested: [repair]
   - id: publish
     uses: result.publish
-  - id: repair
-    uses: agent.session
-    with:
-      role: coder
-      writeLease:
-        targetRef: current
-        ttlSeconds: 900
-    completion:
-      all:
-        - key: commit
-          verify: git.commitOnTarget
-        - key: checks
-          verify: value.nonEmpty
-    on:
-      completed: [review-after-repair]
-  - id: review-after-repair
-    uses: agent.session
-    with:
-      role: reviewer
-    completion:
-      all:
-        - key: review
-          verify: value.equals
-          expected: approved
-        - key: checks
-          verify: value.nonEmpty
-    on:
-      completed: [publish-repaired]
-  - id: publish-repaired
-    uses: result.publish
+structure:
+  body:
+    id: delivery
+    type: sequence
+    steps:
+      - id: development
+        type: loop
+        maxRounds: 2
+        initial:
+          op: literal
+          value:
+            approved: false
+            feedback: null
+        condition:
+          op: not
+          value:
+            op: ref
+            path: /vars/approved
+        body:
+          id: iteration
+          type: sequence
+          steps:
+            - id: implement-step
+              type: task
+              activity: implement
+            - id: review-step
+              type: task
+              activity: review
+              accept:
+                - completed
+                - changesRequested
+        update:
+          op: object
+          fields:
+            approved:
+              op: eq
+              left:
+                op: ref
+                path: /results/review-step/outcome
+              right:
+                op: literal
+                value: completed
+            feedback:
+              op: ref
+              path: /results/review-step
+      - id: publish-step
+        type: task
+        activity: publish

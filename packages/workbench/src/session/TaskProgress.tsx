@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 
 import { refreshAgentActivities, useAgentActivities } from "../workspace/useAgentActivity";
 import { useWorkbench } from "./store";
+import { WorkflowStructureDetails } from "./StructuredWorkflow";
 import { canHandleInteraction } from "./attention";
 
 const labels: Record<string, string> = {
@@ -87,6 +88,7 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
             </div>;
           })}
           {task.cleanupError && <p className="mt-1 text-xs text-danger">收尾待处理：{task.cleanupError}</p>}
+          <WorkflowStructureDetails workspaceId={session.workspaceId} runId={task.runId} revision={task.revision} />
           {task.executorSessionId && <button type="button" className="min-h-9 text-xs text-accent"
             onClick={() => void selectSession(task.executorSessionId!)}>查看执行记录</button>}
         </li>)}

@@ -2,6 +2,7 @@ import type { ExecutorFlowStatus, FlowMessageStatus } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
 import { useWorkbench } from "./store";
+import { StructuredWorkflow } from "./StructuredWorkflow";
 
 const labels: Record<string, string> = {
   "run.requested": "收到执行任务",
@@ -89,8 +90,9 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
           : !flow && !error ? <p role="status" className="mt-2 text-sm text-muted">正在读取执行记录…</p> : null}
         {error ? <p role="alert" className="mt-2 break-words text-sm text-danger">无法读取执行记录：{error}。可刷新重试；新建的 Executor 会话需要先由发起会话启动流程。</p> : null}
       </header>
+      {flow?.run.structure ? <StructuredWorkflow run={flow.run} /> : null}
       <ol className="space-y-4" aria-label="执行消息">
-        {messages.map((message) => <FlowMessage key={message.messageId} message={message} />)}
+        {messages.filter(message => message.kind !== "structure.transition").map((message) => <FlowMessage key={message.messageId} message={message} />)}
       </ol>
       {flow ? <section aria-label="当前节点状态" className="rounded-xl border border-line px-4 py-3">
         <h3 className="text-sm font-medium">当前节点状态</h3>

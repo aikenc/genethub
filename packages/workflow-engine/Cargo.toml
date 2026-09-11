@@ -1,0 +1,12 @@
+[package]
+name = "workflow-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic structured workflow transitions; storage and effects belong to the host"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2 = "0.10"

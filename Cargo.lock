@@ -1430,6 +1430,7 @@ dependencies = [
  "uuid",
  "webrtc",
  "windows-sys 0.61.2",
+ "workflow-engine",
 ]
 
 [[package]]
@@ -5301,6 +5302,16 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "wast",
+]
+
+[[package]]
+name = "workflow-engine"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

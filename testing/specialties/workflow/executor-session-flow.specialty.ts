@@ -50,7 +50,7 @@ function fieldFromRequest(value: unknown, field: string): unknown {
   return numeric ? Number(numeric[1]) : undefined;
 }
 
-for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "restart-handoff"] as const) defineSpecialty(
+for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "restart-handoff", "corrupt-frontier"] as const) defineSpecialty(
   {
     id: outcome === "approved" ? "specialty.workflow.executor-session-flow" : `specialty.workflow.executor-session-flow.${outcome}`,
     title: "Executor Session drives Coder and Reviewer with structured messages",
@@ -95,6 +95,8 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
       const gameHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Asteroid Garden</title><style>body{margin:0;background:#08152b;color:#fff;font:16px sans-serif;text-align:center}canvas{background:#10264c;border:2px solid #79e8ff;margin:20px}</style></head><body><h1>Asteroid Garden</h1><p>方向键移动，收集星种</p><canvas id="game" width="640" height="360"></canvas><script>const c=document.querySelector('#game'),x=c.getContext('2d');let px=320,score=0;addEventListener('keydown',e=>{px+=e.key==='ArrowLeft'?-20:e.key==='ArrowRight'?20:0;score++;draw()});function draw(){x.fillStyle='#10264c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#79e8ff';x.fillRect(px,300,28,28);x.fillStyle='#fff';x.fillText('星种 '+score,20,30)}draw()</script></body></html>`;
       let pmStage = 0;
+      const coderOperations = new Set<string>();
+      const reviewerOperations = new Set<string>();
       const coderStages = { implement: 0, repair: 0 };
       const reviewerStages = { review: 0, after: 0 };
       let pmAtReview: number | undefined;
@@ -102,11 +104,13 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
         if (body.includes("你是小游戏项目的 Coder")) {
-          const repairing = body.includes("当前节点：repair");
+          const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
+          if (operation) coderOperations.add(operation);
+          const repairing = operation ? [...coderOperations].indexOf(operation) > 0 : body.includes("当前节点：repair");
           const stage = coderStages[repairing ? "repair" : "implement"]++;
           if (repairing && stage === 0) {
             repairedFromFinding = body.includes("startup-ready-defect") && body.includes("runtime-start-failed");
-            t.assertions.assert(pmStage === pmAtReview, "ordinary rework woke PM instead of following the DAG");
+            t.assertions.assert(pmStage === pmAtReview, "ordinary rework woke PM instead of following the workflow");
           }
           if (stage === 0) {
             return {
@@ -129,7 +133,9 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           return { text: "实现节点已完成。" };
         }
         if (body.includes("你是小游戏项目的 Reviewer")) {
-          const afterRepair = body.includes("当前节点：review-after-repair");
+          const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
+          if (operation) reviewerOperations.add(operation);
+          const afterRepair = operation ? [...reviewerOperations].indexOf(operation) > 0 : body.includes("当前节点：review-after-repair");
           const stage = reviewerStages[afterRepair ? "after" : "review"]++;
           if (!afterRepair && stage === 0) pmAtReview = pmStage;
           if (afterRepair && stage === 0) t.assertions.assert(pmStage === pmAtReview, "rereview consumed a PM turn");
@@ -253,7 +259,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         `PM turn failed: ${JSON.stringify(pmEvents.slice(-10).map((event) => event.raw)).slice(-6000)}`,
       );
 
-      if (outcome === "cancel-handoff" || outcome === "restart-handoff") {
+      if (outcome === "cancel-handoff" || outcome === "restart-handoff" || outcome === "corrupt-frontier") {
         let accepted: import("@genehub/proto").WorkflowRunStatus | undefined;
         await t.tools.waitUntil(async () => {
           const result = await opened.client.call({type: "workflow.history", payload: {workspaceId: projectId, limit: 10}});
@@ -280,9 +286,28 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         // stops/starts; a synchronous child command blocks this Node event loop.
         const stopped = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
         t.assertions.assert(stopped.code === 0, `daemon stop failed: ${stopped.stderr}`);
+        if (outcome === "corrupt-frontier") {
+          const snapshotPath = path.join(projectRoot,"spaces","executor",".genethub","sessions",accepted!.executorSessionId!,"components","executor","snapshots",`run-${accepted!.id}.json`);
+          const saved = JSON.parse(readFileSync(snapshotPath,"utf8"));
+          t.assertions.assert(!!saved.run.engine,"fault fixture lacks a structured snapshot");
+          saved.run.engine.frames[saved.run.engine.root].cursor = {phase:"selected",child:999999};
+          writeFileSync(snapshotPath,JSON.stringify(saved));
+          t.note("Daemon stopped; changed the isolated persisted root cursor to an invalid child before restart.");
+        }
         const started = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], opened.daemon.env);
         t.assertions.assert(started.code === 0, `daemon restart failed: ${started.stderr}`);
         opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+        if (outcome === "corrupt-frontier") {
+          await t.tools.waitUntil(async()=>{
+            const reply = await opened.client.call({type:"workflow.get",payload:{workspaceId:projectId,runId:accepted!.id}});
+            if(reply?.type !== "workflowRun" || reply.data.status !== "blocked") return false;
+            t.assertions.assert(reply.data.reason?.includes("快照") && reply.data.nodes.filter(n=>n.sessionId).length === 1,"invalid snapshot guessed a successor or concealed its reason");
+            const worker=reply.data.nodes.find(n=>n.sessionId)!;
+            const session=await opened.client.call({type:"session.get",payload:{sessionId:worker.sessionId!}});
+            return session?.type === "snapshot" && session.data.summary.status === "closed";
+          },35_000);
+          return;
+        }
       }
       await t.tools.waitUntil(async () => {
         const history = await opened.client.call({
@@ -378,25 +403,26 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       });
       t.assertions.assert(flowReply?.type === "sessionFlow", `session.flow returned ${flowReply?.type}`);
       const flow = flowReply?.type === "sessionFlow" ? flowReply.data : undefined;
-      const kinds = flow?.messages.map((message) => message.kind) ?? [];
+      const kinds = flow?.messages.filter(message=>message.kind !== "structure.transition").map((message) => message.kind) ?? [];
       const terminal = outcome === "exhausted" ? "run.blocked" : "run.completed";
       const expected = ["run.requested", "node.assigned", "node.completed", "node.assigned", "node.completed"];
       if (repairs) expected.push("node.assigned", "node.completed", "node.assigned", "node.completed");
       expected.push(terminal);
       t.assertions.assert(kinds.join(",") === expected.join(","), `unexpected FlowMessage timeline: ${JSON.stringify(kinds)}`);
       t.assertions.assert(flow?.run.status === run?.status, "Executor flow snapshot disagrees with Run");
-      const implementation = run?.nodes.find(node => node.id === "implement");
-      const repair = run?.nodes.find(node => node.id === "repair");
+      const implementations = run!.nodes.filter(node=>workers.some(w=>w.id === node.sessionId && w.managed?.role === "coder"))
+        .sort((a,b)=>(a.assignedAtMs ?? 0)-(b.assignedAtMs ?? 0));
+      const [implementation,repair] = implementations;
       if (!repairs) {
-        t.assertions.assert(repair?.status === "unreached" && !repair.sessionId, "approval unnecessarily launched repair");
+        t.assertions.assert(!repair, "approval unnecessarily launched repair");
       } else {
         t.assertions.assert(repairedFromFinding, "repair assignment omitted the review reason and evidence");
         t.assertions.assert(repair?.evidence.commit && repair.evidence.commit !== implementation?.evidence.commit,
           "repair reused the first commit instead of acquiring a fresh baseline");
         t.assertions.assert(git(projectRoot, ["rev-parse", "HEAD"]) === repair?.evidence.commit, "repair evidence does not name the actual target commit");
-        t.assertions.assert(run?.nodes.find(node => node.id === "publish")?.status === "unreached", "rejection took the first publish branch");
-        t.assertions.assert(run?.nodes.find(node => node.id === "publish-repaired")?.status === (outcome === "exhausted" ? "unreached" : "completed"), "repair publication ignored final review");
       }
+      t.assertions.assert(run!.nodes.some(n=>n.uses === "result.publish" && n.status === "completed") === (outcome !== "exhausted"), "publication ignored final review");
+      t.assertions.assert(!!run!.structure,"default development template is not structured");
       t.assertions.assert(workers.every(worker => worker.status === "closed"), "terminal nodes left live execution owners");
 
       const executorRoot = path.join(projectRoot, "spaces", "executor");
@@ -420,7 +446,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       );
     } finally {
       opened.client.close();
-      opened.daemon.stop();
+      await runGenetAsync(opened.daemon.genet,["daemon","stop"],opened.daemon.env);
       await opened.mock.stop();
     }
   },

@@ -1918,7 +1918,11 @@ activationHistory: Array<WorkflowActivationStatus>, };
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, 
+export type WorkflowRunStatus = { 
+/**
+ * Versioned structured-definition and instance-address projection; absent for legacy DAG Runs.
+ */
+structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, 
 /**
  * Why execution is blocked, stopping or cancelled.
  */

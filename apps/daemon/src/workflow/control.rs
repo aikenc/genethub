@@ -198,18 +198,30 @@ pub(crate) async fn start_assigned(
 ) -> Result<()> {
     let workspace = state.workspaces.get(workspace_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
-    let run = {
-        let _guard = lock_run(&runtime, run_id)?;
-        load_run(&runtime, run_id)?
-    };
+    let _guard = lock_run(&runtime, run_id)?;
+    let mut run = load_run(&runtime, run_id)?;
+    let _request = request::request_lock(&runtime,request::group_id(&run))?;
     request::ensure_open(&runtime, &run)?;
     if run.status != "running" {
         return Ok(());
+    }
+    let deadline_reached = run.engine.as_ref().and_then(|engine|workflow_engine::pending(engine).wake_at_ms)
+        .is_some_and(|deadline|now_ms().max(0) as u64 >= deadline);
+    if run.engine.is_some() && (deadline_reached || request::budget_exhausted(&runtime,&run,now_ms())?) {
+        request_stop(&mut run,"blocked","流程或活动达到期限，或原始请求耗尽 LLM 调用上限".into());
+        run.revision += 1; save_run(&runtime,&run)?; return Ok(());
     }
     if !run.nodes.values().any(|node| {
         node.status == "running" && node.session_id.as_deref() == Some(session.id.as_str())
     }) {
         bail!("Worker assignment no longer belongs to an active node");
+    }
+    if run.engine.is_some() {
+        let node = run.nodes.iter().find(|(_,node)|node.session_id.as_deref() == Some(session.id.as_str())).map(|(id,_)|id.clone()).expect("assignment validated");
+        if structured::accepted(&mut run,&node)? {
+            run.revision += 1; save_run(&runtime,&run)?;
+        }
+        if run.status != "running" {return Ok(());}
     }
     state
         .sessions
@@ -360,6 +372,7 @@ pub(crate) async fn maintain(state: &Shared) {
                 let _job = job;
                 let result: Result<()> = async {
                     finish_nodes(&owner, &runtime, &run.id).await?;
+                    structured::drive(&owner, &runtime, &run.id).await?;
                     reconcile(&owner, &runtime, &run.id).await?;
                     supervision::diagnostics(&owner, &runtime, &run.id).await?;
                     supervision::deliver_notice(&owner, &runtime, &run.id).await?;
@@ -405,7 +418,15 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
             if let Some(activity) = activity { run.nodes.get_mut(node_id).expect("node").activity = activity; }
             let outcome = run.nodes[node_id].outcome.unwrap_or_default();
             run.nodes.get_mut(node_id).expect("node").status = "completed".into();
-            let definition = run.definition.nodes.iter().find(|node| &node.id == node_id).expect("definition");
+            if run.engine.is_some() {
+                structured::settled(&mut run, node_id)?;
+                structured::finalize(runtime,&mut run).await;
+                run.revision += 1;
+                run.updated_at_ms = now_ms();
+                save_run(runtime, &run)?;
+                continue;
+            }
+            let definition = runtime_node(&run, node_id)?;
             let targets = definition.on.get(outcome_event(outcome)).cloned().unwrap_or_default();
             let leases_before = run.leases.clone();
             let sessions = match activate(state, &runtime.project_root, runtime, &mut run, targets).await {
@@ -572,6 +593,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 _ => {}
             }
         }
+        structured::retired(&mut current)?;
         current.status = stop.target;
         current.leases.clear();
         for diagnostic in &mut current.supervision.diagnostics {

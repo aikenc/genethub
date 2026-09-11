@@ -138,42 +138,7 @@ pub(super) async fn observe(
         episode = episode.min(activity_ms);
         stalled.push("Run 尚未收敛且没有 Worker 接棒".into());
     }
-    let group = all_runs(runtime)?
-        .into_iter()
-        .filter(|other| request::group_id(other) == request::group_id(run))
-        .collect::<Vec<_>>();
-    let execution_ms = group.iter().filter(|other| other.id != run.id)
-        .map(|other| request::execution_ms(other, now)).sum::<i64>()
-        + request::execution_ms(run, now);
-    let calls: u64 = group
-        .iter()
-        .filter(|other| other.id != run.id)
-        .flat_map(|run| {
-            run.nodes
-                .values()
-                .map(|node| node.activity.llm_rounds)
-                .chain(
-                    run.supervision
-                        .diagnostics
-                        .iter()
-                        .map(|diag| diag.activity.llm_rounds),
-                )
-        })
-        .sum::<u64>()
-        + run
-            .nodes
-            .values()
-            .map(|node| node.activity.llm_rounds)
-            .sum::<u64>()
-        + run
-            .supervision
-            .diagnostics
-            .iter()
-            .map(|diag| diag.activity.llm_rounds)
-            .sum::<u64>();
-    if !waiting
-        && (execution_ms >= request::REQUEST_DEADLINE_MS
-            || calls >= request::MAX_LLM_ROUNDS)
+    if request::budget_exhausted(runtime,run,now)?
     {
         control::request_stop(
             run,
@@ -195,6 +160,7 @@ pub(super) async fn observe(
         "{}。静默只触发诊断，不自动终止长工具。",
         stalled.join("；")
     ));
+    let group = all_runs(runtime)?.into_iter().filter(|other|request::group_id(other) == request::group_id(run)).collect::<Vec<_>>();
     let group_diagnostics: usize = group
         .iter()
         .map(|run| run.supervision.diagnostics.len())

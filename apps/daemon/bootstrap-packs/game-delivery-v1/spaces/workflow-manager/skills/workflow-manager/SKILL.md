@@ -14,3 +14,5 @@ Run `node skills/workflow-manager/scripts/evaluate.mjs` from this WorkflowManage
 When delegated by PM, follow its requested scope and return your report through the managed completion contract. A reasoned no-change or unsupported result is valid: state the observed facts, limitation, alternative and reconsideration condition. Do not force an edit just to produce a Candidate. For complex changes, return an experiment plan with baseline, candidate/team/environment binding, comparison criteria, budget and stop conditions; never activate first to test later. Compilation checks are structural evidence, not an independent quality verdict.
 
 For complex changes, read [experiment execution](references/experiments.md) for the actual candidate/team/environment binding and supported trial/adoption commands.
+
+For control-flow edits, read [structured workflow definitions](references/structured-flows.md). Use the current v2 structured language for loops and parallel composition; preserve v1 definitions on existing Runs.
