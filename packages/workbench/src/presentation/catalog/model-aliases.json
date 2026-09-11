@@ -15,7 +15,10 @@
     { "agentId": "codex", "modelId": "gpt-5.3-codex-spark", "shortLabel": "5.3 Spark" },
     { "agentId": "claude", "modelId": "default", "shortLabel": "Default" },
     { "agentId": "claude", "modelId": "sonnet", "shortLabel": "Sonnet" },
-    { "agentId": "claude", "modelId": "opus", "shortLabel": "Opus" }
+    { "agentId": "claude", "modelId": "opus", "shortLabel": "Opus" },
+    { "agentId": "tclaude", "modelId": "default", "shortLabel": "Default" },
+    { "agentId": "tclaude", "modelId": "sonnet", "shortLabel": "Sonnet" },
+    { "agentId": "tclaude", "modelId": "opus", "shortLabel": "Opus" }
   ],
   "multimodalHints": [
     "gpt-4o",

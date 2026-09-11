@@ -23,6 +23,13 @@
       "startWithoutModelCatalog": true
     },
     {
+      "ids": ["tclaude"],
+      "label": "TClaude",
+      "glyph": "T",
+      "modeKind": "permission",
+      "startWithoutModelCatalog": true
+    },
+    {
       "ids": ["codex", "acp:codex", "acp:codex-acp"],
       "label": "Codex",
       "modeKind": "permission",

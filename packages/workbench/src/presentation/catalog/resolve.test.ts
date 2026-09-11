@@ -23,6 +23,10 @@ describe("Agent presentation catalog", () => {
       kind: "glyph",
       glyph: "✱",
     });
+    expect(resolveAgentPresentation({ id: "tclaude", label: "TClaude" })).toMatchObject({
+      kind: "glyph",
+      glyph: "T",
+    });
     expect(resolveAgentPresentation({ id: "codex", label: "Codex" })).toEqual({
       kind: "text",
       label: "Codex",
@@ -111,7 +115,7 @@ describe("model display names", () => {
   });
 
   it("applies the same eight-grapheme fallback to every dynamic Agent catalog", () => {
-    for (const agentId of ["genet", "opencode", "claude", "codex", "cursor", "acp"]) {
+    for (const agentId of ["genet", "opencode", "claude", "tclaude", "codex", "cursor", "acp"]) {
       expect(
         resolveModelPresentation({
           agentId,
@@ -176,6 +180,7 @@ describe("runtime badges", () => {
   it("separates a permission policy from an ACP workflow selector", () => {
     expect(resolveAgentProfile("codex").modeKind).toBe("permission");
     expect(resolveAgentProfile("claude").modeKind).toBe("permission");
+    expect(resolveAgentProfile("tclaude").modeKind).toBe("permission");
     expect(resolveAgentProfile("cursor").modeKind).toBe("workflow");
     expect(resolveAgentProfile("acp:private")).toEqual({
       modeKind: "unknown",
@@ -184,6 +189,14 @@ describe("runtime badges", () => {
   });
 
   it("only shows the unlock emoji for known unrestricted modes", () => {
+    expect(
+      resolveModeBadge({
+        agentId: "tclaude",
+        permissions: true,
+        modeId: "bypassPermissions",
+        modeLabel: "Bypass permissions",
+      }),
+    ).toMatchObject({ emoji: "🔓", risk: "unrestricted" });
     expect(
       resolveModeBadge({
         agentId: "codex",
