@@ -340,6 +340,12 @@ async function main(): Promise<number> {
       : has(args, "--failed")
         ? results.filter((item) => item.status !== "passed")
         : results;
+    // Detailed inspection reads the already-redacted retained failure evidence.
+    // Keep the default summary small and never open a path supplied as a case id.
+    if (caseId) for (const result of filtered) {
+      const diagnostic = path.join(runDir, "failures", result.caseId.replace(/[^\w.-]+/g, "_"), "diagnostic.md");
+      if (existsSync(diagnostic)) result.diagnostic = readFileSync(diagnostic, "utf8").slice(-64 * 1024);
+    }
     process.stdout.write(`${JSON.stringify({ manifest, results: filtered }, null, 2)}\n`);
     return 0;
   }

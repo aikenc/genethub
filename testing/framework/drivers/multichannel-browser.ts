@@ -106,8 +106,8 @@ export async function openMultichannelBrowser(t: CaseContext, mode: "rendezvous"
 import { Client, ServicePreviewClient } from '@genehub/workbench/client';
 async function connectionInput(){const result=await window.connectionInput();if(result.admissionError)throw Object.assign(new Error(result.admissionError.message),{status:result.admissionError.status});return result;}
 const endpoint=await connectionInput();
-const client=new Client({...endpoint,rtcEnabled:false,requestTimeoutMs:3000,onDiagnostic(e){if(e.kind==='operation' && e.detail.phase==='finish'){mc.operations.push(e.detail);if(mc.operations.length>128)mc.operations.shift()}},redial:()=>connectionInput()});
-const mc={client,ServicePreviewClient,events:[],repairs:0,states:[],operations:[]};
+const client=new Client({...endpoint,rtcEnabled:false,requestTimeoutMs:3000,onDiagnostic(e){if(['error','connection','rtc'].includes(e.kind)){mc.diagnostics.push(e);if(mc.diagnostics.length>64)mc.diagnostics.shift()}if(e.kind==='operation' && e.detail.phase==='finish'){mc.operations.push(e.detail);if(mc.operations.length>128)mc.operations.shift()}},redial:()=>connectionInput()});
+const mc={client,ServicePreviewClient,events:[],repairs:0,states:[],operations:[],diagnostics:[]};
 client.onStateChange(s=>{mc.states.push(s);if(mc.states.length>128)mc.states.shift();document.querySelector('#status').textContent=s});
 window.mc=mc;client.connect();
 `);

@@ -29,6 +29,7 @@ function wedgeCase(
   // transport: sharing a machine with nine other environments is what made
   // that one slow enough to look like a hang.
   cpu = 1,
+  tags: string[] = [],
 ): void {
   defineSpecialty(
     {
@@ -36,7 +37,7 @@ function wedgeCase(
       title,
       oracle,
       catches,
-      tags: ["core", "agent", "wedge-depth", "fault-injection"],
+      tags: ["core", "agent", "wedge-depth", "fault-injection", ...tags],
       llm: { default: "none" },
       expectedDurationMs: durationMs,
       timeoutMs: durationMs * 4,
@@ -52,6 +53,13 @@ function wedgeCase(
       });
       try {
         await run(t, session);
+      } catch (error) {
+        t.note(JSON.stringify({ connectionState: session.client.connectionState,
+          close: session.client.lastCloseReason, failure: session.client.failure,
+          events: session.events.length, resyncs: session.resyncs(), resyncStatus: session.resyncStatus(),
+          diagnostics: session.connectionDiagnostics,
+          stack: error instanceof Error ? error.stack : String(error) }));
+        throw error;
       } finally {
         await session.dispose();
       }
@@ -252,6 +260,7 @@ wedgeCase(
   // Thousands of events through a real transport is slow work.
   180_000,
   2,
+  ["event-flood", "multichannel", "network-risk-v2"],
 );
 
 /**

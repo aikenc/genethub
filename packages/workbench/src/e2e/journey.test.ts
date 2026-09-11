@@ -1,5 +1,4 @@
 // @vitest-environment node
-import type { ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import {
   existsSync,
@@ -50,7 +49,7 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
   "a session, end to end",
   () => {
     let model: MockModel;
-    let daemon: ChildProcess;
+    let stopDaemon: (() => Promise<void>) | undefined;
     let client: Client;
     let dataDir: string;
     let homeDir: string;
@@ -76,7 +75,7 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
         workspaceDir: path.join(homeDir, "GeneHub"),
         log: "warn",
       });
-      daemon = started.process;
+      stopDaemon = started.stop;
       client = new Client({
         url: started.url,
         localServerProof: started.localServerProof,
@@ -113,7 +112,7 @@ describe.skipIf(missingArtifacts(runtimeArtifacts(DAEMON)))(
 
     afterAll(async () => {
       client?.close();
-      daemon?.kill("SIGKILL");
+      await stopDaemon?.();
       await model?.stop();
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(homeDir, { recursive: true, force: true });

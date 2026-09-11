@@ -7,6 +7,7 @@ defineJourney(
     oracle: "session.interrupt after a live turn yields turnCanceled rather than completed or failed",
     catches: ["interrupt swallowed at t=0", "stopped turn reported as completed"],
     tags: ["third-party", "session", "claude"],
+    llm: { default: "real" },
     expectedDurationMs: 60_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],

@@ -299,7 +299,7 @@ mod tests {
     /// Round trips inside either implementation cannot detect a length prefix,
     /// protocol version, nonce layout or AAD field drifting on only one side.
     #[test]
-    fn matches_the_web_protocol_v3_handshake_and_key_vectors() {
+    fn matches_the_web_protocol_v4_handshake_and_key_vectors() {
         assert_eq!(
             client_proof(VECTOR_SECRET, VECTOR_CONTEXT, VECTOR_CLIENT_NONCE),
             "2a0958501e684eb33817ddca6c2346e3a5f0d683b2c821666c0b045a5afe801b"
@@ -326,7 +326,7 @@ mod tests {
         );
         assert_eq!(
             hex(&seal_data_record(&key, Direction::ClientToDaemon, 7, b"binary\0body",).unwrap(),),
-            "47480300000000000000000778bfb3552d1c1a17eac4131325b976445893ce649d9c4361da402a"
+            "474804000000000000000007d55ac697ca0bd69c1309742df49f096e59255f8545ce3329949e3f"
         );
     }
 }

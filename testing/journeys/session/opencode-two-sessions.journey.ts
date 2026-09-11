@@ -7,16 +7,17 @@ defineJourney(
     oracle: "two in-flight turns complete, each with exactly one turnStarted on its own subscribe",
     catches: ["shared adapter state mixing two agents"],
     tags: ["third-party", "session", "opencode"],
+    llm: { default: "mock" },
     expectedDurationMs: 120_000,
     timeoutMs: 210_000,
     surfaces: ["daemon", "agent", "workbench-client"],
     productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
-    t.flows.main.seedHostBetaProviders(t.env);
-    const modelId = t.flows.main.writeOpencodeBuiltinConfig(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
+      const modelId = t.flows.main.writeOpencodeBuiltinConfig(t.env, opened.mock);
+      await t.flows.main.configureMockProvider(opened.client, opened.mock);
       await t.flows.main.requireAgentReady(opened.client, "opencode");
       const thirdParty = await t.flows.main.createAgentSession(opened.client, {
         workspaceId: opened.workspaceId,

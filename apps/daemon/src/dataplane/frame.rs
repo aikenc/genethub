@@ -106,7 +106,7 @@ mod tests {
         };
         assert_eq!(
             frame.encode().unwrap(),
-            vec![3, 3, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 3, b'a', b'b', b'c']
+            vec![4, 3, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 3, b'a', b'b', b'c']
         );
         assert_eq!(Frame::decode(&frame.encode().unwrap()).unwrap(), frame);
     }
@@ -119,9 +119,20 @@ mod tests {
             value: 1,
             payload: vec![0; MAX_PAYLOAD_BYTES],
         };
+        // Ordinary records use the v4 resumable envelope, not the bootstrap header.
+        let wire = genehub_proto::resume::Payload {
+            epoch: 1, seq: 1,
+            frame: genehub_proto::resume::Frame {
+                kind: frame.kind as u8, stream_id: frame.stream_id,
+                value: frame.value, payload: frame.payload,
+            },
+        };
         assert_eq!(
-            frame.encode().unwrap().len() + SECURE_RECORD_HEADER_BYTES + SECURE_RECORD_TAG_BYTES,
+            wire.encode().unwrap().len() + SECURE_RECORD_HEADER_BYTES + SECURE_RECORD_TAG_BYTES,
             genehub_proto::MAX_DATA_FRAME_BYTES
         );
+        let mut oversized = wire;
+        oversized.frame.payload.push(0);
+        assert!(oversized.encode().is_err());
     }
 }

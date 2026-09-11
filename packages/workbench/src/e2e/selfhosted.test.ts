@@ -28,11 +28,6 @@ const DAEMON = builtBinary(
   ["genet-local", "genet-dev", "genet-beta", "genet"],
   process.env.GENET_E2E_DAEMON,
 );
-const AGENT = builtBinary(
-  REPO,
-  ["genet-agent-local", "genet-agent-beta", "genet-agent-dev", "genet-agent"],
-  process.env.GENET_E2E_AGENT,
-);
 const RELAY = path.join(REPO, "apps/relay/dist/main.js");
 const JOIN_TOKEN = "e2e-join-token";
 const REPLY = "已经看过了，这个仓库编译得过。";
@@ -51,11 +46,11 @@ const socketFactory = (url: string) =>
  * fail to add up to a usable product.
  */
 describe.skipIf(
-  missingArtifacts({ ...runtimeArtifacts(DAEMON), agent: AGENT, relay: RELAY }),
+  missingArtifacts({ ...runtimeArtifacts(DAEMON), relay: RELAY }),
 )("reaching a machine with nothing but open-source pieces", () => {
   let relay: ChildProcess;
   let relayOrigin: string;
-  let daemon: ChildProcess;
+  let stopDaemon: (() => Promise<void>) | undefined;
   let owner: Client;
   let model: MockModel;
   let dataDir: string;
@@ -75,9 +70,8 @@ describe.skipIf(
       dataDir,
       workspaceDir: path.join(homeDir, "GeneHub"),
       log: "warn",
-      agent: AGENT,
     });
-    daemon = local.process;
+    stopDaemon = local.stop;
 
     owner = new Client({
       url: local.url,
@@ -107,7 +101,7 @@ describe.skipIf(
 
   afterAll(async () => {
     owner?.close();
-    daemon?.kill("SIGKILL");
+    await stopDaemon?.();
     relay?.kill("SIGKILL");
     await model?.close();
     // beforeAll can fail before the temporary roots are allocated (for

@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { defineSpecialty, openMultichannelBrowser, allocatePort } from "../../framework/public.ts";
+import { defineSpecialty, openMultichannelBrowser, allocatePort, registerControlledAgent, readControlledAgentJournal } from "../../framework/public.ts";
 
 const meta = (name: string, title: string, oracle: string, duration = 30000) => ({
   id: `specialty.multichannel.${name}`, title, oracle, catches: [title],
@@ -245,3 +245,82 @@ for (const rtc of [false, true]) {
     } finally { await stack.stop(); }
   });
 }
+
+for (const useRtc of [false, true]) defineSpecialty({
+  ...meta("hosted-renewal-continuity-" + (useRtc ? "rtc" : "fabric"),
+    "Five real Hosted renewals preserve responsive business access",
+    "Across five newly issued leases, public RPC stays under one second, connection state remains ready and the original subscription receives exact ordered events", 180000),
+  tags: ["multichannel", "network-risk-v2", "merge-risk", "renewal-continuity"],
+}, async t => {
+  const stack = await openMultichannelBrowser(t, "hosted");
+  try {
+    const id = await t.flows.main.createBuiltinSession(stack.opened.client, stack.opened.workspaceId);
+    if (useRtc) await stack.rtc();
+    await stack.page.evaluate(async id => {
+      const m = (window as any).mc;
+      await m.client.subscribe(id, { onEvent(e: unknown) { m.events.push(e); }, onResync() { m.repairs++; } });
+      m.originalId = m.client.logicalConnectionId; m.states.length = 0;
+    }, id);
+    const initial = stack.issued(), expected: string[] = [];
+    let maxRpcMs = 0;
+    const deadline = Date.now() + 210000;
+    while (stack.issued() < initial + 5 && Date.now() < deadline) {
+      const probe = await stack.page.evaluate(async () => {
+        const m = (window as any).mc, started = performance.now();
+        const reply = await m.client.call({ type: "workspace.list" });
+        return { ms: performance.now() - started, type: reply?.type, states: [...m.states] };
+      });
+      maxRpcMs = Math.max(maxRpcMs, probe.ms);
+      t.assertions.assert(probe.type === "workspaces" && probe.ms < 1000, "healthy renewal delayed business RPC: " + probe.ms + "ms");
+      t.assertions.assert(probe.states.every((s: string) => s === "ready"), "healthy renewal advertised connection loss: " + probe.states);
+      const title = "continuous-" + expected.length; expected.push(title);
+      await stack.opened.client.call({ type: "session.rename", payload: { sessionId: id, title } });
+      await stack.page.waitForFunction(title => (window as any).mc.events.some((e: any) => e.event.title === title), title, { timeout: 3000 });
+      await new Promise(r => setTimeout(r, 200));
+    }
+    await new Promise(r => setTimeout(r, 1000));
+    const actual = await stack.page.evaluate(() => {
+      const m = (window as any).mc;
+      return { retained: m.originalId === m.client.logicalConnectionId, repairs: m.repairs, states: m.states,
+        titles: m.events.filter((e: any) => e.event.type === "titleChanged").map((e: any) => e.event.title) };
+    });
+    t.note(`renewals=${stack.issued() - initial} maxRpcMs=${Math.round(maxRpcMs)} events=${expected.length}`);
+    t.assertions.assert(stack.issued() >= initial + 5, "five real lease renewals did not occur");
+    t.assertions.assert(actual.retained && actual.repairs === 0 && actual.states.every((s: string) => s === "ready"), "renewal replaced or interrupted the business owner");
+    t.assertions.assert(JSON.stringify(actual.titles) === JSON.stringify(expected), "renewal lost, duplicated or reordered subscription events");
+  } finally { await stack.stop(); }
+});
+
+for (const path of ["fabric", "rtc"] as const) defineSpecialty({
+  ...meta(`event-flood-${path}`, `A ${path} browser learns the terminal outcome after 4000 real Agent events`,
+    "The original browser subscription converges through a terminal event or declared resync; its logical connection survives and public session.get reports idle", 45000),
+  tags: ["multichannel", "network-risk-v2", "event-flood", `event-flood-${path}`],
+}, async t => {
+  const agent = registerControlledAgent(t.env, { profile: "flood-events", id: `browser-flood-${path}`, floods: 4000 });
+  t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane=debug";
+  const stack = await openMultichannelBrowser(t);
+  try {
+    await t.flows.main.requireAgentReady(stack.opened.client, agent.agentId);
+    const sessionId = await t.flows.main.createAgentSession(stack.opened.client, {
+      workspaceId: stack.opened.workspaceId, agentId: agent.agentId, modelId: null,
+    });
+    if (path === "rtc") await stack.rtc();
+    await stack.page.evaluate(async id => {
+      const m = (window as any).mc; m.floodSettled = false; m.id = m.client.logicalConnectionId; m.states = []; m.diagnostics = [];
+      await m.client.subscribe(id, {
+        onEvent(e: any) { m.events.push(e); if (["turnCompleted", "turnFailed"].includes(e.event.type)) m.floodSettled = true; },
+        onResync(snapshot: any) { m.repairs++; if (snapshot.summary.status === "idle") m.floodSettled = true; },
+      });
+    }, sessionId);
+    await t.flows.main.sendPrompt(stack.opened.client, sessionId, "say a lot");
+    await stack.page.waitForFunction(() => (window as any).mc.floodSettled, null, { timeout: 60000 });
+    const result = await stack.page.evaluate(async id => {
+      const m = (window as any).mc, reply = await m.client.call({ type: "session.get", payload: { sessionId: id } });
+      return { idle: reply?.type === "snapshot" && reply.data.summary.status === "idle",
+        same: m.client.logicalConnectionId === m.id, states: m.states, events: m.events.length, repairs: m.repairs, diagnostics: m.diagnostics };
+    }, sessionId);
+    t.assertions.assert(readControlledAgentJournal(agent).some(e => e.event === "answered" && e.floods === 4000), "Agent did not emit the required flood");
+    t.assertions.assert(result.idle && result.same && !result.states.includes("reconnecting"), "legal event burst broke the original browser connection: " + JSON.stringify(result));
+    t.note(JSON.stringify({ path, ...result }));
+  } finally { await stack.stop(); }
+});

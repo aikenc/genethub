@@ -4,18 +4,20 @@ defineJourney(
   {
     id: "journey.session.opencode-same-timeline",
     title: "OpenCode reaches the same timeline as the built-in agent",
-    oracle: "an opencode session turn completes with a reply after the CLI is on PATH and pointed at the built-in DeepSeek key",
+    oracle: "an opencode session turn completes with a reply after the CLI is on PATH and pointed at a controlled LLM endpoint",
     catches: ["OpenCode handshake never becomes a turn", "prompt echoed as the reply"],
     tags: ["third-party", "session", "opencode"],
+    llm: { default: "mock" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
     productInterfaces: ["@genehub/workbench/client"],
   },
   async (t) => {
-    const modelId = t.flows.main.writeOpencodeBuiltinConfig(t.env);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
+      const modelId = t.flows.main.writeOpencodeBuiltinConfig(t.env, opened.mock);
+      await t.flows.main.configureMockProvider(opened.client, opened.mock);
       await t.flows.main.requireAgentReady(opened.client, "opencode");
       const sessionId = await t.flows.main.createAgentSession(opened.client, {
         workspaceId: opened.workspaceId,

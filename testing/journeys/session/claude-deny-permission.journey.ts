@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { BlockedError, defineJourney } from "../../framework/public.ts";
+import { defineJourney } from "../../framework/public.ts";
 
 defineJourney(
   {
@@ -10,6 +10,7 @@ defineJourney(
     oracle: "session.respondPermission deny leaves denied.txt absent after the turn settles",
     catches: ["denied Write still reaches the filesystem"],
     tags: ["third-party", "session", "claude"],
+    llm: { default: "real" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],
@@ -26,10 +27,8 @@ defineJourney(
         modelId: claude.catalog.models[0]?.id ?? null,
       });
       const events = await t.flows.main.attachEventLog(opened.client, sessionId);
-      const asking =
-        claude.catalog.defaultMode === "manual" || claude.catalog.defaultMode === "default"
-          ? claude.catalog.defaultMode
-          : "manual";
+      const asking = claude.catalog.modes.find(mode => mode.id === "manual" || mode.id === "default")?.id;
+      if (!asking) throw new Error("installed Claude catalog omitted an asking mode");
       await opened.client.call({ type: "session.setMode", payload: { sessionId, modeId: asking } });
       await t.flows.main.sendPrompt(
         opened.client,
@@ -43,8 +42,7 @@ defineJourney(
               (item) =>
                 item.type === "permissionRequested" ||
                 item.type === "turnCompleted" ||
-                item.type === "turnFailed" ||
-                item.type === "turnCanceled",
+                item.type === "turnFailed",
             ),
           120_000,
         );
@@ -58,8 +56,9 @@ defineJourney(
         if (existsSync(path.join(t.env.workspace, "denied.txt"))) {
           throw new Error("default mode wrote denied.txt without asking permission");
         }
-        throw new BlockedError("this run finished without a Write permission prompt");
+        throw new Error("asking mode finished without a Write permission prompt");
       }
+      t.assertions.assert(!existsSync(path.join(t.env.workspace, "denied.txt")), "Write ran before a permission decision");
       const inner = t.flows.main.sessionEventOf(asked);
       const request = inner?.request as
         | { id?: string; options?: Array<{ id: string; kind: string }> }
@@ -78,23 +77,14 @@ defineJourney(
           outcome: { outcome: "selected", optionId },
         },
       });
-      try {
-        await t.tools.waitUntil(
-          () =>
-            events.some(
-              (item) => item.type === "turnCompleted" || item.type === "turnFailed" || item.type === "turnCanceled",
-            ),
-          120_000,
-        );
-      } catch (error) {
-        throw new Error(
-          `${error instanceof Error ? error.message : String(error)}; events=${JSON.stringify(events.map((item) => item.type))}`,
-        );
-      }
-      t.assertions.assert(
-        !events.some((item) => item.type === "turnFailed"),
-        "a denial should not itself fail the turn",
-      );
+      // Asking stops the old execution before publishing permissionRequested.
+      // An earlier turnCanceled is not evidence that the denial was applied.
+      const snapshot = await opened.client.call({ type: "session.get", payload: { sessionId } });
+      t.assertions.assert(snapshot?.type === "snapshot", "denied session is readable");
+      if (snapshot?.type !== "snapshot") throw new Error("expected session snapshot");
+      t.assertions.assert(snapshot.data.pendingPermissions.length === 0, "denial left a pending permission");
+      t.assertions.assert(snapshot.data.summary.status === "idle", "denial resumed the stopped execution");
+      t.assertions.assert(!events.some(item => item.type === "turnFailed"), "a denial should not itself fail the turn");
       t.assertions.assert(
         !existsSync(path.join(t.env.workspace, "denied.txt")),
         "a denied Write must never reach the filesystem",

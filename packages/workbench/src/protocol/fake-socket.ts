@@ -46,7 +46,7 @@ export interface FakePeerOptions {
 }
 
 /**
- * A small in-memory v3 daemon behind a WebSocket-shaped carrier.
+ * A small in-memory logical daemon behind a WebSocket-shaped carrier.
  *
  * Tests still decide exactly when the socket opens, authenticates, replies and
  * drops, but the bytes between those decisions are the real bounded E2EE data
@@ -73,7 +73,11 @@ export class FakeSocket implements WebSocketLike {
   /** A suspended page's carrier: records arrive, nothing ever answers. */
   private silent = false;
 
-  constructor(private readonly options: FakePeerOptions = {}) {}
+  constructor(private readonly options: FakePeerOptions = {},
+    private readonly peer: { endpoint?: DataEndpoint; socket?: FakeSocket } = {}) {}
+
+  /** End the logical owner, as distinct from losing one physical carrier. */
+  endSession(): void { this.endpoint?.close("fake peer session ended"); }
 
   /** Stops answering RPCs without closing, the way a frozen carrier does. */
   silence(): void {
@@ -120,7 +124,7 @@ export class FakeSocket implements WebSocketLike {
   }
 
   /**
-   * Completes the real v3 PSK transcript and starts an in-memory server
+   * Completes the real PSK transcript and starts an in-memory server
    * DataEndpoint. A different secret is useful for authentication-failure
    * tests.
    */
@@ -225,15 +229,20 @@ export class FakeSocket implements WebSocketLike {
       },
       close: (reason) => this.close(1000, reason),
     };
-    this.endpoint = new DataEndpoint({
-      role: "server",
-      carrier,
-      key,
-      maxReceiveBytesPerStream: 64 * 1024 * 1024,
-    });
-    this.endpoint.onIncoming((stream) => {
-      void this.handle(stream, identity).catch(() => {});
-    });
+    this.peer.socket = this;
+    if (this.peer.endpoint?.state === "open") {
+      this.endpoint = this.peer.endpoint;
+      // Attach installs record callbacks synchronously; the welcome must precede
+      // the asynchronous logical resume exchange on the client side.
+      this.background(this.endpoint.attach(carrier, key));
+    } else {
+      this.endpoint = this.peer.endpoint = new DataEndpoint({
+        role: "server", carrier, key, maxReceiveBytesPerStream: 64 * 1024 * 1024,
+      });
+      this.endpoint.onIncoming((stream) => {
+        void this.peer.socket!.handle(stream, identity).catch(() => {});
+      });
+    }
     const welcome = new TextEncoder().encode(
       JSON.stringify({ version: DATA_PLANE_VERSION, serverNonce, proof }),
     );
@@ -353,7 +362,7 @@ export class FakeSocket implements WebSocketLike {
    */
   private background(task: Promise<void>): void {
     void task.catch((error) => {
-      if (this.closed) return;
+      if (this.closed || this.endpoint?.state === "closed") return;
       queueMicrotask(() => {
         throw error;
       });
@@ -368,12 +377,13 @@ export function socketQueue(options: FakePeerOptions = {}): {
   urls: string[];
   latest(): FakeSocket;
 } {
+  const peer: { endpoint?: DataEndpoint; socket?: FakeSocket } = {};
   const sockets: FakeSocket[] = [];
   const urls: string[] = [];
   return {
     factory: (url) => {
       urls.push(url);
-      const socket = new FakeSocket(options);
+      const socket = new FakeSocket(options, peer);
       sockets.push(socket);
       return socket;
     },

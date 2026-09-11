@@ -76,7 +76,7 @@ async function connected(options: Partial<ClientOptions> = {}): Promise<{
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("the v3 peer connection", () => {
+describe("the logical peer connection", () => {
   it("requires the out-of-band loopback PSK and verifies encrypted identity", async () => {
     const proof = localProof();
     const queue = socketQueue({ secret: proof.proof, identity: localIdentity });
@@ -312,7 +312,8 @@ describe("the v3 peer connection", () => {
     client.close();
 
     await pending.catch(() => undefined);
-    await settle();
+    // Logical close allows one second to deliver the authenticated terminal frame.
+    await waitFor(() => socket.closed, 2000);
     expect(socket.closed).toBe(true);
   });
 });
@@ -349,10 +350,10 @@ describe("RPC exchanges are independent logical streams", () => {
     const { client, socket } = await connected();
     const request = client.call({ type: "agent.list" });
     await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
-    socket.close({ code: 1013, reason: "too slow" });
+    socket.endSession();
 
     await expect(request).rejects.toBeInstanceOf(ConnectionOutcomeUnknownError);
-    expect(client.lastCloseReason).toEqual({ code: 1013, reason: "too slow" });
+    expect(socket.sent.filter(message => message.type === "agent.list")).toHaveLength(1);
     client.close();
   });
 
@@ -537,7 +538,7 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
         rtcSupported: true,
       },
     });
-    const rtcFactory = vi.fn(async (base) => ({
+    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async (base) => ({
       endpoint: base,
       peer: {} as RTCPeerConnection,
       close() {},
@@ -555,7 +556,10 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     queue.latest().acceptHandshake();
     await waitFor(() => client.rtcState === "connected");
 
-    expect(rtcFactory).toHaveBeenCalledTimes(1);
+    await waitFor(() => rtcFactory.mock.calls.length === 2);
+    expect(rtcFactory).toHaveBeenCalledTimes(2);
+    expect(rtcFactory.mock.calls[0]?.[3]).toEqual({ policy: "direct-only" });
+    expect(rtcFactory.mock.calls[1]?.[3]).toEqual({ endpoint: rtcFactory.mock.calls[1]?.[0] });
     client.setRtcEnabled(false);
     expect(client.rtcState).toBe("disabled");
     client.close();

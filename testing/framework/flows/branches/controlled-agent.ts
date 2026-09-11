@@ -28,6 +28,7 @@ export interface ControlledAgentSession {
    * arrival order. Replays are included because a client that ignored them
    * would be a broken client, not evidence about the product. */
   events: Array<{ type?: string; raw: unknown }>;
+  connectionDiagnostics: unknown[];
   /** How many times the daemon told this client it had fallen behind. */
   resyncs(): number;
   /** The status carried by the most recent resync snapshot, if any. */
@@ -57,7 +58,13 @@ export async function openControlledAgentSession(input: {
   agent: ControlledAgentOptions;
 }): Promise<ControlledAgentSession> {
   const agent = registerControlledAgent(input.lease, input.agent);
-  const opened = await openWorkspace({ openRoot: input.openRoot, lease: input.lease });
+  const connectionDiagnostics: unknown[] = [];
+  const opened = await openWorkspace({ openRoot: input.openRoot, lease: input.lease,
+    onDiagnostic(event) {
+      if (event.kind !== "error" && event.kind !== "connection") return;
+      connectionDiagnostics.push(event);
+      if (connectionDiagnostics.length > 32) connectionDiagnostics.shift();
+    } });
   try {
     await requireAgentReady(opened.client, agent.agentId);
     const sessionId = await createAgentSession(opened.client, {
@@ -89,6 +96,7 @@ export async function openControlledAgentSession(input: {
       workspaceRoot: opened.workspaceRoot,
       sessionId,
       events,
+      connectionDiagnostics,
       resyncs: () => resyncCount,
       resyncStatus: () => lastResyncStatus,
       journal: () => readControlledAgentJournal(agent),

@@ -30,3 +30,5 @@ export { watchInputs } from "./engine/input-watch.ts";
 export { waitForExit, collectOutput } from "./process/wait.ts";
 
 export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "./engine/scheduler.ts";
+
+export { runNodeUnit } from "./adapters/node.ts";

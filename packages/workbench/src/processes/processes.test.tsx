@@ -36,6 +36,8 @@ const server: BackgroundProcess = {
 beforeEach(() => {
   useWorkbench.setState({
     client: null,
+    connection: "ready",
+    activeWorkspaceId: null,
     backgroundProcesses: [],
     sessions: [],
     activeSessionId: null,
@@ -78,11 +80,9 @@ describe("the background process panel", () => {
 
     render(<ProcessesPanel />);
     await userEvent.click(await screen.findByText("node server.js --port 3000"));
-    expect(screen.getByText("4242")).toBeInTheDocument();
-    expect(screen.getByText("4200")).toBeInTheDocument();
-    expect(screen.getByText("1 小时")).toBeInTheDocument();
+    expect(screen.getByText(/来源：.*PID 4242 · 父进程 4200/)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "结束进程" }));
+    await userEvent.click(screen.getByRole("button", { name: "结束进程树" }));
     await waitFor(() => {
       const kill = calls.find((call) => call.type === "process.kill");
       expect(kill).toBeDefined();
@@ -112,7 +112,7 @@ describe("the background process panel", () => {
     useWorkbench.setState({ client });
 
     render(<ProcessesPanel />);
-    expect(await screen.findByText("没有留下运行中的进程")).toBeInTheDocument();
+    expect(await screen.findByText("暂无可显示的运行；程序启动后可刷新。")).toBeInTheDocument();
   });
 });
 

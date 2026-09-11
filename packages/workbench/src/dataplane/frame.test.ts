@@ -17,7 +17,7 @@ describe("data-plane frames", () => {
       payload: new Uint8Array([0x61, 0x62, 0x63]),
     });
     expect([...wire]).toEqual([
-      3, 3, 0, 0,
+      4, 3, 0, 0,
       1, 2, 3, 4,
       5, 6, 7, 8,
       0, 0, 0, 3,

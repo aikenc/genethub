@@ -11,7 +11,7 @@ const SECRET = "0123456789abcdef".repeat(4);
 const CONTEXT = "hosted:cap_golden";
 const CLIENT_NONCE = "00112233445566778899aabbccddeeff";
 const SERVER_NONCE = "ffeeddccbbaa99887766554433221100";
-describe("the protocol-v3 cross-language E2EE wire", () => {
+describe("the protocol-v4 cross-language E2EE wire", () => {
   /** Mirrored byte-for-byte in apps/daemon/src/channel_auth.rs. */
   it("matches the Rust handshake and binary record golden vectors", async () => {
     expect(await channelClientProof(SECRET, CONTEXT, CLIENT_NONCE)).toBe(
@@ -30,7 +30,7 @@ describe("the protocol-v3 cross-language E2EE wire", () => {
     const plaintext = new TextEncoder().encode("binary\0body");
     const wire = await sealDataRecord(key, "client-to-daemon", 7, plaintext);
     expect(hex(wire)).toBe(
-      "47480300000000000000000778bfb3552d1c1a17eac4131325b976445893ce649d9c4361da402a",
+      "474804000000000000000007d55ac697ca0bd69c1309742df49f096e59255f8545ce3329949e3f",
     );
     expect(hex(await openDataRecord(key, "client-to-daemon", 7, wire))).toBe(
       hex(plaintext),

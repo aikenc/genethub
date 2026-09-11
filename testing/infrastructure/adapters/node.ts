@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 
@@ -24,8 +24,8 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
   const lease = createLease();
   const resultDir = mkdtempSync(path.join(tmpdir(), "testctl-result-"));
   const resultPath = path.join(resultDir, "result.json");
-  const tsx = path.join(path.dirname(require.resolve("tsx/package.json")), "dist/cli.mjs");
-  const child = spawnGroup(process.execPath, [tsx, WORKER], {
+  const tsxLoader = pathToFileURL(require.resolve("tsx")).href;
+  const child = spawnGroup(process.execPath, ["--import", tsxLoader, WORKER], {
     env: {
       ...process.env,
       ...lease.env,
@@ -46,9 +46,17 @@ export async function runNodeUnit(unit: WorkUnit, extraEnv: Record<string, strin
   child.stdout?.on("data", () => {});
   child.stderr?.on("data", (chunk: Buffer) => { stderrTail = (stderrTail + chunk.toString()).slice(-8192); });
   try {
-    await waitForExit(child, unit.meta.timeoutMs);
+    const exitCode = await waitForExit(child, unit.meta.timeoutMs);
     const raw = readFileSync(resultPath, "utf8");
     result = JSON.parse(raw) as UnitResult;
+    if (result.id !== unit.id || result.caseId !== unit.caseId || result.variant !== unit.variant) {
+      throw new Error("worker result identity does not match its assigned unit");
+    }
+    if (exitCode !== 0 || child.signalCode !== null) {
+      result.status = "failed";
+      result.message = (result.message ? result.message + "; " : "")
+        + `worker terminated abnormally: exit=${exitCode} signal=${child.signalCode}`;
+    }
     if (result.status !== "passed" && result.status !== "not-applicable") {
       result.diagnostic = collectFailureDiagnostic(lease);
     }

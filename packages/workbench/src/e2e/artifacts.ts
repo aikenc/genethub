@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 
 /** Finds the channel-stamped executable Cargo actually built in this checkout. */
 export function builtBinary(
@@ -69,6 +70,7 @@ export function runtimeArtifacts(daemon: string): {
 
 export type StartedDaemon = {
   process: ChildProcess;
+  stop(): Promise<void>;
   url: string;
   localServerProof: {
     proof: string;
@@ -145,6 +147,18 @@ export function startListeningDaemon(
         child.removeAllListeners("exit");
         resolve({
           process: child,
+          async stop() {
+            // The product stop command verifies this isolated daemon and retires
+            // its child tree. Killing just the host strands external agents.
+            await promisify(execFile)(daemon, ["daemon", "stop"], {
+              env: { ...process.env, ...daemonEnvironment(daemon, values) }, timeout: 15000,
+            });
+            if (child.exitCode !== null || child.signalCode !== null) return;
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(() => reject(new Error("stopped daemon did not exit")), 5000);
+              child.once("exit", () => { clearTimeout(timer); resolve(); });
+            });
+          },
           url: frame.url,
           localServerProof: { proof: frame.serverProof, ...frame.admission },
         });

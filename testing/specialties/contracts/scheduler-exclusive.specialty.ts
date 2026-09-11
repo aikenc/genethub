@@ -1,5 +1,5 @@
 import { defineSpecialty } from "../../framework/public.ts";
-import { claimNext, completeUnit, createScheduler, defaultBudget, hasClaimable } from "../../infrastructure/public.ts";
+import { claimNext, completeUnit, createScheduler, defaultBudget, hasClaimable } from "../../framework/public.ts";
 
 type WorkUnit = Parameters<typeof createScheduler>[0][number];
 

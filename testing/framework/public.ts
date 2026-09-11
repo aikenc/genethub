@@ -84,3 +84,8 @@ export { trackResources } from "../infrastructure/public.ts";
 export { redactText, redactValue, watchInputs } from "../infrastructure/public.ts";
 
 export { waitForExit, collectOutput } from "../infrastructure/public.ts";
+
+export { runNodeUnit } from "../infrastructure/public.ts";
+export { registerControlledAgent, readControlledAgentJournal } from "../infrastructure/public.ts";
+
+export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "../infrastructure/public.ts";
