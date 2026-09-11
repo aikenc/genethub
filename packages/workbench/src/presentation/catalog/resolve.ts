@@ -10,6 +10,7 @@ import type {
   EffortBadge,
   EffortLevel,
   ModelAliasRule,
+  ModelFamilyRule,
   PermissionBadge,
 } from "./types";
 
@@ -27,6 +28,8 @@ export type AgentModeKind = "permission" | "workflow" | "unknown";
 
 const agentRules = agentConfig.agents as AgentVisualRule[];
 const modelRules = modelConfig.exact as ModelAliasRule[];
+const modelFamilies = (modelConfig.families ?? []) as ModelFamilyRule[];
+const ignorePrefixes = (modelConfig.ignorePrefixes ?? []) as string[];
 
 export function resolveAgentPresentation(
   agent: Pick<AgentInfo, "id" | "label">,
@@ -94,7 +97,7 @@ export interface ModelPresentation {
   modelId: string;
   fullLabel: string;
   shortLabel: string;
-  source: "scoped-map" | "global-map" | "label" | "id";
+  source: "scoped-map" | "global-map" | "family-map" | "label" | "id";
 }
 
 export function resolveModelPresentation({
@@ -106,13 +109,16 @@ export function resolveModelPresentation({
   modelId: string;
   modelLabel?: string | null;
 }): ModelPresentation {
+  const idKey = basename(modelId);
   const scoped = modelRules.find(
-    (rule) => rule.agentId === agentId && rule.modelId === modelId,
+    (rule) =>
+      rule.agentId === agentId && (rule.modelId === modelId || rule.modelId === idKey),
   );
   const global = modelRules.find(
-    (rule) => rule.agentId === undefined && rule.modelId === modelId,
+    (rule) =>
+      rule.agentId === undefined && (rule.modelId === modelId || rule.modelId === idKey),
   );
-  const fullLabel = modelLabel?.trim() || basename(modelId) || modelId;
+  const fullLabel = modelLabel?.trim() || idKey || modelId;
   const matched = scoped ?? global;
   if (matched) {
     return {
@@ -120,6 +126,15 @@ export function resolveModelPresentation({
       fullLabel,
       shortLabel: matched.shortLabel,
       source: scoped ? "scoped-map" : "global-map",
+    };
+  }
+  const familyLabel = resolveFamilyShortLabel(modelId);
+  if (familyLabel) {
+    return {
+      modelId,
+      fullLabel,
+      shortLabel: familyLabel,
+      source: "family-map",
     };
   }
   return {
@@ -132,6 +147,86 @@ export function resolveModelPresentation({
     ),
     source: modelLabel?.trim() ? "label" : "id",
   };
+}
+
+/**
+ * Compact chip text for a well-known family, regardless of which Agent listed
+ * it. Vendor prefixes and a trailing `[1m]` window stay out of the chip; the
+ * wire id is unchanged.
+ */
+export function resolveFamilyShortLabel(modelId: string): string | null {
+  let name = basename(modelId);
+  const window = takeWindowMarker(name);
+  if (window) name = window.body;
+  name = stripIgnorePrefix(name);
+  const tokens = name.split(/[-_]/).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const matched = matchFamily(tokens[0]);
+  if (!matched) return null;
+  const rest = matched.rest.length > 0 ? matched.rest : tokens.slice(1);
+  let label = matched.shortLabel;
+  if (matched.attached && rest.length > 0) {
+    const [head, ...tail] = rest;
+    label = `${matched.shortLabel}${isVersionPart(head) ? head : titleModelToken(head)}`;
+    if (tail.length > 0) {
+      label += tail.every(isVersionPart)
+        ? ` ${tail.join(".")}`
+        : ` ${tail.map(titleModelToken).join(" ")}`;
+    }
+  } else if (rest.length > 0) {
+    label += rest.every(isVersionPart)
+      ? ` ${rest.join(".")}`
+      : ` ${rest.map(titleModelToken).join(" ")}`;
+  }
+  return window ? `${label} · ${window.marker}` : label;
+}
+
+function matchFamily(
+  first: string,
+): { shortLabel: string; rest: string[]; attached: boolean } | null {
+  const lower = first.toLocaleLowerCase();
+  const exact = modelFamilies.find((family) => family.id === lower);
+  if (exact) return { shortLabel: exact.shortLabel, rest: [], attached: false };
+  const attached = modelFamilies.find((family) => {
+    if (!family.attached || !lower.startsWith(family.id) || lower.length <= family.id.length) {
+      return false;
+    }
+    return /^\d/.test(lower.slice(family.id.length));
+  });
+  if (!attached) return null;
+  return {
+    shortLabel: attached.shortLabel,
+    rest: [first.slice(attached.id.length)],
+    attached: true,
+  };
+}
+
+function stripIgnorePrefix(name: string): string {
+  const lower = name.toLocaleLowerCase();
+  const prefix = ignorePrefixes.find((candidate) =>
+    lower.startsWith(`${candidate.toLocaleLowerCase()}-`),
+  );
+  return prefix ? name.slice(prefix.length + 1) : name;
+}
+
+function takeWindowMarker(name: string): { body: string; marker: string } | null {
+  const match = /\[([\d.]+)([mk])\]$/i.exec(name);
+  if (!match || match.index === undefined) return null;
+  return {
+    body: name.slice(0, match.index),
+    marker: `${match[1]}${match[2].toUpperCase()}`,
+  };
+}
+
+function isVersionPart(token: string): boolean {
+  return /^\d+(?:\.\d+)*$/.test(token);
+}
+
+function titleModelToken(token: string): string {
+  if (/^v\d/i.test(token) || (/^[a-z]\d/i.test(token) && token.length <= 4)) {
+    return token.toUpperCase();
+  }
+  return `${token.charAt(0).toUpperCase()}${token.slice(1).toLocaleLowerCase()}`;
 }
 
 export function resolveEffortBadge(effortId?: string | null): EffortBadge {

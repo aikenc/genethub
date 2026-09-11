@@ -17,9 +17,18 @@ export interface AgentAssetVariants {
 }
 
 export interface ModelAliasRule {
+  /** When set, this exception applies to one Agent. Omit it for every catalog. */
   agentId?: string;
   modelId: string;
   shortLabel: string;
+}
+
+/** A well-known model family that can appear under any Agent or vendor prefix. */
+export interface ModelFamilyRule {
+  id: string;
+  shortLabel: string;
+  /** Match `hy3` as family `hy` plus an attached remainder, not a separate token. */
+  attached?: boolean;
 }
 
 export interface RuntimeBadge {

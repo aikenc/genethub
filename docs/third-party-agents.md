@@ -146,7 +146,7 @@ TClaude 是腾讯内部对 Claude Code 的包装器（OA 登录 + 内部网关�
 - 会话导入读 `~/.tclaude/projects`，不读 `~/.claude`，也不吃 `CLAUDE_CONFIG_DIR`。
 - 登录是这个 CLI 自己的事：`tclaude login`。probe 只看二进制在不在——包装器没有只读的 `login status`，乱跑 `login` 可能打开 OA 流程。
 
-官方 Claude Code 和 TClaude 可以同时装、同时出现在选择器里；resume 句柄按 agent id 分开，不会把一边的 session id 喂给另一边。
+官方 Claude Code 和 TClaude 可以同时装、同时出现在选择器里；resume 句柄按 agent id 分开，不会把一边的 session id 喂给另一边。选择器芯片上的短名由工作台表现层目录处理，不改 CLI 报上来的 id。
 
 粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
 
