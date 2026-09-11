@@ -23,6 +23,10 @@ describe("Agent presentation catalog", () => {
       kind: "glyph",
       glyph: "✱",
     });
+    expect(resolveAgentPresentation({ id: "tclaude", label: "TClaude" })).toMatchObject({
+      kind: "glyph",
+      glyph: "T",
+    });
     expect(resolveAgentPresentation({ id: "codex", label: "Codex" })).toEqual({
       kind: "text",
       label: "Codex",
@@ -58,6 +62,8 @@ describe("presentation catalog integrity", () => {
       (rule) => `${rule.agentId ?? "*"}\u0000${rule.modelId}`,
     );
     expect(new Set(modelKeys).size).toBe(modelKeys.length);
+    const familyIds = modelConfig.families.map((rule) => rule.id);
+    expect(new Set(familyIds).size).toBe(familyIds.length);
     const permissionKeys = badgeConfig.permissions.flatMap((rule) =>
       rule.agentIds.flatMap((agentId) => rule.ids.map((modeId) => `${agentId}\u0000${modeId}`)),
     );
@@ -76,6 +82,11 @@ describe("presentation catalog integrity", () => {
       expect(rule.modelId.trim()).not.toBe("");
       expect(rule.shortLabel.trim()).not.toBe("");
     }
+    for (const rule of modelConfig.families) {
+      expect(rule.id.trim()).not.toBe("");
+      expect(rule.shortLabel.trim()).not.toBe("");
+    }
+    expect(modelConfig.ignorePrefixes.every((prefix) => prefix.trim())).toBe(true);
     expect(modelConfig.fallback.maxGraphemes).toBe(8);
   });
 });
@@ -111,7 +122,7 @@ describe("model display names", () => {
   });
 
   it("applies the same eight-grapheme fallback to every dynamic Agent catalog", () => {
-    for (const agentId of ["genet", "opencode", "claude", "codex", "cursor", "acp"]) {
+    for (const agentId of ["genet", "opencode", "claude", "tclaude", "codex", "cursor", "acp"]) {
       expect(
         resolveModelPresentation({
           agentId,
@@ -124,6 +135,65 @@ describe("model display names", () => {
 
   it("does not split a joined emoji grapheme", () => {
     expect(truncateGraphemes("👨‍👩‍👧‍👦abcdefghi", 8)).toBe("👨‍👩‍👧‍👦abcdefg…");
+  });
+
+  it("applies family shorthands to any Agent, including vendor prefixes and window markers", () => {
+    const cases = [
+      ["claude-sonnet-5[1m]", "Sonnet 5 · 1M"],
+      ["claude-sonnet-4-6", "Sonnet 4.6"],
+      ["claude-sonnet-4-6[1m]", "Sonnet 4.6 · 1M"],
+      ["claude-opus-5[1m]", "Opus 5 · 1M"],
+      ["claude-haiku-4-5", "Haiku 4.5"],
+      ["claude-kimi-k3[1m]", "Kimi K3 · 1M"],
+      ["claude-glm-5.3[1m]", "GLM 5.3 · 1M"],
+      ["claude-deepseek-v4-flash[1m]", "DeepSeek V4 Flash · 1M"],
+      ["claude-deepseek-v4-pro[1m]", "DeepSeek V4 Pro · 1M"],
+      ["claude-hy3", "HY3"],
+      ["deepseek/deepseek-v4-flash", "DeepSeek V4 Flash"],
+    ] as const;
+    for (const agentId of ["tclaude", "claude", "genet", "acp:private"]) {
+      for (const [modelId, shortLabel] of cases) {
+        expect(
+          resolveModelPresentation({
+            agentId,
+            modelId,
+            modelLabel: modelId,
+          }),
+        ).toMatchObject({ modelId, fullLabel: modelId, shortLabel, source: "family-map" });
+      }
+    }
+  });
+
+  it("keeps a real runtime display name and only shortens the chip", () => {
+    expect(
+      resolveModelPresentation({
+        agentId: "tclaude",
+        modelId: "default",
+        modelLabel: "Default (recommended)",
+      }),
+    ).toMatchObject({
+      fullLabel: "Default (recommended)",
+      shortLabel: "Default",
+      source: "global-map",
+    });
+    expect(
+      resolveModelPresentation({
+        agentId: "claude",
+        modelId: "sonnet",
+        modelLabel: "Sonnet",
+      }),
+    ).toMatchObject({ fullLabel: "Sonnet", shortLabel: "Sonnet", source: "global-map" });
+    expect(
+      resolveModelPresentation({
+        agentId: "genet",
+        modelId: "deepseek/deepseek-v4-flash",
+        modelLabel: "DeepSeek:deepseek-v4-flash",
+      }),
+    ).toMatchObject({
+      fullLabel: "DeepSeek:deepseek-v4-flash",
+      shortLabel: "DeepSeek V4 Flash",
+      source: "family-map",
+    });
   });
 });
 
@@ -176,6 +246,7 @@ describe("runtime badges", () => {
   it("separates a permission policy from an ACP workflow selector", () => {
     expect(resolveAgentProfile("codex").modeKind).toBe("permission");
     expect(resolveAgentProfile("claude").modeKind).toBe("permission");
+    expect(resolveAgentProfile("tclaude").modeKind).toBe("permission");
     expect(resolveAgentProfile("cursor").modeKind).toBe("workflow");
     expect(resolveAgentProfile("acp:private")).toEqual({
       modeKind: "unknown",
@@ -184,6 +255,14 @@ describe("runtime badges", () => {
   });
 
   it("only shows the unlock emoji for known unrestricted modes", () => {
+    expect(
+      resolveModeBadge({
+        agentId: "tclaude",
+        permissions: true,
+        modeId: "bypassPermissions",
+        modeLabel: "Bypass permissions",
+      }),
+    ).toMatchObject({ emoji: "🔓", risk: "unrestricted" });
     expect(
       resolveModeBadge({
         agentId: "codex",

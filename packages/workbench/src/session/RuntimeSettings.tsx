@@ -356,9 +356,23 @@ function ModelOption({
     modelLabel: model.label,
   });
   const traits = resolveModelTraits(model);
+  const accessibleName = [
+    display.fullLabel,
+    traits.reasoning ? "推理" : null,
+    traits.multimodal ? "多模态" : null,
+    unavailable ? "当前目录已不再提供" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <label
-      title={unavailable ? `${model.id}（当前目录已不再提供）` : model.id}
+      title={
+        unavailable
+          ? `${model.id}（当前目录已不再提供）`
+          : display.fullLabel === model.id
+            ? model.id
+            : `${display.fullLabel}（${model.id}）`
+      }
       className="flex h-8 min-w-0 cursor-pointer items-center gap-1 rounded-lg px-2 text-sm hover:bg-raised has-[:checked]:bg-accent/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
     >
       <input
@@ -368,22 +382,20 @@ function ModelOption({
         checked={checked}
         disabled={unavailable}
         onChange={() => onPick(model.id)}
+        aria-label={accessibleName}
         className="sr-only"
       />
-      <span className={`min-w-0 flex-1 truncate ${unavailable ? "text-danger" : "text-fg"}`}>
-        {display.fullLabel}
+      <span
+        aria-hidden
+        className={`min-w-0 flex-1 truncate ${unavailable ? "text-danger" : "text-fg"}`}
+      >
+        {display.shortLabel}
       </span>
       {traits.reasoning ? (
-        <>
-          <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-          <span className="sr-only">推理</span>
-        </>
+        <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
       ) : null}
       {traits.multimodal ? (
-        <>
-          <Eye className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-          <span className="sr-only">多模态</span>
-        </>
+        <Eye className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
       ) : null}
       {unavailable ? <span className="sr-only">当前目录已不再提供</span> : null}
       <Tick checked={checked} />

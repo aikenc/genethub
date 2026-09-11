@@ -67,7 +67,12 @@ impl Registry {
             // wrapper. Going native buys back per-tool permission control
             // that ACP does not expose to a client; see that module's doc
             // comment for the reverse-engineered protocol notes.
-            Arc::new(ClaudeAdapter::default()),
+            Arc::new(ClaudeAdapter::claude()),
+            // TClaude is Claude Code plus Tencent's internal gateway. It
+            // forwards the same `stream-json` flags, so the protocol adapter
+            // is shared; the binary, help passthrough and `~/.tclaude`
+            // history are not.
+            Arc::new(ClaudeAdapter::tclaude()),
             // Codex likewise (`adapter::codex`): its own `app-server`
             // JSON-RPC, not `codex-acp`. Which also removes an install step
             // nobody could guess at — this entry used to report "not
@@ -356,6 +361,15 @@ mod tests {
             assert!(matches!(agent.probe, ProbeState::Ready));
         }
         assert!(available.len() <= all.len());
+    }
+
+    #[test]
+    fn tclaude_is_a_builtin_next_to_official_claude() {
+        let registry = Registry::new(&BTreeMap::new());
+        let claude = registry.get("claude").expect("official Claude Code");
+        let tclaude = registry.get("tclaude").expect("TClaude");
+        assert_eq!(claude.label(), "Claude Code");
+        assert_eq!(tclaude.label(), "TClaude");
     }
 
     #[tokio::test]

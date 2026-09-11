@@ -1,5 +1,8 @@
-//! Adapter for Claude Code, spoken natively over its own `stream-json`
-//! stdio protocol instead of through the `claude-agent-acp` wrapper.
+//! Adapter for Claude Code (and Tencent's `tclaude` wrapper), spoken natively
+//! over Claude's own `stream-json` stdio protocol instead of through the
+//! `claude-agent-acp` wrapper. TClaude forwards every launch flag to upstream
+//! Claude Code; this file is instantiated twice (`claude` / `tclaude`) so the
+//! two CLIs keep separate ids, help probing and history directories.
 //!
 //! We still never manage how this CLI reaches a model: env vars and its own
 //! config file are Claude Code's documented surface for that, not ours
@@ -81,12 +84,53 @@ use tokio::sync::{broadcast, Mutex};
 use super::stdio::write_json_line;
 use super::usage;
 use super::{
-    find_executable, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
+    find_executable_in, AgentAdapter, AgentSession, Chatter, ImportCandidate, ImportedHistory,
     PersistHandle, PromptInput, ProviderMap, SessionConfig,
 };
 
-const BINARY: &str = "claude";
 const EVENT_CAPACITY: usize = 1024;
+
+/// Which Claude-protocol CLI this adapter instance talks to.
+///
+/// Official Claude Code and Tencent's `tclaude` wrapper speak the same
+/// `stream-json` stdio protocol; the wrapper only changes the binary name,
+/// how `--help` is reached, and where it stores history. Identity stays on
+/// the adapter so resume and import cannot cross the two installs.
+#[derive(Clone, Copy)]
+struct ClaudeFlavor {
+    id: &'static str,
+    label: &'static str,
+    binary: &'static str,
+    /// Args that reach the upstream `--help`. `tclaude --help` is wrapper
+    /// help and does not list permission modes; those live behind `--`.
+    help_args: &'static [&'static str],
+    config_dir_name: &'static str,
+}
+
+const CLAUDE: ClaudeFlavor = ClaudeFlavor {
+    id: "claude",
+    label: "Claude Code",
+    binary: "claude",
+    help_args: &["--help"],
+    config_dir_name: ".claude",
+};
+
+const TCLAUDE: ClaudeFlavor = ClaudeFlavor {
+    id: "tclaude",
+    label: "TClaude",
+    binary: "tclaude",
+    help_args: &["--", "--help"],
+    config_dir_name: ".tclaude",
+};
+
+fn tclaude_install_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
+        dirs.push(PathBuf::from(home).join(".local").join("bin"));
+    }
+    dirs
+}
 
 /// Permission modes, named as the CLI names them on the wire — these go into
 /// `--permission-mode` and `set_permission_mode` unchanged, and appear in the
@@ -140,10 +184,11 @@ fn apply_claude_sandbox_compat(command: &mut Command) {
     command.env(CLAUDE_SANDBOX_COMPAT_ENV.0, CLAUDE_SANDBOX_COMPAT_ENV.1);
 }
 
-#[derive(Default)]
 pub struct ClaudeAdapter {
-    /// `claude --help`, read once per daemon run: it is the only place this CLI
-    /// says which permission modes the build accepts, and the answer cannot
+    flavor: ClaudeFlavor,
+    extra_dirs: Vec<PathBuf>,
+    /// This build's `--help`, read once per daemon run: it is the only place
+    /// this CLI says which permission modes it accepts, and the answer cannot
     /// change without the binary being replaced under us.
     help: tokio::sync::OnceCell<String>,
     /// What the CLI answered to an `initialize` control request — its model list,
@@ -157,28 +202,62 @@ pub struct ClaudeAdapter {
     program: Option<PathBuf>,
 }
 
+impl Default for ClaudeAdapter {
+    fn default() -> Self {
+        Self::claude()
+    }
+}
+
 impl ClaudeAdapter {
+    pub fn claude() -> Self {
+        Self::with_flavor(CLAUDE, Vec::new())
+    }
+
+    pub fn tclaude() -> Self {
+        Self::with_flavor(TCLAUDE, tclaude_install_dirs())
+    }
+
+    fn with_flavor(flavor: ClaudeFlavor, extra_dirs: Vec<PathBuf>) -> Self {
+        ClaudeAdapter {
+            flavor,
+            extra_dirs,
+            help: tokio::sync::OnceCell::new(),
+            hello: tokio::sync::OnceCell::new(),
+            program: None,
+        }
+    }
+
     #[cfg(all(test, unix))]
     fn with_program(program: PathBuf) -> Self {
         ClaudeAdapter {
             program: Some(program),
-            ..ClaudeAdapter::default()
+            ..ClaudeAdapter::claude()
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn tclaude_with_program(program: PathBuf) -> Self {
+        ClaudeAdapter {
+            program: Some(program),
+            extra_dirs: Vec::new(),
+            ..ClaudeAdapter::tclaude()
         }
     }
 
     fn program(&self) -> Option<PathBuf> {
         match &self.program {
             Some(explicit) => Some(explicit.clone()),
-            None => find_executable(BINARY),
+            None => find_executable_in(self.flavor.binary, &self.extra_dirs),
         }
     }
 
     /// This build's own help text, read once and remembered.
     async fn help(&self, program: &std::path::Path) -> &str {
+        let help_args = self.flavor.help_args;
         self.help
             .get_or_init(|| async {
                 Command::new(program)
-                    .arg("--help")
+                    .args(help_args)
                     .output()
                     .await
                     .ok()
@@ -497,11 +576,11 @@ fn initial_permission_mode(requested: Option<&str>, help: &str) -> String {
 #[async_trait]
 impl AgentAdapter for ClaudeAdapter {
     fn id(&self) -> &str {
-        "claude"
+        self.flavor.id
     }
 
     fn label(&self) -> &str {
-        "Claude Code"
+        self.flavor.label
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -562,7 +641,7 @@ impl AgentAdapter for ClaudeAdapter {
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
         let program = self
             .program()
-            .ok_or_else(|| anyhow!("claude is not installed"))?;
+            .ok_or_else(|| anyhow!("{} is not installed", self.flavor.binary))?;
 
         let mut command = Command::new(&program);
         apply_claude_sandbox_compat(&mut command);
@@ -668,7 +747,7 @@ impl AgentAdapter for ClaudeAdapter {
         if let Some(session_id) = config
             .resume
             .as_ref()
-            .filter(|handle| handle.agent_id == "claude")
+            .filter(|handle| handle.agent_id == self.flavor.id)
             .and_then(|handle| handle.value.get("sessionId"))
             .and_then(Value::as_str)
         {
@@ -687,7 +766,7 @@ impl AgentAdapter for ClaudeAdapter {
         // default filter, which is how "Claude Code stopped unexpectedly." became
         // the entire error message.
         let said = Arc::new(Chatter::default());
-        said.watch("claude", Some(stderr)).await;
+        said.watch(self.flavor.id, Some(stderr)).await;
 
         let child = Arc::new(Mutex::new(Some(child)));
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
@@ -722,6 +801,7 @@ impl AgentAdapter for ClaudeAdapter {
             awaiting: awaiting.clone(),
             models,
             efforts,
+            agent_id: self.flavor.id,
         };
 
         let control = ControlState {
@@ -749,26 +829,30 @@ impl AgentAdapter for ClaudeAdapter {
         cwd: &Path,
         limit: usize,
     ) -> Result<Option<Vec<ImportCandidate>>> {
-        Ok(Some(claude_candidates(cwd, limit).await?))
+        Ok(Some(claude_candidates(cwd, limit, &self.flavor).await?))
     }
 
     async fn import_history(&self, cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
-        claude_history(cwd, source_id).await
+        claude_history(cwd, source_id, &self.flavor).await
     }
 }
 
-fn claude_config_dir() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Ok(PathBuf::from(path));
+fn claude_config_dir(flavor: &ClaudeFlavor) -> Result<PathBuf> {
+    // Official Claude Code documents CLAUDE_CONFIG_DIR. TClaude keeps its
+    // own home (`.tclaude`) and must not inherit that override.
+    if flavor.id == CLAUDE.id {
+        if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+            return Ok(PathBuf::from(path));
+        }
     }
     crate::config::home_dir()
-        .map(|home| home.join(".claude"))
-        .ok_or_else(|| anyhow!("cannot find the Claude config directory"))
+        .map(|home| home.join(flavor.config_dir_name))
+        .ok_or_else(|| anyhow!("cannot find the {} config directory", flavor.label))
 }
 
 /// Verbatim shape of Claude's project-directory encoding for ordinary paths.
 /// The rare >200-character case includes the SDK's signed 32-bit JS hash.
-fn claude_project_dir(cwd: &Path) -> Result<PathBuf> {
+fn claude_project_dir(cwd: &Path, flavor: &ClaudeFlavor) -> Result<PathBuf> {
     let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let text = canonical.to_string_lossy();
     let replaced: String = text
@@ -794,7 +878,7 @@ fn claude_project_dir(cwd: &Path) -> Result<PathBuf> {
             replaced.chars().take(200).collect::<String>()
         )
     };
-    Ok(claude_config_dir()?.join("projects").join(encoded))
+    Ok(claude_config_dir(flavor)?.join("projects").join(encoded))
 }
 
 fn radix36(mut value: u32) -> String {
@@ -821,8 +905,12 @@ fn radix36(mut value: u32) -> String {
 /// there each step is an open and a read, not a `serde` call.
 const IMPORT_STEP: usize = 256;
 
-async fn claude_candidates(cwd: &Path, limit: usize) -> Result<Vec<ImportCandidate>> {
-    let directory = claude_project_dir(cwd)?;
+async fn claude_candidates(
+    cwd: &Path,
+    limit: usize,
+    flavor: &ClaudeFlavor,
+) -> Result<Vec<ImportCandidate>> {
+    let directory = claude_project_dir(cwd, flavor)?;
     let mut files = match std::fs::read_dir(&directory) {
         Ok(entries) => entries
             .flatten()
@@ -900,7 +988,11 @@ fn claude_descriptor(path: &Path) -> Result<Option<(String, String, String)>> {
     Ok(Some((session_id, title.clone(), title)))
 }
 
-async fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> {
+async fn claude_history(
+    cwd: &Path,
+    source_id: &str,
+    flavor: &ClaudeFlavor,
+) -> Result<ImportedHistory> {
     if source_id.is_empty()
         || !source_id
             .chars()
@@ -908,7 +1000,7 @@ async fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> 
     {
         anyhow::bail!("invalid Claude session id");
     }
-    let path = claude_project_dir(cwd)?.join(format!("{source_id}.jsonl"));
+    let path = claude_project_dir(cwd, flavor)?.join(format!("{source_id}.jsonl"));
     use std::io::BufRead as _;
     let file = std::fs::File::open(&path)
         .with_context(|| format!("reading selected Claude session {}", path.display()))?;
@@ -979,7 +1071,7 @@ async fn claude_history(cwd: &Path, source_id: &str) -> Result<ImportedHistory> 
         updated_at_ms,
         items,
         persist: Some(PersistHandle {
-            agent_id: "claude".into(),
+            agent_id: flavor.id.into(),
             value: json!({ "sessionId": source_id }),
         }),
         continuation: ImportContinuation::Native,
@@ -1090,6 +1182,9 @@ struct ClaudeSession {
     /// The model ids this install offered, which are the only ones a `set_model`
     /// can be checked against.
     models: Vec<String>,
+    /// Resume and import must name this instance (`claude` vs `tclaude`), not
+    /// the protocol they share.
+    agent_id: &'static str,
 }
 
 /// `request_id` -> whoever is waiting for that `control_response`.
@@ -1366,7 +1461,7 @@ impl AgentSession for ClaudeSession {
     fn persistence(&self) -> Option<PersistHandle> {
         let session_id = self.native_session_id.lock().unwrap().clone()?;
         Some(PersistHandle {
-            agent_id: "claude".into(),
+            agent_id: self.agent_id.into(),
             value: json!({ "sessionId": session_id }),
         })
     }
@@ -2267,6 +2362,57 @@ mod tests {
     fn claude_child_always_gets_sandbox_compat_env() {
         // WASI cannot see the host uid, so this must not be gated on euid==0.
         assert_eq!(CLAUDE_SANDBOX_COMPAT_ENV, ("IS_SANDBOX", "1"));
+    }
+
+    #[test]
+    fn tclaude_is_a_separate_agent_from_official_claude() {
+        let claude = ClaudeAdapter::claude();
+        let tclaude = ClaudeAdapter::tclaude();
+        assert_eq!(claude.id(), "claude");
+        assert_eq!(claude.label(), "Claude Code");
+        assert_eq!(tclaude.id(), "tclaude");
+        assert_eq!(tclaude.label(), "TClaude");
+        assert_eq!(TCLAUDE.help_args, ["--", "--help"]);
+        assert_eq!(CLAUDE.help_args, ["--help"]);
+    }
+
+    #[test]
+    fn tclaude_history_lives_under_dot_tclaude() {
+        let path = claude_config_dir(&TCLAUDE).expect("home");
+        assert!(path.ends_with(".tclaude"), "{}", path.display());
+    }
+
+    #[test]
+    fn tclaude_also_looks_in_the_user_local_bin() {
+        let dirs = tclaude_install_dirs();
+        if std::env::var_os("HOME").is_some() || std::env::var_os("USERPROFILE").is_some() {
+            assert!(dirs
+                .iter()
+                .any(|dir| { dir.ends_with(std::path::Path::new(".local").join("bin")) }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tclaude_asks_upstream_help_through_the_wrapper_separator() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("tclaude");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let adapter = ClaudeAdapter::tclaude_with_program(fake.clone());
+        let help = adapter.help(&fake).await;
+        assert!(
+            help.is_empty() || help.contains("--"),
+            "recorded help: {help}"
+        );
+        let args = std::fs::read_to_string(dir.path().join("args")).expect("wrapper argv");
+        assert_eq!(args, "--\n--help\n");
     }
 
     /// How hard to think is a second axis, and the CLI reports it per model —

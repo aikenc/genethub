@@ -28,6 +28,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `genet` | 子进程 + stdio JSONL | 我们自己写的兜底 agent，见 [builtin-agent.md](./builtin-agent.md) |
 | `opencode` | 本地 HTTP + SSE | 探测 `opencode` 二进制；模型/密钥全在它自己的 `opencode.json` |
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
+| `tclaude` | 子进程 + 原生 `stream-json` stdio | 探测 `tclaude`（腾讯内部 Claude Code 包装器）。协议与 `claude` 相同，历史在 `~/.tclaude`，见 §3.2 |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
 | `cursor` | 子进程 + ACP over stdio | 探测 PATH 与官方安装目录上的 `cursor-agent`（Windows 走 `PATHEXT`，不写死后缀），再用 `cursor-agent status` 看登录；说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
@@ -41,6 +42,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | Genet | 不做工作区目录限制；文件工具接受绝对路径，命令继承 daemon 用户权限 |
 | OpenCode | `OPENCODE_PERMISSION` 注入全工具、外部目录与网络全允许策略 |
 | Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox。子进程始终带 `IS_SANDBOX=1`（Claude CLI 的容器/CI 开关）：线上 daemon 是 WASI guest，看不到宿主 uid，uid-0 才注入会在 Linux root 上变成空操作，CLI 会因该 flag 直接 exit 1 |
+| TClaude | 与 Claude Code 相同的启动旗标和 `IS_SANDBOX=1`；包装器把它们原样转给上游 CLI |
 | Codex | `approval_policy="never"` + `sandbox_mode="danger-full-access"`，新会话默认 `full-access` |
 | Cursor | `--force --sandbox disabled --trust --approve-mcps acp` |
 | 自定义 ACP | command 原样启动；GeneHub 不能猜某个未知 CLI 的私有放权参数，接入声明应自行带上 |
@@ -67,7 +69,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | Agent | adapter 映射 |
 |---|---|
 | Genet | CLI `--add-system-prompt` |
-| Claude Code | CLI `--append-system-prompt` |
+| Claude Code / TClaude | CLI `--append-system-prompt` |
 | Codex | app-server `thread/start` / `thread/resume` 的 `developerInstructions` |
 | OpenCode | message API 的 `system` |
 | Cursor / 自定义 ACP | 标准 ACP 没有 system 字段。Cursor 把 guidance 放进 embedded `resource`（`genehub://system-guidance`）并在 `session/new` 带 `_meta.systemPrompt.append`，避免其自动起名吃到 Skill 目录；其他 ACP CLI 仍用每个 `session/prompt` 的首个 text block。用户请求始终是单独的 text block |
@@ -132,6 +134,19 @@ Claude Code 的模型和权限模式**不是我们编的表**，是开机跟它�
 不是「DeepSeek 能不能连 Claude Code」——后者是 DeepSeek 自己的产品能力，我们只是借用。
 
 在显式较低权限模式下，`can_use_tool` 的选项仍会被归一化成暂停卡片；但 daemon 不再维持一个等待回复的 Claude 进程，批准后恢复同一个原生会话继续。
+
+### 3.2 TClaude：同一套原生协议，独立的二进制与登录
+
+TClaude 是腾讯内部对 Claude Code 的包装器（OA 登录 + 内部网关）。它把自己的 `--help`/`login`/`daemon` 拦下来，其余参数原样转给上游 Claude Code，所以 daemon 复用 `adapter::claude`，不新写协议。
+
+和官方 `claude` 的差别只在探测与落盘，不在线格式：
+
+- 探测 `tclaude`（PATH，以及 Cursor 同类的 `~/.local/bin`），未安装就不出现。
+- 权限模式从 `tclaude -- --help` 读：单独的 `tclaude --help` 是包装器帮助，不含 `--permission-mode`。
+- 会话导入读 `~/.tclaude/projects`，不读 `~/.claude`，也不吃 `CLAUDE_CONFIG_DIR`。
+- 登录是这个 CLI 自己的事：`tclaude login`。probe 只看二进制在不在——包装器没有只读的 `login status`，乱跑 `login` 可能打开 OA 流程。
+
+官方 Claude Code 和 TClaude 可以同时装、同时出现在选择器里；resume 句柄按 agent id 分开，不会把一边的 session id 喂给另一边。选择器芯片上的短名由工作台表现层目录处理，不改 CLI 报上来的 id。
 
 粘贴图片现在会作为附件随消息一起发：`claude`（Anthropic 内容块）、`codex`（先落到 scratch 再发 `localImage` 路径）、`opencode`（`file` part + data URL）、经 `acp` 声明的 agent（ACP `image` 内容块）都会转发；`genet` 自己的 provider 层还不接受图片，见 [roadmap.md](./roadmap.md)「明确不做」。
 
