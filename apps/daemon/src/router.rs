@@ -711,22 +711,16 @@ async fn dispatch(
                 Ok(space) => space,
                 Err(error) => return failed(error),
             };
-            // A PM takeover introduces durable project control, so its Runs
-            // must be started by the Session that owns that binding. Keep the
-            // V2-A `workflow init` compatibility path for an ordinary,
-            // unregistered project: it has neither a PM component nor a Pack
-            // receipt and `workflow::dispatch` still proves that the caller is
-            // the project's non-managed root Session.
-            let requires_project_control = agent_space_requires_project_control(&project_space);
-            if requires_project_control
-                && !state
-                    .project_control
-                    .is_bound(&workspace_id, parent_session_id)
+            // Delegation belongs to the authorized project, not to one chat tab.
+            // dispatch below still requires an ordinary root Session in this project;
+            // configuration changes retain their controller/exception checks.
+            if agent_space_requires_project_control(&project_space)
+                && !state.project_control.has_binding(&workspace_id)
                 && !crate::workflow::exception_authority(state, &workspace_id, parent_session_id).await.unwrap_or(false)
             {
                 return Handled::err(
                     ErrorCode::Forbidden,
-                    "当前 Session 没有这个项目的 ProjectControlBinding；请先完成 PM 接管",
+                    "项目尚未接管；请先完成 PM 接管后再委托任务",
                 );
             }
             let transition = match crate::workflow::dispatch(

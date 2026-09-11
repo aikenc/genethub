@@ -20,3 +20,13 @@ workflows:
     match:
       kind: workflow
       complexity: review
+  - id: game-assessment
+    path: game-assessment.yaml
+    match:
+      kind: game
+      complexity: assessment
+  - id: game-review
+    path: game-review.yaml
+    match:
+      kind: game
+      complexity: review

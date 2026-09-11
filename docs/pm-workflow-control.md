@@ -166,3 +166,9 @@ no-overwrite asset writer. The legacy source lives in
 `apps/daemon/workflow-templates/direct-change/`; its file order, bytes and digest
 remain compatible. It still initializes a direct workflow without taking over the
 project or creating a PM team. Team topology and Pack upgrades remain explicit.
+
+## Business delegation and configuration control
+
+A project with an existing takeover binding allows its ordinary root PM conversations to dispatch work. The runtime still rejects managed/cross-project callers and preserves per-request ownership, cancellation fences and budgets. Delegating work does not transfer the configuration controller or grant Builder/upgrade/component authority; those retain controller and exceptional-recovery checks.
+
+Game Pack v5 routes `game/assessment` and `game/review` to Game Reviewer, returning reports without implementing changes. `workflow/review` remains process diagnosis/evaluation. Old projects use the standard digest-checked Pack upgrade; in-flight Run definitions are retained.
