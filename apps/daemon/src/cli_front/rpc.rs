@@ -12,7 +12,6 @@ use genehub_proto::{
 };
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::authz::Principal;
 use crate::router::{self, SideEffect};
 use crate::state::Shared;
 
@@ -116,13 +115,15 @@ impl Rpc {
 
     pub async fn connect() -> Result<Self, ConnectError> {
         let state = super::local_state().map_err(ConnectError::Unavailable)?;
+        let principal = super::caller_principal();
         let handled = tokio::spawn({
             let state = state.clone();
+            let principal = principal.clone();
             async move {
                 router::handle(
                     &state,
                     TransportKind::Loopback,
-                    &Principal::LocalUser,
+                    &principal,
                     Request::ConnectionIdentity,
                 )
                 .await
@@ -187,14 +188,9 @@ impl Rpc {
         match &self.inner {
             Inner::Local(local) => {
                 let state = local.state.clone();
+                let principal = super::caller_principal();
                 let handled = tokio::spawn(async move {
-                    router::handle(
-                        &state,
-                        TransportKind::Loopback,
-                        &Principal::LocalUser,
-                        request,
-                    )
-                    .await
+                    router::handle(&state, TransportKind::Loopback, &principal, request).await
                 })
                 .await
                 .map_err(|error| RpcError::Transport(format!("rpc task failed: {error}")))?;
@@ -232,14 +228,11 @@ impl Rpc {
     ) -> Result<Running, RpcError> {
         match &self.inner {
             Inner::Local(local) => {
-                let started = crate::dataplane::exec::start(
-                    &local.state,
-                    &Principal::LocalUser,
-                    request.clone(),
-                    stdin,
-                )
-                .await
-                .map_err(start_error)?;
+                let principal = super::caller_principal();
+                let started =
+                    crate::dataplane::exec::start(&local.state, &principal, request.clone(), stdin)
+                        .await
+                        .map_err(start_error)?;
                 Ok(Running {
                     confinement: started.confinement,
                     inner: RunningInner::Local {

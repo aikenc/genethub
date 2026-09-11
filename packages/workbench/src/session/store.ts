@@ -1,4 +1,8 @@
+import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
+  AgentSpaceBuilderOperation,
+  AgentSpaceBuilderReport,
+  AgentSpaceOperation,
   AgentInfo,
   Attachment,
   BackgroundProcess,
@@ -48,6 +52,8 @@ import {
 import {
   applySequenced,
   emptyTimeline,
+  mergeHistoryItems,
+  insertHistoryPage,
   fromSnapshot,
   type PendingMessage,
   type TimelineState,
@@ -106,6 +112,8 @@ export type PreviewFloatRequest = Omit<PreviewFloatTarget, "sessionId"> & {
  * a model in an empty chat is not silently dropped.
  */
 export interface Draft {
+  /** Local identity, never a daemon Session ID. */
+  localId?: string;
   workspaceId: string;
   agentId: string | null;
   modelId: string | null;
@@ -142,7 +150,7 @@ const TAB_TITLES: Record<string, string> = {
   chat: "新会话",
   files: "文件",
   terminal: "终端",
-  settings: "设置",
+  settings: "系统设置",
   devices: "设备",
   logs: "日志",
   processes: "此电脑的后台进程",
@@ -173,6 +181,14 @@ export type ForwardDraft = {
   attachments?: Attachment[];
 };
 
+const forwardMemory = new Map<string, ForwardDraft | null>();
+function forwardKey(state: Pick<WorkbenchState, "client" | "activeSessionId" | "draft">, id?: string): string {
+  return `forward:${state.client?.identity?.machineId ?? "unconnected"}:${id ?? state.activeSessionId ?? state.draft?.localId ?? "empty"}`;
+}
+function recalledForward(key: string): ForwardDraft | null {
+  return forwardMemory.has(key) ? forwardMemory.get(key)! : localValue<ForwardDraft>(key);
+}
+
 /**
  * A finished piece of work the user may want to act on — a Fork or forward
  * that landed on another machine. The action is theirs to take; nothing here
@@ -193,6 +209,9 @@ interface WorkbenchState {
   workspaces: WorkspaceInfo[];
   activeWorkspaceId: string | null;
   sessions: SessionSummary[];
+  sessionsLoaded: boolean;
+  sessionsError: boolean;
+  includeArchived: boolean;
   activeSessionId: string | null;
   /** Set while an unstarted conversation is on screen. See `Draft`. */
   draft: Draft | null;
@@ -231,6 +250,8 @@ interface WorkbenchState {
   /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
   tabLimit: number;
   notice: string | null;
+  /** Bounded, memory-only UI diagnostics; never copied into automatic feedback. */
+  interfaceLogs: Array<{ at: number; machine: string; message: string }>;
   /**
    * Content on its way back to the composer, put there by `editPending`.
    *
@@ -297,6 +318,8 @@ interface WorkbenchState {
   download: UpdateDownload;
 
   attach(client: Client): Promise<void>;
+  /** Refreshes AgentSpace composition, Parent tree, Pack and health facts. */
+  refreshWorkspaces(): Promise<void>;
   /** Refreshes daemon-owned session status for the sidebar. */
   refreshSessions(): Promise<void>;
   openWorkspace(root: string): Promise<void>;
@@ -305,6 +328,18 @@ interface WorkbenchState {
   renameWorkspace(workspaceId: string, name: string): Promise<void>;
   /** Hides a workspace registration without deleting files or conversations. */
   removeWorkspace(workspaceId: string): Promise<void>;
+  /** Applies one Human-authored AgentSpace change under the displayed CAS revision. */
+  configureAgentSpace(
+    workspaceId: string,
+    expectedRevision: number,
+    operation: AgentSpaceOperation,
+  ): Promise<void>;
+  /** Checks or verifies one existing Space through the daemon-owned builder. */
+  inspectAgentSpaceBuild(
+    projectWorkspaceId: string,
+    targetWorkspaceId: string,
+    operation: AgentSpaceBuilderOperation,
+  ): Promise<AgentSpaceBuilderReport | null>;
   loadTree(path?: string): Promise<void>;
   refreshGit(): Promise<void>;
   loadDiff(path?: string): Promise<void>;
@@ -359,15 +394,18 @@ interface WorkbenchState {
   newSession(
     workspaceId?: string | null,
     agentId?: string | null,
-    options?: { addressScope?: AddressScope },
+    options?: { addressScope?: AddressScope; localId?: string },
   ): void;
   selectSession(sessionId: string): Promise<void>;
+  archiveSession(sessionId: string, archived: boolean): Promise<void>;
+  loadHistory(): Promise<void>;
+  loadNarrativeItem(itemId: string): Promise<void>;
   loadRound(roundId: string): Promise<void>;
   loadOlderTrunks(roundId: string): Promise<void>;
   loadTrunk(roundId: string, trunkIndex: number): Promise<void>;
   loadBlob(blob: BlobRef): Promise<void>;
   /** Gives a session the name the user typed, on the machine and here. */
-  renameSession(sessionId: string, title: string): Promise<void>;
+  renameSession(sessionId: string, title: string): Promise<boolean>;
   /** Erases a session. There is no undo; the caller does the asking. */
   deleteSession(sessionId: string): Promise<void>;
   openTab(kind: TabKind, title?: string): void;
@@ -381,9 +419,9 @@ interface WorkbenchState {
   closePreviewFloat(): void;
   send(text: string, attachments?: Attachment[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
-  retryPending(): Promise<void>;
+  retryPending(messageId?: string): Promise<void>;
   /** Takes a failed message back into the composer instead of resending it. */
-  editPending(): void;
+  editPending(messageId?: string): void;
   /** Acknowledges that the composer has taken `restoreDraft` back. */
   restoredDraft(): void;
   /**
@@ -479,6 +517,25 @@ function endsATurn(type: SequencedEvent["event"]["type"]): boolean {
   return type === "turnCompleted" || type === "turnFailed" || type === "turnCanceled";
 }
 
+/**
+ * A background Session may finish while this browser has no live subscription
+ * to it. PM bootstrap can change the AgentSpace catalog during that turn, so a
+ * transition observed by the cheap Session poll is the one useful signal to
+ * refresh the more expensive Workspace catalog. Stable idle Sessions must not
+ * turn the two-second poll into a Workspace poll as well.
+ */
+function polledTurnFinished(
+  previous: SessionSummary[],
+  current: SessionSummary[],
+): boolean {
+  const currentById = new Map(current.map((session) => [session.id, session]));
+  return previous.some((session) => {
+    if (session.status !== "running" && session.status !== "waiting") return false;
+    const next = currentById.get(session.id);
+    return !next || (next.status !== "running" && next.status !== "waiting");
+  });
+}
+
 function changesTheRoundLayer(event: SequencedEvent): boolean {
   switch (event.event.type) {
     case "turnCompleted":
@@ -499,20 +556,7 @@ function changesTheRoundLayer(event: SequencedEvent): boolean {
 
 function shouldExpandLastRound(summary: SessionSummary | undefined): boolean {
   if (!summary || summary.status === "running" || summary.status === "waiting") return true;
-  try {
-    const readAt = Number(localStorage.getItem(`genehub:session-read:${summary.id}`) ?? "0");
-    return !Number.isFinite(readAt) || readAt < summary.updatedAtMs;
-  } catch {
-    return true;
-  }
-}
-
-function markSessionRead(summary: SessionSummary): void {
-  try {
-    localStorage.setItem(`genehub:session-read:${summary.id}`, String(summary.updatedAtMs));
-  } catch {
-    // Storage can be disabled; the safe fallback is to prefetch next time.
-  }
+  return !summary.latestReply || hasUnreadReply(useWorkbench.getState().client?.identity?.machineId ?? "", summary);
 }
 
 /** The reconnect sentence this store put on screen, while it is still true. */
@@ -633,6 +677,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   workspaces: [],
   activeWorkspaceId: null,
   sessions: [],
+  sessionsLoaded: false,
+  sessionsError: false,
+  includeArchived: false,
   activeSessionId: null,
   draft: null,
   addressScope: "machine",
@@ -646,6 +693,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   subscriptionOwner: null,
   tabLimit: 16,
   notice: null,
+  interfaceLogs: [],
   restoreDraft: null,
   composerDraftInserts: [],
   forwardDraft: null,
@@ -666,13 +714,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   download: { state: "idle" },
 
   async attach(client) {
+    sessionSummaryEpoch++;
     reconnectNotice = null;
     connectionLossNotice = null;
     // Subscriptions belong to the client that made them. This one has never
     // subscribed to anything, and saying otherwise is how a session opened
     // before a machine switch ends up with no live stream at all.
-    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null });
+    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null,
+      sessions: [], sessionsLoaded: false, sessionsError: false });
     client.onStateChange((connection) => {
+      if (get().client !== client) return;
+      sessionSummaryEpoch++;
       set({ connection });
       // A connection that was refused knows why — wrong credential, revoked
       // device, protocol mismatch — and none of those are fixed by waiting. Say
@@ -726,8 +778,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const download = await client.call({ type: "update.downloadState" });
         if (download?.type === "updateDownload") set({ download: download.data });
       })().catch((error: unknown) => unattended(client, get, set)(error));
-      await refreshCatalog(client, set);
-      if (get().client === client) await land(get);
+      const initial = get();
+      // Catalog hydration can finish after someone has already picked an expert.
+      // Initial landing must not replace that explicit page with the newest session.
+      const mayLand = () => get().client === client && get().draft === initial.draft &&
+        get().activeSessionId === initial.activeSessionId && get().activeTabId === initial.activeTabId;
+      await refreshCatalog(client, set, mayLand);
+      if (mayLand()) await land(get);
       await ancillary;
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
@@ -742,7 +799,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async refreshSessions() {
     const client = get().client;
     if (!client) return;
-    await loadSessions(client, set).catch(unattended(client, get, set));
+    const previous = get().sessions;
+    const sessions = await loadSessions(client, set).catch(unattended(client, get, set));
+    if (get().client === client && sessions && polledTurnFinished(previous, sessions)) {
+      await loadWorkspaces(client, set).catch(unattended(client, get, set));
+    }
+  },
+
+  async refreshWorkspaces() {
+    const client = get().client;
+    if (!client) return;
+    await loadWorkspaces(client, set).catch(unattended(client, get, set));
   },
 
   async openWorkspace(root) {
@@ -775,7 +842,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         payload: { workspaceId, name: wanted },
       }),
     );
-    if (reply?.type !== "workspace") return;
+    if (reply?.type !== "workspace") throw new Error("专家重命名失败，请检查连接或错误提示。");
+    // The rename reply is the authority for this action. A follow-up list can
+    // lag behind it (and older daemons may not answer that request at all), so
+    // applying the returned Workspace locally also updates every derived
+    // AgentSpace breadcrumb without reverting the visible rename.
     set((state) => ({
       workspaces: upsertBy(state.workspaces, reply.data, (workspace) => workspace.id),
     }));
@@ -783,29 +854,49 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async removeWorkspace(workspaceId) {
     const client = require_(get().client);
+    // Plan from current public facts; never infer membership from names or paths.
+    const catalog = await client.call({ type: "workspace.list" });
+    if (catalog?.type !== "workspaces") throw new Error("无法读取专家列表，未执行移除。");
+    const planned = new Set<string>();
+    const order: string[] = [];
+    const visit = (id: string) => {
+      if (planned.has(id)) return;
+      planned.add(id);
+      for (const w of catalog.data) if (w.agentSpace?.parentWorkspaceId === id) visit(w.id);
+      order.push(id);
+    };
+    visit(workspaceId);
+    const summary = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
+    if (summary?.type !== "sessions") throw new Error("无法确认会话状态，未执行移除。");
+    if (summary.data.some(s => planned.has(s.workspaceId) && ["running", "waiting"].includes(s.status))) {
+      throw new Error("专家或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
+    }
+    let remaining = catalog.data;
+    let failure: unknown;
+    // Existing per-workspace RPC keeps its authoritative activity and child guards.
+    // Stop on a race/failure and reconcile completed removals, without claiming atomicity.
+    for (const id of order) {
+      if (get().client !== client) { failure = new Error("设备已切换，停止后续移除"); break; }
+      try {
+        const reply = await client.call({ type: "workspace.remove", payload: { workspaceId: id } });
+        if (reply?.type !== "workspaces") throw new Error("未收到移除结果");
+        remaining = reply.data;
+      } catch (e) { failure = e; break; }
+    }
+    if (get().client !== client) throw failure ?? new Error("设备已切换");
     const before = get();
-    const removedSessionIds = new Set(
-      before.sessions
-        .filter((session) => session.workspaceId === workspaceId)
-        .map((session) => session.id),
-    );
-    const removedTabs = before.tabs.filter(
-      (tab) =>
-        (tab.sessionId && removedSessionIds.has(tab.sessionId)) ||
-        (tab.id === DRAFT_TAB && before.draft?.workspaceId === workspaceId),
-    );
-    const reply = await asked(set, () =>
-      client.call({ type: "workspace.remove", payload: { workspaceId } }),
-    );
-    if (reply?.type !== "workspaces") return;
-
+    const removedIds = new Set(catalog.data.filter(w => !remaining.some(r => r.id === w.id)).map(w => w.id));
+    const removedSessionIds = new Set(summary.data.filter(s => removedIds.has(s.workspaceId)).map(s => s.id));
+    const removedTabs = before.tabs.filter(tab =>
+      (tab.sessionId && removedSessionIds.has(tab.sessionId)) ||
+      (tab.id === DRAFT_TAB && before.draft && removedIds.has(before.draft.workspaceId)));
     discardSubscriptions(client, removedTabs);
     const removedWasActive =
-      before.activeWorkspaceId === workspaceId ||
+      Boolean(before.activeWorkspaceId && removedIds.has(before.activeWorkspaceId)) ||
       (before.activeSessionId ? removedSessionIds.has(before.activeSessionId) : false) ||
-      before.draft?.workspaceId === workspaceId;
+      Boolean(before.draft && removedIds.has(before.draft.workspaceId));
     const nextWorkspaceId = removedWasActive
-      ? (reply.data[0]?.id ?? null)
+      ? (remaining[0]?.id ?? null)
       : before.activeWorkspaceId;
     set((state) => {
       const tabs = state.tabs.filter((tab) => !removedTabs.some((removed) => removed.id === tab.id));
@@ -813,10 +904,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ? state.activeTabId
         : (tabs.at(-1)?.id ?? null);
       return {
-        workspaces: reply.data,
+        workspaces: remaining,
         activeWorkspaceId: nextWorkspaceId,
         activeSessionId: removedWasActive ? null : state.activeSessionId,
-        draft: state.draft?.workspaceId === workspaceId ? null : state.draft,
+        draft: state.draft && removedIds.has(state.draft.workspaceId) ? null : state.draft,
         tabs,
         activeTabId,
         timeline: removedWasActive ? emptyTimeline() : state.timeline,
@@ -833,6 +924,30 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (removedWasActive && nextWorkspaceId) {
       get().newSession(nextWorkspaceId, null, { addressScope: "workspace" });
     }
+    if (failure) throw new Error(`移除未全部完成，列表已更新：${failure instanceof Error ? failure.message : String(failure)}`);
+  },
+
+  async configureAgentSpace(workspaceId, expectedRevision, operation) {
+    const reply = await require_(get().client).call({
+        type: "agentSpace.configure",
+        payload: { workspaceId, expectedRevision, operation },
+      });
+    if (reply?.type !== "workspace") throw new Error("未收到专家配置更新结果");
+    await get().refreshWorkspaces();
+  },
+
+  async inspectAgentSpaceBuild(projectWorkspaceId, targetWorkspaceId, operation) {
+    const reply = await require_(get().client).call({
+        type: "agentSpace.builder",
+        payload: {
+          workspaceId: projectWorkspaceId,
+          targetWorkspaceId,
+          spaceName: "existing",
+          operation,
+        },
+      });
+    if (reply?.type !== "agentSpaceBuilder") throw new Error("未收到构建配置结果");
+    return reply.data;
   },
 
   newSession(workspaceId, agentId, options) {
@@ -844,9 +959,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // switching projects is exactly when the Agent usually changes too. Only a
     // project's own history outranks the conversation in front of the user;
     // an inherited last-used choice does not.
+    const localId = options?.localId ?? crypto.randomUUID();
+    const cachedDraft = state.client?.identity ? draftIdentities(state.client.identity.machineId).find(item => item.localId === localId) : undefined;
     const own = recallRuntimeChoice(target, state.agents);
     const chosenAgentId =
-      agentId ??
+      agentId ?? cachedDraft?.agentId ??
       (own.scoped ? own.agentId : null) ??
       state.draft?.agentId ??
       state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
@@ -859,6 +976,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ? own
         : recallRuntimeChoice(target, state.agents, chosenAgentId);
     if (agentId) rememberRuntimeChoice(target, agentId);
+    const draftRuntime = cachedDraft?.runtimeValues ? {modelId:cachedDraft.modelId ?? null, modeId:cachedDraft.modeId ?? null, effortId:cachedDraft.effortId ?? null, runtimeValues:cachedDraft.runtimeValues} : remembered;
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -874,15 +993,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const evictedSessionIds = tabSessionIds(limited.evicted);
     set({
       draft: {
+        localId,
         workspaceId: target,
         agentId: chosenAgentId,
-        modelId: remembered.modelId,
-        modeId: remembered.modeId,
-        effortId: remembered.effortId,
-        runtimeValues: remembered.runtimeValues,
+        modelId: draftRuntime.modelId,
+        modeId: draftRuntime.modeId,
+        effortId: draftRuntime.effortId,
+        runtimeValues: draftRuntime.runtimeValues,
       },
       activeWorkspaceId: target,
       activeSessionId: null,
+      forwardDraft: recalledForward(forwardKey(state, localId)),
       addressScope:
         options?.addressScope ?? (state.addressScope === "machine" ? "machine" : "workspace"),
       timeline: emptyTimeline(),
@@ -899,6 +1020,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async selectSession(sessionId) {
     const client = require_(get().client);
     const summary = get().sessions.find((entry) => entry.id === sessionId);
+    if (summary && client.identity) saveLocalValue(`last:${client.identity.machineId}:${summary.workspaceId}`, sessionId);
     const tabId = `chat:${sessionId}`;
     let evicted: WorkbenchTab[] = [];
     let warm = false;
@@ -933,6 +1055,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       warm = mine.includes(sessionId);
       return {
         activeSessionId: sessionId,
+        forwardDraft: recalledForward(forwardKey(state, sessionId)),
         draft: null,
         // The project follows the conversation. Every workspace's sessions are
         // in the list at once now, so the one just clicked may belong to a
@@ -967,6 +1090,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         if (endsATurn(event.event.type) && get().agents.some((agent) => !canStartAgent(agent))) {
           void get().refreshAgents();
         }
+        if (endsATurn(event.event.type)) void get().refreshWorkspaces();
+        if (endsATurn(event.event.type) || event.event.type === "permissionRequested" || event.event.type === "permissionResolved") void get().refreshSessions();
         set((state) => {
           const timeline = applySequenced(
             state.sessionTimelines[sessionId] ?? emptyTimeline(),
@@ -1013,17 +1138,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         }));
         },
       },
-      { expandLastRound: shouldExpandLastRound(summary) },
+      { expandLastRound: shouldExpandLastRound(summary), recentRounds: 10 },
     );
 
     if (get().client !== client) return;
     const typedSnapshot = snapshot as SessionSnapshot;
-    const previous = timelineOf(get(), sessionId);
+    const current = timelineOf(get(), sessionId);
+    const saved = client.identity?.features?.includes("session.input.v1") ? savedInputReceipts(client.identity.machineId, sessionId) : [];
+    const previous = { ...current, inputOutbox: [...(current.inputOutbox ?? []), ...saved.filter(input => !current.inputOutbox?.some(existing => existing.messageId === input.messageId))] };
+    for (const input of previous.inputOutbox) {
+      if (typedSnapshot.items.some(item => item.id === input.messageId) && client.identity) saveInputReceipt(client.identity.machineId, sessionId, input, true);
+    }
     const base = fromSnapshot(typedSnapshot, previous.pending, previous);
     // A slower subscription must not repaint whichever session the user opened
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
-    markSessionRead(typedSnapshot.summary);
     adoptSnapshotStatus(sessionId, typedSnapshot, set);
     const timeline = withSnapshotStatus(replayed.reduce(applySequenced, base), typedSnapshot);
     set((state) => {
@@ -1037,6 +1166,35 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ...(state.activeSessionId === sessionId ? { timeline } : {}),
       };
     });
+  },
+
+  async loadNarrativeItem(itemId) {
+    const sessionId = get().activeSessionId;
+    const client = get().client;
+    if (!sessionId || !client) return;
+    const reply = await client.call({type: "session.narrative", payload: {sessionId, itemId, throughRoundId: null, cursor: null, limit: null}});
+    if (get().client !== client || reply?.type !== "sessionNarrative") return;
+    patchTimeline(sessionId, set, timeline => ({
+      items: mergeHistoryItems(timeline.items, reply.data.items),
+      historyExcerptIds: timeline.historyExcerptIds?.filter(id => id !== itemId),
+    }));
+  },
+
+  async loadHistory() {
+    const sessionId = get().activeSessionId;
+    const client = get().client;
+    const beforeItemId = get().timeline.historyBefore;
+    if (!sessionId || !client || !beforeItemId) return;
+    const reply = await client.call({type: "session.get", payload: {sessionId, recentRounds: 10, beforeItemId}});
+    if (get().client !== client || reply?.type !== "snapshot") return;
+    const page = reply.data;
+    if (!page.historyWindowed) throw new Error("此服务尚不支持历史窗口，请更新服务后重试。");
+    patchTimeline(sessionId, set, timeline => ({
+      items: insertHistoryPage(timeline.items, page.items, beforeItemId),
+      rounds: [...new Map([...(page.rounds ?? []), ...timeline.rounds].map(round => [round.roundId, round])).values()].sort((a,b) => a.startedAtMs-b.startedAtMs),
+      historyBefore: page.historyBefore ?? null,
+      historyExcerptIds: [...new Set([...(page.historyExcerptIds ?? []).filter(id => !timeline.items.some(item => item.id === id) || timeline.historyExcerptIds?.includes(id)), ...(timeline.historyExcerptIds ?? [])])],
+    }));
   },
 
   async loadRound(roundId) {
@@ -1324,10 +1482,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async send(text, attachments = []) {
+    if (get().client?.identity?.features?.includes("session.input.v1")) {
+      await sendDurableInput(get, set, text, attachments);
+      return;
+    }
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
     set({ notice: null });
     const active = get().activeSessionId;
+    const originClient = get().client;
+    const originDraft = get().draft?.localId;
+    const machine = originClient?.identity?.machineId;
+    const originKey = machine && (active || originDraft) ? `outbox:${machine}:${active || originDraft}` : null;
     // Only one message may be in flight. The daemon enforces this too, but its
     // refusal arrives as a red line about a turn already running — which is a
     // report of our own double send, not news the reader can act on.
@@ -1361,6 +1527,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       };
     });
 
+    if (originKey) saveLocalValue(originKey, {text, attachmentCount:attachments.length});
+
     // This is where a draft becomes a conversation: the machine hears about it
     // at the first message, not when the button was pressed.
     const sessionId = await start(get, set, pending);
@@ -1369,8 +1537,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // session there is a bubble to mark; a conversation that could not even be
       // created has nowhere to put one, so the text goes back to the composer
       // rather than nowhere — it only exists here.
+      if (get().client !== originClient) return;
       if (active) failPending(active, set, get().notice ?? "无法开始会话");
-      else
+      else if (get().draft?.localId === originDraft)
         set((state) => ({
           restoreDraft: { text, attachments },
           timeline: { ...state.timeline, pending: null },
@@ -1378,11 +1547,15 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       return;
     }
 
+    const sentKey = machine ? `outbox:${machine}:${sessionId}` : null;
+    if (sentKey) saveLocalValue(sentKey, {text, attachmentCount:attachments.length});
+    if (originKey && originKey !== sentKey) saveLocalValue(originKey, null);
+    if (machine && originDraft && !active) forgetDraftIdentity(machine, originDraft);
     try {
       // Artifact Preview URLs are bound at chat/document render time from the
       // current workspace roots. Agents emit relative/absolute file paths; the
       // daemon teaches path-linking rules (not a deployment-specific prefix).
-      await require_(get().client).call({
+      await require_(originClient).call({
         type: "session.send",
         // Continuing a round after an interrupt is not wired into the UI
         // yet — every message from here is a fresh round until it is
@@ -1395,6 +1568,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           continuesRound: null,
         },
       });
+      if (sentKey) saveLocalValue(sentKey, null);
+      if (get().client !== originClient) return;
       // The daemon publishes the user message before it answers this call, and
       // replies and events share one socket in arrival order, so the real item
       // is already here. This is the second of the two ways the placeholder
@@ -1409,14 +1584,20 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       // taken — `ConnectionOutcomeUnknownError` exists to say exactly that —
       // and calling it a failure would put a second bubble next to the real one
       // as soon as the replay lands. Leave it pending; the resync decides.
-      if (error instanceof ConnectionOutcomeUnknownError) return;
+      if (error instanceof ConnectionOutcomeUnknownError || get().client !== originClient) return;
       const message = error instanceof Error ? error.message : String(error);
       failPending(sessionId, set, message);
       set({ notice: message });
     }
   },
 
-  async retryPending() {
+  async retryPending(messageId) {
+    if (messageId) {
+      const sessionId = get().activeSessionId;
+      const input = sessionId ? timelineOf(get(), sessionId).inputOutbox?.find(input => input.messageId === messageId) : null;
+      if (input) await sendDurableInput(get, set, input.text, input.attachments, input);
+      return;
+    }
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
     const pending = timelineOf(get(), sessionId).pending;
@@ -1426,7 +1607,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     await get().send(pending.text, pending.attachments);
   },
 
-  editPending() {
+  editPending(messageId) {
+    if (messageId) {
+      // Unknown delivery must be reconciled with its original identity first.
+      set({ notice: "这条消息的接收结果尚未确认；请先重试核对，再发送修改要求。" });
+      return;
+    }
     const sessionId = get().activeSessionId;
     if (!sessionId) return;
     const pending = timelineOf(get(), sessionId).pending;
@@ -1459,6 +1645,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   setForwardDraft(draft) {
+    const key = forwardKey(get());
+    forwardMemory.set(key, draft);
+    // Capsules remain reviewable after refresh; binary thumbs remain in memory only.
+    saveLocalValue(key, draft ? {...draft, attachments: [], sourceTitle: `${draft.sourceTitle ?? "转发内容"}${draft.attachments?.length ? "（刷新后请重新附加图片）" : ""}`} : null);
     set({ forwardDraft: draft });
   },
 
@@ -1648,14 +1838,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
 
   async renameSession(sessionId, title) {
     const wanted = title.trim();
-    if (!wanted) return;
+    if (!wanted) return false;
     const reply = await asked(set, () =>
       require_(get().client).call({ type: "session.rename", payload: { sessionId, title: wanted } }),
     );
-    if (reply?.type !== "session") return;
+    if (reply?.type !== "session") return false;
     // From the reply rather than from what was typed: the daemon trims and
     // caps, and the sidebar should show the name that was actually stored.
     applyTitle(sessionId, reply.data.title ?? wanted, set);
+    return true;
+  },
+
+  async archiveSession(sessionId, archived) {
+    const client = require_(get().client);
+    const reply = await asked(set, () => client.call({type: "session.archive", payload: {sessionId, archived}}));
+    if (reply) await loadSessions(client, set);
   },
 
   async deleteSession(sessionId) {
@@ -1967,12 +2164,32 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const sessionId = get().activeSessionId;
     const request = get().timeline.pendingPermission;
     if (!sessionId || !request) return;
-    await asked(set, () =>
+    patchTimeline(sessionId, set, () => ({
+      permissionProgress: {
+        requestId: request.id,
+        stage: "submitting",
+        message:
+          request.kind === "question"
+            ? "正在提交回答…"
+            : request.kind === "planApproval"
+              ? "正在提交计划确认…"
+              : "正在提交授权决定…",
+      },
+    }));
+    const reply = await asked(set, () =>
       require_(get().client).call({
         type: "session.respondPermission",
         payload: { sessionId, requestId: request.id, outcome },
       }),
     );
+    if (reply === undefined) {
+      patchTimeline(sessionId, set, (timeline) => ({
+        permissionProgress:
+          timeline.permissionProgress?.requestId === request.id
+            ? null
+            : timeline.permissionProgress,
+      }));
+    }
   },
 }));
 
@@ -1982,11 +2199,12 @@ type Setter = (
     | ((state: WorkbenchState) => Partial<WorkbenchState>),
 ) => void;
 
-async function refreshCatalog(client: Client, set: Setter): Promise<void> {
+async function refreshCatalog(client: Client, set: Setter, mayLand: () => boolean): Promise<void> {
   const [agents, workspaces] = await Promise.all([
     client.call({ type: "agent.list" }),
     client.call({ type: "workspace.list" }),
   ]);
+  if (useWorkbench.getState().client !== client) return;
   if (agents?.type === "agents") set({ agents: agents.data });
   if (workspaces?.type === "workspaces") {
     set({ workspaces: workspaces.data });
@@ -2000,8 +2218,16 @@ async function refreshCatalog(client: Client, set: Setter): Promise<void> {
     // against the list, because a session can outlive the workspace's entry.
     const last = newest(sessions);
     const known = workspaces.data.some((entry) => entry.id === last?.workspaceId);
-    set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
+    if (mayLand()) set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
   }
+}
+
+async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {
+  const reply = await client.call({ type: "workspace.list" });
+  if (useWorkbench.getState().client !== client) return [];
+  const workspaces = reply?.type === "workspaces" ? reply.data : [];
+  if (reply?.type === "workspaces") set({ workspaces });
+  return workspaces;
 }
 
 /**
@@ -2075,6 +2301,13 @@ async function applyLanding(
     useWorkbench.setState({ notice: "这个会话已经不在了。" });
     return false;
   }
+  if (intent.localDraftId && intent.localDraftWorkspaceId && get().client?.identity) {
+    const cached = draftIdentities(get().client!.identity!.machineId).find(draft => draft.localId === intent.localDraftId && draft.workspaceId === intent.localDraftWorkspaceId);
+    if (cached && get().workspaces.some(workspace => workspace.id === cached.workspaceId)) {
+      get().newSession(cached.workspaceId, cached.agentId, {addressScope: "workspace", localId: cached.localId});
+      return true;
+    }
+  }
   const workspaceId = intent.workspaceId
     ? expandLocator(
         intent.workspaceId,
@@ -2125,6 +2358,41 @@ function openLandingPreview(get: () => WorkbenchState, intent: LandingIntent | n
  * is a caller that should quietly do nothing: `asked` has already said why if a
  * request was made and refused.
  */
+async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: string, attachments: Attachment[], retry?: PendingMessage): Promise<void> {
+  const client = get().client;
+  const machine = client?.identity?.machineId;
+  if (!client || !machine) { set({ notice: "连接恢复后再发送。", restoreDraft: { text, attachments } }); return; }
+  const origin = get().activeSessionId;
+  if (!origin && get().timeline.pending) { set({ restoreDraft: { text, attachments } }); return; }
+  // A Session can receive a new independent request while its squad works.
+  // Do not silently bind arbitrary chat to the sole existing task. Explicit
+  // task references and retries retain the target captured at admission.
+  const input: PendingMessage = retry ?? { messageId: `u_${crypto.randomUUID().replaceAll("-", "")}`, text, attachments, sentAtMs: Date.now(), error: null };
+  if (!origin) set(state => ({ timeline: { ...state.timeline, pending: input } }));
+  const sessionId = origin ?? await start(get, set, input);
+  if (!sessionId || get().client !== client) { if (get().client === client) set({ restoreDraft: { text, attachments } }); return; }
+  patchTimeline(sessionId, set, timeline => ({ pending: timeline.pending?.messageId === input.messageId ? null : timeline.pending,
+    inputOutbox: [...(timeline.inputOutbox ?? []).filter(item => item.messageId !== input.messageId), { ...input, error: null }] }));
+  saveInputReceipt(machine, sessionId, input);
+  try {
+    if (retry) {
+      const lookup = await client.call({ type: "session.narrative", payload: { sessionId, itemId: input.messageId ?? null, throughRoundId: null, cursor: null, limit: null } });
+      if (lookup?.type === "sessionNarrative" && lookup.data.items?.some(item => item.id === input.messageId)) {
+        saveInputReceipt(machine, sessionId, input, true);
+        if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.filter(item => item.messageId !== input.messageId) }));
+        return;
+      }
+      if (input.missingAttachments) throw new Error("本地附件已失效，原消息仍待核对；请检查服务端记录并重新附加图片。");
+    }
+    await client.call({ type: "session.send", payload: { sessionId, messageId: input.messageId, taskRunId: input.taskRunId, text: input.text, attachments: input.attachments, artifactPreviewBaseUrl: null, continuesRound: null } });
+    saveInputReceipt(machine, sessionId, input, true);
+    if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.filter(item => item.messageId !== input.messageId) }));
+  } catch (error) {
+    const message = error instanceof ConnectionOutcomeUnknownError ? "接收结果待核对；重试会使用原消息 ID。" : error instanceof Error ? error.message : String(error);
+    if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.map(item => item.messageId === input.messageId ? { ...item, error: message } : item) }));
+  }
+}
+
 async function start(
   get: () => WorkbenchState,
   set: Setter,
@@ -2143,7 +2411,7 @@ async function start(
   if (!agentId) return null;
 
   const reply = await asked(set, () =>
-    require_(get().client).call({
+    require_(state.client).call({
       type: "session.create",
       payload: {
         workspaceId: draft.workspaceId,
@@ -2156,7 +2424,7 @@ async function start(
       },
     }),
   );
-  if (reply?.type !== "session") return null;
+  if (reply?.type !== "session" || get().client !== state.client) return null;
 
   // The choice that actually started a conversation, not merely one that was
   // looked at: this is what the next new chat in this project opens with.
@@ -2172,7 +2440,7 @@ async function start(
     sessions: [reply.data, ...current.sessions],
     // A forward capsule parked on the unstarted conversation belongs to the
     // session that conversation just became; re-key it or the card vanishes.
-    ...(current.forwardDraft?.sessionId === null
+    ...(current.draft?.localId === draft.localId && current.forwardDraft?.sessionId === null
       ? { forwardDraft: { ...current.forwardDraft, sessionId: reply.data.id } }
       : {}),
     // Seed before `selectSession` so the first paint of the new session still
@@ -2187,14 +2455,20 @@ async function start(
         }
       : {}),
   }));
-  // Clears the draft and turns its tab into this session's.
-  await get().selectSession(reply.data.id);
+  if (get().forwardDraft?.sessionId === reply.data.id) {
+    const moved = get().forwardDraft;
+    forwardMemory.set(forwardKey(get(), reply.data.id), moved);
+    if (draft.localId) { forwardMemory.delete(forwardKey(get(), draft.localId)); saveLocalValue(forwardKey(get(), draft.localId), null); }
+  }
+  if (!pending && draft.localId && state.client?.identity) forgetDraftIdentity(state.client.identity.machineId, draft.localId);
+  // Only the originating draft may follow this late create response.
+  if (get().draft?.localId === draft.localId && !get().activeSessionId) await get().selectSession(reply.data.id);
   // Before `setEffort`, which is another round trip: the first message of a new
   // conversation should not be the one message that waits longest to appear.
   if (pending) patchTimeline(reply.data.id, set, () => ({ pending }));
   // `session.create` has no field for it, so the one choice that cannot ride
   // along is made immediately afterwards instead of being lost.
-  if (draft.effortId) await get().setEffort(draft.effortId);
+  if (draft.effortId) await asked(set, () => require_(state.client).call({type:"session.setEffort", payload:{sessionId:reply.data.id, effortId:draft.effortId!}}));
   return reply.data.id;
 }
 
@@ -2209,7 +2483,9 @@ function failPending(sessionId: string, set: Setter, message: string): void {
 function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>): void {
   const draft = get().draft;
   if (!draft) return;
-  set({ draft: { ...draft, ...change } });
+  const next = { ...draft, ...change };
+  if (next.localId && get().client?.identity) rememberDraftIdentity(get().client!.identity!.machineId, {...next, localId:next.localId, title:"新会话草稿"});
+  set({ draft: next });
 }
 
 /**
@@ -2271,19 +2547,49 @@ function remember(state: WorkbenchState, axes: AgentRuntimeMemory): void {
  * per workspace would mean one round trip per row, and a tree that fills in
  * raggedly as the answers arrive.
  */
+let sessionSummaryEpoch = 0;
+const sessionSummaryLoads = new WeakMap<Client, { epoch: number; promise: Promise<SessionSummary[]> }>();
 async function loadSessions(client: Client, set: Setter): Promise<SessionSummary[]> {
-  const reply = await client.call({
-    type: "session.list",
-    payload: { workspaceId: null, includeArchived: false },
-  });
-  if (reply?.type !== "sessions") return [];
-  set({ sessions: reply.data });
-  return reply.data;
+  const epoch = sessionSummaryEpoch;
+  const existing = sessionSummaryLoads.get(client);
+  if (existing?.epoch === epoch) return existing.promise;
+  const before = new Map(useWorkbench.getState().sessions.map(session => [session.id, session]));
+  const promise = (async () => {
+    try {
+      const reply = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
+      if (useWorkbench.getState().client !== client || epoch !== sessionSummaryEpoch) return [];
+      if (reply?.type !== "sessions") throw new Error("会话摘要暂不可用");
+      initializeReplyReads(client.identity?.machineId ?? "", reply.data);
+      set(state => {
+        const current = new Map(state.sessions.map(session => [session.id, session]));
+        const ids = new Set(reply.data.map(session => session.id));
+        const sessions = reply.data.filter(session => !before.has(session.id) || current.has(session.id)).map(session => {
+          const previous = before.get(session.id);
+          const live = current.get(session.id);
+          if (!live || live === previous) return session;
+          // Preserve only fields changed while this request was in flight.
+          // Status/title/permission events cannot be undone by a slow list.
+          const old = new Map(Object.entries(previous ?? {}));
+          const newer = Object.fromEntries(Object.entries(live).filter(([key, value]) => old.get(key) !== value));
+          return { ...session, ...newer };
+        });
+        sessions.push(...state.sessions.filter(session => !before.has(session.id) && !ids.has(session.id)));
+        return { sessions, sessionsLoaded: true, sessionsError: false };
+      });
+      return useWorkbench.getState().sessions;
+    } catch (error) {
+      if (useWorkbench.getState().client === client && epoch === sessionSummaryEpoch) set({ sessionsError: true });
+      throw error;
+    }
+  })();
+  sessionSummaryLoads.set(client, { epoch, promise });
+  try { return await promise; }
+  finally { if (sessionSummaryLoads.get(client)?.promise === promise) sessionSummaryLoads.delete(client); }
 }
 
 /** The most recently touched of a set, or null. */
 function newest(sessions: SessionSummary[]): SessionSummary | null {
-  return sessions.reduce<SessionSummary | null>(
+  return sessions.filter(session => !session.archived).reduce<SessionSummary | null>(
     (best, session) => (!best || session.updatedAtMs > best.updatedAtMs ? session : best),
     null,
   );
@@ -2329,7 +2635,7 @@ function withSnapshotStatus(previous: TimelineState, snapshot: SessionSnapshot):
   // An approval still waiting outranks it, the same way it does when a snapshot
   // is applied whole: there is a card on screen the user has to answer.
   const waiting = (snapshot.pendingPermissions?.length ?? 0) > 0;
-  return { ...previous, status: waiting ? "waiting" : status };
+  return { ...previous, status: waiting && !snapshot.summary.inputSummary ? "waiting" : status };
 }
 
 function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
@@ -2337,7 +2643,11 @@ function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: 
   if (!status) return;
   set((state) => ({
     sessions: state.sessions.map((session) =>
-      session.id === sessionId && session.status !== status ? { ...session, status } : session,
+      session.id === sessionId ? { ...session, ...snapshot.summary,
+        interactionSummary: {
+          count: (snapshot.pendingPermissions ?? []).length,
+          requests: (snapshot.pendingPermissions ?? []).slice(0, 16).map(request => ({ requestId: request.id, kind: request.kind, title: request.title.slice(0, 160) })),
+        } } : session,
     ),
   }));
 }
@@ -2348,7 +2658,7 @@ function applySessionStatus(
   set: Setter,
 ): void {
   const status =
-    event.type === "turnStarted" || event.type === "permissionResolved"
+    event.type === "turnStarted"
       ? "running"
       : event.type === "permissionRequested"
         ? "waiting"
@@ -2359,11 +2669,21 @@ function applySessionStatus(
             : event.type === "sessionStatusChanged"
               ? event.status
               : null;
-  if (!status) return;
+  if (!status && event.type !== "permissionResolved") return;
   set((state) => ({
-    sessions: state.sessions.map((session) =>
-      session.id === sessionId ? { ...session, status } : session,
-    ),
+    sessions: state.sessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      const interactionSummary = event.type === "permissionRequested"
+        ? { count: (session.interactionSummary?.count ?? 0) + Number(!session.interactionSummary?.requests.some(request => request.requestId === event.request.id)),
+            requests: [{ requestId: event.request.id, kind: event.request.kind, title: event.request.title.slice(0, 160) }, ...(session.interactionSummary?.requests.filter(request => request.requestId !== event.request.id) ?? [])].slice(0, 16) }
+        : event.type === "permissionResolved" && session.interactionSummary
+          ? { count: Math.max(0, session.interactionSummary.count - Number(session.interactionSummary.requests.some(request => request.requestId === event.requestId))),
+            requests: session.interactionSummary.requests.filter(request => request.requestId !== event.requestId) }
+          : session.interactionSummary;
+      const next = event.type === "permissionResolved" ? (session.status === "waiting" && !interactionSummary?.count ? "idle" : session.status)
+        : status === "idle" && interactionSummary?.count ? "waiting" : status ?? session.status;
+      return { ...session, status: next, interactionSummary };
+    }),
   }));
 }
 
@@ -2424,7 +2744,7 @@ function discardSubscriptions(client: Client | null, tabs: WorkbenchTab[]): void
 }
 
 /** Replaces the node at `path` with a freshly loaded one, in place. */
-function graft(tree: FileNode, path: string, subtree: FileNode): FileNode {
+export function graft(tree: FileNode, path: string, subtree: FileNode): FileNode {
   if (tree.path === path) return subtree;
   if (!tree.children) return tree;
   return { ...tree, children: tree.children.map((child) => graft(child, path, subtree)) };
@@ -2518,3 +2838,12 @@ async function batchOrSequentially<T>(
     return null;
   }
 }
+
+// Capture the shared notice channel once, including notices written by the shell.
+// Clearing an active notice does not erase history; no raw messages go to telemetry.
+useWorkbench.subscribe((state, previous) => {
+  if (!state.notice || state.notice === previous.notice) return;
+  useWorkbench.setState({ interfaceLogs: [...state.interfaceLogs.slice(-99), {
+    at: Date.now(), machine: state.client?.identity?.machineId ?? "", message: state.notice.slice(0, 2000),
+  }] });
+});

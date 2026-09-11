@@ -1,0 +1,32 @@
+schema: genehub.workflow.catalog.v1
+workflows:
+  - id: game-project
+    path: game-project.yaml
+    match:
+      kind: game
+      complexity: project
+  - id: game-feature
+    path: game-feature.yaml
+    match:
+      kind: feature
+      complexity: complex
+  - id: workflow-improvement
+    path: workflow-improvement.yaml
+    match:
+      kind: workflow
+      complexity: improvement
+  - id: workflow-review
+    path: workflow-review.yaml
+    match:
+      kind: workflow
+      complexity: review
+  - id: game-assessment
+    path: game-assessment.yaml
+    match:
+      kind: game
+      complexity: assessment
+  - id: game-review
+    path: game-review.yaml
+    match:
+      kind: game
+      complexity: review

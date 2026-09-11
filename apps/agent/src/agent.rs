@@ -90,8 +90,8 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
             break;
         }
 
-        let results = if assistant.stop_reason == StopReason::Length {
-            fail_truncated_calls(&emitter, &calls)
+        let (results, requested_input) = if assistant.stop_reason == StopReason::Length {
+            (fail_truncated_calls(&emitter, &calls), false)
         } else {
             execute_calls(&state, &emitter, &snapshot, &calls).await
         };
@@ -117,6 +117,10 @@ pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
             "message": assistant_value,
             "toolResults": result_values,
         }));
+
+        if requested_input {
+            break;
+        }
 
         if state.lock().await.abort.requested() {
             eprintln!("event=turn_cancelled_after_tools");
@@ -354,7 +358,7 @@ async fn execute_calls(
     emitter: &Emitter,
     snapshot: &Snapshot,
     calls: &[(String, String, Value)],
-) -> Vec<Message> {
+) -> (Vec<Message>, bool) {
     for (id, name, arguments) in calls {
         emitter.send(json!({
             "type": "tool_execution_start",
@@ -366,12 +370,32 @@ async fn execute_calls(
 
     let abort = { state.lock().await.abort.clone() };
     let tools_enabled = snapshot.tools_enabled;
+    let interaction_is_valid = calls.len() == 1 && calls[0].1 == "request_user_input";
+    let requested_input = !tools::evidence::enabled()
+        && interaction_is_valid
+        && tools::user_input(&calls[0].2).is_ok();
     let futures = calls.iter().map(|(id, name, arguments)| {
         let emitter = emitter.clone();
         let cwd = snapshot.cwd.clone();
         let abort = abort.clone();
         async move {
-            let result = if !tools_enabled {
+            let result = if name == "request_user_input" && !interaction_is_valid {
+                tools::ToolResult::error(
+                    "request_user_input must be the only tool call in this assistant message",
+                )
+            } else if name == "request_user_input" && !tools::evidence::enabled() {
+                match tools::user_input(arguments) {
+                    Ok(payload) => {
+                        emitter.send(json!({
+                            "type": "user_input_requested",
+                            "toolCallId": id,
+                            "questions": payload["questions"],
+                        }));
+                        tools::ToolResult::ok("Waiting for the user's response.")
+                    }
+                    Err(error) => tools::ToolResult::error(error),
+                }
+            } else if !tools_enabled {
                 tools::ToolResult::error("Tools are disabled for this private analysis run")
             } else if abort.requested() {
                 tools::ToolResult::error("Operation aborted")
@@ -402,7 +426,8 @@ async fn execute_calls(
         }
     });
 
-    futures_util::future::join_all(futures).await
+    let results = futures_util::future::join_all(futures).await;
+    (results, requested_input)
 }
 
 async fn finish_without_model(
@@ -655,9 +680,11 @@ mod tests {
             }
             _ = &mut running => panic!("the command unexpectedly finished before cancellation"),
         }
-        let results = tokio::time::timeout(std::time::Duration::from_secs(2), &mut running)
-            .await
-            .expect("the tool await is cancellation-aware");
+        let (results, stopped_for_human_input) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), &mut running)
+                .await
+                .expect("the tool await is cancellation-aware");
+        assert!(!stopped_for_human_input);
         assert_eq!(results.len(), 1);
         assert!(matches!(
             &results[0],

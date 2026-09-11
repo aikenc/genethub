@@ -49,6 +49,25 @@ struct Agent {
     watched_at: std::time::Instant,
 }
 
+/// Persisted before stopping the adapter, so a daemon restart cannot mistake
+/// forgotten in-memory ownership for proof that cleanup succeeded.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupReceipt {
+    captured_at_ms: i64,
+    processes: Vec<CleanupIdentity>,
+    error: Option<String>,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupIdentity {
+    pid: u32,
+    group: u32,
+    running_for_seconds: u64,
+}
+
 /// How much disagreement to allow between our clock and `ps` rounding its
 /// answer down to whole seconds.
 const CLOCK_SLACK: u64 = 5;
@@ -124,6 +143,77 @@ impl Processes {
     /// report.
     pub async fn forget(&self, session_id: &str) {
         self.agents.write().await.remove(session_id);
+    }
+
+    pub(crate) async fn prepare_cleanup(&self, session_id: &str) -> CleanupReceipt {
+        let mut receipt = CleanupReceipt {
+            captured_at_ms: chrono::Utc::now().timestamp_millis(),
+            processes: Vec::new(),
+            error: None,
+            completed: false,
+        };
+        let Some(agent) = self.agents.read().await.get(session_id).copied() else {
+            return receipt;
+        };
+        let Some(rows) = census().await else {
+            receipt.error = Some("process census unavailable before shutdown; descendant cleanup remains unconfirmed".into());
+            return receipt;
+        };
+        let mut owned = claimed_by(&rows, agent, agent.watched_at.elapsed().as_secs());
+        if let Some(parent) = rows.iter().find(|row| {
+            row.pid == agent.pid
+                && row.running_for_seconds + CLOCK_SLACK >= agent.watched_at.elapsed().as_secs()
+        }) {
+            owned.push(parent);
+        }
+        if owned.len() > 4096 {
+            receipt.error =
+                Some("process cleanup exceeds the 4096-process observation bound".into());
+        }
+        receipt.processes = owned
+            .into_iter()
+            .take(4096)
+            .map(|row| CleanupIdentity {
+                pid: row.pid,
+                group: row.group,
+                running_for_seconds: row.running_for_seconds,
+            })
+            .collect();
+        receipt
+    }
+
+    pub(crate) async fn verify_cleanup(&self, receipt: &CleanupReceipt) -> anyhow::Result<()> {
+        if let Some(error) = &receipt.error {
+            anyhow::bail!("{error}");
+        }
+        if receipt.processes.is_empty() {
+            return Ok(());
+        }
+        let rows = census()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("process cleanup could not be verified"))?;
+        let elapsed = chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_sub(receipt.captured_at_ms)
+            .max(0) as u64
+            / 1000;
+        let remaining = receipt
+            .processes
+            .iter()
+            .filter(|old| {
+                rows.iter().any(|now| {
+                    old.pid == now.pid
+                        && old.group == now.group
+                        && now.running_for_seconds.saturating_add(CLOCK_SLACK)
+                            >= old.running_for_seconds.saturating_add(elapsed)
+                })
+            })
+            .map(|old| old.pid)
+            .collect::<Vec<_>>();
+        if !remaining.is_empty() {
+            anyhow::bail!("recorded session processes still exist; cleanup requires reconciliation: {remaining:?}");
+        }
+        Ok(())
     }
 
     /// Everything still running that some session's agent started.
@@ -205,6 +295,37 @@ impl Processes {
         }
     }
 
+    /// Cancellation must distinguish an empty census from an unavailable one.
+    pub(crate) async fn stop_all_checked(&self, session_id: &str) -> anyhow::Result<usize> {
+        let Some(agent) = self.agents.read().await.get(session_id).copied() else {
+            return Ok(0);
+        };
+        let before = census()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("process census unavailable; cleanup is unconfirmed"))?;
+        let claimed = claimed_by(&before, agent, agent.watched_at.elapsed().as_secs());
+        let mut ending = tokio::task::JoinSet::new();
+        for row in &claimed {
+            ending.spawn(end_observed((*row).clone()));
+        }
+        ending.join_all().await;
+        let after = census()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("process cleanup could not be verified"))?;
+        let remaining = claimed_by(&after, agent, agent.watched_at.elapsed().as_secs());
+        let known_remaining = claimed
+            .iter()
+            .filter(|old| after.iter().any(|now| same_process(old, now)))
+            .count();
+        if !remaining.is_empty() || known_remaining > 0 {
+            anyhow::bail!(
+                "{} session processes have not stopped",
+                remaining.len().max(known_remaining)
+            );
+        }
+        Ok(claimed.len())
+    }
+
     /// Ends everything a session left running, but not the agent itself.
     pub async fn stop_all(&self, session_id: &str) -> usize {
         let Some(agent) = self.agents.read().await.get(session_id).copied() else {
@@ -241,6 +362,49 @@ struct Row {
     group: u32,
     running_for_seconds: u64,
     command: String,
+}
+
+fn same_process(before: &Row, after: &Row) -> bool {
+    before.pid == after.pid
+        && before.group == after.group
+        && after.running_for_seconds + CLOCK_SLACK >= before.running_for_seconds
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn end_observed(row: Row) {
+    crate::process::end_tree(row.pid).await;
+}
+
+/// The guest uses the existing nonblocking process import. Numeric pids are
+/// taken only from the ownership census; never signal an unverified group.
+#[cfg(target_family = "wasm")]
+async fn end_observed(row: Row) {
+    let signal = |signal: &'static str, pid: u32| async move {
+        let mut command = crate::os_process::Command::new("kill");
+        command
+            .args([signal, &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(CENSUS_TIMEOUT, command.output()).await;
+    };
+    signal("-TERM", row.pid).await;
+    let deadline = tokio::time::Instant::now() + crate::process::GRACE;
+    while tokio::time::Instant::now() < deadline {
+        let Some(current) = census().await else {
+            return;
+        };
+        if !current.iter().any(|now| same_process(&row, now)) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let Some(current) = census().await else {
+        return;
+    };
+    if current.iter().any(|now| same_process(&row, now)) {
+        signal("-KILL", row.pid).await;
+    }
 }
 
 /// The processes of a session's agent, excluding the agent.

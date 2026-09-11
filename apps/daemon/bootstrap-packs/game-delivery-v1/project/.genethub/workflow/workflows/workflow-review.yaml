@@ -1,0 +1,17 @@
+schema: genehub.workflow.definition.v1
+id: workflow-review
+version: 1
+entry: specialist
+nodes:
+  - id: specialist
+    uses: agent.session
+    with:
+      role: workflow-reviewer
+    completion:
+      all:
+        - key: report
+          verify: value.nonEmpty
+    on:
+      completed: [publish]
+  - id: publish
+    uses: result.publish

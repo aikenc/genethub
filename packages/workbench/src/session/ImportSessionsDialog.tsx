@@ -141,7 +141,7 @@ export function ImportSessionsDialog({
             : null}
           {!loading && listing && total === 0 ? (
             <p className="rounded-xl border border-line bg-raised/50 px-3 py-4 text-center text-sm text-muted">
-              当前工作区没有可导入的新会话。
+              当前Agent没有可导入的新会话。
             </p>
           ) : null}
           {listing && listing.filteredDuplicates > 0 ? (

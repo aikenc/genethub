@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 46] = [
+const COMMAND_NAMES: [&str; 57] = [
     "schema",
     "context",
     "capabilities",
@@ -28,6 +28,8 @@ const COMMAND_NAMES: [&str; 46] = [
     "workspace.show",
     "session.list",
     "session.get",
+    "session.components",
+    "session.flow",
     "session.inspect",
     "session.narrative",
     "session.rounds",
@@ -41,6 +43,15 @@ const COMMAND_NAMES: [&str; 46] = [
     "session.respond",
     "session.interrupt",
     "session.close",
+    "workflow.init",
+    "workflow.inspect",
+    "workflow.activate",
+    "workflow.dispatch",
+    "workflow.get",
+    "workflow.history",
+    "workflow.check",
+    "workflow.complete",
+    "workflow.cancel",
     "machine.list",
     "machine.show",
     "machine.pair",
@@ -101,6 +112,11 @@ fn mutates(name: &str) -> bool {
             | "session.respond"
             | "session.interrupt"
             | "session.close"
+            | "workflow.init"
+            | "workflow.activate"
+            | "workflow.dispatch"
+            | "workflow.complete"
+            | "workflow.cancel"
             | "machine.pair"
             | "machine.forget"
             | "device.invite"
@@ -125,6 +141,12 @@ enum Query {
         workspace_id: Option<String>,
     },
     SessionGet {
+        session_id: String,
+    },
+    SessionComponents {
+        session_id: String,
+    },
+    SessionFlow {
         session_id: String,
     },
     SessionInspect {
@@ -283,6 +305,22 @@ fn parse_session(args: &[String]) -> Result<Query, CliFailure> {
             }),
             _ => Err(CliFailure::invalid_args(
                 "session get needs exactly one session id",
+            )),
+        },
+        "components" => match &args[1..] {
+            [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionComponents {
+                session_id: session_id.clone(),
+            }),
+            _ => Err(CliFailure::invalid_args(
+                "session components needs exactly one session id",
+            )),
+        },
+        "flow" => match &args[1..] {
+            [session_id] if !session_id.trim().is_empty() => Ok(Query::SessionFlow {
+                session_id: session_id.clone(),
+            }),
+            _ => Err(CliFailure::invalid_args(
+                "session flow needs exactly one Executor Session id",
             )),
         },
         "inspect" => {
@@ -510,12 +548,43 @@ async fn execute(
             let rpc = connect_selected(selection).await?;
             let snapshot = snapshot(
                 rpc.call(Request::SessionGet {
+                    recent_rounds: None,
+                    before_item_id: None,
                     session_id: session_id.clone(),
                 })
                 .await
                 .map_err(rpc_error)?,
             )?;
             Ok(("session.get", json!({"session": snapshot})))
+        }
+        Query::SessionComponents { session_id } => {
+            let rpc = connect_selected(selection).await?;
+            let instances = component_instances(
+                rpc.call(Request::SessionComponents {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(rpc_error)?,
+            )?;
+            Ok((
+                "session.components",
+                json!({"sessionId": session_id, "components": instances}),
+            ))
+        }
+        Query::SessionFlow { session_id } => {
+            let rpc = connect_selected(selection).await?;
+            let Reply::SessionFlow(flow) = rpc
+                .call(Request::SessionFlow {
+                    session_id: session_id.clone(),
+                })
+                .await
+                .map_err(rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered session.flow with the wrong reply",
+                ));
+            };
+            Ok(("session.flow", json!({"flow": flow})))
         }
         Query::SessionInspect {
             session_id,
@@ -1047,6 +1116,8 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
+        "session.components" => session_schema("genet session components <id>", json!({})),
+        "session.flow" => session_schema("genet session flow <id>", json!({})),
         "shell" => (
             "genet shell [--workspace <id> | --cwd <dir>] [--machine <id>] [--env NAME=VALUE]... \
              [--timeout <s>] [--max-output <bytes>] -- <command> [args...]",
@@ -1147,17 +1218,70 @@ fn command_schema(name: &str) -> Value {
             ),
         ),
         "session.send" => (
-            "genet session send <id> \"<text>\" [--wait|--no-wait] [--timeout <s>]",
+            "genet session send <id> \"<text>\" [--message-id <id> [--task-run <run>]] [--wait|--no-wait] [--timeout <s>]",
             true,
             object_input(
                 json!({
                     "sessionId": {"type": "string", "minLength": 1},
                     "prompt": {"type": "string", "minLength": 1},
-                    "wait": {"type": "boolean", "default": true},
+                    "messageId": {"type": "string", "minLength": 1, "maxLength": 128,
+                        "description": "--message-id; stable receipt ID, requires session.input.v1; returns acceptance"},
+                    "taskRunId": {"type": "string", "minLength": 1,
+                        "description": "--task-run; optional related Run owned by this PM; requires messageId"},
+                    "wait": {"type": "boolean",
+                        "description": "defaults to false with messageId, true otherwise; --wait is incompatible with messageId"},
                     "timeout": {"type": ["integer", "null"], "minimum": 1},
                 }),
                 &["sessionId", "prompt"],
             ),
+        ),
+        "workflow.init" => workflow_schema(
+            "genet workflow init [--workspace <id>] [--agent <id>] [--model <id>]",
+            json!({"agentId": {"type": "string"}, "modelId": {"type": "string"}}), &[],
+        ),
+        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>]", json!({}), &[]),
+        "workflow.activate" => workflow_schema(
+            "genet workflow activate [--workspace <id>] [--candidate <digest>] --revision <n>",
+            json!({"candidateDigest": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
+        ),
+        "workflow.dispatch" => workflow_schema(
+            "genet workflow dispatch [--workspace <id>] [--workflow <id> | --kind <kind> --complexity <level>] [--task <id>] --message <text> [--candidate <digest>] [--retry-of <run>] [--resume-cancelled] [--wait|--no-wait] [--timeout <s>]",
+            json!({
+                "workflowId": {"type": "string"}, "kind": {"type": "string"}, "complexity": {"type": "string"},
+                "taskId": {"type": "string", "description": "--task; dispatch idempotency key, generated if omitted"},
+                "prompt": {"type": "string", "minLength": 1, "description": "--message or positional text"},
+                "candidateDigest": {"type": "string", "description": "--candidate"},
+                "retryOf": {"type": "string", "description": "--retry-of; shares original request identity and limits"},
+                "resumeCancelled": {"type": "boolean", "default": false, "description": "--resume-cancelled; requires new user input"},
+                "wait": {"type": "boolean", "default": true}, "timeout": {"type": "integer", "minimum": 0}
+            }), &["prompt"],
+        ),
+        "workflow.get" => workflow_schema(
+            "genet workflow get [--workspace <id>] [--run <id>]",
+            json!({"runId": {"type": "string", "description": "--run; omitted only with a current Worker binding"}}), &[],
+        ),
+        "workflow.history" => workflow_schema(
+            "genet workflow history [--workspace <id>] [--limit <n>]",
+            json!({"limit": {"type": "integer", "minimum": 1}}), &[],
+        ),
+        "workflow.check" => workflow_schema(
+            "genet workflow check [--workspace <id>] [--run <id>]",
+            json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}}), &[],
+        ),
+        "workflow.complete" => workflow_schema(
+            "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--outcome completed|changesRequested|failed|blocked] [--reason <text>]",
+            json!({
+                "runId": {"type": "string"}, "nodeId": {"type": "string"},
+                "revision": {"type": "integer", "minimum": 0},
+                "evidence": {"type": "object", "additionalProperties": {"type": "string"}, "description": "--evidence key=value; success uses the graph's evidence requirements"},
+                "outcome": {"enum": ["completed", "changesRequested", "failed", "blocked"], "default": "completed"},
+                "reason": {"type": "string", "minLength": 1, "description": "required for a negative outcome"}
+            }), &[],
+        ),
+        "workflow.cancel" => workflow_schema(
+            "genet workflow cancel [--workspace <id>] --run <id> --revision <n>",
+            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}}),
+            &["runId", "revision"],
         ),
         "session.respond" => (
             "genet session respond <id> --request <rid> --choose <optionId>",
@@ -1297,6 +1421,17 @@ fn command_schema(name: &str) -> Value {
         "streaming": streams(name),
         "inputSchema": with_selectors(name, input),
         "outputSchema": match name {
+            "workflow.init" => single_output("workflow.initialized"),
+            "workflow.activate" => single_output("workflow.activated"),
+            "workflow.complete" => single_output("workflow.completed"),
+            "workflow.cancel" => single_output("workflow.cancelling"),
+            "workflow.dispatch" => json!({
+                "type": "object",
+                "$comment": "JSON Lines; --no-wait ends with workflow.started, --wait continues to workflow.result",
+                "required": ["schema", "type"],
+                "properties": {"schema": {"const": CLI_SCHEMA},
+                    "type": {"enum": ["workflow.started", "session.event", "session.result", "workflow.result", "error"]}},
+            }),
             _ if !streams(name) => single_output(name),
             "shell" => command_output(),
             _ => stream_output(),
@@ -1352,7 +1487,10 @@ fn command_output() -> Value {
 }
 
 fn streams(name: &str) -> bool {
-    matches!(name, "shell" | "agent.run" | "session.send")
+    matches!(
+        name,
+        "shell" | "agent.run" | "session.send" | "workflow.dispatch"
+    )
 }
 
 fn single_output(name: &str) -> Value {
@@ -1393,9 +1531,26 @@ fn stream_output() -> Value {
         "x-terminalTypes": ["session.result", "error"],
         "x-resultStatuses": [
             "completed", "failed", "canceled", "waiting",
-            "detached", "timedOut", "disconnected", "running",
+            "detached", "timedOut", "disconnected", "running", "accepted",
         ],
     })
+}
+
+fn workflow_schema(
+    synopsis: &'static str,
+    extra: Value,
+    required: &[&str],
+) -> (&'static str, bool, Value) {
+    let mut properties = extra.as_object().cloned().unwrap_or_default();
+    properties.insert("workspaceId".into(), json!({
+        "type": "string", "minLength": 1,
+        "description": "--workspace; otherwise resolves from the authenticated Session project or local working directory",
+    }));
+    (
+        synopsis,
+        true,
+        object_input(Value::Object(properties), required),
+    )
 }
 
 /// Adds the global selectors to a command's input schema, but only where they
@@ -1494,6 +1649,15 @@ fn snapshot(reply: Reply) -> Result<SessionSnapshot, CliFailure> {
     }
 }
 
+fn component_instances(
+    reply: Reply,
+) -> Result<Vec<genehub_proto::ComponentInstanceInfo>, CliFailure> {
+    match reply {
+        Reply::SessionComponents(instances) => Ok(instances),
+        other => Err(unexpected_reply("session components", &other)),
+    }
+}
+
 fn inspection(reply: Reply) -> Result<SessionInspection, CliFailure> {
     match reply {
         Reply::SessionInspection(value) => Ok(value),
@@ -1576,6 +1740,8 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Session(_) => "session",
         Reply::ForkTransfer(_) => "forkTransfer",
         Reply::Sessions(_) => "sessions",
+        Reply::SessionComponents(_) => "session components",
+        Reply::SessionFlow(_) => "session flow",
         Reply::SessionImports(_) => "session imports",
         Reply::Snapshot(_) => "session snapshot",
         Reply::SessionInspection(_) => "session inspection",
@@ -1589,6 +1755,14 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::Blobs(_) => "blobs",
         Reply::SessionArtifactUpload(_) => "session artifact upload",
         Reply::SessionArtifact(_) => "session artifact",
+        Reply::WorkflowCheck(_) => "workflow check",
+        Reply::WorkflowProject(_) => "workflow project",
+        Reply::WorkflowRun(_) => "workflow run",
+        Reply::WorkflowRuns(_) => "workflow runs",
+        Reply::AgentSpaceBuilder(_) => "agent space builder",
+        Reply::AgentSpaceChangePlan(_) => "agent space change plan",
+        Reply::BootstrapPack(_) => "bootstrap pack",
+        Reply::BootstrapPacks(_) => "bootstrap packs",
         Reply::Workspace(_) => "workspace",
         Reply::Workspaces(_) => "workspaces",
         Reply::Directory(_) => "directory",
@@ -1891,6 +2065,11 @@ mod tests {
         assert!(mismatch.message.contains("returned sessions"));
 
         let summary = SessionSummary {
+            interaction_summary: None,
+            work_summary: None,
+            input_summary: None,
+            message_preview: None,
+            latest_reply: None,
             id: "s_1".into(),
             workspace_id: "w_1".into(),
             agent_id: "genet".into(),
@@ -1907,6 +2086,7 @@ mod tests {
             lineage: None,
             imported: None,
             last_activity_at_ms: None,
+            managed: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

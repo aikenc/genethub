@@ -21,6 +21,12 @@ use serde_json::Value;
 
 const JOIN_TOKEN: &str = "cli-e2e-join-token-that-is-long-enough";
 
+// These cases spawn real Relay/Daemon/CLI stacks, and two of them mutate the
+// process-wide agent-command override. Serializing the outer cases keeps those
+// global fixtures isolated; concurrency inside each real stack remains part
+// of the contract under test.
+static REMOTE_CASES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -109,17 +115,28 @@ fn start_relay(bundle: &Path) -> Relay {
 
 /// A `genet` installation: one data directory, and the binary run against it.
 enum Cli {
-    /// Its own directory, holding nothing but what pairing put there. This is
-    /// the jump box or CI runner the feature exists for.
-    Elsewhere(tempfile::TempDir),
+    /// Its own directory and daemon. Since the CLI became a thin loopback
+    /// forwarder, even the jump box must run a local daemon; that daemon is the
+    /// E2EE endpoint which reaches the far machine through the relay.
+    Elsewhere {
+        data: tempfile::TempDir,
+        _daemon: Daemon,
+    },
     /// The machine's own directory, so the same binary reaches the daemon over
     /// loopback. Only used to compare the two answers.
     OnTheMachine(PathBuf),
 }
 
 impl Cli {
-    fn new() -> Self {
-        Cli::Elsewhere(tempfile::tempdir().expect("a data directory for the CLI"))
+    async fn new() -> Self {
+        let data = tempfile::tempdir().expect("a data directory for the CLI");
+        let daemon = Daemon::start(Paths::new(data.path()))
+            .await
+            .expect("the CLI's local daemon could not be started");
+        Cli::Elsewhere {
+            data,
+            _daemon: daemon,
+        }
     }
 
     fn on(data: &Path) -> Self {
@@ -128,7 +145,7 @@ impl Cli {
 
     fn home(&self) -> &Path {
         match self {
-            Cli::Elsewhere(dir) => dir.path(),
+            Cli::Elsewhere { data, .. } => data.path(),
             Cli::OnTheMachine(path) => path,
         }
     }
@@ -234,6 +251,7 @@ async fn wait_until_online(daemon: &Daemon) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -245,7 +263,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
 
     // Pairing, from a CLI installation that has never heard of this machine.
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -283,7 +301,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
         .state
         .devices
         .invite_with(GrantSet::of([Capability::Read]));
-    let onlooker = Cli::new();
+    let onlooker = Cli::new().await;
     let (paired, code) = onlooker.run(&[
         "machine",
         "pair",
@@ -339,6 +357,7 @@ async fn a_machine_across_a_relay_answers_exactly_as_the_local_one_does() {
 /// in a directory named here, and comes back as a finished turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -356,7 +375,7 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -405,6 +424,7 @@ async fn a_prompt_typed_here_is_answered_by_an_agent_running_there() {
 /// back with the two streams still apart and the command's own status intact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -426,7 +446,7 @@ async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -557,6 +577,7 @@ async fn a_command_typed_here_runs_there_and_reports_what_it_did() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -567,7 +588,7 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -617,6 +638,7 @@ async fn a_device_that_was_revoked_is_told_to_pair_again_rather_than_to_wait() {
 /// diffed two transcripts at three in the morning.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -635,7 +657,7 @@ async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let elsewhere = Cli::new();
+    let elsewhere = Cli::new().await;
     let (paired, code) = elsewhere.run(&[
         "machine",
         "pair",
@@ -695,6 +717,7 @@ async fn the_same_command_returns_the_same_bytes_from_here_and_from_there() {
 /// why it cannot be shown from inside one connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -711,7 +734,7 @@ async fn a_backgrounded_conversation_keeps_going_and_can_be_picked_up_again() {
         .expect("the machine could not be started");
     let rendezvous = attach(&daemon, &relay.origin).await;
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",
@@ -864,6 +887,7 @@ async fn settled(cli: &Cli, machine_id: &str, session_id: &str) -> u64 {
 /// m_x` means.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_machine_that_answers_with_a_different_identity_is_refused() {
+    let _case = REMOTE_CASES.lock().await;
     let Some(bundle) = relay_bundle() else { return };
     let relay = start_relay(&bundle);
 
@@ -874,7 +898,7 @@ async fn a_machine_that_answers_with_a_different_identity_is_refused() {
     let rendezvous = attach(&daemon, &relay.origin).await;
 
     let invite = daemon.state.devices.invite_with(GrantSet::full());
-    let cli = Cli::new();
+    let cli = Cli::new().await;
     let (paired, code) = cli.run(&[
         "machine",
         "pair",

@@ -187,6 +187,10 @@ pub enum Principal {
     /// caller can already read files as this account and start processes as it,
     /// so withholding a capability here would protect nothing.
     LocalUser,
+    /// A loopback CLI invocation carrying a daemon-verified proof minted for
+    /// one durable ordinary Session. It may inspect project state and drive
+    /// only Workflow children whose parent is that exact Session.
+    SessionController { session_id: String },
     /// A paired device, holding exactly what it was granted.
     Device { id: String, grants: GrantSet },
     /// An end-to-end authenticated hosted channel that never identified as a
@@ -232,6 +236,10 @@ impl Principal {
     pub fn allows(&self, capability: Capability) -> bool {
         match self {
             Principal::LocalUser | Principal::Channel => true,
+            Principal::SessionController { .. } => matches!(
+                capability,
+                Capability::Handshake | Capability::Read | Capability::Session
+            ),
             Principal::Device { grants, .. } => grants.allows(capability),
             Principal::Pairing => capability == Capability::Handshake,
         }
@@ -240,6 +248,13 @@ impl Principal {
     pub fn device_id(&self) -> Option<&str> {
         match self {
             Principal::Device { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+
+    pub fn session_controller_id(&self) -> Option<&str> {
+        match self {
+            Principal::SessionController { session_id } => Some(session_id),
             _ => None,
         }
     }
@@ -328,6 +343,10 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionNarrative { .. }
         | Request::SessionRounds { .. }
         | Request::SessionContext { .. }
+        | Request::WorkflowInspect { .. }
+        | Request::WorkflowCheck { .. }
+        | Request::WorkflowGet { .. }
+        | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
         | Request::RoundTrunkGet { .. }
@@ -335,6 +354,10 @@ pub fn required(request: &Request) -> Capability {
         | Request::BlobGet { .. }
         | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
+        | Request::AgentSpaceChildren { .. }
+        | Request::BootstrapPackList
+        | Request::SessionComponents { .. }
+        | Request::SessionFlow { .. }
         | Request::DirectoryList { .. }
         | Request::FileTree { .. }
         | Request::LogTail { .. }
@@ -358,6 +381,14 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::AgentSpaceBuilder { .. }
+        | Request::ProjectBootstrap { .. }
+        | Request::ProjectApprovalRequest { .. }
+        | Request::WorkflowInitialize { .. }
+        | Request::WorkflowActivate { .. }
+        | Request::WorkflowDispatch { .. }
+        | Request::WorkflowComplete { .. }
+        | Request::WorkflowCancel { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }
@@ -402,6 +433,8 @@ pub fn required(request: &Request) -> Capability {
         // reading one.
         Request::WorkspaceOpen { .. }
         | Request::WorkspaceCreate { .. }
+        | Request::WorkspaceAddRoot { .. }
+        | Request::AgentSpaceConfigure { .. }
         | Request::WorkspaceRename { .. }
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet
@@ -415,6 +448,11 @@ pub fn required(request: &Request) -> Capability {
         | Request::HubClaimLink
         | Request::HubConnect { .. }
         | Request::HubUnpair => Capability::Settings,
+
+        // Planning is read-only. The returned approval challenge is bound to
+        // the caller Session but cannot mutate anything until a Human answers
+        // it and the same Session presents the one-use grant on apply.
+        Request::AgentSpaceChangePlan { .. } => Capability::Read,
 
         Request::DeviceList
         | Request::DeviceInvite(_)

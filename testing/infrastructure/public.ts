@@ -8,6 +8,12 @@ export type {
   RunManifest,
   UnitResult,
 } from "./types.ts";
+export {
+  DAEMON_COMPONENT,
+  GENET,
+  HOST,
+  runtimeArtifactCandidates,
+} from "./engine/artifacts.ts";
 export { defineE2e, defineJourney, defineSpecialty, getRegisteredCase } from "./engine/registry.ts";
 export type { DefineInput } from "./engine/registry.ts";
 export { createLease, releaseLease, type EnvironmentLease } from "./environment/lease.ts";

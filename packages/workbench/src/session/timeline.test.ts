@@ -196,6 +196,45 @@ describe("the session timeline", () => {
       outcome: { outcome: "selected", optionId: "yes" },
     });
     expect(answered.pendingPermission).toBeNull();
+    expect(answered.permissionProgress?.message).toBe("授权已接受，Agent 正在继续执行。");
+
+    const finished = apply(answered, {
+      type: "turnCompleted",
+      turnId: "t1",
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        llmRounds: 0,
+        toolOutputTokens: 0,
+        compactionCount: 0,
+        outputRateEstimated: false,
+      },
+    });
+    expect(finished.permissionProgress).toBeNull();
+  });
+
+  it("names a confirmed plan while its continuation is starting", () => {
+    const request = {
+      id: "plan-1",
+      kind: "planApproval" as const,
+      title: "Initialize the PM project",
+      options: [{ id: "yes", label: "Confirm", kind: "allowOnce" as const }],
+    };
+    const asked = apply(emptyTimeline(), { type: "permissionRequested", request });
+    const answered = apply(asked, {
+      type: "permissionResolved",
+      requestId: request.id,
+      outcome: { outcome: "selected", optionId: "yes" },
+    });
+
+    expect(answered.pendingPermission).toBeNull();
+    expect(answered.permissionProgress).toEqual({
+      requestId: "plan-1",
+      stage: "continuing",
+      message: "计划确认已保存，等待 Agent 恢复执行。",
+    });
   });
 
   it("does not clear an approval that a different request resolved", () => {

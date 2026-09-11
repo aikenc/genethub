@@ -1,0 +1,5 @@
+schema: genehub.workflow.role.v1
+id: worker
+agentId: {{AGENT_ID}}
+{{MODEL_ID_YAML}}userInteraction: readOnly
+prompt: prompts/direct-worker.md

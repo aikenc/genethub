@@ -7,6 +7,8 @@ defineJourney(
     oracle: "agent.refresh catalog lists this CLI's modes, and setModel/setMode/setEffort refuse unknown ids",
     catches: ["hardcoded permission-mode", "picker showing a model the CLI never offered"],
     tags: ["third-party", "session", "claude"],
+    llm: { default: "real" },
+    resources: { pool: "real-llm" },
     expectedDurationMs: 120_000,
     timeoutMs: 210_000,
     surfaces: ["daemon", "agent", "workbench-client"],

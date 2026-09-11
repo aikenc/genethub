@@ -56,6 +56,12 @@ export interface CaseMeta {
   surfaces: string[];
   productInterfaces?: string[];
   requiredArtifacts?: string[];
+  /**
+   * Repositories this case cannot run without, beyond the open tree. Declared
+   * so a run refuses up front instead of spending the whole gate and then
+   * reporting the case blocked.
+   */
+  requiredRepos?: Array<"cloud">;
   doubleExceptions?: DoubleException[];
   retention?: boolean;
   file: string;
@@ -131,7 +137,17 @@ export interface RunManifest {
   governanceDigest?: string;
   environments: number;
   resultsPath: string;
-  leak: { processes: number; ports: number };
+  /**
+   * `processes` counts unit process groups the run could not reap. `ports` is
+   * null because nothing in the runner keeps a port registry to audit, and a
+   * fabricated zero is worse than an honest absence.
+   */
+  leak: { processes: number; ports: number | null };
+  /**
+   * Artifacts this run did not prove current, because it was told the build
+   * was already prepared. Empty when the run built them itself.
+   */
+  unprovenArtifacts?: string[];
 }
 
 export interface CliOptions {

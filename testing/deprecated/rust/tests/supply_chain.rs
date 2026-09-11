@@ -40,7 +40,7 @@ fn release_actions_are_immutable_and_publish_alone_can_write_contents() {
         .iter()
         .filter(|action| action.starts_with("actions/checkout@"))
         .count();
-    assert_eq!(checkout_count, 3);
+    assert_eq!(checkout_count, 4);
     assert_eq!(
         workflow.matches("persist-credentials: false").count(),
         checkout_count,
@@ -78,7 +78,7 @@ fn tag_releases_must_come_from_the_observed_public_main_history() {
 fn read(relative: &str) -> String {
     fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
+            .join("../../..")
             .join(relative),
     )
     .unwrap_or_else(|error| panic!("cannot read {relative}: {error}"))

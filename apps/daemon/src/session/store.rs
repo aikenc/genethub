@@ -29,9 +29,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImageThumb, ImportContinuation,
-    PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
-    SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
-    UnsupportedFormat,
+    ManagedSessionInfo, PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk,
+    RoundTrunkSummary, SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary,
+    TimelineItem, UnsupportedFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -94,7 +94,13 @@ const MAX_BLOB_BYTES: u64 = 512 * 1024 * 1024;
 ///     is correctness-breaking rather than merely metadata it can ignore.
 /// 6 — imported origin and continuation mode. An older build would allow a
 ///     read-only imported transcript to send into a blank Agent context.
-pub const SESSION_FORMAT: u32 = 6;
+/// 7 — managed parent and human-interaction policy. An older build would let a
+///     human write into a Workflow-owned child Session.
+/// 8 — durable Human decision delivery. Older builds would discard an
+///     acknowledged continuation when rewriting metadata.
+/// 9 — durable input, execution fences and cleanup receipts. Older writers
+///     would discard acknowledged messages or unfinished cancellation.
+pub const SESSION_FORMAT: u32 = 9;
 
 /// What a `meta.json` from before versioning is: the layout numbered 4, which
 /// is the only one that has ever been written into a workspace.
@@ -125,9 +131,77 @@ struct MetaHeader {
     project_key: String,
 }
 
+/// Durable Human decision and delivery intent. Completion is acknowledged only
+/// when its adapter turn terminates; a lost process may therefore redeliver it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanContinuation {
+    pub request: PermissionRequest,
+    pub outcome: genehub_proto::PermissionOutcome,
+    pub decided_at_ms: i64,
+    #[serde(default)]
+    pub project_approval: bool,
+    #[serde(default)]
+    pub grant_recorded: bool,
+    #[serde(default)]
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionActivity {
+    pub last_at_ms: i64,
+    pub llm_rounds: u64,
+    pub tokens: Option<u64>,
+    pub turn_id: Option<String>,
+    pub turn_rounds: u64,
+    pub turn_tokens: u64,
+}
+
+/// Control records reference the one original UserMessage in chat.jsonl.
+/// `receiving` reserves delivery responsibility before appending that body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionInbox {
+    #[serde(default)]
+    pub entries: Vec<InboxEntry>,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default)]
+    pub has_delivered: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxEntry {
+    pub message_id: String,
+    #[serde(default)]
+    pub received_at_ms: i64,
+    pub digest: String,
+    pub source: String,
+    pub task_run_id: Option<String>,
+    /// receiving / queued / sent / handled; errors pause automatic processing.
+    pub state: String,
+    pub turn_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
+    #[serde(default)]
+    pub activity: ExecutionActivity,
+    #[serde(default)]
+    pub execution_retired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_cleanup: Option<crate::processes::CleanupReceipt>,
+    #[serde(default)]
+    pub inbox: SessionInbox,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_preview: Option<genehub_proto::SessionMessagePreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_reply: Option<genehub_proto::SessionReplyCursor>,
     pub id: String,
     /// Which workspace this conversation belongs to.
     ///
@@ -172,10 +246,22 @@ pub struct SessionMeta {
     /// Stored in meta so no live socket or Agent process is required.
     #[serde(default)]
     pub pending_permission: Option<PermissionRequest>,
+    #[serde(default)]
+    pub pending_project_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_continuation: Option<HumanContinuation>,
     /// The Agent this session runs remains `agent_id`; lineage only describes
     /// where inherited history came from and how it reached this Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
+    /// Optional Workflow ownership on an otherwise ordinary Session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedSessionInfo>,
+    /// Project-versioned role/node contract captured when the managed Session
+    /// is created. Private to the daemon because it is execution context, not
+    /// a second user-authored message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_system_prompt: Option<String>,
     /// Provider source identity stays private to the daemon. It is also the
     /// durable duplicate key, while the public summary exposes only the Agent
     /// and whether native continuation survived.
@@ -214,6 +300,23 @@ pub struct ContextSeed {
     pub text: String,
 }
 
+pub(super) fn interaction_summary<'a>(
+    requests: impl IntoIterator<Item = &'a PermissionRequest>,
+) -> genehub_proto::SessionInteractionSummary {
+    let mut summary = genehub_proto::SessionInteractionSummary::default();
+    for request in requests {
+        summary.count = summary.count.saturating_add(1);
+        if summary.requests.len() < 16 {
+            summary.requests.push(genehub_proto::SessionInteractionRef {
+                request_id: request.id.clone(),
+                kind: request.kind,
+                title: request.title.chars().take(160).collect(),
+            });
+        }
+    }
+    summary
+}
+
 impl SessionMeta {
     /// A session written by a build from the future, described from its
     /// location and its file's frozen header alone.
@@ -222,6 +325,12 @@ impl SessionMeta {
     /// does not know what the rest of it means.
     fn unopenable(id: String, workspace_id: String, cwd: PathBuf, header: MetaHeader) -> Self {
         SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             id,
             workspace_id,
             format: header.format,
@@ -238,7 +347,11 @@ impl SessionMeta {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         }
     }
@@ -264,10 +377,30 @@ impl SessionMeta {
         last_activity_at_ms: Option<i64>,
     ) -> SessionSummary {
         SessionSummary {
+            interaction_summary: self
+                .openable()
+                .then(|| interaction_summary(self.pending_permission.iter())),
+            latest_reply: self.latest_reply.clone(),
+            input_summary: (!self.inbox.entries.is_empty()).then(|| {
+                genehub_proto::SessionInputSummary {
+                    pending_message_ids: self
+                        .inbox
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.state != "handled")
+                        .map(|entry| entry.message_id.clone())
+                        .collect(),
+                    paused: self.inbox.paused,
+                    error: self.inbox.error.clone(),
+                }
+            }),
+            work_summary: None,
+            message_preview: self.message_preview.clone(),
             last_activity_at_ms,
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
             agent_id: self.agent_id.clone(),
+            managed: self.managed.clone(),
             title: self.title.clone(),
             status,
             model_id: self.model_id.clone(),
@@ -730,6 +863,12 @@ impl Store {
     /// onto workspace-relative ones.
     pub fn workspace_root(&self, workspace_id: &str) -> Result<PathBuf> {
         self.homes.root(workspace_id)
+    }
+
+    /// Everything the daemon owns for one Space, sessions included. Component
+    /// storage that must outlive a single conversation lives here.
+    pub fn space_home(&self, workspace_id: &str) -> Result<PathBuf> {
+        self.homes.home_dir(workspace_id)
     }
 
     fn raw_session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
@@ -1899,6 +2038,12 @@ mod project_home_tests {
 
     fn meta(id: &str, workspace_id: &str, cwd: &Path) -> SessionMeta {
         SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             id: id.into(),
             workspace_id: workspace_id.into(),
             format: SESSION_FORMAT,
@@ -1915,7 +2060,11 @@ mod project_home_tests {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         }
     }

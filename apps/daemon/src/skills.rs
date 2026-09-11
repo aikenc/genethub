@@ -338,6 +338,28 @@ mod tests {
     }
 
     #[test]
+    fn pm_bootstrap_uses_the_session_bound_human_approval_request() {
+        let root = temp_dir("pm-bootstrap-interaction");
+        let skills = load(&root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "pm-project-bootstrap")
+            .expect("PM bootstrap built-in");
+        let body = std::fs::read_to_string(&skill.file_path).unwrap();
+
+        assert!(body.contains("space approval request --challenge <challengeId>"));
+        assert!(body.contains("only submits a durable approval request"));
+        assert!(body.contains("authenticated Human answers"));
+        assert!(body.contains("ordinary chat"));
+        assert!(body.contains("stops this Agent turn"));
+        assert!(body.contains("command success is not approval"));
+        assert!(body.contains("stable action ID"));
+        assert!(!body.contains("Keep this command attached"));
+        assert!(!body.contains("request_user_input"));
+        assert!(!body.contains("AskQuestion"));
+    }
+
+    #[test]
     fn unknown_data_dir_skill_is_not_in_the_genehub_catalog() {
         let root = temp_dir("unknown");
         write_skill(

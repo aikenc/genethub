@@ -9,6 +9,8 @@ defineJourney(
     oracle: "a codex session turn completes with a reply after the CLI is on PATH and logged in",
     catches: ["Codex handshake never becomes a turn"],
     tags: ["third-party", "session", "codex"],
+    llm: { default: "real" },
+    resources: { pool: "real-llm" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],

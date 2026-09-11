@@ -1,5 +1,5 @@
 import type { AgentInfo, Reply, Request, WorkspaceInfo } from "@genehub/proto";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -739,6 +739,57 @@ describe("the first run", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/m-17ef85c5"));
     await waitFor(() => expect(document.title).toBe("本机"));
     expect(screen.getByRole("heading", { name: "新会话" })).toBeInTheDocument();
+  });
+});
+
+describe("a stopped interaction", () => {
+  it("gives the approval card the action area instead of covering it with the composer", async () => {
+    const project = workspace("w1", "game", "/home/me/game", true);
+    const { client } = stubClient({
+      "agent.list": () => ({ type: "agents", data: [READY_AGENT] }),
+      "workspace.list": () => ({ type: "workspaces", data: [project] }),
+      "session.list": () => ({
+        type: "sessions",
+        data: [
+          {
+            id: "s1",
+            workspaceId: project.id,
+            agentId: READY_AGENT.id,
+            title: "初始化团队",
+            createdAtMs: 1,
+            updatedAtMs: 1,
+            archived: false,
+            status: "waiting",
+          },
+        ],
+      }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    await start(client, hostWith());
+    await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("s1"));
+    expect(screen.getByLabelText("任务描述")).toBeInTheDocument();
+
+    act(() => {
+      useWorkbench.setState((state) => ({
+        timeline: {
+          ...state.timeline,
+          status: "waiting",
+          pendingPermission: {
+            id: "plan-1",
+            kind: "planApproval",
+            title: "初始化 PM 项目",
+            detail: "创建 Executor、Coder、Reviewer 和 WorkflowManager。",
+            options: [
+              { id: "accept", label: "批准并继续", kind: "allowOnce" },
+              { id: "reject", label: "拒绝计划", kind: "reject" },
+            ],
+          },
+        },
+      }));
+    });
+
+    expect(await screen.findByLabelText("Agent 计划确认")).toBeInTheDocument();
+    expect(screen.queryByLabelText("任务描述")).not.toBeInTheDocument();
   });
 });
 

@@ -24,12 +24,21 @@ import type {
  * meant the text left the composer and nothing took its place.
  */
 export interface PendingMessage {
+  messageId?: string;
+  taskRunId?: string;
+  missingAttachments?: number;
   text: string;
   attachments: Attachment[];
   /** When it left the composer, so a slow agent start can be named. */
   sentAtMs: number;
   /** Set only when the send definitely failed, so the text stays recoverable. */
   error: string | null;
+}
+
+export interface PermissionProgress {
+  requestId: string;
+  stage: "submitting" | "continuing";
+  message: string;
 }
 
 export interface TimelineState {
@@ -39,8 +48,11 @@ export interface TimelineState {
   activeTurn: string | null;
   activeTurnStartedAtMs?: number | null;
   pendingPermission: PermissionRequest | null;
+  /** Human-visible acknowledgement between answering a card and turn end. */
+  permissionProgress: PermissionProgress | null;
   /** The message this client has sent and not seen come back, if any. */
   pending: PendingMessage | null;
+  inputOutbox?: PendingMessage[];
   lastError: TurnError | null;
   usage: Usage | null;
   modelId: string | null;
@@ -50,6 +62,9 @@ export interface TimelineState {
   seq: number;
   /** Every round of this session, in order, unexpanded. */
   rounds: RoundSummary[];
+  historyBefore?: string | null;
+  historyWindowed?: boolean;
+  historyExcerptIds?: string[];
   /** The trunk index of each round opened so far, by round id. */
   roundLayers: Record<string, RoundLayer>;
   /** Trunks pulled in full, by `roundId:trunkIndex`. */
@@ -65,6 +80,7 @@ export function emptyTimeline(): TimelineState {
     activeTurn: null,
     activeTurnStartedAtMs: null,
     pendingPermission: null,
+    permissionProgress: null,
     pending: null,
     lastError: null,
     usage: null,
@@ -96,13 +112,23 @@ export function fromSnapshot(
 ): TimelineState {
   const pendingPermission = snapshot.pendingPermissions?.[0] ?? null;
   const rounds = roundsFromSnapshot(snapshot);
+  const previousItems = new Map(previous?.items.map(item => [item.id, item]));
+  const excerptIds = new Set(snapshot.historyExcerptIds ?? []);
+  const items = snapshot.items.map(item => excerptIds.has(item.id) && previousItems.has(item.id) && !previous?.historyExcerptIds?.includes(item.id) ? previousItems.get(item.id)! : item);
+  const retainedExcerpts = [...new Set([...(previous?.historyExcerptIds ?? []).filter(id => !snapshot.items.some(item => item.id === id)), ...(snapshot.historyExcerptIds ?? []).filter(id => !previousItems.has(id) || previous?.historyExcerptIds?.includes(id))])];
   return {
     ...emptyTimeline(),
     pending,
-    items: snapshot.items,
+    inputOutbox: previous?.inputOutbox?.filter(input => !snapshot.items.some(item => item.id === input.messageId)),
+    items: snapshot.historyWindowed && previous
+      ? mergeHistoryItems(previous.items, items)
+      : items,
+    historyBefore: snapshot.historyWindowed && previous?.historyWindowed && snapshot.items.some(item => previousItems.has(item.id)) ? previous.historyBefore : snapshot.historyBefore,
+    historyWindowed: snapshot.historyWindowed,
+    historyExcerptIds: retainedExcerpts,
     // Old daemon snapshots may still say `running`; the durable interaction is
     // authoritative because there is deliberately no live turn behind it.
-    status: pendingPermission ? "waiting" : snapshot.summary.status,
+    status: pendingPermission && !snapshot.summary.inputSummary ? "waiting" : snapshot.summary.status,
     // The request the agent is waiting on. Dropping it was a hang the user could
     // not get out of: after a reconnect too old to replay, the snapshot is all
     // there is, so a session paused for approval came back with no card to
@@ -122,7 +148,9 @@ export function fromSnapshot(
       ),
     ),
     seq: snapshot.seq,
-    rounds: rounds.rounds,
+    rounds: snapshot.historyWindowed && previous
+      ? [...new Map([...previous.rounds, ...rounds.rounds].map(round => [round.roundId, round])).values()].sort((a,b) => a.startedAtMs - b.startedAtMs)
+      : rounds.rounds,
     roundLayers: previous
       ? { ...previous.roundLayers, ...rounds.roundLayers }
       : rounds.roundLayers,
@@ -183,21 +211,15 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
       return {
         ...state,
         items: upsert(state.items, event.item),
-        // The echo of our own message is what the placeholder was standing in
-        // for. Keeping both would show the message twice. The daemon runs one
-        // turn per session, so a user message arriving while we are waiting on
-        // ours is ours; the reply to `session.send` clears it too, and whichever
-        // arrives first is enough. Clearing pending used to put Send back on
-        // the composer until `turnStarted`; the turn has already left, so the
-        // durable status becomes running here.
-        pending: event.item.type === "userMessage" ? null : state.pending,
-        status:
-          event.item.type === "userMessage" && state.status === "idle"
-            ? "running"
-            : state.status,
+        pending: event.item.type === "userMessage" && (!state.pending?.messageId || state.pending.messageId === event.item.id) ? null : state.pending,
+        inputOutbox: event.item.type === "userMessage" ? state.inputOutbox?.filter(input => input.messageId !== event.item.id) : state.inputOutbox,
+        // A durable admission is a session item, with no adapter turn yet.
+        status: event.item.type === "userMessage" && event.turnId && state.status === "idle" ? "running" : state.status,
+        permissionProgress: state.permissionProgress,
       };
 
     case "itemDelta":
+      if (state.historyExcerptIds?.includes(event.itemId)) return state;
       return { ...state, items: applyDelta(state.items, event) };
 
     case "turnProgress":
@@ -210,6 +232,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         activeTurnStartedAtMs: null,
         status: "idle",
         usage: event.usage,
+        permissionProgress: null,
       };
 
     case "turnFailed":
@@ -219,13 +242,25 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         activeTurnStartedAtMs: null,
         status: "failed",
         lastError: event.error,
+        permissionProgress: null,
       };
 
     case "turnCanceled":
-      return { ...state, activeTurn: null, activeTurnStartedAtMs: null, status: "idle" };
+      return {
+        ...state,
+        activeTurn: null,
+        activeTurnStartedAtMs: null,
+        status: "idle",
+        permissionProgress: null,
+      };
 
     case "permissionRequested":
-      return { ...state, status: "waiting", pendingPermission: event.request };
+      return {
+        ...state,
+        status: "waiting",
+        pendingPermission: event.request,
+        permissionProgress: null,
+      };
 
     case "permissionResolved":
       return state.pendingPermission?.id === event.requestId
@@ -233,6 +268,11 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
             ...state,
             status: state.activeTurn ? "running" : "idle",
             pendingPermission: null,
+            permissionProgress: {
+              requestId: event.requestId,
+              stage: "continuing",
+              message: permissionResolutionMessage(state.pendingPermission, event.outcome),
+            },
           }
         : state;
 
@@ -259,6 +299,20 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
     case "sessionStatusChanged":
       return { ...state, status: event.status };
   }
+}
+
+function permissionResolutionMessage(
+  request: PermissionRequest,
+  outcome: Extract<SessionEvent, { type: "permissionResolved" }>["outcome"],
+): string {
+  if (outcome.outcome === "timedOut") return "确认已超时；任务不会继续执行。";
+  if (outcome.outcome === "canceled") return "已取消；任务不会继续执行。";
+  if (outcome.outcome === "answered") return "回答已提交，Agent 正在继续执行。";
+
+  const option = request.options.find((candidate) => candidate.id === outcome.optionId);
+  if (option?.kind === "reject") return "已拒绝；Agent 正在安全结束本次任务。";
+  if (request.kind === "planApproval") return "计划确认已保存，等待 Agent 恢复执行。";
+  return "授权已接受，Agent 正在继续执行。";
 }
 
 export function applySequenced(state: TimelineState, event: SequencedEvent): TimelineState {
@@ -338,4 +392,23 @@ export function assistantText(state: TimelineState): string {
     )
     .map((item) => item.text)
     .join("");
+}
+
+/** Earlier page first; live/current copies win on overlap. Stable IDs survive reconnects. */
+export function mergeHistoryItems(earlier: TimelineItem[], current: TimelineItem[]): TimelineItem[] {
+  return [...new Map([...earlier, ...current].map(item => [item.id, item])).values()];
+}
+
+/** Insert a previous page at its cursor, including a gap between two retained windows. */
+export function insertHistoryPage(current: TimelineItem[], page: TimelineItem[], beforeId: string): TimelineItem[] {
+  const result = [...current];
+  let anchor = beforeId;
+  for (const item of [...page].reverse()) {
+    if (!result.some(entry => entry.id === item.id)) {
+      const at = result.findIndex(entry => entry.id === anchor);
+      result.splice(at < 0 ? 0 : at, 0, item);
+    }
+    anchor = item.id;
+  }
+  return result;
 }

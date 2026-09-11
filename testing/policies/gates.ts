@@ -8,6 +8,9 @@ export function selectForGate(
   if (tags.length > 0 && !tags.some((tag) => item.tags.includes(tag))) {
     return { include: false, reason: "tag filter" };
   }
+  if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {
+    return { include: false, reason: "real LLM canary is release-only" };
+  }
   if (gate === "infra-compact") {
     return item.tags.includes("infra-compact")
       ? { include: true, reason: "infra compact" }
@@ -32,6 +35,11 @@ export function selectForGate(
     return gate === "beta" || gate === "stable"
       ? { include: true, reason: "release browser matrix" }
       : { include: false, reason: "playwright not in this gate" };
+  }
+  if (item.kind === "e2e") {
+    return gate === "beta" || gate === "stable"
+      ? { include: true, reason: "release platform matrix" }
+      : { include: false, reason: "e2e platform matrix not in this gate" };
   }
   if (item.runner === "rust-legacy") {
     return { include: false, reason: "frozen crate retained, rust-legacy not in required gates" };
@@ -75,6 +83,8 @@ export function qualificationReasons(input: {
   requiredCloudSha?: string;
   requiredArtifactHash?: string;
   requiredNotExecuted?: string[];
+  unprovenArtifacts?: string[];
+  leakedProcessGroups?: number;
 }): string[] {
   const reasons: string[] = [];
   if (input.failed > 0) reasons.push("failed cases present");
@@ -101,6 +111,18 @@ export function qualificationReasons(input: {
   }
   if (input.requiredNotExecuted && input.requiredNotExecuted.length > 0) {
     reasons.push(`required cases not executed: ${input.requiredNotExecuted.join(",")}`);
+  }
+  if (
+    (input.gate === "dev" || input.gate === "beta" || input.gate === "stable") &&
+    input.unprovenArtifacts &&
+    input.unprovenArtifacts.length > 0
+  ) {
+    reasons.push(
+      `release gate cannot accept an unproven build: ${input.unprovenArtifacts.join(",")}`,
+    );
+  }
+  if (input.leakedProcessGroups && input.leakedProcessGroups > 0) {
+    reasons.push(`${input.leakedProcessGroups} unit process group(s) survived the run`);
   }
   return reasons;
 }

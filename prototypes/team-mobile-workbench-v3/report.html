@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>营地工作流说明 · 静态文件样例</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eceee2;color:#304530;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;line-height:1.8}main{max-width:800px;margin:0 auto;padding:clamp(24px,5vw,65px)}.eyebrow{font-size:11px;letter-spacing:.15em;margin-top:35px}h1{font:clamp(31px,7vw,48px)/1.5 Georgia,'Songti SC',serif;margin:20px 0}h2{font-size:22px;margin:12px 0}p{font-size:15px}.meta{font-size:12px;color:#64745f}nav{display:flex;gap:10px;margin:30px 0}button,a{font:inherit;min-height:44px;display:inline-flex;align-items:center}button{padding:8px 16px;border:1px solid #bac8ac;background:transparent;border-radius:24px;cursor:pointer;color:inherit}button.active{background:#345438;color:#fff}a{color:inherit}article{background:#fafbf4;border:1px solid #d6dec9;border-radius:15px;padding:24px;margin:20px 0}article small{font-size:11px;color:#78846c}details{border-top:1px solid #dce2d1;margin-top:18px;padding-top:8px}summary{cursor:pointer;min-height:44px;display:flex;align-items:center}footer{border-top:1px solid #c8d3b8;margin-top:40px;padding-top:25px;font-size:12px;color:#67755f}button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid #365b35;outline-offset:3px}[hidden]{display:none}
+</style>
+</head>
+<body><main>
+<a href="index.html">← 返回第三版原型</a>
+<div class="eyebrow">FIELD NOTES / WORKFLOW</div><h1>先让验收看得清。</h1>
+<p>两次营地交付之后，留下一份可以慢慢修改的说明。</p>
+<p class="meta">生成于 2026-09-06 09:30 · 来源：Run 014 / 015 · 静态演示数据</p>
+<p class="meta">本文件不连接 GeneHub，不读取实时状态。运行详情请回到原型里的执行信息流。</p>
+<nav aria-label="筛选说明"><button class="active" data-filter="all" aria-pressed="true">全部记录</button><button data-filter="review" aria-pressed="false">只看验收</button></nav>
+<article data-kind="delivery"><small>RUN 014 / 读取时已完成</small><h2>一个能继续生长的营地</h2><p>先完成场景与点击移动，再交回检查结果。页面文件留在项目目录里，普通会话也可以继续修改它。</p></article>
+<article data-kind="review"><small>RUN 015 / 读取时执行中</small><h2>把手机验收提前</h2><p>昼夜实现已返回结果，触屏检查仍在执行。下一次讨论先关注操作区域，再查看整体体验。</p><details><summary>展开观察与建议</summary><p>节点记录与证据是分析依据。把“先看哪件事”写在页面里，不改变 Executor 的节点顺序。若要改实际流程，仍在 WorkflowManager 会话中提出目标，沿用已有候选与授权流程。</p></details></article>
+<footer>这就是普通的 HTML/CSS/JS 项目文件。WorkflowManager 可以在用户引导下修改内容和布局；下次更新会重写文件，不自动进入 Workflow Candidate，也不改变历史 Run。<br><a href="README.md">查看第三版落地说明</a></footer>
+</main><script>
+for(const b of document.querySelectorAll('[data-filter]'))b.addEventListener('click',()=>{for(const item of document.querySelectorAll('[data-filter]')){const on=item===b;item.classList.toggle('active',on);item.setAttribute('aria-pressed',String(on));}for(const item of document.querySelectorAll('article'))item.hidden=b.dataset.filter==='review'&&item.dataset.kind!=='review';});
+</script></body></html>

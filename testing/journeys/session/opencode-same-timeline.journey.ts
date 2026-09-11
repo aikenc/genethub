@@ -7,6 +7,8 @@ defineJourney(
     oracle: "an opencode session turn completes with a reply after the CLI is on PATH and pointed at the built-in DeepSeek key",
     catches: ["OpenCode handshake never becomes a turn", "prompt echoed as the reply"],
     tags: ["third-party", "session", "opencode"],
+    llm: { default: "real" },
+    resources: { pool: "real-llm" },
     expectedDurationMs: 90_000,
     timeoutMs: 180_000,
     surfaces: ["daemon", "agent", "workbench-client"],

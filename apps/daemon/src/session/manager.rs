@@ -11,17 +11,19 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use genehub_proto::{
     Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
-    HistoryCoverage, ImportContinuation, ItemDelta, PermissionOptionKind, PermissionOutcome,
-    PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability, RoundLayer,
-    RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
+    HistoryCoverage, ImportContinuation, ItemDelta, ManagedSessionInfo, PermissionOptionKind,
+    PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability,
+    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
     SessionArtifactFile, SessionArtifactUpload, SessionContext, SessionEvent,
     SessionImportCandidate, SessionImportListing, SessionImportSource, SessionInspection,
     SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot,
     SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator, TurnErrorCode,
     TurnOutcome, TurnStats, Usage,
 };
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
@@ -33,13 +35,18 @@ use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
     self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
-    normalize_session_title, now_ms, title_from, ChatLog, ContextSeedState, ImportedSessionMeta,
-    SessionMeta, Store, SESSION_FORMAT,
+    normalize_session_title, now_ms, title_from, ChatLog, ContextSeedState, HumanContinuation,
+    ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
 use crate::adapter::{AgentSession, PersistHandle, PromptInput, ProviderMap, SessionConfig};
 use crate::diagnostics::Diagnostics;
+
+#[path = "activity.rs"]
+mod activity;
+#[path = "inbox.rs"]
+mod inbox;
 
 const BROADCAST_CAPACITY: usize = 1024;
 const IMPORT_CANDIDATE_TTL_MS: i64 = 10 * 60 * 1000;
@@ -127,6 +134,8 @@ struct Live {
     /// of these claims. This lock never covers a call into an agent.
     execution: Mutex<Option<Execution>>,
     next_execution: AtomicU64,
+    inbox_lock: Mutex<()>,
+    delivery_dispatching: AtomicBool,
     closing: AtomicBool,
     retirement: Mutex<()>,
     cleanup: crate::adapter::SessionTasks,
@@ -177,6 +186,10 @@ struct Live {
     /// recomposes domain/channel/workspace from its actual address.
     additional_system_prompt: Mutex<Option<String>>,
     pending_permissions: Mutex<Vec<PermissionRequest>>,
+    /// Serializes presentation, Human decisions and continuation dispatch.
+    interaction_lock: Mutex<()>,
+    /// Execution guard only. The decision and delivery obligation live in meta.
+    continuation_dispatched: std::sync::atomic::AtomicBool,
     /// Item ids settled during the current turn, flushed to disk when it ends.
     turn_items: Mutex<Vec<String>>,
     /// When the turn in progress last had its narrative written out, which
@@ -218,6 +231,9 @@ enum ExecutionPhase {
 struct Execution {
     id: u64,
     phase: ExecutionPhase,
+    consultation: bool,
+    input_ids: Vec<String>,
+    human_request_id: Option<String>,
     turn_id: Option<String>,
     cancel: tokio::sync::watch::Sender<bool>,
     ready: tokio::sync::watch::Sender<bool>,
@@ -229,6 +245,9 @@ impl Execution {
         Self {
             id,
             phase: ExecutionPhase::Starting,
+            consultation: false,
+            input_ids: Vec::new(),
+            human_request_id: None,
             turn_id: None,
             cancel: tokio::sync::watch::channel(false).0,
             ready: tokio::sync::watch::channel(false).0,
@@ -412,6 +431,13 @@ pub struct SessionManager {
     /// Exact channel front door supplied by the launcher. This is a runtime
     /// binding, never inferred from a product or channel name.
     front_door_cli: Option<PathBuf>,
+    /// Ephemeral daemon secret for session-bound controller proofs. Reopened
+    /// Agent processes receive a fresh proof, so it never becomes project
+    /// source or durable user data.
+    controller_secret: String,
+    /// Shared with the request router: it associates an Agent-native question
+    /// with a daemon-authored mutation plan before the card reaches a Human.
+    project_control: Option<crate::project_control::Broker>,
 }
 
 impl SessionManager {
@@ -435,6 +461,8 @@ impl SessionManager {
             import_candidates: Mutex::new(HashMap::new()),
             skills_dir: None,
             front_door_cli: None,
+            controller_secret: uuid::Uuid::new_v4().simple().to_string(),
+            project_control: None,
         }
     }
 
@@ -445,6 +473,11 @@ impl SessionManager {
     ) -> Self {
         self.skills_dir = Some(dir.into());
         self.front_door_cli = front_door_cli;
+        self
+    }
+
+    pub fn with_project_control(mut self, broker: crate::project_control::Broker) -> Self {
+        self.project_control = Some(broker);
         self
     }
 
@@ -470,6 +503,12 @@ impl SessionManager {
 
         let now = now_ms();
         let meta = SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             effort_id: None,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -486,7 +525,11 @@ impl SessionManager {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         };
         self.store.save_meta(&meta)?;
@@ -520,6 +563,128 @@ impl SessionManager {
             Arc::new(Live::new(meta, self.store.clone())),
         );
         Ok(summary)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_managed(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        managed: ManagedSessionInfo,
+        managed_system_prompt: String,
+    ) -> Result<SessionSummary> {
+        self.create_managed_named(
+            workspace_id,
+            cwd,
+            agent_id,
+            model_id,
+            mode_id,
+            runtime_values,
+            title,
+            managed,
+            managed_system_prompt,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_managed_named(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        managed: ManagedSessionInfo,
+        managed_system_prompt: String,
+        stable_id: Option<String>,
+    ) -> Result<SessionSummary> {
+        if let Some(id) = &stable_id {
+            if let Ok(existing) = self.summary(id).await {
+                if existing.workspace_id != workspace_id
+                    || existing.managed.as_ref().is_none_or(|info| {
+                        info.workflow_run_id != managed.workflow_run_id
+                            || info.node_id != managed.node_id
+                    })
+                {
+                    bail!("diagnostic Session identity conflict");
+                }
+                return Ok(existing);
+            }
+        }
+        self.registry.require(agent_id)?;
+        let now = now_ms();
+        let meta = SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
+            effort_id: None,
+            runtime_values,
+            id: stable_id.unwrap_or_else(|| format!("s_{}", uuid::Uuid::new_v4().simple())),
+            workspace_id: workspace_id.to_string(),
+            format: SESSION_FORMAT,
+            agent_id: agent_id.to_string(),
+            title,
+            title_locked: false,
+            cwd,
+            model_id,
+            mode_id,
+            created_at_ms: now,
+            updated_at_ms: now,
+            archived: false,
+            persist: None,
+            pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
+            lineage: None,
+            managed: Some(managed),
+            managed_system_prompt: Some(managed_system_prompt),
+            imported: None,
+        };
+        self.store.save_meta(&meta)?;
+        let summary = meta.summary(SessionStatus::Idle);
+        self.sessions.write().await.insert(
+            meta.id.clone(),
+            Arc::new(Live::new(meta, self.store.clone())),
+        );
+        Ok(summary)
+    }
+
+    /// Authenticates a local Agent CLI as exactly one durable Session. The
+    /// proof becomes invalid when the Session no longer exists or is unreadable.
+    pub async fn authenticate_controller(&self, session_id: &str, token: &str) -> bool {
+        if self.summary(session_id).await.is_err() {
+            return false;
+        }
+        let Ok(presented) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(token) else {
+            return false;
+        };
+        let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(self.controller_secret.as_bytes())
+        else {
+            return false;
+        };
+        mac.update(b"genehub.session-controller.v1\0");
+        mac.update(session_id.as_bytes());
+        mac.verify_slice(&presented).is_ok()
+    }
+
+    fn controller_token(&self, session_id: &str) -> String {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(self.controller_secret.as_bytes())
+            .expect("HMAC accepts every secret length");
+        mac.update(b"genehub.session-controller.v1\0");
+        mac.update(session_id.as_bytes());
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     }
 
     pub async fn fork(
@@ -667,6 +832,12 @@ impl SessionManager {
             .as_deref()
             .and_then(|title| title_from(&format!("{title} · 分支")));
         let meta = SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
@@ -683,6 +854,8 @@ impl SessionManager {
             archived: false,
             persist,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: Some(SessionLineage {
                 source_session_id: session_id.to_string(),
                 source_turn_id: turn_id.to_string(),
@@ -690,6 +863,8 @@ impl SessionManager {
                 method,
                 context,
             }),
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         };
         let write = || -> Result<()> {
@@ -861,6 +1036,12 @@ impl SessionManager {
         };
         let now = now_ms();
         let meta = SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -880,6 +1061,8 @@ impl SessionManager {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: Some(SessionLineage {
                 source_session_id: transfer.source_session_id,
                 source_turn_id: transfer.source_turn_id,
@@ -887,6 +1070,8 @@ impl SessionManager {
                 method: ForkMethod::ReconstructedContext,
                 context: Some(built.stats),
             }),
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         };
         let write = || -> Result<()> {
@@ -1067,6 +1252,12 @@ impl SessionManager {
             now
         };
         let meta = SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
@@ -1083,7 +1274,11 @@ impl SessionManager {
             archived: false,
             persist: history.persist,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: Some(ImportedSessionMeta {
                 source_key: candidate.source_key,
                 agent_id: candidate.agent_id,
@@ -1166,10 +1361,44 @@ impl SessionManager {
             }
         }
         let unsaved = self.recover_interrupted_turn(&meta, &mut chat).await?;
+        let restored_round = if meta.pending_permission.is_some()
+            || meta
+                .human_continuation
+                .as_ref()
+                .is_some_and(|c| !c.completed)
+        {
+            chat.rounds
+                .last()
+                .map(|record| -> Result<ActiveRound> {
+                    Ok(ActiveRound {
+                        round_id: record.round_id.clone(),
+                        ord: record.ord,
+                        user_item_id: record.user_item_id.clone(),
+                        adapter_turn_ids: record.adapter_turn_ids.clone(),
+                        started_at_ms: record.started_at_ms,
+                        blocked_since_ms: Some(meta.updated_at_ms),
+                        blocked_ms: record.blocked_ms,
+                        blocked_intervals: Vec::new(),
+                        outcome: None,
+                        current_trunk: TrunkBuilder::default(),
+                        round_deltas: HashMap::new(),
+                        last_attributed_rounds: 0,
+                        closed_trunks: self.store.load_trunk_index(
+                            &meta.workspace_id,
+                            &meta.id,
+                            record.ord,
+                        )?,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let live = Arc::new(Live::new(meta, self.store.clone()));
         *live.items.lock().await = chat.items;
         *live.rounds.lock().await = chat.rounds;
         *live.turn_items.lock().await = unsaved;
+        *live.active_round.lock().await = restored_round;
         sessions.insert(session_id.to_string(), live.clone());
         Ok(live)
     }
@@ -1219,12 +1448,46 @@ impl SessionManager {
     pub async fn summary(&self, session_id: &str) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let status = *live.status.lock().await;
-        let summary = live
+        let mut summary = live
             .meta
             .lock()
             .await
             .summary_with_activity(status, live.activity_of(status));
+        summary.interaction_summary = Some(super::store::interaction_summary(
+            live.pending_permissions.lock().await.iter(),
+        ));
         Ok(summary)
+    }
+
+    /// A snapshot of live member turns; reading it never starts an Agent.
+    pub(crate) async fn executing_workflow_runs(&self) -> HashSet<String> {
+        let lives = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut runs = HashSet::new();
+        for live in lives {
+            let status = *live.status.lock().await;
+            if status == SessionStatus::Running {
+                if let Some(managed) = &live.meta.lock().await.managed {
+                    runs.insert(managed.workflow_run_id.clone());
+                }
+            }
+        }
+        runs
+    }
+
+    /// Execution ownership, including startup and cleanup, is stronger than a
+    /// rendered idle status. Workflow reconciliation must not guess from chat.
+    pub(crate) async fn has_execution(&self, session_id: &str) -> bool {
+        let live = self.sessions.read().await.get(session_id).cloned();
+        match live {
+            Some(live) => live.execution.lock().await.is_some(),
+            None => false,
+        }
     }
 
     pub async fn begin_artifact(
@@ -1316,10 +1579,24 @@ impl SessionManager {
                     let status = *live.status.lock().await;
                     (status, live.activity_of(status))
                 }
-                None if meta.pending_permission.is_some() => (SessionStatus::Waiting, None),
+                None if meta.execution_retired => (SessionStatus::Closed, None),
+                None if meta.pending_permission.is_some()
+                    || meta
+                        .human_continuation
+                        .as_ref()
+                        .is_some_and(|c| !c.completed) =>
+                {
+                    (SessionStatus::Waiting, None)
+                }
                 None => (SessionStatus::Idle, None),
             };
-            out.push(meta.summary_with_activity(status, activity));
+            let mut summary = meta.summary_with_activity(status, activity);
+            if let Some(live) = self.sessions.read().await.get(&meta.id) {
+                summary.interaction_summary = Some(super::store::interaction_summary(
+                    live.pending_permissions.lock().await.iter(),
+                ));
+            }
+            out.push(summary);
         }
         Ok(out)
     }
@@ -1327,6 +1604,107 @@ impl SessionManager {
     pub async fn snapshot(&self, session_id: &str) -> Result<SessionSnapshot> {
         let live = self.live(session_id).await?;
         live.snapshot().await
+    }
+
+    /// History-only reads share the snapshot shape but never create a subscription.
+    pub async fn history_snapshot(
+        &self,
+        session_id: &str,
+        recent_rounds: u32,
+        before_item_id: Option<&str>,
+    ) -> Result<SessionSnapshot> {
+        let live = self.live(session_id).await?;
+        let _owner = live.execution.lock().await;
+        let snapshot = self.snapshot_for_open(&live, false).await?;
+        Self::window_snapshot(snapshot, recent_rounds, before_item_id)
+    }
+
+    fn window_snapshot(
+        mut snapshot: SessionSnapshot,
+        recent_rounds: u32,
+        before_item_id: Option<&str>,
+    ) -> Result<SessionSnapshot> {
+        let end = match before_item_id {
+            Some(id) => snapshot
+                .items
+                .iter()
+                .position(|item| item.id() == id)
+                .ok_or_else(|| anyhow!("history cursor no longer exists; reopen the session"))?,
+            None => snapshot.items.len(),
+        };
+        let rounds = snapshot.rounds.as_deref().unwrap_or(&[]);
+        let positions: HashMap<&str, usize> = snapshot.items[..end]
+            .iter()
+            .enumerate()
+            .map(|(index, item)| (item.id(), index))
+            .collect();
+        let boundaries: Vec<usize> = rounds
+            .iter()
+            .filter_map(|round| round.user_item_id.as_deref())
+            .filter_map(|id| positions.get(id).copied())
+            .collect();
+        let limit = recent_rounds.clamp(1, 100) as usize;
+        // Unround legacy/imported history remains reachable through the same stable cursor.
+        let mut start = if boundaries.len() > limit {
+            boundaries[boundaries.len() - limit]
+        } else if boundaries.is_empty() {
+            end.saturating_sub(limit * 4)
+        } else {
+            0
+        };
+        // Bound pathological legacy histories as well as the ordinary round count.
+        start = start.max(end.saturating_sub(128));
+        for item in &mut snapshot.items[start..end] {
+            let bytes = serde_json::to_vec(item)?.len();
+            if bytes <= 16 * 1024 {
+                continue;
+            }
+            match item {
+                TimelineItem::UserMessage {
+                    id,
+                    text,
+                    attachments,
+                } => {
+                    snapshot
+                        .history_excerpt_ids
+                        .get_or_insert_with(Vec::new)
+                        .push(id.clone());
+                    *text = text.chars().take(2048).collect();
+                    attachments.clear();
+                }
+                TimelineItem::AssistantMessage { id, text, .. } => {
+                    snapshot
+                        .history_excerpt_ids
+                        .get_or_insert_with(Vec::new)
+                        .push(id.clone());
+                    *text = text.chars().take(2048).collect();
+                }
+                _ => {}
+            }
+        }
+        snapshot.history_before = (start > 0).then(|| snapshot.items[start].id().to_owned());
+        snapshot.items = snapshot.items[start..end].to_vec();
+        if let Some(rounds) = snapshot.rounds.as_mut() {
+            rounds.retain(|round| {
+                round
+                    .user_item_id
+                    .as_deref()
+                    .is_some_and(|id| snapshot.items.iter().any(|item| item.id() == id))
+            });
+        }
+        snapshot.history_windowed = Some(true);
+        Ok(snapshot)
+    }
+
+    /// Which Space this Session instantiates, and the two directories its
+    /// Component Instances write to. The caller supplies the Space's
+    /// composition, so this stays ignorant of the project registry.
+    pub async fn component_scope(&self, session_id: &str) -> Result<(String, PathBuf, PathBuf)> {
+        let live = self.live(session_id).await?;
+        let workspace_id = live.meta.lock().await.workspace_id.clone();
+        let space_home = self.store.space_home(&workspace_id)?;
+        let session_dir = self.store.session_dir(&workspace_id, session_id)?;
+        Ok((workspace_id, space_home, session_dir))
     }
 
     /// A bounded-reader view frozen at an optional round boundary. This is the
@@ -1920,6 +2298,22 @@ impl SessionManager {
         bool,
         broadcast::Receiver<SequencedEvent>,
     )> {
+        self.subscribe_window(session_id, since_seq, expand_last_round, None)
+            .await
+    }
+
+    pub async fn subscribe_window(
+        &self,
+        session_id: &str,
+        since_seq: Option<u64>,
+        expand_last_round: bool,
+        recent_rounds: Option<u32>,
+    ) -> Result<(
+        SessionSnapshot,
+        Vec<SequencedEvent>,
+        bool,
+        broadcast::Receiver<SequencedEvent>,
+    )> {
         let live = self.live(session_id).await?;
         // Subscribe before snapshotting so nothing can slip through the gap
         // between the two.
@@ -1960,6 +2354,10 @@ impl SessionManager {
         drop(replay);
 
         let snapshot = self.snapshot_for_open(&live, expand_last_round).await?;
+        let snapshot = match recent_rounds {
+            Some(limit) => Self::window_snapshot(snapshot, limit, None)?,
+            None => snapshot,
+        };
         Ok((snapshot, events, reset, receiver))
     }
 
@@ -1977,6 +2375,29 @@ impl SessionManager {
         providers: &ProviderMap,
         artifact_preview_base_url: Option<String>,
         continues_round: Option<String>,
+    ) -> Result<String> {
+        self.send_prepared(
+            session_id,
+            text,
+            attachments,
+            providers,
+            artifact_preview_base_url,
+            continues_round,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_prepared(
+        &self,
+        session_id: &str,
+        text: String,
+        attachments: Vec<Attachment>,
+        providers: &ProviderMap,
+        artifact_preview_base_url: Option<String>,
+        continues_round: Option<String>,
+        prepared: Option<(TimelineItem, Vec<String>)>,
     ) -> Result<String> {
         let live = self.live(session_id).await?;
         if live
@@ -2008,12 +2429,33 @@ impl SessionManager {
                 .map(|adapter| adapter.host_form_payloads())
                 .unwrap_or(true)
         };
-        let additional_system_prompt = Some(crate::skills::session_guidance(
+        let mut additional_system_prompt = crate::skills::session_guidance(
             self.skills_dir.as_deref(),
             self.front_door_cli.as_deref(),
             host_paths,
-        ));
-        let execution = live.claim_execution(false).await?;
+        );
+        let meta = live.meta.lock().await.clone();
+        if let Some(managed) = meta.managed_system_prompt.as_deref() {
+            additional_system_prompt.push_str("\n\n");
+            additional_system_prompt.push_str(managed);
+        } else if let Some(root) = crate::workflow::root_session_guidance(&meta.cwd) {
+            additional_system_prompt.push_str("\n\n");
+            additional_system_prompt.push_str(&root);
+        }
+        let additional_system_prompt = Some(additional_system_prompt);
+        let execution = live.claim_execution(prepared.is_some()).await?;
+        if let Some((_, ids)) = &prepared {
+            let mut owner = live.execution.lock().await;
+            if let Some(current) = owner.as_mut() {
+                current.consultation = !live.pending_permissions.lock().await.is_empty();
+                current.input_ids = ids.clone();
+                current.human_request_id = meta
+                    .human_continuation
+                    .as_ref()
+                    .filter(|decision| !decision.completed && decision.grant_recorded)
+                    .map(|decision| decision.request.id.clone());
+            }
+        }
         let mut handover = Handover {
             live: live.clone(),
             id: execution.id,
@@ -2025,7 +2467,7 @@ impl SessionManager {
             _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("the execution was stopped during handover")),
             result = tokio::time::timeout(HANDOVER_BUDGET, self.start_turn(
                 &live, session_id, text, attachments, providers,
-                additional_system_prompt, continues_round, execution.id,
+                additional_system_prompt, continues_round, execution.id, prepared,
             )) => result.unwrap_or_else(|_| Err(anyhow!(
                 "the agent did not take this message within {}s; delivery may be unknown",
                 HANDOVER_BUDGET.as_secs()
@@ -2051,6 +2493,7 @@ impl SessionManager {
         additional_system_prompt: Option<String>,
         continues_round: Option<String>,
         execution_id: u64,
+        prepared: Option<(TimelineItem, Vec<String>)>,
     ) -> Result<String> {
         // The process is lazy, so this is still before any Agent sees the first
         // turn. A running Agent retains the exact prefix it started with; if it
@@ -2058,7 +2501,36 @@ impl SessionManager {
         if live.agent.lock().await.is_none() {
             *live.additional_system_prompt.lock().await = additional_system_prompt;
         }
-        self.ensure_started(live, providers).await?;
+        let human_id = live
+            .execution
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|execution| execution.human_request_id.clone());
+        let elevated = match live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .as_ref()
+            .filter(|decision| Some(&decision.request.id) == human_id.as_ref())
+        {
+            Some(decision) => continuation_for(&decision.request, &decision.outcome)?
+                .is_some_and(|continuation| continuation.elevated),
+            None => false,
+        };
+        let mode_override = if elevated {
+            let agent_id = live.meta.lock().await.agent_id.clone();
+            self.registry
+                .require(&agent_id)?
+                .catalog(providers)
+                .await
+                .default_mode
+        } else {
+            None
+        };
+        self.ensure_started_in_mode(live, providers, mode_override)
+            .await?;
 
         let seed_owner = {
             let meta = live.meta.lock().await;
@@ -2083,48 +2555,71 @@ impl SessionManager {
             .map(|seed| prompt_with_seed(&seed.text, &text))
             .unwrap_or_else(|| text.clone());
 
-        // Record the prompt before handing it over: if the agent dies on the
-        // next line, the user's question is still in the log.
-        let item = TimelineItem::UserMessage {
-            id: format!("u_{}", uuid::Uuid::new_v4().simple()),
-            text: text.clone(),
-            attachments: attachments.clone(),
-        };
-        {
-            let mut items = live.items.lock().await;
-            items.push(item.clone());
-        }
-        // A session that already has a name keeps it against later prompts.
-        // An Agent title can still replace a first-prompt label unless the
-        // user locked the name with `rename`.
-        let (workspace_id, needs_title) = {
-            let meta = live.meta.lock().await;
-            let needs_title = match meta.title.as_deref() {
-                None => true,
-                Some(title) if !meta.title_locked && is_catalog_noise_title(title) => true,
-                _ => false,
-            };
-            (meta.workspace_id.clone(), needs_title)
-        };
-        self.store
-            .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
-
-        if needs_title {
-            if let Some(title) = title_from(&text) {
-                {
-                    let mut meta = live.meta.lock().await;
-                    meta.title = Some(title.clone());
-                    meta.updated_at_ms = now_ms();
-                    self.store.save_meta(&meta)?;
+        let item = if let Some((item, ids)) = &prepared {
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            next.inbox.has_delivered = true;
+            for entry in &mut next.inbox.entries {
+                if ids.contains(&entry.message_id) {
+                    entry.state = "sent".into();
                 }
-                // Without this, the sidebar keeps showing "新会话" until
-                // something else happens to trigger a `session.list` refetch
-                // (switching workspaces, reconnecting) — the title on disk
-                // and the title on screen silently disagree until then.
-                live.publish(SessionEvent::TitleChanged { title }).await;
             }
-        }
+            self.store.save_meta(&next)?;
+            *meta = next;
+            item.clone()
+        } else {
+            // Record the prompt before handing it over: if the agent dies on the
+            // next line, the user's question is still in the log.
+            let item = TimelineItem::UserMessage {
+                id: format!("u_{}", uuid::Uuid::new_v4().simple()),
+                text: text.clone(),
+                attachments: attachments.clone(),
+            };
+            {
+                let mut items = live.items.lock().await;
+                items.push(item.clone());
+            }
+            // A session that already has a name keeps it against later prompts.
+            // An Agent title can still replace a first-prompt label unless the
+            // user locked the name with `rename`.
+            let (workspace_id, needs_title) = {
+                let meta = live.meta.lock().await;
+                (
+                    meta.workspace_id.clone(),
+                    meta.title.is_none()
+                        || (!meta.title_locked
+                            && meta.title.as_deref().is_some_and(is_catalog_noise_title)),
+                )
+            };
+            self.store
+                .append_chat_items(&workspace_id, session_id, std::slice::from_ref(&item))?;
 
+            {
+                let mut meta = live.meta.lock().await;
+                meta.message_preview = visible_message_preview(std::slice::from_ref(&item));
+                self.store.save_meta(&meta)?;
+            }
+            if needs_title {
+                if let Some(title) = title_from(&text) {
+                    {
+                        let mut meta = live.meta.lock().await;
+                        meta.title = Some(title.clone());
+                        meta.updated_at_ms = now_ms();
+                        self.store.save_meta(&meta)?;
+                    }
+                    // Without this, the sidebar keeps showing "新会话" until
+                    // something else happens to trigger a `session.list` refetch
+                    // (switching workspaces, reconnecting) — the title on disk
+                    // and the title on screen silently disagree until then.
+                    live.publish(SessionEvent::TitleChanged { title }).await;
+                }
+            }
+            item
+        };
+
+        if prepared.is_some() && live.meta.lock().await.inbox.paused {
+            bail!("PM continuation was explicitly paused before handover");
+        }
         let agent = live
             .agent()
             .await
@@ -2161,17 +2656,32 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("this handover no longer owns the session"))?;
         execution.turn_id = Some(turn_id.clone());
         execution.phase = ExecutionPhase::Running;
-        if let Some(superseded) = live
-            .begin_round(continues_round.as_deref(), &turn_id, item.id())
-            .await
-        {
-            tracing::info!(
-                "round {} superseded by a new message ({} adapter turn(s), {}ms blocked)",
-                superseded.round_id,
-                superseded.adapter_turn_ids.len(),
-                superseded.blocked_ms
-            );
-            persist_round(live, superseded).await;
+        if execution.consultation {
+            live.continue_round(&turn_id).await;
+        } else {
+            if let Some(superseded) = live
+                .begin_round(continues_round.as_deref(), &turn_id, item.id())
+                .await
+            {
+                tracing::info!(
+                    "round {} superseded by a new message ({} adapter turn(s), {}ms blocked)",
+                    superseded.round_id,
+                    superseded.adapter_turn_ids.len(),
+                    superseded.blocked_ms
+                );
+                persist_round(live, superseded).await;
+            }
+        }
+        if prepared.is_some() {
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            for entry in &mut next.inbox.entries {
+                if execution.input_ids.contains(&entry.message_id) {
+                    entry.turn_id = Some(turn_id.clone());
+                }
+            }
+            self.store.save_meta(&next)?;
+            *meta = next;
         }
 
         // The user message belongs to the turn it started.
@@ -2205,6 +2715,14 @@ impl SessionManager {
             return Ok(());
         }
         let mut meta = live.meta.lock().await.clone();
+        if meta
+            .managed
+            .as_ref()
+            .is_some_and(|managed| managed.evidence_scope.is_some())
+            && meta.agent_id != "genet"
+        {
+            anyhow::bail!("evidence-only sessions currently require the built-in GeneHub Agent");
+        }
         let adapter = self.registry.require(&meta.agent_id)?;
         let offered = adapter.catalog(providers).await;
         if normalize_runtime_selection(&mut meta, &offered) {
@@ -2255,8 +2773,28 @@ impl SessionManager {
         }
 
         let scratch = self.store.make_scratch_dir(&meta.workspace_id, &meta.id)?;
-        let additional_system_prompt = live.additional_system_prompt.lock().await.clone();
+        let additional_system_prompt =
+            live.additional_system_prompt
+                .lock()
+                .await
+                .clone()
+                .or_else(|| {
+                    let mut guidance = crate::skills::session_guidance(
+                        self.skills_dir.as_deref(),
+                        self.front_door_cli.as_deref(),
+                        adapter.host_form_payloads(),
+                    );
+                    if let Some(managed) = meta.managed_system_prompt.as_deref() {
+                        guidance.push_str("\n\n");
+                        guidance.push_str(managed);
+                    }
+                    Some(guidance)
+                });
         let config = |resume: Option<PersistHandle>| SessionConfig {
+            evidence_scope: meta
+                .managed
+                .as_ref()
+                .and_then(|managed| managed.evidence_scope.clone()),
             session_id: meta.id.clone(),
             cwd: meta.cwd.clone(),
             model_id: meta.model_id.clone(),
@@ -2266,11 +2804,15 @@ impl SessionManager {
             additional_system_prompt: additional_system_prompt.clone(),
             skills_dir: self.skills_dir.clone(),
             front_door_cli: self.front_door_cli.clone(),
+            controller_token: Some(self.controller_token(&meta.id)),
             scratch_dir: scratch.clone(),
             providers: providers.clone(),
             resume,
         };
 
+        if meta.persist.is_none() && meta.inbox.has_delivered {
+            bail!("the accepted messages require the original Agent context, but no native resume handle is available");
+        }
         // A resume handle points at state the session directory does not own —
         // the agent CLI's own thread store, under the user's home. That store
         // can be pruned by the CLI, wiped by the user, or simply absent on the
@@ -2282,6 +2824,18 @@ impl SessionManager {
         let session = match adapter.start(config(meta.persist.clone())).await {
             Ok(session) => session,
             Err(error) if meta.persist.is_some() => {
+                if meta
+                    .inbox
+                    .entries
+                    .iter()
+                    .any(|entry| entry.state != "handled")
+                    || meta
+                        .human_continuation
+                        .as_ref()
+                        .is_some_and(|c| !c.completed)
+                {
+                    return Err(error).context("cannot resume approved Session history; restore the Agent session before continuing");
+                }
                 abandoned_handle = true;
                 tracing::warn!(
                     agent = %meta.agent_id,
@@ -2344,6 +2898,7 @@ impl SessionManager {
             self.replay_window,
             self.processes.clone(),
             self.diagnostics.clone(),
+            self.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         Ok(())
@@ -2351,6 +2906,50 @@ impl SessionManager {
 
     pub async fn interrupt(&self, session_id: &str) -> Result<()> {
         let live = self.live(session_id).await?;
+        {
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            next.inbox.paused = true;
+            self.store.save_meta(&next)?;
+            *meta = next;
+        }
+        let _interaction = live.interaction_lock.lock().await;
+        // Fieldless clients retain their historical stop-waiting contract.
+        // A durable-input PM instead preserves the Human card during a stop.
+        if live.meta.lock().await.inbox.entries.is_empty() {
+            let had_interaction = {
+                let meta = live.meta.lock().await;
+                meta.pending_permission.is_some()
+                    || meta
+                        .human_continuation
+                        .as_ref()
+                        .is_some_and(|c| !c.completed)
+            };
+            if had_interaction {
+                cancel_human_continuation(&live, &self.store).await?;
+                if let Some(broker) = &self.project_control {
+                    broker.revoke_session(session_id).await?;
+                }
+                if live.execution.lock().await.is_none() {
+                    if let Some(round) = live
+                        .settle_round(Settling::Kernel, RoundOutcome::Canceled)
+                        .await
+                    {
+                        persist_round(&live, round).await;
+                    }
+                    *live.status.lock().await = SessionStatus::Idle;
+                    live.publish(SessionEvent::SessionStatusChanged {
+                        status: SessionStatus::Idle,
+                    })
+                    .await;
+                    return Ok(());
+                }
+            }
+        }
+        self.interrupt_execution(&live).await
+    }
+
+    async fn interrupt_execution(&self, live: &Arc<Live>) -> Result<()> {
         let mut owner = live.execution.lock().await;
         let Some(execution) = owner.as_mut() else {
             return Ok(());
@@ -2554,6 +3153,26 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        let previous = live.meta.lock().await.human_continuation.clone();
+        if let Some(previous) = previous {
+            if previous.request.id == request_id {
+                if previous.outcome != outcome {
+                    bail!("this interaction already has a different Human decision");
+                }
+                if !previous.completed && *live.status.lock().await == SessionStatus::Failed {
+                    let mut meta = live.meta.lock().await;
+                    let mut next = meta.clone();
+                    next.inbox.paused = false;
+                    next.inbox.error = None;
+                    self.store.save_meta(&next)?;
+                    *meta = next;
+                    live.continuation_dispatched.store(false, Ordering::SeqCst);
+                    *live.status.lock().await = SessionStatus::Waiting;
+                }
+                return Ok(());
+            }
+        }
         let request = live
             .pending_permissions
             .lock()
@@ -2564,60 +3183,59 @@ impl SessionManager {
             .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
         let continuation = continuation_for(&request, &outcome)?;
 
-        if let Some(continuation) = continuation {
-            let execution = live.claim_execution(true).await?;
-            let mut ownership = Handover {
-                live: live.clone(),
-                id: execution.id,
-                complete: false,
-            };
-            let mut cancel = execution.cancel.subscribe();
-            let handover = async {
-                let mode_override = if continuation.elevated {
-                    let agent_id = live.meta.lock().await.agent_id.clone();
-                    self.registry
-                        .require(&agent_id)?
-                        .catalog(providers)
-                        .await
-                        .default_mode
-                } else {
-                    None
-                };
-                self.ensure_started_in_mode(&live, providers, mode_override)
-                    .await?;
-                let agent = live
-                    .agent()
-                    .await
-                    .ok_or_else(|| anyhow!("the resumed session has no agent"))?;
-                let turn_id = agent
-                    .send(PromptInput {
-                        text: continuation.prompt,
-                        attachments: Vec::new(),
-                    })
-                    .await?;
-                let mut owner = live.execution.lock().await;
-                let current = owner
-                    .as_mut()
-                    .filter(|current| current.id == execution.id)
-                    .ok_or_else(|| anyhow!("this continuation no longer owns the session"))?;
-                live.continue_round(&turn_id).await;
-                current.turn_id = Some(turn_id);
-                current.phase = ExecutionPhase::Running;
-                current.ready.send_replace(true);
-                Ok::<_, anyhow::Error>(())
-            };
-            let sent = tokio::select! {
-                biased;
-                _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("continuation stopped during handover")),
-                result = tokio::time::timeout(HANDOVER_BUDGET, handover) =>
-                    result.unwrap_or_else(|_| Err(anyhow!("continuation handover timed out; delivery may be unknown"))),
-            };
-            if let Err(error) = sent {
-                retire_execution(&live, execution.id, Some(error.to_string()), false).await?;
-                ownership.complete = true;
-                return Err(error);
+        if request.kind == PermissionRequestKind::PlanApproval
+            || !live.meta.lock().await.inbox.entries.is_empty()
+        {
+            let mut project_approval = live.meta.lock().await.pending_project_approval;
+            if let Some(broker) = &self.project_control {
+                if project_approval || broker.is_plan_request(session_id, request_id).await {
+                    project_approval = true;
+                    broker
+                        .validate_human_response(session_id, request_id, &outcome)
+                        .await?;
+                }
             }
-            ownership.complete = true;
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            next.format = SESSION_FORMAT;
+            next.human_continuation = Some(HumanContinuation {
+                request: request.clone(),
+                outcome: outcome.clone(),
+                decided_at_ms: now_ms(),
+                project_approval,
+                grant_recorded: false,
+                completed: false,
+            });
+            next.pending_permission = None;
+            next.pending_project_approval = false;
+            self.store.save_meta(&next)?;
+            *meta = next;
+            drop(meta);
+            live.continuation_dispatched.store(false, Ordering::SeqCst);
+            let resolved = SessionEvent::PermissionResolved {
+                request_id: request_id.into(),
+                outcome,
+            };
+            apply(&live, &resolved).await;
+            live.publish(resolved).await;
+            if live.execution.lock().await.is_none() {
+                *live.status.lock().await = SessionStatus::Waiting;
+                live.publish(SessionEvent::SessionStatusChanged {
+                    status: SessionStatus::Waiting,
+                })
+                .await;
+            }
+            tracing::info!(
+                event = "human_continuation_queued",
+                session = session_id,
+                request = request_id
+            );
+            return Ok(());
+        }
+
+        if let Some(continuation) = continuation {
+            self.continue_after_human_response(&live, providers, continuation, None)
+                .await?;
         } else {
             // Denied or canceled: no more agent work is coming for this
             // request, so the round it belonged to is done, not dangling.
@@ -2653,6 +3271,295 @@ impl SessionManager {
             .await;
         }
         Ok(())
+    }
+
+    /// Resume a persisted native session with a new adapter turn in the same round.
+    async fn continue_after_human_response(
+        &self,
+        live: &Arc<Live>,
+        providers: &ProviderMap,
+        continuation: Continuation,
+        human_request_id: Option<String>,
+    ) -> Result<bool> {
+        let execution = live.claim_execution(true).await?;
+        if let Some(current) = live.execution.lock().await.as_mut() {
+            current.human_request_id = human_request_id;
+        }
+        let mut ownership = Handover {
+            live: live.clone(),
+            id: execution.id,
+            complete: false,
+        };
+        let mut cancel = execution.cancel.subscribe();
+        let handover = async {
+            let mode_override = if continuation.elevated {
+                let agent_id = live.meta.lock().await.agent_id.clone();
+                self.registry
+                    .require(&agent_id)?
+                    .catalog(providers)
+                    .await
+                    .default_mode
+            } else {
+                None
+            };
+            self.ensure_started_in_mode(live, providers, mode_override)
+                .await?;
+            let agent = live
+                .agent()
+                .await
+                .ok_or_else(|| anyhow!("the resumed session has no agent"))?;
+            let turn_id = agent
+                .send(PromptInput {
+                    text: continuation.prompt,
+                    attachments: Vec::new(),
+                })
+                .await?;
+            let mut owner = live.execution.lock().await;
+            let current = owner
+                .as_mut()
+                .filter(|current| current.id == execution.id)
+                .ok_or_else(|| anyhow!("this continuation no longer owns the session"))?;
+            live.continue_round(&turn_id).await;
+            if let Some(round) = live.active_round.lock().await.clone() {
+                live.record_round(&round).await;
+            }
+            current.turn_id = Some(turn_id);
+            current.phase = ExecutionPhase::Running;
+            current.ready.send_replace(true);
+            Ok::<_, anyhow::Error>(())
+        };
+        let sent = tokio::select! {
+            biased;
+            _ = cancel.wait_for(|canceled| *canceled) => Err(anyhow!("continuation stopped during handover")),
+            result = tokio::time::timeout(HANDOVER_BUDGET, handover) =>
+                result.unwrap_or_else(|_| Err(anyhow!("continuation handover timed out; delivery may be unknown"))),
+        };
+        if let Err(error) = sent {
+            retire_execution(live, execution.id, Some(error.to_string()), false).await?;
+            ownership.complete = true;
+            return Err(error);
+        }
+        ownership.complete = true;
+        Ok(true)
+    }
+
+    /// Persist and stop before exposing the Human card. The CLI is a submission,
+    /// never a waiter or an approval result channel.
+    pub async fn request_project_approval(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+        expires_at_ms: i64,
+    ) -> Result<()> {
+        if request.kind != PermissionRequestKind::PlanApproval {
+            bail!("expected a daemon-authored plan approval");
+        }
+        if expires_at_ms <= now_ms() {
+            bail!("approvalStale: create a new plan");
+        }
+        let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        {
+            let pending = live.pending_permissions.lock().await;
+            if pending.iter().any(|p| p.id == request.id) {
+                return Ok(());
+            }
+            if !pending.is_empty() {
+                bail!("answer or cancel the pending Agent interaction first");
+            }
+        }
+        if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, true).await {
+            let message = format!("{error:#}");
+            fail_human_pause(&live, &self.store, error).await;
+            return Err(anyhow!(message));
+        }
+        // Stop and drain the same writer before releasing this execution.
+        live.stop_pump().await?;
+        let mut owner = live.execution.lock().await;
+        let turn = owner
+            .as_ref()
+            .and_then(|execution| execution.turn_id.clone());
+        if let Some(turn_id) = turn {
+            live.publish(SessionEvent::TurnCanceled { turn_id }).await;
+        }
+        live.finish_execution(
+            &mut owner,
+            SessionEvent::PermissionRequested { request },
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Called under the interaction lock by either delivery path. Authority is
+    /// recorded once; a chat input can carry an already accepted decision, but
+    /// can never synthesize one from a pending card.
+    async fn prepare_human_delivery(
+        &self,
+        live: &Arc<Live>,
+    ) -> Result<Option<(String, Continuation)>> {
+        let Some(mut decision) = live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .clone()
+            .filter(|decision| !decision.completed)
+        else {
+            return Ok(None);
+        };
+        if !decision.grant_recorded {
+            let session = live.meta.lock().await.id.clone();
+            if decision.project_approval {
+                let broker = self
+                    .project_control
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("project approval authority unavailable"))?;
+                broker
+                    .record_human_response_at(
+                        &session,
+                        &decision.request.id,
+                        &decision.outcome,
+                        decision.decided_at_ms,
+                    )
+                    .await?;
+            }
+            decision.grant_recorded = true;
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            next.human_continuation = Some(decision.clone());
+            self.store.save_meta(&next)?;
+            *meta = next;
+        }
+        if let Some(mut continuation) = continuation_for(&decision.request, &decision.outcome)? {
+            if decision.project_approval {
+                continuation.prompt.push_str(&format!(
+                "\nDurable GeneHub interaction {}. Plan details:\n{}\nOnly if approved, use action ID {} for the mutation and any retry. Inspect existing results before acting; completed mutations must not be repeated.",
+                decision.request.id, decision.request.detail.as_deref().unwrap_or(""), decision.request.id));
+            }
+            Ok(Some((decision.request.id, continuation)))
+        } else {
+            finish_human_continuation(live, &self.store, &decision.request.id).await?;
+            if let Some(round) = live
+                .settle_round(Settling::Kernel, RoundOutcome::Canceled)
+                .await
+            {
+                persist_round(live, round).await;
+            }
+            *live.status.lock().await = SessionStatus::Idle;
+            Ok(None)
+        }
+    }
+
+    /// Called by the same per-Session dispatcher as accepted chat inputs.
+    async fn deliver_human_continuation(&self, live: &Arc<Live>, providers: &ProviderMap) {
+        let Ok(_interaction) = live.interaction_lock.try_lock() else {
+            return;
+        };
+        if *live.status.lock().await == SessionStatus::Closed {
+            return;
+        }
+        let Some(decision) = live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .clone()
+            .filter(|c| !c.completed)
+        else {
+            return;
+        };
+        if live.execution.lock().await.is_some() || live.meta.lock().await.inbox.paused {
+            return;
+        }
+        // The common input batch includes the accepted decision. Starting
+        // a separate continuation here would starve or repeatedly preempt it.
+        if live
+            .meta
+            .lock()
+            .await
+            .inbox
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.state.as_str(), "queued" | "sent"))
+        {
+            return;
+        }
+        if live.continuation_dispatched.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let result: Result<()> = async {
+            if let Some((request_id, continuation)) = self.prepare_human_delivery(&live).await?
+            {
+                self.continue_after_human_response(
+                    &live,
+                    providers,
+                    continuation,
+                    Some(request_id),
+                )
+                .await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            let id = live.meta.lock().await.id.clone();
+            tracing::error!(event = "human_continuation_failed", session = %id, request = %decision.request.id, %error);
+            // No hot retry loop, no lost decision. A restart retries the
+            // durable obligation; the failure remains visible meanwhile.
+            *live.status.lock().await = SessionStatus::Failed;
+            live.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Failed,
+            })
+            .await;
+            let event = SessionEvent::Item {
+                turn_id: String::new(),
+                item: TimelineItem::Error {
+                    id: format!("approval-resume-{}", decision.request.id),
+                    message: format!(
+                        "授权结果已保存，继续执行失败：{error:#}。请重启 daemon 后重试恢复。"
+                    ),
+                },
+            };
+            apply(&live, &event).await;
+            live.publish(event).await;
+            if let Err(save_error) = flush_turn(&live, &self.store).await {
+                tracing::error!(%save_error, "could not persist continuation failure");
+            }
+        }
+    }
+
+    pub(crate) async fn pending_questions(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PermissionRequest>> {
+        let live = self.live(session_id).await?;
+        let requests = live.pending_permissions.lock().await;
+        Ok(requests.iter().take(16).cloned().collect())
+    }
+
+    pub async fn pending_permission_kind(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<PermissionRequestKind>> {
+        let live = self.live(session_id).await?;
+        let kind = live
+            .pending_permissions
+            .lock()
+            .await
+            .iter()
+            .find(|request| request.id == request_id)
+            .map(|request| request.kind);
+        let answer = kind.or(live
+            .meta
+            .lock()
+            .await
+            .human_continuation
+            .as_ref()
+            .filter(|c| c.request.id == request_id)
+            .map(|c| c.request.kind));
+        Ok(answer)
     }
 
     pub async fn archive(&self, session_id: &str, archived: bool) -> Result<SessionSummary> {
@@ -2711,6 +3618,11 @@ impl SessionManager {
         // appending to a timeline we just removed, and the session would
         // reappear a moment after being deleted.
         if let Some(live) = live {
+            let _interaction = live.interaction_lock.lock().await;
+            cancel_human_continuation(&live, &self.store).await?;
+            if let Some(broker) = &self.project_control {
+                broker.revoke_session(session_id).await?;
+            }
             self.end_what_it_left(session_id).await;
             live.shutdown().await?;
         }
@@ -2721,13 +3633,133 @@ impl SessionManager {
         self.store.delete(&workspace_id, session_id)
     }
 
+    pub(crate) async fn fence_execution(&self, session_id: &str) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let mut meta = live.meta.lock().await;
+        let mut next = meta.clone();
+        next.execution_retired = true;
+        self.store.save_meta(&next)?;
+        *meta = next;
+        live.closing.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) async fn consulting(&self, session_id: &str) -> bool {
+        let Ok(live) = self.live(session_id).await else {
+            return false;
+        };
+        let consulting = live
+            .execution
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|execution| execution.consultation);
+        consulting
+    }
+
+    pub(crate) async fn current_request(
+        &self,
+        session_id: &str,
+    ) -> Result<(Option<String>, Option<String>, bool)> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        if let Some(entry) = meta
+            .inbox
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.state == "sent" && entry.source == "user")
+            .or_else(|| {
+                meta.inbox
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.state == "sent")
+            })
+        {
+            return Ok((
+                Some(entry.message_id.clone()),
+                entry.task_run_id.clone(),
+                entry.source == "user",
+            ));
+        }
+        drop(meta);
+        let id = live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|round| round.user_item_id.clone());
+        Ok((id, None, true))
+    }
+
+    pub(crate) async fn user_input_after(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        after_ms: i64,
+    ) -> Result<bool> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        if let Some(entry) = meta
+            .inbox
+            .entries
+            .iter()
+            .find(|entry| entry.message_id == message_id)
+        {
+            return Ok(entry.source == "user" && entry.received_at_ms > after_ms);
+        }
+        drop(meta);
+        let round = live.active_round.lock().await;
+        Ok(round.as_ref().is_some_and(|round| {
+            round.user_item_id.as_deref() == Some(message_id) && round.started_at_ms > after_ms
+        }))
+    }
+
     pub async fn close(&self, session_id: &str) -> Result<()> {
         let live = match self.sessions.read().await.get(session_id).cloned() {
             Some(live) => live,
             None => return Ok(()),
         };
-        self.end_what_it_left(session_id).await;
+        let _interaction = live.interaction_lock.lock().await;
+        cancel_human_continuation(&live, &self.store).await?;
+        if let Some(broker) = &self.project_control {
+            broker.revoke_session(session_id).await?;
+        }
+        let saved = live
+            .meta
+            .lock()
+            .await
+            .execution_cleanup
+            .clone()
+            .filter(|receipt| !receipt.completed);
+        let mut receipt = match saved {
+            Some(receipt) => receipt,
+            None => {
+                let receipt = self.processes.prepare_cleanup(session_id).await;
+                let mut meta = live.meta.lock().await;
+                let mut next = meta.clone();
+                next.execution_cleanup = Some(receipt.clone());
+                self.store.save_meta(&next)?;
+                *meta = next;
+                receipt
+            }
+        };
+        // Still stop the owned adapter when observation fails. The persisted
+        // receipt keeps uncertainty visible across retries and daemon restart.
+        if let Err(error) = self.processes.stop_all_checked(session_id).await {
+            tracing::warn!(session = session_id, %error, "descendant cleanup needs verification");
+        }
         live.shutdown().await?;
+        self.processes.verify_cleanup(&receipt).await?;
+        receipt.completed = true;
+        {
+            let mut meta = live.meta.lock().await;
+            let mut next = meta.clone();
+            next.execution_cleanup = Some(receipt);
+            self.store.save_meta(&next)?;
+            *meta = next;
+        }
         self.sessions.write().await.remove(session_id);
         self.processes.forget(session_id).await;
         Ok(())
@@ -2967,7 +3999,11 @@ impl Live {
         event: SessionEvent,
         closed: bool,
     ) -> Result<()> {
+        let consultation = owner
+            .as_ref()
+            .is_some_and(|execution| execution.consultation);
         let outcome = match &event {
+            _ if consultation && !closed => None,
             SessionEvent::TurnCompleted { .. } => Some(RoundOutcome::Completed),
             SessionEvent::TurnFailed { .. } => Some(RoundOutcome::Failed),
             _ if closed => Some(RoundOutcome::Canceled),
@@ -3016,8 +4052,38 @@ impl Live {
             return Err(error)
                 .context("the answer remains pending on disk; a new send will retry saving it");
         }
+        inbox::settle_inputs(self, owner.as_ref(), &event).await?;
+        if let Some(request_id) = owner
+            .as_ref()
+            .and_then(|execution| execution.human_request_id.as_deref())
+        {
+            if matches!(event, SessionEvent::TurnCompleted { .. }) {
+                finish_human_continuation(self, &self.store, request_id).await?;
+            } else {
+                // A stopped continuation remains an obligation, and an explicit
+                // stop's inbox pause prevents the dispatcher from undoing it.
+                self.continuation_dispatched.store(false, Ordering::SeqCst);
+                if matches!(event, SessionEvent::TurnFailed { .. }) {
+                    let mut meta = self.meta.lock().await;
+                    let mut next = meta.clone();
+                    next.inbox.paused = true;
+                    next.inbox.error =
+                        Some("Human 决定已保存，PM 继续执行失败；发送新消息后核对并继续。".into());
+                    self.store.save_meta(&next)?;
+                    *meta = next;
+                }
+            }
+        }
         apply(self, &event).await;
         self.publish(event).await;
+        if consultation && !self.pending_permissions.lock().await.is_empty() && !closed {
+            self.round_blocked().await;
+            *self.status.lock().await = SessionStatus::Waiting;
+            self.publish(SessionEvent::SessionStatusChanged {
+                status: SessionStatus::Waiting,
+            })
+            .await;
+        }
         if closed {
             *self.status.lock().await = SessionStatus::Closed;
             self.publish(SessionEvent::SessionStatusChanged {
@@ -3032,15 +4098,24 @@ impl Live {
     fn new(meta: SessionMeta, store: Store) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let pending = meta.pending_permission.clone();
+        let queued = meta
+            .human_continuation
+            .as_ref()
+            .is_some_and(|c| !c.completed);
+        let retired = meta.execution_retired;
         Live {
             execution: Mutex::new(None),
             next_execution: AtomicU64::new(1),
-            closing: AtomicBool::new(false),
+            inbox_lock: Mutex::new(()),
+            delivery_dispatching: AtomicBool::new(false),
+            closing: AtomicBool::new(meta.execution_retired),
             retirement: Mutex::new(()),
             cleanup: crate::adapter::SessionTasks::default(),
             store,
             meta: Mutex::new(meta),
-            status: Mutex::new(if pending.is_some() {
+            status: Mutex::new(if retired {
+                SessionStatus::Closed
+            } else if pending.is_some() || queued {
                 SessionStatus::Waiting
             } else {
                 SessionStatus::Idle
@@ -3057,6 +4132,8 @@ impl Live {
             agent: Mutex::new(None),
             additional_system_prompt: Mutex::new(None),
             pending_permissions: Mutex::new(pending.into_iter().collect()),
+            interaction_lock: Mutex::new(()),
+            continuation_dispatched: std::sync::atomic::AtomicBool::new(false),
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
             open_turn_dirty: AtomicBool::new(false),
@@ -3088,17 +4165,23 @@ impl Live {
 
     async fn snapshot_unlocked(&self) -> Result<SessionSnapshot> {
         let status = *self.status.lock().await;
+        let pending_permissions = self.pending_permissions.lock().await.clone();
+        let mut summary = self
+            .meta
+            .lock()
+            .await
+            .summary_with_activity(status, self.activity_of(status));
+        summary.interaction_summary = Some(super::store::interaction_summary(&pending_permissions));
         Ok(SessionSnapshot {
-            summary: self
-                .meta
-                .lock()
-                .await
-                .summary_with_activity(status, self.activity_of(status)),
+            summary,
             items: self.items.lock().await.clone(),
             seq: self.seq.load(Ordering::SeqCst),
-            pending_permissions: self.pending_permissions.lock().await.clone(),
+            pending_permissions,
             rounds: None,
             expanded_round: None,
+            history_before: None,
+            history_windowed: None,
+            history_excerpt_ids: None,
         })
     }
 
@@ -3663,7 +4746,13 @@ fn continuation_for(
                 return Ok(None);
             };
             if option.kind == PermissionOptionKind::Reject {
-                return Ok(None);
+                return Ok(Some(Continuation {
+                    elevated: false,
+                    prompt: format!(
+                        "The user rejected the interrupted plan '{}'. Do not apply it or perform any of its mutations. Briefly confirm that no changes were made, then stop unless the user gives a different goal.",
+                        request.title
+                    ),
+                }));
             }
             Ok(Some(Continuation {
                 elevated: false,
@@ -3876,36 +4965,151 @@ async fn report_cleanup_failure(live: &Arc<Live>, error: &anyhow::Error) {
     .await;
 }
 
+async fn cancel_open_tools(live: &Arc<Live>) {
+    let tools: Vec<_> = live
+        .items
+        .lock()
+        .await
+        .iter()
+        .filter_map(|item| match item {
+            TimelineItem::ToolCall {
+                id,
+                status: ToolStatus::Pending | ToolStatus::Running,
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    for item_id in tools {
+        let event = SessionEvent::ItemDelta {
+            turn_id: String::new(),
+            item_id,
+            delta: ItemDelta::ToolStatus {
+                status: ToolStatus::Canceled,
+                detail: None,
+                images: Vec::new(),
+            },
+        };
+        apply(live, &event).await;
+        live.publish(event).await;
+    }
+}
+
 async fn stop_agent_for_interaction(
     live: &Arc<Live>,
     store: &Store,
     request: &PermissionRequest,
+    project_approval: bool,
 ) -> Result<()> {
+    if live
+        .meta
+        .lock()
+        .await
+        .pending_permission
+        .as_ref()
+        .is_some_and(|pending| pending.id != request.id)
+    {
+        bail!("a Human request is already pending; the new request cannot replace it");
+    }
     let _retirement = live.retirement.lock().await;
-    live.round_blocked().await;
     let agent = live.agent().await;
     let persist = agent.as_ref().and_then(|agent| agent.persistence());
     {
         let mut meta = live.meta.lock().await;
+        let mut next = meta.clone();
         if let Some(persist) = persist {
-            meta.persist = Some(persist);
+            next.persist = Some(persist);
         }
-        meta.pending_permission = Some(request.clone());
-        meta.updated_at_ms = now_ms();
-        if let Err(error) = store.save_meta(&meta) {
-            tracing::error!(
-                "could not persist stopped interaction {}: {error}",
-                request.id
-            );
-        }
+        next.format = SESSION_FORMAT;
+        next.pending_permission = Some(request.clone());
+        next.pending_project_approval = project_approval;
+        next.human_continuation = None;
+        next.updated_at_ms = now_ms();
+        store
+            .save_meta(&next)
+            .context("persisting Human pause before stopping Agent")?;
+        *meta = next;
     }
-
+    live.round_blocked().await;
+    // Set Waiting before interrupt so a terminal event cannot complete the
+    // business round while its Human interaction is being installed.
+    *live.status.lock().await = SessionStatus::Waiting;
+    if let Some(execution) = live.execution.lock().await.as_mut() {
+        execution.phase = ExecutionPhase::Stopping;
+    }
     if let Some(agent) = agent {
-        // Interruption is best-effort and bounded. The process is closed either
-        // way, so no approval request or live transport has to survive.
         let _ = tokio::time::timeout(Duration::from_secs(5), agent.interrupt()).await;
         close_current_agent(live).await?;
     }
+    cancel_open_tools(live).await;
+    // The durable request above fences the retiring turn. Expose its card
+    // only after the Agent process is gone, including to snapshot readers.
+    *live.pending_permissions.lock().await = vec![request.clone()];
+    *live.status.lock().await = SessionStatus::Waiting;
+    tracing::info!(event = "human_interaction_stopped", request = %request.id);
+    Ok(())
+}
+
+async fn cancel_human_continuation(live: &Arc<Live>, store: &Store) -> Result<()> {
+    let mut meta = live.meta.lock().await;
+    let mut next = meta.clone();
+    let pending = next.pending_permission.take();
+    next.pending_project_approval = false;
+    if let Some(decision) = &mut next.human_continuation {
+        decision.completed = true;
+    }
+    store.save_meta(&next)?;
+    *meta = next;
+    drop(meta);
+    live.continuation_dispatched.store(true, Ordering::SeqCst);
+    live.pending_permissions.lock().await.clear();
+    if let Some(request) = pending {
+        let event = SessionEvent::PermissionResolved {
+            request_id: request.id,
+            outcome: PermissionOutcome::Canceled,
+        };
+        apply(live, &event).await;
+        live.publish(event).await;
+    }
+    Ok(())
+}
+
+async fn fail_human_pause(live: &Arc<Live>, _store: &Store, error: anyhow::Error) {
+    tracing::error!(%error, "could not persist or stop Human interaction");
+    let _retirement = live.retirement.lock().await;
+    if close_current_agent(live).await.is_err() {
+        return;
+    }
+    cancel_open_tools(live).await;
+    let mut owner = live.execution.lock().await;
+    let turn_id = owner
+        .as_ref()
+        .and_then(|execution| execution.turn_id.clone())
+        .unwrap_or_default();
+    let event = SessionEvent::TurnFailed {
+        turn_id,
+        error: genehub_proto::TurnError {
+            code: TurnErrorCode::Internal,
+            message: format!("无法完成待确认暂停，请检查请求与恢复状态：{error:#}"),
+        },
+    };
+    if let Err(save_error) = live.finish_execution(&mut owner, event, false).await {
+        tracing::error!(%save_error, "could not commit failed Human pause");
+    }
+}
+
+async fn finish_human_continuation(live: &Live, store: &Store, request_id: &str) -> Result<()> {
+    let mut meta = live.meta.lock().await;
+    let mut next = meta.clone();
+    if let Some(decision) = next
+        .human_continuation
+        .as_mut()
+        .filter(|decision| decision.request.id == request_id)
+    {
+        decision.completed = true;
+    }
+    store.save_meta(&next)?;
+    *meta = next;
     Ok(())
 }
 
@@ -3966,6 +5170,7 @@ async fn pump_events(
     replay_window: usize,
     processes: Arc<crate::processes::Processes>,
     diagnostics: Arc<Diagnostics>,
+    project_control: Option<crate::project_control::Broker>,
 ) {
     let (workspace_id, session_id) = {
         let meta = live.meta.lock().await;
@@ -4043,6 +5248,7 @@ async fn pump_events(
             _ = checkpoint.tick() => {
                 let _owner = live.execution.lock().await;
                 live.persist_open_turn_if_due().await;
+                if let Err(error) = store.save_meta(&*live.meta.lock().await) { tracing::error!(%error, "persisting execution checkpoint"); }
                 continue;
             }
         };
@@ -4113,6 +5319,7 @@ async fn pump_events(
             continue;
         }
 
+        activity::observe(&live, &event).await;
         if let SessionEvent::TurnProgress { turn_id, usage } = &event {
             token_usage::merge_progress(live_usage.entry(turn_id.clone()).or_default(), usage);
             if let Some(merged) = live_usage.get(turn_id) {
@@ -4361,15 +5568,45 @@ async fn pump_events(
             }
         };
 
+        if let (Some(project_control), SessionEvent::PermissionRequested { request }) =
+            (&project_control, &event)
+        {
+            match project_control
+                .normalize_request(&session_id, request)
+                .await
+            {
+                Ok(request) => event = SessionEvent::PermissionRequested { request },
+                Err(error) => {
+                    drop(owner);
+                    fail_human_pause(&live, &store, error).await;
+                    break;
+                }
+            }
+        }
+
         if let SessionEvent::PermissionRequested { request } = &event {
             if let Some(execution) = owner.as_mut() {
                 execution.phase = ExecutionPhase::Stopping;
             }
             drop(owner);
-            if let Err(error) = stop_agent_for_interaction(&live, &store, request).await {
-                tracing::error!(%error, "could not stop for interaction");
+            // A CLI pause can retire this pump while holding interaction.
+            let _interaction = tokio::select! {
+                biased;
+                _ = async { let _ = stopping.wait_for(|stop| *stop).await; } => break 'events,
+                guard = live.interaction_lock.lock() => guard,
+            };
+            let project_approval = match &project_control {
+                Some(broker) => broker.is_plan_request(&session_id, &request.id).await,
+                None => false,
+            };
+            if let Err(error) =
+                stop_agent_for_interaction(&live, &store, request, project_approval).await
+            {
+                fail_human_pause(&live, &store, error).await;
                 break;
             }
+            flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
+            flush_blob_writer(&blob_sender).await;
             let mut owner = live.execution.lock().await;
 
             // End the old turn before exposing the request. Approval later
@@ -4400,6 +5637,20 @@ async fn pump_events(
             break;
         }
 
+        // Closing an Agent at a durable Human pause may surface as an
+        // adapter crash. The user-requested pause is the authoritative cause.
+        let consultation = owner
+            .as_ref()
+            .is_some_and(|execution| execution.consultation);
+        if !consultation && live.meta.lock().await.pending_permission.is_some() {
+            event = match event {
+                SessionEvent::TurnCompleted { turn_id, .. }
+                | SessionEvent::TurnFailed { turn_id, .. } => {
+                    SessionEvent::TurnCanceled { turn_id }
+                }
+                other => other,
+            };
+        }
         if matches!(
             event,
             SessionEvent::TurnCompleted { .. }
@@ -4865,6 +6116,32 @@ async fn persist_round(live: &Live, round: ActiveRound) {
     live.record_round(&round).await;
 }
 
+fn visible_message_preview(items: &[TimelineItem]) -> Option<genehub_proto::SessionMessagePreview> {
+    items.iter().rev().find_map(|item| match item {
+        TimelineItem::UserMessage { id, text, .. }
+        | TimelineItem::AssistantMessage { id, text, .. } => {
+            Some(genehub_proto::SessionMessagePreview {
+                item_id: id.clone(),
+                text: text.chars().take(160).collect(),
+                at_ms: now_ms(),
+            })
+        }
+        _ => None,
+    })
+}
+
+fn latest_reply(items: &[TimelineItem]) -> Option<genehub_proto::SessionReplyCursor> {
+    items.iter().rev().find_map(|item| match item {
+        TimelineItem::AssistantMessage { id, text, .. } if !text.trim().is_empty() => {
+            Some(genehub_proto::SessionReplyCursor {
+                item_id: id.clone(),
+                at_ms: now_ms(),
+            })
+        }
+        _ => None,
+    })
+}
+
 /// Writes what this turn produced, once, when the turn ends: narrative to the
 /// chat layer, work to the open trunk.
 async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
@@ -4901,6 +6178,12 @@ async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
     live.open_turn_dirty.store(false, Ordering::SeqCst);
     let mut meta = live.meta.lock().await;
     meta.updated_at_ms = now_ms();
+    if let Some(preview) = visible_message_preview(&settled) {
+        meta.message_preview = Some(preview);
+    }
+    if let Some(reply) = latest_reply(&settled) {
+        meta.latest_reply = Some(reply);
+    }
     store.save_meta(&meta)?;
     Ok(())
 }
@@ -5007,6 +6290,12 @@ mod tests {
 
     fn meta() -> SessionMeta {
         SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
@@ -5023,7 +6312,11 @@ mod tests {
             archived: false,
             persist: None,
             pending_permission: None,
+            pending_project_approval: false,
+            human_continuation: None,
             lineage: None,
+            managed: None,
+            managed_system_prompt: None,
             imported: None,
         }
     }
@@ -5052,6 +6345,25 @@ mod tests {
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
+    }
+
+    #[tokio::test]
+    async fn controller_proof_is_bound_to_one_existing_session_and_one_daemon_lifetime() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+
+        let token = sessions.controller_token("s1");
+        assert!(sessions.authenticate_controller("s1", &token).await);
+        assert!(!sessions.authenticate_controller("missing", &token).await);
+        assert!(!sessions.authenticate_controller("s1", "not-a-proof").await);
+
+        let restarted = manager(workspace.path());
+        assert!(restarted.summary("s1").await.is_ok());
+        assert!(
+            !restarted.authenticate_controller("s1", &token).await,
+            "controller proof must not become durable project authority"
+        );
     }
 
     /// An agent whose past threads are gone: it starts fresh, and refuses to
@@ -6302,6 +7614,12 @@ mod tests {
         sessions
             .store
             .save_meta(&SessionMeta {
+                inbox: Default::default(),
+                execution_retired: false,
+                execution_cleanup: None,
+                activity: Default::default(),
+                message_preview: None,
+                latest_reply: None,
                 agent_id: "amnesiac".into(),
                 persist: Some(stale),
                 ..meta()
@@ -6345,6 +7663,12 @@ mod tests {
         sessions
             .store
             .save_meta(&SessionMeta {
+                inbox: Default::default(),
+                execution_retired: false,
+                execution_cleanup: None,
+                activity: Default::default(),
+                message_preview: None,
+                latest_reply: None,
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -6396,6 +7720,12 @@ mod tests {
         sessions
             .store
             .save_meta(&SessionMeta {
+                inbox: Default::default(),
+                execution_retired: false,
+                execution_cleanup: None,
+                activity: Default::default(),
+                message_preview: None,
+                latest_reply: None,
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -6468,6 +7798,12 @@ mod tests {
     #[tokio::test]
     async fn an_agent_title_replaces_the_first_prompt_title() {
         let (live, _dir) = live_session(SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             title: Some("Fix the login redirect".into()),
             ..meta()
         });
@@ -6548,6 +7884,12 @@ mod tests {
     #[tokio::test]
     async fn a_latin_agent_title_does_not_replace_a_cjk_prompt_title() {
         let (live, _dir) = live_session(SessionMeta {
+            inbox: Default::default(),
+            execution_retired: false,
+            execution_cleanup: None,
+            activity: Default::default(),
+            message_preview: None,
+            latest_reply: None,
             title: Some("生成三张风景画，简笔风".into()),
             ..meta()
         });
@@ -6998,6 +8340,107 @@ mod tests {
         assert_eq!(*live.status.lock().await, SessionStatus::Idle);
     }
 
+    /// Regression: a Human wait must release the provider process, even if
+    /// the CLI's caller would otherwise stay attached indefinitely.
+    #[tokio::test]
+    async fn cli_requested_plan_approval_stops_before_presenting_the_card() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = Arc::new(manager(workspace.path()));
+        sessions.store.save_meta(&meta()).unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (events, _) = broadcast::channel(1);
+        *live.agent.lock().await = Some(Arc::new(StoppingSession {
+            events,
+            interrupted: interrupted.clone(),
+            closed: closed.clone(),
+        }));
+        live.begin_round(None, "t-original", "u-original").await;
+        let request = interaction(PermissionRequestKind::PlanApproval);
+        sessions
+            .request_project_approval("s1", request.clone(), now_ms() + 60_000)
+            .await
+            .unwrap();
+        assert!(interrupted.load(Ordering::SeqCst));
+        assert!(closed.load(Ordering::SeqCst));
+        assert!(live.agent().await.is_none());
+        assert_eq!(
+            sessions.summary("s1").await.unwrap().status,
+            SessionStatus::Waiting
+        );
+        assert_eq!(
+            sessions
+                .store
+                .load_meta("w1", "s1")
+                .unwrap()
+                .pending_permission
+                .unwrap()
+                .id,
+            request.id
+        );
+        assert!(live
+            .active_round
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .outcome
+            .is_none());
+    }
+
+    /// Regression for the detached CLI: delivery is driven by the persisted
+    /// decision, independent of whether the previous adapter turn had ended.
+    #[tokio::test]
+    async fn a_plan_approval_queues_one_continuation_without_a_waiter() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        live.begin_round(None, "t-original", "u-original").await;
+        let request = interaction(PermissionRequestKind::PlanApproval);
+        stop_agent_for_interaction(&live, &sessions.store, &request, false)
+            .await
+            .unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (events, _) = broadcast::channel(4);
+        *live.agent.lock().await = Some(Arc::new(RecordingSession {
+            events,
+            prompts: prompts.clone(),
+        }));
+        let outcome = PermissionOutcome::Selected {
+            option_id: "yes".into(),
+        };
+        sessions
+            .respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new())
+            .await
+            .unwrap();
+        assert!(
+            prompts.lock().unwrap().is_empty(),
+            "Human acknowledgement is independent of provider execution"
+        );
+        assert!(sessions
+            .store
+            .load_meta("w1", "s1")
+            .unwrap()
+            .human_continuation
+            .is_some());
+        sessions
+            .respond_permission("s1", &request.id, outcome, &ProviderMap::new())
+            .await
+            .unwrap();
+        sessions
+            .deliver_human_continuation(&live, &ProviderMap::new())
+            .await;
+        sessions
+            .deliver_human_continuation(&live, &ProviderMap::new())
+            .await;
+        assert_eq!(prompts.lock().unwrap().len(), 1);
+        let round = live.active_round.lock().await.clone().unwrap();
+        assert_eq!(round.adapter_turn_ids, vec!["t-original", "t-resumed"]);
+        assert!(round.outcome.is_none());
+    }
+
     #[tokio::test]
     async fn a_new_interaction_replaces_a_stale_one() {
         let (live, _store_dir) = live_session(meta());
@@ -7063,6 +8506,11 @@ mod tests {
         closed: Arc<std::sync::atomic::AtomicBool>,
     }
 
+    struct RecordingSession {
+        events: broadcast::Sender<SessionEvent>,
+        prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
+    }
+
     #[async_trait::async_trait]
     impl AgentSession for StoppingSession {
         fn events(&self) -> broadcast::Receiver<SessionEvent> {
@@ -7108,6 +8556,42 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl AgentSession for RecordingSession {
+        fn events(&self) -> broadcast::Receiver<SessionEvent> {
+            self.events.subscribe()
+        }
+
+        async fn send(&self, input: PromptInput) -> Result<String> {
+            self.prompts.lock().unwrap().push(input);
+            Ok("t-resumed".into())
+        }
+
+        async fn interrupt(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_model(&self, _model_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn set_mode(&self, _mode_id: &str) -> Result<()> {
+            anyhow::bail!("not used")
+        }
+
+        async fn respond_permission(
+            &self,
+            _request_id: &str,
+            _outcome: PermissionOutcome,
+        ) -> Result<()> {
+            anyhow::bail!("CLI approval is resolved by its daemon waiter")
+        }
+    }
+
     #[tokio::test]
     async fn an_interaction_is_persisted_before_the_agent_process_is_closed() {
         let dir = tempfile::tempdir().unwrap();
@@ -7123,7 +8607,9 @@ mod tests {
         }));
         let request = interaction(PermissionRequestKind::Permission);
 
-        let _ = stop_agent_for_interaction(&live, &store, &request).await;
+        stop_agent_for_interaction(&live, &store, &request, false)
+            .await
+            .unwrap();
 
         assert!(live.agent.lock().await.is_none());
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
@@ -7267,16 +8753,18 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_only_resumes_after_explicit_approval() {
+    fn a_plan_rejection_resumes_only_to_confirm_zero_mutation() {
         let request = interaction(PermissionRequestKind::PlanApproval);
-        assert!(continuation_for(
+        let rejected = continuation_for(
             &request,
             &PermissionOutcome::Selected {
                 option_id: "no".into(),
             },
         )
         .unwrap()
-        .is_none());
+        .expect("a plan rejection resumes for a zero-change acknowledgement");
+        assert!(!rejected.elevated);
+        assert!(rejected.prompt.contains("Do not apply"));
         let approved = continuation_for(
             &request,
             &PermissionOutcome::Selected {
@@ -7437,6 +8925,7 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             Arc::new(Diagnostics::new()),
+            Some(crate::project_control::Broker::new(dir.path()).unwrap()),
         ));
         for event in script {
             agent_events.send(event).expect("the pump is listening");
@@ -8067,6 +9556,7 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
+            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         (sessions, events, turn_ids)
@@ -8537,6 +10027,7 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
+            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
         let turn2 = sessions
@@ -8968,6 +10459,7 @@ mod tests {
             64,
             sessions.processes(),
             sessions.diagnostics.clone(),
+            sessions.project_control.clone(),
         ));
         *live.pump.lock().await = Some(pump);
 
@@ -9634,6 +11126,7 @@ mod tests {
             64,
             crate::processes::Processes::new(),
             diagnostics.clone(),
+            Some(crate::project_control::Broker::new(dir.path()).unwrap()),
         ));
 
         agent_events

@@ -1,4 +1,4 @@
-import { defineSpecialty } from "../../framework/public.ts";
+import { defineSpecialty, openBrowser } from "../../framework/public.ts";
 
 defineSpecialty(
   {
@@ -14,9 +14,10 @@ defineSpecialty(
     surfaces: ["workbench-ui"],
   },
   async (t) => {
-    if(!t.browser) throw new Error('browser context missing');
-    const page=await t.browser.newPage();
-    await page.goto('about:blank');
-    t.assertions.assert(await page.evaluate(()=>navigator.userAgent.includes('Chrome')), 'a real Chromium page is required');
+    const browser = await openBrowser();
+    try {
+      await browser.page.goto("about:blank");
+      t.assertions.assert(await browser.page.evaluate(() => navigator.userAgent.includes("Chrome")), "page fixture did not launch Chromium");
+    } finally { await browser.close(); }
   },
 );

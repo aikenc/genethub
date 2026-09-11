@@ -236,6 +236,7 @@ interface Subscription {
   retry: ReturnType<typeof setTimeout> | null;
   retryDelay: number;
   expandLastRound: boolean;
+  recentRounds?: number;
 }
 
 interface PendingCall {
@@ -694,7 +695,7 @@ export class Client {
   async subscribe(
     sessionId: string,
     handlers: Pick<Subscription, "onEvent" | "onResync">,
-    options: { expandLastRound?: boolean } = {},
+    options: { expandLastRound?: boolean; recentRounds?: number } = {},
   ): Promise<{ snapshot: unknown; replayed: SequencedEvent[]; reset: boolean }> {
     const subscription: Subscription = {
       seq: 0,
@@ -706,6 +707,7 @@ export class Client {
       retry: null,
       retryDelay: 250,
       expandLastRound: options.expandLastRound ?? true,
+      recentRounds: options.recentRounds,
     };
     const previous = this.subscriptions.get(sessionId);
     if (previous?.retry != null) clearTimeout(previous.retry);
@@ -713,7 +715,7 @@ export class Client {
     const connection = this.connectionEpoch;
     const reply = await this.call({
       type: "subscribe",
-      payload: { sessionId, sinceSeq: 0, expandLastRound: subscription.expandLastRound },
+      payload: { sessionId, sinceSeq: 0, expandLastRound: subscription.expandLastRound, recentRounds: subscription.recentRounds },
     }).catch(() => undefined);
     if (this.subscriptions.get(sessionId) !== subscription || connection !== this.connectionEpoch || reply?.type !== "subscribed") {
       if (this.subscriptions.get(sessionId) === subscription) this.subscriptions.delete(sessionId);
@@ -1219,6 +1221,7 @@ export class Client {
             sessionId,
             sinceSeq: subscription.resetRequired ? 0 : subscription.seq,
             expandLastRound: subscription.expandLastRound,
+            recentRounds: subscription.recentRounds,
           },
         }).catch(() => undefined);
         if (this.subscriptions.get(sessionId) !== subscription || this.stopped) return;

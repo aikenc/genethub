@@ -8,6 +8,7 @@ import {
   resolveAgentPresentation,
 } from "../presentation/catalog/resolve";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+import { buildAgentSpaceTree, flattenAgentSpaceTree } from "../workspace/agent-space-tree";
 
 export interface MachineOption {
   /** Daemon identity. Unlike routeId, this is stable across connection paths. */
@@ -210,18 +211,20 @@ export function WorkspaceList({
   loading?: boolean;
   onSelect(workspaceId: string): void;
 }) {
+  const tree = buildAgentSpaceTree(workspaces);
+  const ordered = flattenAgentSpaceTree(tree);
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标工作区</legend>
+      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标专家</legend>
       {loading ? (
         <p className="mt-2 text-xs text-faint">正在读取目标机器…</p>
       ) : workspaces.length > 0 ? (
         <div
           role="listbox"
-          aria-label="目标工作区"
+          aria-label="目标专家"
           className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
         >
-          {workspaces.map((workspace) => {
+          {ordered.map((workspace) => {
             const selected = workspace.id === selectedWorkspaceId;
             return (
               <button
@@ -239,7 +242,9 @@ export function WorkspaceList({
               >
                 <WorkspaceIcon workspace={workspace} />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-fg">{workspace.name}</span>
+                  <span className="block truncate text-fg">
+                    {tree.breadcrumbById[workspace.id] ?? workspace.name}
+                  </span>
                   <span className="block truncate text-[10px] text-faint">{workspace.root}</span>
                 </span>
               </button>
@@ -248,7 +253,7 @@ export function WorkspaceList({
         </div>
       ) : (
         <p className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-          目标机器没有可用工作区。
+          目标机器没有可用专家。
         </p>
       )}
     </fieldset>
@@ -266,12 +271,12 @@ export function AgentGrid({
   selectedAgentId: string;
   disabled?: boolean;
   onSelect(agentId: string): void;
-  /** Shown as "当前 Agent" when it is also the selection's machine default. */
+  /** Shown as "当前执行引擎" when it is also the selection's machine default. */
   currentAgentId?: string;
 }) {
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标 Agent</legend>
+      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标执行引擎</legend>
       <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
         {agents.map((agent) => {
           const presentation = resolveAgentPresentation(agent);
@@ -298,7 +303,7 @@ export function AgentGrid({
                 <span className="block truncate text-fg">{presentation.label}</span>
                 <span className={`block text-[10px] ${availability ? "text-danger" : "text-faint"}`}>
                   {agent.id === currentAgentId
-                    ? "当前 Agent"
+                    ? "当前执行引擎"
                     : availability?.fullLabel ?? "已就绪"}
                 </span>
               </span>

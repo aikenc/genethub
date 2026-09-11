@@ -48,6 +48,10 @@ pub enum Request {
         /// the subscription response.
         #[serde(default)]
         expand_last_round: bool,
+        /// Optional UI history window. Does not alter Agent context or replay semantics.
+        #[serde(default)]
+        #[ts(optional)]
+        recent_rounds: Option<u32>,
     },
     #[serde(rename = "unsubscribe", rename_all = "camelCase")]
     Unsubscribe { session_id: String },
@@ -83,6 +87,177 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
+    /// Reads and validates the project-owned source under
+    /// `.genethub/workflow/`. The target must be a non-worker project entry;
+    /// its optional PM marker is irrelevant. This is a pure projection and
+    /// starts no Agent.
+    #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
+    WorkflowInspect { workspace_id: String },
+    /// Applies the deterministic genesis pack and activates its first
+    /// Candidate. Only a local user or an ordinary main Session in this
+    /// project may request the mutation.
+    #[serde(rename = "workflow.initialize", rename_all = "camelCase")]
+    WorkflowInitialize {
+        workspace_id: String,
+        agent_id: String,
+        #[serde(default)]
+        model_id: Option<String>,
+    },
+    /// Promotes the current source Candidate or rolls back to a persisted one.
+    /// `expectedRevision` is the activation CAS and is never optional.
+    #[serde(rename = "workflow.activate", rename_all = "camelCase")]
+    WorkflowActivate {
+        workspace_id: String,
+        #[serde(default)]
+        candidate_digest: Option<String>,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
+    /// Starts one project-defined Workflow. The durable parent Session comes
+    /// from the authenticated session-bound CLI identity, never this payload.
+    #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
+    WorkflowDispatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        retry_of: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        resume_cancelled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        candidate_digest: Option<String>,
+        workspace_id: String,
+        workflow_id: String,
+        task_id: String,
+        prompt: String,
+    },
+    #[serde(rename = "workflow.check", rename_all = "camelCase")]
+    WorkflowCheck {
+        workspace_id: String,
+        run_id: Option<String>,
+    },
+    #[serde(rename = "workflow.get", rename_all = "camelCase")]
+    WorkflowGet {
+        workspace_id: String,
+        run_id: String,
+    },
+    /// Lists recent Runs for project-side Workflow analysis. This is a
+    /// read-only projection; detailed structured messages remain Session-owned.
+    #[serde(rename = "workflow.history", rename_all = "camelCase")]
+    WorkflowHistory {
+        workspace_id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Supplies explicit evidence for the node owned by this managed Session.
+    /// `expectedRevision` is a project-run CAS, not a best-effort hint.
+    #[serde(rename = "workflow.complete", rename_all = "camelCase")]
+    WorkflowComplete {
+        workspace_id: String,
+        run_id: String,
+        node_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        evidence: std::collections::BTreeMap<String, String>,
+        /// Absent retains the existing successful-completion contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        outcome: Option<WorkflowNodeOutcome>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        reason: Option<String>,
+    },
+    /// Persist the stop decision before reclaiming Executor/Worker resources.
+    /// Repeating cancellation is safe; completion is observed through the Run.
+    #[serde(rename = "workflow.cancel", rename_all = "camelCase")]
+    WorkflowCancel {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
+    /// Mounts, configures or removes one responsibility on an already-open,
+    /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
+    ///
+    /// This never creates files and never provisions a Space. Exactly one
+    /// operation is applied per call, under `expectedRevision`; a Space that
+    /// was never registered starts at revision `0`.
+    #[serde(rename = "agentSpace.configure", rename_all = "camelCase")]
+    AgentSpaceConfigure {
+        workspace_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        operation: AgentSpaceOperation,
+        /// Required when the caller is a SessionController; omitted for a
+        /// direct authenticated Human UI action.
+        #[serde(default)]
+        #[ts(optional)]
+        plan_digest: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        action_id: Option<String>,
+    },
+    /// Creates the immutable challenge used before an Agent-driven
+    /// Component/Parent/lifecycle mutation.
+    #[serde(rename = "agentSpace.changePlan", rename_all = "camelCase")]
+    AgentSpaceChangePlan {
+        workspace_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        operation: AgentSpaceOperation,
+    },
+    /// Runs one deterministic AgentSpaceBuilder operation inside the
+    /// authenticated project's `spaces/` boundary. The operation never
+    /// chooses a role or team shape; those decisions come from a Bootstrap
+    /// Pack or the caller's project Skill.
+    #[serde(rename = "agentSpace.builder", rename_all = "camelCase")]
+    AgentSpaceBuilder {
+        /// Project boundary that owns the target Space.
+        workspace_id: String,
+        /// Existing Workspace to check/build. Absent preserves the CLI's
+        /// `<project>/spaces/<spaceName>` creation contract.
+        #[serde(default)]
+        target_workspace_id: Option<String>,
+        space_name: String,
+        operation: AgentSpaceBuilderOperation,
+    },
+    /// Plans or applies a versioned project-owned team/DCG asset bundle.
+    #[serde(rename = "project.bootstrap", rename_all = "camelCase")]
+    ProjectBootstrap {
+        workspace_id: String,
+        pack_id: String,
+        apply: bool,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Required for apply and copied verbatim from the preceding plan.
+        #[serde(default)]
+        plan_digest: Option<String>,
+        /// Stable id chosen by the Agent for idempotent apply replay.
+        #[serde(default)]
+        action_id: Option<String>,
+        /// CAS value copied from the preceding plan.
+        #[serde(default)]
+        #[ts(type = "number | null")]
+        expected_revision: Option<u64>,
+    },
+    /// Lists the versioned Bootstrap Packs available in this daemon build.
+    #[serde(rename = "project.bootstrap.list")]
+    BootstrapPackList,
+    /// Presents one daemon-authored project mutation plan to the Human and
+    /// waits for their answer. A SessionController may request this card but
+    /// cannot answer it; approval authority remains Human-only and the
+    /// resulting grant never crosses this API.
+    #[serde(rename = "project.approval.request", rename_all = "camelCase")]
+    ProjectApprovalRequest { challenge_id: String },
+    /// The direct child Spaces this one may dispatch to.
+    ///
+    /// Refused unless the Space mounts an enabled `executor`, and never
+    /// reaches past a child that is itself an Executor: that subtree is the
+    /// child's own scheduling boundary.
+    #[serde(rename = "agentSpace.children", rename_all = "camelCase")]
+    AgentSpaceChildren { workspace_id: String },
     #[serde(rename = "session.list", rename_all = "camelCase")]
     SessionList {
         #[serde(default)]
@@ -91,7 +266,22 @@ pub enum Request {
         include_archived: bool,
     },
     #[serde(rename = "session.get", rename_all = "camelCase")]
-    SessionGet { session_id: String },
+    SessionGet {
+        session_id: String,
+        #[serde(default)]
+        #[ts(optional)]
+        recent_rounds: Option<u32>,
+        #[serde(default)]
+        #[ts(optional)]
+        before_item_id: Option<String>,
+    },
+    /// Which responsibilities are live in this Session, and where each may
+    /// write. Read-only: composition is changed on the Space, not here.
+    #[serde(rename = "session.components", rename_all = "camelCase")]
+    SessionComponents { session_id: String },
+    /// Reads the structured DCG timeline owned by an Executor Session.
+    #[serde(rename = "session.flow", rename_all = "camelCase")]
+    SessionFlow { session_id: String },
     #[serde(rename = "session.inspect", rename_all = "camelCase")]
     SessionInspect {
         session_id: String,
@@ -168,6 +358,14 @@ pub enum Request {
     },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
+        /// Opts into durable receipt before Agent delivery. Retries must reuse
+        /// the same ID and exact payload; absence keeps legacy send semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        task_run_id: Option<String>,
         session_id: String,
         text: String,
         #[serde(default)]
@@ -525,6 +723,9 @@ pub enum Request {
     WorkspaceList,
     #[serde(rename = "workspace.open", rename_all = "camelCase")]
     WorkspaceOpen { root: String },
+    /// Append a directory to a saved code-workspace; preserves workspace identity.
+    #[serde(rename = "workspace.addRoot", rename_all = "camelCase")]
+    WorkspaceAddRoot { workspace_id: String, root: String },
     #[serde(rename = "workspace.create", rename_all = "camelCase")]
     WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
@@ -699,6 +900,8 @@ pub enum Reply {
     Session(SessionSummary),
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
+    SessionComponents(Vec<ComponentInstanceInfo>),
+    SessionFlow(ExecutorFlowStatus),
     SessionImports(SessionImportListing),
     Snapshot(SessionSnapshot),
     SessionInspection(SessionInspection),
@@ -712,6 +915,14 @@ pub enum Reply {
     Blobs(Vec<BlobPayload>),
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
+    WorkflowProject(WorkflowProjectStatus),
+    WorkflowRun(WorkflowRunStatus),
+    WorkflowCheck(WorkflowCheckReport),
+    WorkflowRuns(Vec<WorkflowRunStatus>),
+    AgentSpaceBuilder(AgentSpaceBuilderReport),
+    AgentSpaceChangePlan(AgentSpaceChangePlan),
+    BootstrapPack(BootstrapPackReport),
+    BootstrapPacks(Vec<BootstrapPackInfo>),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),
@@ -732,6 +943,39 @@ pub enum Reply {
     Processes(Vec<BackgroundProcess>),
     /// Nothing to return, but the call succeeded.
     Ack,
+}
+
+/// One change to an AgentSpace's registration.
+///
+/// Kept as a closed set rather than a patch document so every mutation has a
+/// reviewable contract: the daemon can state exactly which invariants each
+/// operation must re-check instead of diffing arbitrary fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentSpaceOperation {
+    /// Mounts a component, or reconfigures one that is already mounted.
+    /// Registers the Space itself when it is still at revision `0`.
+    #[serde(rename_all = "camelCase")]
+    SetComponent {
+        component_id: String,
+        enabled: bool,
+        #[serde(default)]
+        role: Option<String>,
+    },
+    /// Unmounts a component. Its session-scope history stays on disk; only
+    /// the registration goes away.
+    #[serde(rename_all = "camelCase")]
+    RemoveComponent { component_id: String },
+    /// Moves the Space in the ownership tree, or detaches it into a project
+    /// root when the parent is absent.
+    #[serde(rename_all = "camelCase")]
+    SetParent {
+        #[serde(default)]
+        parent_workspace_id: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetLifecycle { lifecycle: String },
 }
 
 /// One file the browser intends to place in a session artifact bundle.

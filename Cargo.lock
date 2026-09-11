@@ -1416,11 +1416,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "toml",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -1428,6 +1430,7 @@ dependencies = [
  "uuid",
  "webrtc",
  "windows-sys 0.61.2",
+ "workflow-engine",
 ]
 
 [[package]]
@@ -3318,6 +3321,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "serial2"
 version = "0.2.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4034,6 +4050,12 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -5280,6 +5302,16 @@ dependencies = [
  "log",
  "thiserror 1.0.69",
  "wast",
+]
+
+[[package]]
+name = "workflow-engine"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

@@ -307,6 +307,7 @@ impl Journey {
             Reply::Session(summary) => {
                 self.client
                     .call(Request::Subscribe {
+                        recent_rounds: None,
                         session_id: summary.id.clone(),
                         since_seq: None,
                         expand_last_round: false,
@@ -344,6 +345,8 @@ impl Journey {
     ) -> Result<()> {
         self.client
             .call(Request::SessionSend {
+                message_id: None,
+                task_run_id: None,
                 session_id: session_id.to_string(),
                 text: text.to_string(),
                 attachments: vec![],
