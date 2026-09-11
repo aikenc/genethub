@@ -8,7 +8,7 @@ defineSpecialty(
     title: "Two sessions in two workspaces complete without mixing turns",
     oracle: "two in-flight genet turns each complete with exactly one turnStarted on their own subscribe",
     catches: ["shared session state mixing two workspaces"],
-    tags: ["core", "concurrency", "parity"],
+    tags: ["network-risk-v2", "core", "concurrency", "parity"],
     llm: { default: "mock" },
     expectedDurationMs: 30_000,
     timeoutMs: 75_000,

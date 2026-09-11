@@ -12,7 +12,7 @@ defineSpecialty({
   title: "Resume journals and physical channels preserve custody under loss and cancellation",
   oracle: "Independent literal binary corpus, exact byte/lease accounting, at-most-once delivery and immutable path policy across 100 handoffs; channel nonce ordering and closure fencing",
   catches: ["u64 rounded through JS number", "ACK treated as consumption", "duplicate OPEN delivery", "data exhausts progress reserve", "direct-only falls back to Fabric", "failed attach extends TTL", "cancelled write consumes nonce", "closed channel delivers late crypto"],
-  tags: ["core", "contract", "connectivity", "resume-core"],
+  tags: ["network-risk-v2", "core", "contract", "connectivity", "resume-core"],
   llm: { default: "none" },
   expectedDurationMs: 60000, timeoutMs: 300000,
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },

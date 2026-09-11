@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
@@ -19,7 +19,7 @@ function pressureCase(
       title,
       oracle,
       catches,
-      tags: ["core", "daemon", "concurrency", "backpressure-depth"],
+      tags: ["network-risk-v2", "core", "daemon", "concurrency", "backpressure-depth", id],
       llm: { default: needsMock ? "mock" : "none" },
       expectedDurationMs: needsMock ? 35_000 : 20_000,
       timeoutMs: 120_000,
@@ -63,9 +63,9 @@ pressureCase(
   "every client completes 32 reads and remains usable afterward",
   ["one socket monopolizes dispatcher", "per-client response routing crosses", "late client starves"],
   async (t, opened) => {
-    const clients = await Promise.all(
-      Array.from({ length: 6 }, (_, index) => t.flows.main.openSecondClient(opened, `burst-reader-${index}`)),
-    );
+    const clients = [opened.client, ...await Promise.all(
+      Array.from({ length: 5 }, (_, index) => t.flows.main.openSecondClient(opened, `burst-reader-${index}`)),
+    )];
     try {
       const groups = await Promise.all(
         clients.map((client) => Promise.all(Array.from({ length: 32 }, () => client.call({ type: "workspace.list" })))),
@@ -220,4 +220,41 @@ pressureCase(
     t.assertions.assert(max < 1_000, `Agent burst starved a daemon read for ${max}ms`);
   },
   true,
+);
+
+pressureCase(
+  "specialty.backpressure.preview-flood-exact-bytes",
+  "A burst of 128 previews preserves each response and the original connection",
+  "128 distinct 256 KiB files return exact bytes; an independent peer stays usable and the original logical owner remains",
+  ["preview flood closes peer", "crossed preview responses", "writer pressure loses control frames"],
+  async (t, opened) => {
+    const peer = await t.flows.main.openSecondClient(opened, "preview-control");
+    const owner = opened.client.logicalConnectionId;
+    const files = Array.from({ length: 128 }, (_, n) => {
+      const bytes = Buffer.alloc(256 * 1024, n);
+      const name = `flood-${n}.bin`;
+      writeFileSync(path.join(t.env.workspace, name), bytes);
+      return { name, bytes };
+    });
+    try {
+      let completed = 0;
+      const pending = Promise.all(files.map(async file => {
+        const response = await opened.client.preview(opened.workspaceId, `${opened.rootHandle}/${file.name}`);
+        t.assertions.assert(Buffer.from(response.bytes).equals(file.bytes), `preview bytes crossed or truncated: ${file.name}`);
+        completed++;
+      }));
+      // Attach rejection handling before the independent peer probe.
+      const outcome = pending.then(() => null, error => error as Error);
+      for (let n = 0; n < 5; n++) {
+        const started = performance.now();
+        const reply = await peer.call({ type: "workspace.list" });
+        t.assertions.assert(reply?.type === "workspaces" && performance.now() - started < 2000, "preview flood blocked independent peer");
+      }
+      const failure = await outcome;
+      if (failure) throw failure;
+      t.assertions.assert(completed === 128, "preview did not complete every response");
+      t.assertions.assert(opened.client.logicalConnectionId === owner, "preview flood replaced original owner");
+      t.assertions.assert((await opened.client.call({ type: "workspace.list" }))?.type === "workspaces", "original peer unusable after preview flood");
+    } finally { peer.close(); }
+  },
 );

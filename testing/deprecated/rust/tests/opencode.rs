@@ -19,7 +19,7 @@ macro_rules! needs_opencode {
     ($journey:expr) => {
         if !binary_on_path("opencode") {
             eprintln!(
-                "skipping {}: OpenCode is not on PATH; install it to cover the adapter",
+                "TESTCTL_BLOCKED: {}: OpenCode is not on PATH; install it to cover the adapter",
                 module_path!()
             );
             $journey.finish().await;

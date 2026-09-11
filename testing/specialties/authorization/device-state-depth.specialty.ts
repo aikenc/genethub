@@ -1,12 +1,12 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
+import { defineSpecialty, daemonEndpoint, startFaultLink, connectProductClient, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
 function authStateCase(id: string, title: string, oracle: string, catches: string[], run: (t: CaseContext, opened: Opened) => Promise<void>): void {
-  defineSpecialty({ id: `specialty.authorization.state.${id}`, title, oracle, catches, tags: ["core", "daemon", "authorization-state-depth"], llm: { default: "none" }, expectedDurationMs: 20_000, timeoutMs: 120_000, resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" }, surfaces: ["daemon", "workbench-client"], productInterfaces: ["@genehub/workbench/client"] }, async (t) => {
+  defineSpecialty({ id: `specialty.authorization.state.${id}`, title, oracle, catches, tags: ["network-risk-v2", "core", "daemon", "authorization-state-depth"], llm: { default: "none" }, expectedDurationMs: 20_000, timeoutMs: 120_000, resources: { environments: 1, cpu: 1, memoryMb: 512, io: 1, browser: 0, pool: "standard" }, surfaces: ["daemon", "workbench-client"], productInterfaces: ["@genehub/workbench/client"] }, async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try { await run(t, opened); } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
   });
@@ -58,7 +58,7 @@ authStateCase("independent-invites", "Two invitations can be claimed independent
 });
 
 authStateCase("five-way-claim-one-winner", "Five concurrent claims have exactly one winner", "one credential is minted and one racer appears in device.list", ["claim consume race", "multiple credentials per invite"], async (t, opened) => {
-  const code = await invite(opened, ["read"]); const settled = await Promise.allSettled(Array.from({ length: 5 }, (_, index) => t.flows.main.claimDeviceInvite(opened.daemon, code, `five-racer-${index}`))); t.assertions.assert(settled.filter((item) => item.status === "fulfilled").length === 1, `winner count ${JSON.stringify(settled)}`); t.assertions.assert((await list(opened)).filter((item) => item.name.startsWith("five-racer-")).length === 1, "phantom racers listed");
+  const code = await invite(opened, ["read"]); const settled = await Promise.allSettled(Array.from({ length: 5 }, (_, index) => t.flows.main.claimDeviceInvite(opened.daemon, code, `five-racer-${index}`))); t.assertions.assert(settled.filter((item) => item.status === "fulfilled").length === 1, `winner count ${JSON.stringify(settled.map(item => item.status))}`); t.assertions.assert((await list(opened)).filter((item) => item.name.startsWith("five-racer-")).length === 1, "phantom racers listed");
 });
 
 authStateCase("wrong-invite-id-preserves-code", "A wrong invite id does not consume the valid code", "the forged id is rejected and the original code remains claimable", ["secret used without invite id", "failed lookup consumes invite"], async (t, opened) => {
@@ -92,3 +92,26 @@ authStateCase("read-cannot-write-file", "Read credentials cannot write files", "
 authStateCase("device-list-stable", "Repeated device listings are structurally stable", "twenty reads retain one exact id, name, and grant set", ["list duplicates entries", "grants mutate on read"], async (t, opened) => {
   const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read", "files"], "stable-list"); try { for (let index = 0; index < 20; index += 1) { const matches = (await list(opened)).filter((item) => item.id === paired.deviceId); t.assertions.assert(matches.length === 1 && matches[0]?.name === "stable-list" && JSON.stringify(matches[0].grants) === JSON.stringify(["handshake", "read", "files"]), `listing drift ${index}: ${JSON.stringify(matches)}`); } } finally { paired.client.close(); }
 });
+
+
+authStateCase("read-grants-survive-recovery", "A recovered read-only device never inherits owner permissions",
+  "Real credential reconnects across an opaque cut; reads still work, writes remain forbidden and no disk effect appears",
+  ["resume restores owner access", "grants lost during handshake"], async (t, opened) => {
+    const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "recovery-read-only");
+    paired.client.close();
+    const link = await startFaultLink(daemonEndpoint(opened.daemon).url);
+    const endpoint = () => ({ url: link.urlFor(daemonEndpoint(opened.daemon).url), credential: paired.credential });
+    const client = await connectProductClient({ ...endpoint(), redial: async () => endpoint() });
+    try {
+      const deniedWrite = () => t.assertions.expectProtocolCode(() => client.call({ type: "file.write", payload: {
+        workspaceId: opened.workspaceId, path: opened.rootHandle + "/recovery-forbidden.txt", content: "bad",
+      } }), "forbidden");
+      await deniedWrite();
+      const old = client.logicalConnectionId, count = link.connections(); link.cut();
+      await t.tools.waitUntil(() => link.connections() > count && client.connectionState === "ready", 15000);
+      t.assertions.assert(client.logicalConnectionId === old, "credential recovery replaced logical owner");
+      t.assertions.assert((await client.call({ type: "workspace.list" }))?.type === "workspaces", "legal read lost after recovery");
+      await deniedWrite();
+      t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, "recovery-forbidden.txt")), "denied mutation reached disk");
+    } finally { client.close(); await link.stop(); }
+  });

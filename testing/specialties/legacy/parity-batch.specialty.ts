@@ -1,26 +1,18 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty } from "../../framework/public.ts";
 
-function walkTs(dir: string, acc: string[] = []): string[] {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walkTs(full, acc);
-    else if (entry.name.endsWith(".ts")) acc.push(full);
-  }
-  return acc;
-}
-
 defineSpecialty(
   {
     id: "specialty.contracts.rust-crate-retained",
-    title: "Frozen Rust crate stays on disk and is not executed by testctl",
-    oracle: "testing/deprecated/rust still has Cargo.toml and suite files; rust-parity rows are all legacyExecution stopped; cargo test --workspace excludes genehub-testing",
-    catches: ["crate deleted", "rust-legacy cases re-registered without L13 evidence", "CI still runs frozen crate"],
+    title: "Frozen Rust cases remain required until per-case parity is established",
+    oracle: "testing/deprecated/rust still has Cargo.toml and suite files; rust-parity rows remain required and are registered for testctl",
+    catches: ["crate deleted", "legacy cases silently removed from required execution"],
     tags: ["core", "contract"],
-    expectedDurationMs: 400,
-    timeoutMs: 10_000,
+    expectedDurationMs: 6000,
+    timeoutMs: 30000,
     surfaces: ["legacy-rust"],
   },
   async (t) => {
@@ -28,6 +20,7 @@ defineSpecialty(
     t.assertions.assert(existsSync(path.join(crate, "Cargo.toml")), "frozen crate Cargo.toml missing");
     for (const suite of [
       "journeys.rs",
+      "concurrency.rs",
       "command.rs",
       "authorization.rs",
       "claude.rs",
@@ -41,18 +34,15 @@ defineSpecialty(
     const parity = JSON.parse(readFileSync(path.join(t.openRoot, "testing/migration/rust-parity.json"), "utf8")) as {
       cases: Array<{ oldId: string; legacyExecution?: string }>;
     };
-    const stillRequired = parity.cases.filter((item) => item.legacyExecution !== "stopped");
-    t.assertions.assert(
-      stillRequired.length === 0,
-      `legacyExecution still required: ${stillRequired.map((item) => item.oldId).join(",")}`,
-    );
-    const reregistered = walkTs(path.join(t.openRoot, "testing"))
-      .filter((file) => file.includes("/journeys/") || file.includes("/specialties/"))
-      .filter((file) => /runner:\s*["']rust-legacy["']/.test(readFileSync(file, "utf8")));
-    t.assertions.assert(
-      reregistered.length === 0,
-      `rust-legacy runner re-registered: ${reregistered.join(",")}`,
-    );
+    const stopped = parity.cases.filter(item => item.legacyExecution !== "required");
+    t.assertions.assert(stopped.length === 0, "legacy cases stopped without verified per-case retirement");
+    const tsx = path.join(t.openRoot, "testing/node_modules/tsx/dist/cli.mjs");
+    for (const gate of ["change", "merge", "dev", "beta", "stable"]) {
+      const output = execFileSync(process.execPath, [tsx, path.join(t.openRoot, "testing/bin/testctl.ts"), "plan", "--open", t.openRoot,
+        "--cloud", process.env.TESTCTL_CLOUD_ROOT!, "--gate", gate], { encoding: "utf8", timeout: 10000 });
+      const planned = new Set((JSON.parse(output) as { units: Array<{ id: string }> }).units.map(u => u.id));
+      for (const row of parity.cases) t.assertions.assert(planned.has(row.oldId + "::default"), gate + " omitted required legacy " + row.oldId);
+    }
     const cargoToml = readFileSync(path.join(t.openRoot, "Cargo.toml"), "utf8");
     t.assertions.assert(
       cargoToml.includes('"testing/deprecated/rust"'),

@@ -51,7 +51,7 @@ interface ControlServerLike {
   close(): Promise<void>;
 }
 
-export async function startHub(input: { databasePath: string }): Promise<HubHandle> {
+export async function startHub(input: { databasePath: string; relayOrigin?: string; relayToken?: string; routeGrantTtlSeconds?: number }): Promise<HubHandle> {
   const cloudRoot = process.env.TESTCTL_CLOUD_ROOT?.trim();
   if (!cloudRoot) {
     throw new BlockedError(
@@ -71,7 +71,9 @@ export async function startHub(input: { databasePath: string }): Promise<HubHand
   // relay origin at a dead loopback port so that failure is fast and
   // deterministic; this driver exists for cases whose oracle never crosses
   // the relay.
-  process.env.HUB_RELAY_ORIGIN ??= "http://127.0.0.1:1";
+  process.env.HUB_RELAY_ORIGIN = input.relayOrigin ?? "http://127.0.0.1:1";
+  // Each testctl case has a separate process. Set real product configuration before import.
+  if (input.routeGrantTtlSeconds !== undefined) process.env.HUB_FABRIC_ROUTE_GRANT_TTL = String(input.routeGrantTtlSeconds);
 
   mkdirSync(path.dirname(input.databasePath), { recursive: true });
   const module = (await import(pathToFileURL(entry).href)) as {
@@ -92,7 +94,7 @@ export async function startHub(input: { databasePath: string }): Promise<HubHand
     consoleDir: path.join(path.dirname(input.databasePath), "no-console"),
     // The relay authenticates to the control plane with this token. No relay
     // ever dials in these cases, but the server refuses to start without one.
-    relayToken: `testctl-${randomBytes(24).toString("hex")}`,
+    relayToken: input.relayToken ?? `testctl-${randomBytes(24).toString("hex")}`,
   });
   const origin = `http://127.0.0.1:${control.port}`;
 

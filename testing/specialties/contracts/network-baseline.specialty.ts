@@ -12,7 +12,7 @@ for (const component of ["relay", "cloud-server"] as const) {
     title: `${component} existing contract and authorization baseline`,
     oracle: "Existing package typecheck and Node TAP suites complete with nonzero test count and zero failures",
     catches: ["relay boundary regression", "control-plane authorization regression", "cross-repo type drift"],
-    tags: ["contract", "network-baseline"],
+    tags: ["network-risk-v2", "contract", "network-baseline"],
     llm: { default: "none" },
     expectedDurationMs: 20000, timeoutMs: 180000,
     resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 0 },

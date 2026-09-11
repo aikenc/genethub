@@ -23,7 +23,7 @@ defineSpecialty(
       "browser never receives actual audio/video",
       "stop leaks backend media session",
     ],
-    tags: ["page-experience", "service-preview-media"],
+    tags: ["network-risk-v2", "page-experience", "service-preview-media"],
     runner: "playwright",
     llm: { default: "none" },
     expectedDurationMs: 15000,

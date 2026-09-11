@@ -18,7 +18,7 @@ defineSpecialty(
     title: "Browser subscriptions remain live across RTC upgrades and fallback",
     oracle: "Real browser receives sequenced session events and completion over the same connection that owns its subscription with stable logical identity across RTC activation, relay outage and real RTC failure",
     catches: ["empty new conversation after RTC connects", "history snapshot without subsequent events", "RTC fallback loses subscription", "unsubscribe targets a different peer"],
-    tags: ["page-experience", "rtc-subscriptions", "connectivity"],
+    tags: ["network-risk-v2", "multichannel","page-experience", "rtc-subscriptions", "connectivity"],
     runner: "playwright",
     llm: { default: "mock" },
     expectedDurationMs: 30000,

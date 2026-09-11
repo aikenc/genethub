@@ -46,12 +46,22 @@ try {
     process.exit(0);
   }
   const ctx = await createCaseContext(definition);
+  let runError: unknown;
+  let didFail = false;
   try {
     await definition.run(ctx);
-    finish("passed", ctx.takeNote());
+  } catch (error) {
+    didFail = true; runError = error;
   } finally {
-    await ctx.dispose();
+    try { await ctx.dispose(); } catch (error) { if (!didFail) runError = error; didFail = true; }
   }
+  if (didFail) {
+    if (!(runError instanceof Error)) runError = new Error(String(runError));
+    const note = ctx.takeNote();
+    if (runError instanceof Error && note) runError.message += String.fromCharCode(10) + "Evidence: " + note;
+    throw runError;
+  }
+  finish("passed", ctx.takeNote());
 } catch (error) {
   if (error instanceof BlockedError) {
     finish("blocked", error.message, error.blockedReason);

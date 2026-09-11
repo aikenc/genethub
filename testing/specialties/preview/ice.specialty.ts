@@ -15,7 +15,7 @@ defineSpecialty(
       "channel configuration ignored",
       "unbounded credential request",
     ],
-    tags: ["core", "service-preview", "hub"],
+    tags: ["network-risk-v2", "core", "service-preview", "hub"],
     llm: { default: "none" },
     expectedDurationMs: 5000,
     timeoutMs: 30000,
@@ -135,6 +135,14 @@ defineSpecialty(
         remaining > 0 && remaining <= 600,
         "TURN credential expiry unbounded",
       );
+      for (const [identity, secret] of [[daemonId, machineSecret + "-wrong"], [daemonId + "-other", machineSecret]]) {
+        const denied = await fetch(hub.origin + "/api/rtc/credentials", {
+          method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + secret },
+          body: JSON.stringify({ daemonId: identity, runId: randomBytes(16).toString("hex") }),
+        });
+        t.assertions.assert(denied.status === 403, "wrong machine identity or secret minted TURN credentials");
+        await denied.body?.cancel();
+      }
       const oversized = await fetch(hub.origin + "/api/rtc/credentials", {
         method: "POST",
         body: "x".repeat(2048),

@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import type { UnitResult } from "../infrastructure/public.ts";
 import { BlockedError, createLease, releaseLease, type CaseMeta, type EnvironmentLease } from "../infrastructure/public.ts";
 
 import { assertions } from "./assertions/index.ts";
@@ -19,6 +21,8 @@ export interface CaseContext {
   note(text: string): void;
   /** @internal */
   takeNote(): string | undefined;
+  stage<T>(name: string, run: () => Promise<T>): Promise<T>;
+  takeStages(): UnitResult["stages"];
   flows: {
     main: {
       startLocalEnvironment: typeof startLocalEnvironment;
@@ -90,6 +94,9 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
       throw new BlockedError(`Browser prerequisite unavailable: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  const stages: NonNullable<UnitResult["stages"]> = (meta.stages ?? []).map(name => ({ name, status: "not-executed" }));
+  const persistStages = () => { if (process.env.TESTCTL_STAGES_PATH) writeFileSync(process.env.TESTCTL_STAGES_PATH, JSON.stringify(stages)); };
+  persistStages();
   const NOTE_BUDGET = 4096;
   const notes: string[] = [];
   let noteBytes = 0;
@@ -104,6 +111,15 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
       const slice = text.length > remaining ? `${text.slice(0, remaining - 1)}…` : text;
       notes.push(slice);
       noteBytes += slice.length;
+    },
+    takeStages() { return stages; },
+    async stage<T>(name: string, run: () => Promise<T>): Promise<T> {
+      const stage = stages.find(s => s.name === name);
+      if (!stage || stage.status !== "not-executed") throw new Error("undeclared or repeated stage: " + name);
+      stage.status = "running"; persistStages(); const start = performance.now();
+      try { const value = await run(); stage.status = "passed"; return value; }
+      catch (error) { stage.status = "failed"; throw error; }
+      finally { stage.durationMs = Math.round(performance.now() - start); persistStages(); }
     },
     takeNote() {
       return notes.length > 0 ? notes.join("\n") : undefined;

@@ -6,8 +6,8 @@ import { defineSpecialty } from "../../framework/public.ts";
 defineSpecialty(
   {
     id: "specialty.contracts.rust-legacy-adapter-kept",
-    title: "The TypeScript rust-legacy adapter remains as unused process code",
-    oracle: "testing/infrastructure/adapters/rust-legacy.ts exists so the frozen crate can be invoked manually, but required gates do not call cargo test",
+    title: "The TypeScript rust-legacy adapter remains available for required frozen cases",
+    oracle: "testing/infrastructure/adapters/rust-legacy.ts exists so required frozen cases use the TypeScript process adapter",
     catches: ["adapter deleted while crate is retained"],
     tags: ["core", "contract"],
     expectedDurationMs: 200,

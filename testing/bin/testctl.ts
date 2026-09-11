@@ -1,10 +1,11 @@
 #!/usr/bin/env node
+import { watchInputs } from "../infrastructure/engine/input-watch.ts";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { catalogDigest, loadCatalog } from "../infrastructure/engine/catalog.ts";
-import { artifactIdentity, repoIdentity, runsIgnored } from "../infrastructure/engine/git.ts";
+import { artifactBundleIdentity, artifactIdentity, repoIdentity, runsIgnored } from "../infrastructure/engine/git.ts";
 import { planCases } from "../infrastructure/engine/planner.ts";
 import { addResult, emptyCounts, rollupStatus } from "../infrastructure/engine/result.ts";
 import {
@@ -130,6 +131,14 @@ async function main(): Promise<number> {
       process.stderr.write("space runs/ is not gitignored\n");
       return 2;
     }
+    const captureInputs = () => ({
+      open: repoIdentity(openRoot),
+      cloud: cloudRoot ? repoIdentity(cloudRoot) : { path: "", sha: "n/a", branch: "n/a", dirty: false, dirtyDigest: "n/a" },
+      artifact: artifactIdentity(openRoot),
+      bundle: artifactBundleIdentity(openRoot, cloudRoot),
+    });
+    const inputsAtStart = captureInputs();
+    const inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle.files.map(f => f.path));
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const plan = planCases(cases, gate, tagsOf(args));
     const store = createRunStore(space, topic);
@@ -233,7 +242,7 @@ async function main(): Promise<number> {
     const endedAt = new Date();
     const counts = emptyCounts();
     for (const result of results) addResult(counts, result);
-    const status = rollupStatus(results);
+    const status = results.length === 0 ? "blocked" : rollupStatus(results);
     const open = repoIdentity(openRoot);
     const cloud = cloudRoot
       ? repoIdentity(cloudRoot)
@@ -259,6 +268,17 @@ async function main(): Promise<number> {
       requiredArtifactHash: process.env.TESTCTL_REQUIRE_ARTIFACT_HASH,
       requiredNotExecuted: requiredCases.filter((id) => !executed.has(id)),
     });
+    const inputObservation = inputWatch.stop();
+    const inputDrift = inputObservation.changed || JSON.stringify(inputsAtStart) !== JSON.stringify({ open, cloud, artifact, bundle: artifactBundleIdentity(openRoot, cloudRoot) });
+    if (tagsOf(args).length > 0 && ["dev", "beta", "stable"].includes(gate)) reasons.push("filtered selection is not the complete release gate");
+    if (!inputObservation.complete) reasons.push("input change observation incomplete");
+    if (inputDrift) reasons.push("source or CLI artifact changed during run");
+    if (results.length === 0) reasons.push("no test cases executed");
+    const leakCount = (key: "processes" | "ports") => results.length > 0 && results.every(r => r.cleanup?.before[key] != null)
+      ? results.reduce((sum, r) => sum + r.cleanup!.before[key]!, 0) : null;
+    const leak = { processes: leakCount("processes"), ports: leakCount("ports") };
+    if (leak.processes === null || leak.ports === null) reasons.push("resource census incomplete");
+    else if (leak.processes > 0 || leak.ports > 0) reasons.push("resource leaks observed");
     const manifest: RunManifest = {
       schema: "genehub.test-run.v1",
       runId: path.basename(store.dir),
@@ -288,7 +308,11 @@ async function main(): Promise<number> {
       governanceDigest: checkGovernance(openRoot, cloudRoot).digest,
       environments,
       resultsPath: path.join(store.dir, "results.ndjson"),
-      leak: { processes: 0, ports: 0 },
+      leak,
+      inputsAtStart,
+      artifactBundle: inputsAtStart.bundle,
+      inputObservation,
+      inputDrift,
     };
     const failed = results.filter((item) => item.status !== "passed" && item.status !== "not-applicable");
     const slowest = [...results].sort((a, b) => b.durationMs - a.durationMs).slice(0, 5);

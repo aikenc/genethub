@@ -6,7 +6,7 @@ defineSpecialty({
   title: "Client consent survives a real long network outage without replaying stale operations",
   oracle: "After more than 90 seconds disconnected the same client/session resumes without approval, deadlines decrease, stale commands do not execute; offline revoke and coordinator restart cannot restore old consent",
   catches: ["heartbeat expiry revokes valid consent", "reconnect extends authorization", "stale queued actions execute on return", "revoked consent resurrects", "missing registration loops forever"],
-  tags: ["page-experience", "client-debug", "client-debug-reconnect"], runner: "playwright", llm: { default: "none" },
+  tags: ["network-risk-v2", "page-experience", "client-debug", "client-debug-reconnect"], runner: "playwright", llm: { default: "none" },
   expectedDurationMs: 140000, timeoutMs: 240000,
   resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 1, browser: 1, pool: "browser" },
   surfaces: ["workbench-ui", "daemon", "cli"], productInterfaces: ["@genehub/workbench", "genet client"],

@@ -11,7 +11,7 @@ defineSpecialty({
   title: "A running shell stream survives a physical socket loss without restarting its process",
   oracle: "The same public DataStream completes with before/after stdout, one exit and one append to a real file after a real WebSocket terminate and fresh admission",
   catches: ["carrier abort destroys handler", "recovery replays business request", "FIN lost across resume", "client opens a replacement event stream"],
-  tags: ["core", "connectivity", "logical-resume"],
+  tags: ["network-risk-v2", "multichannel","core", "connectivity", "logical-resume"],
   llm: { default: "none" },
   expectedDurationMs: 20000, timeoutMs: 90000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0 },

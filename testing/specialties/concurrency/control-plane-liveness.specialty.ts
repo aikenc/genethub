@@ -51,7 +51,7 @@ function livenessCase(
       title,
       oracle,
       catches,
-      tags: ["core", "concurrency", "control-plane-liveness", "fault-injection"],
+      tags: ["network-risk-v2", "core", "concurrency", "control-plane-liveness", "fault-injection"],
       llm: { default: "none" },
       expectedDurationMs: durationMs,
       timeoutMs: durationMs * 4,

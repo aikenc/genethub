@@ -9,7 +9,7 @@ defineSpecialty({
   title:"Installed Skill Python application registers without Node and appears in workspace processes",
   oracle:"Copied installed application carries binary HTTP and WS, appears with a scoped preview entry, rejects unauthorized and stale shutdown, and removes its registration on stop",
   catches:["source-tree-only Skill assets", "Node-only service protocol", "service credentials leaked in process list", "stale run stops a new application", "service shutdown leaves registration"],
-  tags:["core","service-preview","builtin-skills"], llm:{default:"none"},
+  tags: ["network-risk-v2", "core","service-preview","builtin-skills"], llm:{default:"none"},
   expectedDurationMs:12000,timeoutMs:90000,
   resources:{environments:1,cpu:2,memoryMb:768,io:1,browser:0,pool:"standard"},
   surfaces:["daemon","workbench","service-preview"],productInterfaces:["@genehub/workbench/client"],

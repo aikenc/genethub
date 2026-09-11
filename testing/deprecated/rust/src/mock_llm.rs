@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +48,72 @@ pub struct Turn {
     tools: Vec<(String, Value)>,
     prompt_tokens: u64,
     completion_tokens: u64,
+}
+
+/// Deterministic model-and-tool workloads for capacity journeys.
+///
+/// The profile changes both the number and shape of real Agent tool loops and
+/// the SSE cadence. `Normal` is deliberately the default: an accidental run
+/// must not fall back to the old one-read microbenchmark.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MockWorkloadProfile {
+    Fast,
+    #[default]
+    Normal,
+    Deep,
+}
+
+impl MockWorkloadProfile {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Normal => "normal",
+            Self::Deep => "deep",
+        }
+    }
+
+    pub const fn tool_rounds(self) -> usize {
+        match self {
+            Self::Fast => 1,
+            Self::Normal => 4,
+            Self::Deep => 10,
+        }
+    }
+
+    pub const fn tool_calls_per_turn(self) -> usize {
+        match self {
+            Self::Fast => 1,
+            Self::Normal => 6,
+            Self::Deep => 17,
+        }
+    }
+
+    pub const fn model_requests_per_turn(self) -> usize {
+        self.tool_rounds() + 1
+    }
+
+    pub const fn frame_gap(self) -> Duration {
+        match self {
+            Self::Fast => Duration::ZERO,
+            Self::Normal => Duration::from_millis(15),
+            Self::Deep => Duration::from_millis(40),
+        }
+    }
+}
+
+impl FromStr for MockWorkloadProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "fast" => Ok(Self::Fast),
+            "normal" => Ok(Self::Normal),
+            "deep" => Ok(Self::Deep),
+            other => Err(format!(
+                "unknown mock workload {other:?}; expected fast, normal, or deep"
+            )),
+        }
+    }
 }
 
 impl Turn {
@@ -169,8 +236,24 @@ fn split(text: &str) -> Vec<String> {
 #[derive(Default)]
 struct Inner {
     script: VecDeque<Scripted>,
+    repeated: Option<Repeated>,
     /// Every request body received, for assertions about what we sent the model.
     requests: Vec<Value>,
+    request_body_bytes: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum Repeated {
+    ToolThenText {
+        name: String,
+        arguments: Value,
+        text: String,
+    },
+    SlowText {
+        text: String,
+        gap: Duration,
+    },
+    Workload(MockWorkloadProfile),
 }
 
 pub struct MockLlm {
@@ -241,6 +324,42 @@ impl MockLlm {
         self.push(Scripted::Slow { turn, gap }).await;
     }
 
+    /// Answers any number of concurrent, independent agent turns with the
+    /// same tool-then-text flow. A FIFO script cannot model this honestly:
+    /// one fast agent's follow-up may arrive before another agent's first
+    /// request. The request history decides which half of the flow applies.
+    pub async fn repeat_tool_then_text(
+        &self,
+        name: impl Into<String>,
+        arguments: Value,
+        text: impl Into<String>,
+    ) {
+        self.inner.lock().await.repeated = Some(Repeated::ToolThenText {
+            name: name.into(),
+            arguments,
+            text: text.into(),
+        });
+    }
+
+    /// Keeps one or more model requests in flight for an isolation probe.
+    pub async fn repeat_slow_text(&self, text: impl Into<String>, gap: Duration) {
+        self.inner.lock().await.repeated = Some(Repeated::SlowText {
+            text: text.into(),
+            gap,
+        });
+    }
+
+    /// Replays a concurrency-safe coding workload for any number of Agents.
+    /// Progress is derived from each request's conversation after its latest
+    /// user message, so interleaved requests never share mutable round state.
+    pub async fn repeat_workload(&self, profile: MockWorkloadProfile) {
+        self.inner.lock().await.repeated = Some(Repeated::Workload(profile));
+    }
+
+    pub async fn clear_repeated(&self) {
+        self.inner.lock().await.repeated = None;
+    }
+
     /// What the agent sent the model, in order.
     pub async fn requests(&self) -> Vec<Value> {
         self.inner.lock().await.requests.clone()
@@ -248,6 +367,12 @@ impl MockLlm {
 
     pub async fn request_count(&self) -> usize {
         self.inner.lock().await.requests.len()
+    }
+
+    /// Compact-JSON request sizes approximate the real provider body emitted
+    /// by the Agent and make accumulated tool history visible in load reports.
+    pub async fn request_body_bytes(&self) -> Vec<usize> {
+        self.inner.lock().await.request_body_bytes.clone()
     }
 
     pub fn shutdown(self) {
@@ -276,8 +401,14 @@ async fn completions(
 
     let scripted = {
         let mut guard = inner.lock().await;
-        guard.requests.push(body);
-        guard.script.pop_front()
+        guard
+            .request_body_bytes
+            .push(serde_json::to_vec(&body).map_or(0, |bytes| bytes.len()));
+        guard.requests.push(body.clone());
+        guard
+            .script
+            .pop_front()
+            .or_else(|| guard.repeated.as_ref().map(|plan| repeated(plan, &body)))
     };
 
     let scripted = match scripted {
@@ -329,6 +460,174 @@ async fn completions(
             lines.push("data: [DONE]\n\n".to_string());
             trickle(lines, gap)
         }
+    }
+}
+
+fn repeated(plan: &Repeated, body: &Value) -> Scripted {
+    match plan {
+        Repeated::ToolThenText {
+            name,
+            arguments,
+            text,
+        } => {
+            let has_tool_result = body["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .is_some_and(|message| message["role"] == "tool");
+            if has_tool_result {
+                Scripted::Reply(Turn::text(text.clone()))
+            } else {
+                Scripted::Reply(Turn::tool(name.clone(), arguments.clone()))
+            }
+        }
+        Repeated::SlowText { text, gap } => Scripted::Slow {
+            turn: Turn::text(text.clone()),
+            gap: *gap,
+        },
+        Repeated::Workload(profile) => workload(*profile, body),
+    }
+}
+
+fn workload(profile: MockWorkloadProfile, body: &Value) -> Scripted {
+    let round = completed_tool_rounds(body);
+    let rounds = workload_rounds(profile);
+    let turn = if let Some(calls) = rounds.get(round) {
+        let mut calls = calls.iter();
+        let (name, arguments) = calls
+            .next()
+            .expect("every workload round has at least one tool");
+        let mut turn = Turn::tool(*name, arguments.clone());
+        for (name, arguments) in calls {
+            turn = turn.and_tool(*name, arguments.clone());
+        }
+        if profile == MockWorkloadProfile::Fast {
+            turn
+        } else {
+            turn.thinking(format!(
+                "Inspecting the workspace: {} round {}.",
+                profile.name(),
+                round + 1
+            ))
+        }
+    } else {
+        let turn = Turn::text(format!(
+            "{} workspace investigation complete.",
+            profile.name()
+        ));
+        if profile == MockWorkloadProfile::Deep {
+            turn.thinking("Cross-checking the accumulated evidence before reporting.")
+        } else {
+            turn
+        }
+    };
+    if profile.frame_gap().is_zero() {
+        Scripted::Reply(turn)
+    } else {
+        Scripted::Slow {
+            turn,
+            gap: profile.frame_gap(),
+        }
+    }
+}
+
+fn completed_tool_rounds(body: &Value) -> usize {
+    let Some(messages) = body["messages"].as_array() else {
+        return 0;
+    };
+    let after_user = messages
+        .iter()
+        .rposition(|message| message["role"] == "user")
+        .map_or(messages.as_slice(), |index| &messages[index + 1..]);
+    after_user
+        .iter()
+        .filter(|message| {
+            message["role"] == "assistant"
+                && message["tool_calls"]
+                    .as_array()
+                    .is_some_and(|calls| !calls.is_empty())
+        })
+        .count()
+}
+
+fn workload_rounds(profile: MockWorkloadProfile) -> Vec<Vec<(&'static str, Value)>> {
+    let list_and_find = vec![
+        ("ls", json!({"path": ""})),
+        ("find", json!({"pattern": ".rs", "path": "", "limit": 40})),
+    ];
+    match profile {
+        MockWorkloadProfile::Fast => vec![vec![("read", json!({"path": "task.txt"}))]],
+        MockWorkloadProfile::Normal => vec![
+            list_and_find,
+            vec![(
+                "grep",
+                json!({"pattern": "GENEHUB_LOAD_MARKER", "path": "src", "limit": 40}),
+            )],
+            vec![
+                ("read", json!({"path": "README.md"})),
+                ("read", json!({"path": "src/lib.rs"})),
+            ],
+            vec![(
+                "bash",
+                json!({"command": "wc -l README.md src/lib.rs src/main.rs tests/workflow.rs"}),
+            )],
+        ],
+        MockWorkloadProfile::Deep => vec![
+            list_and_find,
+            vec![
+                (
+                    "grep",
+                    json!({"pattern": "GENEHUB_LOAD_MARKER", "path": "src", "limit": 100}),
+                ),
+                ("grep", json!({"pattern": "TODO", "path": "", "limit": 100})),
+            ],
+            vec![
+                ("read", json!({"path": "README.md"})),
+                ("read", json!({"path": "task.txt"})),
+            ],
+            vec![
+                ("read", json!({"path": "src/lib.rs"})),
+                ("read", json!({"path": "src/main.rs"})),
+            ],
+            vec![
+                (
+                    "grep",
+                    json!({"pattern": "#[test]", "path": "tests", "limit": 20}),
+                ),
+                (
+                    "grep",
+                    json!({"pattern": "architecture", "path": "docs", "limit": 20}),
+                ),
+            ],
+            vec![
+                (
+                    "bash",
+                    json!({"command": "wc -l README.md src/lib.rs src/main.rs tests/workflow.rs docs/design.md"}),
+                ),
+                (
+                    "bash",
+                    json!({"command": "find src tests docs -type f -print | sort"}),
+                ),
+            ],
+            vec![(
+                "grep",
+                json!({"pattern": "pub fn", "path": "src", "limit": 100}),
+            )],
+            vec![(
+                "grep",
+                json!({"pattern": "evidence-", "path": "data/deep-context.txt", "limit": 40}),
+            )],
+            vec![(
+                "bash",
+                json!({"command": "cksum data/deep-context.txt && head -n 20 data/deep-context.txt"}),
+            )],
+            vec![
+                ("find", json!({"pattern": ".md", "path": "", "limit": 40})),
+                (
+                    "grep",
+                    json!({"pattern": "architecture", "path": "docs", "limit": 40}),
+                ),
+            ],
+        ],
     }
 }
 
@@ -454,6 +753,68 @@ mod tests {
         assert!(usage["total_tokens"].as_u64().unwrap() > 0);
     }
 
+    #[test]
+    fn workload_profiles_are_named_bounded_and_default_to_normal() {
+        assert_eq!(MockWorkloadProfile::default(), MockWorkloadProfile::Normal);
+        for (name, profile, rounds, calls, requests, gap) in [
+            ("fast", MockWorkloadProfile::Fast, 1, 1, 2, 0),
+            ("normal", MockWorkloadProfile::Normal, 4, 6, 5, 15),
+            ("deep", MockWorkloadProfile::Deep, 10, 17, 11, 40),
+        ] {
+            assert_eq!(name.parse::<MockWorkloadProfile>().unwrap(), profile);
+            assert_eq!(profile.name(), name);
+            assert_eq!(profile.tool_rounds(), rounds);
+            assert_eq!(profile.tool_calls_per_turn(), calls);
+            assert_eq!(profile.model_requests_per_turn(), requests);
+            assert_eq!(profile.frame_gap(), Duration::from_millis(gap));
+            assert_eq!(
+                workload_rounds(profile).iter().map(Vec::len).sum::<usize>(),
+                calls
+            );
+        }
+        assert!("slow".parse::<MockWorkloadProfile>().is_err());
+    }
+
+    #[test]
+    fn a_repeated_workload_advances_from_each_requests_own_history() {
+        let first = scripted_turn(workload(
+            MockWorkloadProfile::Normal,
+            &json!({"messages": [{"role": "user", "content": "inspect"}]}),
+        ));
+        assert_eq!(first.tools.len(), 2);
+        assert_eq!(first.tools[0].0, "ls");
+
+        let second = scripted_turn(workload(
+            MockWorkloadProfile::Normal,
+            &json!({"messages": [
+                {"role": "user", "content": "inspect"},
+                {"role": "assistant", "tool_calls": [{"id": "a"}]},
+                {"role": "tool", "tool_call_id": "a", "content": "result"}
+            ]}),
+        ));
+        assert_eq!(second.tools.len(), 1);
+        assert_eq!(second.tools[0].0, "grep");
+
+        let reset = scripted_turn(workload(
+            MockWorkloadProfile::Normal,
+            &json!({"messages": [
+                {"role": "user", "content": "old"},
+                {"role": "assistant", "tool_calls": [{"id": "old"}]},
+                {"role": "tool", "tool_call_id": "old", "content": "result"},
+                {"role": "user", "content": "new"}
+            ]}),
+        ));
+        assert_eq!(reset.tools.len(), 2);
+        assert_eq!(reset.tools[0].0, "ls");
+    }
+
+    fn scripted_turn(scripted: Scripted) -> Turn {
+        match scripted {
+            Scripted::Reply(turn) | Scripted::Slow { turn, .. } => turn,
+            other => panic!("workload returned {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn requests_are_recorded_for_assertions() {
         let mock = MockLlm::start().await.unwrap();
@@ -463,6 +824,12 @@ mod tests {
         assert!(response.contains("chatcmpl-mock"));
         assert_eq!(mock.request_count().await, 1);
         assert_eq!(mock.requests().await[0]["model"], "m");
+        assert_eq!(
+            mock.request_body_bytes().await,
+            vec![serde_json::to_vec(&json!({"model": "m", "messages": []}))
+                .unwrap()
+                .len()]
+        );
         mock.shutdown();
     }
 

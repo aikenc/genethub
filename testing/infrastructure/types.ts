@@ -18,7 +18,8 @@ export type GateName =
   | "infra-compact"
   | "infra-parallel"
   | "specialty:page-experience"
-  | "specialty:contracts";
+  | "specialty:contracts"
+  | "specialty:multichannel";
 
 export interface CaseResources {
   environments: number;
@@ -58,6 +59,7 @@ export interface CaseMeta {
   requiredArtifacts?: string[];
   doubleExceptions?: DoubleException[];
   retention?: boolean;
+  stages?: string[];
   file: string;
 }
 
@@ -84,6 +86,8 @@ export interface UnitResult {
   blockedReason?: string;
   /** Bounded failure-only evidence. Kept out of results.ndjson and redacted by the run store. */
   diagnostic?: string;
+  stages?: Array<{ name: string; status: "not-executed" | "running" | "passed" | "failed"; durationMs?: number }>;
+  cleanup?: { before: { processes: number | null; ports: number | null }; after: { processes: number | null; ports: number | null }; scope: string };
 }
 
 export interface RepoIdentity {
@@ -131,7 +135,11 @@ export interface RunManifest {
   governanceDigest?: string;
   environments: number;
   resultsPath: string;
-  leak: { processes: number; ports: number };
+  leak: { processes: number | null; ports: number | null };
+  inputsAtStart?: { open: RepoIdentity; cloud: RepoIdentity; artifact: ArtifactIdentity };
+  inputDrift?: boolean;
+  inputObservation?: { changed: boolean; complete: boolean };
+  artifactBundle?: { files: Array<{ path: string; hash: string }>; hash: string; runtime: { node: string; platform: string; arch: string } };
 }
 
 export interface CliOptions {

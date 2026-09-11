@@ -8,6 +8,11 @@ export function selectForGate(
   if (tags.length > 0 && !tags.some((tag) => item.tags.includes(tag))) {
     return { include: false, reason: "tag filter" };
   }
+  if (gate === "specialty:multichannel") {
+    return item.tags.includes("multichannel")
+      ? { include: true, reason: "public business multichannel contract" }
+      : { include: false, reason: "not multichannel" };
+  }
   if (gate === "infra-compact") {
     return item.tags.includes("infra-compact")
       ? { include: true, reason: "infra compact" }
@@ -34,7 +39,7 @@ export function selectForGate(
       : { include: false, reason: "playwright not in this gate" };
   }
   if (item.runner === "rust-legacy") {
-    return { include: false, reason: "frozen crate retained, rust-legacy not in required gates" };
+    return { include: true, reason: "L13: frozen legacy required until verified parity" };
   }
   if (item.tags.includes("v1-wasm")) {
     return { include: false, reason: "v1 signed-wasm role, not on this tree" };

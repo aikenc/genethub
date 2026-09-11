@@ -24,7 +24,7 @@ function contractCase(
     title: name.replaceAll("-", " "),
     oracle,
     catches,
-    tags: ["core", "agent", "session", "chat-lifecycle", "fault-injection", name],
+    tags: ["network-risk-v2", "core", "agent", "session", "chat-lifecycle", "fault-injection", name],
     llm: { default: "none" },
     expectedDurationMs: 35_000,
     timeoutMs: 100_000,
@@ -84,7 +84,7 @@ contractCase(
       const current = await next.client.call({ type: "session.get", payload: { sessionId: session.sessionId } });
       t.assertions.assert(current?.type === "snapshot" && current.data.seq > oldSeq, "the new daemon did not overlap the old cursor");
       release();
-      await t.tools.waitUntil(() => reset !== undefined, 20_000);
+      await t.tools.waitUntil(() => reset !== undefined, 20_000).catch(() => { throw new Error("original subscriber never resynced after new daemon: state=" + observer.connectionState); });
       t.assertions.assert(reset === true && recovered.includes("Disconnected execution 1."),
         `overlapping daemon sequences were treated as continuous: reset=${reset}`);
       await t.flows.main.sendPrompt(next.client, session.sessionId, "Live after the reset.");
@@ -250,7 +250,7 @@ contractCase(
     await t.tools.waitUntil(() => session.client.connectionState !== "ready", 5_000);
     const started = runGenet(session.daemon.genet, ["daemon", "start"], session.daemon.env);
     t.assertions.assert(started.code === 0, `restart failed: ${started.stderr}`);
-    await t.tools.waitUntil(() => session.client.connectionState === "ready", 30_000);
+    await t.tools.waitUntil(() => session.client.connectionState === "ready", 30_000).catch(() => { throw new Error("original business Client did not recover after daemon restart: state=" + session.client.connectionState); });
     await t.flows.main.sendPrompt(session.client, session.sessionId, "After restart, on the same Client.");
     await t.tools.waitUntil(() => completed(session) === 3, 15_000)
       .catch(() => { throw new Error(`same Client lost completion after restart: completions=${completed(session)}, resyncs=${session.resyncs()}`); });

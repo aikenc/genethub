@@ -65,7 +65,7 @@ function recoveryCase(
       title,
       oracle,
       catches,
-      tags: ["core", "daemon", "recovery-depth"],
+      tags: ["network-risk-v2", "core", "daemon", "recovery-depth"],
       llm: { default: needsMockLlm ? "mock" : "none" },
       expectedDurationMs,
       timeoutMs: 120_000,

@@ -92,7 +92,12 @@ defineSpecialty(
   },
   async (t) => {
     const workflow = readOpen(t.openRoot, ".github/workflows/release.yml");
-    t.assertions.assert(workflow.includes("dist/genehub_guest.wasm"), "signed component not packed");
+    t.assertions.assert(workflow.split("\n  signed_component:\n").length === 2, "component must be built once");
+    t.assertions.assert(workflow.includes('"$host_bin" pack "$raw" dist/genehub_guest.wasm "$CHANNEL" "$version"'), "signed component pack missing");
+    t.assertions.assert(workflow.includes('"$host_bin" inspect dist/genehub_guest.wasm'), "packed identity inspection missing");
+    t.assertions.assert(workflow.includes("identity.releaseVersion !== process.env.VERSION"), "release version not checked");
+    t.assertions.assert(workflow.includes('cmp "$GENEHUB_COMPONENT_WASM" apps/desktop/src-tauri/bin/genehub_guest.wasm'), "desktop byte identity not checked");
+    t.assertions.assert(workflow.includes("cp component/genehub_guest.wasm dist/genehub_guest.wasm"), "release did not copy shared component");
     t.assertions.assert(
       !workflow.includes("COMPONENT_SIGNING_KEY"),
       "external signing keys are removed until the stable line graduates",
@@ -124,28 +129,21 @@ defineSpecialty(
     title: "Native runtime cannot take back business wire ownership",
     oracle: "native crates do not import Request/Reply/ServerFrame",
     catches: ["daemon owning the business codec"],
-    tags: ["core", "contract", "parity", "v1-wasm"],
+    tags: ["core", "contract", "parity"],
     expectedDurationMs: 800,
     timeoutMs: 15_000,
     surfaces: ["release"],
   },
   async (t) => {
     const forbidden = [
-      "genehub_app_proto::Request",
-      "genehub_app_proto::Reply",
-      "genehub_app_proto::ServerFrame",
-      "use genehub_app_proto::{Request",
-      "use genehub_app_proto::{Reply",
-      "use genehub_app_proto::{ServerFrame",
+      "genehub_proto::Request",
+      "genehub_proto::Reply",
+      "genehub_proto::ServerFrame",
+      "use genehub_proto::{Request",
+      "use genehub_proto::{Reply",
+      "use genehub_proto::{ServerFrame",
     ];
-    const roots = [
-      "apps/cli/src",
-      "apps/daemon/src",
-      "packages/platform-abi/src",
-      "packages/platform-native/src",
-      "packages/platform-system/src",
-      "apps/desktop/src-tauri/src",
-    ];
+    const roots = ["apps/host/src", "apps/cli/src", "packages/frontdoor/src"];
     for (const root of roots) {
       for (const relative of rustFiles(t.openRoot, root)) {
         const body = readOpen(t.openRoot, relative);
@@ -154,7 +152,11 @@ defineSpecialty(
         }
       }
     }
-    const dataPlane = readOpen(t.openRoot, "packages/app-core/src/dataplane.rs");
-    t.assertions.assert(dataPlane.includes("PeerHello") && dataPlane.includes("ServerFrame"), "app-core lost the wire");
+    const guest = readOpen(t.openRoot, "apps/guest/Cargo.toml");
+    t.assertions.assert(guest.includes("genet-daemon"), "guest lost business runtime");
+    const native = readOpen(t.openRoot, "apps/host/Cargo.toml");
+    t.assertions.assert(!/^(genehub-proto|genet-daemon)\s*=/m.test(native), "thin native host linked business schema/runtime");
+    const dispatcher = readOpen(t.openRoot, "apps/daemon/src/dataplane/endpoint.rs");
+    t.assertions.assert(dispatcher.includes("Request") && dispatcher.includes("Reply"), "guest lost business dispatcher");
   },
 );

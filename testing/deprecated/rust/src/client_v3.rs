@@ -9,7 +9,7 @@ use genehub_proto::{
 };
 use genet_daemon::dataplane::client::ClientEndpoint;
 use serde_json::Value;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
 pub const WAIT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -20,6 +20,7 @@ pub struct Client {
     pub events: Mutex<mpsc::UnboundedReceiver<SequencedEvent>>,
     pub pty: Mutex<mpsc::UnboundedReceiver<(String, String)>>,
     pub notices: Mutex<mpsc::UnboundedReceiver<String>>,
+    read_pause: watch::Sender<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -84,8 +85,19 @@ impl Client {
                 }
             }
         });
+        let (read_pause, mut read_paused) = watch::channel(false);
         let reader = tokio::spawn(async move {
-            while let Some(Ok(message)) = source.next().await {
+            loop {
+                if *read_paused.borrow() {
+                    if read_paused.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                let message = tokio::select! {
+                    changed = read_paused.changed() => { if changed.is_err() { break; } continue; }
+                    message = source.next() => match message { Some(Ok(message)) => message, _ => break },
+                };
                 match message {
                     Message::Binary(record)
                         if record.len() <= genehub_proto::MAX_DATA_FRAME_BYTES =>
@@ -101,7 +113,9 @@ impl Client {
         });
         let (endpoint, endpoint_task) = ClientEndpoint::start(key, carrier);
         let endpoint_monitor = tokio::spawn(async move {
-            let _ = endpoint_task.await;
+            if let Ok(Err(error)) = endpoint_task.await {
+                eprintln!("legacy public endpoint terminated: {error:#}");
+            }
         });
 
         let (events_rx, pty_rx, notice_rx, event_reader) = Self::read_events(&endpoint).await?;
@@ -111,8 +125,16 @@ impl Client {
             events: Mutex::new(events_rx),
             pty: Mutex::new(pty_rx),
             notices: Mutex::new(notice_rx),
+            read_pause,
             tasks: vec![writer, reader, endpoint_monitor, event_reader],
         })
+    }
+
+    pub fn pause_inbound(&self) {
+        self.read_pause.send_replace(true);
+    }
+    pub fn resume_inbound(&self) {
+        self.read_pause.send_replace(false);
     }
 
     #[allow(clippy::type_complexity)]
@@ -291,8 +313,19 @@ impl Client {
                 }
             }
         });
+        let (read_pause, mut read_paused) = watch::channel(false);
         let downlink = tokio::spawn(async move {
-            while let Some(record) = from_daemon.recv().await {
+            loop {
+                if *read_paused.borrow() {
+                    if read_paused.changed().await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                let record = tokio::select! {
+                    changed = read_paused.changed() => { if changed.is_err() { break; } continue; }
+                    record = from_daemon.recv() => match record { Some(record) => record, None => break },
+                };
                 if to_daemon.send(record).await.is_err() {
                     return;
                 }
@@ -300,7 +333,9 @@ impl Client {
         });
         let (endpoint, endpoint_task) = ClientEndpoint::start(key, client_carrier);
         let endpoint_monitor = tokio::spawn(async move {
-            let _ = endpoint_task.await;
+            if let Ok(Err(error)) = endpoint_task.await {
+                eprintln!("legacy public endpoint terminated: {error:#}");
+            }
         });
         let (events_rx, pty_rx, notice_rx, event_reader) = Self::read_events(&endpoint).await?;
         Ok(Self {
@@ -308,6 +343,7 @@ impl Client {
             events: Mutex::new(events_rx),
             pty: Mutex::new(pty_rx),
             notices: Mutex::new(notice_rx),
+            read_pause,
             tasks: vec![peer, uplink, downlink, endpoint_monitor, event_reader],
         })
     }
@@ -465,10 +501,10 @@ impl Client {
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Some(event)) if event.session_id == session_id => match event.event {
                     SessionEvent::PermissionRequested { request } => return Ok(request.id),
-                    SessionEvent::TurnCompleted { .. }
+                    terminal @ (SessionEvent::TurnCompleted { .. }
                     | SessionEvent::TurnFailed { .. }
-                    | SessionEvent::TurnCanceled { .. } => {
-                        bail!("the turn ended without ever asking permission")
+                    | SessionEvent::TurnCanceled { .. }) => {
+                        bail!("the turn ended without ever asking permission: {terminal:?}")
                     }
                     _ => continue,
                 },

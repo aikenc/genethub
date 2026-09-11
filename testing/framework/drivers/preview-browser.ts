@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { writeFile, mkdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import type { Page } from "playwright";
 import type { EnvironmentLease } from "../../infrastructure/public.ts";
 import type { DaemonEndpoint } from "./daemon.ts";
@@ -44,6 +44,7 @@ export async function openPreviewBrowser(input: {
     join(root, "consumer.tsx"),
     `import React from 'react';
 import {createRoot} from 'react-dom/client';
+import '@genehub/workbench/theme.css';
 import {App,AssetPreviewPage,Client,browserHost,useWorkbench,configureClientDebugHost,openClientDebug} from '@genehub/workbench';
 const input=await window.previewInput();
 if(input.surface==='client-debug'){
@@ -51,11 +52,10 @@ if(input.surface==='client-debug'){
  document.getElementById('root').innerHTML='<h1>Client debug consumer</h1><input aria-label="Debug input"><p id="marker">original</p>';
  openClientDebug();
 }else if(input.surface==='processes'){
- const host={...browserHost(),endpoint:async()=>({...input.endpoint,via:'lan'})};
+ const host={...browserHost(),endpoint:async()=>({...((await window.previewInput()).endpoint),via:'loopback'})};
  createRoot(document.getElementById('root')).render(<App host={host}/>);
- while(useWorkbench.getState().connection!=='ready'||!useWorkbench.getState().workspaces.length)await new Promise(r=>setTimeout(r,50));
- await useWorkbench.getState().selectWorkspace(input.workspaceId);
- useWorkbench.getState().openTab('processes');
+ while(useWorkbench.getState().connection!=='ready'||useWorkbench.getState().activeWorkspaceId!==input.workspaceId||(!useWorkbench.getState().draft&&!useWorkbench.getState().activeSessionId))await new Promise(r=>setTimeout(r,50));
+ window.previewAppReady=true;
 }else{
  const client=new Client({...input.endpoint,rtcEnabled:false});client.connect();
  while(client.connectionState!=='ready'){document.getElementById('root').textContent='Client: '+client.connectionState+' '+(client.failure?.message??'');if(client.connectionState==='closed')throw new Error('Client closed');await new Promise(r=>setTimeout(r,50));}
@@ -63,15 +63,22 @@ if(input.surface==='client-debug'){
 }
 `,
   );
+  const tailwindPath = testingRequire.resolve("@genehub/workbench/tailwind");
+  const tailwind = (await import(pathToFileURL(tailwindPath).href)).default;
   const server = await vite.createServer({
     configFile: false,
     root,
     logLevel: "error",
     esbuild: { jsx: "automatic" },
+    css: { postcss: { plugins: [require("tailwindcss")({ ...tailwind, content: [join(dirname(tailwindPath), "src/**/*.{ts,tsx}"), join(root, "*.tsx")] }), require("autoprefixer")()] } },
     resolve: {
       alias: [
         {
-          find: "@genehub/workbench",
+          find: "@genehub/workbench/theme.css",
+          replacement: testingRequire.resolve("@genehub/workbench/theme.css"),
+        },
+        {
+          find: /^@genehub\/workbench$/,
           replacement: testingRequire.resolve("@genehub/workbench"),
         },
         {
@@ -112,5 +119,15 @@ if(input.surface==='client-debug'){
     surface: input.surface,
   }));
   await input.page.goto(server.resolvedUrls.local[0]);
+  if (input.surface === "processes") {
+    await input.page.waitForFunction(() => (window as any).previewAppReady === true, null, { timeout: 30000 });
+    const menu = input.page.getByRole("button", { name: "此电脑的后台进程", exact: true });
+    if (!(await menu.isVisible())) {
+      const phoneTools = input.page.getByRole("button", { name: "工具", exact: true });
+      if (await phoneTools.isVisible()) await phoneTools.click();
+      else await input.page.getByRole("button", { name: "打开右侧工具", exact: true }).click();
+    }
+    await menu.click();
+  }
   return { errors, close: () => server.close() };
 }

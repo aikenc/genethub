@@ -20,7 +20,7 @@ const POOL_WEIGHT: Record<ResourcePool, Partial<TokenBudget>> = {
   standard: {},
   browser: {},
   heavy: { cpu: 4 },
-  exclusive: { environments: 99 },
+  exclusive: {},
   "real-llm": {},
 };
 
@@ -81,8 +81,14 @@ function give(available: TokenBudget, need: TokenBudget): void {
   available.browser += need.browser;
 }
 
+function canClaim(state: SchedulerState, unit: WorkUnit): boolean {
+  if ([...state.running.values()].some((running) => running.meta.resources.pool === "exclusive")) return false;
+  if (unit.meta.resources.pool === "exclusive" && state.running.size > 0) return false;
+  return fits(state.available, cost(unit));
+}
+
 export function hasClaimable(state: SchedulerState): boolean {
-  return state.pending.some((unit) => fits(state.available, cost(unit)));
+  return state.pending.some((unit) => canClaim(state, unit));
 }
 
 export function claimNext(state: SchedulerState): WorkUnit | undefined {
@@ -90,7 +96,7 @@ export function claimNext(state: SchedulerState): WorkUnit | undefined {
   let longest = -1;
   for (let i = 0; i < state.pending.length; i += 1) {
     const unit = state.pending[i];
-    if (!unit || !fits(state.available, cost(unit))) continue;
+    if (!unit || !canClaim(state, unit)) continue;
     const expected = state.history.get(unit.caseId) ?? unit.meta.expectedDurationMs;
     if (expected > longest) {
       longest = expected;

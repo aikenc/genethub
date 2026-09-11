@@ -196,7 +196,7 @@ async fn a_command_run_for_someone_else_is_confined_or_refused_but_never_neither
 async fn a_confined_command_still_works_inside_the_workspace() {
     let journey = Journey::start().await.expect("journey starts");
     if !genet_daemon::isolation::report().enforced {
-        eprintln!("skipping: this machine cannot confine a process");
+        eprintln!("TESTCTL_BLOCKED: this machine cannot confine a process");
         return;
     }
     std::fs::write(
@@ -235,7 +235,7 @@ async fn a_confined_command_still_works_inside_the_workspace() {
 async fn a_confined_command_is_told_it_is_confined_and_where_it_may_go() {
     let journey = Journey::start().await.expect("journey starts");
     if !genet_daemon::isolation::report().enforced {
-        eprintln!("skipping: this machine cannot confine a process");
+        eprintln!("TESTCTL_BLOCKED: this machine cannot confine a process");
         return;
     }
 
@@ -334,7 +334,7 @@ async fn every_folder_of_a_multi_root_workspace_is_inside_the_confinement() {
     // the report would still say "confined".
     let journey = Journey::start().await.expect("journey starts");
     if !genet_daemon::isolation::report().enforced {
-        eprintln!("skipping: this machine cannot confine a process");
+        eprintln!("TESTCTL_BLOCKED: this machine cannot confine a process");
         return;
     }
     let home = std::path::Path::new(&journey.workspace.root)

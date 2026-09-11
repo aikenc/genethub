@@ -19,3 +19,7 @@ tempfile = "3"
 tokio.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 uuid.workspace = true
+
+# Capture bounded failure diagnostics from the real restored concurrency run.
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

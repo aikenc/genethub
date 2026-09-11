@@ -18,7 +18,7 @@ defineSpecialty(
       "WebSocket loses binary message boundaries",
       "stopped runs remain discoverable",
     ],
-    tags: ["core", "service-preview"],
+    tags: ["network-risk-v2", "core", "service-preview"],
     llm: { default: "none" },
     expectedDurationMs: 20000,
     timeoutMs: 120000,
@@ -153,8 +153,8 @@ defineSpecialty(
         chunks++;
       }
       t.assertions.assert(
-        chunks >= 2 && text.includes("data:"),
-        "SSE did not stream",
+        chunks >= 2 && text === Array.from({ length: 5 }, (_, n) => "data: " + (n + 1) + "\n\n").join(""),
+        "SSE lost, duplicated or reordered a progress event",
       );
       const received: Uint8Array[] = [];
       const socket = await active.websocket("/api/demo/ws", async (packet) => {

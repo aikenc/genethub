@@ -37,7 +37,7 @@ function fabricMeta(id: string, title: string, oracle: string, catches: string[]
     title,
     oracle,
     catches,
-    tags: ["core", "wasm-guest", "v2-shell", "connectivity"],
+    tags: ["network-risk-v2", "core", "wasm-guest", "v2-shell", "connectivity"],
     llm: { default: "none" as const },
     expectedDurationMs: 25_000,
     timeoutMs: 150_000,

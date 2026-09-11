@@ -251,6 +251,29 @@ impl Journey {
         })
     }
 
+    pub async fn additional_workspace(&self, name: &str) -> Result<WorkspaceInfo> {
+        if name.is_empty()
+            || name.len() > 64
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            anyhow::bail!("invalid journey workspace name {name:?}");
+        }
+        let root = self._home.path().join("workspaces").join(name);
+        std::fs::create_dir_all(&root)?;
+        match self
+            .client
+            .call(Request::WorkspaceOpen {
+                root: root.display().to_string(),
+            })
+            .await?
+        {
+            Reply::Workspace(workspace) => Ok(workspace),
+            other => anyhow::bail!("expected a workspace, got {other:?}"),
+        }
+    }
+
     pub fn project(&self) -> &Path {
         &self.project
     }
@@ -538,10 +561,19 @@ fn real_api_key() -> Result<String> {
             return Ok(key);
         }
     }
+    // Same existing host provider configuration used by TS fixtures; never emit its contents.
+    if let Ok(home) = std::env::var("TESTCTL_HOST_HOME") {
+        let config = PathBuf::from(home).join(".local/share/GeneHub-beta/config.json");
+        if let Ok(bytes) = std::fs::read(config) {
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(key) = value.pointer("/agents/providers/deepseek/apiKey").and_then(|v| v.as_str()).filter(|key| !key.is_empty()) {
+                    return Ok(key.to_owned());
+                }
+            }
+        }
+    }
     let env_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .context("no repository root")?
-        .join(".env");
+        .join("../../../.env");
     let contents = std::fs::read_to_string(&env_file).with_context(|| {
         format!(
             "JOURNEY_LLM=real needs DEEPSEEK_API_KEY, and {} could not be read",
@@ -566,7 +598,7 @@ macro_rules! real_only {
     ($journey:expr) => {
         if $journey.mode.is_mock() {
             eprintln!(
-                "skipping {}: only a real provider can reject us for real",
+                "TESTCTL_BLOCKED: {}: only a real provider can reject us for real",
                 module_path!()
             );
             $journey.finish().await;
@@ -584,7 +616,7 @@ macro_rules! mock_only {
     ($journey:expr) => {
         if !$journey.mode.is_mock() {
             eprintln!(
-                "skipping {}: needs fault injection, which only the mock can do",
+                "TESTCTL_BLOCKED: {}: needs fault injection, which only the mock can do",
                 module_path!()
             );
             $journey.finish().await;

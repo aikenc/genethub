@@ -9,7 +9,7 @@ defineSpecialty(
     title: "One case cannot see another case writable paths",
     oracle: "lease home, data, and workspace are unique and marker files stay inside the lease",
     catches: ["shared home", "global GENEHUB_DATA_DIR", "process leak from prior case"],
-    tags: ["core", "concurrency"],
+    tags: ["network-risk-v2", "core", "concurrency"],
     expectedDurationMs: 800,
     timeoutMs: 15_000,
     surfaces: ["testctl"],

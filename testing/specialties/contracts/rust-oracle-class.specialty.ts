@@ -63,8 +63,8 @@ defineSpecialty(
       "ts-owned row without tsId",
     );
     t.assertions.assert(
-      parity.cases.every((item) => item.legacyExecution === "stopped"),
-      "rust-legacy execution is still required for some rows",
+      parity.cases.every((item) => item.legacyExecution === "required"),
+      "frozen legacy execution must remain required pending verified parity",
     );
     t.assertions.assert(
       Boolean(parity.parityEvidence?.tsCore && parity.parityEvidence.rustLegacy && parity.parityEvidence.openSha && parity.parityEvidence.artifact),

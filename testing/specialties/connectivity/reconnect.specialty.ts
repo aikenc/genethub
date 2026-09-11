@@ -4,9 +4,9 @@ defineSpecialty(
   {
     id: "specialty.connectivity.reconnect",
     title: "CLI admission can restart a daemon and list workspaces again",
-    oracle: "workspace.list succeeds before and after genet daemon stop/start",
+    oracle: "A registered and renamed workspace retains its exact identity and name across daemon stop/start; new admission has a different logical identity",
     catches: ["stale endpoint", "shared data dir"],
-    tags: ["core", "connectivity"],
+    tags: ["network-risk-v2", "core", "connectivity"],
     llm: { default: "none" },
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,

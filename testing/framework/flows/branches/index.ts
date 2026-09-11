@@ -24,7 +24,12 @@ export async function reconnectAfterStop(input: {
     ...firstEndpoint,
     redial: async () => daemonEndpoint(first),
   });
+  const registered = await firstClient.call({ type: "workspace.open", payload: { root: input.lease.workspace } });
+  if (registered?.type !== "workspace") throw new Error("pre-restart workspace registration failed");
+  const workspaceId = registered.data.id;
+  await firstClient.call({ type: "workspace.rename", payload: { workspaceId, name: "persisted-network-workspace" } });
   const before = await firstClient.call({ type: "workspace.list" });
+  const oldLogicalId = firstClient.logicalConnectionId;
   firstClient.close();
   first.stop();
   const second = startDaemon({ genet, wasm, lease: input.lease });
@@ -34,9 +39,13 @@ export async function reconnectAfterStop(input: {
     redial: async () => daemonEndpoint(second),
   });
   const after = await secondClient.call({ type: "workspace.list" });
+  const newLogicalId = secondClient.logicalConnectionId;
   secondClient.close();
   second.stop();
-  return { listed: before?.type === "workspaces" && after?.type === "workspaces" };
+  return { listed: before?.type === "workspaces" && after?.type === "workspaces"
+    && before.data.some(w => w.id === workspaceId && w.name === "persisted-network-workspace")
+    && after.data.some(w => w.id === workspaceId && w.name === "persisted-network-workspace")
+    && typeof oldLogicalId === "string" && typeof newLogicalId === "string" && oldLogicalId !== newLogicalId };
 }
 
 export function leftoverProcesses(lease: EnvironmentLease): number {

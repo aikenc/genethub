@@ -15,7 +15,7 @@ function authCase(
       title,
       oracle,
       catches,
-      tags: ["core", "daemon", "authorization-depth"],
+      tags: ["network-risk-v2", "core", "daemon", "authorization-depth"],
       llm: { default: "none" },
       expectedDurationMs: 20_000,
       timeoutMs: 90_000,
@@ -132,7 +132,7 @@ authCase(
     try {
       const reply = await returning.call({ type: "workspace.list" });
       t.assertions.assert(reply?.type === "workspaces", "stored credential did not survive restart");
-      const listed = devicesOf(await opened.client.call({ type: "device.list" }));
+      const listed = devicesOf(await opened.client.call({ type: "device.list" }).catch(() => { throw new Error("fresh credential read succeeded after restart, but original owner failed to recover; state=" + opened.client.connectionState); }));
       t.assertions.assert(listed.some((entry) => entry.id === paired.deviceId), "restart replaced device identity");
     } finally { returning.close(); }
   },

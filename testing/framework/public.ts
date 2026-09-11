@@ -76,3 +76,11 @@ export { registerScriptedCodex } from "./builders/codex.ts";
 
 export { allocatePort } from "../infrastructure/public.ts";
 export { openPreviewBrowser } from './drivers/preview-browser.ts';
+export { startFaultLink } from "./drivers/fault-link.ts";
+export { openMultichannelBrowser } from "./drivers/multichannel-browser.ts";
+
+export { repoIdentity } from "../infrastructure/public.ts";
+export { trackResources } from "../infrastructure/public.ts";
+export { redactText, redactValue, watchInputs } from "../infrastructure/public.ts";
+
+export { waitForExit, collectOutput } from "../infrastructure/public.ts";

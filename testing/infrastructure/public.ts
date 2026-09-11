@@ -21,3 +21,12 @@ export {
   type ControlledAgentOptions,
   type ControlledAgentProfile,
 } from "./agents/index.ts";
+
+export { repoIdentity } from "./engine/git.ts";
+export { trackResources } from "./environment/resource-census.ts";
+export { redactText, redactValue } from "./evidence/redact.ts";
+export { watchInputs } from "./engine/input-watch.ts";
+
+export { waitForExit, collectOutput } from "./process/wait.ts";
+
+export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "./engine/scheduler.ts";

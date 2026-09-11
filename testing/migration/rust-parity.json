@@ -9,7 +9,7 @@
     "cloudSha": "6a32f010147cbc0b62dae1c3ae36c4dc1694fab2",
     "artifact": "4ae8a6ff7d5203b763487f30e35c81f232ffe6dda978e64eb221a8f788cf33da"
   },
-  "notes": "Oracle classes are public-behavior, os-fact, production-support, or native-intrinsic. pending-classification is forbidden. tsId is set only when a TypeScript parity case exists. assertionDelta records Rust vs TS oracle differences. status ts-owned means TS is the required oracle; source-retained means no TS twin this stage. legacyExecution stopped means testctl gates do not invoke cargo test; testing/deprecated/rust is kept on disk (L13).",
+  "notes": "Historical parityEvidence is retained for audit, not accepted as blanket retirement proof. All frozen cases remain required pending per-case matching-input parity and fault evidence.",
   "cases": [
     {
       "oldId": "rust.authorization.a_device_gets_what_its_invitation_named_and_nothing_else",
@@ -19,7 +19,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.authorization.invite-read-only uses Client.pairDevice and production grants. Rust used the test PeerClient. Same invitation/revoke/files/pty refusals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.authorization.a_device_without_a_terminal_grant_is_not_sent_the_terminal_anyway",
@@ -29,7 +29,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.authorization.no-pty-grant-no-bytes uses Client.pairDevice and production grants. Rust used the test PeerClient. Same invitation/revoke/files/pty refusals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.authorization.a_device_granted_everything_still_works_exactly_as_before",
@@ -39,7 +39,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.authorization.invite-full-grants uses Client.pairDevice and production grants. Rust used the test PeerClient. Same invitation/revoke/files/pty refusals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.authorization.a_device_revoked_while_connected_stops_being_able_to_act",
@@ -49,7 +49,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.authorization.revoke-stops-acting uses Client.pairDevice and production grants. Rust used the test PeerClient. Same invitation/revoke/files/pty refusals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.authorization.a_device_without_a_files_grant_cannot_take_the_bytes_by_another_door",
@@ -59,7 +59,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.authorization.files-grant-preview uses Client.pairDevice and production grants. Rust used the test PeerClient. Same invitation/revoke/files/pty refusals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.authorization.a_terminal_for_someone_else_is_confined_or_refused_but_never_neither",
@@ -69,7 +69,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.authorization.confined-pty-or-refused uses Client.pairDevice and production grants. Rust used the test PeerClient. Same invitation/revoke/files/pty refusals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.claude.claude_code_reaches_the_same_timeline_as_the_built_in_agent",
@@ -79,7 +79,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-same-timeline uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.claude.accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt",
@@ -89,7 +89,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-accept-edits uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.claude.the_model_and_mode_pickers_offer_what_this_cli_actually_accepts",
@@ -99,7 +99,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-catalog-pickers uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.claude.interrupting_claude_code_ends_the_turn_as_canceled",
@@ -109,7 +109,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-interrupt uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.claude.denying_a_permission_request_stops_the_tool_without_touching_disk",
@@ -119,7 +119,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.claude-deny-permission uses the production Client and the installed Claude CLI pointed at the host DeepSeek key. Rust used Journey + client_v3. Unknown picker ids are protocol badRequest, not a non-protocol 'invalid'.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.claude.a_sub_agents_work_stays_inside_the_call_that_dispatched_it",
@@ -128,8 +128,8 @@
       "tsId": null,
       "status": "source-retained",
       "oracleClass": "public-behavior",
-      "assertionDelta": "No TS this stage: Task dispatch is the model's call, not a stable Client oracle. Frozen Rust source is retained and is not executed by testctl.",
-      "legacyExecution": "stopped"
+      "assertionDelta": "No TS this stage: Task dispatch is the model's call, not a stable Client oracle. Frozen Rust source is retained and required through testctl.",
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.the_two_output_streams_arrive_apart_and_the_status_is_the_command_s_own",
@@ -139,7 +139,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.streams-apart uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_is_a_list_so_nothing_in_it_becomes_a_second_command",
@@ -149,7 +149,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.argv-is-a-list uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_device_without_the_terminal_grant_cannot_run_a_command_either",
@@ -159,7 +159,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.no-pty-grant-forbidden uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_run_for_someone_else_is_confined_or_refused_but_never_neither",
@@ -169,7 +169,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.confined-or-refused uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_confined_command_still_works_inside_the_workspace",
@@ -179,7 +179,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.confined-works-inside uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_confined_command_is_told_it_is_confined_and_where_it_may_go",
@@ -189,7 +189,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.confined-is-announced uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_that_is_not_confined_does_not_claim_to_be",
@@ -199,7 +199,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.unconfined-does-not-claim uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.every_folder_of_a_multi_root_workspace_is_inside_the_confinement",
@@ -209,7 +209,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.multi-root-confinement uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_that_leaves_something_behind_still_reports_when_it_finished",
@@ -219,7 +219,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.background-child-does-not-hold uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_is_given_what_was_piped_to_it",
@@ -229,7 +229,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.stdin-is-piped uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_given_nothing_reads_end_of_file_rather_than_waiting",
@@ -239,7 +239,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.empty-stdin-eof uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_runs_with_the_environment_it_was_given",
@@ -249,7 +249,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.env-reaches-command uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_that_runs_out_of_time_is_ended_and_says_so",
@@ -259,7 +259,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.timeout-ends-and-says-so uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_that_finishes_within_its_limit_is_left_alone",
@@ -269,7 +269,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.within-limit-left-alone uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_ended_for_running_long_is_asked_before_it_is_made_to",
@@ -279,7 +279,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.timeout-asks-before-kill uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_directory_outside_the_workspace_is_refused_rather_than_clamped",
@@ -289,7 +289,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.cwd-outside-refused uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.command.a_command_does_not_outlive_the_caller_that_asked_for_it",
@@ -299,7 +299,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.cli.does-not-outlive-caller uses Client.openShellStream / daemon shell.run; Rust used the Journey shell helper. Same public refusals (403/501), stdout/stderr split, timeout, and confinement oracles.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.concurrency.latency_summary_counts_only_operations_strictly_over_three_seconds",
@@ -308,8 +308,8 @@
       "tsId": null,
       "status": "source-retained",
       "oracleClass": "production-support",
-      "assertionDelta": "Harness unit test of LatencySummary over_3s counting, not daemon behavior. No product TS twin. Frozen source retained, not executed by testctl.",
-      "legacyExecution": "stopped"
+      "assertionDelta": "Harness unit test of LatencySummary over_3s counting, not daemon behavior. No product TS twin. Frozen source restored and required through testctl.",
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.concurrency.concurrent_user_journey_matches_profile",
@@ -319,17 +319,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS proves two workspaces and two genet sessions complete without mixing turnStarted, through @genehub/workbench/client. Does not copy native_resource_count, multi-browser subscribe, or load-profile timing (those probes are do-not-export).",
-      "legacyExecution": "stopped"
-    },
-    {
-      "oldId": "rust.concurrency.journey_",
-      "suite": "concurrency",
-      "testName": "journey_",
-      "tsId": null,
-      "status": "source-retained",
-      "oracleClass": "public-behavior",
-      "assertionDelta": "Not a crate test; name taken from a workload fixture that writes fake #[test] fn journey_NNN. No TS twin. Frozen source retained, not executed by testctl.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.concurrency.blocking_canaries_locate_the_global_stall",
@@ -339,7 +329,7 @@
       "status": "ts-owned",
       "oracleClass": "os-fact",
       "assertionDelta": "TS proves workspace.list stays under 500ms during a delayed mock turn, plus a companion slow-git file.tree/list canary. Does not copy pause_inbound preview flood or native_resource_count.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.cursor.cursor_reaches_the_same_timeline_as_the_built_in_agent",
@@ -349,7 +339,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.cursor-same-timeline uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.cursor.a_cursor_tool_call_is_visible_while_the_turn_is_still_running",
@@ -359,7 +349,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.cursor-tool-while-running uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.installing_puts_binaries_and_logic_where_the_path_can_find_them",
@@ -369,7 +359,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.binaries-and-logic-on-path runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.an_explicit_install_can_restart_the_daemon_with_the_new_binary",
@@ -379,7 +369,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.restart-daemon-with-new-binary runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.unsafe_download_bases_are_refused_before_fetching",
@@ -389,7 +379,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.unsafe-bases-refused runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.every_fetch_is_pinned_to_https_including_redirects",
@@ -399,7 +389,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.https-pin runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.a_download_that_does_not_match_its_checksum_is_not_installed",
@@ -409,7 +399,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.checksum-mismatch runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.a_release_with_no_checksums_is_refused_rather_than_trusted",
@@ -419,7 +409,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.no-checksums-refused runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.install.the_tree_installer_refuses_without_an_explicit_download_base",
@@ -429,7 +419,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS specialty.install.local-tree-needs-base runs scripts/install.sh against a fake release with a curl shim, matching the Rust unix installer properties. Unsupported linux/arm64 is BlockedError rather than a silent return.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.the_main_journey_runs_a_task_end_to_end_on_the_built_in_agent",
@@ -439,7 +429,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.tool-write is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.streaming_output_is_visible_before_the_turn_ends",
@@ -449,7 +439,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.stream-before-complete is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_multi_step_task_feeds_tool_results_back_until_it_finishes",
@@ -459,7 +449,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.multi-step-copy is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.agents_that_are_not_installed_stay_out_of_the_picker",
@@ -469,7 +459,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.uninstalled-agents-omitted is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.the_picker_is_filled_from_what_the_provider_says_it_has",
@@ -479,7 +469,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.picker-from-provider is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_provider_the_user_adds_works_like_the_ones_we_ship",
@@ -489,7 +479,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.custom-provider is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.models_written_by_hand_need_no_list_call",
@@ -499,7 +489,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.models-by-hand is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.capabilities_are_declared_so_the_ui_never_offers_a_dead_control",
@@ -509,7 +499,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.capabilities-declared is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.switching_the_thinking_level_takes_effect_on_the_built_in_agent",
@@ -519,7 +509,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.thinking-effort is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_choice_made_before_the_first_prompt_is_announced_and_not_only_stored",
@@ -529,7 +519,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.choice-before-prompt is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.the_built_in_agent_still_answers_to_the_old_name_for_thinking",
@@ -539,7 +529,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.old-thinking-mode-name is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_prompt_arriving_mid_turn_is_refused_rather_than_interleaved",
@@ -549,7 +539,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.mid-turn-refused is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.an_unknown_tool_still_renders_instead_of_disappearing",
@@ -559,7 +549,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.unknown-tool-renders is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_task_with_no_credentials_says_so_instead_of_failing_silently",
@@ -569,7 +559,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.missing-credentials is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_key_entered_in_settings_makes_the_very_next_task_work",
@@ -579,7 +569,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.key-in-settings-next-task is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_key_the_provider_will_not_accept_says_that_and_not_add_a_key",
@@ -589,7 +579,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.rejected-key-names-provider is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_real_provider_that_rejects_our_key_says_so_instead_of_hanging",
@@ -599,7 +589,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.real-provider-rejects-key is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.model_failures_surface_as_actionable_errors",
@@ -609,7 +599,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.model-rate-limited is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.the_agent_hands_the_model_a_system_prompt_and_tool_definitions",
@@ -619,7 +609,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.system-prompt-and-tools is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.conversation_history_is_replayed_to_the_model_on_the_next_turn",
@@ -629,7 +619,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.history-replayed-to-model is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.changes_made_by_the_agent_show_up_in_git_and_can_be_committed",
@@ -639,7 +629,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.git-commit is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.what_an_agent_left_running_is_answerable_to_the_session_that_started_it",
@@ -649,7 +639,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.process-list-empty is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.files_can_be_browsed_and_edited_through_the_workspace",
@@ -659,7 +649,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.workspace.browse-and-edit is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.writes_outside_the_workspace_are_refused",
@@ -669,7 +659,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.workspace.writes-outside-refused is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_terminal_opens_echoes_resizes_and_closes",
@@ -679,7 +669,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.pty-echo is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_commands_output_stays_behind_the_access_layer",
@@ -689,7 +679,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.command-output-bounded is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.reconnecting_replays_the_gap_without_losing_or_repeating_events",
@@ -699,7 +689,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.reconnect-replays-gap is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.asking_for_a_gap_older_than_the_window_gets_an_honest_full_reset",
@@ -709,7 +699,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.gap-older-than-window is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.history_survives_a_daemon_restart_and_the_conversation_continues",
@@ -719,7 +709,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.history-survives-restart is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_session_found_in_the_list_can_be_reopened_and_continued",
@@ -729,7 +719,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.reopen-from-list is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.interrupting_a_running_turn_ends_it_as_canceled",
@@ -739,7 +729,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.interrupt-cancels is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.continues_round_is_accepted_over_the_wire_and_ignored_when_unrecognized",
@@ -749,7 +739,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.continues-round-unknown is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_message_naming_continues_round_after_an_interrupt_still_runs_normally",
@@ -759,7 +749,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.continues-round-after-interrupt is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_completed_round_is_recorded_in_the_round_ledger_on_disk",
@@ -769,7 +759,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.round-ledger-on-disk is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.an_interrupted_round_left_dangling_is_ledgered_as_superseded_once_a_new_one_starts",
@@ -779,7 +769,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.interrupted-round-superseded is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_client_that_drops_mid_turn_gets_the_missing_events_when_it_returns",
@@ -789,7 +779,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.drop-mid-turn-survives is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_second_client_sees_the_same_session_as_the_first",
@@ -799,7 +789,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.second-client-same-timeline is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_connection_without_the_token_is_rejected_outright",
@@ -809,7 +799,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.wrong-token-rejected is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_malformed_frame_gets_an_error_rather_than_silence",
@@ -819,7 +809,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.missing-session-not-found is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.an_empty_prompt_is_refused_before_it_reaches_the_model",
@@ -829,7 +819,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.empty-prompt-refused is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.sessions_list_per_workspace_and_can_be_archived",
@@ -839,7 +829,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.list-and-archive is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_session_title_comes_from_the_first_thing_the_user_says",
@@ -849,7 +839,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.title-from-prompt is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.tool_calls_move_through_their_states_rather_than_appearing_finished",
@@ -859,7 +849,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.tool-states is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.the_log_can_be_read_from_whatever_device_saw_the_error",
@@ -869,7 +859,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.log-readable is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_log_request_cannot_reach_outside_the_log_directory",
@@ -879,7 +869,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.log-cannot-escape is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.journeys.a_session_starts_where_it_was_told_to_and_cannot_be_told_to_leave",
@@ -889,7 +879,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.cwd-stays-inside is the required public-behavior oracle on @genehub/workbench/client and genet daemon. Rust used Journey/client_v3 against the same signed Wasm. Faults are mock LLM scripts or protocol refusals, not monkey-patched internals.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.opencode.a_third_party_agent_reaches_the_same_timeline_as_the_built_in_one",
@@ -899,7 +889,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.opencode-same-timeline uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.opencode.two_agents_run_side_by_side_without_leaking_into_each_other",
@@ -909,7 +899,7 @@
       "status": "ts-owned",
       "oracleClass": "public-behavior",
       "assertionDelta": "TS journey.session.opencode-two-sessions uses the production Client and the host CLI. Rust used Journey + client_v3. Missing login/install is BlockedError, not skip/pass.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required"
     },
     {
       "oldId": "rust.supply_chain.release_actions_are_immutable_and_only_official_github_can_write_contents",
@@ -919,7 +909,8 @@
       "status": "ts-owned",
       "oracleClass": "native-intrinsic",
       "assertionDelta": "TS specialty.contracts.release-actions-pinned reads the same release/workflow source facts as the frozen supply-chain tests (native-intrinsic / public-behavior as classified).",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required",
+      "restoration": "2026-09-11: historical IDs retained, paths and release job names adapted to current host/guest and tagged prerelease distribution; see legacy-restoration.md in dev-net."
     },
     {
       "oldId": "rust.supply_chain.app_release_embeds_one_signed_logic_and_separates_fast_from_official_distribution",
@@ -929,7 +920,8 @@
       "status": "ts-owned",
       "oracleClass": "native-intrinsic",
       "assertionDelta": "TS specialty.contracts.release-signed-component reads the same release/workflow source facts as the frozen supply-chain tests (native-intrinsic / public-behavior as classified).",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required",
+      "restoration": "2026-09-11: historical IDs retained, paths and release job names adapted to current host/guest and tagged prerelease distribution; see legacy-restoration.md in dev-net."
     },
     {
       "oldId": "rust.supply_chain.tag_releases_must_come_from_the_observed_public_main_history",
@@ -939,7 +931,8 @@
       "status": "ts-owned",
       "oracleClass": "native-intrinsic",
       "assertionDelta": "TS specialty.contracts.release-from-main reads the same release/workflow source facts as the frozen supply-chain tests (native-intrinsic / public-behavior as classified).",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required",
+      "restoration": "2026-09-11: historical IDs retained, paths and release job names adapted to current host/guest and tagged prerelease distribution; see legacy-restoration.md in dev-net."
     },
     {
       "oldId": "rust.supply_chain.native_runtime_cannot_take_back_business_wire_ownership",
@@ -949,7 +942,17 @@
       "status": "ts-owned",
       "oracleClass": "native-intrinsic",
       "assertionDelta": "TS walks native Rust sources for the same wire-ownership invariant the frozen crate asserted.",
-      "legacyExecution": "stopped"
+      "legacyExecution": "required",
+      "restoration": "2026-09-11: historical IDs retained, paths and release job names adapted to current host/guest and tagged prerelease distribution; see legacy-restoration.md in dev-net."
+    }
+  ],
+  "catalogCorrections": [
+    {
+      "oldId": "rust.concurrency.journey_",
+      "reason": "Fixture string, not a compiled crate test; mistakenly harvested from write_workload_fixture. No real case retired.",
+      "sourceRevision": "5f644664aa038a819756344bc6c4bfd57ef8875d",
+      "sourcePath": "testing/deprecated/rust/tests/concurrency.rs",
+      "sourceFunction": "write_workload_fixture"
     }
   ]
 }

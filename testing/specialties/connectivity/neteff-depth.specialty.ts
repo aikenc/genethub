@@ -80,8 +80,8 @@ function neteffMeta(input: {
     oracle: input.oracle,
     catches: input.catches,
     tags: input.relay
-      ? ["neteff", "performance", "connectivity", "wasm-guest", "relay"]
-      : ["neteff", "performance", "connectivity", "wasm-guest"],
+      ? ["network-risk-v2", "multichannel", "neteff", "performance", "connectivity", "wasm-guest", "relay"]
+      : ["network-risk-v2", "multichannel", "neteff", "performance", "connectivity", "wasm-guest"],
     llm: { default: "none" as const },
     expectedDurationMs: 20_000,
     timeoutMs: 90_000,
@@ -91,7 +91,8 @@ function neteffMeta(input: {
       memoryMb: 1024,
       io: 1,
       browser: 0,
-      pool: "heavy" as const,
+      // TCP and product samples are sequential; unrelated jobs would bias their ratio.
+      pool: "exclusive" as const,
     },
     surfaces: input.relay
       ? ["daemon", "relay", "workbench-client", "tcp-control"]
@@ -264,7 +265,7 @@ function headline(label: string, samples: UtilizationSample[], target: number): 
   return (
     `核心指标（同链路原始 TCP 带宽利用率；优化目标≥${(target * 100).toFixed(0)}%且不随 RTT 下滑）：` +
     `${ladder}。目标状态=${met ? "达到" : "未达到"}；` +
-    `${label} 的通过只表示测量有效并守住现状下限，不代表网络优化完成。`
+    `${label} 测量范围为本轮文件大小、链路参数与运行环境。`
   );
 }
 
@@ -375,9 +376,12 @@ defineSpecialty(
         try {
           client = await connectLinkedDaemon(opened, productLink, `neteff-direct-${rttMs}ms`, probe);
           productLink.resetStats();
-          const preview = measurePreview(t, { client, opened, file, probe });
+          let previewFinished = false;
+          const preview = measurePreview(t, { client, opened, file, probe }).then(result => { previewFinished = true; return result; });
+          void preview.catch(() => {});
           if (rttMs === 200) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
+            await t.tools.waitUntil(() => productLink.stats().targetToClientBytes >= 64 * 1024, 10000);
+            t.assertions.assert(!previewFinished, "bulk preview completed before the fairness probe");
             const rpcBegan = performance.now();
             const workspaces = await client.call({ type: "workspace.list" });
             busyRpcMs = performance.now() - rpcBegan;
@@ -414,18 +418,19 @@ defineSpecialty(
       await opened.mock.stop();
       await rawServer.stop();
     }
-    for (const sample of samples) {
-      t.assertions.assert(
-        sample.utilization >= DIRECT_TARGET_UTILIZATION,
-        `${sample.label}: ${(sample.utilization * 100).toFixed(1)}% of same-link TCP is below the phase-1 ${(DIRECT_TARGET_UTILIZATION * 100).toFixed(0)}% target`,
-      );
-    }
     t.note(
       `neteff preview-direct-bandwidth-utilization (daemon=wasm guest, link=${LINK_BANDWIDTH_MBPS}Mbps)\n` +
         `${headline("直连", samples, DIRECT_TARGET_UTILIZATION)}\n` +
         `fairness rpcDuring8MiBAt200ms=${busyRpcMs?.toFixed(0) ?? "-"}ms target<=1500ms\n` +
         samples.map((sample) => sample.line).join("\n"),
     );
+    for (const sample of samples) {
+      t.assertions.assert(
+        sample.utilization >= DIRECT_TARGET_UTILIZATION,
+        `${sample.label}: ${(sample.utilization * 100).toFixed(1)}% of same-link TCP is below the phase-1 ${(DIRECT_TARGET_UTILIZATION * 100).toFixed(0)}% target`,
+      );
+    }
+
   },
 );
 
@@ -540,9 +545,12 @@ defineSpecialty(
           redial: async () => ({ url: routedRendezvous, credential }),
         }).catch((error: unknown) => { throw new Error(`${error instanceof Error ? error.message : String(error)}; ${label}; ${probe.summary()}`); });
         try {
-          const preview = measurePreview(t, { client, opened, file, probe });
+          let previewFinished = false;
+          const preview = measurePreview(t, { client, opened, file, probe }).then(result => { previewFinished = true; return result; });
+          void preview.catch(() => {});
           if (point.clientRttMs === 100 && point.daemonRttMs === 100) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
+            await t.tools.waitUntil(() => clientLink.stats().targetToClientBytes >= 64 * 1024, 10000);
+            t.assertions.assert(!previewFinished, "relayed bulk preview completed before the fairness probe");
             const rpcBegan = performance.now();
             const workspaces = await client.call({ type: "workspace.list" });
             busyRpcMs = performance.now() - rpcBegan;

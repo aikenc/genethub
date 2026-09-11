@@ -10,7 +10,7 @@ defineSpecialty(
     title: "A slow git.status does not stall unrelated daemon reads",
     oracle: "workspace.list and file.tree return in under 500ms while git.status is still in a 900ms wrapper",
     catches: ["git Process::Run holds the daemon message loop"],
-    tags: ["core", "concurrency", "parity"],
+    tags: ["network-risk-v2", "core", "concurrency", "parity"],
     llm: { default: "mock" },
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,

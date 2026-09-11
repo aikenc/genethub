@@ -19,7 +19,7 @@ export interface RelayHandle {
  * mode on a dynamic loopback port. A missing bundle blocks the case rather
  * than silently substituting anything else for the forwarding layer.
  */
-export async function startRelay(input: { openRoot: string }): Promise<RelayHandle> {
+export async function startRelay(input: { openRoot: string; port?: number; control?: { origin: string; token: string } }): Promise<RelayHandle> {
   const bundle = path.join(input.openRoot, "apps", "relay", "dist", "main.js");
   if (!existsSync(bundle)) {
     throw new BlockedError(`relay bundle missing at ${bundle}; build it with: npm --prefix apps/relay run build`);
@@ -29,9 +29,10 @@ export async function startRelay(input: { openRoot: string }): Promise<RelayHand
   const child = spawn(process.execPath, [bundle], {
     env: {
       ...process.env,
-      RELAY_MODE: "rendezvous",
+      RELAY_MODE: input.control ? "control" : "rendezvous",
+      ...(input.control ? { RELAY_CONTROL_ORIGIN: input.control.origin, RELAY_CONTROL_TOKEN: input.control.token } : {}),
       RELAY_HOST: "127.0.0.1",
-      RELAY_PORT: "0",
+      RELAY_PORT: String(input.port ?? 0),
       RELAY_JOIN_TOKEN: joinToken,
     },
     stdio: ["ignore", "pipe", "pipe"],

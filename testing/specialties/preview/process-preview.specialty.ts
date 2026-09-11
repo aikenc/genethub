@@ -8,7 +8,7 @@ defineSpecialty({
   title:"Phone-sized workbench opens a registered Python video application from background processes",
   oracle:"Real App process row opens Preview, browser decodes a video file over WebRTC and disabling preview releases the media session",
   catches:["process service entry not usable on phone layout","preview navigation loses workspace","Python media requires Node","closing service access leaks media"],
-  tags:["page-experience","service-preview-media"],runner:"playwright",llm:{default:"none"},expectedDurationMs:25000,timeoutMs:120000,
+  tags: ["network-risk-v2", "network-v2-diagnostic", "page-experience","service-preview-media"],runner:"playwright",llm:{default:"none"},expectedDurationMs:25000,timeoutMs:120000,
   resources:{environments:1,cpu:2,memoryMb:1536,io:1,browser:1,pool:"browser"},
   surfaces:["browser","daemon","service-preview"],productInterfaces:["@genehub/workbench"],requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
 },async t=>{
@@ -42,8 +42,13 @@ with av.open(sys.argv[1],'w') as out:
       const r=await opened.client.call({type:'process.workspaceList',payload:{workspaceId:opened.workspaceId}});
       return r?.type==='processes'&&r.data.some(p=>p.service?.reachable);
     },15000);
-    consumer=await openPreviewBrowser({openRoot:t.openRoot,lease:t.env,page,endpoint:daemonEndpoint(opened.daemon),workspaceId:opened.workspaceId,entryPath:`${opened.rootHandle}/index.html`,surface:'processes'});
-    await page.getByRole('button').filter({hasText:'内容过程预览（Python 示例）'}).click({timeout:30000});
+    consumer=await openPreviewBrowser({openRoot:t.openRoot,lease:t.env,page,endpoint:daemonEndpoint(opened.daemon),refreshEndpoint:()=>daemonEndpoint(opened.daemon),workspaceId:opened.workspaceId,entryPath:`${opened.rootHandle}/index.html`,surface:'processes'});
+    await page.getByRole('button').filter({hasText:'内容过程预览（Python 示例）'}).click({timeout:30000}).catch(async () => {
+      const controls = await page.getByRole("button").allTextContents();
+      const rows = await opened.client.call({ type: "process.workspaceList", payload: { workspaceId: opened.workspaceId } });
+      const services = rows?.type === "processes" ? rows.data.filter(p => p.service).map(p => ({ name: p.service!.name, reachable: p.service!.reachable })) : [];
+      throw new Error("registered service missing from process UI: " + JSON.stringify({ services, controls: controls.slice(0, 30), errors: consumer?.errors, body: (await page.locator("body").innerText()).slice(-1800) }));
+    });
     await page.getByRole('button',{name:'打开预览',exact:true}).click();
     await page.getByRole('button',{name:'允许本次预览访问登记服务',exact:true}).click({timeout:30000});
     await page.getByRole('button',{name:'连接音视频',exact:true}).click();

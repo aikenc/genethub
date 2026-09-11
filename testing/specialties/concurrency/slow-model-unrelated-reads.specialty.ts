@@ -6,7 +6,7 @@ defineSpecialty(
     title: "A slow model turn does not stall unrelated daemon reads",
     oracle: "workspace.list from a second client returns in under 500ms while a delayed mock turn is in flight",
     catches: ["resident guest turn holds the whole daemon"],
-    tags: ["core", "concurrency", "parity"],
+    tags: ["network-risk-v2", "core", "concurrency", "parity"],
     llm: { default: "mock" },
     expectedDurationMs: 20_000,
     timeoutMs: 60_000,

@@ -24,6 +24,8 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
     dir,
     writeResult(result) {
       const { diagnostic: _diagnostic, ...publicResult } = result;
+      if (publicResult.message) publicResult.message = redactText(publicResult.message);
+      if (publicResult.blockedReason) publicResult.blockedReason = redactText(publicResult.blockedReason);
       appendFileSync(path.join(dir, "results.ndjson"), `${JSON.stringify(publicResult)}\n`);
     },
     writeFailure(result, diagnostic) {
@@ -39,7 +41,7 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
     },
     finalize(manifest, summary) {
       writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-      writeFileSync(path.join(dir, "summary.md"), summary);
+      writeFileSync(path.join(dir, "summary.md"), redactText(summary));
       if (manifest.status === "passed") {
         rmSync(path.join(dir, ".internal"), { recursive: true, force: true });
       }
