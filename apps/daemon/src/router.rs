@@ -147,6 +147,13 @@ async fn dispatch(
     request: Request,
 ) -> Handled {
     match request {
+        Request::ClientDebug(request) => match state.client_debug.handle(request).await {
+            Ok(reply) => Handled::ok(Reply::ClientDebug(reply)),
+            Err(error) => Handled {
+                reply: Err(error),
+                effect: SideEffect::None,
+            },
+        },
         Request::ConnectionIdentity => Handled::ok(Reply::Hello(HelloResult {
             daemon_version: state.version.clone(),
             web_protocol: WEB_PROTOCOL_VERSION,
@@ -156,6 +163,8 @@ async fn dispatch(
             machine_name: crate::link::default_display_name(),
             rtc_supported: crate::dataplane::rtc::SUPPORTED,
             features: Some(vec![
+                "service.preview.v1".to_string(),
+                "process.services.v1".to_string(),
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                 genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
@@ -368,6 +377,20 @@ async fn dispatch(
         Request::BlobGet { session_id, blob } => {
             match state.sessions.blob(&session_id, &blob).await {
                 Ok(blob) => Handled::ok(Reply::Blob(blob)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::RoundTrunkBatchGet { session_id, refs } => {
+            match state.sessions.round_trunks(&session_id, &refs).await {
+                Ok(trunks) => Handled::ok(Reply::RoundTrunks(trunks)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::BlobBatchGet { session_id, blobs } => {
+            match state.sessions.blobs(&session_id, &blobs).await {
+                Ok(blobs) => Handled::ok(Reply::Blobs(blobs)),
                 Err(error) => failed(error),
             }
         }
@@ -1019,14 +1042,14 @@ async fn dispatch(
         }
 
         Request::WorkspaceCreate { root, name } => {
-            let path = Path::new(&root);
-            if let Err(error) = std::fs::create_dir_all(path) {
+            let path = crate::guest_paths::guest_path(Path::new(&root));
+            if let Err(error) = std::fs::create_dir_all(&path) {
                 return Handled::err(
                     ErrorCode::BadRequest,
                     format!("could not create {root}: {error}"),
                 );
             }
-            match state.workspaces.open(path, Some(name)).await {
+            match state.workspaces.open(&path, Some(name)).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
@@ -1289,7 +1312,44 @@ async fn dispatch(
             Err(error) => failed(error),
         },
 
-        Request::ProcessList => Handled::ok(Reply::Processes(state.processes.list().await)),
+        Request::ProcessList => {
+            match crate::dataplane::service_preview::process_snapshot(state, caller, None).await {
+                Ok(rows) => Handled::ok(Reply::Processes(rows)),
+                Err(e) => failed(e),
+            }
+        }
+        Request::ProcessWorkspaceList { workspace_id } => {
+            match crate::dataplane::service_preview::process_snapshot(
+                state,
+                caller,
+                Some(&workspace_id),
+            )
+            .await
+            {
+                Ok(rows) => Handled::ok(Reply::Processes(rows)),
+                Err(e) => failed(e),
+            }
+        }
+        Request::ProcessServiceStop {
+            workspace_id,
+            entry_path,
+            run_id,
+        } => {
+            if !caller.allows(crate::authz::Capability::Services) {
+                return Handled::err(ErrorCode::Forbidden, "需要 services 授权");
+            }
+            match crate::dataplane::service_preview::stop_registered(
+                state,
+                &workspace_id,
+                &entry_path,
+                &run_id,
+            )
+            .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(e) => failed(e),
+            }
+        }
         Request::ProcessKill { session_id, pid } => {
             match state.processes.stop(&session_id, pid).await {
                 crate::processes::Stopped::Yes => Handled::ok(Reply::Ack),
@@ -1448,7 +1508,7 @@ mod tests {
         match handled.reply {
             Err(error) => {
                 assert_eq!(error.code, ErrorCode::NotFound);
-                assert_eq!(error.message, "找不到该会话：s1");
+                assert_eq!(error.message, "会话不存在：s1");
             }
             Ok(_) => panic!("expected an error"),
         }

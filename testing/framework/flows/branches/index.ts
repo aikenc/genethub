@@ -5,6 +5,13 @@ import { daemonEndpoint, startDaemon } from "../../drivers/daemon.ts";
 import { locateGenet, tryLocateDaemonComponent } from "../../drivers/cli.ts";
 import { connectProductClient } from "../../drivers/client.ts";
 
+export {
+  openControlledAgentSession,
+  processAlive,
+  timeControlCall,
+  type ControlledAgentSession,
+} from "./controlled-agent.ts";
+
 export async function reconnectAfterStop(input: {
   openRoot: string;
   lease: EnvironmentLease;

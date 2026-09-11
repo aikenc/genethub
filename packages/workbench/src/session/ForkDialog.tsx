@@ -1,29 +1,18 @@
-import type { AgentInfo, WorkspaceInfo } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { AgentMark } from "../presentation/AgentMark";
+import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  canStartAgent,
-  resolveAgentAvailability,
-  resolveAgentPresentation,
-} from "../presentation/catalog/resolve";
-import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
+  AgentGrid,
+  MachineGrid,
+  useMachineCatalog,
+  WorkspaceList,
+  type MachineCatalog,
+  type MachineOption,
+} from "./MachineCatalogPicker";
 
-export interface ForkMachineOption {
-  /** Daemon identity. Unlike routeId, this is stable across connection paths. */
-  id: string;
-  /** Host-owned locator used to open the machine. */
-  routeId: string;
-  label: string;
-  kind: "local" | "remote";
-  online?: boolean;
-}
-
-export interface ForkCatalog {
-  agents: AgentInfo[];
-  workspaces: WorkspaceInfo[];
-}
+export type ForkMachineOption = MachineOption;
+export type ForkCatalog = MachineCatalog;
 
 export interface ForkSelection {
   machine: ForkMachineOption;
@@ -52,42 +41,30 @@ export function ForkDialog({
   onClose(): void;
   onConfirm(selection: ForkSelection): Promise<boolean>;
 }) {
-  const [machines, setMachines] = useState([sourceMachine]);
-  const [selectedMachineId, setSelectedMachineId] = useState(sourceMachine.id);
-  const [catalog, setCatalog] = useState<ForkCatalog>(sourceCatalog);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(sourceWorkspaceId);
-  const [selectedAgentId, setSelectedAgentId] = useState(sourceAgentId);
-  const [loadingMachines, setLoadingMachines] = useState(Boolean(listMachines));
-  const [loadingCatalog, setLoadingCatalog] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
+  const {
+    machines,
+    selectedMachine,
+    catalog,
+    workspaceId: selectedWorkspaceId,
+    setWorkspaceId: setSelectedWorkspaceId,
+    agentId: selectedAgentId,
+    setAgentId: setSelectedAgentId,
+    loadingMachines,
+    loadingCatalog,
+    problem,
+    setProblem,
+    pickMachine,
+  } = useMachineCatalog({
+    sourceMachine,
+    sourceCatalog,
+    sourceWorkspaceId,
+    sourceAgentId,
+    listMachines,
+    loadCatalog,
+  });
   const [busy, setBusy] = useState(false);
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  const catalogRequest = useRef(0);
-
-  useEffect(() => {
-    if (!listMachines) return;
-    let cancelled = false;
-    void listMachines()
-      .then((found) => {
-        if (cancelled) return;
-        const byId = new Map(found.map((machine) => [machine.id, machine]));
-        byId.set(sourceMachine.id, {
-          ...byId.get(sourceMachine.id),
-          ...sourceMachine,
-        });
-        setMachines([...byId.values()]);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setProblem(message(error));
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingMachines(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [listMachines, sourceMachine]);
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -108,46 +85,6 @@ export function ForkDialog({
     };
   }, [busy, onClose]);
 
-  const pickMachine = (machine: ForkMachineOption) => {
-    if (machine.id === selectedMachineId || machine.online === false) return;
-    setSelectedMachineId(machine.id);
-    setProblem(null);
-    const request = ++catalogRequest.current;
-    if (machine.id === sourceMachine.id) {
-      setCatalog(sourceCatalog);
-      setSelectedWorkspaceId(sourceWorkspaceId);
-      setSelectedAgentId(sourceAgentId);
-      setLoadingCatalog(false);
-      return;
-    }
-    if (!loadCatalog) return;
-    setLoadingCatalog(true);
-    setCatalog({ agents: [], workspaces: [] });
-    void loadCatalog(machine)
-      .then((loaded) => {
-        if (catalogRequest.current !== request) return;
-        setCatalog(loaded);
-        setSelectedWorkspaceId(
-          loaded.workspaces.some((workspace) => workspace.id === sourceWorkspaceId)
-            ? sourceWorkspaceId
-            : (loaded.workspaces[0]?.id ?? ""),
-        );
-        setSelectedAgentId(
-          loaded.agents.some((agent) => agent.id === sourceAgentId && canStartAgent(agent))
-            ? sourceAgentId
-            : (loaded.agents.find(canStartAgent)?.id ?? ""),
-        );
-      })
-      .catch((error: unknown) => {
-        if (catalogRequest.current === request) setProblem(message(error));
-      })
-      .finally(() => {
-        if (catalogRequest.current === request) setLoadingCatalog(false);
-      });
-  };
-
-  const selectedMachine =
-    machines.find((machine) => machine.id === selectedMachineId) ?? sourceMachine;
   const selectedAgent = catalog.agents.find((agent) => agent.id === selectedAgentId);
   const selectedWorkspace = catalog.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
@@ -201,119 +138,32 @@ export function ForkDialog({
         </header>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
-          <fieldset disabled={busy || loadingMachines}>
-            <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标机器</legend>
-            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {machines.map((machine) => (
-                <label
-                  key={machine.id}
-                  className="flex min-h-14 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-                >
-                  <input
-                    type="radio"
-                    name="fork-machine"
-                    value={machine.id}
-                    aria-label={`${machine.label}${machine.online === false ? " 离线" : ""}`}
-                    checked={machine.id === selectedMachineId}
-                    disabled={machine.online === false}
-                    onChange={() => pickMachine(machine)}
-                    className="sr-only"
-                  />
-                  <span
-                    className={`h-2 w-2 shrink-0 rounded-full ${machine.online === false ? "bg-faint" : "bg-ok"}`}
-                    aria-hidden
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-fg">{machine.label}</span>
-                    <span className="block text-[10px] text-faint">
-                      {machine.id === sourceMachine.id ? "当前机器" : machine.online === false ? "离线" : "可连接"}
-                    </span>
-                  </span>
-                </label>
-              ))}
-            </div>
-            {loadingMachines ? <p className="mt-2 text-xs text-faint">正在读取机器列表…</p> : null}
-          </fieldset>
+          <MachineGrid
+            machines={machines}
+            selectedMachineId={selectedMachine.id}
+            sourceMachineId={sourceMachine.id}
+            disabled={busy || loadingMachines}
+            loading={loadingMachines}
+            onPick={pickMachine}
+          />
 
-          <fieldset disabled={busy || loadingCatalog}>
-            <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标工作区</legend>
-            {loadingCatalog ? (
-              <p className="mt-2 text-xs text-faint">正在读取目标机器…</p>
-            ) : catalog.workspaces.length > 0 ? (
-              <div
-                role="listbox"
-                aria-label="目标工作区"
-                className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
-              >
-                {catalog.workspaces.map((workspace) => {
-                  const selected = workspace.id === selectedWorkspaceId;
-                  return (
-                    <button
-                      key={workspace.id}
-                      type="button"
-                      role="option"
-                      aria-selected={selected}
-                      title={workspace.root}
-                      onClick={() => setSelectedWorkspaceId(workspace.id)}
-                      className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-2 text-left text-sm ${
-                        selected
-                          ? "bg-accent/10 text-fg"
-                          : "text-muted hover:bg-raised hover:text-fg"
-                      }`}
-                    >
-                      <WorkspaceIcon workspace={workspace} />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-fg">{workspace.name}</span>
-                        <span className="block truncate text-[10px] text-faint">{workspace.root}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-                目标机器没有可用工作区。
-              </p>
-            )}
-          </fieldset>
+          <WorkspaceList
+            workspaces={catalog.workspaces}
+            selectedWorkspaceId={selectedWorkspaceId}
+            disabled={busy || loadingCatalog}
+            loading={loadingCatalog}
+            onSelect={setSelectedWorkspaceId}
+          />
 
-          <fieldset disabled={busy || loadingCatalog}>
-            <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标 Agent</legend>
-            <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-              {catalog.agents.map((agent) => {
-                const presentation = resolveAgentPresentation(agent);
-                const availability = resolveAgentAvailability(agent);
-                return (
-                  <label
-                    key={agent.id}
-                    className="flex min-h-16 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-                  >
-                    <input
-                      type="radio"
-                      name="fork-agent"
-                      value={agent.id}
-                      aria-label={`${presentation.label}${availability ? ` ${availability.fullLabel}` : ""}`}
-                      checked={agent.id === selectedAgentId}
-                      disabled={!canStartAgent(agent)}
-                      onChange={() => setSelectedAgentId(agent.id)}
-                      className="sr-only"
-                    />
-                    {presentation.kind === "text" ? null : (
-                      <AgentMark agent={agent} className="h-6 w-6" fallbackToText={false} />
-                    )}
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-fg">{presentation.label}</span>
-                      <span className={`block text-[10px] ${availability ? "text-danger" : "text-faint"}`}>
-                        {agent.id === sourceAgentId && selectedMachine.id === sourceMachine.id
-                          ? "当前 Agent"
-                          : availability?.fullLabel ?? "已就绪"}
-                      </span>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          </fieldset>
+          <AgentGrid
+            agents={catalog.agents}
+            selectedAgentId={selectedAgentId}
+            disabled={busy || loadingCatalog}
+            onSelect={setSelectedAgentId}
+            currentAgentId={
+              selectedMachine.id === sourceMachine.id ? sourceAgentId : undefined
+            }
+          />
 
           {problem ? <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{problem}</p> : null}
 
@@ -357,7 +207,7 @@ export function ForkDialog({
                   else setBusy(false);
                 })
                 .catch((error: unknown) => {
-                  setProblem(message(error));
+                  setProblem(error instanceof Error ? error.message : String(error));
                   setBusy(false);
                 });
             }}
@@ -370,5 +220,3 @@ export function ForkDialog({
     document.body,
   );
 }
-
-const message = (error: unknown) => error instanceof Error ? error.message : String(error);

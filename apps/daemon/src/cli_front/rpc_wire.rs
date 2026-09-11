@@ -128,6 +128,7 @@ impl Rpc {
                 proof: crate::channel_auth::client_proof(&admission.server_proof, context, &nonce),
             },
             rtc_supported: false,
+            max_bulk_stream_window_bytes: None,
         };
         timeout_send(
             &mut socket,
@@ -267,17 +268,13 @@ impl Rpc {
             &nonce,
         )
         .await?;
-        // The Hub said which key this machine has, and the connection proved
-        // one. Comparing them is the only reason asking the Hub was worth
-        // anything: a Hub that lies gets caught here rather than believed.
-        if !ticket.fingerprint.is_empty()
-            && !rpc.hello.fingerprint.is_empty()
-            && rpc.hello.fingerprint != ticket.fingerprint
-        {
-            return Err(ConnectError::Protocol(
-                "the machine that answered is not the one the Hub named".into(),
-            ));
-        }
+        // Hub tickets hash the enrollment public key (`publicKeyFingerprint`).
+        // `Hello.fingerprint` hashes `machine_id:secret` for local display.
+        // Those strings never match; treating them as the same identity key
+        // made every `genet --machine` hosted hop fail after a ticket was
+        // issued. The ticket plus channel proof already named the peer.
+        // A later Hello field that carries the public-key digest can restore
+        // this comparison without blocking remote shell.
         Ok(rpc)
     }
 
@@ -564,6 +561,7 @@ async fn link_up(
         client_name: format!("{}-cli", crate::channel::CLI_BINARY),
         auth,
         rtc_supported: false,
+        max_bulk_stream_window_bytes: None,
     };
     let link = crate::transport::fabric::dial(endpoint, route_ticket, &hello)
         .await

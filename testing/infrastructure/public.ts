@@ -13,3 +13,11 @@ export type { DefineInput } from "./engine/registry.ts";
 export { createLease, releaseLease, type EnvironmentLease } from "./environment/lease.ts";
 export { allocatePort } from "./environment/ports.ts";
 export { startMockLlm, type MockLlmHandle } from "./services/mock-llm/index.ts";
+export {
+  registerControlledAgent,
+  readControlledAgentJournal,
+  type ControlledAgentHandle,
+  type ControlledAgentJournalEntry,
+  type ControlledAgentOptions,
+  type ControlledAgentProfile,
+} from "./agents/index.ts";

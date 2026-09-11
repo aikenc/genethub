@@ -21,7 +21,7 @@ use crate::transport::admission::Admission;
 
 use super::{
     DATA_CHANNEL_LABEL, MAX_RTC_PEERS, RTC_ADMISSION_LIFETIME, RTC_CHANNEL_QUEUE,
-    RTC_GATHER_TIMEOUT, RTC_HELLO_TIMEOUT, RTC_SIGNAL_BYTES, STUN_SERVER,
+    RTC_GATHER_TIMEOUT, RTC_HELLO_TIMEOUT, RTC_SIGNAL_BYTES,
 };
 
 static RTC_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -69,7 +69,7 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     let session = Session::accept(
         &request.sdp,
         &Config {
-            ice_servers: vec![STUN_SERVER.to_string()],
+            ice_servers: super::stun_urls(&super::ice_config(&services.state).await),
             channel_label: DATA_CHANNEL_LABEL.to_string(),
             gather_timeout: RTC_GATHER_TIMEOUT,
             max_message_bytes: genehub_proto::MAX_DATA_FRAME_BYTES,
@@ -107,6 +107,21 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     stream.finish().await
 }
 
+async fn wait_until_open(session: &Session, patience: std::time::Duration) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + patience;
+    loop {
+        match session.state() {
+            State::Open => return Ok(()),
+            State::Closed => anyhow::bail!("RTC data channel closed before it opened"),
+            State::Connecting => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("RTC data channel did not open in time");
+        }
+        genet_wasi::poll::idle().await;
+    }
+}
+
 /// Waits out the peer's hello, then carries records until either side stops.
 ///
 /// Holding the session and the slot for the whole of it is what bounds an
@@ -119,6 +134,7 @@ async fn serve(
     inherited: PeerAccess,
     admission: Admission,
 ) -> Result<()> {
+    wait_until_open(&session, RTC_ADMISSION_LIFETIME).await?;
     let hello = tokio::time::timeout(RTC_HELLO_TIMEOUT, session.next())
         .await
         .map_err(|_| anyhow!("RTC peer hello timed out"))?

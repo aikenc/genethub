@@ -618,6 +618,28 @@ describe("the settings panel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("EEEE-FFFF");
   });
 
+  it("shows the RTC failure phase instead of a single 直连失败 sentence", async () => {
+    const { client } = stubDaemon({
+      "settings.get": () => ({ type: "settings", data: { lanEnabled: false, providers: [] } }),
+      "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
+    });
+    Object.assign(client, {
+      rtcState: "failed",
+      rtcFailure: {
+        phase: "channel",
+        message: "RTC DataChannel did not open",
+        durationMs: 1840,
+      },
+      onRtcStateChange: () => () => {},
+    });
+    install(client);
+
+    render(<SettingsPanel host={browserHost()} />);
+    expect(await screen.findByTestId("rtc-status")).toHaveTextContent("打开通道");
+    expect(screen.getByTestId("rtc-status")).toHaveTextContent("RTC DataChannel did not open");
+    expect(screen.getByTestId("rtc-status")).toHaveTextContent("1840ms");
+  });
+
   it("re-probes the agents after a key lands, so the list stops lying", async () => {
     const { client, calls } = stubDaemon({
       "settings.get": () => ({
@@ -756,13 +778,15 @@ describe("the version section", () => {
     render(<SettingsPanel host={desktopish("0.1.17")} />);
 
     expect(await screen.findByTestId("app-version")).toHaveTextContent(shownVersion);
-    expect(screen.getByTestId("daemon-version")).toHaveTextContent(`daemon ${shownVersion}`);
+    expect(screen.getByTestId("daemon-version")).toHaveTextContent(
+      `daemon ${shownVersion} · Live`,
+    );
     // The page is a third artefact, deployed on its own schedule, and the two
     // numbers above say nothing about it. An hour went once on a phone that was
     // three releases behind while the screen said "daemon 0.1.21" and looked
     // right. Only that a build is named — the name itself is a bundle-time
     // stamp, which is not this file's to predict.
-    expect(screen.getByTestId("page-build")).toHaveTextContent(/页面 \S/);
+    expect(screen.getByTestId("page-build")).toHaveTextContent(/页面（console） \S/);
     // Nothing is asked until the button is pressed. An outbound call on mount is
     // the thing this design is avoiding.
     expect(calls.some((call) => call.type === "update.check")).toBe(false);
@@ -979,7 +1003,10 @@ describe("the version section", () => {
 
     render(<SettingsPanel host={browserHost()} />);
 
-    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(`daemon ${shownVersion}`);
+    expect(await screen.findByTestId("daemon-version")).toHaveTextContent(
+      `daemon ${shownVersion} · Live`,
+    );
+    expect(screen.getByTestId("browser-no-app")).toHaveTextContent("浏览器（无安装包版本）");
     expect(screen.queryByTestId("app-version")).toBeNull();
   });
 });

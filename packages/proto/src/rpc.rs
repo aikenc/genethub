@@ -30,6 +30,8 @@ pub struct ProtocolIdentity {
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Request {
+    #[serde(rename = "client.debug")]
+    ClientDebug(crate::ClientDebugRequest),
     /// Returns machine metadata only after the channel key is active, so a
     /// forwarding service cannot read a user's alias or fingerprint.
     #[serde(rename = "connection.identity")]
@@ -148,6 +150,22 @@ pub enum Request {
     /// what makes this a seek instead of a scan (`docs/session-storage.md`).
     #[serde(rename = "blob.get", rename_all = "camelCase")]
     BlobGet { session_id: String, blob: BlobRef },
+    /// Batch variant of `round.trunk.get`: same per-trunk semantics, one
+    /// round trip. Responses align with request order; any unknown locator
+    /// fails the whole batch rather than returning a partial result.
+    #[serde(rename = "round.trunk.batchGet", rename_all = "camelCase")]
+    RoundTrunkBatchGet {
+        session_id: String,
+        refs: Vec<TrunkLocator>,
+    },
+    /// Batch variant of `blob.get`: same per-blob semantics, one round trip.
+    /// Responses align with request order; any unknown ref fails the whole
+    /// batch rather than returning a partial result.
+    #[serde(rename = "blob.batchGet", rename_all = "camelCase")]
+    BlobBatchGet {
+        session_id: String,
+        blobs: Vec<BlobRef>,
+    },
     #[serde(rename = "session.send", rename_all = "camelCase")]
     SessionSend {
         session_id: String,
@@ -612,6 +630,15 @@ pub enum Request {
     /// navigated away from is the one most worth showing.
     #[serde(rename = "process.list")]
     ProcessList,
+    #[serde(rename = "process.workspaceList", rename_all = "camelCase")]
+    ProcessWorkspaceList { workspace_id: String },
+    /// Authenticated application shutdown; never signals a caller-supplied PID.
+    #[serde(rename = "process.serviceStop", rename_all = "camelCase")]
+    ProcessServiceStop {
+        workspace_id: String,
+        entry_path: String,
+        run_id: String,
+    },
     /// Ends one process and everything below it.
     ///
     /// The session is part of the request rather than looked up from the pid,
@@ -630,6 +657,8 @@ pub enum Request {
 #[serde(tag = "type", content = "data", rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub enum Reply {
+    #[serde(rename = "client.debug")]
+    ClientDebug(crate::ClientDebugResponse),
     Hello(HelloResult),
     /// A subscribe always answers with a snapshot plus any replayed events, so
     /// the client has exactly one code path for "catch up".
@@ -678,7 +707,9 @@ pub enum Reply {
     SessionContext(SessionContext),
     RoundLayer(RoundLayer),
     RoundTrunk(RoundTrunk),
+    RoundTrunks(Vec<RoundTrunk>),
     Blob(BlobPayload),
+    Blobs(Vec<BlobPayload>),
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
     Workspace(WorkspaceInfo),
@@ -756,15 +787,28 @@ pub struct SessionArtifactBundle {
     pub files: Vec<SessionArtifactStoredFile>,
 }
 
-/// A process an agent started and did not stop.
-///
-/// Assembled from what the operating system says rather than from what was
-/// recorded when it started, because we did not start it — the agent did, and
-/// what it started is only visible from the outside.
+/// Public preview capability attached to a running application. Contains no credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct BackgroundService {
+    pub name: String,
+    pub run_id: String,
+    pub entry_path: String,
+    pub reachable: bool,
+    pub can_stop: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct BackgroundProcess {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service: Option<BackgroundService>,
     /// The conversation whose agent is answerable for this.
     pub session_id: String,
     pub pid: u32,

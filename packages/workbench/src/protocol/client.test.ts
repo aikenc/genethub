@@ -499,7 +499,21 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
       mediaType: "text/markdown",
       sourceBytes: bytes.byteLength,
     }, bytes);
-    expect(Array.from((await preview).bytes)).toEqual(Array.from(bytes));
+    const result = await preview;
+    expect(Array.from(result.bytes)).toEqual(Array.from(bytes));
+    expect(result.transfer).toMatchObject({
+      transport: "websocket",
+      responseBytes: bytes.byteLength,
+      chunkCount: 1,
+      largestChunkBytes: bytes.byteLength,
+    });
+    expect(result.transfer.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(result.transfer.firstByteMs).not.toBeNull();
+    expect(result.transfer.transferMs).toBeGreaterThanOrEqual(0);
+    if (result.transfer.averageBytesPerSecond !== null) {
+      expect(Number.isFinite(result.transfer.averageBytesPerSecond)).toBe(true);
+      expect(result.transfer.averageBytesPerSecond).toBeGreaterThan(0);
+    }
 
     const missing = client.preview("workspace-1", "r_project/gone.png");
     await waitFor(() => socket.lastOf("asset.preview").id !== exchange.id);
@@ -595,6 +609,42 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
       (event) => event.kind === "rtc" && "iceConnectionState" in event.detail,
     );
     expect(rtc?.detail.iceConnectionState).toBe("checking");
+    client.close();
+  });
+
+  it("keeps the failing RTC phase so settings can show more than 直连失败", async () => {
+    vi.stubGlobal("RTCPeerConnection", class {});
+    const { RtcUpgradeError } = await import("../dataplane/rtc");
+    const secret = "r".repeat(64);
+    const queue = socketQueue({
+      secret,
+      identity: {
+        machineId: "m_remote",
+        fingerprint: "FP-REMOTE",
+        transport: "forwarded",
+        rtcSupported: true,
+      },
+    });
+    const rtcFactory = vi.fn(async () => {
+      throw new RtcUpgradeError("channel", new Error("RTC DataChannel did not open"));
+    });
+    const client = new Client({
+      url: "wss://relay.example/fabric/v2",
+      channelCredential: { capabilityId: "cap-1", secret },
+      socketFactory: queue.factory,
+      rtcFactory,
+      rtcEnabled: true,
+    });
+    client.connect();
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.length === 1);
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.rtcState === "failed");
+    expect(client.rtcFailure).toMatchObject({
+      phase: "channel",
+      message: "RTC DataChannel did not open",
+    });
+    expect(client.rtcFailure?.durationMs).toBeGreaterThanOrEqual(0);
     client.close();
   });
 });

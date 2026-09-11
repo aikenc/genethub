@@ -17,6 +17,8 @@ export {
 } from "./protocol/client";
 export type {
   AssetPreviewResult,
+  AssetPreviewTransferStats,
+  AssetPreviewTransport,
   ClientDiagnosticDetail,
   ClientDiagnosticEvent,
   ClientDiagnosticKind,
@@ -31,3 +33,5 @@ export type {
   WebSocketLike,
 } from "./protocol/client";
 export type { DataStream } from "./dataplane";
+
+export { ServicePreviewClient } from "./preview/serviceClient";

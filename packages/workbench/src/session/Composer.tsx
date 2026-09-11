@@ -19,7 +19,7 @@ import {
 } from "../speech/SpeechComposer";
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
-import type { ComposerDraftInsert } from "./store";
+import type { ComposerDraftInsert, ForwardDraft } from "./store";
 
 /**
  * What the composer is in the middle of.
@@ -45,6 +45,27 @@ function sessionBusy(status: SessionStatus | null | undefined): boolean {
  * the durable status, so a tab switch onto a running/waiting chat can show
  * Stop before the snapshot arrives.
  */
+/**
+ * How long a running turn has been quiet, once that is worth saying.
+ *
+ * Below the threshold this is nothing: agents pause to think, and a counter
+ * that starts at one second would make every ordinary turn look troubled. Past
+ * it, the number is the whole point — "又卡住了" was filed against a turn that
+ * had been running for six minutes and forty-nine seconds and was fine.
+ */
+export function quietFor(lastActivityAtMs: number | null | undefined, nowMs: number): string | null {
+  if (!lastActivityAtMs) return null;
+  const seconds = Math.floor((nowMs - lastActivityAtMs) / 1000);
+  if (seconds < QUIET_AFTER_SECONDS) return null;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 1) return `已静默 ${seconds} 秒`;
+  const rest = seconds % 60;
+  return rest === 0 ? `已静默 ${minutes} 分` : `已静默 ${minutes} 分 ${rest} 秒`;
+}
+
+/** Long enough that an ordinary pause to think never reaches it. */
+const QUIET_AFTER_SECONDS = 60;
+
 export function resolveComposerPhase({
   pending,
   timelineStatus,
@@ -106,7 +127,9 @@ export function Composer({
   commands,
   restoreDraft,
   insertDraft,
+  forwardDraft,
   speech,
+  lastActivityAtMs,
   onSend,
   onInterrupt,
   onPickAgent,
@@ -114,9 +137,11 @@ export function Composer({
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
+  onRefreshAgents,
   onHeightChange,
   onRestoreDraft,
   onInsertDraft,
+  onClearForwardDraft,
   minimized,
   onExpand,
 }: {
@@ -142,8 +167,19 @@ export function Composer({
   restoreDraft?: { text: string; attachments: Attachment[] } | null;
   /** One line produced outside Chat that should be appended, never sent. */
   insertDraft?: ComposerDraftInsert | null;
+  /** A forward capsule parked here, sent ahead of the user's own text. */
+  forwardDraft?: ForwardDraft | null;
   /** Available only when the connected daemon advertises Speech Protocol v2. */
   speech?: SpeechInputTarget;
+  /**
+   * When the running turn last produced anything, if a turn is running.
+   *
+   * A quiet turn is not a dead turn, and nothing here treats it as one. It is
+   * shown because the person waiting is the only one who can tell whether this
+   * much silence is normal for what they asked — and every "又卡住了" report we
+   * have is someone who had no way to tell.
+   */
+  lastActivityAtMs?: number | null;
   onSend(text: string, attachments: Attachment[]): void;
   onInterrupt(): void;
   onPickAgent(id: string): void;
@@ -151,17 +187,32 @@ export function Composer({
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
   onPickRuntimeAxis?(axisId: string, valueId: string): void;
+  onRefreshAgents?(): void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
   onHeightChange?(height: number): void;
   /** Acknowledges that `restoreDraft` has been taken into the field. */
   onRestoreDraft?(): void;
   /** Acknowledges that `insertDraft` has been appended to the field. */
   onInsertDraft?(id: string): void;
+  /** Removes the parked forward capsule without sending it. */
+  onClearForwardDraft?(): void;
   /** Fast-scroll compact bar. The full card comes back on `onExpand`. */
   minimized?: boolean;
   onExpand?(): void;
 }) {
   const [draft, setDraft] = useState("");
+  // Only while a turn is running, and only every few seconds: the number this
+  // feeds is read in minutes, and a per-second timer on the composer would cost
+  // more than the precision is worth.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const watchingQuiet = phase === "running" && Boolean(lastActivityAtMs);
+  useEffect(() => {
+    if (!watchingQuiet) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, [watchingQuiet]);
+  const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState(0);
@@ -267,14 +318,23 @@ export function Composer({
     // anything the reader did wrong.
     if (phase !== "idle" || disabled || speechInput.busy) return;
     const text = draft.trim();
-    if (!text && attachments.length === 0) return;
+    if (!text && attachments.length === 0 && !forwardDraft) return;
+    // The parked capsule travels ahead of the user's own words, inside the
+    // same message, so the receiver sees history first and the ask second.
+    const payload = forwardDraft
+      ? text
+        ? `${forwardDraft.capsule}\n\n${text}`
+        : forwardDraft.capsule
+      : text;
+    const outgoing = [...(forwardDraft?.attachments ?? []), ...attachments];
     speechInput.dismissReview();
     setSpeechTextRange(null);
     setActiveSpeechSpan(null);
     setDraft("");
     setAttachments([]);
     setDismissed(false);
-    onSend(text, attachments);
+    onSend(payload, outgoing);
+    if (forwardDraft) onClearForwardDraft?.();
   };
 
   // A message that failed comes back whole, text and attachments together, so
@@ -432,6 +492,34 @@ export function Composer({
           focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
+        {forwardDraft ? (
+          <div className="px-4 pt-3" data-testid="forward-draft">
+            <div className="flex items-center gap-2 rounded-xl border border-line bg-raised/50 px-3 py-2">
+              <span aria-hidden className="text-muted">
+                ↪
+              </span>
+              <span className="min-w-0 flex-1 truncate text-xs text-muted">
+                转发自 {forwardDraft.sourceTitle ?? forwardDraft.sourceSessionId} ·{" "}
+                {forwardDraft.itemCount} 条 · 约{" "}
+                {forwardDraft.estimatedTokens >= 1000
+                  ? `${(forwardDraft.estimatedTokens / 1000).toFixed(1)}k`
+                  : forwardDraft.estimatedTokens}{" "}
+                tokens
+                {forwardDraft.attachments && forwardDraft.attachments.length > 0
+                  ? ` · ${forwardDraft.attachments.length} 张图`
+                  : ""}
+              </span>
+              <button
+                type="button"
+                aria-label="移除转发的会话历史"
+                className="shrink-0 rounded-full px-2 py-0.5 text-xs text-muted hover:bg-surface hover:text-fg"
+                onClick={() => onClearForwardDraft?.()}
+              >
+                移除
+              </button>
+            </div>
+          </div>
+        ) : null}
         {attachments.length > 0 ? (
           <div
             className="flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3"
@@ -645,6 +733,7 @@ export function Composer({
               onPickMode={onPickMode}
               onPickEffort={onPickEffort ?? (() => {})}
               onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
+              onRefreshAgents={onRefreshAgents}
             />
           </div>
           <div
@@ -751,22 +840,34 @@ export function Composer({
                 <Loader2 className="h-6 w-6 animate-spin md:h-4 md:w-4" aria-hidden />
               </button>
             ) : phase === "running" ? (
-              <button
-                type="button"
-                aria-label="停止"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={onInterrupt}
-                className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"
-              >
-                <span className="h-[18px] w-[18px] rounded-[3px] bg-current md:h-3 md:w-3 md:rounded-[2px]" />
-              </button>
+              <div className="flex shrink-0 items-center gap-1.5">
+                {quiet ? (
+                  // Next to Stop, because that is the decision it informs.
+                  <span className="whitespace-nowrap text-[10px] leading-none text-muted" title="智能体已接受这一轮，但有一段时间没有新内容了。这不代表它出了问题——长任务本来就会安静很久。">
+                    {quiet}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label="停止"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={onInterrupt}
+                  className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"
+                >
+                  <span className="h-[18px] w-[18px] rounded-[3px] bg-current md:h-3 md:w-3 md:rounded-[2px]" />
+                </button>
+              </div>
             ) : (
               <button
                 type="button"
                 aria-label="发送"
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => send()}
-                disabled={disabled || speechInput.busy || (draft.trim().length === 0 && attachments.length === 0)}
+                disabled={
+                  disabled ||
+                  speechInput.busy ||
+                  (draft.trim().length === 0 && attachments.length === 0 && !forwardDraft)
+                }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >
                 <svg

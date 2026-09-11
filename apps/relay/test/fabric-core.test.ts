@@ -49,7 +49,12 @@ class TestConnection implements FabricEndpointConnection {
 
   constructor(
     handle: string,
-    options: { epoch?: string; expiresAt?: string | null; connectionGeneration?: number } = {},
+    options: {
+      epoch?: string;
+      expiresAt?: string | null;
+      connectionGeneration?: number;
+      transportFlow?: boolean;
+    } = {},
   ) {
     this.context = Object.freeze({
       endpointHandle: handle,
@@ -58,10 +63,15 @@ class TestConnection implements FabricEndpointConnection {
       connectionGeneration: options.connectionGeneration ?? 1,
       presenceLeaseSeconds: 90,
       connectionEpoch: options.epoch ?? `epoch:${handle}`,
+      transportFlow: options.transportFlow ?? false,
     });
   }
 
   send(frame: FabricFrame): void {
+    this.sent.push(cloneFrame(frame));
+  }
+
+  async sendFlow(frame: FabricFrame): Promise<void> {
     this.sent.push(cloneFrame(frame));
   }
 
@@ -161,6 +171,60 @@ async function establish(
 }
 
 describe("Fabric endpoint-neutral routing", () => {
+  it("negotiates transport flow only when both physical endpoints opt in", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { streamId: () => id(900) });
+    const source = new TestConnection("endpoint:flow-source", {
+      transportFlow: true,
+    });
+    const target = new TestConnection("endpoint:flow-target", {
+      transportFlow: true,
+    });
+    core.register(source);
+    core.register(target);
+    authority.grant("flow", target.context.endpointHandle);
+
+    await core.handle(source, open(id(91), "flow", "hello"));
+    const incoming = last(target);
+    assert.equal(incoming.kind, FabricKind.Incoming);
+    assert.equal(incoming.value, 0n);
+    await core.handle(
+      target,
+      frame(FabricKind.Accept, incoming.streamId, 0n, Buffer.from("accepted")),
+    );
+    assert.equal(last(source).kind, FabricKind.Accept);
+    assert.equal(last(source).value, 0n);
+
+    const sourceFrames = source.sent.length;
+    await core.handle(
+      source,
+      frame(FabricKind.Data, id(91), 1n, Buffer.from("opaque-record")),
+    );
+    assert.deepEqual(
+      last(target),
+      frame(FabricKind.Data, incoming.streamId, 1n, Buffer.from("opaque-record")),
+    );
+    assert.equal(
+      source.sent.length,
+      sourceFrames,
+      "Relay must not return or forward application credit in transport flow",
+    );
+  });
+
+  it("falls back to legacy credit when either endpoint lacks the capability", async () => {
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, { streamId: () => id(899) });
+    const source = new TestConnection("endpoint:new", { transportFlow: true });
+    const target = new TestConnection("endpoint:old");
+    core.register(source);
+    core.register(target);
+    const peer = await establish(core, authority, source, target, id(92), "legacy");
+    assert.equal(target.sent[0]?.value, CREDIT);
+    assert.equal(last(source).value, CREDIT);
+    assert.equal(core.usesTransportFlow(source, id(92)), false);
+    assert.equal(core.usesTransportFlow(target, peer), false);
+  });
+
   it("prunes idle endpoint tombstones during sweep and clears them on unregister", () => {
     let now = 1_000;
     const authority = new TestAuthority();

@@ -242,11 +242,7 @@ fn validate_dimensions(cols: u16, rows: u16) -> Result<()> {
 }
 
 fn default_shell() -> String {
-    if cfg!(windows) {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-    }
+    super::default_shell_for(cfg!(windows), |key| std::env::var(key).ok())
 }
 
 #[cfg(test)]

@@ -66,7 +66,10 @@ browser Fabric endpoint ─┐
                                        └─ events stream
 ```
 
-Fabric v2 只负责 endpoint admission、opaque route、outer stream、credit 和转发。每个 routed peer carrier 再承载 protocol-v3 logical streams。这样 Relay 不需要知道 method、workspace、path、MIME、status 或业务 body。
+Fabric v2 只负责 endpoint admission、opaque route、outer stream 和转发。新 endpoint 双方协商
+`transport-flow` 时，每条 TCP/WebSocket 腿使用自己的 socket 背压；任一旧端存在时才回退 outer
+stream credit。每个 routed peer carrier 再承载 protocol-v3 logical streams。这样 Relay 不需要知道
+method、workspace、path、MIME、status 或业务 body。
 
 这里的“短连接”指 logical stream，不是每个请求重建 TCP、WebSocket 或 PeerConnection。建立新请求只分配 stream id 和有界状态。
 
@@ -150,16 +153,27 @@ version:u8 | kind:u8 | flags:u16 | streamId:u32 | value:u32 | length:u32 | paylo
 | DataFrame header | 16 bytes |
 | 单 DATA plaintext payload | 16,340 bytes |
 | Exchange head | 8 KiB |
-| 初始 stream credit | 256 KiB |
+| 通用/未知长度 stream 初始 credit | 256 KiB |
+| Preview 初始授信（新 client + 新 daemon） | 64 MiB，等于完整方法上限 |
+| Preview 首批 bulk 兼容授信 | 8 MiB；无能力字段的更老 daemon 回退 256 KiB |
 | endpoint active streams | 256 |
 | 通用 finite response body | 64 MiB |
 | Preview source/body | 64 MiB |
 
 client-opened stream 使用奇数 id，server-opened stream 预留偶数 id，0 只用于 endpoint control。所有已知长度的 request/response 都在 FIN 时核对精确长度；无 head 的 response DATA、序号跳跃、credit 溢出和非法状态转换都会被拒绝。
 
-发送端按 stream 维护队列，并以简单 round-robin 每轮发送一帧。每条 stream 有独立 256 KiB credit；只有消费者取走 bytes 才返回 `WINDOW_UPDATE`。Web 与 daemon 同时有 endpoint、carrier 和 handler 队列上限。
+发送端按 stream 维护队列，并以简单 round-robin 每轮发送一帧。通用 RPC、events、PTY 等流仍以
+256 KiB 为初始 credit，消费者取走 bytes 后返回 `WINDOW_UPDATE`。有限 `asset.preview` 是明确
+allowlist：新 client 在 `PeerHello` 声明最大能力，新 daemon 返回双方共同上限，当前新/新组合一次
+授予完整 64 MiB 方法上限。授信只是发送许可、不预分配内存；即使没有任何信用回包，一个合法 Preview
+也能发送完。真实排队由精确 body length、TCP/socket drain、8 个 Preview worker 以及 endpoint/carrier
+有界队列控制。16 KiB 分片只负责加密 record 和公平调度，不要求每片等待 RTT。
 
-daemon carrier reader 只做 record 验证、frame decode 和有界入队，不等待文件 IO、Agent 或业务 handler。每条 incoming stream 在独立 task 中处理；Preview 文件读取进入最多 2 路的 blocking worker 槽。因此慢 IO 只占用自己的 stream/window，不堵塞连接 reader。
+daemon carrier reader 只做 record 验证、frame decode 和有界入队，不等待文件 IO、Agent 或业务
+handler。队列满时异步等待空间，不把正常突发误报为协议违规。每条 incoming stream 在独立 task 中
+处理；Preview 最多 8 个 worker permit，首遍用固定 256 KiB 缓冲扫描长度/类型/SHA，复位同一文件句柄
+后第二遍流式发送并复核 SHA。client 只做一次精确最终分配。因此慢 IO 只占用自己的 stream/worker，
+不堵塞连接 reader，也不需要用小信用窗口代替内存管理。
 
 ## 5. Exchange 语义
 

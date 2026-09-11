@@ -133,6 +133,14 @@ impl AgentAdapter for GenetAdapter {
         }
     }
 
+    fn host_form_payloads(&self) -> bool {
+        // The v2 agent is the component's own agent-serve entry, spawned as a
+        // wasm child that shares this daemon's preopen namespace — guest paths
+        // are the only spelling it understands. Only the legacy branch, a
+        // native binary beside the daemon, needs host-form payloads.
+        self.binary.is_some()
+    }
+
     async fn probe(&self) -> ProbeState {
         match &self.binary {
             Some(_) => ProbeState::Ready,
@@ -197,6 +205,7 @@ impl AgentAdapter for GenetAdapter {
         write_models_file(&home, &config.providers)?;
 
         let session_file = home.join("session.jsonl");
+        let legacy_native = self.binary.is_some();
         let (mut command, describe) = match self.binary.clone() {
             Some(binary) => (Command::new(&binary), binary.display().to_string()),
             // v2: the agent is the `agent-run` entry of the same component the
@@ -216,11 +225,20 @@ impl AgentAdapter for GenetAdapter {
                 (command, format!("{cli} agent-serve"))
             }
         };
+        // The host's spawn import translates only argv[0]; a native agent
+        // binary receives --session verbatim, so on a Windows host it needs
+        // the host spelling. The wasm child shares our preopens and takes the
+        // guest path as-is.
+        let session_arg = if legacy_native {
+            crate::guest_paths::host_path(&session_file)
+        } else {
+            session_file.clone()
+        };
         command
             .arg("--mode")
             .arg("rpc")
             .arg("--session")
-            .arg(&session_file)
+            .arg(&session_arg)
             .arg("--genehub-session-id")
             .arg(&config.session_id)
             .current_dir(&config.cwd)
@@ -276,6 +294,7 @@ impl AgentAdapter for GenetAdapter {
         said.watch("genet-agent", Some(stderr)).await;
 
         let session = GenetSession {
+            tasks: super::SessionTasks::default(),
             stdin: Mutex::new(stdin),
             events: events.clone(),
             turn: turn.clone(),
@@ -284,7 +303,9 @@ impl AgentAdapter for GenetAdapter {
             session_file,
         };
 
-        tokio::spawn(translate_stream(stdout, events, turn, child, said));
+        session
+            .tasks
+            .spawn(translate_stream(stdout, events, turn, child, said));
 
         Ok(Box::new(session))
     }
@@ -314,6 +335,7 @@ impl TurnState {
 }
 
 struct GenetSession {
+    tasks: super::SessionTasks,
     stdin: Mutex<ChildStdin>,
     events: broadcast::Sender<SessionEvent>,
     turn: Arc<Mutex<TurnState>>,
@@ -378,13 +400,8 @@ impl AgentSession for GenetSession {
     }
 
     async fn close(&self) -> Result<()> {
-        // Dropping stdin is the agent's shutdown signal; it drains in-flight
-        // work before exiting, so wait rather than killing outright.
-        let mut child = self.child.lock().await;
-        if let Some(mut child) = child.take() {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-        }
+        super::close_child(&self.child).await?;
+        self.tasks.stop().await;
         Ok(())
     }
 
@@ -515,6 +532,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 item: TimelineItem::AssistantMessage {
                     id,
                     text: String::new(),
+                    received_at_ms: None,
                 },
             });
         }
@@ -541,7 +559,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     .to_string();
                 emit(SessionEvent::Item {
                     turn_id,
-                    item: TimelineItem::AssistantMessage { id, text },
+                    item: TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 });
             }
         }
@@ -554,6 +576,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 item: TimelineItem::Reasoning {
                     id,
                     text: String::new(),
+                    received_at_ms: None,
                 },
             });
         }
@@ -594,6 +617,9 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     name: name.to_string(),
                     status: ToolStatus::Pending,
                     detail: detail_from_call(name, &arguments),
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -606,6 +632,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     delta: ItemDelta::ToolStatus {
                         status: ToolStatus::Running,
                         detail: None,
+                        images: vec![],
                     },
                 });
             }
@@ -637,6 +664,9 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                     name: name.clone(),
                     status,
                     detail: detail_from_result(&name, &arguments, result, is_error),
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
             });
         }
@@ -675,7 +705,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
                 .to_string();
             emit(SessionEvent::Item {
                 turn_id,
-                item: TimelineItem::Compaction { id, reason },
+                item: TimelineItem::Compaction {
+                    id,
+                    reason,
+                    received_at_ms: None,
+                },
             });
         }
 
@@ -1120,7 +1154,12 @@ mod tests {
         assert!(matches!(events[0], SessionEvent::TurnStarted { .. }));
         let item_id = match &events[1] {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert!(text.is_empty(), "the opening item starts empty");
@@ -1134,7 +1173,12 @@ mod tests {
         ));
         match &events[4] {
             SessionEvent::Item {
-                item: TimelineItem::AssistantMessage { id, text },
+                item:
+                    TimelineItem::AssistantMessage {
+                        id,
+                        text,
+                        received_at_ms: None,
+                    },
                 ..
             } => {
                 assert_eq!(id, &item_id, "the final item reuses the streaming id");

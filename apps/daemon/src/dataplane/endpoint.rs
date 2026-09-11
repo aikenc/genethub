@@ -103,17 +103,19 @@ struct Credit {
 
 struct CreditInner {
     value: Mutex<u32>,
+    maximum: u32,
     notify: tokio::sync::Notify,
 }
 
 impl Credit {
     fn new(value: u32) -> Result<Self> {
-        if value == 0 || value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES {
+        if value == 0 || value > genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES {
             anyhow::bail!("invalid initial stream credit");
         }
         Ok(Self {
             inner: Arc::new(CreditInner {
                 value: Mutex::new(value),
+                maximum: value,
                 notify: tokio::sync::Notify::new(),
             }),
         })
@@ -142,7 +144,7 @@ impl Credit {
         let Some(next) = current.checked_add(value) else {
             return false;
         };
-        if next > genehub_proto::INITIAL_STREAM_WINDOW_BYTES {
+        if next > self.inner.maximum {
             return false;
         }
         *current = next;
@@ -400,7 +402,7 @@ pub(crate) struct PeerServices {
     event_sender: mpsc::Sender<ServerFrame>,
     event_receiver: tokio::sync::Mutex<Option<mpsc::Receiver<ServerFrame>>>,
     subscriptions: tokio::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
-    carrier_kind: CarrierKind,
+    pub(crate) carrier_kind: CarrierKind,
 }
 
 /// Serves one already mutually-authenticated peer until its carrier closes.
@@ -443,6 +445,7 @@ pub async fn serve(
     // Decided once, at connection: grants are fixed when a device is paired,
     // and revoking one drops its connections rather than editing them.
     let watcher = Principal::of(&state, &access);
+    let scoped_processes = access.workspace_id.is_some();
     state
         .diagnostics
         .record("stream", "data.endpoint", "online", None);
@@ -458,6 +461,16 @@ pub async fn serve(
                         {
                             continue;
                         }
+                        let frame = if scoped_processes
+                            && matches!(frame, ServerFrame::BackgroundProcesses { .. })
+                        {
+                            // A notification only; the client refetches its scoped snapshot.
+                            ServerFrame::BackgroundProcesses {
+                                processes: Vec::new(),
+                            }
+                        } else {
+                            frame
+                        };
                         if events.send(frame).await.is_err() {
                             return;
                         }
@@ -572,8 +585,6 @@ fn dispatch(
             || frame.stream_id.is_multiple_of(2)
             || streams.contains_key(&frame.stream_id)
             || streams.len() >= genehub_proto::MAX_ACTIVE_DATA_STREAMS
-            || frame.value == 0
-            || frame.value > genehub_proto::INITIAL_STREAM_WINDOW_BYTES
             || frame.payload.is_empty()
             || frame.payload.len() > genehub_proto::MAX_EXCHANGE_HEAD_BYTES
         {
@@ -597,6 +608,20 @@ fn dispatch(
                 .timeout_ms
                 .is_some_and(|timeout| timeout == 0 || timeout > 3_600_000)
         {
+            writer.try_send(Frame {
+                kind: Kind::Reset,
+                stream_id: frame.stream_id,
+                value: RESET_PROTOCOL,
+                payload: Vec::new(),
+            })?;
+            return Ok(());
+        }
+        let maximum_window = if head.method == "asset.preview" {
+            genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES
+        } else {
+            genehub_proto::INITIAL_STREAM_WINDOW_BYTES
+        };
+        if frame.value == 0 || frame.value > maximum_window {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,
@@ -811,8 +836,12 @@ async fn serve_stream(stream: &mut ServerStream, services: &PeerServices) -> Res
         StreamMethod::Events => handle_events(stream, services).await,
         StreamMethod::ProtocolIdentity => handle_protocol_identity(stream, services).await,
         StreamMethod::AssetPreview => crate::dataplane::preview::handle(stream, services).await,
+        StreamMethod::ServicePreview => {
+            crate::dataplane::service_preview::handle(stream, services).await
+        }
         StreamMethod::ShellRun => crate::dataplane::exec::handle(stream, services).await,
         StreamMethod::RtcNegotiate => crate::dataplane::rtc::handle(stream, services).await,
+        StreamMethod::RtcConfig => crate::dataplane::rtc::config_handle(stream, services).await,
         StreamMethod::SpeechTranscribe => crate::speech::handle(stream, services).await,
     }
 }
@@ -903,6 +932,44 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     };
     stream.diagnostic_operation = diagnostic_operation(&stream.head.metadata);
     if let Some(scope) = &services.access.workspace_id {
+        if matches!(request, Request::ClientDebug(_)) {
+            return send_error(
+                stream,
+                403,
+                ErrorCode::Forbidden,
+                "client debugging requires a machine capability, not a workspace capability",
+            )
+            .await;
+        }
+        if matches!(request, Request::ProcessList) {
+            return send_error(
+                stream,
+                403,
+                ErrorCode::Forbidden,
+                "use workspace-scoped process listing",
+            )
+            .await;
+        }
+        if let Request::ProcessKill { session_id, .. } | Request::ProcessKillAll { session_id } =
+            &request
+        {
+            let allowed = services
+                .state
+                .sessions
+                .list(Some(scope), true)
+                .await?
+                .iter()
+                .any(|session| &session.id == session_id);
+            if !allowed {
+                return send_error(
+                    stream,
+                    403,
+                    ErrorCode::Forbidden,
+                    "session outside workspace capability",
+                )
+                .await;
+            }
+        }
         if let Some(requested) = request_workspace(&request) {
             if requested != scope {
                 return send_error(
@@ -1015,6 +1082,7 @@ fn diagnostic_operation(metadata: &serde_json::Value) -> Option<String> {
 fn support_stream_operation(method: &str) -> Option<&'static str> {
     match method {
         "asset.preview" => Some("asset.preview"),
+        "service.preview" => Some("service.preview"),
         "rtc.negotiate" => Some("rtc.negotiate"),
         "shell.run" => Some("shell.run"),
         _ => None,
@@ -1170,7 +1238,9 @@ fn request_workspace(request: &Request) -> Option<&str> {
             ..
         }
         | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
-        Request::SessionCreate { workspace_id, .. }
+        Request::ProcessWorkspaceList { workspace_id }
+        | Request::ProcessServiceStop { workspace_id, .. }
+        | Request::SessionCreate { workspace_id, .. }
         | Request::SessionImportList { workspace_id, .. }
         | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }
@@ -1277,11 +1347,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn credit_never_exceeds_the_fixed_stream_window() {
+    async fn credit_never_exceeds_its_negotiated_stream_window() {
         let credit = Credit::new(10).unwrap();
         assert_eq!(credit.take(7).await.unwrap(), 7);
         assert!(credit.add(7));
-        assert!(!credit.add(genehub_proto::INITIAL_STREAM_WINDOW_BYTES));
+        assert!(!credit.add(1));
+        let bulk = Credit::new(genehub_proto::MAX_BULK_STREAM_WINDOW_BYTES).unwrap();
+        assert_eq!(bulk.take(1).await.unwrap(), 1);
+        assert!(bulk.add(1));
     }
 
     #[test]
@@ -1349,6 +1422,7 @@ mod tests {
                         retrieval: genehub_proto::RetrievalCapability::Genehub,
                         reason: None,
                     },
+                    blob_appendix: vec![],
                 },
                 target,
             }),

@@ -48,7 +48,7 @@ try {
   const ctx = await createCaseContext(definition);
   try {
     await definition.run(ctx);
-    finish("passed");
+    finish("passed", ctx.takeNote());
   } finally {
     await ctx.dispose();
   }

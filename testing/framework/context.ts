@@ -1,15 +1,24 @@
-import { createLease, releaseLease, type CaseMeta, type EnvironmentLease } from "../infrastructure/public.ts";
+import { BlockedError, createLease, releaseLease, type CaseMeta, type EnvironmentLease } from "../infrastructure/public.ts";
 
 import { assertions } from "./assertions/index.ts";
 import { data } from "./builders/index.ts";
 import { completeVerifiableTask, handshakeAndList, startLocalEnvironment, openWorkspace, createBuiltinSession, createAgentSession, requireAgentReady, configureMockProvider, sendPrompt, attachEventLog, openSecondClient, pairDevice, connectDevice, claimDeviceInvite, daemonWsUrl, connectWithoutAdmission, seedHostCursorLogin, seedHostBetaProviders, seedHostCodexLogin, pointClaudeAtBuiltinLlm, writeOpencodeBuiltinConfig, sessionEventOf, startShell, runShell, shellText, shellExit, shellTimedOut } from "./flows/main/index.ts";
-import { leftoverProcesses, reconnectAfterStop } from "./flows/branches/index.ts";
+import { leftoverProcesses, openControlledAgentSession, processAlive, reconnectAfterStop, timeControlCall } from "./flows/branches/index.ts";
 import { waitUntil } from "./tools/wait.ts";
 
 export interface CaseContext {
+  browser?: import('playwright').BrowserContext;
   meta: CaseMeta;
   env: EnvironmentLease;
   openRoot: string;
+  /**
+   * Appends to the case's bounded public summary (4 KiB cap, truncated
+   * beyond it). A passing case's note lands in results.ndjson as its
+   * message; cases declaring `retention` also get a redacted report file.
+   */
+  note(text: string): void;
+  /** @internal */
+  takeNote(): string | undefined;
   flows: {
     main: {
       startLocalEnvironment: typeof startLocalEnvironment;
@@ -43,6 +52,9 @@ export interface CaseContext {
     branches: {
       reconnectAfterStop: typeof reconnectAfterStop;
       leftoverProcesses: typeof leftoverProcesses;
+      openControlledAgentSession: typeof openControlledAgentSession;
+      timeControlCall: typeof timeControlCall;
+      processAlive: typeof processAlive;
     };
   };
   data: typeof data;
@@ -66,10 +78,36 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
   } satisfies EnvironmentLease;
   const lease = env.root ? env : createLease();
   const openRoot = process.env.TESTCTL_OPEN_ROOT ?? process.cwd();
+  let browser: import('playwright').Browser | undefined;
+  let browserContext: import('playwright').BrowserContext | undefined;
+  if (process.env.TESTCTL_BROWSER_REQUIRED === '1') {
+    try {
+      const { chromium } = await import('playwright');
+      browser = await chromium.launch();
+      browserContext = await browser.newContext();
+    } catch (error) {
+      await browser?.close();
+      throw new BlockedError(`Browser prerequisite unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const NOTE_BUDGET = 4096;
+  const notes: string[] = [];
+  let noteBytes = 0;
   return {
     meta,
+    browser: browserContext,
     env: lease,
     openRoot,
+    note(text: string) {
+      const remaining = NOTE_BUDGET - noteBytes;
+      if (remaining <= 0) return;
+      const slice = text.length > remaining ? `${text.slice(0, remaining - 1)}…` : text;
+      notes.push(slice);
+      noteBytes += slice.length;
+    },
+    takeNote() {
+      return notes.length > 0 ? notes.join("\n") : undefined;
+    },
     flows: {
       main: {
         startLocalEnvironment,
@@ -100,12 +138,20 @@ export async function createCaseContext(meta: CaseMeta): Promise<CaseContext> {
         shellExit,
         shellTimedOut,
       },
-      branches: { reconnectAfterStop, leftoverProcesses },
+      branches: {
+        reconnectAfterStop,
+        leftoverProcesses,
+        openControlledAgentSession,
+        timeControlCall,
+        processAlive,
+      },
     },
     data,
     assertions,
     tools: { waitUntil },
     async dispose() {
+      await browserContext?.close();
+      await browser?.close();
       if (!env.root) releaseLease(lease);
     },
   };

@@ -6,7 +6,7 @@
 //! reason `--machine` exists and `--device` is refused
 //! (`genet-remote-execution.md` §3).
 
-use genehub_proto::{InviteScope, Reply, Request};
+use genehub_proto::{HubStatus, InviteScope, Reply, Request};
 use serde_json::json;
 
 use super::machines::{self, PairedMachine};
@@ -18,7 +18,7 @@ use super::target::Selection;
 /// credential store are properties of the machine the command runs on.
 pub async fn machine(args: &[String]) -> i32 {
     let outcome = match args.first().map(String::as_str) {
-        Some("list") => list(),
+        Some("list") => list(&args[1..]).await,
         Some("pair") => pair(&args[1..]).await,
         Some("forget") => forget(&args[1..]),
         Some("show") => show(&args[1..]),
@@ -57,12 +57,104 @@ fn unknown(group: &str, given: Option<&str>, expected: &str) -> CliFailure {
     })
 }
 
-fn list() -> Result<serde_json::Value, CliFailure> {
+async fn list(args: &[String]) -> Result<serde_json::Value, CliFailure> {
+    if args == ["--reachable"] {
+        return reachable().await;
+    }
+    if !args.is_empty() {
+        return Err(CliFailure::invalid_args(
+            "machine list accepts only --reachable",
+        ));
+    }
     let machines = machines::load()?;
     Ok(json!({
         "machines": machines.iter().map(PairedMachine::public).collect::<Vec<_>>(),
         "store": machines::file()?.display().to_string(),
     }))
+}
+
+/// Explicit opt-in discovery: self + direct credentials + this identity's Hub directory.
+/// An unavailable Hub is an error, never a partial directory presented as complete.
+async fn reachable() -> Result<serde_json::Value, CliFailure> {
+    let paired = machines::load()?;
+    let rpc = Rpc::connect().await.map_err(super::query::connect_error)?;
+    let hub_status = rpc
+        .call(Request::HubStatus)
+        .await
+        .map_err(super::query::rpc_error)?;
+    let (hub_self, hub_machines) = match hub_status {
+        Reply::HubStatus(HubStatus::Unpaired) => (None, Vec::new()),
+        Reply::HubStatus(HubStatus::Paired { machine_id, .. }) => {
+            match rpc
+                .call(Request::HubMachines)
+                .await
+                .map_err(super::query::rpc_error)?
+            {
+                Reply::HubMachines(items) => (Some(machine_id), items),
+                other => return Err(unexpected(other)),
+            }
+        }
+        Reply::HubStatus(_) => {
+            return Err(CliFailure::business(
+                "machineDirectoryUnavailable",
+                "Hub pairing is not ready; retry after it settles",
+                None,
+            ))
+        }
+        other => return Err(unexpected(other)),
+    };
+    let local_id = hub_self.as_deref().unwrap_or(&rpc.hello().machine_id);
+    let direct = paired
+        .iter()
+        .map(|m| {
+            json!({
+                "machineId": m.machine_id, "name": m.name, "online": null, "source": "paired"
+            })
+        })
+        .collect();
+    let hub = hub_machines
+        .iter()
+        .map(|m| {
+            json!({
+                "machineId": m.id, "name": m.name, "online": m.online, "source": "hub"
+            })
+        })
+        .collect();
+    Ok(json!({"scope": "reachable", "machines": merge_directory(
+        local_id, &rpc.hello().machine_name, direct, hub
+    )}))
+}
+
+fn merge_directory(
+    local_id: &str,
+    local_name: &str,
+    direct: Vec<serde_json::Value>,
+    hub: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut entries = std::collections::BTreeMap::new();
+    entries.insert(
+        local_id.to_string(),
+        json!({
+            "machineId": local_id, "name": local_name, "online": true, "source": "local"
+        }),
+    );
+    // Hub display names are current; direct credential names may predate a rename.
+    for entry in direct.into_iter().chain(hub) {
+        entries.insert(
+            entry["machineId"].as_str().expect("machine id").to_string(),
+            entry,
+        );
+    }
+    entries
+        .into_iter()
+        .map(|(id, mut entry)| {
+            entry["local"] = json!(id == local_id);
+            if id == local_id {
+                entry["online"] = json!(true);
+            }
+            entry
+        })
+        .collect()
 }
 
 fn show(args: &[String]) -> Result<serde_json::Value, CliFailure> {
@@ -311,6 +403,37 @@ fn redacted(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reachable_directory_deduplicates_ids_but_preserves_name_collisions() {
+        let rows = merge_directory(
+            "self",
+            "old",
+            vec![json!({"machineId":"remote", "name":"stale", "source":"paired", "online":null})],
+            vec![
+                json!({"machineId":"self", "name":"genethub-server-beta", "source":"hub", "online":false}),
+                json!({"machineId":"remote", "name":"genethub-server-beta", "source":"hub", "online":true}),
+            ],
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r["name"] == "genethub-server-beta")
+                .count(),
+            2
+        );
+        let local = rows.iter().find(|r| r["machineId"] == "self").unwrap();
+        assert_eq!(local["local"], true);
+        assert_eq!(local["online"], true);
+        assert!(!rows.iter().any(|r| r.get("secret").is_some()));
+    }
+
+    #[test]
+    fn unpaired_local_installation_still_has_a_local_target() {
+        let rows = merge_directory("self", "genethub-server-beta", vec![], vec![]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["local"], true);
+    }
 
     #[test]
     fn a_pairing_error_never_echoes_the_ticket_that_reached_the_machine() {

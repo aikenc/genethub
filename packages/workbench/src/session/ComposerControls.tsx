@@ -34,6 +34,7 @@ export function ComposerControls({
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
+  onRefreshAgents,
 }: {
   agents: AgentInfo[];
   agentId: string | null;
@@ -49,6 +50,7 @@ export function ComposerControls({
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
   onPickRuntimeAxis?(axisId: string, valueId: string): void;
+  onRefreshAgents?(): void;
 }) {
   const [open, setOpen] = useState(false);
   const generatedId = useId();
@@ -113,7 +115,8 @@ export function ComposerControls({
   const setPanelOpen = useCallback((next: boolean) => {
     setOpen(next);
     onOpenChange?.(next);
-  }, [onOpenChange]);
+    if (next) onRefreshAgents?.();
+  }, [onOpenChange, onRefreshAgents]);
   const closePanel = useCallback(() => setPanelOpen(false), [setPanelOpen]);
 
   return (
@@ -200,6 +203,7 @@ export function ComposerControls({
           onPickMode={onPickMode}
           onPickEffort={onPickEffort}
           onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
+          onRefreshAgents={onRefreshAgents}
         />
       ) : null}
     </>

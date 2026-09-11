@@ -28,20 +28,28 @@ pub struct AppState {
     auth_in_flight: AtomicBool,
 }
 
-/// Begins first-run authentication in the main WebView. No renderer command is
+/// Begins authentication in the main WebView. No renderer command is
 /// involved: the remote page receives neither Tauri globals nor capabilities.
+///
+/// For a paired daemon this mints a one-use owner claim link on every launch —
+/// that is the sign-in, not an optional extra. Navigating to the bare
+/// workbench URL assumed the WebView still held a session from an earlier
+/// claim, and whenever it did not (fresh install, expired cookie) the window
+/// landed on the signed-out page with no way forward of its own
+/// (fb__Y-nM9ptEeYt). The link is redeemed immediately in this machine's own
+/// window, so minting it per launch adds no exposure beyond what the tray
+/// recovery always had.
 pub(crate) fn start_auth(app: &tauri::AppHandle) {
-    start_auth_flow(app, false);
+    start_auth_flow(app);
 }
 
-/// Explicit recovery action for a paired daemon whose WebView is signed into
-/// no account or the wrong account. Unlike ordinary startup, this may mint a
-/// one-use owner claim link and therefore only runs from the tray command.
+/// Tray re-run of the startup flow, for a WebView that ended up signed into
+/// the wrong account or signed back out while the app was already running.
 pub(crate) fn start_claim(app: &tauri::AppHandle) {
-    start_auth_flow(app, true);
+    start_auth_flow(app);
 }
 
-fn start_auth_flow(app: &tauri::AppHandle, claim_existing: bool) {
+fn start_auth_flow(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
@@ -53,7 +61,7 @@ fn start_auth_flow(app: &tauri::AppHandle, claim_existing: bool) {
     let data_dir = state.data_dir.clone();
     let app = app.clone();
     std::thread::spawn(move || {
-        let routed = apply_application_routes(&app, &binary, &data_dir, claim_existing);
+        let routed = apply_application_routes(&app, &binary, &data_dir);
         if let Err(error) = routed {
             tracing_line(&format!("登录官网失败: {error}"));
             show_boot_error(&app, &error);
@@ -84,12 +92,11 @@ fn apply_application_routes(
     app: &tauri::AppHandle,
     binary: &Path,
     data_dir: &Path,
-    claim_existing: bool,
 ) -> Result<(), String> {
     let deadline = Instant::now() + AUTH_TIMEOUT;
     let mut previous = None;
     while Instant::now() < deadline {
-        let directive = application_route(binary, data_dir, claim_existing)?;
+        let directive = application_route(binary, data_dir)?;
         if previous.as_deref() != Some(directive.navigate.as_str()) {
             let target = external_web_url(&directive.navigate)?;
             ensure_web_reachable(&target)?;
@@ -106,16 +113,9 @@ fn apply_application_routes(
     Err("登录等待超时，请从托盘重新选择“连接到 Hub”".to_string())
 }
 
-fn application_route(
-    binary: &Path,
-    data_dir: &Path,
-    claim_existing: bool,
-) -> Result<DesktopDirective, String> {
+fn application_route(binary: &Path, data_dir: &Path) -> Result<DesktopDirective, String> {
     let mut command = Command::new(binary);
     command.args(["desktop", "route"]);
-    if claim_existing {
-        command.arg("--claim");
-    }
     command
         .env(channel::ENV_DATA_DIR, data_dir)
         .stdin(Stdio::null())

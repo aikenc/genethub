@@ -235,8 +235,9 @@ impl Config {
                         )
                     })?;
                 }
-                let config: Self = serde_json::from_value(value)
+                let mut config: Self = serde_json::from_value(value)
                     .with_context(|| format!("parsing {}", path.display()))?;
+                config.normalize_workspace_paths();
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -247,6 +248,25 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_string_pretty(self)?;
         save_private(path, body.as_bytes())
+    }
+
+    /// Rewrites workspace roots from a Windows host's spelling into the
+    /// component's preopen namespace. Configs written by a pre-component
+    /// (native) daemon carry `F:\…` or the `\\?\` verbatim form, which no
+    /// WASI call can resolve; a no-op everywhere else.
+    fn normalize_workspace_paths(&mut self) {
+        for mapping in &mut self.workspace_roots {
+            mapping.root = crate::guest_paths::guest_path(&mapping.root);
+        }
+        for workspace in &mut self.workspaces {
+            workspace.root = crate::guest_paths::guest_path(&workspace.root);
+            for folder in &mut workspace.folders {
+                folder.root = crate::guest_paths::guest_path(&folder.root);
+            }
+            if let Some(workspace_file) = &mut workspace.workspace_file {
+                *workspace_file = crate::guest_paths::guest_path(workspace_file);
+            }
+        }
     }
 
     /// Returns the device-wide locator for one already-canonical directory,

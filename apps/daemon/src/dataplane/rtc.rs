@@ -31,10 +31,9 @@ pub(crate) const MAX_RTC_PEERS: usize = 32;
 /// The one channel a peer may open. Ordered, binary, and named for the wire
 /// version it carries.
 pub(crate) const DATA_CHANNEL_LABEL: &str = "genehub-data-v3";
-/// Where to learn this machine's public address. One public STUN server, and
-/// no TURN: a relayed RTC path would be the baseline again, more slowly.
-pub(crate) const STUN_SERVER: &str = "stun:stun.cloudflare.com:3478";
-/// How long a peer has to prove itself once its channel is open.
+
+/// How long a peer has to prove itself once its channel is open. ICE and
+/// DataChannel setup are waited for separately, up to [`RTC_ADMISSION_LIFETIME`].
 pub(crate) const RTC_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether this build can carry a direct RTC channel at all.
@@ -54,3 +53,65 @@ mod carrier;
 mod carrier;
 
 pub(crate) use carrier::handle;
+
+/// Channel-selected STUN, or explicit self-hosted local configuration. No public
+/// third-party server is silently substituted when configuration is unavailable.
+pub(crate) async fn ice_config(state: &crate::state::Shared) -> serde_json::Value {
+    let file = state.paths.root.join("rtc.json");
+    if let Ok(metadata) = std::fs::symlink_metadata(&file) {
+        if metadata.is_file() && metadata.len() <= 16 * 1024 {
+            if let Ok(bytes) = std::fs::read(&file) {
+                if bytes.len() <= 16 * 1024 {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        return value;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(link) = state.link.get() {
+        if let Ok(Ok(value)) =
+            tokio::time::timeout(Duration::from_secs(3), link.rtc_config(None)).await
+        {
+            return value;
+        }
+    }
+    serde_json::json!({"version":1,"iceServers":[],"turnAvailable":false})
+}
+pub(crate) fn stun_urls(value: &serde_json::Value) -> Vec<String> {
+    value["iceServers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(8)
+        .flat_map(|server| server["urls"].as_array().into_iter().flatten())
+        .filter_map(|url| url.as_str())
+        .filter(|url| {
+            url.starts_with("stun:")
+                && url.len() <= 256
+                && !url.contains(['@', '/', '\\', '\n', '\r'])
+        })
+        .take(8)
+        .map(str::to_string)
+        .collect()
+}
+pub(super) async fn config_handle(
+    stream: &mut super::endpoint::ServerStream,
+    services: &super::endpoint::PeerServices,
+) -> anyhow::Result<()> {
+    stream.read_body(0).await?;
+    let value = ice_config(&services.state).await;
+    let body = serde_json::to_vec(
+        &serde_json::json!({"version":1,"iceServers":stun_urls(&value).into_iter().map(|url|serde_json::json!({"urls":[url]})).collect::<Vec<_>>()}),
+    )?;
+    stream
+        .respond(&genehub_proto::ExchangeResponseHead {
+            status: 200,
+            metadata: serde_json::Value::Null,
+            body_length: Some(body.len() as u64),
+            error: None,
+        })
+        .await?;
+    stream.write(&body).await?;
+    stream.finish().await
+}

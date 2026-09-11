@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionArtifactBundle } from "@genehub/proto";
 
 import type { Client } from "../protocol/client";
+import { activeDiagnosticClient } from "../diagnostics";
 import type { Host } from "../host";
 import { registerPreviewPopoutClient } from "./popout";
 import { PreviewPopoutPage } from "./PreviewPopoutPage";
@@ -113,6 +114,7 @@ describe("standalone Preview window", () => {
 
     expect(previewMock.props?.runtimeSessionId).toBe("s_demo");
     expect(previewMock.props?.client).toBe(sharedClient);
+    expect(activeDiagnosticClient()).toBe(sharedClient);
     expect(posted).not.toContainEqual(expect.objectContaining({ type: "ready" }));
 
     await userEvent.click(screen.getByRole("button", { name: "simulate collector ready" }));

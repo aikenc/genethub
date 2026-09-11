@@ -172,6 +172,9 @@ async function main(): Promise<number> {
             [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
           );
         }
+        if (result.status === "passed" && result.message && unit.meta.retention) {
+          store.writeReport(result);
+        }
       }).finally(() => {
         inflight.delete(task);
       });

@@ -404,6 +404,7 @@ mod tests {
         TimelineItem::AssistantMessage {
             id: id.into(),
             text: text.into(),
+            received_at_ms: None,
         }
     }
 

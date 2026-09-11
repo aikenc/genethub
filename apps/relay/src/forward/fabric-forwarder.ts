@@ -24,6 +24,7 @@ import {
   FabricKind,
   FabricReset,
   type FabricFrame,
+  FABRIC_TRANSPORT_FLOW,
 } from "./fabric-frame.js";
 
 interface SocketPeer {
@@ -320,6 +321,7 @@ export class FabricForwarder {
     }
 
     this.sockets.handleUpgrade(request, socket, head, (ws) => {
+      const requestUrl = requestTarget(request.url);
       this.register(ws, {
         endpointHandle: grant.endpointHandle,
         revocationHandle: grant.revocationHandle,
@@ -327,6 +329,8 @@ export class FabricForwarder {
         connectionGeneration: grant.connectionGeneration,
         presenceLeaseSeconds: grant.presenceLeaseSeconds,
         connectionEpoch: randomBytes(16).toString("hex"),
+        transportFlow:
+          requestUrl?.searchParams.get("flow") === FABRIC_TRANSPORT_FLOW,
       }, revocationCheckpoint);
     });
   }
@@ -351,6 +355,7 @@ export class FabricForwarder {
       closed: false,
       strikes: 0,
       send: (frame) => this.deliver(socket, encodeFabricFrame(frame)),
+      sendFlow: (frame) => this.deliverFlow(socket, encodeFabricFrame(frame)),
       close: (code) => this.closeSocket(socket, code),
     };
     const peer: SocketPeer = {
@@ -425,15 +430,25 @@ export class FabricForwarder {
           frameBytes: buffer.length,
         });
       }
-      void this.core.handle(connection, frame).catch((error: unknown) => {
-        log.warn("fabric: frame handling failed", {
-          ...this.diagnosticFields(socket),
-          streamId: frame.streamId,
-          frameKind: fabricKindName(frame.kind),
-          errorType: diagnosticErrorType(error),
-        });
-        this.closeSocket(socket, 1011, "frame handling failed");
-      });
+      const transportFlow =
+        frame.kind === FabricKind.Data &&
+        this.core.usesTransportFlow(connection, frame.streamId);
+      if (transportFlow) socket.pause();
+      void this.core.handle(connection, frame).then(
+        () => {
+          if (transportFlow && socket.readyState === socket.OPEN) socket.resume();
+        },
+        (error: unknown) => {
+          if (transportFlow && socket.readyState === socket.OPEN) socket.resume();
+          log.warn("fabric: frame handling failed", {
+            ...this.diagnosticFields(socket),
+            streamId: frame.streamId,
+            frameKind: fabricKindName(frame.kind),
+            errorType: diagnosticErrorType(error),
+          });
+          this.closeSocket(socket, 1011, "frame handling failed");
+        },
+      );
     });
 
     const shutdown = (code: number, reason: Buffer) => {
@@ -504,6 +519,39 @@ export class FabricForwarder {
       release();
       this.terminate(socket, "the send threw");
     }
+  }
+
+  /**
+   * DATA in transport-flow mode resolves only when `ws` drained the frame into
+   * this TCP leg. Pausing the source socket while this promise is pending makes
+   * TCP, not a remote application acknowledgement, carry the backpressure.
+   */
+  private deliverFlow(socket: WebSocket, payload: Buffer): Promise<void> {
+    if (socket.readyState !== socket.OPEN) {
+      return Promise.reject(new Error("the target Fabric socket is closed"));
+    }
+    const release = this.outboundBudget.reserve(socket, payload.length);
+    if (!release) {
+      this.closeSocket(socket, 1013, "too slow");
+      return Promise.reject(new Error("the target Fabric socket queue is full"));
+    }
+    return new Promise<void>((resolve, reject) => {
+      try {
+        socket.send(payload, { binary: true }, (error) => {
+          release();
+          if (error) {
+            this.terminate(socket, "the transport-flow send failed");
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      } catch (error) {
+        release();
+        this.terminate(socket, "the transport-flow send threw");
+        reject(error);
+      }
+    });
   }
 
   /** The reason exists only here; a peer cut off before the close handshake

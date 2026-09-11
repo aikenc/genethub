@@ -6,7 +6,7 @@ defineJourney(
     title: "An agent that left nothing running answers an empty process list",
     oracle: "process.list is empty and process.kill of pid 1 is notFound",
     catches: ["killing foreign pids", "invented process table"],
-    tags: ["core", "session", "parity"],
+    tags: ["core", "session", "parity", "processes"],
     expectedDurationMs: 15_000,
     timeoutMs: 45_000,
     surfaces: ["daemon", "workbench-client"],

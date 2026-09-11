@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>服务 Preview 接入示例</title>
+<style>body{font:16px system-ui;background:#10202b;color:#e3f1f7;padding:24px;max-width:760px;margin:auto}button{padding:10px;margin:6px;background:#aeead1;border:0;border-radius:6px}pre{white-space:pre-wrap;background:#172e3a;padding:18px;border-radius:8px}</style>
+<h1>服务 Preview 接入示例</h1><p>先在 GeneHub 的可信工具栏允许本次预览访问登记服务，再检查后端与双向消息。</p>
+<button id="http">请求后端</button><button id="stream">读取流式进度</button><button id="ws">WebSocket 回声</button><pre id="output">等待操作</pre>
+<script>
+const output=document.querySelector('#output');
+document.querySelector('#http').onclick=async()=>{try{const r=await fetch('/api/demo/status');output.textContent=JSON.stringify(await r.json(),null,2);}catch(e){output.textContent=e.message;}};
+document.querySelector('#stream').onclick=async()=>{try{output.textContent='';const r=await fetch('/api/demo/stream');const reader=r.body.getReader();while(true){const n=await reader.read();if(n.done)break;output.textContent+=new TextDecoder().decode(n.value);}}catch(e){output.textContent=e.message;}};
+document.querySelector('#ws').onclick=()=>{const s=new WebSocket('/api/demo/events');s.onopen=()=>s.send('服务连接成功');s.onmessage=e=>{output.textContent=e.data;s.close();};s.onerror=()=>output.textContent='服务连接失败';};
+</script></html>

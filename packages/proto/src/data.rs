@@ -22,12 +22,22 @@ pub use genehub_identity::DATA_PLANE_VERSION;
 pub const MAX_DATA_FRAME_BYTES: usize = 16 * 1024;
 pub const MAX_EXCHANGE_HEAD_BYTES: usize = 8 * 1024;
 pub const INITIAL_STREAM_WINDOW_BYTES: u32 = 256 * 1024;
-pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
 /// Finite exchange bodies share the Preview source cap so a WASM/H5 game
 /// asset can arrive in one exact response. Indefinite event streams omit a
 /// body length and remain bounded by stream credit instead.
 pub const MAX_FINITE_EXCHANGE_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_PREVIEW_SOURCE_BYTES: usize = 64 * 1024 * 1024;
+/// The first negotiated Preview implementation advertised this lease. Peers
+/// that do not declare a larger receive capability must keep receiving it.
+pub const LEGACY_BULK_STREAM_WINDOW_BYTES: u32 = 8 * 1024 * 1024;
+/// Largest receive lease a mutually capable peer may advertise for Preview.
+///
+/// This equals the method's complete legal body, so a finite Preview never
+/// needs an application-layer acknowledgement to make forward progress.
+/// It is permission, not allocation: socket backpressure, exact body length,
+/// the Preview worker pool and bounded queues own the real resource budgets.
+pub const MAX_BULK_STREAM_WINDOW_BYTES: u32 = MAX_PREVIEW_SOURCE_BYTES as u32;
+pub const MAX_ACTIVE_DATA_STREAMS: usize = 256;
 const _: () = assert!(MAX_EXCHANGE_HEAD_BYTES < MAX_DATA_FRAME_BYTES);
 
 /// How a peer proves possession of an end-to-end secret during carrier setup.
@@ -76,6 +86,12 @@ pub struct PeerHello {
     /// Capability advertisement only.  Signaling remains encrypted data-plane
     /// traffic and no RTC address is ever placed in this hello.
     pub rtc_supported: bool,
+    /// Optional for wire compatibility. A missing field identifies a peer
+    /// from the first finite-bulk rollout, whose largest understood lease is
+    /// [`LEGACY_BULK_STREAM_WINDOW_BYTES`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_bulk_stream_window_bytes: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -85,6 +101,12 @@ pub struct PeerWelcome {
     pub version: u32,
     pub server_nonce: String,
     pub proof: String,
+    /// Optional for wire compatibility. A missing field is the v3 256 KiB
+    /// receive lease; new clients use the larger value only for allowlisted
+    /// finite bulk methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_bulk_stream_window_bytes: Option<u32>,
 }
 
 /// Non-trickle RTC signaling carried inside an already E2EE Exchange.
@@ -330,5 +352,10 @@ mod tests {
         assert_eq!(MAX_DATA_FRAME_BYTES, 16_384);
         assert_eq!(MAX_FINITE_EXCHANGE_BODY_BYTES, 67_108_864);
         assert_eq!(MAX_PREVIEW_SOURCE_BYTES, 67_108_864);
+        assert_eq!(
+            MAX_BULK_STREAM_WINDOW_BYTES as usize,
+            MAX_PREVIEW_SOURCE_BYTES
+        );
+        const { assert!(LEGACY_BULK_STREAM_WINDOW_BYTES < MAX_BULK_STREAM_WINDOW_BYTES) };
     }
 }

@@ -45,13 +45,14 @@ describe("the session timeline", () => {
       name: "bash",
       status: "pending",
       detail: { kind: "shell", command: "ls", output: "", exitCode: undefined },
+      images: [],
     };
 
     const running = apply(apply(emptyTimeline(), { type: "item", turnId: "t1", item: call }), {
       type: "itemDelta",
       turnId: "t1",
       itemId: "c1",
-      delta: { kind: "toolStatus", status: "running" },
+      delta: { kind: "toolStatus", status: "running", images: [] },
     });
 
     expect(running.items).toHaveLength(1);
@@ -84,6 +85,7 @@ describe("the session timeline", () => {
       name: "bash",
       status: "running",
       detail: { kind: "shell", command: "ls", output: "", exitCode: undefined },
+      images: [],
     };
     const done = apply(apply(emptyTimeline(), { type: "item", turnId: "t1", item: call }), {
       type: "itemDelta",
@@ -93,6 +95,7 @@ describe("the session timeline", () => {
         kind: "toolStatus",
         status: "ok",
         detail: { kind: "shell", command: "ls", output: "a\nb", exitCode: 0 },
+        images: [],
       },
     });
 
@@ -326,6 +329,41 @@ describe("the session timeline", () => {
 
     expect(state.items.map((item) => item.id)).toEqual(["a1"]);
     expect(state.seq).toBe(5);
+  });
+
+  it("keeps the first tool start when a completed replacement restamps now", () => {
+    const started = apply(emptyTimeline(), {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "bash",
+        status: "running",
+        detail: { kind: "shell", command: "cargo check", output: "", exitCode: undefined },
+        images: [],
+        startedAtMs: 1_000,
+      },
+    });
+    const done = apply(started, {
+      type: "item",
+      turnId: "t1",
+      item: {
+        type: "toolCall",
+        id: "c1",
+        name: "bash",
+        status: "ok",
+        detail: { kind: "shell", command: "cargo check", output: "ok", exitCode: 0 },
+        images: [],
+        startedAtMs: 21_000,
+        finishedAtMs: 21_000,
+      },
+    });
+    const item = done.items[0]!;
+    expect(item.type).toBe("toolCall");
+    if (item.type !== "toolCall") return;
+    expect(item.startedAtMs).toBe(1_000);
+    expect(item.finishedAtMs).toBe(21_000);
   });
 });
 

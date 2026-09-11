@@ -1,9 +1,11 @@
+use std::io::Read;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
     AssetPreviewError, AssetPreviewRequest, ExchangeResponseHead, WorkspaceFileSourceKind,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use super::endpoint::{PeerServices, ServerStream};
@@ -70,28 +72,54 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     };
     let root = resolved.root;
     let path = resolved.relative.to_string_lossy().replace('\\', "/");
-    let read = async move {
-        let _slot = slot;
-        crate::files::preview(&root, &path).await
-    };
+    let read = crate::files::preview(&root, &path);
     let file = match tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await {
         Ok(Ok(file)) => file,
         Ok(Err(failure)) => return failure_response(stream, failure).await,
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
+    // The bounded worker permit covers both the metadata scan and the actual
+    // source read; streaming must not turn one retained Vec into hundreds of
+    // concurrent disk readers.
+    let _slot = slot;
     send_file(stream, file).await
 }
 
 async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<()> {
+    let (metadata, mut source, expected_digest) = file.into_parts();
+    let expected_bytes = metadata.source_bytes;
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
-            metadata: serde_json::to_value(file.metadata)?,
-            body_length: Some(file.bytes.len() as u64),
+            metadata: serde_json::to_value(&metadata)?,
+            body_length: Some(expected_bytes),
             error: None,
         })
         .await?;
-    stream.write(&file.bytes).await?;
+    let mut hasher = Sha256::new();
+    let mut sent = 0u64;
+    let mut step = vec![0u8; crate::files::PREVIEW_STEP_BYTES];
+    loop {
+        let read = source
+            .read(&mut step)
+            .map_err(|error| anyhow!("preview source read failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        sent = sent
+            .checked_add(read as u64)
+            .ok_or_else(|| anyhow!("preview source length overflow"))?;
+        if sent > expected_bytes {
+            return Err(anyhow!("preview source changed while it was streamed"));
+        }
+        hasher.update(&step[..read]);
+        stream.write(&step[..read]).await?;
+        crate::blocking::breathe().await;
+    }
+    let streamed_digest: [u8; 32] = hasher.finalize().into();
+    if sent != expected_bytes || streamed_digest != expected_digest {
+        return Err(anyhow!("preview source changed while it was streamed"));
+    }
     stream.finish().await
 }
 

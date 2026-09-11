@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
+import {
+  defineSpecialty,
+  genetEnv,
+  locateGenet,
+  parseJson,
+  runGenet,
+  type CaseContext,
+} from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 type EventLog = Array<{ type?: string; raw: unknown }>;
@@ -257,6 +264,151 @@ persistenceCase(
     }
   },
   85_000,
+);
+
+// Every case above restarts between turns, which is the easy half of
+// durability. These two restart during one, because that is when a user
+// actually closes the window: an answer is arriving, it is taking a while, and
+// they quit. Whatever was already on screen was, as far as they know, said.
+//
+// The agent is a real external ACP CLI that speaks once and then stops
+// talking, so the quit lands with narrative delivered and the round still
+// open — no product internal is stubbed to arrange it.
+
+type ControlledAgent = Awaited<
+  ReturnType<CaseContext["flows"]["branches"]["openControlledAgentSession"]>
+>;
+
+/** What the agent says before it falls silent, and therefore the word that
+ * has to survive. Matched against the whole item rather than a parsed text
+ * field: the question is whether the sentence is still there at all. */
+const SPOKEN = "thinking";
+
+function timesSaid(items: unknown[]): number {
+  return items.filter((item) => JSON.stringify(item).includes(SPOKEN)).length;
+}
+
+function midTurnDurabilityCase(
+  id: string,
+  title: string,
+  oracle: string,
+  catches: string[],
+  agentId: string,
+  endTheDaemon: (t: CaseContext, session: ControlledAgent) => Promise<void>,
+): void {
+  defineSpecialty(
+    {
+      id,
+      title,
+      oracle,
+      catches,
+      tags: ["core", "agent", "session", "persistence-depth", "fault-injection"],
+      llm: { default: "none" },
+      expectedDurationMs: 40_000,
+      timeoutMs: 160_000,
+      resources: { environments: 1, cpu: 2, memoryMb: 1024, io: 2, browser: 0, pool: "standard" },
+      surfaces: ["daemon", "agent-adapter", "workbench-client"],
+      productInterfaces: ["@genehub/workbench/client", "daemon-protocol", "agents.custom"],
+    },
+    async (t) => {
+      const session = await t.flows.branches.openControlledAgentSession({
+        openRoot: t.openRoot,
+        lease: t.env,
+        agent: { profile: "accept-then-silent", id: agentId },
+      });
+      const opened: Opened[] = [];
+      const reopen = async (): Promise<unknown[]> => {
+        const next = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+        opened.push(next);
+        const reply = await next.client.call({
+          type: "session.get",
+          payload: { sessionId: session.sessionId },
+        });
+        if (reply?.type !== "snapshot") throw new Error(`session.get returned ${reply?.type}`);
+        return reply.data.items;
+      };
+      try {
+        await t.flows.main.sendPrompt(session.client, session.sessionId, "Say something, then stall.");
+        await t.tools
+          .waitUntil(() => timesSaid(session.events.map((event) => event.raw)) > 0, 20_000)
+          .catch(() => {
+            throw new Error(
+              `the agent never reached the client: ${session.events.map((event) => event.type).join(",")}`,
+            );
+          });
+        // The round is deliberately still open here: the fault under test is
+        // what a quit costs, not what a completed turn keeps.
+        t.assertions.assert(
+          session.terminal() === undefined,
+          "the round ended on its own, so this case never tested a quit mid-turn",
+        );
+        session.client.close();
+        await endTheDaemon(t, session);
+
+        const restored = await reopen();
+        t.assertions.assert(
+          timesSaid(restored) === 1,
+          `the restored session should carry what was said exactly once: ${JSON.stringify(restored)}`,
+        );
+        // Recovering an unfinished turn moves it into the log, and a second
+        // start must find that move already done rather than repeat it.
+        opened[0]!.client.close();
+        opened[0]!.daemon.stop();
+        const again = await reopen();
+        t.assertions.assert(
+          timesSaid(again) === 1,
+          `a second start duplicated the recovered turn: ${JSON.stringify(again)}`,
+        );
+      } finally {
+        for (const each of opened) {
+          each.client.close();
+          each.daemon.stop();
+          await each.mock.stop();
+        }
+        await session.dispose();
+      }
+    },
+  );
+}
+
+midTurnDurabilityCase(
+  "specialty.agent.persistence.quitting-mid-turn-keeps-what-was-said",
+  "Quitting while an answer is arriving keeps the part that arrived",
+  "an assistant message the client had already rendered is still in the snapshot after an ordinary daemon stop mid-turn and a restart",
+  [
+    "narrative reaches disk only when the turn ends",
+    "shutdown closes the agent without flushing the open turn",
+    "the restored session shows the prompt with no answer",
+  ],
+  "durable-quit",
+  async (_t, session) => {
+    // The tray's own exit path: `genet daemon stop`, not a signal.
+    session.daemon.stop();
+  },
+);
+
+midTurnDurabilityCase(
+  "specialty.agent.persistence.crashing-mid-turn-keeps-what-was-said",
+  "A crash while an answer is arriving keeps the part that arrived",
+  "an assistant message the client had already rendered is still in the snapshot after the daemon is SIGKILLed mid-turn and restarted",
+  [
+    "the open turn exists only in memory until it settles",
+    "a crash costs a turn the user had already read",
+    "restart reports the session intact while its answer is gone",
+  ],
+  "durable-crash",
+  async (t, _session) => {
+    const genet = locateGenet(t.openRoot);
+    const env = genetEnv(t.openRoot, t.env.env);
+    const status = parseJson(runGenet(genet, ["daemon", "status"], env).stdout);
+    const pid = Number(status.pid);
+    if (!Number.isInteger(pid) || pid <= 0) throw new Error(`no daemon pid: ${JSON.stringify(status)}`);
+    process.kill(pid, "SIGKILL");
+    await t.tools.waitUntil(
+      () => parseJson(runGenet(genet, ["daemon", "status"], env).stdout).running === false,
+      15_000,
+    );
+  },
 );
 
 function roundOutcomes(contents: string): string[] {

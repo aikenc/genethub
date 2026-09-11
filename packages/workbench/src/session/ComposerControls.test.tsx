@@ -74,6 +74,7 @@ function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {
     onPickModel: vi.fn(),
     onPickMode: vi.fn(),
     onPickEffort: vi.fn(),
+    onRefreshAgents: vi.fn(),
   };
   render(
     <ComposerControls
@@ -354,9 +355,26 @@ describe("the rich runtime settings panel", () => {
     ]);
     expect(within(dialog).getByRole("tab", { name: "OpenCode 未安装" })).toBeDisabled();
     expect(within(dialog).getByRole("tab", { name: "ACP agent 未安装" })).toBeDisabled();
+    expect(within(dialog).getAllByText("未安装")).toHaveLength(2);
 
     await userEvent.click(within(dialog).getByRole("button", { name: "收起" }));
     expect(labels()).toHaveLength(4);
+  });
+
+  it("re-probes when the picker opens and when 重新检测 is pressed", async () => {
+    const onRefreshAgents = vi.fn();
+    const variants: AgentInfo[] = [
+      AGENTS[0]!,
+      { ...AGENTS[0]!, id: "cursor", label: "Cursor", probe: { state: "notInstalled" } },
+    ];
+    controls({ agents: variants, onRefreshAgents });
+    expect(onRefreshAgents).not.toHaveBeenCalled();
+    const { dialog } = await openSettings();
+    expect(onRefreshAgents).toHaveBeenCalledTimes(1);
+    expect(within(dialog).getByRole("button", { name: "重新检测" })).toBeInTheDocument();
+    expect(within(dialog).getByText("未安装")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "重新检测" }));
+    expect(onRefreshAgents).toHaveBeenCalledTimes(2);
   });
 
   /** A tab with no bundled brand mark still needs somewhere to look. */

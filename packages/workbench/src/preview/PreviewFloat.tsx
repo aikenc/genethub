@@ -12,7 +12,11 @@ import type { Host } from "../host";
 import type { Client } from "../protocol/client";
 import { useWorkbench, type PreviewFloatTarget } from "../session/store";
 import { isIosStandalonePwa } from "../shell/platform";
-import { AssetPreviewPage, type PreviewMeta } from "./AssetPreviewPage";
+import {
+  AssetPreviewPage,
+  PreviewTransferSummary,
+  type PreviewMeta,
+} from "./AssetPreviewPage";
 import {
   createPortablePreviewUrl,
   createPreviewPopoutChannel,
@@ -389,7 +393,7 @@ export function PreviewFloat({
             <button
               type="button"
               aria-label="查看预览信息"
-              title="查看预览信息"
+              title="查看文件与传输信息"
               className={expandedIconBtn}
               onClick={() => setInfoOpen(true)}
             >
@@ -414,60 +418,60 @@ export function PreviewFloat({
               <MinimizeIcon />
             </button>
             <button
-              type="button"
-              aria-label={copyLinkMode ? "复制预览链接" : "新窗口打开"}
-              title={
-                copyLinkMode
-                  ? "复制预览链接，粘贴到浏览器打开"
-                  : "新窗口打开"
-              }
-              className={`${expandedIconBtn} text-accent`}
-              disabled={copyLinkMode && copyState === "minting"}
-              onClick={() => {
-                if (copyLinkMode) {
-                  void copyPortableLink();
-                  return;
+                type="button"
+                aria-label={copyLinkMode ? "复制预览链接" : "新窗口打开"}
+                title={
+                  copyLinkMode
+                    ? "复制预览链接，粘贴到浏览器打开"
+                    : "新窗口打开"
                 }
-                const popout = createPreviewPopoutUrl(externalUrl, source.sessionId);
-                popouts.current.set(popout.id, source.sessionId);
-                if (client) {
-                  const release = registerPreviewPopoutClient(
-                    { id: popout.id, sessionId: source.sessionId },
-                    source,
-                    client,
+                className={`${expandedIconBtn} text-accent`}
+                disabled={copyLinkMode && copyState === "minting"}
+                onClick={() => {
+                  if (copyLinkMode) {
+                    void copyPortableLink();
+                    return;
+                  }
+                  const popout = createPreviewPopoutUrl(externalUrl, source.sessionId);
+                  popouts.current.set(popout.id, source.sessionId);
+                  if (client) {
+                    const release = registerPreviewPopoutClient(
+                      { id: popout.id, sessionId: source.sessionId },
+                      source,
+                      client,
+                    );
+                    const timer = window.setTimeout(release, 60_000);
+                    popoutBridges.current.set(popout.id, () => {
+                      window.clearTimeout(timer);
+                      release();
+                    });
+                  }
+                  window.dispatchEvent(
+                    new CustomEvent("genehub:preview-open", {
+                      detail: { path: source.path, url: popout.url },
+                    }),
                   );
-                  const timer = window.setTimeout(release, 60_000);
-                  popoutBridges.current.set(popout.id, () => {
-                    window.clearTimeout(timer);
-                    release();
-                  });
-                }
-                window.dispatchEvent(
-                  new CustomEvent("genehub:preview-open", {
-                    detail: { path: source.path, url: popout.url },
-                  }),
-                );
-                // Keep window.open in this exact user gesture so mobile popup
-                // blockers allow it. flushSync commits the float first; if the
-                // browser backgrounds this tab immediately, no later ready
-                // message is needed to make the original Preview collapse.
-                flushSync(() => shrinkToSmallFloat());
-                try {
-                  // A named same-origin window keeps `opener` just long enough
-                  // for the trusted shell to take the shared Client. `_blank`
-                  // is implicitly noopener in some mobile browsers.
-                  const opened = window.open(popout.url, `genehub-preview-${popout.id}`);
-                  if (!opened) throw new Error("浏览器阻止了新窗口");
-                } catch {
-                  popouts.current.delete(popout.id);
-                  popoutBridges.current.get(popout.id)?.();
-                  popoutBridges.current.delete(popout.id);
-                  flushSync(() => maximize());
-                }
-              }}
-            >
-              {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
-            </button>
+                  // Keep window.open in this exact user gesture so mobile popup
+                  // blockers allow it. flushSync commits the float first; if the
+                  // browser backgrounds this tab immediately, no later ready
+                  // message is needed to make the original Preview collapse.
+                  flushSync(() => shrinkToSmallFloat());
+                  try {
+                    // A named same-origin window keeps `opener` just long enough
+                    // for the trusted shell to take the shared Client. `_blank`
+                    // is implicitly noopener in some mobile browsers.
+                    const opened = window.open(popout.url, `genehub-preview-${popout.id}`);
+                    if (!opened) throw new Error("浏览器阻止了新窗口");
+                  } catch {
+                    popouts.current.delete(popout.id);
+                    popoutBridges.current.get(popout.id)?.();
+                    popoutBridges.current.delete(popout.id);
+                    flushSync(() => maximize());
+                  }
+                }}
+              >
+                {copyLinkMode ? <LinkIcon /> : <ExternalLinkIcon />}
+              </button>
             <button
               type="button"
               aria-label="关闭预览"
@@ -645,6 +649,7 @@ function PreviewInfoDialog({
               <dd className="break-all font-mono text-fg">{path}</dd>
             </div>
           </dl>
+          {meta?.transfer ? <PreviewTransferSummary stats={meta.transfer} /> : null}
           <ul className="mt-4 list-disc space-y-2 pl-5 text-xs leading-relaxed text-muted">
             {lines.map((line) => (
               <li key={line} className="break-words">

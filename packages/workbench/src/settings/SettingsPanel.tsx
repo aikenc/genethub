@@ -10,7 +10,7 @@ import { BUILD } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
-import type { RtcState } from "../protocol/client";
+import type { RtcFailure, RtcState } from "../protocol/client";
 import { useWorkbench } from "../session/store";
 import { UI_SCALE_OPTIONS, useUiScale } from "../theme/scale";
 import { THEME_OPTIONS, useTheme } from "../theme/store";
@@ -392,7 +392,7 @@ function RtcConnection() {
         <div className="min-w-0 flex-1">
           <p>优先使用 WebRTC 直连</p>
           <p className="mt-0.5 text-faint" data-testid="rtc-status">
-            {rtcLabel(state, client?.identity?.transport)}
+            {rtcLabel(state, client?.identity?.transport, client?.rtcFailure ?? null)}
           </p>
         </div>
         <label className="inline-flex shrink-0 items-center gap-2">
@@ -414,7 +414,7 @@ function RtcConnection() {
   );
 }
 
-function rtcLabel(state: RtcState, transport?: string): string {
+function rtcLabel(state: RtcState, transport?: string, failure: RtcFailure | null = null): string {
   switch (state) {
     case "disabled":
       return "已关闭";
@@ -427,7 +427,26 @@ function rtcLabel(state: RtcState, transport?: string): string {
     case "connected":
       return "RTC 已直连；新请求会走点对点通道";
     case "failed":
-      return "RTC 直连失败；当前仍使用端到端加密基础连接";
+      return failure
+        ? `RTC 直连失败（${rtcPhaseLabel(failure.phase)}：${failure.message}，${failure.durationMs}ms）；当前仍使用端到端加密基础连接`
+        : "RTC 直连失败；当前仍使用端到端加密基础连接";
+  }
+}
+
+function rtcPhaseLabel(phase: RtcFailure["phase"]): string {
+  switch (phase) {
+    case "gather":
+      return "收集候选";
+    case "signal":
+      return "交换信令";
+    case "channel":
+      return "打开通道";
+    case "handshake":
+      return "通道认证";
+    case "identity":
+      return "身份校验";
+    case "upgrade":
+      return "升级";
   }
 }
 
@@ -562,9 +581,18 @@ function Version({
       <h2 className="mb-2 text-sm font-medium">版本</h2>
       <div className="flex flex-col gap-2 rounded bg-surface px-3 py-2 text-xs">
         <div className="flex flex-wrap items-center gap-3">
-          {app ? <span data-testid="app-version">应用 {shown(app)}</span> : null}
+          {host.appVersion ? (
+            app ? (
+              <span data-testid="app-version">应用 {shown(app)}</span>
+            ) : null
+          ) : (
+            <span className="text-muted" data-testid="browser-no-app">
+              浏览器（无安装包版本）
+            </span>
+          )}
           <span className="text-muted" data-testid="daemon-version">
-            daemon {daemonVersion ? shown(daemonVersion) : "未连接"}
+            {localBundle ? "本机 daemon" : "daemon"}{" "}
+            {daemonVersion ? `${shown(daemonVersion)} · Live` : "未连接"}
           </span>
           <button
             type="button"
@@ -589,7 +617,7 @@ function Version({
             into a bug report, and above it sits a button it must never push off
             the row. */}
         <code className="select-all break-all font-mono text-faint" data-testid="page-build">
-          页面 {BUILD}
+          页面（console） {BUILD}
         </code>
         <p className="text-muted" data-testid="manual-update-note">
           应用内自动下载和安装暂未启用。请从官方发布页手动下载，并通过独立可信渠道核对

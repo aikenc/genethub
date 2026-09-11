@@ -5,6 +5,8 @@
 //! Writing the protocol twice is how frontend and backend drift apart around
 //! the third field rename; generating one from the other makes that impossible.
 
+pub mod client_debug;
+pub use client_debug::*;
 pub mod data;
 pub mod domain;
 pub mod event;
@@ -41,6 +43,7 @@ mod tests {
         round_trip(TimelineItem::AssistantMessage {
             id: "i1".into(),
             text: "hi".into(),
+            received_at_ms: None,
         });
         round_trip(TimelineItem::ToolCall {
             id: "i2".into(),
@@ -51,6 +54,9 @@ mod tests {
                 output: "a\nb".into(),
                 exit_code: Some(0),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         });
         round_trip(TimelineItem::ToolCall {
             id: "i3".into(),
@@ -59,6 +65,9 @@ mod tests {
             detail: ToolCallDetail::Unknown {
                 raw: json!({"anything": [1, 2, 3]}),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         });
     }
 
@@ -149,7 +158,9 @@ mod tests {
             items: vec![TimelineItem::AssistantMessage {
                 id: "a1".into(),
                 text: "done".into(),
+                received_at_ms: None,
             }],
+            blob_appendix: vec![],
             coverage: HistoryCoverage {
                 source_item_count: Some(1),
                 retained_item_count: 1,
@@ -191,13 +202,15 @@ mod tests {
         let mut message = TimelineItem::AssistantMessage {
             id: "i".into(),
             text: "a".into(),
+            received_at_ms: None,
         };
         assert!(message.append_text("b"));
         assert_eq!(
             message,
             TimelineItem::AssistantMessage {
                 id: "i".into(),
-                text: "ab".into()
+                text: "ab".into(),
+                received_at_ms: None,
             }
         );
 
@@ -251,3 +264,6 @@ mod tests {
         })));
     }
 }
+
+pub mod service_preview;
+pub use service_preview::*;

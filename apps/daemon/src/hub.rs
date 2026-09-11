@@ -337,6 +337,30 @@ impl Client {
     /// The daemon does not dial or attach business handlers in this phase; the
     /// method pins the trust boundary for that next step so no implementation
     /// needs to expose `Enrollment::secret` to a Relay.
+    pub async fn rtc_config(
+        &self,
+        enrollment: &Enrollment,
+        run_id: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let response = if let Some(run_id) = run_id {
+            self.http
+                .post(self.url("/api/rtc/credentials")?)
+                .bearer_auth(&enrollment.secret)
+                .json(&serde_json::json!({"daemonId":enrollment.daemon_id,"runId":run_id}))
+                .send()
+                .await?
+        } else {
+            self.http.get(self.url("/api/rtc/config")?).send().await?
+        };
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Channel ICE configuration is unavailable ({})",
+                response.status()
+            );
+        }
+        read_json(response, 16 * 1024, "ICE configuration").await
+    }
+
     pub async fn fabric_admission(&self, enrollment: &Enrollment) -> Result<FabricAdmission> {
         let response = self
             .http
@@ -415,8 +439,50 @@ impl Client {
         }))
     }
 
+    /// Tickets are keyed by the Hub row id (`mch_…`). Workbench URLs and
+    /// agents usually hold the daemon handle (`m_…` / `m-…`).
+    async fn resolve_ticket_machine_id(
+        &self,
+        enrollment: &Enrollment,
+        machine_id: &str,
+    ) -> Result<String> {
+        if machine_id.starts_with("mch_") {
+            return Ok(machine_id.to_string());
+        }
+        let wanted = machine_id
+            .trim()
+            .trim_start_matches("m-")
+            .trim_start_matches("m_")
+            .replace('-', "");
+        if wanted.is_empty() {
+            return Ok(machine_id.to_string());
+        }
+        let directory = self.machines(enrollment).await?;
+        let matches: Vec<_> = directory
+            .iter()
+            .filter(|entry| {
+                let handle = entry
+                    .device_handle
+                    .trim_start_matches("m-")
+                    .trim_start_matches("m_")
+                    .replace('-', "");
+                handle == wanted || (wanted.len() >= 8 && handle.starts_with(&wanted))
+            })
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok(one.id.clone()),
+            [] => Ok(machine_id.to_string()),
+            _ => Err(anyhow!(
+                "{machine_id} matches more than one machine in the Hub directory"
+            )),
+        }
+    }
+
     /// A one-time address for reaching one of them through the forwarding layer.
     pub async fn ticket(&self, enrollment: &Enrollment, machine_id: &str) -> Result<HubTicket> {
+        let machine_id = self
+            .resolve_ticket_machine_id(enrollment, machine_id)
+            .await?;
         let response = self
             .http
             .post(self.url(&format!("/api/machines/{}/tickets", enrollment.daemon_id))?)

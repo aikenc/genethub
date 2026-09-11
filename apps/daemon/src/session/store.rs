@@ -20,7 +20,7 @@
 //! session proportional to what was actually said rather than to the number of
 //! tokens streamed (`docs/daemon.md` §4).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImportContinuation,
+    BlobKind, BlobOverview, BlobPayload, BlobRef, HistoryCoverage, ImageThumb, ImportContinuation,
     PermissionRequest, RoundBatch, RoundBatchSummary, RoundTrunk, RoundTrunkSummary,
     SessionImportOrigin, SessionLineage, SessionStatus, SessionSummary, TimelineItem,
     UnsupportedFormat,
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::rounds::RoundRecord;
+use super::rounds::{self, RoundRecord};
 use crate::adapter::PersistHandle;
 
 #[derive(Debug)]
@@ -250,7 +250,21 @@ impl SessionMeta {
     }
 
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
+        self.summary_with_activity(status, None)
+    }
+
+    /// The same, plus when the running turn last produced anything.
+    ///
+    /// Only a live session can answer that, so it is passed in rather than read
+    /// from disk: metadata records when the session was last written, which is
+    /// a different question and a misleading answer to this one.
+    pub fn summary_with_activity(
+        &self,
+        status: SessionStatus,
+        last_activity_at_ms: Option<i64>,
+    ) -> SessionSummary {
         SessionSummary {
+            last_activity_at_ms,
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
             agent_id: self.agent_id.clone(),
@@ -305,6 +319,18 @@ enum TrunkRow {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         monologue: Option<String>,
+        /// Compaction reason when the batch is a context-compaction marker.
+        /// Rows written before this field existed read as `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        marker: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        llm_rounds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_duration_ms: Option<u64>,
     },
     #[serde(rename_all = "camelCase")]
     Blob {
@@ -313,6 +339,18 @@ enum TrunkRow {
         overview: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blob: Option<BlobRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thumb: Option<ImageThumb>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_kind: Option<genehub_proto::ToolKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<genehub_proto::ToolStatus>,
     },
 }
 
@@ -364,15 +402,21 @@ struct Homes {
     /// Project id to physical Agent/session root.
     workspaces: BTreeMap<String, WorkspaceHome>,
     /// One entry per physical `.genethub`, shared by every project view rooted
-    /// there. Folder and `.code-workspace` identities must never self-contend.
+    /// there. A folder and a `.code-workspace` file in that same folder share
+    /// one project key so they never split one directory's history.
     roots: BTreeMap<PathBuf, Home>,
 }
 
+#[derive(Clone)]
 struct WorkspaceHome {
     root: PathBuf,
     /// Stable within this physical session home and independent of the local
     /// workspace id, so another GeneHub installation can adopt the history.
     project_key: String,
+    /// Older keys that still name this project. A `.code-workspace` file used
+    /// to hash the file path; the directory is the identity now, but those
+    /// conversations stay visible.
+    aliases: Vec<String>,
 }
 
 /// Which directory on disk belongs to each workspace id.
@@ -394,14 +438,22 @@ impl WorkspaceHomes {
     }
 
     pub fn attach_project(&self, workspace_id: &str, project_key: &str, root: &Path) {
+        self.attach_project_aliased(workspace_id, project_key, &[], root);
+    }
+
+    pub fn attach_project_aliased(
+        &self,
+        workspace_id: &str,
+        project_key: &str,
+        aliases: &[String],
+        root: &Path,
+    ) {
         let Ok(mut homes) = self.homes.write() else {
             return;
         };
-        if homes
-            .workspaces
-            .get(workspace_id)
-            .is_some_and(|known| known.root == root && known.project_key == project_key)
-        {
+        if homes.workspaces.get(workspace_id).is_some_and(|known| {
+            known.root == root && known.project_key == project_key && known.aliases == aliases
+        }) {
             return;
         }
         if let Some(previous) = homes.workspaces.insert(
@@ -409,6 +461,7 @@ impl WorkspaceHomes {
             WorkspaceHome {
                 root: root.to_path_buf(),
                 project_key: project_key.to_string(),
+                aliases: aliases.to_vec(),
             },
         ) {
             prune_home(&mut homes, &previous.root);
@@ -451,6 +504,16 @@ impl WorkspaceHomes {
             .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))
     }
 
+    fn claims_project_key(&self, workspace_id: &str, project_key: &str) -> Result<bool> {
+        let homes = self
+            .homes
+            .read()
+            .map_err(|_| anyhow!("the workspace registry is poisoned"))?;
+        Ok(homes.workspaces.get(workspace_id).is_some_and(|home| {
+            home.project_key == project_key || home.aliases.iter().any(|alias| alias == project_key)
+        }))
+    }
+
     fn home_dir(&self, workspace_id: &str) -> Result<PathBuf> {
         Ok(self.root(workspace_id)?.join(HOME_DIR_NAME))
     }
@@ -461,7 +524,7 @@ impl WorkspaceHomes {
 
     /// Every physical session directory once, plus the active projects allowed
     /// to see sessions stored there.
-    fn all_sessions_dirs(&self) -> Vec<(Vec<(String, String)>, PathBuf)> {
+    fn all_sessions_dirs(&self) -> Vec<(Vec<(String, WorkspaceHome)>, PathBuf)> {
         let Ok(homes) = self.homes.read() else {
             return Vec::new();
         };
@@ -473,7 +536,7 @@ impl WorkspaceHomes {
                     .workspaces
                     .iter()
                     .filter(|(_, candidate)| &candidate.root == root)
-                    .map(|(id, home)| (id.clone(), home.project_key.clone()))
+                    .map(|(id, home)| (id.clone(), home.clone()))
                     .collect();
                 (projects, sessions_dir(root))
             })
@@ -663,6 +726,12 @@ impl Store {
         self.raw_session_dir(workspace_id, session_id)
     }
 
+    /// Where the workspace itself lives, for mapping absolute tool paths back
+    /// onto workspace-relative ones.
+    pub fn workspace_root(&self, workspace_id: &str) -> Result<PathBuf> {
+        self.homes.root(workspace_id)
+    }
+
     fn raw_session_dir(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
         Ok(self.homes.sessions_dir(workspace_id)?.join(session_id))
     }
@@ -703,6 +772,52 @@ impl Store {
         Ok(self
             .session_dir(workspace_id, session_id)?
             .join("seed.json"))
+    }
+
+    /// The blob overview rows a fork brought with it: thumbnails and blob
+    /// references, never payloads. Persisted as one JSON value per line so the
+    /// forked session keeps its picture strip and — while the source session
+    /// stays reachable — the refs needed to drill into originals.
+    pub fn save_fork_appendix(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        rows: &[genehub_proto::BlobOverview],
+    ) -> Result<()> {
+        let path = self
+            .session_dir(workspace_id, session_id)?
+            .join("fork-appendix.jsonl");
+        self.prepare_write(
+            workspace_id,
+            session_id,
+            path.parent()
+                .expect("fork-appendix.jsonl always has a parent"),
+        )?;
+        let mut encoded = Vec::new();
+        for row in rows {
+            encoded.extend_from_slice(&serde_json::to_vec(row)?);
+            encoded.push(b'\n');
+        }
+        crate::config::save_private(&path, &encoded)
+    }
+
+    pub fn load_fork_appendix(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<genehub_proto::BlobOverview>> {
+        let path = self
+            .session_dir(workspace_id, session_id)?
+            .join("fork-appendix.jsonl");
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::Deserializer::from_slice(&raw)
+            .into_iter::<genehub_proto::BlobOverview>()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     fn chat_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
@@ -840,8 +955,11 @@ impl Store {
         let header: MetaHeader = serde_json::from_str(&raw)
             .with_context(|| format!("reading the header of {}", path.display()))?;
         if header.format > SESSION_FORMAT {
-            let expected = self.homes.project_key(workspace_id)?;
-            if !header.project_key.is_empty() && header.project_key != expected {
+            if !header.project_key.is_empty()
+                && !self
+                    .homes
+                    .claims_project_key(workspace_id, &header.project_key)?
+            {
                 anyhow::bail!("session {session_id} belongs to another workspace");
             }
             return Ok(SessionMeta::unopenable(
@@ -852,8 +970,11 @@ impl Store {
             ));
         }
         let mut meta: SessionMeta = serde_json::from_str(&raw)?;
-        let expected = self.homes.project_key(workspace_id)?;
-        if !header.project_key.is_empty() && header.project_key != expected {
+        if !header.project_key.is_empty()
+            && !self
+                .homes
+                .claims_project_key(workspace_id, &header.project_key)?
+        {
             anyhow::bail!("session {session_id} belongs to another workspace");
         }
         meta.workspace_id = workspace_id.to_string();
@@ -932,7 +1053,10 @@ impl Store {
                 } else {
                     workspaces
                         .iter()
-                        .find(|(_, candidate)| candidate == &project_key)
+                        .find(|(_, home)| {
+                            home.project_key == project_key
+                                || home.aliases.iter().any(|alias| alias == &project_key)
+                        })
                         .map(|(id, _)| id.clone())
                 };
                 let Some(workspace_id) = owner else {
@@ -1065,10 +1189,20 @@ impl Store {
         )?;
         let mut file = crate::config::open_append(&path)?;
         crate::config::restrict_to_owner(&path)?;
+        // Separate a previous interrupted append from this batch. Empty lines
+        // are ignored on load; an incomplete JSON row must not swallow a retry.
+        writeln!(file)?;
         for row in rows {
             writeln!(file, "{}", serde_json::to_string(row)?)?;
         }
         file.flush()?;
+        file.sync_all()?;
+        // As with save_private, directory syncing depends on the host OS
+        // (including when this code runs as WASI on Windows). File contents
+        // must sync successfully; directory sync is attempted where supported.
+        if let Ok(directory) = File::open(path.parent().expect("chat has a parent")) {
+            let _ = directory.sync_all();
+        }
         Ok(())
     }
 
@@ -1084,13 +1218,24 @@ impl Store {
             Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
         };
         let mut log = ChatLog::default();
+        let mut item_positions = HashMap::<String, usize>::new();
         for (index, line) in BufReader::new(file).lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<ChatRow>(&line) {
-                Ok(ChatRow::Item { item }) => log.items.push(item),
+                Ok(ChatRow::Item { item }) => {
+                    // A failed append may have written complete rows before
+                    // returning an error. Retrying preserves one item per id.
+                    match item_positions.get(item.id()) {
+                        Some(&position) => log.items[position] = item,
+                        None => {
+                            item_positions.insert(item.id().to_string(), log.items.len());
+                            log.items.push(item);
+                        }
+                    }
+                }
                 Ok(ChatRow::Round { round }) => {
                     match log
                         .rounds
@@ -1110,6 +1255,81 @@ impl Store {
         }
         log.rounds.sort_by_key(|round| round.ord);
         Ok(log)
+    }
+
+    // -- the turn in progress -----------------------------------------------
+
+    /// Where the narrative of an unfinished turn waits.
+    ///
+    /// `chat.jsonl` is append-only and is written when a turn ends, which is
+    /// the right home for a settled conversation and the wrong one for a turn
+    /// that has not settled: the same growing answer cannot be appended
+    /// repeatedly without appearing repeatedly. This file is rewritten whole
+    /// instead — the last write is the truth, exactly as for a trunk — and is
+    /// removed once the turn ends and its items reach the log for good.
+    ///
+    /// What it buys is a bound. Without it a daemon that dies mid-answer costs
+    /// the reader everything they had already read; with it, the last moment
+    /// of it.
+    fn open_turn_path(&self, workspace_id: &str, session_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .session_dir(workspace_id, session_id)?
+            .join("open-turn.jsonl"))
+    }
+
+    pub fn write_open_turn(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+        items: &[TimelineItem],
+    ) -> Result<()> {
+        let path = self.open_turn_path(workspace_id, session_id)?;
+        self.prepare_write(
+            workspace_id,
+            session_id,
+            path.parent().expect("open-turn.jsonl always has a parent"),
+        )?;
+        let mut body = Vec::new();
+        for item in items.iter().filter(|item| !is_work_item(item)) {
+            writeln!(
+                body,
+                "{}",
+                serde_json::to_string(&ChatRow::Item { item: item.clone() })?
+            )?;
+        }
+        crate::config::save_private(&path, &body)
+    }
+
+    /// Missing is empty; unreadable is an error. An unreadable recovery copy
+    /// cannot safely be replaced by the next execution's checkpoint.
+    pub fn load_open_turn(
+        &self,
+        workspace_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<TimelineItem>> {
+        let path = self.open_turn_path(workspace_id, session_id)?;
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error)
+                    .context("reading the interrupted answer before accepting new writes")
+            }
+        };
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| match serde_json::from_str::<ChatRow>(line)? {
+                ChatRow::Item { item } => Ok(item),
+                _ => anyhow::bail!("unexpected row in the interrupted answer"),
+            })
+            .collect()
+    }
+
+    pub fn clear_open_turn(&self, workspace_id: &str, session_id: &str) {
+        if let Ok(path) = self.open_turn_path(workspace_id, session_id) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     // -- round layer --------------------------------------------------------
@@ -1141,6 +1361,11 @@ impl Store {
                     blob_count: batch.summary.blob_count,
                     text: batch.summary.text.clone(),
                     monologue: batch.monologue.clone(),
+                    marker: batch.summary.marker.clone(),
+                    llm_rounds: batch.summary.llm_rounds,
+                    started_at_ms: batch.summary.started_at_ms,
+                    duration_ms: batch.summary.duration_ms,
+                    tool_duration_ms: batch.summary.tool_duration_ms,
                 })?
             )?;
             for blob in &batch.blobs {
@@ -1152,6 +1377,12 @@ impl Store {
                         kind: blob.kind,
                         overview: blob.overview.clone(),
                         blob: blob.blob.clone(),
+                        thumb: blob.thumb.clone(),
+                        path: blob.path.clone(),
+                        started_at_ms: blob.started_at_ms,
+                        duration_ms: blob.duration_ms,
+                        tool_kind: blob.tool_kind,
+                        status: blob.status,
                     })?
                 )?;
             }
@@ -1249,12 +1480,22 @@ impl Store {
                     blob_count,
                     text,
                     monologue,
+                    marker,
+                    llm_rounds,
+                    started_at_ms,
+                    duration_ms,
+                    tool_duration_ms,
                 }) => batches.push(RoundBatch {
                     summary: RoundBatchSummary {
                         index,
                         first_item_id,
                         blob_count,
                         text,
+                        marker,
+                        llm_rounds,
+                        started_at_ms,
+                        duration_ms,
+                        tool_duration_ms,
                     },
                     monologue,
                     blobs: Vec::new(),
@@ -1264,6 +1505,12 @@ impl Store {
                     kind,
                     overview,
                     blob,
+                    thumb,
+                    path,
+                    started_at_ms,
+                    duration_ms,
+                    tool_kind,
+                    status,
                 }) => {
                     // A blob row before any batch row means a truncated write.
                     // Attaching it to a synthetic batch keeps the content
@@ -1275,6 +1522,11 @@ impl Store {
                                 first_item_id: item_id.clone(),
                                 blob_count: 0,
                                 text: String::new(),
+                                marker: None,
+                                llm_rounds: None,
+                                started_at_ms: None,
+                                duration_ms: None,
+                                tool_duration_ms: None,
                             },
                             monologue: None,
                             blobs: Vec::new(),
@@ -1289,6 +1541,12 @@ impl Store {
                             kind,
                             overview,
                             blob,
+                            thumb,
+                            path,
+                            started_at_ms,
+                            duration_ms,
+                            tool_kind,
+                            status,
                         });
                 }
                 Err(error) => {
@@ -1299,10 +1557,10 @@ impl Store {
                 }
             }
         }
-        Ok(RoundTrunk {
-            summary: summary.clone(),
-            batches,
-        })
+        let batches = rounds::split_produced_image_batches(batches);
+        let mut summary = summary.clone();
+        summary.batches = batches.iter().map(|batch| batch.summary.clone()).collect();
+        Ok(RoundTrunk { summary, batches })
     }
 
     // -- blob layer ---------------------------------------------------------
@@ -1510,9 +1768,102 @@ pub fn normalize_session_title(title: &str) -> Option<String> {
     Some(trimmed.chars().take(120).collect())
 }
 
+fn has_cjk(text: &str) -> bool {
+    text.chars().any(|ch| {
+        matches!(
+            ch,
+            '\u{4E00}'..='\u{9FFF}'
+                | '\u{3400}'..='\u{4DBF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '\u{3040}'..='\u{30FF}'
+        )
+    })
+}
+
+/// Cursor often auto-names in English. Keep the first-prompt title when the
+/// user wrote CJK and the extraction did not.
+pub fn agent_title_fits_current(current: Option<&str>, incoming: &str) -> bool {
+    !matches!(current, Some(current) if has_cjk(current) && !has_cjk(incoming))
+}
+
+fn folded_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// ACP `session_info_update` often repeats the Skill catalog heading.
+/// Those are not conversation names; keep the first-prompt label instead.
+pub fn is_catalog_noise_title(title: &str) -> bool {
+    matches!(
+        folded_title(title).as_str(),
+        "skillselectionguidance"
+            | "skilldescription"
+            | "genehubsessionhistory"
+            | "genehubspeechruntime"
+            | "genehubhtmlpreview"
+            | "htmlpreviewinfo"
+            | "myskills"
+            | "whatareyourskills"
+    )
+}
+
+/// First user line that is itself a conversation name, not a catalog heading.
+pub fn first_user_title(chat: &ChatLog) -> Option<String> {
+    chat.items.iter().find_map(|item| match item {
+        TimelineItem::UserMessage { text, .. } => {
+            title_from(text).filter(|title| !is_catalog_noise_title(title))
+        }
+        _ => None,
+    })
+}
+
+/// Replaces a persisted catalog heading with the first user line, in memory.
+///
+/// Returns whether `meta.title` changed. The caller writes it back so a list
+/// scan and a rehydrate can share the rule without a second chat load.
+pub fn apply_catalog_title_repair(meta: &mut SessionMeta, chat: &ChatLog) -> bool {
+    if meta.title_locked {
+        return false;
+    }
+    let Some(current) = meta.title.as_deref() else {
+        return false;
+    };
+    if !is_catalog_noise_title(current) {
+        return false;
+    }
+    let Some(title) = first_user_title(chat) else {
+        return false;
+    };
+    meta.title = Some(title);
+    true
+}
+
+impl Store {
+    /// Persists a catalog-heading repair when the chat already has a real name.
+    pub fn repair_catalog_noise_title(&self, meta: &mut SessionMeta) -> Result<bool> {
+        if meta.title_locked {
+            return Ok(false);
+        }
+        match meta.title.as_deref() {
+            Some(title) if is_catalog_noise_title(title) => {}
+            _ => return Ok(false),
+        }
+        let chat = self.load_chat(&meta.workspace_id, &meta.id)?;
+        if !apply_catalog_title_repair(meta, &chat) {
+            return Ok(false);
+        }
+        self.save_meta(meta)?;
+        Ok(true)
+    }
+}
+
 pub fn ensure_within(root: &Path, candidate: &Path) -> Result<PathBuf> {
+    let candidate = crate::guest_paths::guest_path(candidate);
     let joined = if candidate.is_absolute() {
-        candidate.to_path_buf()
+        candidate
     } else {
         root.join(candidate)
     };
@@ -1604,6 +1955,29 @@ mod project_home_tests {
     }
 
     #[test]
+    fn a_legacy_workspace_file_key_is_claimed_by_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach_project("w_old", "workspace:filehash", root.path());
+        let store = Store::new(homes.clone());
+        store
+            .save_meta(&meta("s_old", "w_old", root.path()))
+            .unwrap();
+
+        homes.detach("w_old");
+        homes.attach_project_aliased(
+            "w_dir",
+            "folder",
+            &["workspace:filehash".into()],
+            root.path(),
+        );
+        let listed = store.list_meta().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "s_old");
+        assert_eq!(listed[0].workspace_id, "w_dir");
+    }
+
+    #[test]
     fn a_meta_written_before_title_lock_reads_back_unlocked() {
         let raw = r#"{
             "id": "s1",
@@ -1618,6 +1992,59 @@ mod project_home_tests {
         let meta: SessionMeta = serde_json::from_str(raw).unwrap();
         assert!(!meta.title_locked);
         assert_eq!(meta.title.as_deref(), Some("旧会话"));
+    }
+
+    #[test]
+    fn latin_agent_title_does_not_replace_a_cjk_prompt_title() {
+        assert!(!agent_title_fits_current(
+            Some("生成三张风景画，简笔风"),
+            "Sketchy Scenery Creator"
+        ));
+        assert!(agent_title_fits_current(
+            Some("Fix the login redirect"),
+            "修复登录跳转"
+        ));
+        assert!(agent_title_fits_current(
+            Some("生成三张风景画，简笔风"),
+            "简笔风景"
+        ));
+    }
+
+    #[test]
+    fn catalog_headings_are_not_session_names() {
+        assert!(is_catalog_noise_title("Skill Selection Guidance"));
+        assert!(is_catalog_noise_title("  genehub-html-preview  "));
+        assert!(!is_catalog_noise_title("修复登录跳转"));
+        assert!(!is_catalog_noise_title("genet-beta 更新到最新"));
+    }
+
+    #[test]
+    fn catalog_noise_title_is_replaced_by_the_first_user_line() {
+        let root = tempfile::tempdir().unwrap();
+        let homes = WorkspaceHomes::default();
+        homes.attach_project("w1", "folder", root.path());
+        let store = Store::new(homes);
+        let mut session = meta("s1", "w1", root.path());
+        session.title = Some("Skill Selection Guidance".into());
+        store.save_meta(&session).unwrap();
+        store
+            .append_chat_items(
+                "w1",
+                "s1",
+                &[TimelineItem::UserMessage {
+                    id: "u1".into(),
+                    text: "genet-beta 更新到最新".into(),
+                    attachments: vec![],
+                }],
+            )
+            .unwrap();
+
+        assert!(store.repair_catalog_noise_title(&mut session).unwrap());
+        assert_eq!(session.title.as_deref(), Some("genet-beta 更新到最新"));
+        assert_eq!(session.updated_at_ms, 1, "a title repair is not activity");
+        let loaded = store.load_meta("w1", "s1").unwrap();
+        assert_eq!(loaded.title.as_deref(), Some("genet-beta 更新到最新"));
+        assert_eq!(loaded.updated_at_ms, 1);
     }
 
     #[test]

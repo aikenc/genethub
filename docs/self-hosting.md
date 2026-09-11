@@ -53,6 +53,10 @@ npm start
 | `RELAY_MAX_FRAME_BYTES` | 4 MiB | Relay 通用 frame 防护上限；当前 v3 peer record 仍限制为 16 KiB |
 | `RELAY_HEARTBEAT` | 30 s | socket heartbeat |
 
+其中 8 MiB/64 MiB 是 Relay Node 进程里真实 socket 排队预算，不是应用层传输窗口。新
+client/daemon/Relay 三端协商 `transport-flow` 后，持续发送由每条 TCP 腿的本地 drain 推进；这些预算
+只在下游异常慢或进程内排队增长时触发保护。任一旧端存在时仍回退 256 KiB outer credit。
+
 join token 只让 daemon 占用 node slot，不授予文件或业务权限。client 只能接入一个当前 online 的 slot，随后仍必须在 E2EE peer handshake 中证明 daemon 签发的 device/invite secret。
 
 公网前面必须有 TLS reverse proxy，并允许 WebSocket upgrade：

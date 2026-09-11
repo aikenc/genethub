@@ -565,6 +565,40 @@ input:focus-visible {
   font-size: 0.85em;
 }
 
+.gh-markdown-image {
+  display: block;
+  max-width: min(100%, 11rem);
+  max-height: 9rem;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 0.5rem;
+}
+
+.gh-markdown-image-ref {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  max-width: min(100%, 12rem);
+  margin: 0.25rem 0.35rem 0.25rem 0;
+  padding: 0.35rem;
+  border: 1px solid rgb(var(--line));
+  border-radius: 0.6rem;
+  background: rgb(var(--surface));
+  cursor: zoom-in;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  vertical-align: top;
+}
+.gh-markdown-image-ref:hover { border-color: rgb(var(--faint)); }
+.gh-markdown-image-ref-label {
+  font-size: 0.8em;
+  color: rgb(var(--faint));
+  word-break: break-all;
+}
+
 .gh-mermaid {
   overflow-x: auto;
   overscroll-behavior-x: contain;

@@ -432,6 +432,7 @@ pub fn completed_tool_output(event: &SessionEvent) -> Option<(String, String, St
                 ItemDelta::ToolStatus {
                     status: ToolStatus::Ok | ToolStatus::Error | ToolStatus::Canceled,
                     detail: Some(detail),
+                    ..
                 },
         } => Some((turn_id.clone(), item_id.clone(), tool_output_text(detail))),
         _ => None,
@@ -513,6 +514,9 @@ mod tests {
             detail: ToolCallDetail::Unknown {
                 raw: json!({"rawOutput": {"content": "abcdefgh"}}),
             },
+            images: vec![],
+            started_at_ms: None,
+            finished_at_ms: None,
         }];
         assert_eq!(estimate_item_tool_output(&items), 2);
     }
@@ -535,6 +539,7 @@ mod tests {
                 TimelineItem::AssistantMessage {
                     id: "a".into(),
                     text: "abcdefgh".into(),
+                    received_at_ms: None,
                 },
                 TimelineItem::ToolCall {
                     id: "c1".into(),
@@ -543,10 +548,14 @@ mod tests {
                     detail: ToolCallDetail::Unknown {
                         raw: json!({"rawOutput": {"content": "abcdefghijkl"}}),
                     },
+                    images: vec![],
+                    started_at_ms: None,
+                    finished_at_ms: None,
                 },
                 TimelineItem::Compaction {
                     id: "k1".into(),
                     reason: "auto".into(),
+                    received_at_ms: None,
                 },
             ],
         );

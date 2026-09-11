@@ -1,13 +1,17 @@
-import type { ToolCallDetail, ToolKind, ToolStatus } from "@genehub/proto";
+import type { ToolCallDetail, ToolImage, ToolKind, ToolStatus } from "@genehub/proto";
 import { useState } from "react";
+
+import { ImageThumbStrip } from "./ImageStrip";
 
 export function ToolCallView({
   name,
   detail,
+  images = [],
 }: {
   name: string;
   status: ToolStatus;
   detail: ToolCallDetail;
+  images?: ToolImage[];
 }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -25,7 +29,7 @@ export function ToolCallView({
         <span className="shrink-0 text-base" role="img" aria-label={kindLabel(toolKind(detail))}>
           {kindEmoji(toolKind(detail))}
         </span>
-        <span className="shrink-0 font-mono text-fg">{name}</span>
+        <span className="shrink-0 font-mono text-fg">{name || kindLabel(toolKind(detail))}</span>
         <span className="min-w-0 flex-1 truncate text-muted">{summary}</span>
         <button
           type="button"
@@ -36,6 +40,18 @@ export function ToolCallView({
           {open ? "收起输出" : "查看输出"}
         </button>
       </header>
+      {images.length > 0 ? (
+        <div className="border-t border-line px-3 pb-2">
+          <ImageThumbStrip
+            images={images.map((image, index) => ({
+              id: `${name}-img-${index}`,
+              alt: image.alt,
+              thumb: image.thumb,
+              path: image.path,
+            }))}
+          />
+        </div>
+      ) : null}
       {open ? (
         <div className="min-w-0 border-t border-line px-3 py-2 text-[13px]">
           <div className="mb-1 flex items-center justify-between">
@@ -148,8 +164,8 @@ const LABEL: Record<ToolKind, string> = {
   other: "工具",
 };
 
-const kindEmoji = (kind: ToolKind) => EMOJI[kind];
-const kindLabel = (kind: ToolKind) => LABEL[kind];
+export const kindEmoji = (kind: ToolKind) => EMOJI[kind];
+export const kindLabel = (kind: ToolKind) => LABEL[kind];
 
 function clip(text: string, max: number): string {
   const characters = [...text];

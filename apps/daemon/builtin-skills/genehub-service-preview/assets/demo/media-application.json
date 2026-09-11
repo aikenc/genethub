@@ -1,0 +1,12 @@
+{
+  "name": "原生 WebRTC 连通性示例",
+  "entry": "index.html",
+  "dataPolicy": "auto",
+  "backends": [{
+    "origin": "http://127.0.0.1:18011",
+    "command": ["python3", "media.py"],
+    "health": "/health",
+    "routes": [{"prefix": "/api/media/", "websocket": false}]
+  }],
+  "media": {"offerPath": "/api/media/offer", "stopPath": "/api/media/stop", "microphone": "webrtc"}
+}

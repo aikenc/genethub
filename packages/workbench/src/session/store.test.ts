@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Client } from "../protocol/client";
 import { ConnectionOutcomeUnknownError } from "../protocol/client";
 import { setLandingIntent } from "../location/landing";
+import { resolveComposerPhase } from "./Composer";
 import { defaultAgent, useWorkbench } from "./store";
 import { emptyTimeline } from "./timeline";
 
@@ -176,6 +177,123 @@ describe("a session's title arriving after the first message", () => {
 
     expect(useWorkbench.getState().sessions.find((s) => s.id === "s1")?.title).toBe("修复登录跳转");
     expect(useWorkbench.getState().tabs.find((t) => t.sessionId === "s1")?.title).toBe("修复登录跳转");
+  });
+});
+
+describe("re-probing agents after they may have been installed", () => {
+  const cursorMissing = {
+    id: "cursor",
+    label: "Cursor",
+    builtin: false,
+    probe: { state: "notInstalled" as const },
+    capabilities: {
+      interrupt: true,
+      setModel: true,
+      setEffort: false,
+      setMode: true,
+      permissions: true,
+      resume: true,
+      fork: false,
+      attachments: true,
+    },
+    catalog: {
+      models: [],
+      modes: [],
+      commands: [],
+      defaultModel: undefined,
+      defaultMode: undefined,
+      defaultEffort: undefined,
+    },
+  } as AgentInfo;
+
+  const cursorReady = {
+    ...cursorMissing,
+    probe: { state: "ready" as const },
+    catalog: {
+      ...cursorMissing.catalog,
+      models: [{ id: "auto", label: "Auto", contextWindow: undefined, reasoning: false, efforts: [] }],
+      defaultModel: "auto",
+    },
+  } as AgentInfo;
+
+  function probingClient() {
+    const { client, fire } = stubClient();
+    const calls: string[] = [];
+    const probing = {
+      ...client,
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "agent.refresh") {
+          return { type: "agents", data: [cursorReady] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    return { client: probing, fire, calls };
+  }
+
+  it("replaces the cached catalog when refreshAgents is asked", async () => {
+    const { client, calls } = probingClient();
+    useWorkbench.setState({ client, agents: [cursorMissing] });
+    await useWorkbench.getState().refreshAgents();
+    expect(calls).toEqual(["agent.refresh"]);
+    expect(useWorkbench.getState().agents[0]?.probe.state).toBe("ready");
+  });
+
+  it("re-probes after a turn when some Agent is still unusable", async () => {
+    const { client, fire, calls } = probingClient();
+    useWorkbench.setState({ client, agents: [cursorMissing] });
+    await useWorkbench.getState().selectSession("s1");
+    fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "turnCompleted",
+        turnId: "t1",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 0,
+          compactionCount: 0,
+          outputRateEstimated: false,
+          costUsd: undefined,
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(useWorkbench.getState().agents[0]?.probe.state).toBe("ready");
+    });
+    expect(calls).toContain("agent.refresh");
+  });
+
+  it("does not re-probe after a turn when every Agent is already startable", async () => {
+    const { client, fire, calls } = probingClient();
+    useWorkbench.setState({ client, agents: [cursorReady] });
+    await useWorkbench.getState().selectSession("s1");
+    fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "turnCompleted",
+        turnId: "t1",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          llmRounds: 1,
+          toolOutputTokens: 0,
+          compactionCount: 0,
+          outputRateEstimated: false,
+          costUsd: undefined,
+        },
+      },
+    });
+    await Promise.resolve();
+    expect(calls).not.toContain("agent.refresh");
   });
 });
 
@@ -1237,6 +1355,57 @@ describe("asking the machine about rounds", () => {
     expect(useWorkbench.getState().timeline.roundLayers.r1?.nextCursor).toBeUndefined();
   });
 
+  it("seeds the expanded trunk into roundTrunks so the last gallery can hoist", async () => {
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: 1,
+      endedAtMs: 2,
+      outcome: "completed" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "t1",
+      blobCount: 1,
+      title: "画",
+      batches: [{ index: 0, firstItemId: "t1:img:0", blobCount: 1, text: "1 张图片" }],
+    };
+    const expanded = {
+      summary,
+      batches: [
+        {
+          summary: summary.batches[0]!,
+          monologue: "",
+          blobs: [
+            {
+              itemId: "t1:img:0",
+              kind: "image" as const,
+              overview: "山",
+              path: ".genethub/sessions/s1/images/aa.png",
+            },
+          ],
+        },
+      ],
+    };
+    const client = {
+      call: async () => ({
+        type: "roundLayer",
+        data: { round, trunks: [summary], expandedTrunk: expanded },
+      }),
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      activeSessionId: "s1",
+      timeline: emptyTimeline(),
+      sessionTimelines: { s1: emptyTimeline() },
+    });
+
+    await useWorkbench.getState().loadRound("r1");
+
+    expect(useWorkbench.getState().timeline.roundTrunks["r1:0"]).toEqual(expanded);
+  });
+
   function counting() {
     let inFlight = 0;
     let peak = 0;
@@ -1740,3 +1909,212 @@ function catalogClient(
     unsubscribe: async () => {},
   } as unknown as Client;
 }
+
+describe("batchGet version-skew fallback", () => {
+  const TRUNK = {
+    summary: {
+      index: 0,
+      first_item_id: "i0",
+      blob_count: 0,
+      title: "阶段 0",
+      batches: [],
+    },
+    batches: [],
+  } as never;
+
+  function skewedClient() {
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request.type);
+        if (request.type === "round.trunk.batchGet" || request.type === "blob.batchGet") {
+          throw new Error(
+            `invalid RPC operation body: unknown variant \`${request.type}\`, expected one of \`round.trunk.get\`, \`blob.get\``,
+          );
+        }
+        if (request.type === "round.trunk.get") return { type: "roundTrunk", data: TRUNK };
+        if (request.type === "blob.get") {
+          return { type: "blob", data: { id: "b1", kind: "toolCall", value: { n: 1 } } };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    return { client, calls };
+  }
+
+  it("falls back to one-by-one fetches when the daemon predates batchGet", async () => {
+    const { client, calls } = skewedClient();
+    useWorkbench.setState({ client });
+
+    const trunks = await useWorkbench
+      .getState()
+      .fetchTrunkDetails("s1", [{ roundId: "r1", trunkIndex: 0 }]);
+    expect(trunks).toHaveLength(1);
+    expect(calls).toEqual(["round.trunk.batchGet", "round.trunk.get"]);
+    expect(
+      useWorkbench.getState().sessionTimelines["s1"]?.roundTrunks["r1:0"],
+    ).toBeDefined();
+
+    // The refusal is remembered: the next fill goes straight to single gets.
+    await useWorkbench
+      .getState()
+      .fetchBlobPayloads("s1", [{ id: "b1", kind: "toolCall" } as never]);
+    expect(calls).toEqual(["round.trunk.batchGet", "round.trunk.get", "blob.get"]);
+    expect(useWorkbench.getState().sessionTimelines["s1"]?.blobs["b1"]).toBeDefined();
+    // Expected skew is absorbed, not surfaced as an error notice.
+    expect(useWorkbench.getState().notice).toBeNull();
+  });
+
+  it("keeps using the batch RPC when the daemon answers it", async () => {
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "round.trunk.batchGet") {
+          return { type: "roundTrunks", data: [TRUNK] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+
+    const trunks = await useWorkbench
+      .getState()
+      .fetchTrunkDetails("s1", [{ roundId: "r1", trunkIndex: 0 }]);
+    expect(trunks).toHaveLength(1);
+    expect(calls).toEqual(["round.trunk.batchGet"]);
+  });
+
+  it("reports real failures instead of falling back", async () => {
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        throw new Error("connection lost");
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+
+    const trunks = await useWorkbench
+      .getState()
+      .fetchTrunkDetails("s1", [{ roundId: "r1", trunkIndex: 0 }]);
+    expect(trunks).toBeNull();
+    expect(calls).toEqual(["round.trunk.batchGet"]);
+    expect(useWorkbench.getState().notice).toContain("connection lost");
+  });
+});
+
+/**
+ * A reconnect that could not be filled in is the one moment the event stream
+ * cannot be trusted: the daemon says so by answering with a snapshot and
+ * `reset`, and the events it could not replay are exactly the ones that would
+ * have moved the status. Every freeze report we have looks like this from the
+ * outside — the turn is over on the daemon, and the client still shows a
+ * running session with a composer that will not send.
+ */
+describe("a reconnect the daemon could not fill in", () => {
+  /**
+   * What the composer would put on screen, computed the way `App` computes it.
+   *
+   * Asserting the store field a fix happens to write is how the last attempt at
+   * this passed while the reported symptom stayed: the session list was already
+   * correct — the sidebar repolls it every two seconds — and the thing that will
+   * not let the user send is the timeline. Only this answers "can they type
+   * again", so only this is worth asserting.
+   */
+  function composerPhase(sessionId: string) {
+    const state = useWorkbench.getState();
+    return resolveComposerPhase({
+      pending: state.timeline.pending,
+      timelineStatus: state.timeline.status,
+      activeTurn: state.timeline.activeTurn,
+      sessionStatus: state.sessions.find((session) => session.id === sessionId)?.status,
+    });
+  }
+
+  function subscribingClient(summary: SessionSummary) {
+    let resync: ((snapshot: unknown, events: SequencedEvent[], reset: boolean) => void) | null =
+      null;
+    let subscribes = 0;
+    const client = {
+      subscribe: async (
+        _sessionId: string,
+        handlers: {
+          onEvent: (event: SequencedEvent) => void;
+          onResync: (snapshot: unknown, events: SequencedEvent[], reset: boolean) => void;
+        },
+      ) => {
+        subscribes += 1;
+        resync = handlers.onResync;
+        return {
+          snapshot: { seq: 7, items: [], pendingPermission: undefined, summary },
+          replayed: [],
+          reset: false,
+        };
+      },
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    return {
+      client,
+      subscribes: () => subscribes,
+      /**
+       * A gap the daemon believes it has nothing to fill.
+       *
+       * `reset: false` with no events is not a corner case: a status change that
+       * publishes no event and takes no sequence number — which is what closing
+       * a channel does today — leaves the daemon answering "you are current"
+       * while its own snapshot says the turn is over.
+       */
+      resyncSayingNothingWasMissed: (nextSummary: SessionSummary) =>
+        resync?.(
+          { seq: 7, items: [], pendingPermission: undefined, summary: nextSummary },
+          [],
+          false,
+        ),
+    };
+  }
+
+  it("takes the status from a snapshot the daemon thinks changes nothing", async () => {
+    const running: SessionSummary = { ...SESSION, status: "running" };
+    const { client, resyncSayingNothingWasMissed } = subscribingClient(running);
+    useWorkbench.setState({ client, sessions: [running] });
+
+    await useWorkbench.getState().selectSession("s1");
+    expect(composerPhase("s1")).toBe("running");
+
+    // The turn ended while the connection was down, so `turnCompleted` is among
+    // the events that were dropped.
+    resyncSayingNothingWasMissed({ ...SESSION, status: "idle" });
+
+    expect(composerPhase("s1")).toBe("idle");
+  });
+
+  /**
+   * Switching machines builds a whole new client (`App` tears the old one down
+   * and dials the new target), and the subscription bookkeeping is global to the
+   * store. A session opened before the switch is therefore still listed as
+   * subscribed — on a client that no longer exists — so selecting it again takes
+   * the warm path and never subscribes, and the transcript it shows is whatever
+   * was on screen before.
+   *
+   * This is the shape of fb_PT1yf1Q-UB9p: the pack has six hundred `session.list`
+   * calls and not one `subscribe` in the ten minutes around the switch, with the
+   * daemon reporting the session idle the whole time.
+   */
+  it("subscribes again after a machine switch replaces the client", async () => {
+    const running: SessionSummary = { ...SESSION, status: "running" };
+    const before = subscribingClient(running);
+    useWorkbench.setState({ client: before.client, sessions: [running] });
+    await useWorkbench.getState().selectSession("s1");
+    expect(before.subscribes()).toBe(1);
+    expect(composerPhase("s1")).toBe("running");
+
+    // The user switches machines. Everything the old client knew goes with it.
+    const after = subscribingClient({ ...SESSION, status: "idle" });
+    useWorkbench.setState({ client: after.client, sessions: [{ ...SESSION, status: "idle" }] });
+    await useWorkbench.getState().selectSession("s1");
+
+    expect(after.subscribes()).toBe(1);
+    expect(composerPhase("s1")).toBe("idle");
+  });
+});

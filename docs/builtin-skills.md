@@ -23,6 +23,17 @@ frontmatter 必须包含与目录名完全相同的 `name` 和非空 `descriptio
 整个树只允许普通目录和普通文件，不允许符号链接。资源文件名必须是 UTF-8 且跨平台；构建器会递归嵌入
 所有普通文件，因此不需要维护手写文件清单。
 
+## 场景入口
+
+| Skill | 负责的任务 |
+|---|---|
+| `genehub-html-preview` | 静态 H5、站点、相册及内容创作阶段产物；需要过程服务时转向 Service Preview |
+| `genehub-service-preview` | 影视、DCC、游戏引擎等创作过程预览；按需接入 HTTP/WS、原生媒体和操作回传，数字人为子场景 |
+| `genehub-session-history` | 使用绑定 CLI 查阅会话历史 |
+| `genehub-speech-runtime` | Composer 的本机语音识别 runtime 接入 |
+
+[Service Preview Skill](../apps/daemon/builtin-skills/genehub-service-preview/SKILL.md) 以中文随包携带创作过程接入、启动、媒体架构与契约、数字人、UE 参考文档，可在没有源码的安装环境中阅读。Skill 携带可复制的 Python 直接接入与可选 Node 多后端示例，不携带依赖、模型或 UE 环境；启动参考无需获取产品源码。GeneHub 本体不依赖示例的语言运行时。当前媒体面板没有 UE 输入协议，Skill 必须区分远程观看、交互云游玩和不同 PIE 模式，不能把适配引导宣传为已实现的 UE 功能。
+
 ## 构建与分发
 
 `apps/daemon/build.rs` 与可原生单测的 `apps/daemon/build_support.rs` 在构建期完成以下工作：

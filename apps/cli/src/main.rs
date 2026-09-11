@@ -24,6 +24,7 @@ const FORWARDED: &[&str] = &[
     "agent",
     "shell",
     "speech",
+    "client",
     "process",
     "machine",
     "device",
@@ -179,6 +180,11 @@ pub fn usage() -> i32 {
                                     end one of them, and what it started
   genet process kill-all --session <id>
                                     end everything one conversation left
+  genet client list                 list opted-in clients on --machine coordinator
+  genet client attach <id> --label <operator>
+                                    request time-limited client authorization
+  genet client <verb> <id> --session <capability>
+                                    inspect/eval/act/events/screenshot/reload/result/revoke
   genet speech runtime status      inspect the registered local speech adapter
   genet speech runtime probe       actively check the registered adapter
   genet speech runtime register --command <absolute-path> [--arg <value>...]
@@ -201,10 +207,16 @@ pub fn usage() -> i32 {
   genet <any of the above> --machine <machineId>
                                     run it on a paired machine instead
   genet update                      unsupported until releases are independently signed
-  genet daemon run                  run the daemon in the foreground (systemd)
+  genet daemon run                  run the daemon in the foreground
   genet daemon start                start the daemon in the background
-  genet daemon stop                 stop the daemon (by lock-file pid)
-  genet daemon restart              stop + start
+  genet daemon stop                 stop the verified local daemon instance
+  genet daemon restart              restart a manually started local daemon
+                                    managed daemon: use its existing manager
+                                    daemon-dependent session: verify independent
+                                    SSH/console recovery before restarting
+                                    do not wrap restart in a transient task
+                                    SOP: built-in genehub-daemon-management
+                                    use the channel-bound GENEHUB_CLI
   genet daemon status               whether the daemon is running
   genet daemon endpoint             one-use local wsUrl and process facts
   genet hub status                  Hub pairing state

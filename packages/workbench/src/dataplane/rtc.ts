@@ -12,14 +12,17 @@ import { binaryMessage } from "./websocket";
 
 const SIGNAL_LIMIT = 64 * 1024;
 const CONNECT_TIMEOUT_MS = 20_000;
+/**
+ * Phone peers need server-reflexive candidates in this non-trickle offer.
+ * Host candidates appear immediately; STUN usually finishes in 1–2s. Cap the
+ * wait so a hung STUN server cannot stall the upgrade for 20s.
+ */
+export const GATHER_WAIT_MS = 12_000;
+export const ICE_SERVERS: RTCIceServer[] = [];
 const BUFFERED_HIGH = 256 * 1024;
 const BUFFERED_LOW = 64 * 1024;
 
-export interface RtcDataLink {
-  endpoint: DataEndpoint;
-  peer: RTCPeerConnection;
-  close(): void;
-}
+export type RtcPhase = "gather" | "signal" | "channel" | "handshake";
 
 /**
  * Coarse RTC lifecycle facts for the feedback recorder. Enums and candidate
@@ -27,6 +30,26 @@ export interface RtcDataLink {
  * leaves this function.
  */
 export type RtcDiagnostic = Record<string, string | number | boolean | null>;
+
+/** Structured upgrade failure so settings and diagnostics can show a phase, not one sentence. */
+export class RtcUpgradeError extends Error {
+  readonly phase: RtcPhase;
+  readonly detail: RtcDiagnostic;
+
+  constructor(phase: RtcPhase, cause: unknown, detail: RtcDiagnostic = {}) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(message, { cause: cause instanceof Error ? cause : undefined });
+    this.name = "RtcUpgradeError";
+    this.phase = phase;
+    this.detail = detail;
+  }
+}
+
+export interface RtcDataLink {
+  endpoint: DataEndpoint;
+  peer: RTCPeerConnection;
+  close(): void;
+}
 
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
 export async function openRtcDataLink(
@@ -37,9 +60,18 @@ export async function openRtcDataLink(
   if (typeof RTCPeerConnection !== "function") {
     throw new Error("this browser does not support WebRTC");
   }
-  const peer = new RTCPeerConnection({
-    iceServers: [{ urls: ["stun:stun.cloudflare.com:3478"] }],
-  });
+  let iceServers: RTCIceServer[] = [];
+  const configStream=base.open({version:DATA_PLANE_VERSION,method:"rtc.config",metadata:null,bodyLength:0,timeoutMs:5000});
+  try {
+    await configStream.finish();
+    const head=await configStream.responseHead;
+    if(head.status===200&&!head.error){
+      const config=JSON.parse(new TextDecoder().decode(await collectBody(configStream.body(),16*1024)));
+      if(Array.isArray(config.iceServers))iceServers=config.iceServers.slice(0,8).map((s:{urls?:unknown})=>({urls:Array.isArray(s.urls)?s.urls.filter((u:unknown)=>typeof u==="string"&&u.startsWith("stun:")&&u.length<=256):[]}));
+    }
+  } catch { /* Old daemons have no rtc.config: host candidates remain usable. */ }
+  finally {configStream.reset(DataReset.Cancelled);}
+  const peer = new RTCPeerConnection({ iceServers });
   if (onDiagnostic) watchPeer(peer, diagnosticId ?? null, onDiagnostic);
   const channel = peer.createDataChannel("genehub-data-v3", { ordered: true });
   channel.binaryType = "arraybuffer";
@@ -48,17 +80,34 @@ export async function openRtcDataLink(
   // catch below silences the late rejection from the teardown close.
   const opened = dataChannelOpened(channel, peer);
   let welcome: Promise<Uint8Array> | undefined;
+  let phase: RtcPhase = "gather";
+  const fail = (cause: unknown): never => {
+    throw new RtcUpgradeError(phase, cause, snapshotPeer(peer, diagnosticId));
+  };
   try {
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
-    await iceGathered(peer, CONNECT_TIMEOUT_MS);
-    const local = peer.localDescription;
-    if (!local?.sdp) throw new Error("the browser did not create an RTC offer");
+    await iceGathered(peer, GATHER_WAIT_MS);
+    const offerSdp = peer.localDescription?.sdp;
+    if (!offerSdp) {
+      throw new RtcUpgradeError(
+        phase,
+        "the browser did not create an RTC offer",
+        snapshotPeer(peer, diagnosticId),
+      );
+    }
+    onDiagnostic?.({
+      diagnosticId: diagnosticId ?? null,
+      phase,
+      iceGatheringState: peer.iceGatheringState,
+      ...snapshotPeer(peer, diagnosticId),
+    });
 
-    const request: RtcNegotiationRequest = { sdp: local.sdp };
+    phase = "signal";
+    const request: RtcNegotiationRequest = { sdp: offerSdp };
     const body = new TextEncoder().encode(JSON.stringify(request));
     if (body.byteLength > SIGNAL_LIMIT) {
-      throw new Error("the browser's RTC offer exceeds the signaling limit");
+      fail("the browser's RTC offer exceeds the signaling limit");
     }
     const stream = base.open({
       version: DATA_PLANE_VERSION,
@@ -85,18 +134,20 @@ export async function openRtcDataLink(
       CONNECT_TIMEOUT_MS,
       "RTC signaling timed out",
       () => stream.reset(DataReset.Timeout),
-    );
+    ).catch(fail);
     if (
       !answer.sdp ||
       !answer.capabilityId ||
       !answer.secret ||
       answer.sdp.length > SIGNAL_LIMIT
     ) {
-      throw new Error("the daemon returned an invalid RTC answer");
+      fail("the daemon returned an invalid RTC answer");
     }
-    await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
-    await withDeadline(opened, CONNECT_TIMEOUT_MS, "RTC DataChannel did not open");
+    await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp }).catch(fail);
+    phase = "channel";
+    await withDeadline(opened, CONNECT_TIMEOUT_MS, "RTC DataChannel did not open").catch(fail);
 
+    phase = "handshake";
     const prepared = await preparePeerHandshake({
       kind: "hosted",
       capabilityId: answer.capabilityId,
@@ -106,15 +157,16 @@ export async function openRtcDataLink(
     channel.send(new TextEncoder().encode(JSON.stringify(prepared.hello)));
     const welcomeValue = JSON.parse(
       new TextDecoder("utf-8", { fatal: true }).decode(
-        await withDeadline(welcome, 10_000, "RTC E2EE handshake timed out"),
+        await withDeadline(welcome, 10_000, "RTC E2EE handshake timed out").catch(fail),
       ),
     ) as PeerWelcome;
-    const key = await prepared.complete(welcomeValue);
+    const handshake = await prepared.complete(welcomeValue);
     const carrier = new RtcRecordCarrier(peer, channel);
     const endpoint = new DataEndpoint({
       role: "client",
       carrier,
-      key,
+      key: handshake.key,
+      maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
     return {
@@ -133,7 +185,18 @@ export async function openRtcDataLink(
     welcome?.catch(() => {});
     channel.close();
     peer.close();
-    throw error;
+    const wrapped =
+      error instanceof RtcUpgradeError
+        ? error
+        : new RtcUpgradeError(phase, error, snapshotPeer(peer, diagnosticId));
+    onDiagnostic?.({
+      diagnosticId: diagnosticId ?? null,
+      phase: wrapped.phase,
+      failed: true,
+      message: wrapped.message,
+      ...wrapped.detail,
+    });
+    throw wrapped;
   }
 }
 
@@ -301,20 +364,37 @@ function nextDataChannelMessage(channel: RTCDataChannel): Promise<Uint8Array> {
   });
 }
 
-function iceGathered(peer: RTCPeerConnection, timeoutMs: number): Promise<void> {
+/**
+ * Send the offer after gathering completes so STUN srflx is in the SDP, or
+ * after `waitMs` if STUN never answers. Do not send on host-only after a few
+ * seconds — a phone on cellular cannot use those LAN addresses.
+ *
+ * @internal Exported for tests.
+ */
+export function iceGathered(peer: RTCPeerConnection, waitMs: number): Promise<void> {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
-  return withDeadline(
-    new Promise<void>((resolve) => {
-      const changed = () => {
-        if (peer.iceGatheringState !== "complete") return;
-        peer.removeEventListener("icegatheringstatechange", changed);
-        resolve();
-      };
-      peer.addEventListener("icegatheringstatechange", changed);
-    }),
-    timeoutMs,
-    "RTC ICE gathering timed out",
-  );
+  return new Promise((resolve) => {
+    const finish = () => {
+      peer.removeEventListener("icegatheringstatechange", changed);
+      clearTimeout(timer);
+      resolve();
+    };
+    const changed = () => {
+      if (peer.iceGatheringState === "complete") finish();
+    };
+    const timer = setTimeout(finish, waitMs);
+    peer.addEventListener("icegatheringstatechange", changed);
+  });
+}
+
+function snapshotPeer(peer: RTCPeerConnection, diagnosticId?: string): RtcDiagnostic {
+  return {
+    diagnosticId: diagnosticId ?? null,
+    iceGatheringState: peer.iceGatheringState,
+    iceConnectionState: peer.iceConnectionState,
+    connectionState: peer.connectionState,
+    signalingState: peer.signalingState,
+  };
 }
 
 function withDeadline<T>(

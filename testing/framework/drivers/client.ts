@@ -2,6 +2,7 @@ import { WebSocket } from "ws";
 
 import {
   Client,
+  type ClientDiagnosticEvent,
   type InviteChannelCredential,
   type LocalServerProof,
   type WebSocketLike,
@@ -13,6 +14,8 @@ export async function connectProductClient(input: {
   credential?: { deviceId: string; secret: string };
   inviteCredential?: InviteChannelCredential;
   name?: string;
+  socketFactory?: (url: string) => WebSocketLike;
+  onDiagnostic?: (event: ClientDiagnosticEvent) => void;
   redial?: () => Promise<{
     url: string;
     localServerProof?: LocalServerProof;
@@ -29,6 +32,7 @@ export async function connectProductClient(input: {
     connectTimeoutMs: 45_000,
     helloTimeoutMs: 45_000,
     redialTimeoutMs: 45_000,
+    ...(input.onDiagnostic ? { onDiagnostic: input.onDiagnostic } : {}),
     redial: input.redial
       ? async () => {
           const next = await input.redial!();
@@ -40,7 +44,8 @@ export async function connectProductClient(input: {
           };
         }
       : undefined,
-    socketFactory: (url: string) => new WebSocket(url) as unknown as WebSocketLike,
+    socketFactory:
+      input.socketFactory ?? ((url: string) => new WebSocket(url) as unknown as WebSocketLike),
     clientName: input.name ?? "testctl",
   });
   let lastError = "";

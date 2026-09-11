@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react";
 
 import type { MarkdownArtifactProps } from "./Markdown";
+import { inlineImagesFromTrunks } from "./roundGallery";
 import { useWorkbench } from "./store";
 
 /** Stable empty snapshot so zustand selectors do not infinite-loop on miss. */
@@ -21,6 +22,11 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
     const workspace = state.workspaces.find((entry) => entry.id === workspaceHandle);
     return workspace?.folders ?? NO_FOLDERS;
   });
+  const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
+  const inlineImages = useMemo(
+    () => inlineImagesFromTrunks(Object.values(roundTrunks)),
+    [roundTrunks],
+  );
 
   const loadPreview = useCallback(
     async (path: string) => {
@@ -45,7 +51,8 @@ export function useSessionArtifact(): MarkdownArtifactProps | null {
         rootHandle: folder.rootHandle,
       })),
       ...(sessionId ? { sessionId } : {}),
+      ...(inlineImages.length > 0 ? { inlineImages } : {}),
       loadPreview,
     };
-  }, [deviceHandle, folders, loadPreview, sessionId, workspaceHandle]);
+  }, [deviceHandle, folders, inlineImages, loadPreview, sessionId, workspaceHandle]);
 }

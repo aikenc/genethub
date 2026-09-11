@@ -12,7 +12,11 @@ import type {
   LogTail,
   RemoteAccess,
   PermissionOutcome,
+  BlobPayload,
   BlobRef,
+  Reply,
+  RoundTrunk,
+  TrunkLocator,
   SequencedEvent,
   SessionSnapshot,
   SessionImportListing,
@@ -151,6 +155,35 @@ export type ComposerDraftInsert = {
   text: string;
 };
 
+/**
+ * A forward capsule parked on a composer, shown as a removable quote card
+ * rather than poured into the text field. On send the composer prepends
+ * `capsule` to the user's own text, so the user reviews before anything is
+ * sent (proposal §3.5).
+ */
+export type ForwardDraft = {
+  /** `null` is the unstarted conversation's composer. */
+  sessionId: string | null;
+  capsule: string;
+  itemCount: number;
+  estimatedTokens: number;
+  sourceSessionId: string;
+  sourceTitle: string | null;
+  /** Inlined image thumbs that travel with the capsule on send. */
+  attachments?: Attachment[];
+};
+
+/**
+ * A finished piece of work the user may want to act on — a Fork or forward
+ * that landed on another machine. The action is theirs to take; nothing here
+ * navigates on its own.
+ */
+export type CompletionNotice = {
+  text: string;
+  actionLabel?: string;
+  onAction?: () => void;
+};
+
 let composerDraftInsertSequence = 0;
 
 interface WorkbenchState {
@@ -184,6 +217,17 @@ interface WorkbenchState {
   sessionTimelines: Record<string, TimelineState>;
   /** Sessions whose live event stream we intentionally keep while their tab is open. */
   subscribedSessionIds: string[];
+  /**
+   * Which client the subscriptions above were made on.
+   *
+   * Switching machines builds a new client and throws the old one away, but
+   * this bookkeeping is global to the store. Without an owner, a session opened
+   * before the switch still counts as subscribed afterwards, and selecting it
+   * takes the warm path — no subscribe, no snapshot, and the transcript stays at
+   * whatever it last said, which for a turn that has since finished is Stop
+   * forever.
+   */
+  subscriptionOwner: Client | null;
   /** Six tabs fit a phone; a desktop can keep sixteen useful work surfaces. */
   tabLimit: number;
   notice: string | null;
@@ -197,6 +241,10 @@ interface WorkbenchState {
   restoreDraft: { text: string; attachments: Attachment[] } | null;
   /** Lines waiting to be appended to a session's composer without sending it. */
   composerDraftInserts: ComposerDraftInsert[];
+  /** The forward capsule parked on a composer, if any. One at a time. */
+  forwardDraft: ForwardDraft | null;
+  /** A completed cross-machine outcome offering a follow-up action. */
+  completionNotice: CompletionNotice | null;
   hub: HubStatus | null;
   /**
    * The last way into this machine's identity the Hub handed out.
@@ -347,6 +395,17 @@ interface WorkbenchState {
   appendComposerDraftLine(sessionId: string | null, text: string): void;
   /** Acknowledges that one queued composer insertion has been applied. */
   consumedComposerDraftInsert(id: string): void;
+  /** Parks (or clears, with `null`) the forward capsule on a composer. */
+  setForwardDraft(draft: ForwardDraft | null): void;
+  /** Shows (or clears, with `null`) the completed-work banner. */
+  setCompletionNotice(notice: CompletionNotice | null): void;
+  /**
+   * Batch fetches for the forward dialog's detail fill (proposal §7.0).
+   * Results are also cached into the session's timeline, which the round
+   * layer's own expansion then reuses.
+   */
+  fetchTrunkDetails(sessionId: string, refs: TrunkLocator[]): Promise<RoundTrunk[] | null>;
+  fetchBlobPayloads(sessionId: string, refs: BlobRef[]): Promise<BlobPayload[] | null>;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
   /** Lightweight provider discovery; full history is read only after selection. */
@@ -359,6 +418,12 @@ interface WorkbenchState {
   setEffort(effortId: string): Promise<void>;
   setRuntimeAxis(axisId: string, valueId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
+  /**
+   * Re-probes every Agent. Opening the picker after an install, or finishing a
+   * turn that may have installed one, must not keep showing the first answer
+   * the daemon cached for its lifetime.
+   */
+  refreshAgents(): Promise<void>;
   refreshHub(): Promise<void>;
   pair(hubUrl: string): Promise<void>;
   /** Pairs with an identity the Hub makes up on the spot, nobody to approve it. */
@@ -410,6 +475,10 @@ function patchTimeline(
  * But most events cannot have moved it, and asking after every one would put a
  * request behind every token.
  */
+function endsATurn(type: SequencedEvent["event"]["type"]): boolean {
+  return type === "turnCompleted" || type === "turnFailed" || type === "turnCanceled";
+}
+
 function changesTheRoundLayer(event: SequencedEvent): boolean {
   switch (event.event.type) {
     case "turnCompleted":
@@ -481,6 +550,9 @@ function reportError(set: Setter, error: unknown): void {
 }
 
 let roundReads: Promise<unknown> = Promise.resolve();
+// Scope pending detail reads to the connection as well as the session. A
+// reconnect must never adopt an old client's response or pending promise.
+const trunkReads = new WeakMap<Client, Map<string, Promise<void>>>();
 
 /**
  * Runs round-layer reads one after another.
@@ -571,10 +643,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   timeline: emptyTimeline(),
   sessionTimelines: {},
   subscribedSessionIds: [],
+  subscriptionOwner: null,
   tabLimit: 16,
   notice: null,
   restoreDraft: null,
   composerDraftInserts: [],
+  forwardDraft: null,
+  completionNotice: null,
   hub: null,
   claim: null,
   devices: [],
@@ -593,7 +668,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async attach(client) {
     reconnectNotice = null;
     connectionLossNotice = null;
-    set({ client, notice: null });
+    // Subscriptions belong to the client that made them. This one has never
+    // subscribed to anything, and saying otherwise is how a session opened
+    // before a machine switch ends up with no live stream at all.
+    set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null });
     client.onStateChange((connection) => {
       set({ connection });
       // A connection that was refused knows why — wrong credential, revoked
@@ -631,7 +709,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     });
     client.onNotice((_level, message) => set({ notice: message }));
     client.onUpdateDownload((download) => set({ download }));
-    client.onBackgroundProcesses((backgroundProcesses) => set({ backgroundProcesses }));
+    client.onBackgroundProcesses(() => {
+      void get().refreshBackgroundProcesses();
+    });
     try {
       // Hub status and the download prompt do not read anything the catalog
       // loads, so they fly alongside it instead of queueing behind two relay
@@ -846,7 +926,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           ];
       const limited = limitTabs(opened, tabId, state.tabLimit, state.sessions);
       evicted = limited.evicted;
-      warm = state.subscribedSessionIds.includes(sessionId);
+      // Only warm on the client that actually holds the subscription. A machine
+      // switch replaces the client, and a subscription on a client that is gone
+      // delivers nothing.
+      const mine = state.subscriptionOwner === client ? state.subscribedSessionIds : [];
+      warm = mine.includes(sessionId);
       return {
         activeSessionId: sessionId,
         draft: null,
@@ -860,9 +944,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         timeline: state.sessionTimelines[sessionId] ?? emptyTimeline(),
         tabs: limited.tabs,
         sessionTimelines: omitMany(state.sessionTimelines, tabSessionIds(limited.evicted)),
-        subscribedSessionIds: state.subscribedSessionIds.filter(
-          (id) => !tabSessionIds(limited.evicted).includes(id),
-        ),
+        subscribedSessionIds: mine.filter((id) => !tabSessionIds(limited.evicted).includes(id)),
         activeTabId: tabId,
       };
     });
@@ -877,10 +959,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       sessionId,
       {
         onEvent: (event) => {
+        if (get().client !== client) return;
         if (event.event.type === "titleChanged") {
           applyTitle(sessionId, event.event.title, set);
         }
         applySessionStatus(sessionId, event.event, set);
+        if (endsATurn(event.event.type) && get().agents.some((agent) => !canStartAgent(agent))) {
+          void get().refreshAgents();
+        }
         set((state) => {
           const timeline = applySequenced(
             state.sessionTimelines[sessionId] ?? emptyTimeline(),
@@ -899,15 +985,28 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           }
         },
         onResync: (resnapshot, events, reset) => {
+        if (get().client !== client) return;
         const previous = timelineOf(get(), sessionId);
         const base = reset
           ? fromSnapshot(resnapshot as SessionSnapshot, previous.pending, previous)
-          : previous;
+          : // Even a gap the daemon can fill carries its own answer for the
+            // status, and that answer outranks ours. It has to: a status change
+            // that published no event and took no sequence number leaves the
+            // daemon saying "you are current" while its snapshot says the turn
+            // is over, and replaying the nothing it sent keeps the composer on
+            // Stop for a turn that ended.
+            withSnapshotStatus(previous, resnapshot as SessionSnapshot);
+        // The snapshot is the daemon's own answer, and it arrives precisely
+        // when the events that would have carried the status were the ones
+        // dropped. Replaying only what survived leaves a finished turn showing
+        // as still running, with a composer that will not take the next
+        // message — the shape of every freeze report we have.
         for (const event of events) {
           if (event.event.type === "titleChanged") applyTitle(sessionId, event.event.title, set);
           applySessionStatus(sessionId, event.event, set);
         }
-        const timeline = events.reduce(applySequenced, base);
+        adoptSnapshotStatus(sessionId, resnapshot as SessionSnapshot, set);
+        const timeline = withSnapshotStatus(events.reduce(applySequenced, base), resnapshot as SessionSnapshot);
         set((state) => ({
           sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
           ...(state.activeSessionId === sessionId ? { timeline } : {}),
@@ -917,6 +1016,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       { expandLastRound: shouldExpandLastRound(summary) },
     );
 
+    if (get().client !== client) return;
     const typedSnapshot = snapshot as SessionSnapshot;
     const previous = timelineOf(get(), sessionId);
     const base = fromSnapshot(typedSnapshot, previous.pending, previous);
@@ -924,14 +1024,19 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // next. This is easy to hit when switching pages over a relay: both replies
     // are valid, but only the currently selected session owns the timeline.
     markSessionRead(typedSnapshot.summary);
-    const timeline = replayed.reduce(applySequenced, base);
-    set((state) => ({
-      subscribedSessionIds: state.subscribedSessionIds.includes(sessionId)
-        ? state.subscribedSessionIds
-        : [...state.subscribedSessionIds, sessionId],
-      sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
-      ...(state.activeSessionId === sessionId ? { timeline } : {}),
-    }));
+    adoptSnapshotStatus(sessionId, typedSnapshot, set);
+    const timeline = withSnapshotStatus(replayed.reduce(applySequenced, base), typedSnapshot);
+    set((state) => {
+      // Whose subscriptions these are. A client that has been replaced takes its
+      // subscriptions with it, so the list restarts from this one.
+      const mine = state.subscriptionOwner === client ? state.subscribedSessionIds : [];
+      return {
+        subscriptionOwner: client,
+        subscribedSessionIds: mine.includes(sessionId) ? mine : [...mine, sessionId],
+        sessionTimelines: { ...state.sessionTimelines, [sessionId]: timeline },
+        ...(state.activeSessionId === sessionId ? { timeline } : {}),
+      };
+    });
   },
 
   async loadRound(roundId) {
@@ -956,6 +1061,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const existingFirst = existing?.trunks[0]?.index;
         const keptOlder =
           existingFirst !== undefined && existingFirst < (layer.trunks[0]?.index ?? 0);
+        const expanded = layer.expandedTrunk;
+        const nextRoundTrunks = expanded
+          ? {
+              ...timeline.roundTrunks,
+              [`${layer.round.roundId}:${expanded.summary.index}`]: expanded,
+            }
+          : timeline.roundTrunks;
         return {
           rounds: [
             ...timeline.rounds.filter((round) => round.roundId !== layer.round.roundId),
@@ -969,6 +1081,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
               nextCursor: keptOlder ? existing?.nextCursor : layer.nextCursor,
             },
           },
+          roundTrunks: nextRoundTrunks,
         };
       });
     });
@@ -1002,17 +1115,29 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async loadTrunk(roundId, trunkIndex) {
-    const sessionId = get().activeSessionId;
-    if (!sessionId) return;
-    const reply = await require_(get().client).call({
-      type: "round.trunk.get",
-      payload: { sessionId, roundId, trunkIndex },
+    const { activeSessionId: sessionId, client } = get();
+    if (!sessionId || !client) return;
+    const key = `${sessionId}:${roundId}:${trunkIndex}`;
+    let pending = trunkReads.get(client);
+    if (!pending) { pending = new Map(); trunkReads.set(client, pending); }
+    const existing = pending.get(key);
+    if (existing) return existing;
+    const read = oneAtATime(async () => {
+      // Navigation cancels queued background work before it reaches the wire.
+      if (get().client !== client || get().activeSessionId !== sessionId) return;
+      const reply = await client.call({
+        type: "round.trunk.get",
+        payload: { sessionId, roundId, trunkIndex },
+      });
+      if (get().client !== client || reply?.type !== "roundTrunk") return;
+      const trunk = reply.data;
+      patchTimeline(sessionId, set, (timeline) => ({
+        roundTrunks: { ...timeline.roundTrunks, [`${roundId}:${trunkIndex}`]: trunk },
+      }));
     });
-    if (reply?.type !== "roundTrunk") return;
-    const trunk = reply.data;
-    patchTimeline(sessionId, set, (timeline) => ({
-      roundTrunks: { ...timeline.roundTrunks, [`${roundId}:${trunkIndex}`]: trunk },
-    }));
+    pending.set(key, read);
+    try { await read; }
+    finally { pending.delete(key); }
   },
 
   async loadBlob(blob) {
@@ -1331,6 +1456,80 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set((state) => ({
       composerDraftInserts: state.composerDraftInserts.filter((insert) => insert.id !== id),
     }));
+  },
+
+  setForwardDraft(draft) {
+    set({ forwardDraft: draft });
+  },
+
+  setCompletionNotice(notice) {
+    set({ completionNotice: notice });
+  },
+
+  async fetchTrunkDetails(sessionId, refs) {
+    if (refs.length === 0) return [];
+    const client = require_(get().client);
+    const trunks = await batchOrSequentially(
+      client,
+      "roundTrunks",
+      () => client.call({ type: "round.trunk.batchGet", payload: { sessionId, refs } }),
+      async () => {
+        const oneByOne: RoundTrunk[] = [];
+        for (const ref of refs) {
+          const reply = await client.call({
+            type: "round.trunk.get",
+            payload: { sessionId, roundId: ref.roundId, trunkIndex: ref.trunkIndex },
+          });
+          if (reply?.type !== "roundTrunk") return null;
+          oneByOne.push(reply.data);
+        }
+        return oneByOne;
+      },
+      set,
+    );
+    if (!trunks) return null;
+    patchTimeline(sessionId, set, (timeline) => {
+      const roundTrunks = { ...timeline.roundTrunks };
+      // Responses align with request order; the locator's round id is what
+      // the timeline cache key needs, and the payload does not repeat it.
+      for (const [index, trunk] of trunks.entries()) {
+        const roundId = refs[index]?.roundId;
+        if (roundId) roundTrunks[`${roundId}:${trunk.summary.index}`] = trunk;
+      }
+      return { roundTrunks };
+    });
+    return trunks;
+  },
+
+  async fetchBlobPayloads(sessionId, refs) {
+    if (refs.length === 0) return [];
+    const client = require_(get().client);
+    const payloads = await batchOrSequentially(
+      client,
+      "blobs",
+      () => client.call({ type: "blob.batchGet", payload: { sessionId, blobs: refs } }),
+      async () => {
+        const oneByOne: BlobPayload[] = [];
+        for (const ref of refs) {
+          const reply = await client.call({
+            type: "blob.get",
+            payload: { sessionId, blob: ref },
+          });
+          if (reply?.type !== "blob") return null;
+          oneByOne.push(reply.data);
+        }
+        return oneByOne;
+      },
+      set,
+    );
+    if (!payloads) return null;
+    patchTimeline(sessionId, set, (timeline) => ({
+      blobs: {
+        ...timeline.blobs,
+        ...Object.fromEntries(payloads.map((payload) => [payload.id, payload])),
+      },
+    }));
+    return payloads;
   },
 
   async forkSession(turnId, target) {
@@ -1665,6 +1864,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (agents?.type === "agents") set({ agents: agents.data });
   },
 
+  async refreshAgents() {
+    const client = get().client;
+    if (!client) return;
+    const agents = await client.call({ type: "agent.refresh" }).catch(unattended(client, get, set));
+    if (agents?.type === "agents") set({ agents: agents.data });
+  },
+
   async refreshHub() {
     const reply = await require_(get().client).call({ type: "hub.status" });
     if (reply?.type === "hubStatus") set({ hub: reply.data });
@@ -1719,7 +1925,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async refreshBackgroundProcesses() {
     const client = require_(get().client);
     const reply = await client
-      .call({ type: "process.list" })
+      .call(get().activeWorkspaceId && client.identity?.features?.includes("process.services.v1")
+        ? { type: "process.workspaceList", payload: {workspaceId: get().activeWorkspaceId!} }
+        : { type: "process.list" })
       .catch(unattended(client, get, set));
     if (reply?.type === "processes") set({ backgroundProcesses: reply.data });
   },
@@ -1962,6 +2170,11 @@ async function start(
   });
   set((current) => ({
     sessions: [reply.data, ...current.sessions],
+    // A forward capsule parked on the unstarted conversation belongs to the
+    // session that conversation just became; re-key it or the card vanishes.
+    ...(current.forwardDraft?.sessionId === null
+      ? { forwardDraft: { ...current.forwardDraft, sessionId: reply.data.id } }
+      : {}),
     // Seed before `selectSession` so the first paint of the new session still
     // holds the message that is in flight; otherwise subscribe's empty
     // timeline puts Send back until this function patches pending afterwards.
@@ -2095,6 +2308,40 @@ function applyTitle(sessionId: string, title: string, set: Setter): void {
 }
 
 /** Mirrors live daemon status into the session list without waiting for a poll. */
+/** Takes the status straight from a snapshot the daemon just answered with.
+ *
+ * Events are how the status normally moves, and they are enough right up to
+ * the moment some of them do not arrive. A snapshot has no such gap in it, so
+ * whenever one is in hand it wins over whatever the event stream left behind.
+ */
+/**
+ * The transcript, with the daemon's own word for the status.
+ *
+ * Only the status: a gap the daemon says it can fill is answered by replaying
+ * the events it sends, and rebuilding the whole transcript from the snapshot
+ * would throw away process cards and expanded rounds that nothing asked to
+ * lose. The status is the one field that has no event behind it — that is
+ * exactly why it goes stale.
+ */
+function withSnapshotStatus(previous: TimelineState, snapshot: SessionSnapshot): TimelineState {
+  const status = snapshot?.summary?.status;
+  if (!status) return previous;
+  // An approval still waiting outranks it, the same way it does when a snapshot
+  // is applied whole: there is a card on screen the user has to answer.
+  const waiting = (snapshot.pendingPermissions?.length ?? 0) > 0;
+  return { ...previous, status: waiting ? "waiting" : status };
+}
+
+function adoptSnapshotStatus(sessionId: string, snapshot: SessionSnapshot, set: Setter): void {
+  const status = snapshot?.summary?.status;
+  if (!status) return;
+  set((state) => ({
+    sessions: state.sessions.map((session) =>
+      session.id === sessionId && session.status !== status ? { ...session, status } : session,
+    ),
+  }));
+}
+
 function applySessionStatus(
   sessionId: string,
   event: import("@genehub/proto").SessionEvent,
@@ -2229,4 +2476,45 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
 function require_(client: Client | null): Client {
   if (!client) throw new Error("the workbench is not connected yet");
   return client;
+}
+
+/**
+ * `*.batchGet` is younger than some daemons this build can be pointed at —
+ * browsing an older machine through a newer web is a normal thing to do. One
+ * "unknown variant" refusal tells us the daemon predates batch fetches; the
+ * flag makes that client go one-by-one from then on instead of paying for a
+ * refused round trip on every fill iteration.
+ */
+const batchGetSupport = new WeakMap<Client, boolean>();
+
+function isUnknownVariant(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("unknown variant");
+}
+
+async function batchOrSequentially<T>(
+  client: Client,
+  batchType: "roundTrunks" | "blobs",
+  batch: () => Promise<Reply | undefined>,
+  sequentially: () => Promise<T[] | null>,
+  set: Setter,
+): Promise<T[] | null> {
+  if (batchGetSupport.get(client) !== false) {
+    try {
+      const reply = await batch();
+      if (reply?.type !== batchType) return null;
+      return reply.data as T[];
+    } catch (error) {
+      if (!isUnknownVariant(error)) {
+        reportError(set, error);
+        return null;
+      }
+      batchGetSupport.set(client, false);
+    }
+  }
+  try {
+    return await sequentially();
+  } catch (error) {
+    reportError(set, error);
+    return null;
+  }
 }

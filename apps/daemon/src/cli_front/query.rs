@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 35] = [
+const COMMAND_NAMES: [&str; 46] = [
     "schema",
     "context",
     "capabilities",
@@ -48,6 +48,17 @@ const COMMAND_NAMES: [&str; 35] = [
     "device.list",
     "device.invite",
     "device.revoke",
+    "client.list",
+    "client.attach",
+    "client.status",
+    "client.result",
+    "client.inspect",
+    "client.eval",
+    "client.act",
+    "client.events",
+    "client.screenshot",
+    "client.reload",
+    "client.revoke",
     "speech.runtime.status",
     "speech.runtime.probe",
     "speech.runtime.register",
@@ -77,6 +88,9 @@ const GRANTS: [&str; 10] = [
 /// need to know what is safe to retry, so it is a property of the command
 /// rather than a judgement made at each call site.
 fn mutates(name: &str) -> bool {
+    if name.starts_with("client.") {
+        return !matches!(name, "client.list" | "client.status");
+    }
     matches!(
         name,
         "shell"
@@ -949,6 +963,24 @@ fn schema_data(command: Option<&str>) -> Value {
 
 fn command_schema(name: &str) -> Value {
     let (synopsis, requires_daemon, input) = match name {
+        "client.list" => ("genet client list [--machine <coordinator>]", true, object_input(json!({}), &[])),
+        "client.attach" => ("genet client attach <clientId> --label <operator> [--machine <coordinator>]", true, object_input(json!({"clientId":{"type":"string"},"label":{"type":"string"}}), &["clientId","label"])),
+        "client.eval" => (
+            "genet client eval <clientId> --session <capability> --script <js> [--machine <coordinator>]",
+            true, object_input(json!({"clientId":{"type":"string"},"session":{"type":"string"},"script":{"type":"string"}}), &["clientId","session","script"])
+        ),
+        "client.act" => (
+            "genet client act <clientId> --session <capability> --selector <css> [--value <text>] [--machine <coordinator>]",
+            true, object_input(json!({"clientId":{"type":"string"},"session":{"type":"string"},"selector":{"type":"string"},"value":{"type":"string"}}), &["clientId","session","selector"])
+        ),
+        "client.result" => (
+            "genet client result <clientId> --session <capability> --command <commandId> [--machine <coordinator>]",
+            true, object_input(json!({"clientId":{"type":"string"},"session":{"type":"string"},"command":{"type":"string"}}), &["clientId","session","command"])
+        ),
+        "client.status" | "client.inspect" | "client.events" | "client.screenshot" | "client.reload" | "client.revoke" => (
+            "genet client <verb> <clientId> --session <capability> [--machine <coordinator>]",
+            true, object_input(json!({"clientId":{"type":"string"},"session":{"type":"string"}}), &["clientId","session"])
+        ),
         "schema" => (
             "genet schema [command]",
             false,
@@ -1151,7 +1183,10 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId"],
             ),
         ),
-        "machine.list" => ("genet machine list", false, object_input(json!({}), &[])),
+        "machine.list" => ("genet machine list [--reachable]", false, object_input(json!({
+            "reachable": {"type":"boolean", "default":false,
+                "description":"Include this machine and the current identity's Hub directory; errors rather than returning a partial directory"}
+        }), &[])),
         "machine.show" => (
             "genet machine show <machineId>",
             false,
@@ -1517,6 +1552,7 @@ pub fn unexpected_reply(expected: &str, actual: &Reply) -> CliFailure {
 
 pub fn reply_kind(reply: &Reply) -> &'static str {
     match reply {
+        Reply::ClientDebug(_) => "client debug",
         Reply::Hello(_) => "hello",
         Reply::Subscribed { .. } => "subscribed",
         Reply::Agents(_) => "agents",
@@ -1548,7 +1584,9 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::SessionContext(_) => "session context",
         Reply::RoundLayer(_) => "round layer",
         Reply::RoundTrunk(_) => "round trunk",
+        Reply::RoundTrunks(_) => "round trunks",
         Reply::Blob(_) => "blob",
+        Reply::Blobs(_) => "blobs",
         Reply::SessionArtifactUpload(_) => "session artifact upload",
         Reply::SessionArtifact(_) => "session artifact",
         Reply::Workspace(_) => "workspace",
@@ -1868,6 +1906,7 @@ mod tests {
             unsupported: None,
             lineage: None,
             imported: None,
+            last_activity_at_ms: None,
         };
         assert_eq!(
             sessions(Reply::Sessions(vec![summary.clone()])).unwrap(),

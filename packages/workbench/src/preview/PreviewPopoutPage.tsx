@@ -38,6 +38,15 @@ export function PreviewPopoutPage({
   const effectiveContext = inherited?.context ?? context;
   const sharedClient = inherited?.client ?? null;
 
+  // The feedback launcher is a sibling of this page in a standalone preview,
+  // outside the normal workbench store. Publish the inherited client through
+  // the same explicit diagnostics registry used by portable preview links so
+  // feedback can attach the source session after the user confirms it.
+  useEffect(() => {
+    if (!sharedClient) return;
+    return registerDiagnosticClient(sharedClient);
+  }, [sharedClient]);
+
   // A copied link opened in a fresh browser has no opener to inherit from;
   // the fragment-carried one-time Hub ticket is its whole credential. The
   // ticket is spent by this dial, so reconnect after a drop is impossible —

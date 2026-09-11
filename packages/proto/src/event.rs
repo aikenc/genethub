@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::timeline::{TimelineItem, ToolCallDetail, ToolStatus};
+use crate::timeline::{TimelineItem, ToolCallDetail, ToolImage, ToolStatus};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -242,6 +242,11 @@ pub enum ItemDelta {
         status: ToolStatus,
         #[ts(optional)]
         detail: Option<ToolCallDetail>,
+        /// Images the tool result carried. Adapters fill this when the result
+        /// arrives (which is delta time, not item time); the daemon sheds it
+        /// like `TimelineItem::ToolCall.images`.
+        #[serde(default)]
+        images: Vec<ToolImage>,
     },
 }
 

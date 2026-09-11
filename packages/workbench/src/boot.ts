@@ -19,6 +19,8 @@
  * would paint one frame of the other one on every launch.
  */
 
+import { installClientDebug } from "./client-debug";
+
 import { watchViewport } from "./shell/viewport";
 import { applyUiScale, useUiScale } from "./theme/scale";
 import { applyTheme, useTheme, watchSystemTheme } from "./theme/store";
@@ -40,6 +42,8 @@ export function boot(): void {
   // Belongs to the window, not to any component: the keyboard can arrive while
   // any pane is open, and every one of them is inside the same fixed box.
   watchViewport();
+  if (document.body) installClientDebug();
+  else document.addEventListener("DOMContentLoaded", installClientDebug, { once: true });
 }
 
 boot();

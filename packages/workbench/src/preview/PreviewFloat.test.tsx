@@ -49,6 +49,7 @@ const storeMock = vi.hoisted(() => {
     activeSessionId: "s_demo",
     appendComposerDraftLine: vi.fn(),
     send: vi.fn(),
+    timeline: { blobs: {} as Record<string, { value: unknown }> },
   };
   const useWorkbench = Object.assign(
     (select: (value: typeof state) => unknown) => select(state),
