@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -556,7 +556,7 @@ async fn serve_peer_inner(
     let hello: PeerHello =
         serde_json::from_slice(&frame.payload).context("invalid Fabric peer hello")?;
     let admitted = admission_source.resolve(&hello).await?;
-    let accepted = handshake::accept(
+    let mut accepted = handshake::accept(
         &state,
         TransportKind::Forwarded,
         admitted.admission,
@@ -564,6 +564,42 @@ async fn serve_peer_inner(
         admitted.local_workspace_id,
         admitted.workspace_handle,
     )?;
+    if let (PeerAdmissionSource::Hosted(enrollment), PeerAuth::Hosted { capability_id, .. }) =
+        (admission_source, &hello.auth)
+    {
+        let authority = Arc::new(AtomicBool::new(true));
+        accepted.access.hosted_authority = Some(authority.clone());
+        let weak = Arc::downgrade(&authority);
+        let enrollment = enrollment.clone();
+        let capability_id = capability_id.clone();
+        let expires_at = admitted.expires_at;
+        tokio::spawn(async move {
+            let client = crate::hub::Client::new(&enrollment.hub_url);
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let Some(authority) = weak.upgrade() else {
+                    break;
+                };
+                if expires_at.is_some_and(|at| Instant::now() >= at) {
+                    authority.store(false, Ordering::Release);
+                    break;
+                }
+                // Temporary control-plane loss cannot extend the admitted lease.
+                // An explicit revocation ends it immediately, including active RTC.
+                if matches!(
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        client.fabric_peer_active(&enrollment, &capability_id)
+                    )
+                    .await,
+                    Ok(Ok(false))
+                ) {
+                    authority.store(false, Ordering::Release);
+                    break;
+                }
+            }
+        });
+    }
     let (inbound, mut outbound, carrier) = endpoint::carrier_channels();
     let flow = StreamFlow::from_wire(frame.value)?;
     peers.lock().await.insert(

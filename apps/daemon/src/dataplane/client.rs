@@ -11,6 +11,8 @@ use genehub_proto::{ExchangeRequestHead, ExchangeResponseHead};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) use super::logical_connection::Redial;
+
 use super::authenticated_channel::{authenticated_channel, Role};
 use crate::channel_auth::SessionKey;
 use crate::dataplane::endpoint::{Carrier, PeerReader, PeerWriter};
@@ -99,7 +101,17 @@ impl ClientStream {
 impl ClientEndpoint {
     pub fn start(key: SessionKey, carrier: Carrier) -> (Self, tokio::task::JoinHandle<Result<()>>) {
         let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
-        let task = tokio::spawn(run(key, carrier, receiver));
+        let task = tokio::spawn(run(key, carrier, receiver, None));
+        (Self { commands }, task)
+    }
+
+    pub(crate) fn start_recovering(
+        key: SessionKey,
+        carrier: Carrier,
+        redial: super::logical_connection::Redial,
+    ) -> (Self, tokio::task::JoinHandle<Result<()>>) {
+        let (commands, receiver) = mpsc::channel(COMMAND_QUEUE);
+        let task = tokio::spawn(run(key, carrier, receiver, Some(redial)));
         (Self { commands }, task)
     }
 
@@ -200,7 +212,12 @@ impl ClientEndpoint {
     }
 }
 
-async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Call>) -> Result<()> {
+async fn run(
+    key: SessionKey,
+    carrier: Carrier,
+    mut commands: mpsc::Receiver<Call>,
+    redial: Option<super::logical_connection::Redial>,
+) -> Result<()> {
     let mut streams = HashMap::<u32, Stream>::new();
     let mut next_stream_id = 1u32;
     let (returned_credit, mut credits) = mpsc::channel::<(u32, u32)>(256);
@@ -212,7 +229,8 @@ async fn run(key: SessionKey, carrier: Carrier, mut commands: mpsc::Receiver<Cal
             None,
         )
     } else {
-        let (reader, writer, task) = super::logical_connection::client(key, carrier).await?;
+        let (reader, writer, task) =
+            super::logical_connection::client(key, carrier, redial).await?;
         (
             PeerReader::Logical(reader),
             PeerWriter::Logical(writer),

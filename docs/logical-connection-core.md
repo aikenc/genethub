@@ -86,7 +86,7 @@ offset 32..35 为 payload 长度。保留现有 DataFrame 语义，不嵌入 v3 
 
 该核心约束的是编码字节与由最小 36 字节帧推导出的有限条目数，不是浏览器实际 heap 的测量。
 双方向日志/接收、Map/Vec、等待写入、handler、carrier、加密副本必须在 actor/registry 准入时统一
-核算。128 MiB 不能被描述成已经验证的进程内存上限；32 连接是数量上限，不保证都能协商 4 MiB。
+核算。160 MiB 不能被描述成已经验证的进程内存上限；32 连接是数量上限，不保证都能协商 4 MiB。
 
 当前连接 data 容量为 4 MiB，progress 为 64 KiB，单流窗口统一为 3 MiB。撤销了 Preview 的
 64 MiB 特例。相对原提案的 256 KiB / 1⁄16，3 MiB 是根据真实 100 Mbps、100/200 ms RTT
@@ -129,12 +129,11 @@ ACTIVATE 发出后不再回到旧 epoch；ACTIVATED / SYNCED 丢失通过新 att
 公共 attempt / probe 为 32 位十六进制串，恢复 secret 保留 256 bit。FIN 也接受已验证激活水位的确认。
 
 恢复失败不延长最初 60 秒期限；本地撤权清理 active 和 suspended owner。Hosted 授权到期同样清理
-活动 RTC，不因切换而延长短期授权；新合法 admission 可续期。Hub 撤销的跨 RTC 即时推送尚未实现，
-当前按授权到期与重新 admission 拒绝处理，不能宣称即时跨 Hub 撤权。原生 CLI 当前未持有可供
-重拨的 endpoint，因此明确 CREATE resumable=false，断线即回收，不留下无人可恢复的 60 秒占位。
+活动 RTC，不因切换而延长短期授权；新合法 admission 可续期。Daemon 使用机器身份每秒复核 Hosted capability 是否仍有效，撤销或原租期到期会终止所属逻辑连接；暂时无法访问 Hub 不延长原租期。客户端在租期内刷新准入，明确 401/403 进入关闭终态。此机制增加每活跃授权约 1 次/秒的控制面请求，尚未实现批量复核或推送。
+原生 CLI 的已配对 Device 路由持有重拨 owner，使用新 nonce 完成双向认证后附着原逻辑连接，保留同一流和水位。邀请、一次性 Hosted ticket 和未提供重拨的本地调用仍关闭恢复保留。
 
-硬限制为 32 个 registry 项、128 MiB 传输字节预算。每项当前保守预留 20 MiB：收发日志、接收租约、
-待写帧、至多 256 个生产者帧以及有界物理队列。因此默认字节门会将并存项进一步限制为 **6 个**；
+硬限制为 32 个 registry 项、160 MiB 传输字节预算。每项当前保守预留 20 MiB：收发日志、接收租约、
+待写帧、至多 256 个生产者帧以及有界物理队列。因此默认字节门会将并存项进一步限制为 **8 个**；
 32 是数量上限，不是默认可同时承载 32 个满额连接。此预留不等同于 allocator/RSS 上限。
 更高并存量需要协商配额或动态预留，不能绕过预算创建。direct-only 仅准许 RTC 或真正的 loopback，
 不能由客户端把任意 WebSocket 声称为本机来绕过。
@@ -148,10 +147,9 @@ ACTIVATE 发出后不再回到旧 epoch；ACTIVATED / SYNCED 丢失通过新 att
 
 普通调用、事件与订阅不再按 method 选路。服务 Preview 根据 descriptor 的策略声明选择独立连接；
 描述和 ICE 控制可走普通连接，direct-only 内容只走受限连接，daemon 再次强制验证，不能由浏览器降级。
-受限 RTC 断开当前明确终止受限流，不把其日志回放到 Fabric；普通流按上述机制恢复。
+受限 RTC 断开保留原 direct-only owner，经普通控制连接重新协商后仅接入新的 RTC，保留原 HTTP 流；内容不回放到 Fabric。恢复期限与授权仍独立约束它。
 
-后续仍需更大并存量的可验证配额协商、受限服务的自动重接、Hosted 撤销即时通知、原生 CLI 的重拨
-owner，以及完整 Web/CLI/App 成套发布验收。当前候选不是完整发布资格，不发布 Beta/Stable。
+后续仍需更大并存量的配额协商、Hosted 撤销批量复核或推送、原生 Hosted 的新票据获取与恢复，以及完整 Web/CLI/App 成套发布验收。当前候选不是完整发布资格，不发布 Beta/Stable。
 
 ### dev-net 临时修复核对
 

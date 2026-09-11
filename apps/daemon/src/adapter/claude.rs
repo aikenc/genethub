@@ -177,19 +177,45 @@ impl ClaudeAdapter {
     async fn help(&self, program: &std::path::Path) -> &str {
         self.help
             .get_or_init(|| async {
-                Command::new(program)
+                let mut text = Command::new(program)
                     .arg("--help")
                     .output()
                     .await
                     .ok()
                     .map(|out| {
-                        // Some builds print help on stderr. Both are cheap to read
-                        // and only one of them has to contain the choices.
                         let mut text = String::from_utf8_lossy(&out.stdout).to_string();
                         text.push_str(&String::from_utf8_lossy(&out.stderr));
                         text
                     })
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                // Some CLI builds exit before their piped help is fully flushed.
+                // A short --version invocation still validates preceding options,
+                // and reaches no model. Probe the actual launch parser, rather
+                // than trusting set_permission_mode (some builds accept unknowns).
+                if !text.contains("--permission-mode") {
+                    let mut modes = Vec::new();
+                    for mode in [
+                        "manual",
+                        "default",
+                        MODE_ACCEPT_EDITS,
+                        MODE_PLAN,
+                        MODE_BYPASS,
+                    ] {
+                        let mut command = Command::new(program);
+                        command
+                            .args(["--permission-mode", mode, "--version"])
+                            .kill_on_drop(true);
+                        if let Ok(Ok(output)) =
+                            tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
+                        {
+                            if output.status.success() {
+                                modes.push(mode);
+                            }
+                        }
+                    }
+                    text.push_str(&format!("\n--permission-mode choices: {}\n", json!(modes)));
+                }
+                text
             })
             .await
     }
@@ -423,11 +449,6 @@ fn mode_listed(help: &str, mode: &str) -> bool {
 /// is the newer name; when neither appears the caller passes no flag at all
 /// rather than guessing.
 fn ask_mode_in(help: &str) -> Option<&'static str> {
-    let listed = |name: &str| {
-        help.contains(&format!("\"{name}\""))
-            || help.contains(&format!("'{name}'"))
-            || help.contains(&format!(" {name},"))
-    };
     // Only where the CLI is actually listing permission modes. "default" is a
     // word that appears all over a help text.
     let choices = help
@@ -444,14 +465,6 @@ fn ask_mode_in(help: &str) -> Option<&'static str> {
         return Some("default");
     }
     if listed_in_choices("manual") {
-        return Some("manual");
-    }
-    // A build that documents the flag without listing its choices: the two names
-    // may still be mentioned elsewhere in the text.
-    if listed("default") {
-        return Some("default");
-    }
-    if listed("manual") {
         return Some("manual");
     }
     None

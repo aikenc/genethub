@@ -13,7 +13,7 @@ use crate::channel_auth::{self, SessionKey};
 
 pub(crate) const RESUME_TTL: Duration = Duration::from_secs(60);
 const MAX_CONNECTIONS: usize = 32;
-const GLOBAL_BYTES: usize = 128 * 1024 * 1024;
+const GLOBAL_BYTES: usize = 160 * 1024 * 1024;
 // Reserve conservatively for both journals, receive custody, physical crypto
 // queues and stream command queues before creating any of those owners.
 pub(crate) const CONNECTION_BYTES: usize = 20 * 1024 * 1024;
@@ -58,6 +58,7 @@ struct Entry {
     secret: String,
     resumable: bool,
     authorization_expires_at: Option<Instant>,
+    access: PeerAccess,
     suspended_at: Option<Instant>,
     epoch: u64,
     last_attempt: Option<String>,
@@ -130,6 +131,7 @@ impl Registry {
                 secret: secret.clone(),
                 resumable,
                 authorization_expires_at: access.authorization_expires_at,
+                access: access.clone(),
                 suspended_at: Some(now),
                 epoch: 0,
                 last_attempt: None,
@@ -205,6 +207,7 @@ impl Registry {
             proof,
         )?;
         entry.authorization_expires_at = access.authorization_expires_at;
+        entry.access = access.clone();
         Ok((
             entry.epoch,
             key.resume_server_proof(&entry.secret, id, incarnation, attempt, entry.epoch),
@@ -267,6 +270,24 @@ impl Registry {
             .and_then(|e| e.handle.clone())
             .ok_or_else(|| anyhow!("SessionLost"))
     }
+    pub fn access(&self, id: &str) -> Result<PeerAccess> {
+        let entries = self.entries.lock().unwrap();
+        let entry = entries.get(id).ok_or_else(|| anyhow!("SessionLost"))?;
+        if entry
+            .authorization_expires_at
+            .is_some_and(|at| at <= Instant::now())
+            || entry
+                .access
+                .hosted_authority
+                .as_ref()
+                .is_some_and(|a| !a.load(std::sync::atomic::Ordering::Acquire))
+        {
+            bail!("PolicyDenied");
+        }
+        let mut access = entry.access.clone();
+        access.logical_id = Some(id.to_owned());
+        Ok(access)
+    }
     pub fn remove(&self, id: &str) {
         self.entries.lock().unwrap().remove(id);
     }
@@ -281,7 +302,12 @@ impl Registry {
     }
     fn expire(entries: &mut HashMap<String, Entry>, now: Instant) {
         entries.retain(|_, entry| {
-            entry.authorization_expires_at.is_none_or(|at| now < at)
+            entry
+                .access
+                .hosted_authority
+                .as_ref()
+                .is_none_or(|a| a.load(std::sync::atomic::Ordering::Acquire))
+                && entry.authorization_expires_at.is_none_or(|at| now < at)
                 && entry
                     .suspended_at
                     .is_none_or(|at| now.saturating_duration_since(at) < RESUME_TTL)

@@ -164,6 +164,8 @@ pub fn accept(
         },
         key: key.clone(),
         access: PeerAccess {
+            logical_id: None,
+            hosted_authority: None,
             principal: match &admission {
                 Admission::Fabric {
                     principal: Some(principal),

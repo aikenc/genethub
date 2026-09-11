@@ -75,6 +75,7 @@ export interface Endpoint {
   channelCredential?: { capabilityId: string; secret: string };
   /** One-use opaque route consumed as the first OPEN on a Fabric endpoint. */
   fabricRouteTicket?: string;
+  fabricAuthorizationExpiresAt?: string;
   /** Out-of-band proof that a loopback listener owns the daemon endpoint. */
   localServerProof?: LocalServerProof;
 }
@@ -600,6 +601,7 @@ async function onDaemon<T>(
     credential: endpoint.credential,
     channelCredential: endpoint.channelCredential,
     fabricRouteTicket: endpoint.fabricRouteTicket,
+    fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,
     localServerProof: endpoint.localServerProof,
     rtcEnabled: false,
     ...(socketFactory ? { socketFactory } : {}),

@@ -70,6 +70,7 @@ const openConnection = (
     credential: endpoint.credential,
     channelCredential: endpoint.channelCredential,
     fabricRouteTicket: endpoint.fabricRouteTicket,
+    fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,
     localServerProof: endpoint.localServerProof,
     rtcEnabled: readRtcEnabled(),
     onDiagnostic: emitClientDiagnostic,
@@ -1165,6 +1166,7 @@ async function withForkClient<T>(
 
 function dialOf(endpoint: Endpoint): ProtocolDial {
   return {
+    fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,
     url: endpoint.url,
     ...(endpoint.channelCredential
       ? { channelCredential: endpoint.channelCredential }

@@ -180,6 +180,11 @@ export class LogicalConnection {
     if (channel.phase === "quiesced") return;
     if (bytes[1] === 16) {
       const m = decode(bytes);
+      if (m.op === "error" && m.code === "SessionLost") {
+        // An authenticated peer explicitly lost this logical session (e.g. daemon restart).
+        // End its old streams; the Client may establish a fresh owner and resync subscriptions.
+        this.close(new Error("SessionLost")); return;
+      }
       if (m.op === "close" || m.op === "error") throw new Error(typeof m.code === "string" ? m.code : "logical peer closed");
       if (m.op === "ping" && typeof m.nonce === "string" && m.nonce.length <= 32) { await this.control(channel, { op: "pong", nonce: m.nonce }); return; }
       if (m.op === "pong") return;

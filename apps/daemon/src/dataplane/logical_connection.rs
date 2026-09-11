@@ -109,13 +109,27 @@ impl Drop for Channel {
         self.task.abort();
     }
 }
+pub(crate) type Redial = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(SessionKey, Carrier, Box<dyn Send>)>>
+                    + Send,
+            >,
+        > + Send
+        + Sync,
+>;
 struct Lifetime {
     registry: Option<Arc<Registry>>,
     id: String,
     business: Option<tokio::task::JoinHandle<Result<()>>>,
+    recovery: Option<tokio::task::JoinHandle<()>>,
+    position: Option<Arc<Mutex<Watermark>>>,
 }
 impl Drop for Lifetime {
     fn drop(&mut self) {
+        if let Some(task) = &self.recovery {
+            task.abort();
+        }
         if let Some(task) = &self.business {
             task.abort();
         }
@@ -288,6 +302,7 @@ fn start(
     let registry = state.logical_connections.clone();
     let mut access = access;
     access.direct_only = policy == Policy::DirectOnly;
+    access.logical_id = Some(id.clone());
     let task = tokio::spawn(async move {
         let business = tokio::spawn(super::endpoint::serve_logical(
             state,
@@ -300,6 +315,8 @@ fn start(
             registry: Some(registry),
             id,
             business: Some(business),
+            recovery: None,
+            position: None,
         };
         if let Err(error) = run(&lifetime, kind, policy, attachments, writes, deliver).await {
             tracing::debug!(%error, "logical connection ended");
@@ -333,6 +350,8 @@ async fn run(
     let mut channel: Option<Channel> = None;
     let mut epoch = 0;
     let mut ack = false;
+    // Keep one bounded reply outside the data queue; a full carrier is backpressure, not a protocol failure.
+    let mut pending_pong: Option<String> = None;
     let mut terminals = std::collections::BTreeMap::<u64, oneshot::Sender<Result<()>>>::new();
     let mut budget = false;
     let mut last_ping = Instant::now();
@@ -406,7 +425,9 @@ async fn run(
                     }
                 };
                 let watermark = journal.watermark().map_err(error)?;
-                let bytes = if ack {
+                let bytes = if let Some(nonce) = pending_pong.take() {
+                    Some(Message::Pong { nonce }.encode()?)
+                } else if ack {
                     ack = false;
                     Some(
                         Control::Ack {
@@ -436,6 +457,9 @@ async fn run(
                 permit.send(bytes);
             }
         }
+        if let Some(position) = &lifetime.position {
+            *position.lock().unwrap() = journal.watermark().map_err(error)?;
+        }
         let writable = channel
             .as_ref()
             .filter(|_| pump_blocked)
@@ -446,7 +470,7 @@ async fn run(
                 // The actor alone commits admission and journal positions. An
                 // invalid peer watermark must not displace a healthy channel.
                 let next = attachment.expected.checked_add(1).ok_or_else(|| anyhow!("epoch exhausted"))?;
-                if attachment.expected != epoch { continue; }
+                if (lifetime.registry.is_some() && attachment.expected != epoch) || attachment.expected < epoch { continue; }
                 if journal.activate(attachment.path, next, attachment.position, now()).is_err() { continue; }
                 acknowledge_terminals(&mut terminals, attachment.position.received);
                 epoch = if let Some(registry) = &lifetime.registry { registry.activate(&lifetime.id, &attachment.attempt, attachment.expected, Instant::now())? } else { next };
@@ -460,6 +484,7 @@ async fn run(
                 let (outgoing, mut records) = mpsc::channel::<Vec<u8>>(16);
                 let task = tokio::spawn(async move { while let Some(bytes) = records.recv().await { if attachment.writer.send(&bytes).await.is_err() { break; } } });
                 channel = Some(Channel { reader: attachment.reader, outgoing, task, _closed: attachment.closed, synced: lifetime.registry.is_none(), last_receive: Instant::now() });
+                pending_pong = None;
                 ack = true; budget = true;
             }
             incoming = async { match channel.as_mut() { Some(c) => c.reader.receive().await, None => std::future::pending().await } } => {
@@ -480,7 +505,7 @@ async fn run(
                             active.synced = true;
                         }
                         Message::Close => return Ok(()),
-                        Message::Ping { nonce } if nonce.len() <= 32 => { active.outgoing.try_send(Message::Pong { nonce }.encode()?).map_err(|_| anyhow!("logical control queue full"))?; }
+                        Message::Ping { nonce } if nonce.len() <= 32 => { pending_pong = Some(nonce); }
                         Message::Pong { .. } => {}
                         _ => bail!("invalid logical transition"),
                     }
@@ -526,17 +551,18 @@ async fn run(
 
 /// Native clients use the same journal actor and stream engine. The public
 /// Dropping the native Reader closes dispatch; the actor then releases its
-/// bounded queues. Native admission explicitly disables recovery retention.
+/// bounded queues. Device callers may retain a bounded authenticated redial owner.
 pub(crate) async fn client(
     key: SessionKey,
     carrier: Carrier,
+    redial: Option<Redial>,
 ) -> Result<(Reader, Writer, tokio::task::JoinHandle<()>)> {
     let (mut reader, mut writer) = authenticated_channel(key.clone(), carrier, Role::Client);
     writer
         .send(
             &Message::Create {
                 policy: "relay-allowed".into(),
-                resumable: false,
+                resumable: redial.is_some(),
             }
             .encode()?,
         )
@@ -611,7 +637,61 @@ pub(crate) async fn client(
     let (attach, attachments) = mpsc::channel(4);
     let (outgoing, writes) = mpsc::channel(256);
     let (deliver, incoming) = mpsc::channel(8192);
-    let (closed, _) = oneshot::channel();
+    let (closed, mut disconnected) = oneshot::channel();
+    let local_position = Arc::new(Mutex::new(Watermark {
+        received: 0,
+        data_grant: DATA_BYTES as u64,
+        progress_grant: PROGRESS_BYTES as u64,
+    }));
+    let recovery = redial.map(|redial| {
+        let attach = attach.clone();
+        let local_position = local_position.clone();
+        tokio::spawn(async move {
+            let mut pump: Option<Box<dyn Send>> = None;
+            loop {
+                let _ = disconnected.await;
+                drop(pump.take());
+                let deadline = tokio::time::Instant::now() + RESUME_TTL;
+                loop {
+                    if attach.is_closed() {
+                        return;
+                    }
+                    let position = *local_position.lock().unwrap();
+                    let recovered = tokio::time::timeout_at(deadline, async {
+                        let (key, carrier, pump) = redial().await?;
+                        let (reader, writer) =
+                            authenticated_channel(key.clone(), carrier, Role::Client);
+                        let attachment = resume_client(
+                            &key,
+                            reader,
+                            writer,
+                            &id,
+                            &incarnation,
+                            &secret,
+                            position,
+                        )
+                        .await?;
+                        Ok::<_, anyhow::Error>((attachment, pump))
+                    })
+                    .await;
+                    if let Ok(Ok((mut attachment, next_pump))) = recovered {
+                        let (closed, next_disconnected) = oneshot::channel();
+                        attachment.closed = closed;
+                        if attach.send(attachment).await.is_err() {
+                            return;
+                        }
+                        pump = Some(next_pump);
+                        disconnected = next_disconnected;
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        })
+    });
     attach
         .try_send(Attachment {
             path: resume::Path::Loopback,
@@ -629,6 +709,8 @@ pub(crate) async fn client(
             registry: None,
             id: String::new(),
             business: None,
+            recovery,
+            position: Some(local_position),
         };
         if let Err(error) = run(
             &lifetime,
@@ -652,6 +734,81 @@ pub(crate) async fn client(
         },
         task,
     ))
+}
+
+async fn resume_client(
+    key: &SessionKey,
+    mut reader: AuthenticatedReader,
+    mut writer: AuthenticatedWriter,
+    id: &str,
+    incarnation: &str,
+    secret: &str,
+    position: Watermark,
+) -> Result<Attachment> {
+    let attempt = super::logical_wire::nonce();
+    writer
+        .send(
+            &Message::Attach {
+                id: id.into(),
+                incarnation: incarnation.into(),
+                attempt: attempt.clone(),
+                proof: key.resume_proof(secret, id, incarnation, &attempt),
+            }
+            .encode()?,
+        )
+        .await?;
+    let Message::Attached { epoch, proof } = read_control(&mut reader).await? else {
+        bail!("resume admission rejected");
+    };
+    let expected = decimal(&epoch)?;
+    crate::channel_auth::verify_proof(
+        &key.resume_server_proof(secret, id, incarnation, &attempt, expected),
+        &proof,
+    )?;
+    writer
+        .send(
+            &Message::Activate {
+                attempt: attempt.clone(),
+                expected: epoch,
+                position: Position::from_watermark(position),
+            }
+            .encode()?,
+        )
+        .await?;
+    let Message::Activated { epoch, position } = read_control(&mut reader).await? else {
+        bail!("resume activation rejected");
+    };
+    if decimal(&epoch)?
+        != expected
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("epoch exhausted"))?
+    {
+        bail!("invalid resumed epoch");
+    }
+    writer
+        .send(
+            &Message::Sync {
+                epoch: epoch.clone(),
+            }
+            .encode()?,
+        )
+        .await?;
+    let Message::Synced { epoch: synced } = read_control(&mut reader).await? else {
+        bail!("resume sync rejected");
+    };
+    if synced != epoch {
+        bail!("resume SYNC mismatch");
+    }
+    let (closed, _) = oneshot::channel();
+    Ok(Attachment {
+        path: resume::Path::Loopback,
+        reader,
+        writer,
+        attempt,
+        expected,
+        position: position.watermark()?,
+        closed,
+    })
 }
 
 fn acknowledge_terminals(

@@ -83,7 +83,10 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         .await?;
 
     let state = services.state.clone();
-    let inherited = services.access.clone();
+    let inherited = match services.access.logical_id.as_deref() {
+        Some(id) => services.state.logical_connections.access(id)?,
+        None => services.access.clone(),
+    };
     tokio::spawn(async move {
         if let Err(error) = serve(session, slot, state, inherited, admission).await {
             tracing::debug!(%error, "RTC data channel stopped");

@@ -556,6 +556,64 @@ async fn link_up(
     context: &str,
     nonce: &str,
 ) -> Result<(ClientEndpoint, tokio::task::JoinHandle<()>), ConnectError> {
+    let redial: Option<crate::dataplane::client::Redial> =
+        if let PeerAuth::Device { device_id, .. } = &auth {
+            let endpoint = endpoint.to_owned();
+            let route = route_ticket.to_owned();
+            let secret = secret.to_owned();
+            let context = context.to_owned();
+            let device_id = device_id.clone();
+            Some(std::sync::Arc::new(move || {
+                let endpoint = endpoint.clone();
+                let route = route.clone();
+                let secret = secret.clone();
+                let context = context.clone();
+                let device_id = device_id.clone();
+                Box::pin(async move {
+                    let nonce = fresh_nonce();
+                    let auth = PeerAuth::Device {
+                        device_id,
+                        nonce: nonce.clone(),
+                        proof: crate::channel_auth::client_proof(&secret, &context, &nonce),
+                    };
+                    let (key, carrier, pump) =
+                        authenticated_fabric(&endpoint, &route, auth, &secret, &context, &nonce)
+                            .await
+                            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                    Ok((key, carrier, Box::new(pump) as Box<dyn Send>))
+                })
+            }))
+        } else {
+            None
+        };
+    let (key, carrier, pump) =
+        authenticated_fabric(endpoint, route_ticket, auth, secret, context, nonce).await?;
+    let (data, endpoint_task) = match redial {
+        Some(redial) => ClientEndpoint::start_recovering(key, carrier, redial),
+        None => ClientEndpoint::start(key, carrier),
+    };
+    let monitor = tokio::spawn(async move {
+        let _ = endpoint_task.await;
+        drop(pump);
+    });
+    Ok((data, monitor))
+}
+
+async fn authenticated_fabric(
+    endpoint: &str,
+    route_ticket: &str,
+    auth: PeerAuth,
+    secret: &str,
+    context: &str,
+    nonce: &str,
+) -> Result<
+    (
+        crate::channel_auth::SessionKey,
+        crate::dataplane::endpoint::Carrier,
+        crate::transport::fabric::FabricPump,
+    ),
+    ConnectError,
+> {
     let hello = PeerHello {
         version: genehub_proto::DATA_PLANE_VERSION,
         client_name: format!("{}-cli", crate::channel::CLI_BINARY),
@@ -563,7 +621,26 @@ async fn link_up(
         rtc_supported: false,
         max_bulk_stream_window_bytes: None,
     };
-    let link = crate::transport::fabric::dial(endpoint, route_ticket, &hello)
+    let mut transport_url = crate::http::Url::parse(endpoint)
+        .map_err(|error| ConnectError::Protocol(error.to_string()))?;
+    let routes: Vec<_> = transport_url
+        .query_pairs()
+        .filter(|(name, _)| name == "route")
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    if routes.len() > 1 || routes.first().is_some_and(|value| value != route_ticket) {
+        return Err(ConnectError::Protocol("ambiguous rendezvous route".into()));
+    }
+    let query: Vec<_> = transport_url
+        .query_pairs()
+        .filter(|(name, _)| name != "route")
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect();
+    transport_url.set_query(None);
+    for (name, value) in query {
+        transport_url.query_pairs_mut().append_pair(&name, &value);
+    }
+    let link = crate::transport::fabric::dial(transport_url.as_str(), route_ticket, &hello)
         .await
         .map_err(dial_refusal)?;
     if link.welcome.version != genehub_proto::DATA_PLANE_VERSION {
@@ -583,12 +660,7 @@ async fn link_up(
     })?;
     let key = crate::channel_auth::derive_key(secret, context, nonce, &link.welcome.server_nonce);
     let crate::transport::fabric::FabricLink { carrier, pump, .. } = link;
-    let (data, endpoint_task) = ClientEndpoint::start(key, carrier);
-    let monitor = tokio::spawn(async move {
-        let _ = endpoint_task.await;
-        drop(pump);
-    });
-    Ok((data, monitor))
+    Ok((key, carrier, pump))
 }
 
 /// Keeps the dialer's distinction between "not now" and "not you".

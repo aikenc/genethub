@@ -52,6 +52,8 @@ impl CarrierKind {
 pub struct PeerAccess {
     /// Original authenticated authority, inherited by ephemeral RTC admissions.
     pub principal: String,
+    pub(crate) logical_id: Option<String>,
+    pub(crate) hosted_authority: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) direct_only: bool,
     pub(crate) authorization_expires_at: Option<std::time::Instant>,
     pub transport: TransportKind,
@@ -682,6 +684,9 @@ async fn serve_streams(
     }
     .await;
 
+    if let Err(error) = &outcome {
+        tracing::debug!(%error, "data endpoint ended");
+    }
     peer.handlers.abort_all();
     while peer.handlers.join_next().await.is_some() {}
     drop(peer);
@@ -811,7 +816,10 @@ fn dispatch(
     }
 
     let Some(stream) = streams.get_mut(&frame.stream_id) else {
-        if !matches!(frame.kind, Kind::Reset) {
+        // Consumption credit can arrive after our response FIN retired the stream.
+        // It has no receiver left to credit. Resetting every late update creates
+        // a control-frame storm and can disconnect unrelated active previews.
+        if !matches!(frame.kind, Kind::Reset | Kind::WindowUpdate) {
             writer.try_send(Frame {
                 kind: Kind::Reset,
                 stream_id: frame.stream_id,

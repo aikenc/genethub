@@ -443,11 +443,19 @@ impl Group {
 
 impl Drop for Group {
     fn drop(&mut self) {
+        // Pipe handles may outlive the owner; do not defer cancellation to their final drop.
+        #[cfg(target_family = "wasm")]
+        let _ = self.child.start_kill();
         // Before the inner child drops: `tokio` would kill the one pid and
         // reap it, and a reaped pid can no longer be asked for its group. In
         // the guest the same ordering holds one level out — letting go of the
         // `child` resource is what makes the shell stop the group.
         if let Some(pid) = self.pid {
+            // This owner captured its own group leader at spawn. The leader may
+            // already be reaped while descendants still hold stdout open.
+            #[cfg(unix)]
+            signal_group(pid, KILL);
+            #[cfg(not(unix))]
             stop_tree(pid);
         }
     }

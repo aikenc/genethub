@@ -83,6 +83,7 @@ export interface InviteChannelCredential {
 export interface ProtocolDial {
   url: string;
   fabricRouteTicket?: string;
+  fabricAuthorizationExpiresAt?: string;
   channelCredential?: HostedChannelCredential;
   localServerProof?: LocalServerProof;
 }
@@ -119,6 +120,7 @@ export interface ClientOptions {
   credential?: { deviceId: string; secret: string };
   channelCredential?: HostedChannelCredential;
   fabricRouteTicket?: string;
+  fabricAuthorizationExpiresAt?: string;
   localServerProof?: LocalServerProof;
   inviteCredential?: InviteChannelCredential;
   rtcEnabled?: boolean;
@@ -285,6 +287,8 @@ export class Client {
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
+  private authorizationExpiresAt: string | undefined;
+  private authorizationTimer: ReturnType<typeof setTimeout> | null = null;
   private redialTimer: ReturnType<typeof setTimeout> | null = null;
   private redialAbort: AbortController | null = null;
   private redialGeneration = 0;
@@ -309,6 +313,7 @@ export class Client {
 
   constructor(private readonly options: ClientOptions) {
     this.activeChannelCredential = options.channelCredential;
+    this.authorizationExpiresAt = options.fabricAuthorizationExpiresAt;
     this.activeLocalServerProof = options.localServerProof;
     this.activeFabricRouteTicket = options.fabricRouteTicket ?? embeddedFabricRoute(options.url);
     this.rtcEnabled = options.rtcEnabled !== false;
@@ -389,6 +394,7 @@ export class Client {
         channelCredential: this.activeChannelCredential,
         localServerProof: this.activeLocalServerProof,
         fabricRouteTicket: this.activeFabricRouteTicket,
+        fabricAuthorizationExpiresAt: this.authorizationExpiresAt,
       });
       return;
     }
@@ -747,6 +753,7 @@ export class Client {
     const resuming = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
     if (!resuming) for (const subscription of this.subscriptions.values()) subscription.resetRequired = true;
     this.activeChannelCredential = dial.channelCredential;
+    this.authorizationExpiresAt = dial.fabricAuthorizationExpiresAt;
     this.activeLocalServerProof = dial.localServerProof;
     this.activeFabricRouteTicket = dial.fabricRouteTicket;
     if (!resuming) this.connectionEpoch += 1;
@@ -1375,7 +1382,8 @@ export class Client {
       (fresh) => {
         if (this.stopped || generation !== this.redialGeneration) return;
         this.finishRedial();
-        const dial = typeof fresh === "string" ? { url: fresh } : fresh;
+        const dial = typeof fresh === "string" ? { url: fresh } : { ...fresh };
+        if (typeof dial.url === "string") dial.fabricRouteTicket ??= embeddedFabricRoute(dial.url);
         if (!validDial(dial)) {
           this.failClosed("the control plane returned an invalid peer route");
           return;
@@ -1390,9 +1398,14 @@ export class Client {
         }
         this.dial(dial);
       },
-      () => {
+      (error: unknown) => {
         if (this.stopped || generation !== this.redialGeneration) return;
         this.finishRedial();
+        const status = error && typeof error === "object" && "status" in error ? error.status : undefined;
+        if (status === 401 || status === 403) {
+          this.failClosed("the control plane denied renewed access");
+          return;
+        }
         this.scheduleReconnect();
       },
     );
@@ -1571,7 +1584,11 @@ export class Client {
     const generation = ++this.rtcGeneration;
     const requestId = diagnosticId("rtc");
     const started = this.now();
-    this.closeRtc(false);
+    const previousDirectLink = this.rtcLink;
+    const previousDirect = this.rtcLink?.endpoint.state === "open" ? this.rtcLink.endpoint : undefined;
+    const previousData = this.dataRtcLink;
+    this.rtcLink = null; this.dataRtcLink = null;
+    previousData?.close();
     this.setRtcState("connecting");
     this.diagnostic("operation", {
       operation: "rtc.negotiate",
@@ -1584,7 +1601,7 @@ export class Client {
         base,
         requestId,
         (detail) => this.diagnostic("rtc", detail),
-        { policy: "direct-only" },
+        previousDirect ? { endpoint: previousDirect, policy: "direct-only" } : { policy: "direct-only" },
       );
       if (
         generation !== this.rtcGeneration ||
@@ -1614,9 +1631,9 @@ export class Client {
       this.rtcLink = link;
       link.endpoint.onRecovering(() => {
         if (this.rtcLink !== link) return;
-        this.rtcLink = null;
-        link.close();
-        if (!this.dataRtcLink) this.setRtcState("failed");
+        this.setRtcState("standby");
+        // Keep the restricted logical owner; only a new authenticated RTC can attach.
+        if (this.state === "ready" && this.endpoint === base) this.droppedTransport(epoch);
       });
       link.endpoint.onClose((reason) => {
         if (this.rtcLink !== link) return;
@@ -1656,6 +1673,7 @@ export class Client {
       });
     } catch (error) {
       if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
+      if (!this.rtcLink && previousDirect?.state === "open") this.rtcLink = previousDirectLink;
       this.report(error);
       this.rtcFailure_ = {
         phase: rtcPhaseOf(error),
@@ -1679,6 +1697,7 @@ export class Client {
     if (increment) this.rtcGeneration += 1;
     const link = this.rtcLink, dataLink = this.dataRtcLink;
     this.rtcLink = null; this.dataRtcLink = null;
+    link?.endpoint.close("RTC disabled or client closed");
     link?.close();
     dataLink?.close();
   }
@@ -1713,6 +1732,17 @@ export class Client {
   private setState(state: ConnectionState): void {
     if (this.state === state) return;
     this.state = state;
+    if (this.authorizationTimer !== null) clearTimeout(this.authorizationTimer);
+    this.authorizationTimer = null;
+    if (state === "ready" && this.activeChannelCredential && this.options.redial) {
+      // Hosted leases are at least 60 seconds. Refresh through normal authenticated
+      // admission before expiry even when ordinary traffic has moved entirely to RTC.
+      this.authorizationTimer = setTimeout(() => {
+        this.authorizationTimer = null;
+        if (this.epoch && this.state === "ready") this.droppedTransport(this.epoch);
+      }, Number.isFinite(Date.parse(this.authorizationExpiresAt ?? ""))
+        ? Math.max(1000, Math.min(30_000, Date.parse(this.authorizationExpiresAt!) - Date.now() - 15_000)) : 30_000);
+    }
     this.diagnostic("connection", {
       state,
       closeCode: this.lastClose?.code ?? null,

@@ -382,6 +382,33 @@ impl Client {
         read_json(response, MAX_JSON_RESPONSE_BYTES, "Fabric admission reply").await
     }
 
+    /// Checks continuing authority without minting a key or spending another ticket.
+    pub async fn fabric_peer_active(
+        &self,
+        enrollment: &Enrollment,
+        capability_id: &str,
+    ) -> Result<bool> {
+        let response = self.http.post(self.url("/api/fabric/v2/peer-admissions/check")?)
+            .bearer_auth(&enrollment.secret)
+            .json(&serde_json::json!({ "daemonId": enrollment.daemon_id, "capabilityId": capability_id }))
+            .send().await?;
+        if matches!(response.status().as_u16(), 401 | 403) {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            anyhow::bail!("Fabric authority check unavailable");
+        }
+        #[derive(Deserialize)]
+        struct Status {
+            active: bool,
+        }
+        Ok(
+            read_json::<Status>(response, 1024, "Fabric authority status")
+                .await?
+                .active,
+        )
+    }
+
     /// Redeems a route-bound Fabric peer capability after Relay spent its route.
     pub async fn fabric_peer_admission(
         &self,

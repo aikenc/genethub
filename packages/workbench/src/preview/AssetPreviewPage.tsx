@@ -1651,6 +1651,7 @@ function dial(endpoint: Endpoint): ProtocolDial {
   return {
     url: endpoint.url,
     fabricRouteTicket: endpoint.fabricRouteTicket,
+    fabricAuthorizationExpiresAt: endpoint.fabricAuthorizationExpiresAt,
     channelCredential: endpoint.channelCredential,
     localServerProof: endpoint.localServerProof,
   };

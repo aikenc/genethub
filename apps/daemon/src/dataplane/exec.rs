@@ -181,8 +181,12 @@ pub(crate) async fn start(
             tokio::select! {
                 frame = frames.recv() => match frame {
                     Some(frame) => {
-                        if out.send(frame).await.is_err() {
-                            return;
+                        tokio::select! {
+                            result = out.send(frame) => if result.is_err() { return; },
+                            () = sleep_until(deadline) => {
+                                timed_out = true;
+                                break child.end().await;
+                            }
                         }
                     }
                     None => break Some(match child.wait().await {

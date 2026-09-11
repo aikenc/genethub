@@ -22,33 +22,59 @@ struct Pipe {
     eof: bool,
 }
 
-#[derive(Clone, Default)]
-struct PipeBuffer(Arc<Mutex<Pipe>>);
+const PIPE_BUFFER_BYTES: usize = 128 * 1024;
+
+#[derive(Default)]
+struct PipeBuffer {
+    pipe: Arc<Mutex<Pipe>>,
+    space: Arc<tokio::sync::Notify>,
+    reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+impl Drop for PipeBuffer {
+    fn drop(&mut self) {
+        if let Some(reader) = self.reader.get_mut().unwrap().take() {
+            reader.abort();
+        }
+    }
+}
 
 impl PipeBuffer {
     /// `None` once the pipe is drained *and* at EOF, so the guest can tell
     /// "finished" from "nothing yet".
     fn take(&self, max: usize) -> Option<Vec<u8>> {
-        let mut pipe = self.0.lock().unwrap();
+        let mut pipe = self.pipe.lock().unwrap();
         if pipe.data.is_empty() {
             return if pipe.eof { None } else { Some(Vec::new()) };
         }
         let take = max.min(pipe.data.len());
-        Some(pipe.data.drain(..take).collect())
+        let bytes = pipe.data.drain(..take).collect();
+        drop(pipe);
+        self.space.notify_one();
+        Some(bytes)
     }
 
     fn spawn_reader(&self, mut source: impl tokio::io::AsyncRead + Unpin + Send + 'static) {
-        let buffer = self.clone();
-        tokio::spawn(async move {
+        let buffer = self.pipe.clone();
+        let space = self.space.clone();
+        let reader = tokio::spawn(async move {
             let mut chunk = vec![0u8; 32 * 1024];
             loop {
-                match source.read(&mut chunk).await {
+                let available = PIPE_BUFFER_BYTES - buffer.lock().unwrap().data.len();
+                if available == 0 {
+                    space.notified().await;
+                    continue;
+                }
+                let limit = available.min(chunk.len());
+                match source.read(&mut chunk[..limit]).await {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => buffer.0.lock().unwrap().data.extend(&chunk[..read]),
+                    Ok(read) => buffer.lock().unwrap().data.extend(&chunk[..read]),
                 }
             }
-            buffer.0.lock().unwrap().eof = true;
+            buffer.lock().unwrap().eof = true;
         });
+        if let Some(previous) = self.reader.lock().unwrap().replace(reader) {
+            previous.abort();
+        }
     }
 }
 

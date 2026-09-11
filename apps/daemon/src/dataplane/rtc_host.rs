@@ -91,7 +91,10 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         secret: secret.clone(),
         expires_at: Instant::now() + RTC_ADMISSION_LIFETIME,
     };
-    let inherited = services.access.clone();
+    let inherited = match services.access.logical_id.as_deref() {
+        Some(id) => services.state.logical_connections.access(id)?,
+        None => services.access.clone(),
+    };
     let state = services.state.clone();
 
     let api = APIBuilder::new().build();
