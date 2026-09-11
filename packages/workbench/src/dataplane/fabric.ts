@@ -1,3 +1,4 @@
+import { RecordInbox, type RecordReader } from "./record-inbox";
 import type { PeerWelcome } from "@genehub/proto";
 
 import {
@@ -25,6 +26,7 @@ export async function openFabricDataLink(options: {
   routeTicket: string;
   credential: PeerCredential;
   endpoint?: DataEndpoint;
+  signal?: AbortSignal;
   clientName?: string;
   rtcSupported: boolean;
   socketFactory?: (url: string) => FabricSocketLike;
@@ -39,7 +41,10 @@ export async function openFabricDataLink(options: {
     ...(options.socketFactory ? { socketFactory: options.socketFactory } : {}),
     ...(options.onError ? { onError: options.onError } : {}),
   });
+  const abort = () => fabric.close();
+  options.signal?.addEventListener("abort", abort, { once: true });
   try {
+    if (options.signal?.aborted) throw new Error("Fabric admission cancelled");
     await fabric.connect();
     const prepared = await preparePeerHandshake(options.credential, {
       clientName: options.clientName,
@@ -53,6 +58,7 @@ export async function openFabricDataLink(options: {
     }
     const welcome = JSON.parse(decoder.decode(welcomeBytes)) as PeerWelcome;
     const handshake = await prepared.complete(welcome);
+    if (options.signal?.aborted) throw new Error("Fabric admission cancelled");
     const carrier = new FabricRecordCarrier(fabric, stream);
     const endpoint = options.endpoint ?? new DataEndpoint({
       role: "client",
@@ -75,6 +81,8 @@ export async function openFabricDataLink(options: {
   } catch (error) {
     fabric.close();
     throw error;
+  } finally {
+    options.signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -87,7 +95,8 @@ function transportFlowUrl(value: string): string {
 }
 
 class FabricRecordCarrier implements RecordCarrier {
-  private recordHandler: ((record: Uint8Array) => void) | null = null;
+  private recordHandler: RecordReader | null = null;
+  private readonly inbox = new RecordInbox(record => this.recordHandler?.(record), error => this.fail(error));
   private readonly closeHandlers = new Set<(reason?: unknown) => void>();
   private closed = false;
 
@@ -95,13 +104,7 @@ class FabricRecordCarrier implements RecordCarrier {
     private readonly fabric: FabricEndpoint,
     private readonly stream: FabricStream,
   ) {
-    stream.onData((record) => {
-      if (record.byteLength > MAX_DATA_FRAME_BYTES) {
-        this.fail(new Error("Fabric peer record exceeds 16 KiB"));
-        return;
-      }
-      this.recordHandler?.(record);
-    });
+    stream.onData((record) => this.inbox.push(record));
     stream.onRemoteFinish(() => this.fail(new Error("Fabric peer finished the carrier")));
     void stream.done.then((result) => {
       if (result.type !== "finished") this.fail(result);
@@ -116,7 +119,7 @@ class FabricRecordCarrier implements RecordCarrier {
     return this.stream.sendAsync(record);
   }
 
-  onRecord(handler: (record: Uint8Array) => void): () => void {
+  onRecord(handler: RecordReader): () => void {
     if (this.recordHandler) throw new Error("Fabric peer carrier already has a reader");
     this.recordHandler = handler;
     return () => {
@@ -132,6 +135,7 @@ class FabricRecordCarrier implements RecordCarrier {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.inbox.close();
     if (this.stream.phase !== "closed") {
       try {
         this.stream.reset(FabricReset.EndpointClosed);
@@ -145,6 +149,8 @@ class FabricRecordCarrier implements RecordCarrier {
   private fail(reason?: unknown): void {
     if (this.closed) return;
     this.closed = true;
+    this.inbox.close();
+    this.fabric.close();
     for (const handler of this.closeHandlers) handler(reason);
   }
 }

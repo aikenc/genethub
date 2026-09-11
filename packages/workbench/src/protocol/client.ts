@@ -289,6 +289,7 @@ export class Client {
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private authorizationExpiresAt: string | undefined;
   private authorizationTimer: ReturnType<typeof setTimeout> | null = null;
+  private renewalAbort: AbortController | null = null;
   private redialTimer: ReturnType<typeof setTimeout> | null = null;
   private redialAbort: AbortController | null = null;
   private redialGeneration = 0;
@@ -404,6 +405,8 @@ export class Client {
   close(): void {
     if (this.stopped && this.state === "closed") return;
     this.stopped = true;
+    this.renewalAbort?.abort();
+    this.renewalAbort = null;
     this.redialGeneration += 1;
     this.redialAbort?.abort();
     this.redialAbort = null;
@@ -931,9 +934,18 @@ export class Client {
     this.endpointLifecycleCleanup = () => { stopRecovering(); stopClose(); };
   }
 
+  private markStableAfterGrace(): void {
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      this.attempt = 0;
+    }, STABLE_AFTER_MS);
+  }
+
   private resumedEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
     if (this.endpoint !== endpoint || this.epoch !== epoch || this.stopped) return;
     this.failure = null;
+    this.markStableAfterGrace();
     this.setState("ready");
     this.scheduleHeartbeat();
     this.flushQueue(endpoint, epoch);
@@ -965,11 +977,7 @@ export class Client {
     // Completing E2EE proves identity, but not that the carrier is healthy.
     // A relay that kills every fresh channel must keep escalating backoff
     // instead of returning to a one-second reconnect loop after each Hello.
-    this.clearStableTimer();
-    this.stableTimer = setTimeout(() => {
-      this.stableTimer = null;
-      this.attempt = 0;
-    }, STABLE_AFTER_MS);
+    this.markStableAfterGrace();
     this.setState("ready");
     this.scheduleHeartbeat();
     this.flushQueue(endpoint, epoch);
@@ -1326,6 +1334,8 @@ export class Client {
 
   private droppedTransport(epoch: symbol, close?: CloseReason): void {
     if (!this.isCurrentEpoch(epoch)) return;
+    this.renewalAbort?.abort();
+    this.renewalAbort = null;
     this.lastClose = close;
     // An invite is a one-use bootstrap opportunity, not a reconnectable
     // credential. Replaying the same URL after a timeout/close is both futile
@@ -1729,20 +1739,84 @@ export class Client {
     return !this.stopped && this.epoch === epoch;
   }
 
+  private scheduleAuthorizationRenewal(retryMs?: number): void {
+    if (this.authorizationTimer !== null) clearTimeout(this.authorizationTimer);
+    this.authorizationTimer = null;
+    if (this.stopped || this.state !== "ready" || !this.activeChannelCredential || !this.options.redial) return;
+    const expiry = Date.parse(this.authorizationExpiresAt ?? "");
+    const delay = retryMs ?? (Number.isFinite(expiry)
+      ? Math.max(1000, Math.min(30_000, expiry - Date.now() - 15_000)) : 30_000);
+    this.authorizationTimer = setTimeout(() => {
+      this.authorizationTimer = null;
+      void this.renewAuthorization();
+    }, delay);
+  }
+
+  /** Prepare authenticated replacement admission while the current path keeps serving.
+   * Only a successful logical handoff retires the previous carrier. */
+  private async renewAuthorization(): Promise<void> {
+    const endpoint = this.endpoint, epoch = this.epoch, redial = this.options.redial;
+    if (!endpoint || !epoch || !redial || this.stopped || this.state !== "ready") return;
+    // RTC upgrades use the same ordinary journal's single candidate slot.
+    if (this.renewalAbort || this.redialing || this.rtcState_ === "connecting") {
+      this.scheduleAuthorizationRenewal(1000); return;
+    }
+    const controller = new AbortController();
+    this.renewalAbort = controller;
+    const timer = setTimeout(() => controller.abort(), this.options.redialTimeoutMs ?? 10_000);
+    const current = () => !this.stopped && this.epoch === epoch && this.endpoint === endpoint
+      && this.renewalAbort === controller && !controller.signal.aborted;
+    try {
+      const fresh = await new Promise<string | ProtocolDial>((resolve, reject) => {
+        const abort = () => reject(new Error("authorization renewal timed out or was cancelled"));
+        controller.signal.addEventListener("abort", abort, { once: true });
+        Promise.resolve().then(() => redial(controller.signal)).then(resolve, reject)
+          .finally(() => controller.signal.removeEventListener("abort", abort));
+      });
+      if (!current()) return;
+      const dial = typeof fresh === "string" ? { url: fresh } : { ...fresh };
+      if (typeof dial.url === "string") dial.fabricRouteTicket ??= embeddedFabricRoute(dial.url);
+      if (!validDial(dial) || !dial.channelCredential || !dial.fabricRouteTicket) {
+        this.failClosed("the renewed Hosted route omitted valid admission"); return;
+      }
+      const previous = this.fabricLink;
+      const link = await openFabricDataLink({
+        endpoint, url: dial.url, routeTicket: dial.fabricRouteTicket,
+        credential: { kind: "hosted", ...dial.channelCredential },
+        clientName: this.options.clientName, rtcSupported: this.rtcEnabled && rtcAvailableHere(),
+        signal: controller.signal,
+        ...(this.options.socketFactory ? { socketFactory: this.options.socketFactory as unknown as (url: string) => import("../fabric").FabricSocketLike } : {}),
+        onError: error => this.report(error),
+      });
+      if (!current()) { link.fabric.close(); return; }
+      this.fabricLink = link;
+      this.activeChannelCredential = dial.channelCredential;
+      this.activeFabricRouteTicket = dial.fabricRouteTicket;
+      this.authorizationExpiresAt = dial.fabricAuthorizationExpiresAt;
+      previous?.fabric.close();
+      this.scheduleAuthorizationRenewal();
+      if (this.rtcEnabled) void this.startRtc(endpoint, epoch);
+    } catch (error) {
+      if (this.stopped || this.endpoint !== endpoint || this.epoch !== epoch) return;
+      const status = error && typeof error === "object" && "status" in error ? error.status : undefined;
+      if (status === 401 || status === 403 || fatalConnectionError(error)) {
+        this.failClosed("the control plane denied renewed access"); return;
+      }
+      this.report(error);
+      // The server still enforces the original lease while admission is unavailable.
+      if (this.state === "ready") this.scheduleAuthorizationRenewal(2000);
+    } finally {
+      clearTimeout(timer);
+      if (this.renewalAbort === controller) this.renewalAbort = null;
+    }
+  }
+
   private setState(state: ConnectionState): void {
     if (this.state === state) return;
     this.state = state;
     if (this.authorizationTimer !== null) clearTimeout(this.authorizationTimer);
     this.authorizationTimer = null;
-    if (state === "ready" && this.activeChannelCredential && this.options.redial) {
-      // Hosted leases are at least 60 seconds. Refresh through normal authenticated
-      // admission before expiry even when ordinary traffic has moved entirely to RTC.
-      this.authorizationTimer = setTimeout(() => {
-        this.authorizationTimer = null;
-        if (this.epoch && this.state === "ready") this.droppedTransport(this.epoch);
-      }, Number.isFinite(Date.parse(this.authorizationExpiresAt ?? ""))
-        ? Math.max(1000, Math.min(30_000, Date.parse(this.authorizationExpiresAt!) - Date.now() - 15_000)) : 30_000);
-    }
+    if (state === "ready") this.scheduleAuthorizationRenewal();
     this.diagnostic("connection", {
       state,
       closeCode: this.lastClose?.code ?? null,

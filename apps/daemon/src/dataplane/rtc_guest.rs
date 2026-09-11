@@ -187,6 +187,7 @@ async fn carry(
     inbound: tokio::sync::mpsc::Sender<Vec<u8>>,
     mut outbound: tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<()> {
+    let mut pending = None;
     loop {
         let mut moved = false;
         while let Some(record) = session.receive() {
@@ -196,13 +197,23 @@ async fn carry(
             }
         }
         loop {
-            match outbound.try_recv() {
-                Ok(record) => {
-                    moved = true;
-                    session.send(&record)?;
+            if pending.is_none() {
+                match outbound.try_recv() {
+                    Ok(record) => pending = Some(record),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Ok(()),
                 }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Ok(()),
+            }
+            match session.send(pending.as_ref().unwrap()) {
+                Ok(()) => {
+                    pending = None;
+                    moved = true;
+                }
+                // Keep exactly this unsent record while the host drains. The
+                // next iteration still receives ACKs/data, avoiding a duplex
+                // deadlock when both peers are waiting for send capacity.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error.into()),
             }
         }
         if session.state() == State::Closed {

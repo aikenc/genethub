@@ -4,7 +4,7 @@ import { openDataRecord, sealDataRecord } from "./secure";
 
 export interface RecordCarrier {
   send(record: Uint8Array): void | Promise<void>;
-  onRecord(handler: (record: Uint8Array) => void): () => void;
+  onRecord(handler: (record: Uint8Array) => void | Promise<void>): () => void;
   onClose(handler: (reason?: unknown) => void): () => void;
   close(reason?: string): void;
 }
@@ -30,7 +30,7 @@ export class AuthenticatedChannel {
     role: "client" | "server";
     carrier: RecordCarrier;
     key: ChannelSessionKey;
-    onPlaintext(plaintext: Uint8Array): void;
+    onPlaintext(plaintext: Uint8Array): void | Promise<void>;
     onClose(reason?: unknown): void;
     onError?(error: unknown, source: "send" | "receive"): void;
   }) {
@@ -82,7 +82,7 @@ export class AuthenticatedChannel {
     }
   }
 
-  private receive(record: Uint8Array): void {
+  private receive(record: Uint8Array): void | Promise<void> {
     if (this.closed) return;
     if (record.byteLength < SECURE_RECORD_HEADER_BYTES + 16 || record.byteLength > MAX_DATA_FRAME_BYTES) {
       this.fail(new Error("invalid secure data record length"));
@@ -102,11 +102,12 @@ export class AuthenticatedChannel {
         this.options.key, this.inboundDirection(), sequence, owned,
       );
       // In-flight decryption is not cancellable; its completion is fenced.
-      if (!this.closed) this.options.onPlaintext(plaintext);
+      if (!this.closed) await this.options.onPlaintext(plaintext);
     }).catch((error: unknown) => this.fail(error)).finally(() => {
       this.receiveBytes -= owned.byteLength;
       this.receiveCount--;
     });
+    return this.receiveTail;
   }
 
   private fail(error: unknown, source: "send" | "receive" = "receive"): void {

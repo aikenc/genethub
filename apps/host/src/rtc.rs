@@ -37,6 +37,7 @@ struct Shared {
     answer: Option<String>,
     state: State,
     inbound: VecDeque<Vec<u8>>,
+    inbound_space: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,6 +61,7 @@ impl Shared {
         // Nothing will read them now, and holding a peer's last burst until the
         // guest happens to drop the session is memory nobody asked for.
         inner.inbound.clear();
+        inner.inbound_space.notify_waiters();
     }
 }
 
@@ -70,17 +72,29 @@ fn peer_connection_is_dead(state: RTCPeerConnectionState) -> bool {
     )
 }
 
-/// Keep send order. Overflow ends the session instead of dropping the head of
-/// a framed stream the peer can no longer parse.
-fn enqueue_inbound(shared: &Arc<Mutex<Shared>>, data: Vec<u8>, depth: usize) -> bool {
-    let mut state = shared.lock().unwrap();
-    if state.inbound.len() >= depth {
-        drop(state);
-        Shared::close(shared);
-        return false;
+/// The native callback may wait; the guest import must never block its fiber.
+/// Preserve the bounded queue and let SCTP backpressure the sender.
+async fn enqueue_inbound(shared: &Arc<Mutex<Shared>>, data: Vec<u8>, depth: usize) -> bool {
+    let space = shared.lock().unwrap().inbound_space.clone();
+    loop {
+        let changed = space.notified();
+        {
+            let mut state = shared.lock().unwrap();
+            if state.state == State::Closed { return false; }
+            if state.inbound.len() < depth {
+                state.inbound.push_back(data);
+                return true;
+            }
+        }
+        changed.await;
     }
-    state.inbound.push_back(data);
-    true
+}
+
+fn dequeue_inbound(shared: &Arc<Mutex<Shared>>) -> Option<Vec<u8>> {
+    let mut state = shared.lock().unwrap();
+    let record = state.inbound.pop_front();
+    if record.is_some() { state.inbound_space.notify_one(); }
+    record
 }
 
 impl RtcSession {
@@ -213,7 +227,7 @@ fn attach(
             if message.is_string || message.data.len() > max_message {
                 return;
             }
-            enqueue_inbound(&shared, message.data.to_vec(), depth);
+            enqueue_inbound(&shared, message.data.to_vec(), depth).await;
         })
     }));
 
@@ -268,8 +282,7 @@ impl wit::HostSession for crate::load::Host {
 
     async fn receive(&mut self, this: Resource<RtcSession>) -> Option<Vec<u8>> {
         let session = self.table.get(&this).ok()?;
-        let message = session.shared.lock().unwrap().inbound.pop_front();
-        message
+        dequeue_inbound(&session.shared)
     }
 
     async fn send(&mut self, this: Resource<RtcSession>, data: Vec<u8>) -> Result<(), String> {
@@ -287,6 +300,7 @@ impl wit::HostSession for crate::load::Host {
 
     async fn drop(&mut self, this: Resource<RtcSession>) -> wasmtime::Result<()> {
         if let Ok(session) = self.table.delete(this) {
+            Shared::close(&session.shared);
             // Hanging up is asynchronous, and this import is not: the guest has
             // already let go, so the close runs on its own.
             tokio::spawn(async move {
@@ -449,28 +463,32 @@ mod tests {
         assert!(peer_connection_is_dead(RTCPeerConnectionState::Closed));
     }
 
-    #[test]
-    fn a_full_inbound_queue_closes_instead_of_dropping_the_oldest_record() {
+    #[tokio::test]
+    async fn a_full_inbound_queue_waits_for_consumption_or_close() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
         let shared = Arc::new(Mutex::new(Shared {
             state: State::Open,
             ..Shared::default()
         }));
         for index in 0..8 {
-            assert!(enqueue_inbound(&shared, vec![index], 8));
+            assert!(enqueue_inbound(&shared, vec![index], 8).await);
         }
-        assert!(!enqueue_inbound(&shared, vec![99], 8));
-        let inner = shared.lock().unwrap();
-        assert_eq!(inner.state, State::Closed);
-        assert!(
-            inner.inbound.is_empty() || inner.inbound.front() == Some(&vec![0]),
-            "overflow must not rotate the framed stream to keep the newest bytes"
-        );
-        assert!(
-            inner
-                .inbound
-                .iter()
-                .all(|record| record.first() != Some(&99)),
-            "the overflowing record must not displace earlier ones"
-        );
+        let pending = enqueue_inbound(&shared, vec![99], 8);
+        tokio::pin!(pending);
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        assert_eq!(shared.lock().unwrap().state, State::Open);
+        assert_eq!(dequeue_inbound(&shared), Some(vec![0]));
+        assert!(tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap());
+        for value in (1..8).chain(std::iter::once(99)) {
+            assert_eq!(dequeue_inbound(&shared), Some(vec![value]));
+        }
+        for value in 0..8 { assert!(enqueue_inbound(&shared, vec![value], 8).await); }
+        let pending = enqueue_inbound(&shared, vec![100], 8);
+        tokio::pin!(pending);
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        Shared::close(&shared);
+        assert!(!tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap());
+        assert!(dequeue_inbound(&shared).is_none());
     }
 }

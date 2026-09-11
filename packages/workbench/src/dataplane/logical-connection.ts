@@ -119,6 +119,7 @@ export class LogicalConnection {
         this.inbox = this.inbox.then(async () => { if (this.owns(channel)) await this.receive(bytes, channel); })
           .catch((error: unknown) => { if (this.owns(channel)) this.failed(channel, error); })
           .finally(() => { this.inboxBytes -= bytes.length; this.inboxCount--; });
+        return this.inbox;
       },
       onClose: (reason) => this.lost(channel, reason ?? new Error("physical channel closed")),
       onError: (error, source) => { if (source === "receive") this.failed(channel, error); else this.lost(channel, error); },

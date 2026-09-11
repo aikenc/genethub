@@ -1,3 +1,4 @@
+import { RecordInbox, type RecordReader } from "./record-inbox";
 import { MAX_DATA_FRAME_BYTES } from "./frame";
 import type { RecordCarrier } from "./endpoint";
 
@@ -18,24 +19,14 @@ export interface BinaryWebSocketLike {
 
 /** Ordered, message-preserving WebSocket adapter for secure records. */
 export class WebSocketRecordCarrier implements RecordCarrier {
-  private recordHandler: ((record: Uint8Array) => void) | null = null;
+  private recordHandler: RecordReader | null = null;
+  private readonly inbox = new RecordInbox(record => this.recordHandler?.(record), error => this.fail(error));
   private readonly closeHandlers = new Set<(reason?: unknown) => void>();
-  private receiveTail: Promise<void> = Promise.resolve();
   private closed = false;
 
   constructor(private readonly socket: BinaryWebSocketLike) {
     if ("binaryType" in socket) socket.binaryType = "arraybuffer";
-    socket.onmessage = (event) => {
-      this.receiveTail = this.receiveTail
-        .then(async () => {
-          const record = await binaryMessage(event.data);
-          if (record.byteLength > MAX_DATA_FRAME_BYTES) {
-            throw new Error("WebSocket data record exceeds 16 KiB");
-          }
-          this.recordHandler?.(record);
-        })
-        .catch((error: unknown) => this.fail(error));
-    };
+    socket.onmessage = (event) => this.inbox.push(event.data);
     socket.onerror = (error) => this.fail(error);
     socket.onclose = (event) => this.fail(event);
   }
@@ -62,7 +53,7 @@ export class WebSocketRecordCarrier implements RecordCarrier {
     this.socket.send(record);
   }
 
-  onRecord(handler: (record: Uint8Array) => void): () => void {
+  onRecord(handler: RecordReader): () => void {
     if (this.recordHandler) throw new Error("WebSocket carrier already has a reader");
     this.recordHandler = handler;
     return () => {
@@ -78,12 +69,15 @@ export class WebSocketRecordCarrier implements RecordCarrier {
   close(reason = "data endpoint closed"): void {
     if (this.closed) return;
     this.closed = true;
+    this.inbox.close();
     this.socket.close(1000, reason.slice(0, 123));
   }
 
   private fail(reason?: unknown): void {
     if (this.closed) return;
     this.closed = true;
+    this.inbox.close();
+    this.socket.close(1000, "carrier failed");
     for (const handler of this.closeHandlers) handler(reason);
   }
 }

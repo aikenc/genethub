@@ -130,7 +130,15 @@ impl Session {
     /// framed records, and a peer that silently lost one can no longer read the
     /// rest of the stream.
     pub fn send(&self, data: &[u8]) -> io::Result<()> {
-        with(self.0, |session| session.send(data))?.map_err(io::Error::other)
+        with(self.0, |session| session.send(data))?.map_err(|message| {
+            // The host rejected this record before taking custody. Preserve a
+            // typed, retryable result for the guest's non-blocking carrier pump.
+            if message == "the send queue is full" {
+                io::Error::new(io::ErrorKind::WouldBlock, message)
+            } else {
+                io::Error::other(message)
+            }
+        })
     }
 }
 

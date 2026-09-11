@@ -1,3 +1,4 @@
+import { RecordInbox, type RecordReader } from "./record-inbox";
 import type {
   PeerWelcome,
   RtcNegotiationRequest,
@@ -208,9 +209,9 @@ export async function openRtcDataLink(
 }
 
 class RtcRecordCarrier implements RecordCarrier {
-  private recordHandler: ((record: Uint8Array) => void) | null = null;
+  private recordHandler: RecordReader | null = null;
+  private readonly inbox = new RecordInbox(record => this.recordHandler?.(record), error => this.fail(error));
   private readonly closeHandlers = new Set<(reason?: unknown) => void>();
-  private receiveTail: Promise<void> = Promise.resolve();
   private closed = false;
 
   constructor(
@@ -218,17 +219,7 @@ class RtcRecordCarrier implements RecordCarrier {
     private readonly channel: RTCDataChannel,
   ) {
     channel.bufferedAmountLowThreshold = BUFFERED_LOW;
-    channel.onmessage = (event) => {
-      this.receiveTail = this.receiveTail
-        .then(async () => {
-          const record = await binaryMessage(event.data);
-          if (record.byteLength > MAX_DATA_FRAME_BYTES) {
-            throw new Error("RTC record exceeds 16 KiB");
-          }
-          this.recordHandler?.(record);
-        })
-        .catch((error: unknown) => this.fail(error));
-    };
+    channel.onmessage = (event) => this.inbox.push(event.data);
     channel.onerror = (event) => this.fail(event);
     channel.onclose = () => this.fail(new Error("RTC DataChannel closed"));
     peer.onconnectionstatechange = () => {
@@ -251,7 +242,7 @@ class RtcRecordCarrier implements RecordCarrier {
     this.channel.send(record.slice());
   }
 
-  onRecord(handler: (record: Uint8Array) => void): () => void {
+  onRecord(handler: RecordReader): () => void {
     if (this.recordHandler) throw new Error("RTC carrier already has a reader");
     this.recordHandler = handler;
     return () => {
@@ -267,6 +258,7 @@ class RtcRecordCarrier implements RecordCarrier {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.inbox.close();
     this.channel.close();
     this.peer.close();
   }
@@ -297,6 +289,8 @@ class RtcRecordCarrier implements RecordCarrier {
   private fail(reason?: unknown): void {
     if (this.closed) return;
     this.closed = true;
+    this.inbox.close();
+    this.channel.close(); this.peer.close();
     for (const handler of this.closeHandlers) handler(reason);
   }
 }
