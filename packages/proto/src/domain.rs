@@ -1121,6 +1121,10 @@ pub struct WorkflowCatalogEntryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRunStatus {
+    /// Versioned structured-definition and instance-address projection; absent for legacy DAG Runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "unknown")]
+    pub structure: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub diagnostics: Option<Vec<WorkflowDiagnosticStatus>>,

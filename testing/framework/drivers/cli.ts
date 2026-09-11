@@ -188,9 +188,10 @@ export function runGenetAsync(
   genet: string,
   args: string[],
   env: NodeJS.ProcessEnv,
+  options: { cwd?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(genet, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(genet, args, { env, cwd: options.cwd, stdio: ["ignore", "pipe", "pipe"] });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));

@@ -304,40 +304,37 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             let node_id = node_id
                 .or_else(|| binding.map(|value| value.node_id))
                 .ok_or_else(|| CliFailure::invalid_args("workflow complete 需要 --node <id>"))?;
-            let revision = match revision {
-                Some(revision) => revision,
-                None => {
-                    let Reply::WorkflowRun(current) = rpc
-                        .call(Request::WorkflowGet {
-                            workspace_id: workspace_id.clone(),
-                            run_id: run_id.clone(),
-                        })
-                        .await
-                        .map_err(query::rpc_error)?
-                    else {
-                        return Err(CliFailure::protocol(
-                            "the daemon answered workflow.get with the wrong reply",
-                        ));
-                    };
-                    current.revision
+            // Automatic revision selection can race sibling completions. Retry only
+            // definite pre-commit refusals, never transport/unknown-result failures.
+            let mut attempt = 0;
+            let run = loop {
+                let expected_revision = match revision {
+                    Some(revision) => revision,
+                    None => {
+                        let Reply::WorkflowRun(current) = rpc.call(Request::WorkflowGet {
+                            workspace_id: workspace_id.clone(), run_id: run_id.clone(),
+                        }).await.map_err(query::rpc_error)? else {
+                            return Err(CliFailure::protocol("the daemon answered workflow.get with the wrong reply"));
+                        };
+                        current.revision
+                    }
+                };
+                match rpc.call(Request::WorkflowComplete {
+                    workspace_id: workspace_id.clone(), run_id: run_id.clone(),
+                    node_id: node_id.clone(), expected_revision,
+                    evidence: evidence.clone(), outcome, reason: reason.clone(),
+                }).await {
+                    Ok(Reply::WorkflowRun(run)) => break run,
+                    Ok(_) => return Err(CliFailure::protocol("the daemon answered workflow.complete with the wrong reply")),
+                    Err(super::rpc::RpcError::Remote(ref error))
+                        if revision.is_none() && attempt < 20
+                            && (error.message.starts_with("Workflow revision 冲突：")
+                                || error.message == "Workflow Run 正由另一个请求修改") => {
+                        attempt += 1;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(error) => return Err(query::rpc_error(error)),
                 }
-            };
-            let Reply::WorkflowRun(run) = rpc
-                .call(Request::WorkflowComplete {
-                    workspace_id,
-                    run_id,
-                    node_id,
-                    expected_revision: revision,
-                    evidence,
-                    outcome,
-                    reason,
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered workflow.complete with the wrong reply",
-                ));
             };
             output::succeed("workflow.completed", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
@@ -374,6 +371,24 @@ struct ManagedBinding {
     node_id: String,
 }
 
+/// A managed activity may execute in a plain sub-workspace with no AgentSpace
+/// parent. Its durable Session parent chain still identifies the owning project.
+async fn session_project(state: &crate::state::Shared, summary: &genehub_proto::SessionSummary) -> Result<String,CliFailure> {
+    let mut current = summary.clone();
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..32 {
+        if !seen.insert(current.id.clone()) {break;}
+        if let Some(managed) = &current.managed {
+            current = state.sessions.summary(&managed.parent_session_id).await.map_err(|error|
+                CliFailure::business("workflowBindingUnavailable",format!("无法读取流程归属会话：{error:#}"),None))?;
+        } else {
+            return state.workspaces.project_root(&current.workspace_id).await.map_err(|error|
+                CliFailure::business("workflowBindingUnavailable",format!("无法解析流程所属项目：{error:#}"),None));
+        }
+    }
+    Err(CliFailure::business("workflowBindingUnavailable","流程归属链无效或超过上限",None))
+}
+
 async fn binding_for_missing(needed: bool) -> Result<Option<ManagedBinding>, CliFailure> {
     if !needed {
         return Ok(None);
@@ -391,17 +406,7 @@ async fn binding_for_missing(needed: bool) -> Result<Option<ManagedBinding>, Cli
             None,
         )
     })?;
-    let workspace_id = state
-        .workspaces
-        .project_root(&summary.workspace_id)
-        .await
-        .map_err(|error| {
-            CliFailure::business(
-                "workflowBindingUnavailable",
-                format!("无法解析当前会话的项目 AgentSpace：{error:#}"),
-                None,
-            )
-        })?;
+    let workspace_id = session_project(&state,&summary).await?;
     Ok(summary.managed.map(|managed| ManagedBinding {
         workspace_id,
         run_id: managed.workflow_run_id,
@@ -554,18 +559,7 @@ pub(super) async fn resolve_workspace(
                 None,
             )
         })?;
-        let project_id = state
-            .workspaces
-            .project_root(&summary.workspace_id)
-            .await
-            .map_err(|error| {
-                CliFailure::business(
-                    "workflowBindingUnavailable",
-                    format!("无法解析当前会话的项目 AgentSpace：{error:#}"),
-                    None,
-                )
-            })?;
-        return Ok(project_id);
+        return session_project(&state,&summary).await;
     }
     let cwd = super::caller_cwd();
     let known = query::list_workspaces(rpc).await?;

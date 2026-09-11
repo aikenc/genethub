@@ -30,7 +30,10 @@ pub(crate) async fn check(
                 detail,
             });
         };
-        for node in &run.definition.nodes {
+        let definitions = if run.engine.is_some() {
+            run.nodes.keys().map(|id| runtime_node(&run,id)).collect::<Result<Vec<_>>>()?
+        } else { run.definition.nodes.clone() };
+        for node in &definitions {
             if node.uses != "agent.session" {
                 continue;
             }
@@ -38,7 +41,7 @@ pub(crate) async fn check(
                 .into_iter()
                 .filter(|event| !node.on.contains_key(*event))
                 .collect::<Vec<_>>();
-            if !fallback.is_empty() {
+            if run.engine.is_none() && !fallback.is_empty() {
                 finding(
                     Some(node.id.clone()),
                     "defaultBlockedExit",

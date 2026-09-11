@@ -508,7 +508,9 @@ defineSpecialty(
       const blockedApply = cli(["space", "bootstrap", "apply", "--workspace", approveProject.id, "--pack", "game-delivery-v1", ...rendererArgs,
         "--plan-digest", String(blockedPlan.data.planDigest), "--expected-revision", String(blockedPlan.data.expectedRevision), "--action-id", "blocked-upgrade"]);
       t.assertions.assert(blockedApply.status !== 0 && blockedApply.text.includes("activeRunConflict"), `upgrade apply did not report the active conflict: ${blockedApply.text}`);
-      const cancelled = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id, expectedRevision: conflictingRun!.revision } });
+      const latestConflict = await opened.client.call({type:"workflow.get",payload:{workspaceId:approveProject.id,runId:conflictingRun!.id}});
+      t.assertions.assert(latestConflict?.type === "workflowRun","cannot refresh conflicting Run");
+      const cancelled = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id, expectedRevision: latestConflict!.type === "workflowRun" ? latestConflict.data.revision : -1 } });
       t.assertions.assert(cancelled?.type === "workflowRun" && cancelled.data.status === "cancelling", "old Pack could not use the framework cancellation entry");
       await t.tools.waitUntil(async () => {
         const reply = await opened.client.call({ type: "workflow.get", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id } });

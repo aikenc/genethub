@@ -2,18 +2,19 @@ import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
-import { defineSpecialty } from "../../framework/public.ts";
+import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
+for (const structured of [false,true]) for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
+  if (structured && !["independent","silence-wr","silence-human","cancel"].includes(scenario)) continue;
   const silence = scenario.startsWith("silence");
   const wr = scenario.startsWith("silence-wr");
   defineSpecialty({
-    id: `specialty.workflow-control.${scenario}`,
+    id: `specialty.workflow-control.${scenario}${structured ? ".structured" : ""}`,
     title: `Project workflow recovery across ${scenario}`,
     oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics",
     catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
-    tags: ["core", ...(wr ? ["pm-exception-recovery"] : []), "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
+    tags: ["core", ...(structured ? ["structured-workflow"] : []), ...(wr ? ["pm-exception-recovery"] : []), "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
@@ -37,7 +38,12 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
         id, uses: "agent.session", with: { role, workspace: "." },
         completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] },
       });
-      writeFileSync(workflowFile, JSON.stringify({
+      const {on: _edges,...activity} = node("review");
+      writeFileSync(workflowFile, JSON.stringify(structured ? {
+        schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,
+        nodes:[activity,{id:"publish",uses:"result.publish"}],
+        structure:{body:{id:"delivery",type:"sequence",steps:[{id:"check",type:"task",activity:"review"},{id:"deliver",type:"task",activity:"publish"}]}},
+      } : {
         schema: schema?.split(": ")[1], id: "direct-change", version: 1, entry: "review",
         nodes: [node("review"), { id: "publish", uses: "result.publish" }],
       }));
@@ -117,7 +123,7 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
         await waitTerminal();
         const findings = (await check(run.id)).findings;
         t.assertions.assert(findings.some(f => f.code === "defaultBlockedExit"), "checker omitted the default exit");
-        if (scenario !== "orphan") t.assertions.assert(run.nodes.find(node => node.id === "review")?.outcome === "changesRequested", "negative review was discarded or treated as success");
+        if (scenario !== "orphan") t.assertions.assert(run.nodes.find(node => node.uses === "agent.session")?.outcome === "changesRequested", "negative review was discarded or treated as success");
         t.assertions.assert(run.nodes.find(node => node.id === "publish")?.status === "unreached", "failed review published a successful result");
         if (scenario === "bounds") {
           for (let attempt = 2; attempt <= 3; attempt++) {
@@ -136,8 +142,10 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
           t.assertions.assert(JSON.stringify(opened.mock.requests).includes("requestBudgetExceeded"), "budget refusal was not visible to PM");
         }
       } else {
-        const workerId = run.nodes.find(node => node.id === "review")?.sessionId!;
         await t.tools.waitUntil(() => workerCalls > 0, 30_000);
+        run = await get(original);
+        const workerId = run.nodes.find(node => node.uses === "agent.session")?.sessionId;
+        t.assertions.assert(!!workerId,"started Worker missing from Run");
         if (scenario === "silence-human") {
           await t.tools.waitUntil(async () => {
             const waiting = await snapshot(workerId);
@@ -165,7 +173,7 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
         t.assertions.assert(workerCalls === callsBefore && after.summary.status === before.summary.status, "PM question interrupted or restarted its Worker");
         if (silence) {
           run = await get(original);
-          const node = run.nodes.find(node => node.id === "review")!;
+          const node = run.nodes.find(node => node.uses === "agent.session")!;
           const baseline = Math.max(node.assignedAtMs ?? run.createdAtMs, node.lastActivityAtMs ?? 0);
           await new Promise(resolve => setTimeout(resolve, Math.max(0, baseline + 179_000 - Date.now())));
           t.assertions.assert(!(await check(original)).findings.some(f => f.code === "silentAttempt"), "silence fired before 180 seconds");
@@ -243,6 +251,6 @@ for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independ
         }
       }
       t.note(`scenario=${scenario}; worker calls=${workerCalls}; automatic WR calls=${diagnosticCalls}; PM calls=${pmCalls}`);
-    } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
+    } finally { opened.client.close(); await runGenetAsync(opened.daemon.genet,["daemon","stop"],opened.daemon.env); await opened.mock.stop(); }
   });
 }
