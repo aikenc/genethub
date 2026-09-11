@@ -25,7 +25,7 @@ defineSpecialty({
   title: "An unbound project PM recovers a blocked task and returns to normal permissions",
   oracle: "An approved project keeps normal binding checks; an actual blocked Run lets another PM manage and retry the same request, successful recovery removes the exception, and streamed tool argument fragments execute intact",
   catches: ["every PM always gains project control", "the original Run owner and current PM cannot recover each other's work", "temporary recovery permanently transfers the binding", "empty streaming ids discard tool arguments"],
-  tags: ["core", "workflow", "authorization", "pm-exception-recovery", "pm-recovery-authority"],
+  tags: ["core", "workflow", "authorization", "pm-exception-recovery", "pm-recovery-authority", "pm-business-assessment"],
   llm: { default: "mock" }, expectedDurationMs: 60_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
@@ -41,8 +41,18 @@ defineSpecialty({
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     let bootstrapStage = 0, command: string | undefined, workerCalls = 0;
     let phase = "bootstrap", commandTaken = false;
+    const assessed = new Set<string>();
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
+      if (body.includes("<genehub_managed_session>") && body.includes("角色标签为 `reviewer`")) {
+        const assessment = body.includes("`game-assessment`") ? "assessment" : "review";
+        if (!assessed.has(assessment)) {
+          assessed.add(assessment);
+          const report = JSON.stringify({ verdict: "partial", subject: assessment, scope: "melee and ranged cultivation action game", findings: ["Existing ranged combat reusable; melee needs new collision and animation"], evidence: ["current artifact inspected"], uncertainty: ["combat feel requires prototype"], recommendation: "prototype before implementation" });
+          return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow complete --evidence 'report=${report}'` } } };
+        }
+        return { text: "Business report submitted without implementation." };
+      }
       if (body.includes("EXCEPTION_TEST_WORKER")) {
         workerCalls++;
         if (workerCalls === 1) return { text: "Unable to finish; no node result submitted." };
@@ -108,8 +118,8 @@ defineSpecialty({
     owner = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     t.assertions.assert(other !== owner, "test did not create a second PM Session");
     const dispatch = (task: string) => `"$GENEHUB_CLI" workflow dispatch --workflow game-feature --task ${task} --message recover --no-wait`;
-    const denied = await runCommand(other, "u_normal_denied", dispatch("normal-denied"));
-    t.assertions.assert(denied.includes("forbidden") && (await history()).length === 0, `normal unbound PM gained control: ${denied}; runs=${JSON.stringify(await history())}`);
+    const denied = await runCommand(other, "u_normal_denied", '"$GENEHUB_CLI" workflow activate --revision 0');
+    t.assertions.assert(denied.includes("forbidden") && (await history()).length === 0, `normal unbound PM gained management: ${denied}`);
     const status = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });
     if (status?.type !== "workflowProject") throw new Error("candidate did not compile");
     const initial = await runCommand(owner, "u_owner_start", `"$GENEHUB_CLI" workflow activate --revision ${status.data.activationRevision} && ${dispatch("original")}`);
@@ -148,8 +158,22 @@ defineSpecialty({
       .catch(async error => { throw new Error(`${error}; retry=${recovered}; workerCalls=${workerCalls}; runs=${JSON.stringify(await history())}`); });
     const successor = (await history()).find(run => run.taskId === "recovered")!;
     t.assertions.assert(successor.requestRunId === original.id && successor.parentSessionId === other, "recovery lost request lineage or responding PM");
-    const settled = await runCommand(other, "u_settled_denied", dispatch("settled-denied"));
-    t.assertions.assert(settled.includes("forbidden") && (await history()).length === 2, "recovery authority survived successful resolution");
+    // A successful recovery withdraws management escalation, but the user's next
+    // business request must remain usable in this original conversation.
+    const beforeAssessment = spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout;
+    for (const kind of ["assessment", "review"]) {
+      const delegated = await runCommand(other, `u_business_${kind}`, `"$GENEHUB_CLI" workflow dispatch --kind game --complexity ${kind} --task business-${kind} --message "Assess melee and ranged cultivation gameplay; report only" --no-wait`);
+      t.assertions.assert(!delegated.includes("forbidden"), `old PM could not delegate business ${kind}: ${delegated}`);
+      await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === `business-${kind}` && run.status === "completed"), 40_000)
+        .catch(async error => { throw new Error(`${error}; ${delegated}; runs=${JSON.stringify(await history())}; requests=${JSON.stringify(opened.mock.requests).slice(-8000)}`); });
+      const reportRun = (await history()).find(run => run.taskId === `business-${kind}`)!;
+      t.assertions.assert(reportRun.workflowId === `game-${kind}` && reportRun.parentSessionId === other, "business result did not return to the original PM");
+      const assessmentNode = reportRun.nodes.find(node => node.sessionId)!;
+      const expert = (await snapshot(assessmentNode.sessionId!)).summary;
+      t.assertions.assert(expert.managed?.role === "reviewer", "business request was routed to workflow infrastructure");
+      t.assertions.assert(JSON.stringify(reportRun).includes("partial"), "negative business conclusion was lost or treated as acceptance");
+    }
+    t.assertions.assert(spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout === beforeAssessment, "assessment changed project files");
     const afterPlan = await runCommand(other, "u_settled_management_denied", `${configure} --plan`);
     t.assertions.assert(afterPlan.includes("forbidden"), "exception left unrelated expert management enabled");
     const closedControl = await runCommand(other, "u_settled_worker_denied", `"$GENEHUB_CLI" session interrupt ${worker}`);
@@ -158,8 +182,8 @@ defineSpecialty({
     t.assertions.assert(normalBuilder.includes("forbidden"), "normal PM gained direct Builder write permission");
     const ownerAgain = await runCommand(owner, "u_owner_unchanged", dispatch("owner-unchanged"));
     t.assertions.assert(!ownerAgain.includes("ProjectControlBinding"), "recovery transferred normal project control");
-    await t.tools.waitUntil(async () => (await history()).length === 3, 20_000);
-    t.note("normal denial -> blocked -> cross-PM same-request recovery -> normal denial; binding unchanged; streamed CLI arguments intact");
+    await t.tools.waitUntil(async () => (await history()).length === 5, 20_000);
+    t.note("management denial -> exception recovery -> business assessment and review in original PM -> management still denied; binding unchanged");
   } finally {
     opened.client.close(); opened.daemon.stop(); await opened.mock.stop();
   }
