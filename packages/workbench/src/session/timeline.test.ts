@@ -237,6 +237,26 @@ describe("the session timeline", () => {
     });
   });
 
+  it("explains that an expired plan is being recomputed", () => {
+    const request = {
+      id: "plan-expired",
+      kind: "planApproval" as const,
+      title: "Initialize the PM project",
+      options: [{ id: "yes", label: "Confirm", kind: "allowOnce" as const }],
+    };
+    const asked = apply(emptyTimeline(), { type: "permissionRequested", request });
+    const refreshing = apply(asked, {
+      type: "permissionResolved",
+      requestId: request.id,
+      outcome: { outcome: "timedOut", appliedDefault: "refreshPlan" },
+    });
+
+    expect(refreshing.pendingPermission).toBeNull();
+    expect(refreshing.permissionProgress?.message).toBe(
+      "原计划已过期，正在重新核对并生成新的确认。",
+    );
+  });
+
   it("does not clear an approval that a different request resolved", () => {
     const request = {
       id: "p1",

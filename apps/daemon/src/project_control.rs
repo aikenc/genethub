@@ -24,6 +24,12 @@ const CHALLENGE_TTL_MS: i64 = 10 * 60 * 1_000;
 const APPROVE: &str = "approve-once";
 const REJECT: &str = "reject";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HumanResponseValidation {
+    Accepted,
+    ApprovalExpired,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeSpec {
     pub controller_session_id: String,
@@ -340,19 +346,27 @@ impl Broker {
             .await
     }
 
-    pub async fn validate_human_response(
+    pub(crate) async fn validate_human_response(
         &self,
         session_id: &str,
         request_id: &str,
         outcome: &PermissionOutcome,
-    ) -> Result<()> {
+    ) -> Result<HumanResponseValidation> {
         let state = self.state.lock().await;
         let challenge = state
             .request_to_challenge
             .get(&(session_id.into(), request_id.into()))
             .and_then(|id| state.challenges.get(id))
             .ok_or_else(|| anyhow!("approvalStale: this plan challenge is no longer active"))?;
-        validate_decision(challenge, outcome, now_ms())
+        let decided_at_ms = now_ms();
+        if !challenge.approved
+            && !challenge.rejected
+            && approval_decision_expired(challenge, outcome, decided_at_ms)
+        {
+            return Ok(HumanResponseValidation::ApprovalExpired);
+        }
+        validate_decision(challenge, outcome, decided_at_ms)?;
+        Ok(HumanResponseValidation::Accepted)
     }
 
     pub async fn record_human_response_at(
@@ -697,13 +711,20 @@ fn validate_decision(
         }
         bail!("approvalStale: this plan already has a different Human decision");
     }
-    if approved
-        && (decided_at_ms > challenge.expires_at_ms
-            || decided_at_ms < challenge.expires_at_ms - CHALLENGE_TTL_MS)
-    {
+    if approval_decision_expired(challenge, outcome, decided_at_ms) {
         bail!("approvalStale: this plan challenge expired; create a new plan");
     }
     Ok(())
+}
+
+fn approval_decision_expired(
+    challenge: &Challenge,
+    outcome: &PermissionOutcome,
+    decided_at_ms: i64,
+) -> bool {
+    matches!(outcome, PermissionOutcome::Selected { option_id } if option_id == APPROVE)
+        && (decided_at_ms > challenge.expires_at_ms
+            || decided_at_ms < challenge.expires_at_ms - CHALLENGE_TTL_MS)
 }
 
 fn plan_permission_request(
@@ -1115,10 +1136,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_expired_challenge_cannot_be_normalized_or_approved() {
+    async fn an_expired_challenge_is_retired_without_becoming_approved() {
         let root = tempfile::tempdir().unwrap();
         let broker = Broker::new(root.path()).unwrap();
         let issued = broker.issue(spec()).await.unwrap();
+        let normalized = broker
+            .normalize_request("s_pm", &question(&issued.challenge_id))
+            .await
+            .unwrap();
+        assert_eq!(normalized.kind, PermissionRequestKind::PlanApproval);
         broker
             .state
             .lock()
@@ -1128,11 +1154,19 @@ mod tests {
             .unwrap()
             .expires_at_ms = now_ms() - 1;
 
-        let untouched = broker
-            .normalize_request("s_pm", &question(&issued.challenge_id))
-            .await
-            .unwrap();
-        assert_eq!(untouched.kind, PermissionRequestKind::Question);
+        assert_eq!(
+            broker
+                .validate_human_response(
+                    "s_pm",
+                    "ask_1",
+                    &PermissionOutcome::Selected {
+                        option_id: APPROVE.into(),
+                    },
+                )
+                .await
+                .unwrap(),
+            HumanResponseValidation::ApprovalExpired
+        );
         assert!(broker
             .record_human_response(
                 "s_pm",
@@ -1140,6 +1174,33 @@ mod tests {
                 &PermissionOutcome::Selected {
                     option_id: APPROVE.into(),
                 },
+            )
+            .await
+            .is_err());
+        broker
+            .record_human_response(
+                "s_pm",
+                "ask_1",
+                &PermissionOutcome::TimedOut {
+                    applied_default: "refreshPlan".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(broker
+            .reserve(
+                "s_pm",
+                "w_project",
+                "/project",
+                "project.bootstrap.apply",
+                "game-delivery-v1",
+                "sha256:pack",
+                "sha256:plan",
+                0,
+                None,
+                "sha256:clean",
+                "expired_action",
+                false,
             )
             .await
             .is_err());

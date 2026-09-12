@@ -305,6 +305,9 @@ function permissionResolutionMessage(
   request: PermissionRequest,
   outcome: Extract<SessionEvent, { type: "permissionResolved" }>["outcome"],
 ): string {
+  if (outcome.outcome === "timedOut" && outcome.appliedDefault === "refreshPlan") {
+    return "原计划已过期，正在重新核对并生成新的确认。";
+  }
   if (outcome.outcome === "timedOut") return "确认已超时；任务不会继续执行。";
   if (outcome.outcome === "canceled") return "已取消；任务不会继续执行。";
   if (outcome.outcome === "answered") return "回答已提交，Agent 正在继续执行。";
