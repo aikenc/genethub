@@ -372,6 +372,81 @@ describe("the E2EE data endpoint", () => {
     expect(handlers).toBe(1);
   });
 
+  it.each(["rtc", "base"])("survives loss of %s without replaying a business operation", async (failed) => {
+    const stack = await endpoints();
+    let handlers = 0;
+    stack.server.onIncoming(stream => handlerTasks.push((async () => {
+      handlers++;
+      const bytes = await collectBody(stream.body(), 4);
+      await stream.respond({ status: 200, metadata: null, bodyLength: 4 });
+      await stream.write(bytes); await stream.finish();
+    })()));
+    const stream = stack.client.open(head("one-operation", 4));
+    await stream.write(new Uint8Array([1]));
+    await waitFor(() => handlers === 1);
+    const id = stack.client.logicalId;
+    const [rtcClient, rtcServer] = carriers();
+    const key = await deriveChannelSessionKey("rtc-fallback", "hosted:rtc", randomToken(11), randomToken(12));
+    await Promise.all([stack.server.attach(rtcServer, key, "rtc"), stack.client.attach(rtcClient, key, "rtc")]);
+    await stream.write(new Uint8Array([2]));
+    (failed === "rtc" ? rtcClient : stack.clientCarrier).close("injected physical failure");
+    await waitFor(() => stack.client.activePath === (failed === "rtc" ? "loopback" : "rtc"));
+    expect(stack.client.logicalId).toBe(id);
+    await stream.write(new Uint8Array([3, 4])); await stream.finish();
+    expect(await collectBody(stream.body(), 4)).toEqual(new Uint8Array([1, 2, 3, 4]));
+    await stream.done;
+    expect(handlers).toBe(1);
+  });
+
+  it("fences a queued old base record during authenticated failback", async () => {
+    const stack = await endpoints();
+    await Promise.all([stack.client.ready(), stack.server.ready()]);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let heldRecord = false, reattaching = false;
+    stack.serverCarrier.beforeDelivery = async () => { heldRecord = true; await held; };
+    stack.clientCarrier.beforeDelivery = async (record, sequence) => {
+      const bytes = await openDataRecord(stack.key, "client-to-daemon", sequence, record);
+      if (bytes[1] === 16 && JSON.parse(new TextDecoder().decode(bytes.subarray(4))).op === "attach") reattaching = true;
+    };
+    let handlers = 0;
+    stack.server.onIncoming(stream => handlerTasks.push((async () => {
+      handlers++;
+      const bytes = await collectBody(stream.body(), 2);
+      await stream.respond({ status: 200, metadata: null, bodyLength: 2 });
+      await stream.write(bytes); await stream.finish();
+    })()));
+    const stream = stack.client.open(head("queued-record", 2));
+    try {
+      await stream.write(new Uint8Array([1]));
+      await waitFor(() => heldRecord && handlers === 1);
+      const [rtcClient, rtcServer] = carriers();
+      const key = await deriveChannelSessionKey("rtc-queued", "hosted:rtc", randomToken(15), randomToken(16));
+      await Promise.all([stack.server.attach(rtcServer, key, "rtc"), stack.client.attach(rtcClient, key, "rtc")]);
+      rtcClient.close("fault before old record drains");
+      await waitFor(() => reattaching);
+    } finally { release(); }
+    await waitFor(() => stack.client.activePath === "loopback");
+    await stream.write(new Uint8Array([2])); await stream.finish();
+    expect(await collectBody(stream.body(), 2)).toEqual(new Uint8Array([1, 2]));
+    await stream.done;
+    expect(handlers).toBe(1);
+  });
+
+  it("keeps the idle base probed beyond the channel timeout and uses it on heartbeat failure", async () => {
+    const stack = await endpoints();
+    await Promise.all([stack.client.ready(), stack.server.ready()]);
+    const [rtcClient, rtcServer] = carriers();
+    const key = await deriveChannelSessionKey("rtc-idle", "hosted:rtc", randomToken(13), randomToken(14));
+    await Promise.all([stack.server.attach(rtcServer, key, "rtc"), stack.client.attach(rtcClient, key, "rtc")]);
+    await new Promise(resolve => setTimeout(resolve, 16_000));
+    expect(stack.client.hasPath("loopback")).toBe(true);
+    expect(stack.server.hasPath("loopback")).toBe(true);
+    stack.client.failActivePath(new Error("application heartbeat timed out"));
+    await waitFor(() => stack.client.activePath === "loopback" && stack.server.activePath === "loopback");
+    expect(stack.client.recovering).toBe(false);
+  }, 25_000);
+
   it("rejects a fresh authenticated peer without old-server possession and keeps the healthy connection", async () => {
     const stack = await endpoints();
     await Promise.all([stack.client.ready(), stack.server.ready()]);
@@ -422,10 +497,9 @@ describe("the E2EE data endpoint", () => {
     };
     await Promise.allSettled([stack.server.attach(serverCarrier, fresh, "rtc"), stack.client.attach(clientCarrier, fresh, "rtc")]);
     expect(fault).toBe(true);
-    await waitFor(() => stack.client.recovering && stack.server.recovering);
-    const [nextClient, nextServer] = carriers();
-    const nextKey = await deriveChannelSessionKey("baseline-admission-secret", "hosted:next-baseline", randomToken(7), randomToken(8));
-    await Promise.all([stack.server.attach(nextServer, nextKey, "fabric"), stack.client.attach(nextClient, nextKey, "fabric")]);
+    // Even ambiguous activation loss must use a new epoch on the retained
+    // authenticated base, without creating another business stream.
+    await waitFor(() => stack.client.activePath === "loopback" && stack.server.activePath === "loopback");
     await stream.write(new Uint8Array([2])); await stream.finish();
     expect(await collectBody(stream.body(), 2)).toEqual(new Uint8Array([1, 2]));
     await stream.done;

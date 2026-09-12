@@ -398,6 +398,7 @@ export class DataEndpoint {
   private state_: DataEndpointState = "open";
   private readonly channel: AuthenticatedChannel | LogicalConnection;
   private readonly recoveringHandlers = new Set<() => void>();
+  private readonly pathHandlers = new Set<() => void>();
 
   readonly maxReceiveBytesPerStream: number;
   readonly maxBulkStreamWindowBytes: number;
@@ -441,10 +442,17 @@ export class DataEndpoint {
         onFrame: (frame, release) => this.dispatch(frame, release),
         onClose: (reason) => this.closeFromCarrier(reason),
         onRecovering: () => { for (const handler of this.recoveringHandlers) handler(); },
+        onReady: () => { for (const handler of this.pathHandlers) handler(); },
       });
     }
   }
 
+  onPathChange(handler: () => void): () => void { this.pathHandlers.add(handler); return () => this.pathHandlers.delete(handler); }
+  failActivePath(reason: unknown): void {
+    if (this.channel instanceof LogicalConnection) this.channel.failActive(reason);
+    else this.close(reason instanceof Error ? reason.message : String(reason));
+  }
+  hasPath(path: ResumePath): boolean { return this.channel instanceof LogicalConnection && this.channel.hasPath(path); }
   get activePath(): ResumePath | null { return this.channel instanceof LogicalConnection ? this.channel.path : null; }
   get logicalId(): string | null { return this.channel instanceof LogicalConnection ? this.channel.id : null; }
   get recovering(): boolean { return this.channel instanceof LogicalConnection && this.channel.state === "recovering"; }

@@ -1,3 +1,4 @@
+import { RtcAcceleration, useRtcAccelerated } from "./shell/RtcAcceleration";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ForkTarget,
@@ -1289,6 +1290,7 @@ function ConnectionBadge({
   state: string;
   endpoint: Endpoint;
 }) {
+  const accelerated = useRtcAccelerated();
   const label =
     state === "ready"
       ? endpoint.via === "loopback"
@@ -1304,7 +1306,7 @@ function ConnectionBadge({
 
   return (
     <span className="ml-auto truncate text-[11px] text-faint" role="status">
-      {label} · {endpoint.label}
+      {accelerated ? "直连" : label} · <RtcAcceleration active={accelerated} />{endpoint.label}
     </span>
   );
 }

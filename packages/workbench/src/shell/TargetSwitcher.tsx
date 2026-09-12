@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { Endpoint, Host, Target } from "../host";
 import { openAccount } from "../hub/account";
+import { RtcAcceleration, useRtcAccelerated } from "./RtcAcceleration";
 import { useWorkbench } from "../session/store";
 
 /**
@@ -33,6 +34,7 @@ export function TargetSwitcher({
   /** Banner is a column header; row/menuitem sit in a tool or overflow list. */
   variant?: "banner" | "menuitem" | "row";
 }) {
+  const accelerated = useRtcAccelerated();
   const [open, setOpen] = useState(false);
   const [targets, setTargets] = useState<Target[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -101,7 +103,7 @@ export function TargetSwitcher({
           <>
             <span className="min-w-0 flex-1 truncate">我的电脑</span>
             <span className="min-w-0 max-w-[5.5rem] truncate text-[10px] text-faint">
-              {current?.label ?? "未连接"}
+              <RtcAcceleration active={accelerated} />{current?.label ?? "未连接"}
             </span>
             <span className="shrink-0 text-faint" aria-hidden>
               ▾
@@ -118,7 +120,7 @@ export function TargetSwitcher({
             <span className="min-w-0 flex-1">
               <span className="block text-[10px] uppercase tracking-wide text-faint">机器</span>
               <span className="block truncate text-sm text-fg md:text-xs">
-                {current?.label ?? "未连接"}
+                <RtcAcceleration active={accelerated} />{current?.label ?? "未连接"}
               </span>
             </span>
             <span className="shrink-0 text-faint" aria-hidden>

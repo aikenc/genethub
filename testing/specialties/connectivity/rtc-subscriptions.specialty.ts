@@ -175,10 +175,15 @@ client.connect();
         for (const peer of (window as any).nativePeers) peer.close();
         return before;
       });
-      await page.waitForFunction((offset) => {
+      // A healthy authenticated standby should hide physical failure from the
+      // business session. Assert a real reply, not an intermediate UI state.
+      const afterFault = await page.evaluate(async (offset) => {
         const p = (window as any).probe;
-        return p.states.slice(offset).includes("reconnecting") && p.client.connectionState === "ready";
-      }, beforeFault.states, { timeout: 30000 }).catch(diagnosticFailure);
+        const reply = await p.client.call({ type: "workspace.list" });
+        return { reply: reply?.type, state: p.client.connectionState, states: p.states.slice(offset) };
+      }, beforeFault.states).catch(diagnosticFailure);
+      t.assertions.assert(afterFault.reply === "workspaces" && afterFault.state === "ready", "RTC failure interrupted ordinary RPC");
+      t.assertions.assert(!afterFault.states.includes("reconnecting"), "RTC failure discarded the healthy standby");
       const resumed = await page.evaluate(() => ({ id: (window as any).probe.client.logicalConnectionId, repairs: (window as any).probe.repairs.length }));
       t.assertions.assert(resumed.id === logicalId, "RTC failure replaced the logical connection");
       t.assertions.assert(resumed.repairs === beforeFault.repairs, "carrier recovery rebuilt business subscriptions");
