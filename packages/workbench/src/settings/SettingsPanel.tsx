@@ -6,7 +6,7 @@ import type {
 } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
-import { BUILD } from "../build";
+import { BUILD, PRODUCT_VERSION } from "../build";
 import { CHANNEL, type BuildIdentity } from "../channel";
 import type { Endpoint, Host } from "../host";
 import { Pairing } from "../hub/Pairing";
@@ -550,10 +550,10 @@ const shown = (version: string) =>
 /**
  * Which build this is, and whether a newer one has been published.
  *
- * Two numbers rather than one because they are two executables. A local Windows
- * bundle stamps one version into both, so disagreement there means an upgrade
- * only half landed. A remote daemon belongs to another machine and legitimately
- * updates on a different schedule; the endpoint decides which sentence applies.
+ * App, page and running Component use one version scheme but report their own
+ * actual identities. A newer Live can run on an older compatible App; a native
+ * installation can also be waiting for restart. Difference alone proves neither
+ * a successful upgrade nor a broken installation.
  *
  * The check is a button and never a timer. The selected daemon checks itself;
  * the desktop shell checks its own Windows App. A local bundle can still fetch
@@ -592,7 +592,7 @@ function Version({
           )}
           <span className="text-muted" data-testid="daemon-version">
             {localBundle ? "本机 daemon" : "daemon"}{" "}
-            {daemonVersion ? `${shown(daemonVersion)} · Live` : "未连接"}
+            {daemonVersion ? shown(daemonVersion) : "未连接"}
           </span>
           <button
             type="button"
@@ -617,7 +617,7 @@ function Version({
             into a bug report, and above it sits a button it must never push off
             the row. */}
         <code className="select-all break-all font-mono text-faint" data-testid="page-build">
-          页面（console） {BUILD}
+          GeneHub Web {PRODUCT_VERSION ? shown(PRODUCT_VERSION) : "未标记产品版本"} · build {BUILD}
         </code>
         <p className="text-muted" data-testid="manual-update-note">
           应用内自动下载和安装暂未启用。请从官方发布页手动下载，并通过独立可信渠道核对
@@ -631,12 +631,10 @@ function Version({
             打开官方发布页
           </button>
         </p>
-        {/* Not for a build from source: a developer running a fresh shell against
-            an installed daemon is not a broken upgrade, and saying so would be
-            crying wolf at the one person who can tell the difference. */}
+        {/* An installed App and its running Component can update independently. */}
         {localBundle && app && daemonVersion && app !== daemonVersion && app !== UNRELEASED ? (
-          <p role="alert" className="text-danger">
-            两个版本不一致，上次升级大概只装了一半。重新装一遍安装包，或者从托盘退出再打开。
+          <p className="text-muted">
+            已安装 App 与当前运行 Component 版本不同；Live 更新后可以保持旧 App。
           </p>
         ) : null}
         {!localBundle && app && daemonVersion && app !== daemonVersion ? (

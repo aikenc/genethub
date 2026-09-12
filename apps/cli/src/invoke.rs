@@ -53,6 +53,64 @@ pub async fn hub_status() -> Option<Value> {
     })
 }
 
+/// Actual guest version from the running daemon's context, never from the CLI build.
+pub async fn daemon_version() -> Option<Value> {
+    let records = tokio::time::timeout(Duration::from_secs(2), collect(vec!["context".into()]))
+        .await
+        .ok()?
+        .ok()?;
+    running_version(records)
+}
+
+fn running_version(records: Vec<CliRecord>) -> Option<Value> {
+    if records.last()?.exit != Some(0) {
+        return None;
+    }
+    records.into_iter().find_map(|record| {
+        if record.stream.as_deref() != Some("stdout") {
+            return None;
+        }
+        let line = record.line?;
+        let envelope: Value = serde_json::from_str(&line).ok()?;
+        let version = envelope.pointer("/data/daemon/version")?.as_str()?;
+        Some(Value::String(version.to_owned()))
+    })
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    fn record(raw: Value) -> CliRecord {
+        serde_json::from_value(raw).unwrap()
+    }
+
+    #[test]
+    fn runtime_identity_comes_only_from_a_successful_guest_response() {
+        let response = || {
+            record(serde_json::json!({"stream":"stdout", "line":
+            r#"{"data":{"daemon":{"version":"0.14.1-beta.2"}}}"#}))
+        };
+        assert_eq!(
+            running_version(vec![response(), record(serde_json::json!({"exit":0}))]),
+            Some(Value::String("0.14.1-beta.2".into()))
+        );
+        assert_eq!(running_version(vec![response()]), None);
+        assert_eq!(
+            running_version(vec![response(), record(serde_json::json!({"exit":1}))]),
+            None
+        );
+        assert_eq!(
+            running_version(vec![
+                record(serde_json::json!({"stream":"stdout", "line":
+            r#"{"data":{"version":"0.13.0-beta.2"}}"#})),
+                record(serde_json::json!({"exit":0}))
+            ]),
+            None
+        );
+    }
+}
+
 async fn collect(argv: Vec<String>) -> Result<Vec<CliRecord>, String> {
     let (url, _) = admission()?;
     let cwd = caller_cwd();

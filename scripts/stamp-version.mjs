@@ -1,25 +1,9 @@
 #!/usr/bin/env node
 // The version of the product, written in at build time.
 //
-// The product's version is the git tag, and nothing in the tree claims to know it:
-// the three files below hold 0.0.0, meaning "this build was never released", and
-// the release workflow calls this script with the tag just before it builds. So a
-// release is a tag and nothing else — no version commit, no file to remember.
-//
-// It works this way because the other way was tried: three numbers maintained by
-// hand sat at 0.1.0 through seventeen tagged releases, and every installed copy
-// reported 0.1.0 to its own workbench. A number that a human has to copy into
-// three places is a number that will be wrong, and the only cure that holds is
-// nobody having to copy it anywhere.
-//
-// Why a script rather than `version.workspace = true` everywhere: Cargo can
-// inherit a version only inside one workspace and cannot read another file at all,
-// and the desktop shell sits outside the workspace on purpose (root `Cargo.toml`
-// says why). Its manifest has to carry a literal, so something has to write it.
-//
-//   node scripts/stamp-version.mjs 0.1.18                 write a version
-//   node scripts/stamp-version.mjs --from-tag             write the tag being built, if there is one
-//   node scripts/stamp-version.mjs --verify <binary>      check a built binary reports what it should
+// App CI explicitly supplies its authorized tag; Live publishers supply the product
+// version from their release plan. Never infer the page product version with git describe.
+// The source keeps 0.0.0; these mutations only belong in an isolated build checkout.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -28,6 +12,8 @@ import { fileURLToPath } from "node:url";
 
 // What a build nobody released calls itself. Also the value sitting in the
 // tree, so `git diff` after a release build shows exactly what CI wrote.
+import { parseProductVersion } from "./product-version.mjs";
+
 const UNRELEASED = "0.0.0";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -71,6 +57,7 @@ function rewriteVersion(path, sectionStart, pattern, version) {
 }
 
 function write(version) {
+  parseProductVersion(version);
   // The workspace number, which the daemon, the agent, the protocol crate and
   // the test harness all inherit.
   rewriteVersion(join(repo, "Cargo.toml"), /^\[workspace\.package\]/, /^(version = ").*(")$/, version);

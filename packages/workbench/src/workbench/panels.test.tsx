@@ -779,14 +779,14 @@ describe("the version section", () => {
 
     expect(await screen.findByTestId("app-version")).toHaveTextContent(shownVersion);
     expect(screen.getByTestId("daemon-version")).toHaveTextContent(
-      `daemon ${shownVersion} · Live`,
+      `daemon ${shownVersion}`,
     );
     // The page is a third artefact, deployed on its own schedule, and the two
     // numbers above say nothing about it. An hour went once on a phone that was
     // three releases behind while the screen said "daemon 0.1.21" and looked
     // right. Only that a build is named — the name itself is a bundle-time
     // stamp, which is not this file's to predict.
-    expect(screen.getByTestId("page-build")).toHaveTextContent(/页面（console） \S/);
+    expect(screen.getByTestId("page-build")).toHaveTextContent(/GeneHub Web/);
     // Nothing is asked until the button is pressed. An outbound call on mount is
     // the thing this design is avoiding.
     expect(calls.some((call) => call.type === "update.check")).toBe(false);
@@ -956,7 +956,8 @@ describe("the version section", () => {
       />,
     );
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("只装了一半");
+    expect(await screen.findByText(/Live 更新后可以保持旧 App/)).toBeInTheDocument();
+    expect(screen.queryByText(/只装了一半/)).toBeNull();
   });
 
   it("asks the daemon about both updates when controlling a remote machine", async () => {
@@ -1004,7 +1005,7 @@ describe("the version section", () => {
     render(<SettingsPanel host={browserHost()} />);
 
     expect(await screen.findByTestId("daemon-version")).toHaveTextContent(
-      `daemon ${shownVersion} · Live`,
+      `daemon ${shownVersion}`,
     );
     expect(screen.getByTestId("browser-no-app")).toHaveTextContent("浏览器（无安装包版本）");
     expect(screen.queryByTestId("app-version")).toBeNull();

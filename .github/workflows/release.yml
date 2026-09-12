@@ -99,12 +99,12 @@ jobs:
           if [[ "$tag" == v* ]]; then
             case "$tag" in
               v[0-9]*.[0-9]*.0-beta.[0-9]*)  want=beta ;;
-              v0.0.0-dev.[0-9]*)             want=dev ;;
+              v[0-9]*.[0-9]*.0-dev.[0-9]*)   want=dev ;;
               v[0-9]*.[0-9]*.0)              want=stable ;;
               v[0-9]*.[0-9]*.[0-9]*-beta.[0-9]*|v[0-9]*.[0-9]*.[0-9]*)
                 echo "::error::'$tag' carries a nonzero Live digit — App Releases are always X.Y.0; the Live digit ships through the component channel, never through a tag"
                 exit 1 ;;
-              *) echo "::error::'$tag' is neither vX.Y.0 nor vX.Y.0-beta.N nor v0.0.0-dev.N — no such release"; exit 1 ;;
+              *) echo "::error::'$tag' is neither vX.Y.0 nor vX.Y.0-beta.N nor vX.Y.0-dev.N — no such release"; exit 1 ;;
             esac
           fi
           channel="$(node scripts/channel.mjs --detect)"
@@ -113,20 +113,17 @@ jobs:
             exit 1
           fi
 
-          # Number discipline the checklist cannot enforce: once a minor has
-          # shipped on stable, a beta of that same minor is an update
-          # that is older than what its testers already run. Betas live
-          # strictly on the next minor. Dev tags are always 0.0.0-dev.N and
-          # stay off the product version line, so no such check applies.
+          # Beta must advance beyond Stable using the complete numeric version,
+          # including epoch. Dev slots do not compare with the Stable channel.
           if [[ "$channel" == beta ]] && [[ "$tag" == v* ]]; then
             latest_stable="$(gh release view --json tagName -q .tagName || true)"
             if [ -n "$latest_stable" ]; then
-              pre_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$tag")"
-              stable_minor="$(sed 's/^v[0-9]*\.\([0-9]*\)\..*/\1/' <<<"$latest_stable")"
-              if [ "$pre_minor" -le "$stable_minor" ]; then
-                echo "::error::$tag is a beta of minor $pre_minor, but $latest_stable already shipped — betas start at 0.$((stable_minor + 1)).0-beta.1"
-                exit 1
-              fi
+              TAG_VERSION="${tag#v}" STABLE_VERSION="${latest_stable#v}" node --input-type=module -e '
+                import { compareProductVersions, versionForChannel } from "./scripts/product-version.mjs";
+                const beta = versionForChannel(process.env.TAG_VERSION, "beta");
+                const stable = versionForChannel(process.env.STABLE_VERSION, "stable");
+                if (compareProductVersions(beta, stable) <= 0) throw new Error(`App beta ${beta} must advance beyond Stable ${stable}`);
+              '
             fi
           fi
 
@@ -210,18 +207,14 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/stamp-version.mjs --from-tag
+          if [[ "$GITHUB_REF_NAME" == v[0-9]* ]]; then
+            echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_VERSION=0.0.0" >> "$GITHUB_ENV"
+          fi
+          echo "VITE_GENEHUB_CHANNEL=${{ needs.channel.outputs.name }}" >> "$GITHUB_ENV"
           node scripts/channel.mjs --from-tag
           . scripts/channel.env
-          if [[ "$CHANNEL" == stable ]]; then
-            cargo build --release -p genehub-guest --target wasm32-wasip2
-            raw=target/wasm32-wasip2/release/genehub_guest.wasm
-          else
-            cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
-            raw=target/wasm32-wasip2/iterate/genehub_guest.wasm
-          fi
-          cargo build --profile iterate -p genehub-host
-          host_bin="target/iterate/$HOST_BINARY"
-          mkdir -p dist
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             case "$CHANNEL" in
               beta) manifest=latest-beta.json ;;
@@ -232,23 +225,21 @@ jobs:
             # An App Release takes the tag's Product Version and it must move
             # the channel forward: anything at or below the public manifest
             # would be an anti-rollback violation on every installed host.
-            version="$(CHANNEL="$CHANNEL" TAG_VERSION="${GITHUB_REF_NAME#v}" MANIFEST_URL="$HUB_URL/artifacts/manifests/component/$manifest" node --input-type=module -e '
-              import { compareProductVersions } from "./scripts/product-version.mjs";
-              const tag = process.env.TAG_VERSION;
-              const response = await fetch(process.env.MANIFEST_URL, {
-                cache: "no-store",
-                redirect: "error",
-                signal: AbortSignal.timeout(30_000),
-              });
-              if (response.status !== 404) {
-                if (!response.ok) throw new Error(`release manifest returned ${response.status}`);
+            version="$(CHANNEL="$CHANNEL" TAG_VERSION="${GITHUB_REF_NAME#v}" MANIFEST_BASE="$HUB_URL/artifacts/manifests" MANIFEST_NAME="$manifest" node --input-type=module -e '
+              import { compareProductVersions, versionForChannel, parseProductVersion } from "./scripts/product-version.mjs";
+              const tag = versionForChannel(process.env.TAG_VERSION, process.env.CHANNEL);
+              if (parseProductVersion(tag).live !== 0) throw new Error("App tag must have Live digit zero");
+              for (const [kind, schema] of [["component", "genehub.release-manifest.v2"], ["product", "genehub.release-set.v2"]]) {
+                const response = await fetch(`${process.env.MANIFEST_BASE}/${kind}/${process.env.MANIFEST_NAME}`, {
+                  cache: "no-store", redirect: "error", signal: AbortSignal.timeout(30_000),
+                });
+                if (response.status === 404) continue; // first release or pre-inventory migration
+                if (!response.ok) throw new Error(`${kind} manifest returned ${response.status}`);
                 const body = await response.json();
-                if (body.schema !== "genehub.release-manifest.v2" || body.channel !== process.env.CHANNEL ||
-                    typeof body.releaseVersion !== "string") {
-                  throw new Error("current release manifest has an invalid identity");
-                }
+                if (body.schema !== schema || body.channel !== process.env.CHANNEL) throw new Error(`${kind} manifest has an invalid identity`);
+                versionForChannel(body.releaseVersion, process.env.CHANNEL);
                 if (compareProductVersions(body.releaseVersion, tag) >= 0) {
-                  throw new Error(`tag ${tag} does not move the channel past ${body.releaseVersion}`);
+                  throw new Error(`tag ${tag} does not move the channel past ${kind} ${body.releaseVersion}`);
                 }
               }
               process.stdout.write(tag);
@@ -256,6 +247,16 @@ jobs:
           else
             version="0.0.0-dev.1"
           fi
+          if [[ "$CHANNEL" == stable ]]; then
+            cargo build --release -p genehub-guest --target wasm32-wasip2
+            raw=target/wasm32-wasip2/release/genehub_guest.wasm
+          else
+            cargo build --profile iterate -p genehub-guest --target wasm32-wasip2
+            raw=target/wasm32-wasip2/iterate/genehub_guest.wasm
+          fi
+          cargo build --profile iterate -p genehub-host
+          host_bin="target/iterate/$HOST_BINARY"
+          mkdir -p dist
           # One self-contained development root signs every channel for now;
           # the stable line reintroduces external keys when it graduates.
           "$host_bin" pack "$raw" dist/genehub_guest.wasm "$CHANNEL" "$version"
@@ -323,6 +324,12 @@ jobs:
       # no workflow has to repeat it.
       - run: |
           node scripts/stamp-version.mjs --from-tag
+          if [[ "$GITHUB_REF_NAME" == v[0-9]* ]]; then
+            echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_VERSION=0.0.0" >> "$GITHUB_ENV"
+          fi
+          echo "VITE_GENEHUB_CHANNEL=${{ needs.channel.outputs.name }}" >> "$GITHUB_ENV"
           node scripts/channel.mjs --from-tag
         shell: bash
 
@@ -529,6 +536,12 @@ jobs:
       # come from.
       - run: |
           node scripts/stamp-version.mjs --from-tag
+          if [[ "$GITHUB_REF_NAME" == v[0-9]* ]]; then
+            echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_VERSION=0.0.0" >> "$GITHUB_ENV"
+          fi
+          echo "VITE_GENEHUB_CHANNEL=${{ needs.channel.outputs.name }}" >> "$GITHUB_ENV"
           node scripts/channel.mjs --from-tag
         shell: bash
       # The CLI and the wasm shell for the host target; the guest component
@@ -603,6 +616,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
       # Only this run's release outputs belong in the release. The `verify`
       # reusable CI runs in the same run id and uploads open-ci-bins /
       # open-ci-relay-dist; an unfiltered merge-multiple download pulled those
@@ -624,7 +643,10 @@ jobs:
           name: guest-wasm-release
           path: component
       - name: Include the exact signed guest in the release
-        run: cp component/genehub_guest.wasm dist/genehub_guest.wasm
+        run: |
+          cp component/genehub_guest.wasm dist/genehub_guest.wasm
+          cp component/component-identity.json dist/component-identity.json
+          node scripts/app-release-identity.mjs --dist dist --version "${GITHUB_REF_NAME#v}" --channel "${{ needs.channel.outputs.name }}" --open-sha "$(git rev-parse HEAD)"
       - run: ls -la dist
       # A fixed address for "what is the newest version", so the app's 检查更新
       # has something to ask that is not the GitHub API: 60 requests an hour is
