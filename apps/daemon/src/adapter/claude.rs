@@ -273,13 +273,26 @@ impl ClaudeAdapter {
                 // than trusting set_permission_mode (some builds accept unknowns).
                 if !text.contains("--permission-mode") {
                     let mut modes = Vec::new();
-                    for mode in [
-                        "manual",
-                        "default",
-                        MODE_ACCEPT_EDITS,
-                        MODE_PLAN,
-                        MODE_BYPASS,
-                    ] {
+                    // Current Claude and TClaude builds publish `manual`; some
+                    // newer parsers also accept the undocumented alias
+                    // `default`. Prefer the published spelling when both work,
+                    // while retaining `default` as a compatibility fallback.
+                    for mode in ["manual", "default"] {
+                        let mut command = Command::new(program);
+                        command
+                            .args(&help_args[..help_args.len() - 1])
+                            .args(["--permission-mode", mode, "--version"])
+                            .kill_on_drop(true);
+                        if let Ok(Ok(output)) =
+                            tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
+                        {
+                            if output.status.success() {
+                                modes.push(mode);
+                                break;
+                            }
+                        }
+                    }
+                    for mode in [MODE_ACCEPT_EDITS, MODE_PLAN, MODE_BYPASS] {
                         let mut command = Command::new(program);
                         command
                             .args(&help_args[..help_args.len() - 1])
@@ -2434,7 +2447,6 @@ mod tests {
             concat!(
                 "--\n--help\n",
                 "--\n--permission-mode\nmanual\n--version\n",
-                "--\n--permission-mode\ndefault\n--version\n",
                 "--\n--permission-mode\nacceptEdits\n--version\n",
                 "--\n--permission-mode\nplan\n--version\n",
                 "--\n--permission-mode\nbypassPermissions\n--version\n",
