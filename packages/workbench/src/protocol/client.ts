@@ -847,8 +847,7 @@ export class Client {
       onError: (error) => this.report(error),
     }).then(
       async (link) => {
-        this.dialingTransport = false;
-        if (!this.isCurrentEpoch(epoch)) {
+        if (!this.finishFabricDial(epoch)) {
           link.close();
           return;
         }
@@ -869,12 +868,22 @@ export class Client {
         }
       },
       (error: unknown) => {
-        this.dialingTransport = false;
-        if (!this.isCurrentEpoch(epoch)) return;
+        if (!this.finishFabricDial(epoch)) return;
         this.report(error);
         this.droppedTransport(epoch);
       },
     );
+  }
+
+  private finishFabricDial(epoch: symbol): boolean {
+    // A terminal logical-session error can clear the endpoint while attach is
+    // still pending. Its close callback cannot redial until this attempt ends.
+    // A callback from an older attempt must never clear a newer dial's guard.
+    if (this.epoch !== null && this.epoch !== epoch) return false;
+    this.dialingTransport = false;
+    if (this.isCurrentEpoch(epoch)) return true;
+    if (!this.endpoint) this.scheduleReconnect();
+    return false;
   }
 
   private async establish(socket: WebSocketLike, epoch: symbol): Promise<void> {

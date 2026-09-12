@@ -38,7 +38,7 @@ import {
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
-import { ConnectionOutcomeUnknownError } from "../protocol/client";
+import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
   recallRuntimeChoice,
@@ -526,6 +526,10 @@ let reconnectNotice: string | null = null;
  */
 let connectionLossNotice: string | null = null;
 
+// Only a successful list read on the same client resolves a list timeout.
+// Keep unrelated operation errors visible, including errors with similar text.
+let sessionListTimeoutNotice: { client: Client; message: string } | null = null;
+
 /**
  * The message of an error that is a dropped connection speaking, or null for
  * anything else. `ConnectionOutcomeUnknownError` covers requests in flight;
@@ -544,6 +548,7 @@ function connectionLossMessage(error: unknown): string | null {
  * speaking, so the banner can be withdrawn when the connection returns.
  */
 function reportError(set: Setter, error: unknown): void {
+  sessionListTimeoutNotice = null;
   const message = error instanceof Error ? error.message : String(error);
   if (connectionLossMessage(error)) connectionLossNotice = message;
   set({ notice: message });
@@ -671,6 +676,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     // Subscriptions belong to the client that made them. This one has never
     // subscribed to anything, and saying otherwise is how a session opened
     // before a machine switch ends up with no live stream at all.
+    sessionListTimeoutNotice = null;
     set({ client, notice: null, subscribedSessionIds: [], subscriptionOwner: null });
     client.onStateChange((connection) => {
       set({ connection });
@@ -742,7 +748,13 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   async refreshSessions() {
     const client = get().client;
     if (!client) return;
-    await loadSessions(client, set).catch(unattended(client, get, set));
+    await loadSessions(client, set).catch((error: unknown) => {
+      if (get().client !== client) return;
+      reportError(set, error);
+      if (error instanceof ClientRequestTimeoutError) {
+        sessionListTimeoutNotice = { client, message: error.message };
+      }
+    });
   },
 
   async openWorkspace(root) {
@@ -2277,7 +2289,16 @@ async function loadSessions(client: Client, set: Setter): Promise<SessionSummary
     payload: { workspaceId: null, includeArchived: false },
   });
   if (reply?.type !== "sessions") return [];
-  set({ sessions: reply.data });
+  const timeout = sessionListTimeoutNotice;
+  set((state) => {
+    if (state.client !== client) return {};
+    const resolved = timeout?.client === client;
+    if (resolved && sessionListTimeoutNotice === timeout) sessionListTimeoutNotice = null;
+    return {
+      sessions: reply.data,
+      ...(resolved && state.notice === timeout.message ? { notice: null } : {}),
+    };
+  });
   return reply.data;
 }
 
