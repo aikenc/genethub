@@ -238,11 +238,27 @@ async fn authorize_session_request(
     let Some(target) = target else {
         return Ok(());
     };
-    let summary = state
-        .sessions
-        .summary(target)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
+    let summary = match state.sessions.summary(target).await {
+        Ok(summary) => summary,
+        // Process ownership is checked by the process registry itself. Let an
+        // ordinary caller reach that check when the Session record is already
+        // gone: killing one process then remains `notFound`, while `kill all`
+        // remains an idempotent desired-state cleanup. Session-bound Agents
+        // still take the normal path so a made-up id cannot bypass their child
+        // boundary.
+        Err(error) => {
+            if caller.session_controller_id().is_none()
+                && matches!(
+                    request,
+                    Request::ProcessKill { .. } | Request::ProcessKillAll { .. }
+                )
+                && error.is::<crate::session::manager::SessionMissing>()
+            {
+                return Ok(());
+            }
+            return Err(format!("{error:#}"));
+        }
+    };
     match (caller.session_controller_id(), summary.managed) {
         (Some(controller), Some(managed)) if managed.parent_session_id == controller => Ok(()),
         (Some(controller), Some(_)) if !matches!(request, Request::SessionRespondPermission { .. }) => {

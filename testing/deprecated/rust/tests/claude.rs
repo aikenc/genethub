@@ -422,6 +422,8 @@ async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
     let Reply::Snapshot(snapshot) = journey
         .client
         .call(Request::SessionGet {
+            recent_rounds: None,
+            before_item_id: None,
             session_id: session.clone(),
         })
         .await

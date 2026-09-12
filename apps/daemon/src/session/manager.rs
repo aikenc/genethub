@@ -2096,7 +2096,11 @@ impl SessionManager {
         let index = {
             let active = live.active_round.lock().await;
             let round = active.as_ref()?;
-            if round.outcome.is_some() || round.round_id != view.round_id {
+            // A terminal records its outcome before finish_trunk has completed.
+            // Keep that settling trunk readable until its items move to the
+            // closed index; otherwise list followed by get can transiently
+            // report "no such trunk" at the exact end of a turn.
+            if round.round_id != view.round_id {
                 return None;
             }
             round.closed_trunks.len() as u32
@@ -4336,9 +4340,6 @@ impl Live {
             // would wedge the round. The trunk is lost; the round is not.
             tracing::error!("could not write trunk {index} of {}: {error}", meta.id);
         }
-        if let Some(round) = self.active_round.lock().await.as_mut() {
-            round.closed_trunks.push(trunk.summary);
-        }
         let ids: Vec<String> = std::mem::take(&mut *self.open_trunk_items.lock().await);
         let mut refs = self.blob_refs.lock().await;
         for id in &ids {
@@ -4349,6 +4350,12 @@ impl Live {
             .lock()
             .await
             .retain(|item| !(store::is_work_item(item) && ids.iter().any(|id| id == item.id())));
+        // Publish the closed index only after the same items stop presenting
+        // as an open trunk. The file is already durable above, so readers see
+        // either the in-memory trunk or its closed summary, never both.
+        if let Some(round) = self.active_round.lock().await.as_mut() {
+            round.closed_trunks.push(trunk.summary);
+        }
     }
 
     /// What this turn has said so far, in the order it was said.
