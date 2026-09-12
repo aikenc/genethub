@@ -566,14 +566,17 @@ fn real_api_key() -> Result<String> {
         let config = PathBuf::from(home).join(".local/share/GeneHub-beta/config.json");
         if let Ok(bytes) = std::fs::read(config) {
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(key) = value.pointer("/agents/providers/deepseek/apiKey").and_then(|v| v.as_str()).filter(|key| !key.is_empty()) {
+                if let Some(key) = value
+                    .pointer("/agents/providers/deepseek/apiKey")
+                    .and_then(|v| v.as_str())
+                    .filter(|key| !key.is_empty())
+                {
                     return Ok(key.to_owned());
                 }
             }
         }
     }
-    let env_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../.env");
+    let env_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.env");
     let contents = std::fs::read_to_string(&env_file).with_context(|| {
         format!(
             "JOURNEY_LLM=real needs DEEPSEEK_API_KEY, and {} could not be read",

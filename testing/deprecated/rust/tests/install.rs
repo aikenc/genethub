@@ -50,7 +50,10 @@ fn installing_puts_binaries_and_logic_where_the_path_can_find_them() {
         assert!(ran.status.success(), "{binary} did not run");
     }
 
-    assert_eq!(fs::read(bin.join("genehub_guest.wasm")).expect("installed component"), b"fixture-component");
+    assert_eq!(
+        fs::read(bin.join("genehub_guest.wasm")).expect("installed component"),
+        b"fixture-component"
+    );
     let said = String::from_utf8_lossy(&output.stdout);
     // The installer cannot edit someone's shell profile behind their back, so
     // the least it can do is say the directory is not on PATH.
@@ -117,9 +120,10 @@ fn unsafe_download_bases_are_refused_before_fetching() {
 
 #[test]
 fn every_fetch_is_pinned_to_https_including_redirects() {
-    let script =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh"))
-            .expect("read install.sh");
+    let script = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/install.sh"),
+    )
+    .expect("read install.sh");
     assert!(script.contains("--proto '=https'"));
     assert!(script.contains("--proto-redir '=https'"));
     assert!(script.contains("--max-redirs 5"));
@@ -228,7 +232,8 @@ fn fake_release() -> TempDir {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
-    fs::write(staged.join("genehub_guest.wasm"), b"fixture-component").expect("write component fixture");
+    fs::write(staged.join("genehub_guest.wasm"), b"fixture-component")
+        .expect("write component fixture");
     let asset = dir.path().join(asset_name());
     let tar = Command::new("tar")
         .arg("-czf")
