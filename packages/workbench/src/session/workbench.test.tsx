@@ -2,7 +2,6 @@ import type {
   AgentInfo,
   RoundLayer,
   RoundTrunk,
-  SessionSummary,
   TimelineItem,
   WorkspaceInfo,
 } from "@genehub/proto";
