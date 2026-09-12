@@ -158,8 +158,6 @@ async function main(): Promise<number> {
       artifact: artifactIdentity(openRoot),
       bundle: artifactBundleIdentity(openRoot, cloudRoot),
     });
-    const inputsAtStart = captureInputs();
-    const inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle.files.map(f => f.path));
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const plan = planCases(cases, gate, tagsOf(args));
     const preflight = preflightRun({
@@ -172,6 +170,9 @@ async function main(): Promise<number> {
       process.stderr.write(`${preflight.refusals.join("\n")}\n`);
       return 2;
     }
+    // Preflight may rebuild artifacts; freeze the inputs only after it succeeds.
+    const inputsAtStart = captureInputs();
+    const inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle.files.map(f => f.path));
     const store = createRunStore(space, topic);
     const startedAt = new Date();
     const results: UnitResult[] = [];
