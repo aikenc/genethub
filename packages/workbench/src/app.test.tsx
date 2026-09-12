@@ -65,48 +65,17 @@ describe("the app as the browser loads it", () => {
 
     // Anything at all from the workbench shell proves the tree survived; the
     // failure mode is an empty root, not a wrong pixel.
-    expect(await screen.findByRole("status")).toBeInTheDocument();
-    // Two of them, and only ever one on screen: the phone's header carries its
-    // own, because the sidebar it would otherwise live in is a drawer.
-    expect(
-      screen.getAllByRole("button", { name: "新建会话" }),
-    ).not.toHaveLength(0);
-    expect(screen.getByRole("button", { name: "打开右侧工具" })).toBeInTheDocument();
-
-    screen.getByRole("button", { name: "工具" }).click();
-    const tools = screen.getByRole("complementary", { name: "工具" });
-    expect(within(tools).getByRole("button", { name: "文件" })).toBeInTheDocument();
-    expect(within(tools).getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(within(tools).getByRole("button", { name: "设备" })).toBeInTheDocument();
-    expect(within(tools).getByRole("button", { name: "联调" })).toBeInTheDocument();
-    expect(document.querySelector("[data-genehub-client-debug] button")).toBeNull();
-    expect(within(tools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
-    expect(within(tools).getByText("工作区")).toBeInTheDocument();
-    expect(within(tools).getByText("全局")).toBeInTheDocument();
-    const scale = within(tools).getByRole("group", { name: "界面大小" });
-    expect(within(scale).getByText("界面大小")).toBeInTheDocument();
-    expect(within(tools).getByRole("button", { name: "缩小界面" })).toBeInTheDocument();
-    expect(within(tools).getByRole("button", { name: "放大界面" })).toBeInTheDocument();
-    expect(within(tools).getByText("中")).toBeInTheDocument();
-
-    screen.getByRole("button", { name: "打开右侧工具" }).click();
-    const desktopTools = screen.getByRole("complementary", { name: "右侧工具" });
-    expect(within(desktopTools).getByRole("button", { name: "变更" })).toBeInTheDocument();
-    expect(within(desktopTools).getByRole("button", { name: "文件" })).toBeInTheDocument();
-    expect(within(desktopTools).getByRole("button", { name: "设置" })).toBeInTheDocument();
-    expect(within(desktopTools).getByRole("button", { name: "联调" })).toBeInTheDocument();
-    expect(within(desktopTools).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
-    within(desktopTools).getByRole("button", { name: "变更" }).click();
-    expect(useWorkbench.getState().rightPanel).toBe("changes");
-
-    await userEvent.click(screen.getAllByRole("button", { name: "会话与工作区" })[0]!);
-    const menu = screen.getByRole("menu", { name: "会话与工作区" });
-    expect(within(menu).getByRole("menuitem", { name: "打开工作区" })).toBeInTheDocument();
-    expect(within(menu).getByRole("menuitem", { name: "导入会话" })).toBeInTheDocument();
-    expect(within(menu).getByRole("menuitem", { name: "搜索会话" })).toBeInTheDocument();
-    expect(within(menu).queryByRole("menuitem", { name: "设置" })).not.toBeInTheDocument();
-    expect(within(menu).queryByRole("menuitem", { name: "文件" })).not.toBeInTheDocument();
-    expect(within(menu).queryByRole("button", { name: "反馈问题" })).not.toBeInTheDocument();
+    expect(await screen.findAllByRole("status")).not.toHaveLength(0);
+    const navigation = screen.getByRole("navigation", { name: "工作台导航" });
+    for (const label of ["会话", "专家", "发现", "设置"]) {
+      expect(within(navigation).getByRole("button", { name: label })).toBeInTheDocument();
+    }
+    await userEvent.click(within(navigation).getByRole("button", { name: "设置" }));
+    const settings = screen.getByRole("region", { name: "全局设置" });
+    expect(within(settings).getByRole("button", { name: "日志" })).toBeInTheDocument();
+    expect(within(settings).getByRole("button", { name: "设备" })).toBeInTheDocument();
+    expect(within(settings).getByRole("button", { name: "反馈问题" })).toBeInTheDocument();
+    expect(within(settings).getByRole("group", { name: "界面大小" })).toBeInTheDocument();
   });
 
   it("hands the empty case to whoever embedded it, when they have something to offer", async () => {
@@ -192,7 +161,7 @@ describe("the app as the browser loads it", () => {
     };
 
     render(<App host={host} />);
-    await screen.findByRole("status");
+    await screen.findAllByRole("status");
     ask();
 
     // Landing on settings with nothing new on it would look like the menu item
@@ -205,7 +174,7 @@ describe("the app as the browser loads it", () => {
     );
   });
 
-  it("says why the tray's link could not be minted", async () => {
+  it("records why the tray's link could not be minted in the interface log", async () => {
     // The common case for this: a machine that was never connected to a Hub, so
     // there is no identity to share. Swallowing that leaves a menu item that
     // looks broken rather than one that explained itself.
@@ -231,12 +200,12 @@ describe("the app as the browser loads it", () => {
     };
 
     render(<App host={host} />);
-    await screen.findByRole("status");
+    await screen.findAllByRole("status");
     ask();
 
-    expect(
-      await screen.findByText("这台机器还没有连到 Hub"),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(useWorkbench.getState().interfaceLogs.at(-1)?.message).toBe("这台机器还没有连到 Hub"),
+    );
   });
 
   it("reports an E2EE identity failure rather than blaming network reachability", async () => {
@@ -279,11 +248,11 @@ describe("the app as the browser loads it", () => {
 
   it("opens one connection and keeps it across re-renders", async () => {
     render(<App />);
-    await screen.findByRole("status");
+    await screen.findAllByRole("status");
 
     // Something unrelated changes, the way an incoming event would change it.
     useWorkbench.setState({ notice: "anything" });
-    await waitFor(() => expect(screen.getByRole("status")).toBeInTheDocument());
+    await waitFor(() => expect(useWorkbench.getState().notice).toBe("anything"));
 
     expect(sockets).toBe(1);
   });

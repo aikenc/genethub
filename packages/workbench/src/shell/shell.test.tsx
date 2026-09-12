@@ -225,7 +225,7 @@ describe("the strip along the top", () => {
     );
 
     await userEvent.click(screen.getByRole("menuitem", { name: "文件" }));
-    expect(screen.getByRole("menuitem", { name: "打开工作区…" })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: "打开专家…" })).toBeDisabled();
     expect(pickDirectory).not.toHaveBeenCalled();
   });
 

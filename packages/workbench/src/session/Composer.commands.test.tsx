@@ -123,7 +123,7 @@ describe("the slash command menu", () => {
     await userEvent.type(input, "/");
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /Agent：claude/ }));
+    await userEvent.click(screen.getByRole("button", { name: /执行引擎：claude/ }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "关闭运行设置" }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();

@@ -398,14 +398,16 @@ describe("switching from the sidebar", () => {
     ...overrides,
   });
 
+  const openMachineSwitcher = async () => {
+    await userEvent.click(await screen.findByRole("button", { name: "设置" }));
+    await userEvent.click(await screen.findByRole("button", { name: /切换机器/ }));
+  };
+
   it("names the machine everything below it belongs to", async () => {
     render(<App host={host()} connect={() => stubClient()} />);
 
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /这台电脑/ }),
-      ).toBeInTheDocument(),
-    );
+    await openMachineSwitcher();
+    expect(screen.getByRole("option", { name: /这台电脑/ })).toBeInTheDocument();
   });
 
   it("points the workbench at another machine, credential and all", async () => {
@@ -413,7 +415,7 @@ describe("switching from the sidebar", () => {
     render(<App host={host()} connect={connect} />);
 
     await waitFor(() => expect(connect).toHaveBeenCalled());
-    await userEvent.click(screen.getByRole("button", { name: /这台电脑/ }));
+    await openMachineSwitcher();
     await userEvent.click(
       await screen.findByRole("option", { name: /工作机/ }),
     );
@@ -782,7 +784,7 @@ describe("switching from the sidebar", () => {
     );
 
     await waitFor(() => expect(connect).toHaveBeenCalled());
-    await userEvent.click(screen.getByRole("button", { name: /这台电脑/ }));
+    await openMachineSwitcher();
     await userEvent.click(
       await screen.findByRole("option", { name: /工作机/ }),
     );
@@ -804,7 +806,7 @@ describe("switching from the sidebar", () => {
     render(<App host={host({ openTarget })} connect={connect} />);
 
     await waitFor(() => expect(connect).toHaveBeenCalled());
-    await userEvent.click(screen.getByRole("button", { name: /这台电脑/ }));
+    await openMachineSwitcher();
     await userEvent.click(
       await screen.findByRole("option", { name: /工作机/ }),
     );
@@ -828,11 +830,9 @@ describe("switching from the sidebar", () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(screen.getByText("新建会话")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "会话" })).toBeInTheDocument());
     expect(
-      screen.queryByRole("button", { name: /这台电脑/ }),
+      screen.queryByRole("button", { name: /切换机器/ }),
     ).not.toBeInTheDocument();
   });
 });

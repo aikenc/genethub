@@ -90,7 +90,7 @@ function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {
   return callbacks;
 }
 
-async function openSettings(name: RegExp = /Agent：/) {
+async function openSettings(name: RegExp = /执行引擎：/) {
   const trigger = screen.getByRole("button", { name });
   await userEvent.click(trigger);
   return { trigger, dialog: screen.getByRole("dialog", { name: "Agent 与运行设置" }) };
@@ -101,7 +101,7 @@ describe("the compact runtime summary", () => {
     controls();
     expect(
       screen.getByRole("button", {
-        name: "Agent：GeneHub Agent；模型：DeepSeek V4 Long；思考强度：中",
+        name: "执行引擎：GeneHub Agent；模型：DeepSeek V4 Long；思考强度：中",
       }),
     ).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByText("DeepSeek…")).toBeInTheDocument();
@@ -154,7 +154,7 @@ describe("the compact runtime summary", () => {
       },
     };
     controls({ agents: [emptyAxes] });
-    const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
+    const summary = screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ });
     expect(summary).not.toHaveAccessibleName(/思考强度|权限|模式/);
   });
 });
@@ -197,7 +197,7 @@ describe("the rich runtime settings panel", () => {
     const codex = { ...AGENTS[1]!, id: "codex", label: "Codex" };
     const onPickAgent = vi.fn();
     controls({ agents: [unavailable, codex], onPickAgent });
-    const { dialog } = await openSettings(/Agent：GeneHub Agent（不可用：请先登录）/);
+    const { dialog } = await openSettings(/执行引擎：GeneHub Agent（不可用：请先登录）/);
 
     const bound = within(dialog).getByRole("tab", { name: "GeneHub Agent 不可用：请先登录" });
     expect(bound).toHaveAttribute("aria-selected", "true");
@@ -209,7 +209,7 @@ describe("the rich runtime settings panel", () => {
   it("keeps a removed custom Agent as an unavailable tombstone", async () => {
     controls({ agents: [AGENTS[0]!], agentId: "acp:retired" });
     const { dialog } = await openSettings(
-      /Agent：acp:retired（不可用：已从当前 Agent 配置中移除）/,
+      /执行引擎：acp:retired（不可用：已从当前 Agent 配置中移除）/,
     );
     expect(
       within(dialog).getByRole("tab", {
@@ -270,7 +270,7 @@ describe("the rich runtime settings panel", () => {
       onPickRuntimeAxis,
     });
     expect(screen.getByRole("button", { name: /Fast：快速/ })).toBeInTheDocument();
-    const { dialog } = await openSettings(/Agent：Cursor/);
+    const { dialog } = await openSettings(/执行引擎：Cursor/);
     expect(within(dialog).getByRole("radio", { name: "快速" })).toBeChecked();
 
     await userEvent.click(within(dialog).getByRole("radio", { name: "极速" }));
@@ -286,7 +286,7 @@ describe("the rich runtime settings panel", () => {
     const onPickMode = vi.fn();
     controls({ agentId: "claude", onPickMode });
     expect(screen.getByRole("button", { name: /权限：执行前确认/ })).toBeInTheDocument();
-    const { dialog } = await openSettings(/Agent：Claude Code/);
+    const { dialog } = await openSettings(/执行引擎：Claude Code/);
     expect(within(dialog).queryByText("Run without asking")).not.toBeInTheDocument();
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Bypass 说明" }));
@@ -317,7 +317,7 @@ describe("the rich runtime settings panel", () => {
     controls({ agents: [cursor], agentId: "cursor" });
     expect(screen.getByRole("button", { name: /模式：Agent/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /权限：Agent/ })).not.toBeInTheDocument();
-    const { dialog } = await openSettings(/Agent：Cursor/);
+    const { dialog } = await openSettings(/执行引擎：Cursor/);
     expect(within(dialog).getByText("模式")).toBeInTheDocument();
     expect(within(dialog).getAllByText("⚙️")).toHaveLength(2);
   });
@@ -380,7 +380,7 @@ describe("the rich runtime settings panel", () => {
   /** A tab with no bundled brand mark still needs somewhere to look. */
   it("gives an Agent without a bundled icon its initial instead of a gap", async () => {
     controls({ agents: [{ ...AGENTS[1]!, id: "codex", label: "Codex" }], agentId: "codex" });
-    const { dialog } = await openSettings(/Agent：Codex/);
+    const { dialog } = await openSettings(/执行引擎：Codex/);
     expect(within(dialog).getByRole("tab", { name: "Codex" })).toHaveTextContent("CCodex");
   });
 
@@ -453,7 +453,7 @@ describe("the rich runtime settings panel", () => {
     };
     controls({ agents: [cursor], agentId: "cursor" });
     expect(screen.getByText("Cursor")).toBeInTheDocument();
-    const { dialog } = await openSettings(/Agent：Cursor/);
+    const { dialog } = await openSettings(/执行引擎：Cursor/);
     expect(within(dialog).getByText(/将使用它自身的默认配置/)).toBeInTheDocument();
   });
 
@@ -470,7 +470,7 @@ describe("the rich runtime settings panel", () => {
       },
     };
     controls({ agents: [genet] });
-    const { dialog } = await openSettings(/Agent：GeneHub Agent（待配置：请先配置模型服务）/);
+    const { dialog } = await openSettings(/执行引擎：GeneHub Agent（待配置：请先配置模型服务）/);
     expect(
       within(dialog).getByRole("tab", {
         name: "GeneHub Agent 待配置：请先配置模型服务",

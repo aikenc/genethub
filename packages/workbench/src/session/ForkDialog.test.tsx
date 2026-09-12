@@ -145,7 +145,7 @@ describe("ForkDialog", () => {
     release([sourceMachine]);
     await waitFor(() => expect(screen.queryByText("正在读取机器列表…")).not.toBeInTheDocument());
     expect(screen.getByRole("option", { name: /Destination/ })).toBeInTheDocument();
-    expect(screen.getByRole("listbox", { name: "目标工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("listbox", { name: "目标专家" })).toBeInTheDocument();
   });
 
   it("loads only the selected machine's existing workspaces and Agents", async () => {

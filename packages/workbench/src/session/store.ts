@@ -1642,7 +1642,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   setForwardDraft(draft) {
-    const key = forwardKey(get());
+    // An existing-session forward is selected before navigation reaches its
+    // destination. Persist it under that destination up front so
+    // `selectSession` can restore the capsule instead of replacing it with an
+    // empty draft from the newly active conversation.
+    const key = forwardKey(get(), draft?.sessionId ?? undefined);
     forwardMemory.set(key, draft);
     // Capsules remain reviewable after refresh; binary thumbs remain in memory only.
     saveLocalValue(key, draft ? {...draft, attachments: [], sourceTitle: `${draft.sourceTitle ?? "转发内容"}${draft.attachments?.length ? "（刷新后请重新附加图片）" : ""}`} : null);
@@ -2204,7 +2208,14 @@ async function refreshCatalog(
 ): Promise<void> {
   // Agent probing can inspect several installed adapters. It must not delay
   // the workspace list that gives a deep link its project and conversation.
-  const agents = client.call({ type: "agent.list" });
+  // Start the potentially slow probe beside the route-critical workspace
+  // request, but settle it immediately. If workspace loading fails first, a
+  // raw rejected Promise here would otherwise escape after attach has already
+  // reported the useful workspace error.
+  const agents = client.call({ type: "agent.list" }).then(
+    (reply) => ({ reply } as const),
+    (error: unknown) => ({ error } as const),
+  );
   const workspaces = await client.call({ type: "workspace.list" });
   if (useWorkbench.getState().client !== client) return;
   if (workspaces?.type !== "workspaces") {
@@ -2224,7 +2235,9 @@ async function refreshCatalog(
     if (mayLand()) set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
     if (mayLand()) await land(get);
   }
-  const listedAgents = await agents;
+  const listedAgentsResult = await agents;
+  if ("error" in listedAgentsResult) throw listedAgentsResult.error;
+  const listedAgents = listedAgentsResult.reply;
   if (useWorkbench.getState().client !== client) return;
   if (listedAgents?.type === "agents") set({ agents: listedAgents.data });
   // A project with no saved conversation needs an Agent before it can land on

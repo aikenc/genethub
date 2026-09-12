@@ -542,7 +542,7 @@ describe("a message that has been sent and not yet confirmed", () => {
 });
 
 describe("live session status in the sidebar", () => {
-  it("tracks running, waiting, failed and completed events immediately", async () => {
+  it("tracks turn events while preserving an unresolved Human request", async () => {
     const { client, fire } = stubClient();
     useWorkbench.setState({ client });
     await useWorkbench.getState().selectSession("s1");
@@ -593,7 +593,7 @@ describe("live session status in the sidebar", () => {
         },
       },
     });
-    expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("waiting");
   });
 
   it("refreshes the AgentSpace tree when a polled background turn finishes", async () => {
@@ -873,7 +873,10 @@ describe("forking a completed turn", () => {
         target: { agentId: "claude", workspaceId: "w2" },
       },
     });
-    expect(useWorkbench.getState().sessions[0]).toEqual(forked);
+    expect(useWorkbench.getState().sessions[0]).toEqual({
+      ...forked,
+      interactionSummary: { count: 0, requests: [] },
+    });
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });
@@ -1741,7 +1744,7 @@ describe("renaming a workspace", () => {
 });
 
 describe("removing a workspace registration", () => {
-  it("drops its local navigation state while keeping another workspace intact", async () => {
+  it("drops its local navigation state while preserving historical sessions", async () => {
     const first = {
       id: "w1",
       name: "first",
@@ -1761,11 +1764,14 @@ describe("removing a workspace registration", () => {
     const client = {
       unsubscribe,
       call: async (request: { type: string }) => {
+        if (request.type === "workspace.list") {
+          return { type: "workspaces", data: [first, second] };
+        }
         if (request.type === "workspace.remove") {
           return { type: "workspaces", data: [second] };
         }
         if (request.type === "session.list") {
-          return { type: "sessions", data: [other] };
+          return { type: "sessions", data: [SESSION, other] };
         }
         return undefined;
       },
@@ -1787,7 +1793,7 @@ describe("removing a workspace registration", () => {
     await useWorkbench.getState().removeWorkspace("w1");
 
     expect(useWorkbench.getState().workspaces).toEqual([second]);
-    expect(useWorkbench.getState().sessions).toEqual([other]);
+    expect(useWorkbench.getState().sessions).toEqual([SESSION, other]);
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2"]);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
     expect(unsubscribe).toHaveBeenCalledWith("s1");

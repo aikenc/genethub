@@ -2050,9 +2050,9 @@ describe("the controls offered to the user", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByRole("tablist", { name: "Agent" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("tablist", { name: "执行引擎" })).toBeInTheDocument();
     expect(within(dialog).queryByText("模型")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("模式")).not.toBeInTheDocument();
   });
@@ -2072,7 +2072,7 @@ describe("the controls offered to the user", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
     expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeEnabled();
     expect(within(dialog).getByRole("tab", { name: "OpenCode 未安装" })).toBeDisabled();
@@ -2369,7 +2369,7 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 
     const box = screen.getByLabelText("任务描述");
-    const summary = screen.getByRole("button", { name: /Agent：GeneHub Agent/ });
+    const summary = screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ });
     const card = box.closest("[data-composer-card]");
     const inputSlot = box.closest('[data-composer-slot="input"]');
     const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
@@ -2488,7 +2488,7 @@ describe("the controls offered to the user", () => {
 
   it("keeps the rich settings viewable when Agent switching is locked", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
-    await userEvent.click(screen.getByRole("button", { name: /Agent：GeneHub Agent/ }));
+    await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
     const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
     expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeDisabled();
     expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
@@ -2515,7 +2515,7 @@ describe("the controls offered to the user", () => {
 
     await userEvent.click(screen.getByText("允许一次"));
     expect(onAnswer).toHaveBeenCalledWith({ outcome: "selected", optionId: "allow" });
-    expect(screen.getByText("任务已暂停；授权后会以最高权限从原会话继续。")).toBeInTheDocument();
+    expect(screen.getByText("等待你的授权；授权后会以最高权限从原会话继续。")).toBeInTheDocument();
   });
 
   it("distinguishes an Agent question from a permission grant", () => {
@@ -2533,7 +2533,7 @@ describe("the controls offered to the user", () => {
     );
 
     expect(screen.getByLabelText("Agent 提问")).toBeInTheDocument();
-    expect(screen.getByText("任务已暂停；回答后会从原会话继续。")).toBeInTheDocument();
+    expect(screen.getByText("等待你的回答；提交后会继续处理原问题。")).toBeInTheDocument();
   });
 
   it("labels plan approval as a stopped plan decision", () => {
@@ -2557,7 +2557,7 @@ describe("the controls offered to the user", () => {
     expect(screen.getByRole("heading", { name: "需要你的确认" })).toBeInTheDocument();
     expect(screen.getByText("实现计划")).toBeInTheDocument();
     expect(screen.getByText("先持久化，再恢复。")).toBeInTheDocument();
-    expect(screen.getByText("任务已暂停；确认计划后会从原会话继续。")).toBeInTheDocument();
+    expect(screen.getByText("等待你确认计划；确认后会从原会话继续。")).toBeInTheDocument();
   });
 
   it("acknowledges an approval click while the daemon records it", () => {
@@ -3008,17 +3008,6 @@ describe("an unstarted conversation", () => {
     folders: [],
   });
 
-  const worked = (id: string, workspaceId: string, updatedAtMs: number): SessionSummary => ({
-    id,
-    workspaceId,
-    agentId: "genet",
-    title: undefined,
-    createdAtMs: 0,
-    updatedAtMs,
-    archived: false,
-    status: "idle",
-  });
-
   function draft() {
     useWorkbench.setState({
       workspaces: [
@@ -3034,25 +3023,18 @@ describe("an unstarted conversation", () => {
     useWorkbench.getState().newSession("w1", "genet");
   }
 
-  /** The buttons of one titled section, without its own header controls. */
-  const listed = (section: string) =>
-    within(within(screen.getByRole("region", { name: section })).getByRole("list"))
+  const openings = () =>
+    within(screen.getByRole("region", { name: "可以先问问" }))
       .getAllByRole("button")
       .map((button) => button.textContent);
-  const openings = () => listed("可以先问问");
 
-  it("names every workspace and switches the draft to the one that is picked", async () => {
+  it("leads with the selected expert instead of a second workspace chooser", () => {
     draft();
     render(<NewSessionPanel />);
 
-    expect(screen.getByRole("button", { name: /genethub/ })).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
-    await userEvent.click(screen.getByRole("button", { name: /console/ }));
-
-    expect(useWorkbench.getState().draft?.workspaceId).toBe("w2");
-    expect(useWorkbench.getState().activeSessionId).toBeNull();
+    expect(screen.getByRole("heading", { name: "genethub" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "切换专家" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "console" })).not.toBeInTheDocument();
   });
 
   /**
@@ -3069,69 +3051,27 @@ describe("an unstarted conversation", () => {
   });
 
   /** An empty composer under "描述任务…" is the hardest moment in the product. */
-  it("offers openings, writes one into the composer, and can draw another set", async () => {
+  it("offers openings and writes one into the composer", async () => {
     draft();
     render(<NewSessionPanel />);
 
     const first = openings();
-    expect(first).toHaveLength(4);
+    expect(first).toHaveLength(3);
 
     await userEvent.click(screen.getByText(first[0]!));
     expect(
       useWorkbench.getState().composerDraftInserts.map((insert) => insert.text),
     ).toEqual([first[0]]);
 
-    await userEvent.click(screen.getByRole("button", { name: "换一批建议" }));
-    expect(openings()).toHaveLength(4);
   });
 
-  /**
-   * "点击工作区后，选中的工作区会立刻切换到第一。来回跳变很不好。" The order is
-   * decided once, when the panel opens.
-   */
-  it("does not reshuffle the grid under the finger that just picked a workspace", async () => {
+  it("shows every available expert in the explicit switch dialog", async () => {
     draft();
     render(<NewSessionPanel />);
-    const names = () => listed("工作区");
-    expect(names()).toEqual(["genethub", "console"]);
-
-    await userEvent.click(screen.getByRole("button", { name: "console" }));
-
-    expect(useWorkbench.getState().draft?.workspaceId).toBe("w2");
-    expect(names()).toEqual(["genethub", "console"]);
-    expect(screen.getByRole("button", { name: "console" })).toHaveAttribute(
-      "aria-current",
-      "true",
-    );
-  });
-
-  /**
-   * Four workspaces, and the one the sidebar has selected is always one of them.
-   * Being offered a list that does not include the workspace you are looking at
-   * reads as the panel having changed it.
-   */
-  it("leads with the selected workspace, then the most recently worked in", async () => {
-    const many = Array.from({ length: 6 }, (_, index) =>
-      workspace(`w${index}`, `project-${index}`, `/srv/p${index}`),
-    );
-    useWorkbench.setState({
-      workspaces: many,
-      agents: [agent()],
-      sessions: [worked("a", "w4", 900), worked("b", "w2", 300)],
-      activeSessionId: null,
-      tabs: [],
-      tabLimit: 16,
-    });
-    useWorkbench.getState().newSession("w5", "genet");
-    render(<NewSessionPanel />);
-
-    const names = () =>
-      screen
-        .getAllByRole("button", { name: /^project-/ })
-        .map((button) => button.textContent);
-    expect(names()).toEqual(["project-5", "project-4", "project-2", "project-0"]);
-
-    await userEvent.click(screen.getByRole("button", { name: "更多 2" }));
-    expect(names()).toHaveLength(6);
+    await userEvent.click(screen.getByRole("button", { name: "切换专家" }));
+    const dialog = screen.getByRole("dialog", { name: "切换专家" });
+    expect(within(dialog).getByText("genethub")).toBeInTheDocument();
+    expect(within(dialog).getByText("console")).toBeInTheDocument();
+    expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
   });
 });

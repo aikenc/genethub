@@ -113,7 +113,7 @@ export function NewSessionPanel({ endpoint, surface = "sessions", onSurface, onB
 
     </div>
     {terminalIds.filter(id => wb.workspaces.some(w => w.id === id)).map(id => <div key={id} className={surface === "terminal" && workspace.id === id ? "min-h-0 flex-1" : "hidden"}><TerminalPanel workspaceId={id} /></div>)}
-    {surface === "sessions" && <div className="shrink-0 px-4 pb-2"><div className="mx-auto flex max-w-chat gap-2 overflow-x-auto">{suggestions.map(s => <button type="button" key={s} className="min-h-9 shrink-0 rounded-full border border-line px-3 text-xs text-muted hover:text-fg" onClick={() => wb.appendComposerDraftLine(null, s)}>{s}</button>)}</div></div>}
+    {surface === "sessions" && <div role="region" aria-label="可以先问问" className="shrink-0 px-4 pb-2"><div className="mx-auto flex max-w-chat gap-2 overflow-x-auto">{suggestions.map(s => <button type="button" key={s} className="min-h-9 shrink-0 rounded-full border border-line px-3 text-xs text-muted hover:text-fg" onClick={() => wb.appendComposerDraftLine(null, s)}>{s}</button>)}</div></div>}
     {avatarOpen && <WorkspaceDetailsDialog title="更换头像" onClose={() => setAvatarOpen(false)}><AgentAvatarPicker id={workspace.id} /></WorkspaceDetailsDialog>}
     {renameOpen && <WorkspaceDetailsDialog title="修改专家名称" onClose={() => { if (!renameBusy) setRenameOpen(false); }}>
       <label className="block text-sm">专家名称<input autoFocus aria-label="专家名称" maxLength={80} value={name} disabled={renameBusy} onChange={e => setName(e.target.value)} className="mt-2 min-h-11 w-full rounded-lg border border-line bg-raised px-3" /></label>
