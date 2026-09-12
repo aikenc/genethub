@@ -508,9 +508,23 @@ defineSpecialty(
       const blockedApply = cli(["space", "bootstrap", "apply", "--workspace", approveProject.id, "--pack", "game-delivery-v1", ...rendererArgs,
         "--plan-digest", String(blockedPlan.data.planDigest), "--expected-revision", String(blockedPlan.data.expectedRevision), "--action-id", "blocked-upgrade"]);
       t.assertions.assert(blockedApply.status !== 0 && blockedApply.text.includes("activeRunConflict"), `upgrade apply did not report the active conflict: ${blockedApply.text}`);
-      const latestConflict = await opened.client.call({type:"workflow.get",payload:{workspaceId:approveProject.id,runId:conflictingRun!.id}});
-      t.assertions.assert(latestConflict?.type === "workflowRun","cannot refresh conflicting Run");
-      const cancelled = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id, expectedRevision: latestConflict!.type === "workflowRun" ? latestConflict.data.revision : -1 } });
+      // This is the same bounded read-then-retry semantics as the task panel.
+      // A running Worker may update the Run between `workflow get` and the
+      // direct cancellation request; only that CAS conflict or the brief
+      // mechanical-reconciler lock retries.
+      let cancelled: Awaited<ReturnType<typeof opened.client.call>> | undefined;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const latestConflict = await opened.client.call({type:"workflow.get",payload:{workspaceId:approveProject.id,runId:conflictingRun!.id}});
+        t.assertions.assert(latestConflict?.type === "workflowRun","cannot refresh conflicting Run");
+        try {
+          cancelled = await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id, expectedRevision: latestConflict!.type === "workflowRun" ? latestConflict.data.revision : -1 } });
+          break;
+        } catch (cause) {
+          const retryable = cause instanceof Error && (cause.message.includes("Workflow revision 冲突") || cause.message === "Workflow Run 正由另一个请求修改");
+          if (!retryable || attempt === 2) throw cause;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
       t.assertions.assert(cancelled?.type === "workflowRun" && cancelled.data.status === "cancelling", "old Pack could not use the framework cancellation entry");
       await t.tools.waitUntil(async () => {
         const reply = await opened.client.call({ type: "workflow.get", payload: { workspaceId: approveProject.id, runId: conflictingRun!.id } });

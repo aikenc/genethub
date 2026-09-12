@@ -765,11 +765,16 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       void get().refreshBackgroundProcesses();
     });
     try {
-      // Hub status and the download prompt do not read anything the catalog
-      // loads, so they fly alongside it instead of queueing behind two relay
-      // round trips — on a slow link that queueing is most of what switching
-      // to a machine used to cost.
-      const ancillary = (async () => {
+      const initial = get();
+      // Catalog hydration can finish after someone has already picked an expert.
+      // Initial landing must not replace that explicit page with the newest session.
+      const mayLand = () => get().client === client && get().draft === initial.draft &&
+        get().activeSessionId === initial.activeSessionId && get().activeTabId === initial.activeTabId;
+      await refreshCatalog(client, get, set, mayLand);
+      // The catalog is the page's route authority. Load the route facts before
+      // optional Hub and update state so the initial page either has a project
+      // or reports that its directory could not be read.
+      await (async () => {
         await get().refreshHub();
         // Asked on connect, unlike the update check itself. A download that was
         // running when the window closed is still running, and the prompt to
@@ -778,14 +783,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         const download = await client.call({ type: "update.downloadState" });
         if (download?.type === "updateDownload") set({ download: download.data });
       })().catch((error: unknown) => unattended(client, get, set)(error));
-      const initial = get();
-      // Catalog hydration can finish after someone has already picked an expert.
-      // Initial landing must not replace that explicit page with the newest session.
-      const mayLand = () => get().client === client && get().draft === initial.draft &&
-        get().activeSessionId === initial.activeSessionId && get().activeTabId === initial.activeTabId;
-      await refreshCatalog(client, set, mayLand);
-      if (mayLand()) await land(get);
-      await ancillary;
     } catch (error) {
       // A connection can disappear halfway through being asked things: the tab
       // is closing, or the daemon restarted and the shell has already pointed
@@ -2199,17 +2196,23 @@ type Setter = (
     | ((state: WorkbenchState) => Partial<WorkbenchState>),
 ) => void;
 
-async function refreshCatalog(client: Client, set: Setter, mayLand: () => boolean): Promise<void> {
-  const [agents, workspaces] = await Promise.all([
-    client.call({ type: "agent.list" }),
-    client.call({ type: "workspace.list" }),
-  ]);
+async function refreshCatalog(
+  client: Client,
+  get: () => WorkbenchState,
+  set: Setter,
+  mayLand: () => boolean,
+): Promise<void> {
+  // Agent probing can inspect several installed adapters. It must not delay
+  // the workspace list that gives a deep link its project and conversation.
+  const agents = client.call({ type: "agent.list" });
+  const workspaces = await client.call({ type: "workspace.list" });
   if (useWorkbench.getState().client !== client) return;
-  if (agents?.type === "agents") set({ agents: agents.data });
-  if (workspaces?.type === "workspaces") {
-    set({ workspaces: workspaces.data });
-    const first = workspaces.data[0];
-    if (!first) return;
+  if (workspaces?.type !== "workspaces") {
+    throw new Error("专家目录暂不可用，请重新连接后再试。");
+  }
+  set({ workspaces: workspaces.data });
+  const first = workspaces.data[0];
+  if (first) {
     const sessions = await loadSessions(client, set);
     // Which project to open on. The newest conversation anywhere, rather than
     // whichever workspace the daemon listed first: "coming back means
@@ -2219,7 +2222,14 @@ async function refreshCatalog(client: Client, set: Setter, mayLand: () => boolea
     const last = newest(sessions);
     const known = workspaces.data.some((entry) => entry.id === last?.workspaceId);
     if (mayLand()) set({ activeWorkspaceId: known && last ? last.workspaceId : first.id });
+    if (mayLand()) await land(get);
   }
+  const listedAgents = await agents;
+  if (useWorkbench.getState().client !== client) return;
+  if (listedAgents?.type === "agents") set({ agents: listedAgents.data });
+  // A project with no saved conversation needs an Agent before it can land on
+  // its draft. A named session already opened above without waiting for this.
+  if (mayLand()) await land(get);
 }
 
 async function loadWorkspaces(client: Client, set: Setter): Promise<WorkspaceInfo[]> {

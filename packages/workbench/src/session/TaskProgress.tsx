@@ -2,6 +2,7 @@ import { WorkspaceDetailsDialog } from "../workspace/WorkspaceDetailsDialog";
 import type { SessionSummary } from "@genehub/proto";
 import { useEffect, useState } from "react";
 
+import type { Client } from "../protocol/client";
 import { refreshAgentActivities, useAgentActivities } from "../workspace/useAgentActivity";
 import { useWorkbench } from "./store";
 import { WorkflowStructureDetails } from "./StructuredWorkflow";
@@ -11,6 +12,43 @@ const labels: Record<string, string> = {
   running: "进行中", stopping: "停止中", cancelling: "停止中",
   blocked: "受阻", failed: "失败", cancelled: "已取消", completed: "执行完成",
 };
+
+const CANCEL_ATTEMPTS = 4;
+const CANCEL_RETRY_DELAY_MS = 50;
+
+function isTransientCancelConflict(cause: unknown): boolean {
+  return cause instanceof Error && (
+    cause.message.includes("Workflow revision 冲突")
+    || cause.message === "Workflow Run 正由另一个请求修改"
+  );
+}
+
+/**
+ * Cancellation keeps the daemon's optimistic-concurrency check. A Worker may
+ * record progress after the panel snapshot but before the click reaches the
+ * daemon, so a bounded fresh-read retry turns that ordinary race into the
+ * requested direct stop without weakening the server-side fence. The Run's
+ * mechanical reconciler can also briefly own its lock, which takes this path.
+ */
+async function cancelTask(client: Client, workspaceId: string, runId: string, revision: number): Promise<void> {
+  let expectedRevision = revision;
+  for (let attempt = 0; attempt < CANCEL_ATTEMPTS; attempt += 1) {
+    try {
+      const reply = await client.call({
+        type: "workflow.cancel",
+        payload: { workspaceId, runId, expectedRevision },
+      });
+      if (reply?.type !== "workflowRun") throw new Error("未收到任务终止结果，请核对后重试。");
+      return;
+    } catch (cause) {
+      if (!isTransientCancelConflict(cause) || attempt === CANCEL_ATTEMPTS - 1) throw cause;
+      await new Promise<void>((resolve) => setTimeout(resolve, CANCEL_RETRY_DELAY_MS));
+      const latest = await client.call({ type: "workflow.get", payload: { workspaceId, runId } });
+      if (latest?.type !== "workflowRun") throw new Error("未能刷新任务状态，请核对后重试。");
+      expectedRevision = latest.data.revision;
+    }
+  }
+}
 
 /** Shares the existing session-summary source with the lists. PM turn state
  * stays independent, and task cancellation never waits for an LLM answer. */
@@ -56,9 +94,8 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
                 if (!client) return;
                 const owner = client;
                 setBusy(task.runId); setError(null); setExpanded(true);
-                void owner.call({ type: "workflow.cancel", payload: { workspaceId: session.workspaceId, runId: task.runId, expectedRevision: task.revision } })
-                  .then(async (reply) => {
-                    if (reply?.type !== "workflowRun") throw new Error("未收到任务终止结果，请核对后重试。");
+                void cancelTask(owner, session.workspaceId, task.runId, task.revision)
+                  .then(async () => {
                     await refreshAgentActivities(owner);
                   })
                   .catch((cause: unknown) => {
