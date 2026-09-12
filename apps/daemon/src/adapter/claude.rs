@@ -2413,7 +2413,7 @@ mod tests {
         let fake = dir.path().join("tclaude");
         std::fs::write(
             &fake,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/args\"\n",
+            "#!/bin/sh\nargs=${0%/*}/args\nprintf '%s\\n' \"$@\" >> \"$args\"\n",
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
