@@ -1,4 +1,7 @@
-import { defineSpecialty, genetEnv, locateGenet, runGenet, type CaseContext } from "../../framework/public.ts";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { daemonEndpoint, defineSpecialty, runGenet, type CaseContext } from "../../framework/public.ts";
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
 
@@ -59,10 +62,11 @@ async function mustReject(action: () => Promise<unknown>, message: string): Prom
   throw new Error(message);
 }
 
-function restartDaemon(t: CaseContext): void {
-  const genet = locateGenet(t.openRoot);
-  const env = genetEnv(t.openRoot, t.env.env);
-  const result = runGenet(genet, ["daemon", "restart"], env);
+function restartDaemon(daemon: Opened["daemon"]): void {
+  // The first boot receives the selected guest path through this handle. A
+  // restart must inherit that same environment, otherwise a stale component
+  // beside the CLI can replace the candidate the case is meant to exercise.
+  const result = runGenet(daemon.genet, ["daemon", "restart"], daemon.env);
   if (result.code !== 0) throw new Error(`daemon restart failed: ${result.stderr || result.stdout}`);
 }
 
@@ -127,7 +131,20 @@ authCase(
   async (t, opened) => {
     const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "persistent");
     paired.client.close();
-    restartDaemon(t);
+    const beforeRestart = daemonEndpoint(opened.daemon);
+    restartDaemon(opened.daemon);
+    const afterRestart = daemonEndpoint(opened.daemon);
+    t.assertions.assert(
+      afterRestart.localServerProof.pid !== beforeRestart.localServerProof.pid,
+      "daemon restart reported success without replacing the daemon process",
+    );
+    const persisted = JSON.parse(readFileSync(path.join(t.env.data, "devices.json"), "utf8")) as {
+      devices?: Array<{ id?: string; secret?: string }>;
+    };
+    t.assertions.assert(
+      persisted.devices?.some((device) => device.id === paired.deviceId && device.secret === paired.credential.secret) === true,
+      "restart did not retain the paired device credential on disk",
+    );
     const returning = await t.flows.main.connectDevice(opened.daemon, paired.credential, "persistent");
     try {
       const reply = await returning.call({ type: "workspace.list" });
@@ -147,7 +164,7 @@ authCase(
     const paired = await t.flows.main.pairDevice(opened.client, opened.daemon, ["read"], "revoked");
     paired.client.close();
     await opened.client.call({ type: "device.revoke", payload: { deviceId: paired.deviceId } });
-    restartDaemon(t);
+    restartDaemon(opened.daemon);
     await mustReject(
       () => t.flows.main.connectDevice(opened.daemon, paired.credential, "revoked-return"),
       "revoked credential reconnected after restart",

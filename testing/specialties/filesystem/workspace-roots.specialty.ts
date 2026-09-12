@@ -2,8 +2,6 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   defineSpecialty,
-  genetEnv,
-  locateGenet,
   runGenet,
 } from "../../framework/public.ts";
 
@@ -143,9 +141,9 @@ defineSpecialty(
         );
       }
       const restart = runGenet(
-        locateGenet(t.openRoot),
+        opened.daemon.genet,
         ["daemon", "restart"],
-        genetEnv(t.openRoot, t.env.env),
+        opened.daemon.env,
       );
       t.assertions.assert(restart.code === 0, "daemon restart failed");
       const afterRestart = await t.flows.main.openSecondClient(

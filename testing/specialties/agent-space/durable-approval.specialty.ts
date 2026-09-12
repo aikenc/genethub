@@ -177,7 +177,10 @@ defineSpecialty({
   oracle: "Cursor create_plan cancellation follows the external protocol, Human acceptance survives as a new native turn, and no project grant is required for an ordinary Agent plan",
   catches: ["native plans are rejected as missing PM challenges", "ACP permission request stays unanswered on cancel", "Human wait retains Agent process", "acceptance resumes a fresh native session"],
   tags: ["core", "durable-approval", "agent", "native-plan"],
-  expectedDurationMs: 5_000, timeoutMs: 30_000,
+  // The three protocol waits allow up to 40 seconds in a healthy slow
+  // environment (15s + 10s + 15s), so the unit timeout must exceed that
+  // declared contract rather than force-cleaning a valid continuation.
+  expectedDurationMs: 5_000, timeoutMs: 60_000,
   surfaces: ["daemon", "agent", "acp", "workbench-client"],
   productInterfaces: ["cursor/create_plan", "session/cancel", "session/resume", "session.respondPermission"],
 }, async (t) => {

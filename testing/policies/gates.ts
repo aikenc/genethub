@@ -13,6 +13,12 @@ export function selectForGate(
       ? { include: true, reason: "public business multichannel contract" }
       : { include: false, reason: "not multichannel" };
   }
+  // L13 keeps every frozen legacy case required until its individual parity is
+  // proven. Some of those cases use a real provider, so this obligation must
+  // take precedence over the normal release-only real-provider policy.
+  if (item.runner === "rust-legacy") {
+    return { include: true, reason: "L13: frozen legacy required until verified parity" };
+  }
   if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {
     return { include: false, reason: "real LLM canary is release-only" };
   }
@@ -45,9 +51,6 @@ export function selectForGate(
     return gate === "beta" || gate === "stable"
       ? { include: true, reason: "release platform matrix" }
       : { include: false, reason: "e2e platform matrix not in this gate" };
-  }
-  if (item.runner === "rust-legacy") {
-    return { include: true, reason: "L13: frozen legacy required until verified parity" };
   }
   if (item.tags.includes("v1-wasm")) {
     return { include: false, reason: "v1 signed-wasm role, not on this tree" };

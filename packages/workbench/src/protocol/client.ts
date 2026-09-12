@@ -390,7 +390,10 @@ export class Client {
     if (this.stopped || this.socket || this.fabricLink || this.dialingTransport || this.redialing) return;
     this.attachLifecycle();
     this.clearRetryTimer();
-    if (this.attempt === 0 || !this.options.redial) {
+    // `attempt` is reset after a healthy grace period, so it cannot tell an
+    // initial dial from a later carrier loss. A restarted local daemon needs
+    // a newly issued endpoint proof on its very first reconnect too.
+    if (this.connectionEpoch === 0 || !this.options.redial) {
       this.dial({
         url: this.options.url,
         channelCredential: this.activeChannelCredential,
@@ -862,7 +865,10 @@ export class Client {
           else {
             this.report(error);
             link.close();
-            this.droppedTransport(epoch);
+            // A daemon replacement has no record of the old logical peer.
+            // Its authenticated Fabric carrier is still valid, but an attach
+            // cannot succeed. Drop that stale peer and establish a new one.
+            this.droppedTransport(epoch, undefined, Boolean(previous));
           }
         }
       },
@@ -870,7 +876,7 @@ export class Client {
         this.dialingTransport = false;
         if (!this.isCurrentEpoch(epoch)) return;
         this.report(error);
-        this.droppedTransport(epoch);
+        this.droppedTransport(epoch, undefined, Boolean(previous));
       },
     );
   }
@@ -904,7 +910,18 @@ export class Client {
     const carrier = new WebSocketRecordCarrier(socket);
     if (this.endpoint?.state === "open" && this.endpoint.logicalId) {
       const endpoint = this.endpoint;
-      await endpoint.attach(carrier, handshake.key);
+      try {
+        await endpoint.attach(carrier, handshake.key);
+      } catch (error) {
+        if (this.isCurrent(socket, epoch)) {
+          this.report(error);
+          // The authenticated daemon has rejected the old logical peer,
+          // which happens after it restarts. Retrying the same logical id
+          // would loop forever; reconnect from a fresh endpoint instead.
+          this.dropSocket(socket, epoch, true);
+        }
+        return;
+      }
       if (this.isCurrent(socket, epoch)) this.resumedEndpoint(endpoint, epoch);
       return;
     }
@@ -1330,12 +1347,13 @@ export class Client {
     socket: WebSocketLike,
     epoch: symbol,
     close?: CloseReason,
+    abandonLogical = false,
   ): void {
     if (!this.isCurrent(socket, epoch) || this.stopped) return;
-    this.droppedTransport(epoch, close);
+    this.droppedTransport(epoch, close, abandonLogical);
   }
 
-  private droppedTransport(epoch: symbol, close?: CloseReason): void {
+  private droppedTransport(epoch: symbol, close?: CloseReason, abandonLogical = false): void {
     if (!this.isCurrentEpoch(epoch)) return;
     this.renewalAbort?.abort();
     this.renewalAbort = null;
@@ -1354,7 +1372,7 @@ export class Client {
     this.clearConnectTimer();
     this.clearStableTimer();
     this.clearHeartbeat();
-    const resumable = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
+    const resumable = !abandonLogical && this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
     const socket = this.socket, fabric = this.fabricLink?.fabric;
     this.dataRtcLink = null;
     this.socket = null;
@@ -1373,14 +1391,14 @@ export class Client {
     this.scheduleReconnect();
   }
 
-  private dropSocket(socket: WebSocketLike, epoch: symbol): void {
+  private dropSocket(socket: WebSocketLike, epoch: symbol, abandonLogical = false): void {
     if (!this.isCurrent(socket, epoch)) return;
     socket.onopen = null;
     socket.onclose = null;
     socket.onerror = null;
     socket.onmessage = null;
     socket.close();
-    this.dropped(socket, epoch);
+    this.dropped(socket, epoch, undefined, abandonLogical);
   }
 
   private redial(): void {

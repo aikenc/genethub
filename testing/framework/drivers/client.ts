@@ -23,6 +23,7 @@ export async function connectProductClient(input: {
     inviteCredential?: InviteChannelCredential;
   }>;
 }): Promise<Client> {
+  const diagnostics: ClientDiagnosticEvent[] = [];
   const client = new Client({
     url: input.url,
     localServerProof: input.localServerProof,
@@ -32,7 +33,11 @@ export async function connectProductClient(input: {
     connectTimeoutMs: 45_000,
     helloTimeoutMs: 45_000,
     redialTimeoutMs: 45_000,
-    ...(input.onDiagnostic ? { onDiagnostic: input.onDiagnostic } : {}),
+    onDiagnostic: (event) => {
+      diagnostics.push(event);
+      if (diagnostics.length > 12) diagnostics.shift();
+      input.onDiagnostic?.(event);
+    },
     redial: input.redial
       ? async () => {
           const next = await input.redial!();
@@ -56,7 +61,7 @@ export async function connectProductClient(input: {
     if (client.failure) lastError = JSON.stringify(client.failure);
     if (client.connectionState === "closed") {
       throw new Error(
-        `canonical Client closed: ${JSON.stringify(client.lastCloseReason ?? {})} ${lastError}`,
+        `canonical Client closed: ${JSON.stringify(client.lastCloseReason ?? {})} ${lastError}; diagnostics=${JSON.stringify(diagnostics)}`,
       );
     }
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -64,6 +69,6 @@ export async function connectProductClient(input: {
   const close = client.lastCloseReason;
   client.close();
   throw new Error(
-    `canonical Client did not become ready (${client.connectionState}): ${JSON.stringify(close ?? {})} ${client.failure?.message ?? ""}`,
+    `canonical Client did not become ready (${client.connectionState}): ${JSON.stringify(close ?? {})} ${client.failure?.message ?? ""}; diagnostics=${JSON.stringify(diagnostics)}`,
   );
 }
