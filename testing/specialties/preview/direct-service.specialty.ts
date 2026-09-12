@@ -13,7 +13,8 @@ defineSpecialty({
   expectedDurationMs:12000,timeoutMs:90000,
   resources:{environments:1,cpu:2,memoryMb:768,io:1,browser:0,pool:"standard"},
   surfaces:["daemon","workbench","service-preview"],productInterfaces:["@genehub/workbench/client"],
-  requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
+    requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp"] }],
+requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
 },async t=>{
   const python=process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
   if(!python)throw new BlockedError("GENEHUB_PREVIEW_MEDIA_PYTHON must point to Python 3.11+ with aiohttp");

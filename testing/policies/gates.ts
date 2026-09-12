@@ -1,5 +1,11 @@
 import type { CaseMeta, GateName } from "../infrastructure/types.ts";
 
+export function parseGate(value: string): GateName {
+  const names: GateName[] = ["change", "merge", "dev", "dev-feedback", "beta", "stable", "infra-compact", "infra-parallel", "specialty:page-experience", "specialty:contracts", "specialty:multichannel"];
+  if (!names.includes(value as GateName)) throw new Error(`unknown gate: ${value}`);
+  return value as GateName;
+}
+
 export function selectForGate(
   item: CaseMeta,
   gate: GateName,
@@ -8,6 +14,7 @@ export function selectForGate(
   if (tags.length > 0 && !tags.some((tag) => item.tags.includes(tag))) {
     return { include: false, reason: "tag filter" };
   }
+  if (gate === "dev-feedback") return { include: true, reason: "explicit feedback scope; not a complete release gate" };
   if (gate === "specialty:multichannel") {
     return item.tags.includes("multichannel")
       ? { include: true, reason: "public business multichannel contract" }

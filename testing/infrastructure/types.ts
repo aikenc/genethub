@@ -13,6 +13,7 @@ export type GateName =
   | "change"
   | "merge"
   | "dev"
+  | "dev-feedback"
   | "beta"
   | "stable"
   | "infra-compact"
@@ -57,6 +58,7 @@ export interface CaseMeta {
   surfaces: string[];
   productInterfaces?: string[];
   requiredArtifacts?: string[];
+  requirements?: Array<{ kind: "python"; env: string; minVersion: [number, number]; modules: string[] }>;
   doubleExceptions?: DoubleException[];
   retention?: boolean;
   stages?: string[];
@@ -82,6 +84,8 @@ export interface UnitResult {
   startedAt: string;
   endedAt: string;
   durationMs: number;
+  phase?: "preflight";
+  reusedFrom?: { runId: string; unitId: string };
   message?: string;
   blockedReason?: string;
   /** Bounded failure-only evidence. Kept out of results.ndjson and redacted by the run store. */
@@ -109,6 +113,7 @@ export interface RunQualification {
   policyVersion: string;
   qualified: boolean;
   reasons: string[];
+  scope?: "feedback" | "gate";
 }
 
 export interface RunManifest {
@@ -140,6 +145,25 @@ export interface RunManifest {
   inputDrift?: boolean;
   inputObservation?: { changed: boolean; complete: boolean };
   artifactBundle?: { files: Array<{ path: string; hash: string }>; hash: string; runtime: { node: string; platform: string; arch: string } };
+  selection?: { tags: string[]; cases: string[]; reason: string };
+  preflight?: { issues: Array<{ caseId: string; reason: string }>; checked: number };
+  resumeBinding?: { common: string; cases: Record<string, string> };
+  resumedFrom?: { runId: string; reused: string[] };
+}
+
+export interface RunProgress {
+  schema: "genehub.test-progress.v1";
+  runId: string;
+  gate: GateName;
+  phase: "preflight" | "fingerprinting" | "running" | "finalizing" | "complete" | "error";
+  startedAt: string;
+  updatedAt: string;
+  elapsedMs: number;
+  total: number;
+  completed: number;
+  counts: Record<CaseStatus | "total", number>;
+  active: Array<{ id: string; elapsedMs: number }>;
+  message?: string;
 }
 
 export interface CliOptions {
@@ -173,5 +197,5 @@ export const DEFAULT_RESOURCES: CaseResources = {
   pool: "standard",
 };
 
-export const RUNNER_VERSION = "testctl.v1";
-export const POLICY_VERSION = "gates.v1";
+export const RUNNER_VERSION = "testctl.v2";
+export const POLICY_VERSION = "gates.v2";

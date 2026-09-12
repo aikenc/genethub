@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { catalogDigest, loadCatalog } from "../infrastructure/engine/catalog.ts";
-import { artifactBundleIdentity, artifactIdentity, repoIdentity, runsIgnored } from "../infrastructure/engine/git.ts";
+import { artifactBundleIdentity, artifactIdentity, repoIdentity, runsIgnored, snapshotHasher } from "../infrastructure/engine/git.ts";
 import { planCases } from "../infrastructure/engine/planner.ts";
 import { addResult, emptyCounts, rollupStatus } from "../infrastructure/engine/result.ts";
 import {
@@ -17,15 +17,17 @@ import {
 } from "../infrastructure/engine/scheduler.ts";
 import { runNodeUnit } from "../infrastructure/adapters/node.ts";
 import { runRustLegacyUnit } from "../infrastructure/adapters/rust-legacy.ts";
-import { createRunStore } from "../infrastructure/evidence/run-store.ts";
+import { preflight, digest } from "../infrastructure/engine/preflight.ts";
+import { reusableResults } from "../infrastructure/engine/resume.ts";
+import { createRunStore, readRunResults } from "../infrastructure/evidence/run-store.ts";
 import { parseSummaryLanguage, renderRunSummary } from "../infrastructure/evidence/summary.ts";
 import { checkGovernance } from "../infrastructure/lint/governance.ts";
 import { lintLayers } from "../infrastructure/lint/layers.ts";
-import { qualificationReasons } from "../policies/gates.ts";
+import { parseGate, qualificationReasons } from "../policies/gates.ts";
 import {
   POLICY_VERSION,
   RUNNER_VERSION,
-  type GateName,
+  type RunProgress,
   type RunManifest,
   type UnitResult,
   type WorkUnit,
@@ -44,10 +46,10 @@ function has(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
-function tagsOf(args: string[]): string[] {
+function valuesOf(args: string[], name: string): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--tags" && args[i + 1]) out.push(args[i + 1]!);
+    if (args[i] === name && args[i + 1]) out.push(args[i + 1]!);
   }
   return out;
 }
@@ -56,8 +58,11 @@ function usage(): string {
   return `testctl <lint|governance|plan|run|inspect|compare|list|prune> [options]
   lint [--open <path>] [--cloud <path>]
   governance check [--open <path>] [--cloud <path>]
-  plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>]
-  run --space <abs> --gate <gate> --topic <slug> [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms]
+  plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>] [--case <id>] [--reason <scope explanation>]
+  run --space <abs> --gate <gate> --topic <slug> [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms] [--case <id>|--tags <tag>] [--reason <text>] [--resume <finalized-run>]
+  dev-feedback requires explicit --case/--tags and --reason; it is scoped evidence, never full release qualification.
+  Selected dependencies are checked before execution. Progress is on stderr and inspect works while running.
+  --resume creates new evidence; only matching passed results are reused, failed/unstable retries are refused.
   inspect --run <abs> [--failed|--case <id>]
   compare --base <run> --candidate <run>
   list --space <abs>
@@ -102,16 +107,21 @@ async function main(): Promise<number> {
       return 2;
     }
     const report = checkGovernance(openRoot, cloudRoot);
+    if (report.digest === "missing-governance-docs") report.findings.push({ rule: "governance-documents", file: cloudRoot ?? "", message: "both engineering-principles.md and engineering-laws.md are required; use absolute repository paths" });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    if (report.digest === "missing-governance-docs") {
+      process.stderr.write("governance documents unavailable; pass absolute --open and --cloud repository paths (npm --prefix changes cwd)\n");
+      return 2;
+    }
     return report.findings.length === 0 ? 0 : 2;
   }
 
   if (command === "plan") {
-    const gate = (flag(args, "--gate", "change") || "change") as GateName;
+    const gate = parseGate(flag(args, "--gate", "change"));
     const cases = await loadCatalog({ openRoot, cloudRoot });
-    const plan = planCases(cases, gate, tagsOf(args));
+    const plan = planCases(cases, gate, valuesOf(args, "--tags"), valuesOf(args, "--case"), flag(args, "--reason"));
     process.stdout.write(
-      `${JSON.stringify({ gate, units: plan.units.map((unit) => ({ id: unit.id, ms: unit.meta.expectedDurationMs, runner: unit.meta.runner })), skipped: plan.skipped, estimatedMs: plan.estimatedMs }, null, 2)}\n`,
+      `${JSON.stringify({ gate, scope: gate === "dev-feedback" ? "feedback" : "gate", reason: flag(args, "--reason"), units: plan.units.map((unit) => ({ id: unit.id, ms: unit.meta.expectedDurationMs, runner: unit.meta.runner, surfaces: unit.meta.surfaces, requirements: unit.meta.requirements ?? [] })), skipped: plan.skipped, estimatedMs: plan.estimatedMs }, null, 2)}\n`,
     );
     return 0;
   }
@@ -119,7 +129,7 @@ async function main(): Promise<number> {
   if (command === "run") {
     const space = flag(args, "--space");
     const topic = flag(args, "--topic", "change");
-    const gate = (flag(args, "--gate", "change") || "change") as GateName;
+    const gate = parseGate(flag(args, "--gate", "change"));
     const summaryLanguage = parseSummaryLanguage(flag(args, "--summary-language", "en"));
     const environments = Number(flag(args, "--environments", "16")) || 16;
     const maxRunMs = Number(flag(args, "--max-run-ms", "0")) || 0;
@@ -131,195 +141,258 @@ async function main(): Promise<number> {
       process.stderr.write("space runs/ is not gitignored\n");
       return 2;
     }
-    const captureInputs = () => ({
+    const captureInputs = () => {
+      const hashFile = snapshotHasher();
+      return ({
       open: repoIdentity(openRoot),
       cloud: cloudRoot ? repoIdentity(cloudRoot) : { path: "", sha: "n/a", branch: "n/a", dirty: false, dirtyDigest: "n/a" },
-      artifact: artifactIdentity(openRoot),
-      bundle: artifactBundleIdentity(openRoot, cloudRoot),
-    });
-    const inputsAtStart = captureInputs();
-    const inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle.files.map(f => f.path));
+      artifact: artifactIdentity(openRoot, hashFile),
+      bundle: artifactBundleIdentity(openRoot, cloudRoot, hashFile),
+    }); };
     const cases = await loadCatalog({ openRoot, cloudRoot });
-    const plan = planCases(cases, gate, tagsOf(args));
+    const selection = { tags: valuesOf(args, "--tags"), cases: valuesOf(args, "--case"), reason: flag(args, "--reason").trim() };
+    const plan = planCases(cases, gate, selection.tags, selection.cases, selection.reason);
     const store = createRunStore(space, topic);
     const startedAt = new Date();
     const results: UnitResult[] = [];
-    const scheduler = createScheduler(plan.units, defaultBudget(environments));
-    // Every environment compiles the same component on each daemon start;
-    // a shared, machine-local cache (target/ is gitignored) turns that into
-    // one compile per artifact hash. The host only honours this on the local
-    // channel — released builds always recompile.
-    const componentCache = path.join(openRoot, "target", "test-component-cache");
-    mkdirSync(componentCache, { recursive: true });
-    const extraEnv: Record<string, string> = {
-      TESTCTL_OPEN_ROOT: openRoot,
-      TESTCTL_CLOUD_ROOT: cloudRoot ?? "",
-      GENEHUB_TEST_COMPONENT_CACHE_DIR: componentCache,
+    const active = new Map<string, number>();
+    let phase: RunProgress["phase"] = "preflight";
+    const progress = (message?: string) => {
+      const counts = emptyCounts();
+      for (const result of results) addResult(counts, result);
+      store.writeProgress({ schema: "genehub.test-progress.v1", runId: path.basename(store.dir), gate, phase,
+        startedAt: startedAt.toISOString(), updatedAt: new Date().toISOString(), elapsedMs: Date.now() - startedAt.getTime(),
+        total: plan.units.length, completed: results.length, counts,
+        active: [...active].map(([id, at]) => ({ id, elapsedMs: Date.now() - at })), ...(message ? { message } : {}) });
     };
-    const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
-    const inflight = new Set<Promise<void>>();
-
-    const startOne = (unit: WorkUnit) => {
-      const env = { ...extraEnv };
-      if (unit.meta.runner === "playwright") {
-        env.TESTCTL_BROWSER_ARTIFACTS = path.join(
-          store.dir,
-          "failures",
-          unit.caseId.replace(/[^\w.-]+/g, "_"),
-        );
+    const announce = () => process.stderr.write(`[testctl] ${phase} ${results.length}/${plan.units.length}; active=${[...active.keys()].join(",") || "none"}; elapsed=${Math.round((Date.now() - startedAt.getTime()) / 1000)}s; run=${store.dir}\n`);
+    progress(); announce();
+    const heartbeat = setInterval(() => { progress(); announce(); }, 15_000);
+    heartbeat.unref();
+    let inputWatch: ReturnType<typeof watchInputs> | undefined;
+    try {
+      const prerequisites = await preflight(plan.units.map(unit => unit.meta));
+      const preflightBlocked = prerequisites.issues.length > 0;
+      phase = "fingerprinting"; progress(); announce();
+      // Failed preconditions do not require hashing large binaries or starting any test environments.
+      const inputsAtStart = preflightBlocked ? {
+        open: repoIdentity(openRoot),
+        cloud: cloudRoot ? repoIdentity(cloudRoot) : { path: "", sha: "n/a", branch: "n/a", dirty: false, dirtyDigest: "n/a" },
+        artifact: { path: null, hash: null, kind: "preflight-not-executed" },
+        bundle: undefined,
+      } : captureInputs();
+      if (!preflightBlocked) inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle!.files.map(f => f.path));
+      const governanceDigest = checkGovernance(openRoot, cloudRoot).digest;
+      const resumeBinding = preflightBlocked ? undefined : {
+        common: digest({ inputsAtStart, catalog: catalogDigest(cases), gate, selection,
+          governanceDigest, runner: RUNNER_VERSION, policy: POLICY_VERSION, environment: prerequisites.environment.common, environments }),
+        cases: prerequisites.environment.cases,
+      };
+      const resumeDir = flag(args, "--resume");
+      const resumed = resumeDir && resumeBinding ? reusableResults(resumeDir, resumeBinding, plan.units) : undefined;
+      if (resumed) for (const result of resumed.results) { results.push(result); store.writeResult(result); }
+      if (preflightBlocked) for (const unit of plan.units) {
+        const issue = prerequisites.issues.find(item => item.caseId === unit.caseId);
+        const result: UnitResult = { id: unit.id, caseId: unit.caseId, variant: unit.variant, status: "blocked", phase: "preflight",
+          startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), durationMs: 0,
+          blockedReason: issue?.reason ?? "not started: selected dependency preflight failed" };
+        results.push(result); store.writeResult(result); store.writeFailure(result, result.blockedReason!);
       }
-      const task = runUnit(unit, env, openRoot).then((result) => {
-        completeUnit(scheduler, unit, result.durationMs);
-        results.push(result);
-        store.writeResult(result);
-        if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS) {
-          rmSync(env.TESTCTL_BROWSER_ARTIFACTS, { recursive: true, force: true });
-        }
-        if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
-          store.writeFailure(
-            result,
-            [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
+      for (const issue of prerequisites.issues) process.stderr.write(`[testctl] blocked before execution: ${issue.caseId}: ${issue.reason}\n`);
+      const completedIds = new Set(results.map(result => result.id));
+      const scheduler = createScheduler(plan.units.filter(unit => !completedIds.has(unit.id)), defaultBudget(environments));
+      phase = "running"; progress(); announce();
+      // Every environment compiles the same component on each daemon start;
+      // a shared, machine-local cache (target/ is gitignored) turns that into
+      // one compile per artifact hash. The host only honours this on the local
+      // channel — released builds always recompile.
+      const componentCache = path.join(openRoot, "target", "test-component-cache");
+      if (!preflightBlocked) mkdirSync(componentCache, { recursive: true });
+      const extraEnv: Record<string, string> = {
+        TESTCTL_OPEN_ROOT: openRoot,
+        TESTCTL_CLOUD_ROOT: cloudRoot ?? "",
+        GENEHUB_TEST_COMPONENT_CACHE_DIR: componentCache,
+      };
+      const runDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : Number.POSITIVE_INFINITY;
+      const inflight = new Set<Promise<void>>();
+
+      const startOne = (unit: WorkUnit) => {
+        const env = { ...extraEnv };
+        if (unit.meta.runner === "playwright") {
+          env.TESTCTL_BROWSER_ARTIFACTS = path.join(
+            store.dir,
+            "failures",
+            unit.caseId.replace(/[^\w.-]+/g, "_"),
           );
         }
-        if (result.status === "passed" && result.message && unit.meta.retention) {
-          store.writeReport(result);
-        }
-      }).finally(() => {
-        inflight.delete(task);
-      });
-      inflight.add(task);
-    };
+        active.set(unit.id, Date.now()); progress();
+        const task = runUnit(unit, env, openRoot).then((result) => {
+          active.delete(unit.id);
+          completeUnit(scheduler, unit, result.durationMs);
+          results.push(result);
+          store.writeResult(result);
+          progress();
+          if (result.status !== "passed") process.stderr.write(`[testctl] ${result.status}: ${result.caseId}; inspect --run ${store.dir} --case ${result.caseId}\n`);
+          if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS) {
+            rmSync(env.TESTCTL_BROWSER_ARTIFACTS, { recursive: true, force: true });
+          }
+          if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
+            store.writeFailure(
+              result,
+              [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
+            );
+          }
+          if (result.status === "passed" && result.message && unit.meta.retention) {
+            store.writeReport(result);
+          }
+        }).finally(() => {
+          inflight.delete(task);
+        });
+        inflight.add(task);
+      };
 
-    while (scheduler.pending.length > 0 || inflight.size > 0) {
-      if (scheduler.pending.length > 0 && inflight.size === 0 && !hasClaimable(scheduler)) {
-        const leftover = scheduler.pending.shift();
-        if (leftover) {
-          const blocked: UnitResult = {
-            id: leftover.id,
-            caseId: leftover.caseId,
-            variant: leftover.variant,
-            status: "blocked",
-            startedAt: new Date().toISOString(),
-            endedAt: new Date().toISOString(),
-            durationMs: 0,
-            message: "insufficient resource tokens",
-            blockedReason: "resource deadlock",
-          };
-          results.push(blocked);
-          store.writeResult(blocked);
-          store.writeFailure(blocked, blocked.message ?? "");
-        }
-        continue;
-      }
-      if (Date.now() > runDeadline) {
-        while (scheduler.pending.length > 0) {
+      while (scheduler.pending.length > 0 || inflight.size > 0) {
+        if (scheduler.pending.length > 0 && inflight.size === 0 && !hasClaimable(scheduler)) {
           const leftover = scheduler.pending.shift();
-          if (!leftover) break;
-          const interrupted: UnitResult = {
-            id: leftover.id,
-            caseId: leftover.caseId,
-            variant: leftover.variant,
-            status: "interrupted",
-            startedAt: new Date().toISOString(),
-            endedAt: new Date().toISOString(),
-            durationMs: 0,
-            message: "run reached --max-run-ms",
-          };
-          results.push(interrupted);
-          store.writeResult(interrupted);
+          if (leftover) {
+            const blocked: UnitResult = {
+              id: leftover.id,
+              caseId: leftover.caseId,
+              variant: leftover.variant,
+              status: "blocked",
+              startedAt: new Date().toISOString(),
+              endedAt: new Date().toISOString(),
+              durationMs: 0,
+              message: "insufficient resource tokens",
+              blockedReason: "resource deadlock",
+            };
+            results.push(blocked);
+            store.writeResult(blocked);
+            store.writeFailure(blocked, blocked.message ?? "");
+          }
+          continue;
         }
-        break;
+        if (Date.now() > runDeadline) {
+          while (scheduler.pending.length > 0) {
+            const leftover = scheduler.pending.shift();
+            if (!leftover) break;
+            const interrupted: UnitResult = {
+              id: leftover.id,
+              caseId: leftover.caseId,
+              variant: leftover.variant,
+              status: "interrupted",
+              startedAt: new Date().toISOString(),
+              endedAt: new Date().toISOString(),
+              durationMs: 0,
+              message: "run reached --max-run-ms",
+            };
+            results.push(interrupted);
+            store.writeResult(interrupted);
+          }
+          break;
+        }
+        let claimed = claimNext(scheduler);
+        while (claimed) {
+          startOne(claimed);
+          claimed = claimNext(scheduler);
+        }
+        if (inflight.size > 0) await Promise.race(inflight);
       }
-      let claimed = claimNext(scheduler);
-      while (claimed) {
-        startOne(claimed);
-        claimed = claimNext(scheduler);
-      }
-      if (inflight.size > 0) await Promise.race(inflight);
-    }
-    if (inflight.size > 0) await Promise.all(inflight);
+      if (inflight.size > 0) await Promise.all(inflight);
 
-    const endedAt = new Date();
-    const counts = emptyCounts();
-    for (const result of results) addResult(counts, result);
-    const status = results.length === 0 ? "blocked" : rollupStatus(results);
-    const open = repoIdentity(openRoot);
-    const cloud = cloudRoot
-      ? repoIdentity(cloudRoot)
-      : { path: "", sha: "n/a", branch: "n/a", dirty: false, dirtyDigest: "n/a" };
-    const artifact = artifactIdentity(openRoot);
-    const requiredCases = (process.env.TESTCTL_REQUIRE_CASES ?? "")
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const executed = new Set(results.map((item) => item.caseId));
-    const reasons = qualificationReasons({
-      gate,
-      dirty: open.dirty || cloud.dirty,
-      artifactHash: artifact.hash,
-      blocked: counts.blocked,
-      failed: counts.failed,
-      unstable: counts.unstable,
-      interrupted: counts.interrupted,
-      openSha: open.sha,
-      cloudSha: cloud.sha,
-      requiredOpenSha: process.env.TESTCTL_REQUIRE_OPEN_SHA,
-      requiredCloudSha: process.env.TESTCTL_REQUIRE_CLOUD_SHA,
-      requiredArtifactHash: process.env.TESTCTL_REQUIRE_ARTIFACT_HASH,
-      requiredNotExecuted: requiredCases.filter((id) => !executed.has(id)),
-    });
-    const inputObservation = inputWatch.stop();
-    const inputDrift = inputObservation.changed || JSON.stringify(inputsAtStart) !== JSON.stringify({ open, cloud, artifact, bundle: artifactBundleIdentity(openRoot, cloudRoot) });
-    if (tagsOf(args).length > 0 && ["dev", "beta", "stable"].includes(gate)) reasons.push("filtered selection is not the complete release gate");
-    if (!inputObservation.complete) reasons.push("input change observation incomplete");
-    if (inputDrift) reasons.push("source or CLI artifact changed during run");
-    if (results.length === 0) reasons.push("no test cases executed");
-    const leakCount = (key: "processes" | "ports") => results.length > 0 && results.every(r => r.cleanup?.before[key] != null)
-      ? results.reduce((sum, r) => sum + r.cleanup!.before[key]!, 0) : null;
-    const leak = { processes: leakCount("processes"), ports: leakCount("ports") };
-    if (leak.processes === null || leak.ports === null) reasons.push("resource census incomplete");
-    else if (leak.processes > 0 || leak.ports > 0) reasons.push("resource leaks observed");
-    const manifest: RunManifest = {
-      schema: "genehub.test-run.v1",
-      runId: path.basename(store.dir),
-      topic,
-      gate,
-      status,
-      startedAt: startedAt.toISOString(),
-      endedAt: endedAt.toISOString(),
-      localTime: startedAt.toString(),
-      rfc3339: startedAt.toISOString(),
-      utc: startedAt.toISOString(),
-      trigger: "testctl",
-      runnerVersion: RUNNER_VERSION,
-      open,
-      cloud,
-      artifact,
-      catalogDigest: catalogDigest(cases),
-      selected: results.map((item) => item.caseId),
-      notExecuted: plan.skipped,
-      counts,
-      qualification: {
+      phase = "finalizing"; progress(); announce();
+      const counts = emptyCounts();
+      for (const result of results) addResult(counts, result);
+      const status = results.length === 0 ? "blocked" : rollupStatus(results);
+      const inputsAtEnd = preflightBlocked ? inputsAtStart : captureInputs();
+      const { open, cloud, artifact } = inputsAtEnd;
+      const requiredCases = (process.env.TESTCTL_REQUIRE_CASES ?? "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const executed = new Set(results.map((item) => item.caseId));
+      const reasons = qualificationReasons({
         gate,
-        policyVersion: POLICY_VERSION,
-        qualified: reasons.length === 0 && status === "passed",
-        reasons,
-      },
-      governanceDigest: checkGovernance(openRoot, cloudRoot).digest,
-      environments,
-      resultsPath: path.join(store.dir, "results.ndjson"),
-      leak,
-      inputsAtStart,
-      artifactBundle: inputsAtStart.bundle,
-      inputObservation,
-      inputDrift,
-    };
-    const failed = results.filter((item) => item.status !== "passed" && item.status !== "not-applicable");
-    const slowest = [...results].sort((a, b) => b.durationMs - a.durationMs).slice(0, 5);
-    const summary = renderRunSummary({ manifest, failed, slowest, runDir: store.dir, language: summaryLanguage });
-    store.finalize(manifest, summary);
-    process.stdout.write(`${store.dir}\n${status}\n`);
-    return status === "passed" ? 0 : 1;
+        dirty: open.dirty || cloud.dirty,
+        artifactHash: artifact.hash,
+        blocked: counts.blocked,
+        failed: counts.failed,
+        unstable: counts.unstable,
+        interrupted: counts.interrupted,
+        openSha: open.sha,
+        cloudSha: cloud.sha,
+        requiredOpenSha: process.env.TESTCTL_REQUIRE_OPEN_SHA,
+        requiredCloudSha: process.env.TESTCTL_REQUIRE_CLOUD_SHA,
+        requiredArtifactHash: process.env.TESTCTL_REQUIRE_ARTIFACT_HASH,
+        requiredNotExecuted: requiredCases.filter((id) => !executed.has(id)),
+      });
+      const inputObservation = inputWatch?.stop() ?? { changed: false, complete: false };
+      inputWatch = undefined;
+      const inputDrift = !preflightBlocked && (inputObservation.changed || JSON.stringify(inputsAtStart) !== JSON.stringify(inputsAtEnd));
+      if ((selection.tags.length > 0 || selection.cases.length > 0) && ["merge", "dev", "beta", "stable"].includes(gate)) reasons.push("filtered selection is not the complete release gate");
+      if (preflightBlocked) reasons.push("selected dependencies failed preflight; no test cases executed");
+      if (!inputObservation.complete) reasons.push("input change observation incomplete");
+      if (inputDrift) reasons.push("source or CLI artifact changed during run");
+      if (results.length === 0) reasons.push("no test cases executed");
+      const leakCount = (key: "processes" | "ports") => results.length > 0 && results.every(r => r.cleanup?.before[key] != null)
+        ? results.reduce((sum, r) => sum + r.cleanup!.before[key]!, 0) : null;
+      const leak = { processes: leakCount("processes"), ports: leakCount("ports") };
+      if (leak.processes === null || leak.ports === null) reasons.push("resource census incomplete");
+      else if (leak.processes > 0 || leak.ports > 0) reasons.push("resource leaks observed");
+      const manifest: RunManifest = {
+        schema: "genehub.test-run.v1",
+        runId: path.basename(store.dir),
+        topic,
+        gate,
+        status,
+        startedAt: startedAt.toISOString(),
+        endedAt: new Date().toISOString(),
+        localTime: startedAt.toString(),
+        rfc3339: startedAt.toISOString(),
+        utc: startedAt.toISOString(),
+        trigger: "testctl",
+        runnerVersion: RUNNER_VERSION,
+        open,
+        cloud,
+        artifact,
+        catalogDigest: catalogDigest(cases),
+        selected: plan.units.map(unit => unit.caseId),
+        selection,
+        preflight: { issues: prerequisites.issues, checked: prerequisites.checked },
+        resumeBinding,
+        ...(resumed ? { resumedFrom: { runId: resumed.runId, reused: resumed.results.map(r => r.id) } } : {}),
+        notExecuted: plan.skipped,
+        counts,
+        qualification: {
+          gate,
+          scope: gate === "dev-feedback" ? "feedback" : "gate",
+          policyVersion: POLICY_VERSION,
+          qualified: reasons.length === 0 && status === "passed",
+          reasons,
+        },
+        governanceDigest,
+        environments,
+        resultsPath: path.join(store.dir, "results.ndjson"),
+        leak,
+        inputsAtStart,
+        artifactBundle: inputsAtStart.bundle,
+        inputObservation,
+        inputDrift,
+      };
+      const failed = results.filter((item) => item.status !== "passed" && item.status !== "not-applicable");
+      const slowest = [...results].sort((a, b) => b.durationMs - a.durationMs).slice(0, 5);
+      const summary = renderRunSummary({ manifest, failed, slowest, runDir: store.dir, language: summaryLanguage });
+      store.finalize(manifest, summary);
+      phase = "complete"; progress();
+      process.stdout.write(`${store.dir}\n${status}\n`);
+      return status === "passed" && (!["merge", "dev", "dev-feedback", "beta", "stable"].includes(gate) || manifest.qualification.qualified) ? 0 : 1;
+    } catch (error) {
+      phase = "error"; progress("coordinator stopped without finalized evidence; qualification unavailable");
+      throw error;
+    } finally {
+      clearInterval(heartbeat);
+      inputWatch?.stop();
+    }
   }
 
   if (command === "inspect") {
@@ -328,12 +401,11 @@ async function main(): Promise<number> {
       process.stderr.write("--run is required\n");
       return 2;
     }
-    const manifest = JSON.parse(readFileSync(path.join(runDir, "manifest.json"), "utf8"));
-    const results = readFileSync(path.join(runDir, "results.ndjson"), "utf8")
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as UnitResult);
+    const manifestFile = path.join(runDir, "manifest.json");
+    const manifest = existsSync(manifestFile) ? JSON.parse(readFileSync(manifestFile, "utf8")) : null;
+    const progressFile = path.join(runDir, "progress.json");
+    const progress = existsSync(progressFile) ? JSON.parse(readFileSync(progressFile, "utf8")) as RunProgress : null;
+    const results = readRunResults(runDir);
     const caseId = flag(args, "--case");
     const filtered = caseId
       ? results.filter((item) => item.caseId === caseId)
@@ -346,7 +418,7 @@ async function main(): Promise<number> {
       const diagnostic = path.join(runDir, "failures", result.caseId.replace(/[^\w.-]+/g, "_"), "diagnostic.md");
       if (existsSync(diagnostic)) result.diagnostic = readFileSync(diagnostic, "utf8").slice(-64 * 1024);
     }
-    process.stdout.write(`${JSON.stringify({ manifest, results: filtered }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ manifest, progress, finalized: Boolean(manifest), qualification: manifest?.qualification ?? null, heartbeatAgeMs: progress ? Date.now() - Date.parse(progress.updatedAt) : null, results: filtered }, null, 2)}\n`);
     return 0;
   }
 
@@ -399,4 +471,8 @@ async function main(): Promise<number> {
   return 2;
 }
 
-void main().then((code) => process.exit(code));
+// Let stdout drain: forced process.exit truncated large plan/inspect JSON in pipes.
+void main().then((code) => { process.exitCode = code; }).catch(error => {
+  process.stderr.write(`testctl: ${error instanceof Error ? error.message : "command failed"}\n`);
+  process.exitCode = 2;
+});

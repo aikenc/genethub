@@ -38,7 +38,8 @@ defineSpecialty(
     },
     surfaces: ["browser", "daemon", "service-preview"],
     productInterfaces: ["@genehub/workbench/client"],
-    requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
+    requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp", "aiortc", "av", "numpy"] }],
+  requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
   },
   async (t) => {
     if (!t.browser) throw new BlockedError("real browser required");

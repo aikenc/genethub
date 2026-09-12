@@ -10,7 +10,8 @@ defineSpecialty({
   catches:["process service entry not usable on phone layout","preview navigation loses workspace","Python media requires Node","closing service access leaks media"],
   tags: ["network-risk-v2", "network-v2-diagnostic", "page-experience","service-preview-media"],runner:"playwright",llm:{default:"none"},expectedDurationMs:25000,timeoutMs:120000,
   resources:{environments:1,cpu:2,memoryMb:1536,io:1,browser:1,pool:"browser"},
-  surfaces:["browser","daemon","service-preview"],productInterfaces:["@genehub/workbench"],requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
+  surfaces:["browser","daemon","service-preview"],productInterfaces:["@genehub/workbench"],  requirements: [{ kind: "python", env: "GENEHUB_PREVIEW_MEDIA_PYTHON", minVersion: [3, 11], modules: ["aiohttp", "aiortc", "av", "numpy"] }],
+requiredArtifacts:["genehub-host-local","genehub_guest.wasm"],
 },async t=>{
   const python=process.env.GENEHUB_PREVIEW_MEDIA_PYTHON;
   if(!python||!t.browser)throw new BlockedError("Chromium and Python aiohttp/aiortc/PyAV/numpy required");

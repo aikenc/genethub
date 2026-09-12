@@ -17,7 +17,7 @@ export function governanceDigest(cloudRoot: string | undefined): string {
   ].filter((file) => file && existsSync(file));
   const hash = createHash("sha256");
   for (const file of files) hash.update(readFileSync(file));
-  return files.length === 0 ? "missing-governance-docs" : hash.digest("hex");
+  return files.length !== 2 ? "missing-governance-docs" : hash.digest("hex");
 }
 
 export function checkGovernance(openRoot: string, cloudRoot?: string): GovernanceReport {
