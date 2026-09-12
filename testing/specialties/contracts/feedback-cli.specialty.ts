@@ -51,6 +51,9 @@ defineSpecialty({
   const manifest = (dir: string) => JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
   const assert = t.assertions.assert;
 
+  const capabilities = await cli(["capabilities"]);
+  assert(capabilities.code === 0 && JSON.parse(capabilities.out).feedbackGate === "dev-feedback", "scoped feedback capability unavailable");
+
   assert((await cli(["plan", "--open", repo, "--gate", "dev-feedback"])).code !== 0, "implicit feedback scope accepted");
   assert((await cli(["plan", "--open", repo, "--gate", "typo"])).code !== 0, "unknown gate accepted");
   assert((await cli(["plan", "--open", repo, "--case", "missing"])).code !== 0, "unknown case accepted");

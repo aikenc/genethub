@@ -18,6 +18,8 @@ For a bounded dev feedback, use `plan` then `run --gate dev-feedback --case <id>
 (repeat `--case`, or select with `--tags`). Use absolute `--open`, `--cloud` and `--space` paths:
 `npm --prefix` changes the command working directory. Feedback evidence is distinct from full dev/Beta/Stable qualification.
 Selection output includes affected surfaces, declared dependencies and cumulative expected case duration, not a wall-clock guarantee.
+Before sending new options to an older worktree, run `testctl capabilities` and require `feedbackGate=dev-feedback`.
+Old runners did not reject unknown gate names; do not probe support by attempting a run. Update the same slot's tooling source first.
 
 Selected cases can declare `requirements: [{kind: "python", env: "VARIABLE", minVersion: [3, 11], modules: ["aiohttp"]}]`.
 All consumers of that environment dependency must declare it. The coordinator probes only selected requirements before starting

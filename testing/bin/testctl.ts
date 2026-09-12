@@ -55,7 +55,8 @@ function valuesOf(args: string[], name: string): string[] {
 }
 
 function usage(): string {
-  return `testctl <lint|governance|plan|run|inspect|compare|list|prune> [options]
+  return `testctl <capabilities|lint|governance|plan|run|inspect|compare|list|prune> [options]
+  capabilities
   lint [--open <path>] [--cloud <path>]
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>] [--case <id>] [--reason <scope explanation>]
@@ -94,6 +95,13 @@ async function main(): Promise<number> {
   }
   const openRoot = flag(args, "--open", OPEN_DEFAULT);
   const cloudRoot = flag(args, "--cloud") || undefined;
+
+  if (command === "capabilities") {
+    process.stdout.write(`${JSON.stringify({ schema: "genehub.test-capabilities.v1", runnerVersion: RUNNER_VERSION,
+      policyVersion: POLICY_VERSION, feedbackGate: "dev-feedback", explicitSelection: true, preflight: true,
+      liveInspect: true, resume: "matching-passed-only" }, null, 2)}\n`);
+    return 0;
+  }
 
   if (command === "lint") {
     const findings = lintLayers(openRoot, cloudRoot);
