@@ -107,7 +107,7 @@ import { Client, ServicePreviewClient } from '@genehub/workbench/client';
 async function connectionInput(){const result=await window.connectionInput();if(result.admissionError)throw Object.assign(new Error(result.admissionError.message),{status:result.admissionError.status});return result;}
 const endpoint=await connectionInput();
 const client=new Client({...endpoint,rtcEnabled:false,requestTimeoutMs:3000,onDiagnostic(e){if(['error','connection','rtc'].includes(e.kind)){mc.diagnostics.push(e);if(mc.diagnostics.length>64)mc.diagnostics.shift()}if(e.kind==='operation' && e.detail.phase==='finish'){mc.operations.push(e.detail);if(mc.operations.length>128)mc.operations.shift()}},redial:()=>connectionInput()});
-const mc={client,ServicePreviewClient,events:[],repairs:0,states:[],operations:[],diagnostics:[]};
+const mc={client,ServicePreviewClient,loadWorkbench:()=>import('@genehub/workbench'),events:[],repairs:0,states:[],operations:[],diagnostics:[]};
 client.onStateChange(s=>{mc.states.push(s);if(mc.states.length>128)mc.states.shift();document.querySelector('#status').textContent=s});
 window.mc=mc;client.connect();
 `);
@@ -130,7 +130,7 @@ window.mc=mc;client.connect();
     const testRequire = createRequire(join(t.openRoot, "testing/package.json"));
     const vite = await import(pathToFileURL(require.resolve("vite")).href);
     const server = await vite.createServer({ configFile: false, root, logLevel: "error",
-      resolve: { alias: [{ find: "@genehub/workbench/client", replacement: testRequire.resolve("@genehub/workbench/client") }] },
+      resolve: { alias: [{ find: "@genehub/workbench/client", replacement: testRequire.resolve("@genehub/workbench/client") }, { find: /^@genehub\/workbench$/, replacement: testRequire.resolve("@genehub/workbench") }] },
       server: { host: "127.0.0.1", port: 0, fs: { allow: [root, t.openRoot] } } });
     app = server; await server.listen();
     await page.goto(server.resolvedUrls.local[0]);

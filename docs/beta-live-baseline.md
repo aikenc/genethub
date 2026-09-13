@@ -3,7 +3,7 @@
 App Release 从自己的 tag 源码构建并携带已签名 guest。新 WASM 修改已经随 App 交付；历史 Live
 制品和 component manifest 可以保持原样，无须为“补齐内容”重发、删除或重标版本。
 
-Beta Live 发布脚本以已发布 App 和历史 component 中较新的版本计算下一次 Live。例如：
+Beta Live 发布脚本以已发布 App、历史 component 与有效产品清单中最新的版本计算下一次 Live。例如：
 
 ```text
 历史 Live 0.12.1-beta.11 + App 0.13.0-beta.2 → Live 0.13.1-beta.1
@@ -39,6 +39,7 @@ gh api --paginate --slurp repos/aikenc/genethub/releases | jq 'add' > reviewed-a
 审阅和取得渠道；它不替代设备端的签名/ABI 检查。若 component 已在快照中不存在的新 App 代际，
 脚本会拒绝并要求刷新元数据。
 
+Web-only 和服务端更新也使用 Cloud `publisher/plan-release.mjs` 分配产品版本，不能只改 build SHA。
 正式发布仍走 release-beta 的持久 runner；不要在临时远程 shell 中直接执行长发布命令。
 `--version` 也必须处于已发布 App 代际并不低于自动算出的下一 Live。Stable、dev 的既有算法不变。
 
@@ -57,7 +58,8 @@ gh api --paginate --slurp repos/aikenc/genethub/releases | jq 'add' > reviewed-a
 | 设备已安装 | 目标设备上的二进制版本；注明设备，不能用服务器代替用户 PC |
 | 设备正在运行 | 重连后的 Host / guest 身份；未重启时明确标为旧进程或未验收 |
 
-本修复不改变 App 打包、签名格式、Host 加载规则、component/Web 激活顺序或 daemon 重启流程。
+统一版本实现、产品清单与实际激活验收以 Cloud `docs/release-identity.md` 为准。
+版本管理不自动授权修改 Host 加载规则或重启 daemon。
 ABI 变化仍需现有配对 App 证据；仅修正版本分配不豁免原生依赖审查，也不自动解决旧 App 对新一代
 Live 的兼容性问题。新 App 安装资产可下载不等于所有设备都已升级。
 

@@ -66,7 +66,7 @@ jobs:
       # policy scripts ride along: the version grammar and the channel table
       # are cheap to keep honest and expensive to discover broken.
       - name: The classifier must pass its own contract tests
-        run: node --test scripts/ci-classify.test.mjs scripts/ci-native-fingerprint.test.mjs scripts/ci-wit-digest.test.mjs scripts/product-version.test.mjs scripts/channel.test.mjs
+        run: node --test scripts/ci-classify.test.mjs scripts/ci-native-fingerprint.test.mjs scripts/ci-wit-digest.test.mjs scripts/product-version.test.mjs scripts/app-release-identity.test.mjs scripts/channel.test.mjs packages/workbench/build-stamp.test.mjs
       - id: filter
         shell: bash
         run: |

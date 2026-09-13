@@ -304,7 +304,11 @@ export class Client {
   private rtcFailure_: RtcFailure | null = null;
   private rtcLink: RtcDataLink | null = null;
   private dataRtcLink: RtcDataLink | null = null;
+  private rtcRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private rtcRetryDelay = 1000;
+  private rtcLifecycleCleanup: (() => void) | null = null;
   private rtcGeneration = 0;
+  private rtcNegotiating = false;
   private connectionEpoch = 0;
   private connectionAttemptId: string | null = null;
   private carrier: "websocket" | "fabric" | null = null;
@@ -848,8 +852,7 @@ export class Client {
       onError: (error) => this.report(error),
     }).then(
       async (link) => {
-        this.dialingTransport = false;
-        if (!this.isCurrentEpoch(epoch)) {
+        if (!this.finishFabricDial(epoch)) {
           link.close();
           return;
         }
@@ -873,12 +876,22 @@ export class Client {
         }
       },
       (error: unknown) => {
-        this.dialingTransport = false;
-        if (!this.isCurrentEpoch(epoch)) return;
+        if (!this.finishFabricDial(epoch)) return;
         this.report(error);
         this.droppedTransport(epoch, undefined, Boolean(previous));
       },
     );
+  }
+
+  private finishFabricDial(epoch: symbol): boolean {
+    // A terminal logical-session error can clear the endpoint while attach is
+    // still pending. Its close callback cannot redial until this attempt ends.
+    // A callback from an older attempt must never clear a newer dial's guard.
+    if (this.epoch !== null && this.epoch !== epoch) return false;
+    this.dialingTransport = false;
+    if (this.isCurrentEpoch(epoch)) return true;
+    if (!this.endpoint) this.scheduleReconnect();
+    return false;
   }
 
   private async establish(socket: WebSocketLike, epoch: symbol): Promise<void> {
@@ -950,7 +963,16 @@ export class Client {
       this.report(reason);
       this.droppedTransport(epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
     });
-    this.endpointLifecycleCleanup = () => { stopRecovering(); stopClose(); };
+    const stopPath = endpoint.onPathChange(() => {
+      if (this.endpoint !== endpoint || this.epoch !== epoch || this.stopped) return;
+      if (this.rtcEnabled) {
+        this.setRtcState(endpoint.activePath === "rtc" ? "connected" : "standby");
+        if (endpoint.activePath !== "rtc") this.scheduleRtcRetry();
+      }
+      if (this.state === "ready") { this.scheduleHeartbeat(); this.flushQueue(endpoint, epoch); }
+      if (endpoint.activePath === "rtc" && !endpoint.hasPath(this.carrier === "fabric" ? "fabric" : "loopback")) this.droppedTransport(epoch);
+    });
+    this.endpointLifecycleCleanup = () => { stopRecovering(); stopClose(); stopPath(); };
   }
 
   private markStableAfterGrace(): void {
@@ -1355,6 +1377,15 @@ export class Client {
 
   private droppedTransport(epoch: symbol, close?: CloseReason, abandonLogical = false): void {
     if (!this.isCurrentEpoch(epoch)) return;
+    // A physical base socket can close while the logical peer is served by RTC.
+    // Keep its streams and subscriptions; refresh the missing base in the background.
+    if (this.endpoint?.state === "open" && !this.endpoint.recovering && this.endpoint.activePath === "rtc") {
+      const socket = this.socket, fabric = this.fabricLink?.fabric;
+      this.socket = null; this.fabricLink = null;
+      socket?.close(); fabric?.close();
+      this.scheduleReconnect();
+      return;
+    }
     this.renewalAbort?.abort();
     this.renewalAbort = null;
     this.lastClose = close;
@@ -1458,7 +1489,7 @@ export class Client {
       this.retryTimer !== null ||
       this.redialing
     ) return;
-    this.setState("reconnecting");
+    if (!this.endpoint || this.endpoint.recovering) this.setState("reconnecting");
     const backoff =
       this.options.backoffMs ?? ((attempt: number) => Math.min(1000 * 2 ** attempt, 15_000));
     const base = backoff(this.attempt++);
@@ -1520,24 +1551,15 @@ export class Client {
     } catch (error) {
       if (this.epoch !== epoch || this.stopped) return;
       this.report(error);
-      this.dropCurrentTransport(epoch, { reason: "heartbeat 超时，连接已不可达" });
+      // Fail only the probed physical path. The logical owner authenticates
+      // and synchronizes its standby before attempting an external redial.
+      endpoint.failActivePath(error);
+      if (this.state === "ready") this.scheduleHeartbeat();
     } finally {
       this.heartbeatInFlight = false;
     }
   }
 
-  private dropCurrentTransport(epoch: symbol, close?: CloseReason): void {
-    const socket = this.socket;
-    if (socket && this.epoch === epoch) {
-      this.dropSocket(socket, epoch);
-      return;
-    }
-    const link = this.fabricLink;
-    if (link && this.epoch === epoch) {
-      link.close();
-      this.droppedTransport(epoch, close);
-    }
-  }
 
   /**
    * Browsers tell us directly when the page comes back from suspension or the
@@ -1595,6 +1617,7 @@ export class Client {
   }
 
   private async startRtc(base: DataEndpoint, epoch: symbol): Promise<void> {
+    if (this.rtcNegotiating) return;
     if (!this.rtcEnabled) {
       this.rtcFailure_ = null;
       this.setRtcState("disabled");
@@ -1613,14 +1636,13 @@ export class Client {
       return;
     }
     const generation = ++this.rtcGeneration;
+    this.rtcNegotiating = true;
     const requestId = diagnosticId("rtc");
     const started = this.now();
     const previousDirectLink = this.rtcLink;
     const previousDirect = this.rtcLink?.endpoint.state === "open" ? this.rtcLink.endpoint : undefined;
     const previousData = this.dataRtcLink;
-    this.rtcLink = null; this.dataRtcLink = null;
-    previousData?.close();
-    this.setRtcState("connecting");
+    this.setRtcState(base.activePath === "rtc" ? "connected" : "connecting");
     this.diagnostic("operation", {
       operation: "rtc.negotiate",
       requestId,
@@ -1660,13 +1682,15 @@ export class Client {
       }
       this.rtcFailure_ = null;
       this.rtcLink = link;
-      link.endpoint.onRecovering(() => {
+      this.rtcLifecycleCleanup?.();
+      const stopRecovering = link.endpoint.onRecovering(() => {
         if (this.rtcLink !== link) return;
-        this.setRtcState("standby");
+        this.setRtcState(base.activePath === "rtc" ? "connected" : "standby");
         // Keep the restricted logical owner; only a new authenticated RTC can attach.
-        if (this.state === "ready" && this.endpoint === base) this.droppedTransport(epoch);
+        // Restricted Preview recovery is independent of ordinary business traffic.
+        this.scheduleRtcRetry();
       });
-      link.endpoint.onClose((reason) => {
+      const stopClose = link.endpoint.onClose((reason) => {
         if (this.rtcLink !== link) return;
         this.rtcLink = null;
         this.report(reason);
@@ -1679,6 +1703,7 @@ export class Client {
           this.setRtcState("failed");
         }
       });
+      this.rtcLifecycleCleanup = () => { stopRecovering(); stopClose(); };
       // Restricted service bytes have their own immutable direct-only journal.
       // The second channel activates the existing ordinary logical peer, including events.
       const dataLink = await (this.options.rtcFactory ?? openRtcDataLink)(
@@ -1693,6 +1718,8 @@ export class Client {
         return;
       }
       this.dataRtcLink = dataLink;
+      previousData?.close();
+      this.rtcRetryDelay = 1000;
       this.setRtcState("connected");
       this.diagnostic("operation", {
         operation: "rtc.negotiate",
@@ -1711,7 +1738,8 @@ export class Client {
         message: error instanceof Error ? error.message : String(error),
         durationMs: Math.round(this.now() - started),
       };
-      this.setRtcState("failed");
+      this.setRtcState(base.activePath === "rtc" ? "connected" : "failed");
+      this.scheduleRtcRetry();
       this.diagnostic("operation", {
         operation: "rtc.negotiate",
         requestId,
@@ -1721,11 +1749,31 @@ export class Client {
         durationMs: Math.round(this.now() - started),
         rtcPhase: this.rtcFailure_.phase,
       });
+    } finally {
+      if (generation === this.rtcGeneration) this.rtcNegotiating = false;
     }
   }
 
+  private scheduleRtcRetry(): void {
+    if (this.rtcRetryTimer !== null || !this.rtcEnabled || this.stopped) return;
+    const delay = this.rtcRetryDelay;
+    this.rtcRetryDelay = Math.min(30_000, delay * 2);
+    this.rtcRetryTimer = setTimeout(() => {
+      this.rtcRetryTimer = null;
+      if (!this.rtcEnabled || this.stopped || this.state !== "ready" || !this.endpoint || !this.epoch) return;
+      if (this.renewalAbort || this.rtcNegotiating || this.endpoint.recovering) {
+        this.scheduleRtcRetry(); return;
+      }
+      if (this.endpoint.activePath === "rtc" && this.rtcLink?.endpoint.state === "open" && !this.rtcLink.endpoint.recovering) return;
+      void this.startRtc(this.endpoint, this.epoch);
+    }, delay);
+  }
+
   private closeRtc(increment = true): void {
-    if (increment) this.rtcGeneration += 1;
+    if (this.rtcRetryTimer !== null) clearTimeout(this.rtcRetryTimer);
+    this.rtcRetryTimer = null;
+    this.rtcLifecycleCleanup?.(); this.rtcLifecycleCleanup = null;
+    if (increment) { this.rtcGeneration += 1; this.rtcNegotiating = false; }
     const link = this.rtcLink, dataLink = this.dataRtcLink;
     this.rtcLink = null; this.dataRtcLink = null;
     link?.endpoint.close("RTC disabled or client closed");
@@ -1779,7 +1827,7 @@ export class Client {
     const endpoint = this.endpoint, epoch = this.epoch, redial = this.options.redial;
     if (!endpoint || !epoch || !redial || this.stopped || this.state !== "ready") return;
     // RTC upgrades use the same ordinary journal's single candidate slot.
-    if (this.renewalAbort || this.redialing || this.rtcState_ === "connecting") {
+    if (this.renewalAbort || this.redialing || this.rtcNegotiating) {
       this.scheduleAuthorizationRenewal(1000); return;
     }
     const controller = new AbortController();

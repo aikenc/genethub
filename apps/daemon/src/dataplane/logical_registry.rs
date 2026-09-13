@@ -170,6 +170,7 @@ impl Registry {
     /// Rechecks fresh carrier authentication and scope, then proves recovery
     /// possession bound to that channel's two-nonce key derivation. This method
     /// cannot advance epochs or displace the currently active channel.
+    #[allow(clippy::too_many_arguments)]
     pub fn attach(
         &self,
         id: &str,

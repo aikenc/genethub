@@ -132,6 +132,9 @@ describe("PreviewFloat", () => {
     expect(screen.getByRole("dialog", { name: "文件预览" })).toBeInTheDocument();
     expect(screen.getByText("Cursor Demo Title")).toBeInTheDocument();
     expect(screen.queryByText("r_root/demos/index.html")).not.toBeInTheDocument();
+    const chrome = screen.getByRole("dialog", { name: "文件预览" }).querySelector("header");
+    expect(chrome).toHaveClass("min-h-9");
+    expect(chrome).toHaveStyle({ paddingTop: "env(safe-area-inset-top)" });
 
     await user.click(screen.getByRole("button", { name: "查看预览信息" }));
     expect(screen.getByRole("dialog", { name: "预览信息" })).toBeInTheDocument();

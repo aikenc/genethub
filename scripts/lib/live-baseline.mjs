@@ -43,11 +43,9 @@ export async function readPublishedApps(file) {
   throw new Error("App release history exceeds the lookup bound; use a reviewed --app-releases FILE");
 }
 
-export function betaLiveBaseline({ current, stableLatest, metadata, explicitVersion, versions }) {
-  const { parseProductVersion, compareProductVersions, nextLiveVersion } = versions;
+export function publishedBetaApp(metadata, versions) {
+  const { parseProductVersion, compareProductVersions } = versions;
   if (!Array.isArray(metadata.releases)) throw new Error("--app-releases must contain a GitHub REST releases array");
-  const live = current == null ? null : parseProductVersion(current);
-  if (live && live.tag !== "beta") throw new Error("component baseline does not belong to beta");
   const requiredAssets = [
     "genehub_guest.wasm", "SHA256SUMS", "latest-beta.json",
     "GeneHub-beta-windows-x64-setup.exe",
@@ -72,6 +70,14 @@ export function betaLiveBaseline({ current, stableLatest, metadata, explicitVers
     }
   }
   if (!app) throw new Error("no complete published Beta App release found; refusing to infer the App baseline from tags or old Live alone");
+  return app;
+}
+
+export function betaLiveBaseline({ current, stableLatest, metadata, explicitVersion, resuming = false, versions }) {
+  const { parseProductVersion, compareProductVersions, nextLiveVersion } = versions;
+  const live = current == null ? null : parseProductVersion(current);
+  if (live && live.tag !== "beta") throw new Error("component baseline does not belong to beta");
+  const app = publishedBetaApp(metadata, versions);
   // A higher Live in an App generation missing from release metadata is not a
   // fallback: the snapshot may be stale or incomplete. Fail before publishing.
   const native = parseProductVersion(app.version);
@@ -83,7 +89,7 @@ export function betaLiveBaseline({ current, stableLatest, metadata, explicitVers
   const version = explicitVersion ?? next;
   const parsed = parseProductVersion(version);
   if (parsed.tag !== "beta" || parsed.epoch !== native.epoch || parsed.generation !== native.generation ||
-      parsed.live === 0 || compareProductVersions(version, next) < 0) {
+      parsed.live === 0 || (compareProductVersions(version, next) < 0 && !(resuming && version === product))) {
     throw new Error(`Live version must stay on the published App generation and be at least ${next}`);
   }
   return {

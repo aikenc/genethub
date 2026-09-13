@@ -121,10 +121,13 @@ mod tests {
         };
         // Ordinary records use the v4 resumable envelope, not the bootstrap header.
         let wire = genehub_proto::resume::Payload {
-            epoch: 1, seq: 1,
+            epoch: 1,
+            seq: 1,
             frame: genehub_proto::resume::Frame {
-                kind: frame.kind as u8, stream_id: frame.stream_id,
-                value: frame.value, payload: frame.payload,
+                kind: frame.kind as u8,
+                stream_id: frame.stream_id,
+                value: frame.value,
+                payload: frame.payload,
             },
         };
         assert_eq!(

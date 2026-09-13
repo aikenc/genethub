@@ -28,6 +28,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseProductVersion } from "./product-version.mjs";
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -586,14 +587,15 @@ function stamp(channel) {
 }
 
 // The channel a tag build belongs to: a plain product version is stable, a
-// `-beta.N` prerelease is the beta line, and the `0.0.0-dev.N` slot sequence
+// `-beta.N` prerelease is the beta line, and `-dev.N`
 // is a dev release. Anything else is not a release at all.
 function fromRef() {
   const ref = process.env.GITHUB_REF_NAME ?? "";
-  if (/^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$/.test(ref)) return "beta";
-  if (/^v0\.0\.0-dev\.[0-9]+$/.test(ref)) return "dev";
-  if (/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(ref)) return "stable";
-  return "";
+  if (!ref.startsWith("v")) return "";
+  try {
+    const { tag } = parseProductVersion(ref.slice(1));
+    return tag === null ? "stable" : tag === "beta" || tag === "dev" ? tag : "";
+  } catch { return ""; }
 }
 
 // Every repo-relative path stamp() owns. The persistent publish worktree

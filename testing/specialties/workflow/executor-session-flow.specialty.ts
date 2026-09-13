@@ -76,8 +76,10 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    const handoffRelease = path.join(t.env.root, "handoff-release");
     try {
       const repairs = outcome === "repaired" || outcome === "exhausted";
+      const handoff = outcome === "cancel-handoff" || outcome === "restart-handoff" || outcome === "corrupt-frontier";
       const projectRoot = path.join(opened.workspaceRoot, "asteroid-garden");
       mkdirSync(projectRoot, { recursive: true });
       t.data.git.init(projectRoot);
@@ -121,11 +123,16 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             };
           }
           if (stage === 1) {
+            // Keep the first accepted worker alive at the handoff boundary.
+            // Polling for any finishing node alone can catch a later worker.
+            const waitForHandoff = handoff
+              ? ` && while [ ! -e ${shellArg(handoffRelease)} ]; do sleep 0.05; done`
+              : "";
             return {
               tool: {
                 name: "bash",
                 arguments: {
-                  command: `cd ${shellArg(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke"`,
+                  command: `cd ${shellArg(projectRoot)} && git add index.html && git commit -m "build asteroid garden" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks="index-html-static-smoke"${waitForHandoff}`,
                 },
               },
             };
@@ -249,7 +256,10 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       await t.tools.waitUntil(
         async () => {
           const reply = await opened.client.call({type: "session.get", payload: {sessionId: pmSessionId}});
-          return reply?.type === "snapshot" && reply.data.summary.status === "idle" && !reply.data.pendingPermissions?.length;
+          // Snapshot replies and subscription events use independent streams.
+          // Observe both facts before judging the completed PM turn.
+          const terminal = pmEvents.some(event => event.type === "turnCompleted" || event.type === "turnFailed");
+          return terminal && reply?.type === "snapshot" && reply.data.summary.status === "idle" && !reply.data.pendingPermissions?.length;
         },
         40_000,
       );
@@ -259,7 +269,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         `PM turn failed: ${JSON.stringify(pmEvents.slice(-10).map((event) => event.raw)).slice(-6000)}`,
       );
 
-      if (outcome === "cancel-handoff" || outcome === "restart-handoff" || outcome === "corrupt-frontier") {
+      if (handoff) {
         let accepted: import("@genehub/proto").WorkflowRunStatus | undefined;
         await t.tools.waitUntil(async () => {
           const result = await opened.client.call({type: "workflow.history", payload: {workspaceId: projectId, limit: 10}});
@@ -273,7 +283,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             const result = await opened.client.call({type: "workflow.get", payload: {workspaceId: projectId, runId: accepted!.id}});
             if (result?.type !== "workflowRun" || result.data.status !== "cancelled") return false;
             t.assertions.assert(result.data.nodes.filter(node => node.sessionId).length === 1 && !result.data.reportPending,
-              "cancellation during handoff launched a successor or PM report");
+              `cancellation during handoff launched a successor or PM report: ${JSON.stringify(result.data)}`);
             return true;
           }, 35_000);
           await new Promise(resolve => setTimeout(resolve, 3_000));
@@ -445,6 +455,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         `pm=${pmSessionId} executor=${run?.executorSessionId} coder=${coder?.id} reviewer=${reviewer?.id} run=${runId}`,
       );
     } finally {
+      writeFileSync(handoffRelease, "release\n");
       opened.client.close();
       await runGenetAsync(opened.daemon.genet,["daemon","stop"],opened.daemon.env);
       await opened.mock.stop();

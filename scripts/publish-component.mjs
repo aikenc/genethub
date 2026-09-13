@@ -2,7 +2,7 @@
 // Build, sign, inspect and optionally activate one component-only update —
 // and, with --web, the matching website half of the same Live Release.
 // Native binaries, tags and GitHub releases are deliberately outside this
-// command: a Live Release is local and lands in seconds.
+// command. Build duration depends on the candidate and the existing cache.
 
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
@@ -44,6 +44,7 @@ async function main() {
   const { readCurrent } = await import(pathToFileURL(join(cloud, "publisher/store.mjs")).href);
   const versions = await import(pathToFileURL(join(cloud, "publisher/version.mjs")).href);
   const { nextLiveVersion } = versions;
+  const { currentProduct, preflightProductRelease, collectRelease, commitProductRelease } = await import(pathToFileURL(join(cloud, "publisher/product-release.mjs")).href);
   if (commit) {
     requireClean(open, "genethub");
     requireClean(cloud, "genethub-cloud");
@@ -82,86 +83,91 @@ async function main() {
   // travels in the signed envelope (pack's argv) and reaches the runtime as
   // GENEHUB_COMPONENT_VERSION, and stamping the workspace version would
   // invalidate every crate's fingerprint for nothing.
-  let version = argumentsMap.has("version")
-    ? required("--version", argumentsMap.get("version"))
-    : undefined;
-  let baseline;
-  if ((commit || plan) && channel === "beta") {
-    const current = await readCurrent(root, "component", channel);
-    if (current && (current.value.schema !== "genehub.release-manifest.v2" || current.value.channel !== channel)) {
-      throw new Error("component baseline has an invalid schema or channel");
-    }
-    const stable = await readCurrent(root, "component", "stable");
-    ({ version, baseline } = betaLiveBaseline({
-      current: current?.value.releaseVersion ?? null,
-      stableLatest: stable?.value.releaseVersion,
-      metadata: await readPublishedApps(argumentsMap.get("app-releases")),
-      explicitVersion: version,
-      versions,
-    }));
-  } else if ((commit || plan) && !version) {
-    const current = await readCurrent(root, "component", channel);
-    if (!current) throw new Error("the channel's first component release requires an explicit version");
-    version = nextLiveVersion(current.value.releaseVersion);
-  }
-  if (plan) {
-    process.stdout.write(`${JSON.stringify({ mode: "plan", channel, version, baseline, source }, null, 2)}\n`);
-    return;
-  }
-  temporary ??= mkdtempSync(join(tmpdir(), "genehub-guest-publish-"));
-  // One Live publish per channel at a time; held for the whole run because
-  // the version computation and the store write race just as badly as the
-  // worktree does.
   const releaseLock = commit ? acquirePublishLock(open, channel) : null;
-
-  // The Cargo builds share one package-cache lock, so they run as one
-  // sequential chain; the console build (npm/rolldown-vite) is an independent
-  // toolchain and runs concurrently with it. A committed guest build compiles
-  // in the stamped worktree against its own channel-keyed target directory;
-  // the signer compiles from the main checkout — pack/inspect take channel
-  // and version from argv (the only compiled-in constants they use, MODULE_ID
-  // and the WIT ABI digest, are identical across channels), so one
-  // local-stamped host binary signs every channel and target/publish/signer
-  // stays warm across publishes. An unchanged tree makes every one of these
-  // a no-op measured in seconds.
-  const cargo = resolveCargo(argumentsMap.get("cargo"));
-  let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
-  let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
-  const builds = [];
-  if (!raw || !signer) {
-    builds.push((async () => {
-      if (!raw) {
-        const tree = commit ? ensureStampedWorktree(open, channel, source.openSha) : open;
-        // The channel-keyed target dir doubles as the warm dependency cache;
-        // it predates the worktree flow and stays put so the first publish
-        // under it does not recompile the world.
-        const guestTarget = commit ? join(open, "target", "publish", channel) : join(open, "target");
-        raw = await buildRaw(cargo, channel, tree, guestTarget);
-      }
-      if (!signer) {
-        const signerTarget = commit ? join(open, "target", "publish", "signer") : join(open, "target");
-        signer = await buildSigner(cargo, signerTarget);
-      }
-    })());
-  }
-  if (web) builds.push(buildWeb(cloud, channel));
-  await Promise.all(builds);
-  const builtMs = Date.now() - started;
-
-  const githubUrl = channel === "stable"
-    ? argumentsMap.get("github-url") ??
-      (!commit
-        ? "https://github.com/aikenc/genethub/releases/download/component-candidate/genehub_guest.wasm"
-        : undefined)
-    : undefined;
-  const appRelease = argumentsMap.has("app-release")
-    ? {
-        release: required("--app-release", argumentsMap.get("app-release")),
-        appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
-      }
-    : undefined;
-
   try {
+    let version = argumentsMap.has("version")
+      ? required("--version", argumentsMap.get("version"))
+      : process.env.RELEASE_VERSION;
+    let baseline;
+    if ((commit || plan) && channel === "beta") {
+      const current = await readCurrent(root, "component", channel);
+      if (current && (current.value.schema !== "genehub.release-manifest.v2" || current.value.channel !== channel)) {
+        throw new Error("component baseline has an invalid schema or channel");
+      }
+      const stable = (await currentProduct(root, "stable")) ?? await readCurrent(root, "component", "stable");
+      ({ version, baseline } = betaLiveBaseline({
+        current: [current?.value.releaseVersion, (await currentProduct(root, channel))?.value.releaseVersion].filter(Boolean).sort(versions.compareProductVersions).at(-1) ?? null,
+        stableLatest: stable?.value.releaseVersion,
+        metadata: await readPublishedApps(argumentsMap.get("app-releases")),
+        explicitVersion: version,
+        resuming: version === current?.value.releaseVersion && current?.value.source?.openSha === source.openSha && current?.value.source?.cloudSha === source.cloudSha,
+        versions,
+      }));
+    } else if ((commit || plan) && !version) {
+      const current = await readCurrent(root, "component", channel);
+      if (!current) throw new Error("the channel's first component release requires an explicit version");
+      const effective = (await currentProduct(root, channel))?.value.releaseVersion;
+      version = nextLiveVersion(effective && versions.compareProductVersions(effective, current.value.releaseVersion) > 0 ? effective : current.value.releaseVersion);
+    }
+    if (version) versions.versionForChannel(version, channel);
+    if (commit || plan) await preflightProductRelease(root, { channel, releaseVersion: version, source });
+    if (plan) {
+      process.stdout.write(`${JSON.stringify({ mode: "plan", channel, version, baseline, source }, null, 2)}\n`);
+      return;
+    }
+    temporary ??= mkdtempSync(join(tmpdir(), "genehub-guest-publish-"));
+    // One Live publish per channel at a time; held for the whole run because
+    // the version computation and the store write race just as badly as the
+    // worktree does.
+    // The Cargo builds share one package-cache lock, so they run as one
+    // sequential chain; the console build (npm/rolldown-vite) is an independent
+    // toolchain and runs concurrently with it. A committed guest build compiles
+    // in the stamped worktree against its own channel-keyed target directory;
+    // the signer compiles from the main checkout — pack/inspect take channel
+    // and version from argv (the only compiled-in constants they use, MODULE_ID
+    // and the WIT ABI digest, are identical across channels), so one
+    // local-stamped host binary signs every channel and target/publish/signer
+    // stays warm across publishes. An unchanged tree makes every one of these
+    // a no-op measured in seconds.
+    const cargo = resolveCargo(argumentsMap.get("cargo"));
+    let raw = argumentsMap.get("raw") ? resolve(argumentsMap.get("raw")) : null;
+    let signer = argumentsMap.get("signer") ? resolve(argumentsMap.get("signer")) : null;
+    const builds = [];
+    if (!raw || !signer) {
+      builds.push((async () => {
+        if (!raw) {
+          const tree = commit ? ensureStampedWorktree(open, channel, source.openSha) : open;
+          // The channel-keyed target dir doubles as the warm dependency cache;
+          // it predates the worktree flow and stays put so the first publish
+          // under it does not recompile the world.
+          const guestTarget = commit ? join(open, "target", "publish", channel) : join(open, "target");
+          raw = await buildRaw(cargo, channel, tree, guestTarget);
+        }
+        if (!signer) {
+          const signerTarget = commit ? join(open, "target", "publish", "signer") : join(open, "target");
+          signer = await buildSigner(cargo, signerTarget);
+        }
+      })());
+    }
+    if (web) builds.push(buildWeb(cloud, channel, version));
+    const built = await Promise.allSettled(builds);
+    const failure = built.find(result => result.status === "rejected");
+    if (failure) throw failure.reason;
+    const builtMs = Date.now() - started;
+
+    const githubUrl = channel === "stable"
+      ? argumentsMap.get("github-url") ??
+        (!commit
+          ? "https://github.com/aikenc/genethub/releases/download/component-candidate/genehub_guest.wasm"
+          : undefined)
+      : undefined;
+    const appRelease = argumentsMap.has("app-release")
+      ? {
+          release: required("--app-release", argumentsMap.get("app-release")),
+          appAbiHash: requiredHash("--app-abi-hash", argumentsMap.get("app-abi-hash")),
+        }
+      : undefined;
+
     const result = await publishComponent({
       root,
       channel,
@@ -182,19 +188,25 @@ async function main() {
       }),
     });
     let webReceipt;
-    if (web && result.changed !== false) {
+    if (web) {
       webReceipt = await publishWebHalf({ cloud, stage, channel, source, runner, version: result.version });
+    }
+    let releaseSet;
+    if (commit && process.env.GENEHUB_DEFER_RELEASE_SET !== "1") {
+      const collected = await collectRelease({ stage, root, channel, releaseVersion: result.version,
+        source: { openSha: source.openSha, cloudSha: source.cloudSha }, updated: web ? ["component", "web"] : ["component"] });
+      releaseSet = await commitProductRelease(root, collected);
     }
     const totalMs = Date.now() - started;
     process.stdout.write(`${JSON.stringify(
       { mode: commit ? "committed" : "candidate", store: root, ...result, ...(baseline ? { baseline } : {}),
-        ...(webReceipt ? { web: webReceipt } : {}),
+        ...(webReceipt ? { web: webReceipt } : {}), ...(releaseSet ? { releaseSet } : {}),
         timing: { buildMs: builtMs, totalMs } },
       null, 2,
     )}\n`);
   } finally {
     releaseLock?.();
-    if (commit || argumentsMap.has("discard-candidate")) {
+    if (temporary && (commit || argumentsMap.has("discard-candidate"))) {
       rmSync(temporary, { recursive: true, force: true });
     }
   }
@@ -223,12 +235,12 @@ function buildSigner(cargo, targetDir) {
 // The website half of a Live Release: exact dependencies only when the
 // lockfile moved, then the rolldown-vite build (seconds, not the historical
 // tsc+vite half minute). Tests stay with CI — this chain is for iteration.
-async function buildWeb(cloud, channel) {
+async function buildWeb(cloud, channel, version) {
   const consoleRoot = join(cloud, "console");
   await npmCiIfChanged(consoleRoot);
   const brand = { stable: "GeneHub", beta: "GeneHub Beta", dev: "GeneHub Dev" }[channel];
   await run("npm", ["--prefix", consoleRoot, "run", "build"], {
-    env: { ...process.env, VITE_GENEHUB_CHANNEL: channel, VITE_GENEHUB_BRAND: brand },
+    env: { ...process.env, RELEASE_VERSION: version, VITE_GENEHUB_CHANNEL: channel, VITE_GENEHUB_BRAND: brand },
   });
 }
 
@@ -241,13 +253,14 @@ async function npmCiIfChanged(prefix) {
 }
 
 function publishWebHalf({ cloud, stage, channel, source, runner, version }) {
-  const buildId = `${source.cloudSha.slice(0, 12)}-${source.openSha.slice(0, 12)}-${source.lockfileSha256.slice(0, 12)}`;
+  const buildId = `${version}-${source.cloudSha.slice(0, 12)}-${source.openSha.slice(0, 12)}-${source.lockfileSha256.slice(0, 12)}`;
   return run("node", [
     join(cloud, "deploy", "web-release.mjs"),
     "--stage", stage,
     "--dist", join(cloud, "console", "dist"),
     "--channel", channel,
     "--build-id", buildId,
+    "--defer-release-set", "true",
     "--open-sha", source.openSha,
     "--cloud-sha", source.cloudSha,
     "--lockfile-sha256", source.lockfileSha256,
@@ -352,10 +365,10 @@ function usage() {
 The default uses an isolated candidate store. --commit additionally requires a
 clean paired checkout. --stage implies --store DIR/artifacts, and --web (commit
 only) additionally builds the console and activates the same Product Version
-on the website half, so one command lands a whole Live Release in seconds.
+on the website half. Build duration depends on the candidate and cache.
 Every channel signs with the one self-contained development root; the stable
 line reintroduces external keys when it graduates.
-Beta uses the newer of the published App and component identities as its base.
+Beta uses the newest published App, component and product-set identities as its base.
 App metadata comes from GitHub REST releases, or a reviewed response array in
 --app-releases FILE. Failed tags, drafts and incomplete assets are excluded.
 Lookup failure stops publication. --plan reads identities without building or

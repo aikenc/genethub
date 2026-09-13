@@ -7,7 +7,7 @@ import { defineConfig } from "vitest/config";
 
 // @ts-expect-error -- plain JS, shared with the cloud console's config in
 // another checkout, so it stays outside `src` and outside this tsconfig.
-import { buildDefines } from "./build-stamp.js";
+import { buildDefines, productIdentityPlugin } from "./build-stamp.js";
 
 /**
  * Where the page can find a daemon without a second port forward.
@@ -69,7 +69,7 @@ function relayProxy(): Record<string, string | ProxyOptions> {
 }
 
 export default defineConfig({
-  plugins: [react(), localIdentity()],
+  plugins: [react(), localIdentity(), productIdentityPlugin()],
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),

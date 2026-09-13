@@ -389,7 +389,12 @@ export function PreviewFloat({
         }}
       >
         {expanded ? (
-          <header className="flex h-9 shrink-0 items-center gap-1 overflow-hidden border-b border-line px-1.5">
+          <header
+            className="flex min-h-9 shrink-0 items-center gap-1 overflow-hidden border-b border-line px-1.5"
+            // iOS standalone PWA uses viewport-fit=cover; a fixed h-9 header
+            // sits under the status bar and the close control cannot be tapped.
+            style={{ paddingTop: "env(safe-area-inset-top)" }}
+          >
             <button
               type="button"
               aria-label="查看预览信息"

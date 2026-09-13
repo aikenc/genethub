@@ -141,12 +141,14 @@ defineSpecialty({
     };
     await restore("u_feedback_missing");
     await page.getByRole("button", { name: "重试", exact: true }).click();
-    await page.getByText("RETRY_FEEDBACK_DELIVERED", { exact: true }).waitFor();
+    // The reply can also become a sidebar title; require its message body.
+    const delivered = page.getByTestId("markdown").getByText("RETRY_FEEDBACK_DELIVERED", { exact: true });
+    await delivered.waitFor();
     const narrative = await opened.client.call({ type: "session.narrative", payload: { sessionId: session, itemId: "u_feedback_missing", throughRoundId: null, cursor: null, limit: null } });
     t.assertions.assert(narrative?.type === "sessionNarrative" && narrative.data.items.filter(item => item.id === "u_feedback_missing").length === 1, "retry did not retain the original ID");
     t.assertions.assert(calls === 1, "retry executed more than once");
     await restore("u_feedback_missing");
-    await page.getByText("RETRY_FEEDBACK_DELIVERED", { exact: true }).waitFor();
+    await delivered.waitFor();
     t.assertions.assert(await page.getByRole("button", { name: "重试", exact: true }).count() === 0 && calls === 1, "accepted receipt re-executed or stayed pending");
     await restore("u_feedback_attachment", 1);
     await page.getByRole("button", { name: "重试", exact: true }).click();

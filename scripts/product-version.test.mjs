@@ -11,8 +11,8 @@ const CASES = [
   { current: "0.1.0", next: "0.1.1" },
   { current: "0.1.9", next: "0.1.10" },
   // Beta/dev lines: a Live Release advances the channel counter instead.
-  { current: "0.2.0-beta.1", next: "0.2.0-beta.2" },
-  { current: "0.0.0-dev.4", next: "0.0.0-dev.5" },
+  { current: "0.2.0-beta.1", next: "0.2.1-beta.1" },
+  { current: "0.0.0-dev.4", next: "0.0.1-dev.1" },
 ];
 
 for (const { current, next } of CASES) {

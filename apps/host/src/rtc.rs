@@ -80,7 +80,9 @@ async fn enqueue_inbound(shared: &Arc<Mutex<Shared>>, data: Vec<u8>, depth: usiz
         let changed = space.notified();
         {
             let mut state = shared.lock().unwrap();
-            if state.state == State::Closed { return false; }
+            if state.state == State::Closed {
+                return false;
+            }
             if state.inbound.len() < depth {
                 state.inbound.push_back(data);
                 return true;
@@ -93,7 +95,9 @@ async fn enqueue_inbound(shared: &Arc<Mutex<Shared>>, data: Vec<u8>, depth: usiz
 fn dequeue_inbound(shared: &Arc<Mutex<Shared>>) -> Option<Vec<u8>> {
     let mut state = shared.lock().unwrap();
     let record = state.inbound.pop_front();
-    if record.is_some() { state.inbound_space.notify_one(); }
+    if record.is_some() {
+        state.inbound_space.notify_one();
+    }
     record
 }
 
@@ -479,16 +483,22 @@ mod tests {
         assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
         assert_eq!(shared.lock().unwrap().state, State::Open);
         assert_eq!(dequeue_inbound(&shared), Some(vec![0]));
-        assert!(tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap());
+        assert!(tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap());
         for value in (1..8).chain(std::iter::once(99)) {
             assert_eq!(dequeue_inbound(&shared), Some(vec![value]));
         }
-        for value in 0..8 { assert!(enqueue_inbound(&shared, vec![value], 8).await); }
+        for value in 0..8 {
+            assert!(enqueue_inbound(&shared, vec![value], 8).await);
+        }
         let pending = enqueue_inbound(&shared, vec![100], 8);
         tokio::pin!(pending);
         assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
         Shared::close(&shared);
-        assert!(!tokio::time::timeout(Duration::from_secs(1), pending).await.unwrap());
+        assert!(!tokio::time::timeout(Duration::from_secs(1), pending)
+            .await
+            .unwrap());
         assert!(dequeue_inbound(&shared).is_none());
     }
 }

@@ -66,7 +66,12 @@ pub async fn daemon(args: &[String]) -> i32 {
             }
             crate::wasm::become_daemon()
         }
-        "status" => no_extra(rest, daemon_report),
+        "status" => {
+            if !rest.is_empty() {
+                return crate::usage();
+            }
+            daemon_report().await
+        }
         "endpoint" => no_extra(rest, endpoint),
         "start" => no_extra(rest, start),
         "stop" => no_extra(rest, stop),
@@ -132,14 +137,28 @@ fn facts(paths: &Paths) -> serde_json::Value {
         "port": endpoint.as_ref().map(|endpoint| endpoint.port),
         "endpointFile": paths.endpoint_file(),
         "dataDir": paths.root,
+        // Compatibility alias only: this is the CLI on disk, not the loaded guest.
         "version": env!("CARGO_PKG_VERSION"),
+        "versionSource": "installed-cli",
+        "cliVersion": env!("CARGO_PKG_VERSION"),
+        "daemonVersion": serde_json::Value::Null,
         "channel": channel::CHANNEL,
     })
 }
 
-/// `genet daemon status` — process facts only; no WebSocket.
-fn daemon_report() -> i32 {
-    ok(facts(&paths()))
+/// `genet daemon status` — process facts plus a bounded runtime identity query.
+async fn daemon_report() -> i32 {
+    let mut value = facts(&paths());
+    add_runtime_version(&mut value).await;
+    ok(value)
+}
+
+async fn add_runtime_version(value: &mut serde_json::Value) {
+    if value["running"].as_bool() == Some(true) {
+        value["daemonVersion"] = crate::invoke::daemon_version()
+            .await
+            .unwrap_or(serde_json::Value::Null);
+    }
 }
 
 /// `genet status` — daemon facts plus a hub summary when the daemon answers.
@@ -148,6 +167,7 @@ fn daemon_report() -> i32 {
 async fn overview() -> i32 {
     let paths = paths();
     let mut value = facts(&paths);
+    add_runtime_version(&mut value).await;
     value["hub"] = if value["running"].as_bool() == Some(true) {
         crate::invoke::hub_status()
             .await

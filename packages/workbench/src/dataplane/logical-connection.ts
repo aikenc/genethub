@@ -47,17 +47,19 @@ interface Channel {
   attempt: string;
   expected: bigint;
   committed: boolean;
+  reused: boolean;
   lastReceive: number;
   resolve(): void;
   reject(error: unknown): void;
 }
 
-/** One stream owner with one active channel and at most one prepared candidate.
+/** One stream owner with one active channel, one standby and one prepared candidate.
  * Recovery credentials prove both peers across fresh carrier authentication. */
 export class LogicalConnection {
   private readonly journal: ResumeJournal;
   private active: Channel | null = null;
   private candidate: Channel | null = null;
+  private standby: Channel | null = null;
   private epoch = 0n;
   private credentials: Credentials | null = null;
   private closed = false;
@@ -98,7 +100,9 @@ export class LogicalConnection {
     return this.closed ? "closed" : this.active?.phase === "ready" ? "ready" : this.epoch ? "recovering" : "connecting";
   }
   get path(): ResumePath | null { return this.active?.phase === "ready" ? this.active.path : null; }
+  hasPath(path: ResumePath): boolean { return [this.active, this.standby].some(channel => channel?.path === path); }
   get id(): string | null { return this.credentials?.id ?? null; }
+  failActive(reason: unknown): void { if (this.active) this.lost(this.active, reason); }
   async ready(): Promise<void> {
     while (this.state !== "ready") { this.live(); await this.changed(); }
   }
@@ -108,7 +112,7 @@ export class LogicalConnection {
     if (this.journal.policy === "direct-only" && path === "fabric") return Promise.reject(new ResumeError("PolicyDenied"));
     let resolve!: () => void, reject!: (error: unknown) => void;
     const ready = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
-    const channel: Channel = { key, path, phase: "created", attempt: randomNonce(), expected: 0n, committed: false,
+    const channel: Channel = { key, path, phase: "created", attempt: randomNonce(), expected: 0n, committed: false, reused: false,
       lastReceive: this.now(), resolve, reject, wire: null! };
     this.candidate = channel;
     channel.wire = new AuthenticatedChannel({ role: this.options.role, carrier, key,
@@ -154,12 +158,13 @@ export class LogicalConnection {
   close(error: unknown = new Error("logical connection closed")): void {
     if (this.closed) return;
     this.closed = true; this.terminal = error;
-    const active = this.active, candidate = this.candidate;
-    this.active = null; this.candidate = null;
+    const active = this.active, candidate = this.candidate, standby = this.standby;
+    this.active = null; this.candidate = null; this.standby = null;
     clearInterval(this.clock);
     this.journal.close(); this.credentials = null;
     for (const waiter of this.ackWaiters.values()) waiter.reject(error);
     this.ackWaiters.clear(); this.wake();
+    standby?.wire.close();
     if (candidate && candidate !== active) { candidate.reject(error); candidate.wire.close(); }
     if (active) {
       active.reject(error);
@@ -177,10 +182,11 @@ export class LogicalConnection {
   }
   private async receive(bytes: Uint8Array, channel: Channel): Promise<void> {
     channel.lastReceive = this.now();
-    // Once ACTIVATE is sent, old records cannot move the snapshot used by it.
-    if (channel.phase === "quiesced") return;
+    // Standby channels retain authentication and answer probes, but cannot
+    // deliver old-epoch payloads or change the journal watermark.
     if (bytes[1] === 16) {
       const m = decode(bytes);
+      if (channel === this.standby && (m.op === "close" || m.op === "error")) { this.lost(channel, new Error("standby closed")); return; }
       if (m.op === "error" && m.code === "SessionLost") {
         // An authenticated peer explicitly lost this logical session (e.g. daemon restart).
         // End its old streams; the Client may establish a fresh owner and resync subscriptions.
@@ -189,6 +195,13 @@ export class LogicalConnection {
       if (m.op === "close" || m.op === "error") throw new Error(typeof m.code === "string" ? m.code : "logical peer closed");
       if (m.op === "ping" && typeof m.nonce === "string" && m.nonce.length <= 32) { await this.control(channel, { op: "pong", nonce: m.nonce }); return; }
       if (m.op === "pong") return;
+      if (channel === this.standby) {
+        if (this.options.role !== "server" || m.op !== "attach") return;
+        if (this.candidate) throw new Error("logical candidate already pending");
+        this.standby = null; this.candidate = channel;
+        channel.phase = "created"; channel.committed = false; channel.reused = true;
+      }
+      if (channel.phase === "quiesced") return;
       if (this.options.role === "server") { await this.receiveServer(m, channel); return; }
       if (channel !== this.candidate) throw new Error("control on non-candidate channel");
       if (m.op === "created" && channel.phase === "created" && !this.credentials) {
@@ -217,6 +230,10 @@ export class LogicalConnection {
       if (m.op === "synced" && channel.phase === "synced" && counter(m.epoch) === this.epoch) { this.markReady(channel); return; }
       throw new Error("invalid logical admission transition");
     }
+    // A reused authenticated wire can still drain pre-switch journal records
+    // ahead of ATTACHED. SYNC fences those bytes; do not treat them as payload
+    // for the new epoch or as a malformed fresh-channel admission.
+    if (channel === this.standby || channel.phase === "quiesced" || (channel.reused && channel.phase !== "ready")) return;
     if (channel !== this.active || channel.phase !== "ready") throw new Error("logical payload before SYNC");
     if (bytes[1] === 1) {
       const received = this.journal.receive(bytes);
@@ -271,7 +288,12 @@ export class LogicalConnection {
     this.epoch = epoch; channel.phase = "synced"; channel.committed = true;
     const previous = this.active;
     this.active = channel;
-    if (previous && previous !== channel) previous.wire.close("logical channel activated");
+    if (previous && previous !== channel) {
+      if (previous.path !== channel.path) {
+        this.standby?.wire.close();
+        previous.phase = "quiesced"; this.standby = previous;
+      } else previous.wire.close("logical channel replaced");
+    }
     this.wake();
   }
   private acknowledgeTerminals(received: bigint): void {
@@ -308,22 +330,31 @@ export class LogicalConnection {
   }
   private failed(channel: Channel, error: unknown): void {
     if (!this.owns(channel)) return;
+    if (channel === this.standby) { this.lost(channel, error); return; }
     if (channel === this.candidate && !channel.committed && this.epoch) { this.lost(channel, error); return; }
     this.close(error);
   }
   private lost(channel: Channel, error: unknown): void {
     if (!this.owns(channel)) return;
+    if (this.standby === channel) {
+      this.standby = null; channel.wire.close(); this.options.onReady?.(); return;
+    }
     if (this.candidate === channel) this.candidate = null;
     if (this.active === channel) this.active = null;
     if (channel.committed && this.active?.phase === "quiesced") {
-      const previous = this.active; this.active = null; previous.wire.close();
+      const previous = this.active; this.active = null;
+      this.standby?.wire.close(); this.standby = previous;
     }
     channel.reject(error); channel.wire.close();
     if (this.active?.phase === "ready") { this.wake(); return; }
     if (this.deadline === null) this.deadline = this.now() + 60_000;
     if (this.epoch) this.journal.suspend(this.now());
     this.wake();
-    if (!this.candidate) this.options.onRecovering?.();
+    if (!this.candidate && this.standby && this.options.role === "client") {
+      const fallback = this.standby; this.standby = null; this.candidate = fallback;
+      fallback.attempt = randomNonce(); fallback.committed = false; fallback.reused = true;
+      void this.sendAttach(fallback).catch((cause: unknown) => this.lost(fallback, cause));
+    } else if (!this.candidate) this.options.onRecovering?.();
   }
   private tick(): void {
     if (this.closed) return;
@@ -332,16 +363,18 @@ export class LogicalConnection {
       if (this.deadline !== null && now >= this.deadline) throw new Error("ResumeExpired");
       if (!this.epoch && now >= 60_000) throw new Error("logical admission timed out");
       this.journal.tick(now);
-      for (const channel of new Set([this.active, this.candidate])) {
+      for (const channel of new Set([this.active, this.candidate, this.standby])) {
         if (channel && now - channel.lastReceive >= 15_000) this.lost(channel, new Error("physical channel timed out"));
       }
-      const active = this.active;
-      if (active?.phase === "ready" && now - this.lastPing >= 5_000) {
-        this.lastPing = now; void this.control(active, { op: "ping", nonce: randomNonce() }).catch((e: unknown) => this.lost(active, e));
+      if (now - this.lastPing >= 5_000) {
+        this.lastPing = now;
+        for (const channel of [this.active, this.standby]) {
+          if (channel) void this.control(channel, { op: "ping", nonce: randomNonce() }).catch((e: unknown) => this.lost(channel, e));
+        }
       }
     } catch (error) { this.close(error); }
   }
-  private owns(channel: Channel): boolean { return !this.closed && (this.active === channel || this.candidate === channel); }
+  private owns(channel: Channel): boolean { return !this.closed && (this.active === channel || this.candidate === channel || this.standby === channel); }
   private now(): number { return Math.floor(performance.now() - this.started); }
   private changed(): Promise<void> { return new Promise((resolve) => this.waiters.add(resolve)); }
   private wake(): void { const waiters = [...this.waiters]; this.waiters.clear(); for (const wake of waiters) wake(); }

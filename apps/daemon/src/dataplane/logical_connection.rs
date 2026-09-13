@@ -84,6 +84,7 @@ impl Writer {
     }
 }
 struct Attachment {
+    admission: Option<(SessionKey, PeerAccess, CarrierKind)>,
     path: resume::Path,
     reader: AuthenticatedReader,
     writer: AuthenticatedWriter,
@@ -97,6 +98,9 @@ pub(crate) struct Handle {
     attach: mpsc::Sender<Attachment>,
 }
 struct Channel {
+    path: resume::Path,
+    admission: Option<(SessionKey, PeerAccess, CarrierKind)>,
+    attempt: Option<String>,
     reader: AuthenticatedReader,
     outgoing: mpsc::Sender<Vec<u8>>,
     task: tokio::task::JoinHandle<()>,
@@ -265,6 +269,7 @@ pub(crate) async fn serve(
     handle
         .attach
         .send(Attachment {
+            admission: Some((key, access, kind)),
             path,
             reader,
             writer,
@@ -348,6 +353,7 @@ async fn run(
     let start = Instant::now();
     let now = || start.elapsed().as_millis() as u64;
     let mut channel: Option<Channel> = None;
+    let mut standby: Option<Channel> = None;
     let mut epoch = 0;
     let mut ack = false;
     // Keep one bounded reply outside the data queue; a full carrier is backpressure, not a protocol failure.
@@ -474,7 +480,12 @@ async fn run(
                 if journal.activate(attachment.path, next, attachment.position, now()).is_err() { continue; }
                 acknowledge_terminals(&mut terminals, attachment.position.received);
                 epoch = if let Some(registry) = &lifetime.registry { registry.activate(&lifetime.id, &attachment.attempt, attachment.expected, Instant::now())? } else { next };
-                channel.take();
+                if let Some(mut previous) = channel.take() {
+                    if previous.path != attachment.path && lifetime.registry.is_some() {
+                        previous.synced = false; previous.attempt = None;
+                        standby = Some(previous);
+                    }
+                }
                 let position = Position::from_watermark(journal.watermark().map_err(error)?);
                 if lifetime.registry.is_some() && attachment.writer.send(&Message::Activated { epoch: epoch.to_string(), position }.encode()?).await.is_err() {
                     journal.suspend(now()).map_err(error)?;
@@ -483,7 +494,7 @@ async fn run(
                 }
                 let (outgoing, mut records) = mpsc::channel::<Vec<u8>>(16);
                 let task = tokio::spawn(async move { while let Some(bytes) = records.recv().await { if attachment.writer.send(&bytes).await.is_err() { break; } } });
-                channel = Some(Channel { reader: attachment.reader, outgoing, task, _closed: attachment.closed, synced: lifetime.registry.is_none(), last_receive: Instant::now() });
+                channel = Some(Channel { path: attachment.path, admission: attachment.admission, attempt: None, reader: attachment.reader, outgoing, task, _closed: attachment.closed, synced: lifetime.registry.is_none(), last_receive: Instant::now() });
                 pending_pong = None;
                 ack = true; budget = true;
             }
@@ -525,6 +536,61 @@ async fn run(
                     }
                 }
             }
+            incoming = async { match standby.as_mut() { Some(c) => c.reader.receive().await, None => std::future::pending().await } } => {
+                // A retained carrier has no business-data authority until a fresh
+                // ATTACH/ACTIVATE/SYNC advances the epoch. Probe it independently.
+                let bytes = match incoming {
+                    Ok(Some(bytes)) => bytes,
+                    _ => { standby.take(); continue; }
+                };
+                let idle = standby.as_mut().unwrap();
+                idle.last_receive = Instant::now();
+                if bytes.get(1) != Some(&16) { continue; } // fenced old-epoch payload
+                let message = match Message::decode(&bytes) {
+                    Ok(message) => message,
+                    Err(_) => { standby.take(); continue; }
+                };
+                match message {
+                    Message::Ping { nonce } if nonce.len() <= 32 => {
+                        let _ = idle.outgoing.try_send(Message::Pong { nonce }.encode()?);
+                    }
+                    Message::Pong { .. } => {}
+                    Message::Attach { id, incarnation, attempt, proof } => {
+                        let Some(registry) = &lifetime.registry else { standby.take(); continue; };
+                        let Some((key, access, kind)) = &idle.admission else { standby.take(); continue; };
+                        if id != lifetime.id { standby.take(); continue; }
+                        match registry.attach(&id, &incarnation, key, access, *kind, &attempt, &proof, Instant::now()) {
+                            Ok((attached_epoch, proof)) => {
+                                idle.attempt = Some(attempt);
+                                if idle.outgoing.try_send(Message::Attached { epoch: attached_epoch.to_string(), proof }.encode()?).is_err() { standby.take(); }
+                            }
+                            Err(_) => { standby.take(); }
+                        }
+                    }
+                    Message::Activate { attempt, expected, position } => {
+                        if idle.attempt.as_deref() != Some(&attempt) || decimal(&expected)? != epoch { standby.take(); continue; }
+                        let peer = position.watermark()?;
+                        let next = epoch.checked_add(1).ok_or_else(|| anyhow!("epoch exhausted"))?;
+                        if journal.activate(idle.path, next, peer, now()).is_err() { standby.take(); continue; }
+                        let registry = lifetime.registry.as_ref().ok_or_else(|| anyhow!("missing admission owner"))?;
+                        epoch = registry.activate(&lifetime.id, &attempt, epoch, Instant::now())?;
+                        acknowledge_terminals(&mut terminals, peer.received);
+                        let mut promoted = standby.take().unwrap();
+                        promoted.synced = false; promoted.attempt = None;
+                        if let Some(mut previous) = channel.take() {
+                            previous.synced = false; previous.attempt = None;
+                            standby = Some(previous);
+                        }
+                        promoted.outgoing.try_send(Message::Activated {
+                            epoch: epoch.to_string(), position: Position::from_watermark(journal.watermark().map_err(error)?)
+                        }.encode()?).map_err(|_| anyhow!("logical control queue full"))?;
+                        channel = Some(promoted);
+                        pending_pong = None; ack = true; budget = true;
+                    }
+                    // Closing an obsolete physical path must not close its active sibling.
+                    _ => { standby.take(); }
+                }
+            }
             write = writes.recv(), if pending.len() < 256 && !writes.is_closed() => {
                 match write { Some(write) => pending.push_back(write), None => continue }
             }
@@ -539,8 +605,12 @@ async fn run(
                     if let Some(active) = channel.as_ref().filter(|c| c.synced) {
                         let _ = active.outgoing.try_send(Message::Ping { nonce: super::logical_wire::nonce() }.encode()?);
                     }
+                    if let Some(idle) = &standby {
+                        let _ = idle.outgoing.try_send(Message::Ping { nonce: super::logical_wire::nonce() }.encode()?);
+                    }
                     last_ping = Instant::now();
                 }
+                if standby.as_ref().is_some_and(|c| c.task.is_finished() || c.last_receive.elapsed() >= std::time::Duration::from_secs(15)) { standby.take(); }
                 if channel.as_ref().is_some_and(|c| c.task.is_finished() || c.last_receive.elapsed() >= std::time::Duration::from_secs(15)) {
                     channel.take(); journal.suspend(now()).map_err(error)?; if let Some(registry) = &lifetime.registry { registry.suspend(&lifetime.id, epoch, Instant::now()); }
                 }
@@ -694,6 +764,7 @@ pub(crate) async fn client(
     });
     attach
         .try_send(Attachment {
+            admission: None,
             path: resume::Path::Loopback,
             reader,
             writer,
@@ -801,6 +872,7 @@ async fn resume_client(
     }
     let (closed, _) = oneshot::channel();
     Ok(Attachment {
+        admission: None,
         path: resume::Path::Loopback,
         reader,
         writer,

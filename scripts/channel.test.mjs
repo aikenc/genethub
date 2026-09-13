@@ -65,6 +65,7 @@ test("release tags map to their channel and nothing else does", () => {
   const cases = [
     ["v0.7.0-beta.3", "beta"],
     ["v0.0.0-dev.4", "dev"],
+    ["v0.14.0-dev.2", "dev"],
     ["v0.7.0", "stable"],
     ["v10.20.30", "stable"],
     // Anything else is not a release: rehearsal tags, rc lines, malformed
@@ -72,6 +73,8 @@ test("release tags map to their channel and nothing else does", () => {
     ["v0.7.0-rc.1", ""],
     ["v0.7.0-beta", ""],
     ["v0.7.0-beta.x", ""],
+    ["v0.7.0-beta.0", ""],
+    ["v00.7.0-dev.2", ""],
     ["0.7.0", ""],
     ["release-2026-08", ""],
     ["", ""],
@@ -110,6 +113,7 @@ function stampSandbox() {
   const root = mkdtempSync(join(tmpdir(), "genehub-channel-stamp-"));
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(join(repo, "scripts/channel.mjs"), join(root, "scripts/channel.mjs"));
+  cpSync(join(repo, "scripts/product-version.mjs"), join(root, "scripts/product-version.mjs"));
   for (const relative of STAMPED_FILES) {
     mkdirSync(dirname(join(root, relative)), { recursive: true });
     cpSync(join(repo, relative), join(root, relative));

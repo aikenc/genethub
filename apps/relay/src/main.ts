@@ -83,6 +83,7 @@ export async function startRelay(
     const ready = fabricForwarder.authorityAvailable();
     return {
       status: ready ? "ok" : "degraded",
+      productVersion: process.env.GENEHUB_PRODUCT_VERSION ?? null,
       ready,
       fabric: {
         ...fabricForwarder.stats(),
