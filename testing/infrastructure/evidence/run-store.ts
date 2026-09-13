@@ -1,13 +1,14 @@
-import { mkdirSync, writeFileSync, appendFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, rmSync, existsSync, renameSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { RunManifest, UnitResult } from "../types.ts";
+import type { RunManifest, RunProgress, UnitResult } from "../types.ts";
 import { redactText } from "./redact.ts";
 import { runDirName } from "./validate.ts";
 
 export interface RunStore {
   dir: string;
+  writeProgress(progress: RunProgress): void;
   writeResult(result: UnitResult): void;
   writeFailure(result: UnitResult, diagnostic: string): void;
   writeReport(result: UnitResult): void;
@@ -22,6 +23,11 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
   writeFileSync(path.join(dir, "results.ndjson"), "");
   return {
     dir,
+    writeProgress(progress) {
+      const file = path.join(dir, "progress.json");
+      writeFileSync(`${file}.tmp`, `${JSON.stringify(progress, null, 2)}\n`);
+      renameSync(`${file}.tmp`, file);
+    },
     writeResult(result) {
       const { diagnostic: _diagnostic, ...publicResult } = result;
       if (publicResult.message) publicResult.message = redactText(publicResult.message);
@@ -40,13 +46,23 @@ export function createRunStore(spaceRoot: string, topic: string): RunStore {
       writeFileSync(path.join(folder, name), redactText(result.message ?? ""));
     },
     finalize(manifest, summary) {
-      writeFileSync(path.join(dir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
       writeFileSync(path.join(dir, "summary.md"), redactText(summary));
+      const file = path.join(dir, "manifest.json");
+      writeFileSync(`${file}.tmp`, `${JSON.stringify(manifest, null, 2)}\n`);
+      renameSync(`${file}.tmp`, file);
       if (manifest.status === "passed") {
         rmSync(path.join(dir, ".internal"), { recursive: true, force: true });
       }
     },
   };
+}
+
+/** Ignore only an unfinished final append while a coordinator is writing. */
+export function readRunResults(dir: string): UnitResult[] {
+  const raw = readFileSync(path.join(dir, "results.ndjson"), "utf8");
+  const lines = raw.split("\n");
+  if (!raw.endsWith("\n") && !existsSync(path.join(dir, "manifest.json"))) lines.pop();
+  return lines.filter(Boolean).map(line => JSON.parse(line) as UnitResult);
 }
 
 export function ensureRunsIgnored(spaceRoot: string): void {

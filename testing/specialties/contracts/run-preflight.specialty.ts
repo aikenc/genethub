@@ -28,6 +28,7 @@ defineSpecialty(
     timeoutMs: 90_000,
     resources: { environments: 1, cpu: 1, memoryMb: 256, io: 1, browser: 0, pool: "standard" },
     surfaces: ["testctl"],
+    requiredArtifacts: [],
     productInterfaces: ["testctl run"],
   },
   async (t) => {

@@ -63,6 +63,6 @@ export async function loadCatalog(roots: CatalogRoots): Promise<CaseMeta[]> {
 }
 
 export function catalogDigest(cases: CaseMeta[]): string {
-  const payload = cases.map((item) => ({ id: item.id, file: item.file, runner: item.runner }));
+  const payload = [...cases].sort((a, b) => a.id.localeCompare(b.id));
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }

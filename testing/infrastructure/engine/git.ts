@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -39,12 +39,25 @@ export function repoIdentity(repo: string): RepoIdentity {
   return { path: repo, sha, branch, dirty, dirtyDigest };
 }
 
-export function artifactIdentity(openRoot: string): ArtifactIdentity {
+/** One cache per snapshot only. End-of-run snapshots always read bytes again. */
+export function snapshotHasher(): (file: string) => string {
+  const hashes = new Map<string, string>();
+  return file => {
+    const key = path.resolve(file);
+    const previous = hashes.get(key);
+    if (previous) return previous;
+    const hash = createHash("sha256"), buffer = Buffer.allocUnsafe(1024 * 1024);
+    const fd = openSync(key, "r");
+    try { let bytes: number; while ((bytes = readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, bytes)); }
+    finally { closeSync(fd); }
+    const value = hash.digest("hex"); hashes.set(key, value); return value;
+  };
+}
+
+export function artifactIdentity(openRoot: string, hashFile = snapshotHasher()): ArtifactIdentity {
   const artifact = locateRuntimeArtifact(openRoot, GENET);
   if (!artifact.path) return { path: null, hash: null, kind: "missing" };
-  const digest = spawnSync("sha256sum", [artifact.path], { encoding: "utf8" });
-  const hash = (digest.stdout ?? "").split(/\s+/)[0] || null;
-  return { path: artifact.path, hash, kind: path.basename(artifact.path) };
+  return { path: artifact.path, hash: hashFile(artifact.path), kind: path.basename(artifact.path) };
 }
 
 export function runsIgnored(spaceRoot: string): boolean {
@@ -62,7 +75,7 @@ export function runsIgnored(spaceRoot: string): boolean {
 }
 
 /** Exact bytes of native artifacts and built JS inputs, including explicit overrides. */
-export function artifactBundleIdentity(openRoot: string, cloudRoot?: string) {
+export function artifactBundleIdentity(openRoot: string, cloudRoot?: string, hashFile = snapshotHasher()) {
   const roots = [
     ...["iterate", "debug", "release"].flatMap(profile => [
       ...["genet-local", "genet-dev", "genet-beta", "genet", "genehub-host-local"].map(name => path.join(openRoot, "target", profile, name)),
@@ -79,9 +92,7 @@ export function artifactBundleIdentity(openRoot: string, cloudRoot?: string) {
     const stat = lstatSync(p);
     if (stat.isDirectory()) { for (const name of readdirSync(p).sort()) walk(path.join(p, name)); return; }
     if (!stat.isFile() && !stat.isSymbolicLink()) return;
-    const result = spawnSync("sha256sum", [p], { encoding: "utf8" });
-    if (result.status !== 0) throw new Error("cannot fingerprint artifact input");
-    files.push({ path: p, hash: result.stdout.split(/\s+/)[0]! });
+    if (!files.some(file => file.path === p)) files.push({ path: p, hash: hashFile(p) });
   };
   for (const root of [...new Set(roots)].sort()) walk(root);
   return { files, hash: createHash("sha256").update(JSON.stringify(files)).digest("hex"), runtime: { node: process.version, platform: process.platform, arch: process.arch } };
