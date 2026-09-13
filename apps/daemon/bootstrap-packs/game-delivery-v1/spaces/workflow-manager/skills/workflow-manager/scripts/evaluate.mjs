@@ -118,7 +118,7 @@ const report = {
   missingEvidence: [
     ...(completed.length ? [] : ["completed baseline Run"]),
     ...(nodeDurations.length ? [] : ["measured node durations"]),
-    ...(carrierRolesReady ? [] : ["selected candidate Executor and exactly one enabled Worker per role"]),
+    ...(carrierRolesReady ? [] : ["Candidate roles have no enabled direct Worker on the selected Executor"]),
     "Builder verification, task resources and authorized trial budget",
     "comparable candidate trial and independent WR assessment",
   ],
