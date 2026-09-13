@@ -3498,8 +3498,7 @@ impl SessionManager {
             return;
         }
         let result: Result<()> = async {
-            if let Some((request_id, continuation)) = self.prepare_human_delivery(&live).await?
-            {
+            if let Some((request_id, continuation)) = self.prepare_human_delivery(&live).await? {
                 self.continue_after_human_response(
                     &live,
                     providers,

@@ -431,7 +431,9 @@ impl Broker {
                     || challenge
                         .management_binding
                         .as_ref()
-                        .is_some_and(|project| self.is_bound(project, controller_session_id) || recovery_authorized))
+                        .is_some_and(|project| {
+                            self.is_bound(project, controller_session_id) || recovery_authorized
+                        }))
                     && !challenge.rejected
                     && !challenge.consumed
                     && challenge.spec.controller_session_id == controller_session_id

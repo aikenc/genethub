@@ -142,22 +142,44 @@ impl Prepared {
 
 /// Compatibility workflow assets share the Pack installer, without taking
 /// over a project or creating the PM team. Asset order preserves its v1 digest.
-pub(crate) fn direct_workflow_files(agent_id: &str, model_id: Option<&str>) -> Vec<(String, Vec<u8>)> {
+pub(crate) fn direct_workflow_files(
+    agent_id: &str,
+    model_id: Option<&str>,
+) -> Vec<(String, Vec<u8>)> {
     let model = model_id
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!("modelId: {value}\n"))
         .unwrap_or_default();
     [
-        ("project.yaml", include_str!("../workflow-templates/direct-change/project.yaml")),
-        ("workflows/catalog.yaml", include_str!("../workflow-templates/direct-change/workflows/catalog.yaml")),
-        ("workflows/direct-change.yaml", include_str!("../workflow-templates/direct-change/workflows/direct-change.yaml")),
-        ("roles/worker.yaml", include_str!("../workflow-templates/direct-change/roles/worker.yaml")),
-        ("prompts/direct-worker.md", include_str!("../workflow-templates/direct-change/prompts/direct-worker.md")),
+        (
+            "project.yaml",
+            include_str!("../workflow-templates/direct-change/project.yaml"),
+        ),
+        (
+            "workflows/catalog.yaml",
+            include_str!("../workflow-templates/direct-change/workflows/catalog.yaml"),
+        ),
+        (
+            "workflows/direct-change.yaml",
+            include_str!("../workflow-templates/direct-change/workflows/direct-change.yaml"),
+        ),
+        (
+            "roles/worker.yaml",
+            include_str!("../workflow-templates/direct-change/roles/worker.yaml"),
+        ),
+        (
+            "prompts/direct-worker.md",
+            include_str!("../workflow-templates/direct-change/prompts/direct-worker.md"),
+        ),
     ]
     .into_iter()
     .map(|(path, body)| {
-        (path.to_string(), body.replace("{{AGENT_ID}}", agent_id)
-            .replace("{{MODEL_ID_YAML}}", &model).into_bytes())
+        (
+            path.to_string(),
+            body.replace("{{AGENT_ID}}", agent_id)
+                .replace("{{MODEL_ID_YAML}}", &model)
+                .into_bytes(),
+        )
     })
     .collect()
 }
@@ -392,9 +414,26 @@ async fn apply_inner(
     }
 
     // Recovery is temporary authority, not a new permanent PM takeover.
-    let preserve_controller = !state.project_control.is_bound(&project_workspace_id, controller_session_id)
-        && crate::workflow::exception_authority(state, &project_workspace_id, controller_session_id).await.unwrap_or(false);
+    let preserve_controller = !state
+        .project_control
+        .is_bound(&project_workspace_id, controller_session_id)
+        && crate::workflow::exception_authority(
+            state,
+            &project_workspace_id,
+            controller_session_id,
+        )
+        .await
+        .unwrap_or(false);
 
+    let runtime_path = state
+        .paths
+        .root
+        .join("workflow-runtime")
+        .join(&project_workspace_id);
+    // Capture this before the execution lock creates its daemon-owned lock
+    // directory. A failed first bootstrap must remove runtime state that did
+    // not exist before the transaction.
+    let runtime_existed = runtime_path.exists();
     let execution_runtime = crate::workflow::RuntimeStore::new(
         &state.paths.root,
         &project_workspace_id,
@@ -432,12 +471,6 @@ async fn apply_inner(
     let binding_snapshot = state
         .project_control
         .binding_snapshot(&project_workspace_id)?;
-    let runtime_path = state
-        .paths
-        .root
-        .join("workflow-runtime")
-        .join(&project_workspace_id);
-    let runtime_existed = runtime_path.exists();
     save_transaction(
         state,
         &project_workspace_id,
@@ -621,6 +654,9 @@ async fn apply_inner(
     let (spaces, bootstrap_commit) = match transaction {
         Ok(success) => success,
         Err(error) => {
+            // Windows cannot remove the runtime tree while its lock file is
+            // open. Release the transaction guard before compensation.
+            drop(_execution_guard);
             let mut rollback_errors = Vec::new();
             if !created_git {
                 if let Err(rollback) = crate::git::rollback_bootstrap_git(
@@ -699,7 +735,9 @@ async fn apply_inner(
         "applied",
         spaces,
         Some(bootstrap_commit),
-        state.project_control.is_bound(&project_workspace_id, controller_session_id),
+        state
+            .project_control
+            .is_bound(&project_workspace_id, controller_session_id),
     ))
 }
 
@@ -913,7 +951,9 @@ fn write_new_or_same(project_root: &Path, file: &RenderedFile) -> Result<()> {
 }
 
 pub(crate) fn write_asset(root: &Path, relative: &Path, body: &[u8]) -> Result<()> {
-    let parent = relative.parent().ok_or_else(|| anyhow!("asset has no parent"))?;
+    let parent = relative
+        .parent()
+        .ok_or_else(|| anyhow!("asset has no parent"))?;
     ensure_directory_tree(root, parent, true)?;
     let path = &root.join(relative);
     match crate::config::sensitive_metadata(path) {

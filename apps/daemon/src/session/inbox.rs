@@ -9,7 +9,11 @@ const MAX_RECEIPTS: usize = 4096;
 impl SessionManager {
     /// Retire obsolete workflow wakeups without stopping an existing Agent
     /// turn or discarding any user input, even when it targets the same task.
-    pub(crate) async fn discard_workflow_inputs(&self, session_id: &str, run_id: &str) -> Result<()> {
+    pub(crate) async fn discard_workflow_inputs(
+        &self,
+        session_id: &str,
+        run_id: &str,
+    ) -> Result<()> {
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
         let _admission = live.inbox_lock.lock().await;
@@ -17,13 +21,18 @@ impl SessionManager {
         let mut next = meta.clone();
         let mut changed = false;
         for entry in &mut next.inbox.entries {
-            if entry.source == "workflow" && entry.task_run_id.as_deref() == Some(run_id)
-                && entry.state != "handled" {
+            if entry.source == "workflow"
+                && entry.task_run_id.as_deref() == Some(run_id)
+                && entry.state != "handled"
+            {
                 entry.state = "handled".into();
                 changed = true;
             }
         }
-        if changed { self.store.save_meta(&next)?; *meta = next; }
+        if changed {
+            self.store.save_meta(&next)?;
+            *meta = next;
+        }
         Ok(())
     }
     /// The ACK covers the original chat item and its delivery obligation.
@@ -191,10 +200,16 @@ impl SessionManager {
 
     pub(crate) async fn recover_deliveries(&self) -> Result<()> {
         for meta in self.store.list_meta()? {
-            let has_input = meta.inbox.entries.iter().any(|entry| entry.state != "handled");
-            let has_decision = meta.human_continuation.as_ref().is_some_and(|c| !c.completed);
-            if !meta.openable() || !(has_input || has_decision)
-            {
+            let has_input = meta
+                .inbox
+                .entries
+                .iter()
+                .any(|entry| entry.state != "handled");
+            let has_decision = meta
+                .human_continuation
+                .as_ref()
+                .is_some_and(|c| !c.completed);
+            if !meta.openable() || !(has_input || has_decision) {
                 continue;
             }
             let live = self.live(&meta.id).await?;
@@ -227,7 +242,10 @@ impl SessionManager {
                 !meta.inbox.paused
                     && (meta.inbox.entries.iter().any(|entry| {
                         matches!(entry.state.as_str(), "receiving" | "queued" | "sent")
-                    }) || (meta.human_continuation.as_ref().is_some_and(|c| !c.completed)
+                    }) || (meta
+                        .human_continuation
+                        .as_ref()
+                        .is_some_and(|c| !c.completed)
                         && !live.continuation_dispatched.load(Ordering::SeqCst)))
             };
             if !eligible
@@ -239,12 +257,21 @@ impl SessionManager {
             let state = state.clone();
             let task_live = live.clone();
             live.cleanup.spawn(async move {
-                let has_inputs = task_live.meta.lock().await.inbox.entries.iter().any(|entry|
-                    matches!(entry.state.as_str(), "receiving" | "queued" | "sent"));
+                let has_inputs = task_live
+                    .meta
+                    .lock()
+                    .await
+                    .inbox
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry.state.as_str(), "receiving" | "queued" | "sent"));
                 let result = if has_inputs {
                     state.sessions.deliver_inputs(&state, &task_live).await
                 } else {
-                    state.sessions.deliver_human_continuation(&task_live, &state.providers().await).await;
+                    state
+                        .sessions
+                        .deliver_human_continuation(&task_live, &state.providers().await)
+                        .await;
                     Ok(())
                 };
                 if let Err(error) = result {
@@ -271,7 +298,9 @@ impl SessionManager {
                         tracing::error!(%error, "persisting input error");
                     }
                 }
-                task_live.delivery_dispatching.store(false, Ordering::SeqCst);
+                task_live
+                    .delivery_dispatching
+                    .store(false, Ordering::SeqCst);
             });
         }
     }
@@ -349,7 +378,12 @@ impl SessionManager {
         }
         // Recheck the durable task fence before acquiring the delivery lock.
         // This also retires queued notices left by older daemon versions.
-        for entry in meta.inbox.entries.iter().filter(|entry| entry.source == "workflow" && entry.state != "handled") {
+        for entry in meta
+            .inbox
+            .entries
+            .iter()
+            .filter(|entry| entry.source == "workflow" && entry.state != "handled")
+        {
             if let Some(run_id) = &entry.task_run_id {
                 if !crate::workflow::workflow_notice_current(state, &meta.id, run_id).await? {
                     self.discard_workflow_inputs(&meta.id, run_id).await?;

@@ -146,8 +146,6 @@ async fn start_workflow_sessions(
     Ok(())
 }
 
-
-
 /// Handles one request on behalf of `caller`.
 ///
 /// The caller is passed in rather than re-derived here because the gate above
@@ -164,19 +162,34 @@ pub async fn handle(
     let needed = crate::authz::required(&request);
     let project_management = if !caller.allows(needed) {
         match (&request, caller.session_controller_id()) {
-            (Request::AgentSpaceConfigure { workspace_id, operation, .. }, Some(session_id)) => {
+            (
+                Request::AgentSpaceConfigure {
+                    workspace_id,
+                    operation,
+                    ..
+                },
+                Some(session_id),
+            ) => {
                 match agent_space_management_project(state, caller, workspace_id, operation).await {
-                    Ok(project) => state.project_control.is_bound(&project, session_id)
-                        || crate::workflow::exception_authority(state, &project, session_id).await.unwrap_or(false),
+                    Ok(project) => {
+                        state.project_control.is_bound(&project, session_id)
+                            || crate::workflow::exception_authority(state, &project, session_id)
+                                .await
+                                .unwrap_or(false)
+                    }
                     Err(_) => false,
                 }
             }
             (Request::WorkspaceOpen { root }, Some(session_id)) => {
-                authorize_pm_space_open(state, caller, session_id, root).await.is_ok()
+                authorize_pm_space_open(state, caller, session_id, root)
+                    .await
+                    .is_ok()
             }
             _ => false,
         }
-    } else { false };
+    } else {
+        false
+    };
     if !caller.allows(needed) && !project_management {
         return Handled::err(
             ErrorCode::Unauthorized,
@@ -209,7 +222,8 @@ async fn authorize_pm_space_open(
     let session = state.sessions.summary(session_id).await?;
     let project_id = &session.workspace_id;
     authorize_project_workflow_mutation(state, caller, project_id)
-        .await.map_err(anyhow::Error::msg)?;
+        .await
+        .map_err(anyhow::Error::msg)?;
     if !state.project_control.is_bound(project_id, session_id) {
         anyhow::bail!("projectControlRequired: only the bound PM registers prepared Spaces");
     }
@@ -220,7 +234,10 @@ async fn authorize_pm_space_open(
     let space_root = if requested.is_dir() {
         requested.clone()
     } else {
-        requested.parent().ok_or_else(|| anyhow::anyhow!("Space file has no parent"))?.to_path_buf()
+        requested
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Space file has no parent"))?
+            .to_path_buf()
     };
     let spaces = project.root.join("spaces").canonicalize()?;
     if space_root.parent() != Some(spaces.as_path()) {
@@ -300,10 +317,18 @@ async fn authorize_session_request(
     };
     match (caller.session_controller_id(), summary.managed) {
         (Some(controller), Some(managed)) if managed.parent_session_id == controller => Ok(()),
-        (Some(controller), Some(_)) if !matches!(request, Request::SessionRespondPermission { .. }) => {
-            let project = state.workspaces.project_root(&summary.workspace_id).await
+        (Some(controller), Some(_))
+            if !matches!(request, Request::SessionRespondPermission { .. }) =>
+        {
+            let project = state
+                .workspaces
+                .project_root(&summary.workspace_id)
+                .await
                 .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
-            if crate::workflow::exception_authority(state, &project, controller).await.unwrap_or(false) {
+            if crate::workflow::exception_authority(state, &project, controller)
+                .await
+                .unwrap_or(false)
+            {
                 Ok(())
             } else {
                 Err("受会话绑定的 Agent 只能控制由自己委托的受管子会话".into())
@@ -350,7 +375,9 @@ async fn authorize_project_workflow_mutation(
                 .map_err(|error| format!("无法确认项目管理授权：{error:#}"))?;
             if agent_space_requires_project_control(&space)
                 && !state.project_control.is_bound(workspace_id, session_id)
-                && !crate::workflow::exception_authority(state, workspace_id, session_id).await.unwrap_or(false)
+                && !crate::workflow::exception_authority(state, workspace_id, session_id)
+                    .await
+                    .unwrap_or(false)
             {
                 return Err(
                     "当前 Session 没有这个项目的 ProjectControlBinding；请先完成 PM 接管".into(),
@@ -395,7 +422,9 @@ async fn authorize_agent_space_change(
                 .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
             if summary.workspace_id == workspace_id
                 || state.project_control.is_bound(&project_id, session_id)
-                || crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false)
+                || crate::workflow::exception_authority(state, &project_id, session_id)
+                    .await
+                    .unwrap_or(false)
             {
                 Ok(())
             } else {
@@ -415,24 +444,51 @@ async fn agent_space_management_project(
     workspace_id: &str,
     operation: &genehub_proto::AgentSpaceOperation,
 ) -> Result<String, String> {
-    let project = state.workspaces.project_root(workspace_id).await
+    let project = state
+        .workspaces
+        .project_root(workspace_id)
+        .await
         .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
-    if let genehub_proto::AgentSpaceOperation::SetParent { parent_workspace_id: Some(parent) } = operation {
+    if let genehub_proto::AgentSpaceOperation::SetParent {
+        parent_workspace_id: Some(parent),
+    } = operation
+    {
         authorize_agent_space_change(state, caller, parent).await?;
         if let Some(session) = caller.session_controller_id() {
-            let destination = state.workspaces.project_root(parent).await
+            let destination = state
+                .workspaces
+                .project_root(parent)
+                .await
                 .map_err(|error| format!("无法确认目标项目：{error:#}"))?;
-            let current = state.workspaces.agent_space(workspace_id).await
+            let current = state
+                .workspaces
+                .agent_space(workspace_id)
+                .await
                 .map_err(|error| format!("无法读取 AgentSpace：{error:#}"))?;
-            if current.revision == 0 && current.parent_workspace_id.is_none()
-                && current.components.is_empty() && state.project_control.is_bound(&destination, session)
+            if current.revision == 0
+                && current.parent_workspace_id.is_none()
+                && current.components.is_empty()
+                && state.project_control.is_bound(&destination, session)
             {
-                let child = state.workspaces.get(workspace_id).await
+                let child = state
+                    .workspaces
+                    .get(workspace_id)
+                    .await
                     .map_err(|error| format!("{error:#}"))?;
-                let owner = state.workspaces.get(&destination).await
+                let owner = state
+                    .workspaces
+                    .get(&destination)
+                    .await
                     .map_err(|error| format!("{error:#}"))?;
-                let child_root = child.root.canonicalize().map_err(|error| format!("{error:#}"))?;
-                let spaces = owner.root.join("spaces").canonicalize().map_err(|error| format!("{error:#}"))?;
+                let child_root = child
+                    .root
+                    .canonicalize()
+                    .map_err(|error| format!("{error:#}"))?;
+                let spaces = owner
+                    .root
+                    .join("spaces")
+                    .canonicalize()
+                    .map_err(|error| format!("{error:#}"))?;
                 if child_root.parent() == Some(spaces.as_path()) {
                     return Ok(destination);
                 }
@@ -809,7 +865,9 @@ async fn dispatch(
             // configuration changes retain their controller/exception checks.
             if agent_space_requires_project_control(&project_space)
                 && !state.project_control.has_binding(&workspace_id)
-                && !crate::workflow::exception_authority(state, &workspace_id, parent_session_id).await.unwrap_or(false)
+                && !crate::workflow::exception_authority(state, &workspace_id, parent_session_id)
+                    .await
+                    .unwrap_or(false)
             {
                 return Handled::err(
                     ErrorCode::Forbidden,
@@ -1957,7 +2015,14 @@ async fn dispatch(
             expected_revision,
             operation,
         } => {
-            let project_id = match agent_space_management_project(state, caller, &workspace_id, &operation).await {
+            let project_id = match agent_space_management_project(
+                state,
+                caller,
+                &workspace_id,
+                &operation,
+            )
+            .await
+            {
                 Ok(project) => project,
                 Err(message) => return Handled::err(ErrorCode::Forbidden, message),
             };
@@ -2012,7 +2077,14 @@ async fn dispatch(
             plan_digest,
             action_id,
         } => {
-            let project_id = match agent_space_management_project(state, caller, &workspace_id, &operation).await {
+            let project_id = match agent_space_management_project(
+                state,
+                caller,
+                &workspace_id,
+                &operation,
+            )
+            .await
+            {
                 Ok(project) => project,
                 Err(message) => return Handled::err(ErrorCode::Forbidden, message),
             };
@@ -2082,7 +2154,9 @@ async fn dispatch(
                         None,
                         &current.builder_lock_digest,
                         action_id,
-                        crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false),
+                        crate::workflow::exception_authority(state, &project_id, session_id)
+                            .await
+                            .unwrap_or(false),
                     )
                     .await
                 {
@@ -2194,17 +2268,26 @@ async fn dispatch(
         } => {
             let plan = plan.unwrap_or(false);
             let managed_build = plan || plan_digest.is_some() || action_id.is_some();
-            let read_only = matches!(&operation,
+            let read_only = matches!(
+                &operation,
                 genehub_proto::AgentSpaceBuilderOperation::Check
-                | genehub_proto::AgentSpaceBuilderOperation::Explain
-                | genehub_proto::AgentSpaceBuilderOperation::Verify
-                | genehub_proto::AgentSpaceBuilderOperation::Build { dry_run: true, .. });
+                    | genehub_proto::AgentSpaceBuilderOperation::Explain
+                    | genehub_proto::AgentSpaceBuilderOperation::Verify
+                    | genehub_proto::AgentSpaceBuilderOperation::Build { dry_run: true, .. }
+            );
             let recovery = match caller.session_controller_id() {
-                Some(session) => crate::workflow::exception_authority(state, &workspace_id, session).await.unwrap_or(false),
+                Some(session) => {
+                    crate::workflow::exception_authority(state, &workspace_id, session)
+                        .await
+                        .unwrap_or(false)
+                }
                 None => false,
             };
             if let Some(session_id) = caller.session_controller_id() {
-                if !read_only && !recovery && !(managed_build && state.project_control.is_bound(&workspace_id, session_id)) {
+                if !read_only
+                    && !recovery
+                    && !(managed_build && state.project_control.is_bound(&workspace_id, session_id))
+                {
                     return Handled::err(
                         ErrorCode::Forbidden,
                         "AgentSpaceBuilder: 已授权项目 PM 请先使用 space builder build --plan，再带计划身份 apply；初始化和清理由用户入口或异常恢复执行",
@@ -2259,9 +2342,19 @@ async fn dispatch(
             };
             if managed_build {
                 return match crate::agent_space_builder::management::build(
-                    state, &workspace_id, &space_root, &operation, caller.session_controller_id(),
-                    plan, plan_digest.as_deref(), action_id.as_deref(), expected_revision, recovery,
-                ).await {
+                    state,
+                    &workspace_id,
+                    &space_root,
+                    &operation,
+                    caller.session_controller_id(),
+                    plan,
+                    plan_digest.as_deref(),
+                    action_id.as_deref(),
+                    expected_revision,
+                    recovery,
+                )
+                .await
+                {
                     Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report)),
                     Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
                 };
@@ -2377,7 +2470,13 @@ async fn dispatch(
                                         .issue_management(
                                             prepared.challenge_spec(session_id),
                                             &workspace_id,
-                                            crate::workflow::exception_authority(state, &workspace_id, session_id).await.unwrap_or(false),
+                                            crate::workflow::exception_authority(
+                                                state,
+                                                &workspace_id,
+                                                session_id,
+                                            )
+                                            .await
+                                            .unwrap_or(false),
                                         )
                                         .await
                                     {
@@ -2461,7 +2560,17 @@ async fn dispatch(
                         current.git.head.as_deref(),
                         &current.git.status_digest,
                         action_id,
-                        crate::workflow::exception_authority(state, &state.workspaces.project_root(&workspace_id).await.unwrap_or_else(|_| workspace_id.clone()), session_id).await.unwrap_or(false),
+                        crate::workflow::exception_authority(
+                            state,
+                            &state
+                                .workspaces
+                                .project_root(&workspace_id)
+                                .await
+                                .unwrap_or_else(|_| workspace_id.clone()),
+                            session_id,
+                        )
+                        .await
+                        .unwrap_or(false),
                     )
                     .await
                 {
@@ -3036,7 +3145,6 @@ mod tests {
         });
         assert!(agent_space_requires_project_control(&packed));
     }
-
 
     #[test]
     fn loopback_and_lan_addresses_are_distinguished() {

@@ -53,7 +53,10 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         continue;
                     }
                     summary.executing = Some(
-                        owned.iter().filter(|run| executing_runs.contains(&run.id)).count() as u32,
+                        owned
+                            .iter()
+                            .filter(|run| executing_runs.contains(&run.id))
+                            .count() as u32,
                     );
                     for run in &owned {
                         match run.status.as_str() {
@@ -88,11 +91,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             }),
                             request_run_id: Some(request::group_id(run).into()),
                             report_pending: Some(grouped.get(request::group_id(run)).is_some_and(
-                                |group| {
-                                    group.iter().any(|run| {
-                                        supervision::report_pending(run)
-                                    })
-                                },
+                                |group| group.iter().any(|run| supervision::report_pending(run)),
                             )),
                             run_id: run.id.clone(),
                             task_id: run.task_id.clone(),
@@ -102,7 +101,9 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                             active_nodes: run
                                 .nodes
                                 .iter()
-                                .filter(|(_, node)| matches!(node.status.as_str(), "running" | "finishing"))
+                                .filter(|(_, node)| {
+                                    matches!(node.status.as_str(), "running" | "finishing")
+                                })
                                 .map(|(id, _)| id.clone())
                                 .collect(),
                             executor_session_id: run.executor_session_id.clone(),
@@ -200,16 +201,27 @@ pub(crate) async fn start_assigned(
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let _guard = lock_run(&runtime, run_id)?;
     let mut run = load_run(&runtime, run_id)?;
-    let _request = request::request_lock(&runtime,request::group_id(&run))?;
+    let _request = request::request_lock(&runtime, request::group_id(&run))?;
     request::ensure_open(&runtime, &run)?;
     if run.status != "running" {
         return Ok(());
     }
-    let deadline_reached = run.engine.as_ref().and_then(|engine|workflow_engine::pending(engine).wake_at_ms)
-        .is_some_and(|deadline|now_ms().max(0) as u64 >= deadline);
-    if run.engine.is_some() && (deadline_reached || request::budget_exhausted(&runtime,&run,now_ms())?) {
-        request_stop(&mut run,"blocked","流程或活动达到期限，或原始请求耗尽 LLM 调用上限".into());
-        run.revision += 1; save_run(&runtime,&run)?; return Ok(());
+    let deadline_reached = run
+        .engine
+        .as_ref()
+        .and_then(|engine| workflow_engine::pending(engine).wake_at_ms)
+        .is_some_and(|deadline| now_ms().max(0) as u64 >= deadline);
+    if run.engine.is_some()
+        && (deadline_reached || request::budget_exhausted(&runtime, &run, now_ms())?)
+    {
+        request_stop(
+            &mut run,
+            "blocked",
+            "流程或活动达到期限，或原始请求耗尽 LLM 调用上限".into(),
+        );
+        run.revision += 1;
+        save_run(&runtime, &run)?;
+        return Ok(());
     }
     if !run.nodes.values().any(|node| {
         node.status == "running" && node.session_id.as_deref() == Some(session.id.as_str())
@@ -217,11 +229,19 @@ pub(crate) async fn start_assigned(
         bail!("Worker assignment no longer belongs to an active node");
     }
     if run.engine.is_some() {
-        let node = run.nodes.iter().find(|(_,node)|node.session_id.as_deref() == Some(session.id.as_str())).map(|(id,_)|id.clone()).expect("assignment validated");
-        if structured::accepted(&mut run,&node)? {
-            run.revision += 1; save_run(&runtime,&run)?;
+        let node = run
+            .nodes
+            .iter()
+            .find(|(_, node)| node.session_id.as_deref() == Some(session.id.as_str()))
+            .map(|(id, _)| id.clone())
+            .expect("assignment validated");
+        if structured::accepted(&mut run, &node)? {
+            run.revision += 1;
+            save_run(&runtime, &run)?;
         }
-        if run.status != "running" {return Ok(());}
+        if run.status != "running" {
+            return Ok(());
+        }
     }
     state
         .sessions
@@ -284,7 +304,10 @@ pub(crate) async fn cancel(
     root.revision += 1;
     save_run(&runtime, &root)?; // The request fence survives a partial cascade.
     for previous in group {
-        state.sessions.discard_workflow_inputs(&previous.parent_session_id, &previous.id).await?;
+        state
+            .sessions
+            .discard_workflow_inputs(&previous.parent_session_id, &previous.id)
+            .await?;
         let mut current = load_run(&runtime, &previous.id)?;
         if matches!(current.status.as_str(), "completed" | "cancelled") {
             continue;
@@ -388,19 +411,26 @@ pub(crate) async fn maintain(state: &Shared) {
 /// hold a Run lock while shutting down the Worker that just called complete.
 async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<()> {
     let snapshot = load_run(runtime, run_id)?;
-    if snapshot.status != "running" { return Ok(()); }
+    if snapshot.status != "running" {
+        return Ok(());
+    }
     for (node_id, node) in &snapshot.nodes {
-        if node.status != "finishing" { continue; }
+        if node.status != "finishing" {
+            continue;
+        }
         let activity = if let Some(id) = &node.session_id {
             state.sessions.execution_activity(id).await.ok()
-        } else { None };
+        } else {
+            None
+        };
         let cleanup: Result<()> = async {
             if let Some(id) = &node.session_id {
                 state.sessions.fence_execution(id).await?;
                 state.sessions.close(id).await?;
             }
             Ok(())
-        }.await;
+        }
+        .await;
         let sessions = {
             let _guard = lock_run(runtime, run_id)?;
             let mut run = load_run(runtime, run_id)?;
@@ -408,55 +438,89 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
             if run.status != "running" || request::ensure_open(runtime, &run).is_err() {
                 return Ok(());
             }
-            if run.nodes[node_id].status != "finishing" { continue; }
+            if run.nodes[node_id].status != "finishing" {
+                continue;
+            }
             if let Err(error) = cleanup {
-                request_stop(&mut run, "blocked", format!("节点 {node_id} 收尾失败：{error:#}"));
+                request_stop(
+                    &mut run,
+                    "blocked",
+                    format!("节点 {node_id} 收尾失败：{error:#}"),
+                );
                 run.revision += 1;
                 save_run(runtime, &run)?;
                 return Ok(());
             }
-            if let Some(activity) = activity { run.nodes.get_mut(node_id).expect("node").activity = activity; }
+            if let Some(activity) = activity {
+                run.nodes.get_mut(node_id).expect("node").activity = activity;
+            }
             let outcome = run.nodes[node_id].outcome.unwrap_or_default();
             run.nodes.get_mut(node_id).expect("node").status = "completed".into();
             if run.engine.is_some() {
                 structured::settled(&mut run, node_id)?;
-                structured::finalize(runtime,&mut run).await;
+                structured::finalize(runtime, &mut run).await;
                 run.revision += 1;
                 run.updated_at_ms = now_ms();
                 save_run(runtime, &run)?;
                 continue;
             }
             let definition = runtime_node(&run, node_id)?;
-            let targets = definition.on.get(outcome_event(outcome)).cloned().unwrap_or_default();
+            let targets = definition
+                .on
+                .get(outcome_event(outcome))
+                .cloned()
+                .unwrap_or_default();
             let leases_before = run.leases.clone();
-            let sessions = match activate(state, &runtime.project_root, runtime, &mut run, targets).await {
-                Ok(sessions) => sessions,
-                Err(error) => {
-                    request_stop(&mut run, "blocked", format!("节点 {node_id} 后续派发失败：{error:#}"));
-                    Vec::new()
-                }
-            };
+            let sessions =
+                match activate(state, &runtime.project_root, runtime, &mut run, targets).await {
+                    Ok(sessions) => sessions,
+                    Err(error) => {
+                        request_stop(
+                            &mut run,
+                            "blocked",
+                            format!("节点 {node_id} 后续派发失败：{error:#}"),
+                        );
+                        Vec::new()
+                    }
+                };
             settle_if_terminal(&mut run);
             run.revision += 1;
             run.updated_at_ms = now_ms();
             record_assigned_messages(&mut run, &sessions)?;
             if run.status == "completed" {
                 if let Some(executor) = run.executor_session_id.clone() {
-                    let event = flow_message(&run, "run.completed", None, &executor,
-                        &run.parent_session_id, Some(run.revision), serde_json::json!({"status": run.status}))?;
+                    let event = flow_message(
+                        &run,
+                        "run.completed",
+                        None,
+                        &executor,
+                        &run.parent_session_id,
+                        Some(run.revision),
+                        serde_json::json!({"status": run.status}),
+                    )?;
                     push_flow_message(&mut run, event);
                 }
             }
             if let Err(error) = save_run(runtime, &run) {
-                let leases = run.leases.iter().filter(|(id, _)| !leases_before.contains_key(*id))
-                    .map(|(_, lease)| lease.clone()).collect::<Vec<_>>();
-                return Err(with_activation_cleanup(state, runtime, &sessions, &leases, error).await);
+                let leases = run
+                    .leases
+                    .iter()
+                    .filter(|(id, _)| !leases_before.contains_key(*id))
+                    .map(|(_, lease)| lease.clone())
+                    .collect::<Vec<_>>();
+                return Err(
+                    with_activation_cleanup(state, runtime, &sessions, &leases, error).await,
+                );
             }
-            if run.status == "completed" { release_leases(runtime, &run).await?; }
+            if run.status == "completed" {
+                release_leases(runtime, &run).await?;
+            }
             sessions
         };
         for (session, message) in sessions {
-            if let Err(error) = start_assigned(state, &snapshot.workspace_id, run_id, &session, message).await {
+            if let Err(error) =
+                start_assigned(state, &snapshot.workspace_id, run_id, &session, message).await
+            {
                 abort_launch(state, &snapshot.workspace_id, run_id).await?;
                 return Err(error);
             }
@@ -639,7 +703,8 @@ pub(crate) async fn validate_input_target(
     let runtime = RuntimeStore::new(&state.paths.root, &session.workspace_id, &workspace.root)?;
     let run = load_run(&runtime, run_id)?;
     if run.parent_session_id != session_id
-        && !exception_authority(state, &run.workspace_id, session_id).await? {
+        && !exception_authority(state, &run.workspace_id, session_id).await?
+    {
         bail!("the task belongs to a different PM session");
     }
     Ok(())

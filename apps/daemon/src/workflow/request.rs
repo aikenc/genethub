@@ -53,11 +53,21 @@ pub(super) fn activities(
 /// Shared admission budget; use the in-memory Run being committed rather than
 /// its stale disk copy. Both supervision and dispatch consult this one rule.
 pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
-    let others = all_runs(runtime)?.into_iter().filter(|other|
-        group_id(other) == group_id(run) && other.id != run.id).collect::<Vec<_>>();
-    let elapsed = others.iter().map(|other| execution_ms(other,now)).sum::<i64>() + execution_ms(run,now);
-    let calls = others.iter().flat_map(activities).map(|a|a.llm_rounds).sum::<u64>()
-        + activities(run).map(|a|a.llm_rounds).sum::<u64>();
+    let others = all_runs(runtime)?
+        .into_iter()
+        .filter(|other| group_id(other) == group_id(run) && other.id != run.id)
+        .collect::<Vec<_>>();
+    let elapsed = others
+        .iter()
+        .map(|other| execution_ms(other, now))
+        .sum::<i64>()
+        + execution_ms(run, now);
+    let calls = others
+        .iter()
+        .flat_map(activities)
+        .map(|a| a.llm_rounds)
+        .sum::<u64>()
+        + activities(run).map(|a| a.llm_rounds).sum::<u64>();
     Ok(calls >= MAX_LLM_ROUNDS || (!run.supervision.waiting && elapsed >= REQUEST_DEADLINE_MS))
 }
 
@@ -93,7 +103,8 @@ pub(super) async fn association(
         Some(id) => {
             let run = load_run(runtime, id)?;
             if run.parent_session_id != parent
-                && !exception_authority(state, &run.workspace_id, parent).await? {
+                && !exception_authority(state, &run.workspace_id, parent).await?
+            {
                 bail!("retry target belongs to another PM session");
             }
             Some(run)
@@ -149,7 +160,11 @@ pub(super) async fn admit(
     if group.len() >= MAX_REQUEST_RUNS {
         bail!("requestBudgetExceeded: the original request has reached its {MAX_REQUEST_RUNS} Run limit");
     }
-    if group.iter().map(|run| execution_ms(run, now_ms())).sum::<i64>() >= REQUEST_DEADLINE_MS
+    if group
+        .iter()
+        .map(|run| execution_ms(run, now_ms()))
+        .sum::<i64>()
+        >= REQUEST_DEADLINE_MS
     {
         bail!("requestBudgetExceeded: the original request has exceeded its execution deadline");
     }

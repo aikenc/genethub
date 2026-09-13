@@ -6,8 +6,8 @@
 //! only a transport.
 
 mod diagnostic;
-mod manifest;
 pub(crate) mod management;
+mod manifest;
 mod ownership;
 mod planner;
 
@@ -141,7 +141,13 @@ pub fn run(
     command: Command,
     require_no_post_commands: bool,
 ) -> BuilderResult<Report> {
-    run_bound(project_root, space_root, command, require_no_post_commands, None)
+    run_bound(
+        project_root,
+        space_root,
+        command,
+        require_no_post_commands,
+        None,
+    )
 }
 
 /// Apply the same captured projection that was previewed in a PM plan.
@@ -236,10 +242,14 @@ pub(crate) fn run_bound(
 
             let name = plan.manifest.name.clone();
             let warnings = plan.warnings.clone();
-            let input_digest = sha256_bytes(&serde_json::to_vec(&model_details(&plan))
-                .expect("Builder model serializes"));
+            let input_digest = sha256_bytes(
+                &serde_json::to_vec(&model_details(&plan)).expect("Builder model serializes"),
+            );
             if expected_input_digest.is_some_and(|expected| expected != input_digest) {
-                return fail(Diagnostic::error("PB019", "Builder inputs changed; obtain a new management plan"));
+                return fail(Diagnostic::error(
+                    "PB019",
+                    "Builder inputs changed; obtain a new management plan",
+                ));
             }
             // The embedded CLI is always a structured JSON consumer. Match
             // PipeBuilder's `--format json`: check, explain, and dry-run all
@@ -281,8 +291,14 @@ pub(crate) fn run_bound(
 }
 
 fn init(project_root: &Path, requested_root: &Path) -> BuilderResult<Report> {
+    // `project_root` is canonical, while callers may still hold an equivalent
+    // platform spelling (`/var` vs `/private/var`, or a Windows short path).
+    // Compare filesystem identities before deciding that this is a child
+    // Space; otherwise a root init is misclassified and rejected as PB011.
+    let requested_existing = requested_root.canonicalize().ok();
+    let is_project_root = requested_existing.as_deref() == Some(project_root);
     let spaces_path = project_root.join("spaces");
-    if requested_root != project_root {
+    if !is_project_root {
         if is_symlink(&spaces_path) {
             return fail(
                 Diagnostic::error("PB011", "project spaces/ must not be a symlink")
@@ -303,7 +319,10 @@ fn init(project_root: &Path, requested_root: &Path) -> BuilderResult<Report> {
             ))
         })?
         .to_string();
-    if requested_root != project_root && requested_root.parent() != Some(spaces.as_path()) {
+    let requested_parent = requested_root
+        .parent()
+        .and_then(|parent| parent.canonicalize().ok());
+    if !is_project_root && requested_parent.as_deref() != Some(spaces.as_path()) {
         return fail(
             Diagnostic::error(
                 "PB011",

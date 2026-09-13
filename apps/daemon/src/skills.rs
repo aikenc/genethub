@@ -446,11 +446,19 @@ mod tests {
         // Production daemon is wasm: Windows `C:\` / `\\?\C:\` are rewritten
         // by inbound_absolute (see guest_paths). Bare channel names stay
         // rejected so a PATH hit cannot pick another install.
-        for path in [
+        #[cfg(not(windows))]
+        let paths = [
             "/opt/genehub/dev/genet-dev",
             "/opt/genehub/beta/genet-beta",
             "/opt/genehub/stable/genet",
-        ] {
+        ];
+        #[cfg(windows)]
+        let paths = [
+            r"C:\GeneHub\dev\genet-dev.exe",
+            r"C:\GeneHub\beta\genet-beta.exe",
+            r"C:\GeneHub\stable\genet.exe",
+        ];
+        for path in paths {
             assert_eq!(
                 normalize_front_door_cli(Some(path.into())),
                 Some(PathBuf::from(path))

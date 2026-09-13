@@ -138,8 +138,7 @@ pub(super) async fn observe(
         episode = episode.min(activity_ms);
         stalled.push("Run 尚未收敛且没有 Worker 接棒".into());
     }
-    if request::budget_exhausted(runtime,run,now)?
-    {
+    if request::budget_exhausted(runtime, run, now)? {
         control::request_stop(
             run,
             "blocked",
@@ -160,7 +159,10 @@ pub(super) async fn observe(
         "{}。静默只触发诊断，不自动终止长工具。",
         stalled.join("；")
     ));
-    let group = all_runs(runtime)?.into_iter().filter(|other|request::group_id(other) == request::group_id(run)).collect::<Vec<_>>();
+    let group = all_runs(runtime)?
+        .into_iter()
+        .filter(|other| request::group_id(other) == request::group_id(run))
+        .collect::<Vec<_>>();
     let group_diagnostics: usize = group
         .iter()
         .map(|run| run.supervision.diagnostics.len())
@@ -234,7 +236,9 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
         .unwrap_or_default();
     let recovery = if matches!(run.status.as_str(), "blocked" | "failed") {
         "异常处置：本项目 PM 可直接管理流程与专家、取消或恢复任务，框架会逐次核对异常事实；不因原任务属于另一条 PM 会话而要求用户换会话。成功恢复或取消后回到正常权限。"
-    } else { "" };
+    } else {
+        ""
+    };
     let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
         run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), run.supervision.finding.as_deref().unwrap_or(""), human, recovery);
     run.supervision.notices.push(Notice {
@@ -250,19 +254,34 @@ pub(super) async fn deliver_notice(
     runtime: &RuntimeStore,
     run_id: &str,
 ) -> Result<()> {
-    let ids = load_run(runtime, run_id)?.supervision.notices.into_iter()
-        .filter(|notice| !notice.handled).map(|notice| notice.id).collect::<Vec<_>>();
+    let ids = load_run(runtime, run_id)?
+        .supervision
+        .notices
+        .into_iter()
+        .filter(|notice| !notice.handled)
+        .map(|notice| notice.id)
+        .collect::<Vec<_>>();
     for id in ids {
         let _lock = lock_run(runtime, run_id)?;
         let mut run = load_run(runtime, run_id)?;
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         let root = load_run(runtime, request::group_id(&run))?;
         let cancelled = cancellation_requested(&run) || cancellation_requested(&root);
-        let notice = run.supervision.notices.iter().find(|notice| notice.id == id)
-            .ok_or_else(|| anyhow!("Workflow notice disappeared"))?.clone();
+        let notice = run
+            .supervision
+            .notices
+            .iter()
+            .find(|notice| notice.id == id)
+            .ok_or_else(|| anyhow!("Workflow notice disappeared"))?
+            .clone();
         if cancelled {
-            state.sessions.discard_workflow_inputs(&run.parent_session_id, &run.id).await?;
-            for notice in &mut run.supervision.notices { notice.handled = true; }
+            state
+                .sessions
+                .discard_workflow_inputs(&run.parent_session_id, &run.id)
+                .await?;
+            for notice in &mut run.supervision.notices {
+                notice.handled = true;
+            }
             save_run(runtime, &run)?;
             return Ok(());
         }
@@ -300,7 +319,10 @@ pub(super) async fn deliver_notice(
 
 pub(super) fn cancellation_requested(run: &RunRecord) -> bool {
     matches!(run.status.as_str(), "cancelling" | "cancelled")
-        || run.request.as_ref().is_some_and(|request| request.cancelled)
+        || run
+            .request
+            .as_ref()
+            .is_some_and(|request| request.cancelled)
 }
 
 pub(super) fn report_pending(run: &RunRecord) -> bool {
@@ -373,9 +395,16 @@ pub(super) async fn diagnostics(
     let over_budget = now_ms() - diagnostic.created_at_ms >= DIAGNOSTIC_DEADLINE_MS
         || activity.llm_rounds >= DIAGNOSTIC_CALLS;
     if ended || over_budget || run.status != "running" {
-        let completed_reply = state.sessions.summary(&session_id).await.ok()
-            .is_some_and(|summary| summary.status == genehub_proto::SessionStatus::Idle
-                && summary.latest_reply.is_some());
+        let completed_reply =
+            state
+                .sessions
+                .summary(&session_id)
+                .await
+                .ok()
+                .is_some_and(|summary| {
+                    summary.status == genehub_proto::SessionStatus::Idle
+                        && summary.latest_reply.is_some()
+                });
         state.sessions.fence_execution(&session_id).await?;
         state.sessions.close(&session_id).await?;
         let _lock = lock_run(runtime, run_id)?;
@@ -398,7 +427,11 @@ pub(super) async fn diagnostics(
         let detail = if finished {
             format!("诊断会话 {session_id} 已完成并有回复；PM 请读取报告核对结论后处理原任务。")
         } else {
-            let reason = if over_budget { "达到诊断调用或时间上限" } else { "未产出完整回复或执行异常" };
+            let reason = if over_budget {
+                "达到诊断调用或时间上限"
+            } else {
+                "未产出完整回复或执行异常"
+            };
             run.supervision.diagnostics[index].error = Some(reason.into());
             format!("WR 诊断失败：{reason}，不能视为已有诊断结论。会话 {session_id} 的部分记录仅供参考；PM 应依据 workflow get/check 事实处置原任务，异常期间具备本项目管理权限，不要求用户换会话。")
         };

@@ -31,8 +31,13 @@ pub(crate) async fn check(
             });
         };
         let definitions = if run.engine.is_some() {
-            run.nodes.keys().map(|id| runtime_node(&run,id)).collect::<Result<Vec<_>>>()?
-        } else { run.definition.nodes.clone() };
+            run.nodes
+                .keys()
+                .map(|id| runtime_node(&run, id))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            run.definition.nodes.clone()
+        };
         for node in &definitions {
             if node.uses != "agent.session" {
                 continue;
@@ -62,8 +67,12 @@ pub(crate) async fn check(
                 continue;
             };
             if record.status == "finishing" {
-                finding(Some(node.id.clone()), "nodeFinishing", "info",
-                    "节点结果已持久化，正在确认执行及进程收尾；成功后按定义激活后续节点。".into());
+                finding(
+                    Some(node.id.clone()),
+                    "nodeFinishing",
+                    "info",
+                    "节点结果已持久化，正在确认执行及进程收尾；成功后按定义激活后续节点。".into(),
+                );
             }
             if record.status == "running" {
                 match &record.session_id {
