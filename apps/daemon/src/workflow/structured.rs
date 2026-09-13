@@ -389,6 +389,15 @@ pub(super) fn retired(run: &mut RunRecord) -> Result<()> {
 /// Versioned read-only view for CLI and Workbench. It deliberately excludes
 /// execution context and pending command bodies; the snapshot remains private.
 pub(super) fn projection(run: &RunRecord) -> Option<serde_json::Value> {
+    if run.definition.structure.is_none() {
+        return Some(serde_json::json!({
+            "schema": "genehub.workflow.dag.v1",
+            "entry": run.definition.entry,
+            "nodes": run.definition.nodes.iter().map(|node| serde_json::json!({
+                "id": node.id, "on": node.on,
+            })).collect::<Vec<_>>(),
+        }));
+    }
     let snapshot = run.engine.as_ref()?;
     let active = program(run).and_then(|p| engine::inspect(&p, snapshot).map_err(Into::into));
     Some(serde_json::json!({

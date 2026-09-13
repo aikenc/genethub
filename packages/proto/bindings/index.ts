@@ -1918,7 +1918,7 @@ activationHistory: Array<WorkflowActivationStatus>, };
  */
 export type WorkflowRunStatus = { 
 /**
- * Versioned structured-definition and instance-address projection; absent for legacy DAG Runs.
+ * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
  */
 structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, 
 /**

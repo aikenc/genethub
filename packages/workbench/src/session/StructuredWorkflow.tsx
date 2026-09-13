@@ -11,7 +11,8 @@ const status: Record<string,string> = {running:"执行中",pending:"待执行",c
 export function StructuredWorkflow({run}:{run:WorkflowRunStatus}) {
   const selectSession = useWorkbench(s=>s.selectSession);
   const view = record(run.structure);
-  if (view.schema !== "genehub.workflow.structure.v1") return null;
+  if (view.schema === "genehub.workflow.dag.v1") return <DagWorkflow run={run} />;
+  if (view.schema !== "genehub.workflow.structure.v1") return <p role="status" className="text-sm text-muted">当前版本无法展示此流程结构；可在执行记录中查看节点和结果。</p>;
   const definition = record(view.definition);
   const instances = list(view.instances).map(record);
   const render = (value:unknown, filter:(instance:Record<string,unknown>)=>boolean, depth=0):React.ReactNode => {
@@ -61,6 +62,33 @@ export function StructuredWorkflow({run}:{run:WorkflowRunStatus}) {
     <h3 className="text-sm font-medium">流程与执行实例</h3>
     {typeof view.error === "string" ? <p role="alert" className="text-sm text-danger">执行状态无法核对：{view.error}</p> : null}
     {render(definition.body,()=>true)}
+  </section>;
+}
+
+/** Edges come from the immutable Run definition, never from journal order. */
+function DagWorkflow({ run }: { run: WorkflowRunStatus }) {
+  const selectSession = useWorkbench(s => s.selectSession);
+  const view = record(run.structure);
+  return <section aria-label="结构化流程" className="space-y-2">
+    <h3 className="text-sm font-medium">流程与执行实例</h3>
+    <p className="text-xs text-muted">入口：{String(view.entry ?? "未知")}</p>
+    <ul className="space-y-2">
+      {list(view.nodes).map(record).map(definition => {
+        if (typeof definition.id !== "string") return null;
+        const node = run.nodes.find(item => item.id === definition.id);
+        return <li key={definition.id} className="min-w-0 rounded-lg border border-line px-3 py-2 text-sm">
+          <p className="break-words">{definition.id} · {node ? status[node.status] ?? node.status : "状态待核对"}</p>
+          {Object.entries(record(definition.on)).map(([outcome, targets]) =>
+            <p key={outcome} className="mt-1 break-words text-xs text-muted">{status[outcome] ?? outcome} → {list(targets).filter((target): target is string => typeof target === "string").join("、")}</p>)}
+          {node?.reason ? <p className="mt-1 break-words text-xs">{node.reason}</p> : null}
+          {node?.sessionId ? <button type="button" className="min-h-11 text-xs text-accent" onClick={() => void selectSession(node.sessionId!)}>查看本次工作会话</button> : null}
+          {node && Object.keys(node.evidence).length ? <details className="text-xs">
+            <summary className="min-h-9 cursor-pointer">本次证据</summary>
+            <dl className="space-y-1">{Object.entries(node.evidence).map(([key, value]) => <div key={key} className="break-words"><dt>{key}</dt><dd className="whitespace-pre-wrap">{value}</dd></div>)}</dl>
+          </details> : null}
+        </li>;
+      })}
+    </ul>
   </section>;
 }
 

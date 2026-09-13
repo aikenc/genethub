@@ -292,7 +292,7 @@ export function TimelineView({
   const agents = useWorkbench((workbench) => workbench.agents);
   const workspaces = useWorkbench((workbench) => workbench.workspaces);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
-  const hasExecutor = workspaces.find((space) => space.id === activeSession?.workspaceId)
+  const hasExecutor = !activeSession?.managed && workspaces.find((space) => space.id === activeSession?.workspaceId)
     ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
   const agentLabel = useWorkbench((workbench) => {

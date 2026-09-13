@@ -42,7 +42,7 @@ import {
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
-import { ConnectionOutcomeUnknownError } from "../protocol/client";
+import { ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
   recallRuntimeChoice,
@@ -2399,8 +2399,18 @@ async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: st
   saveInputReceipt(machine, sessionId, input);
   try {
     if (retry) {
-      const lookup = await client.call({ type: "session.narrative", payload: { sessionId, itemId: input.messageId ?? null, throughRoundId: null, cursor: null, limit: null } });
-      if (lookup?.type === "sessionNarrative" && lookup.data.items?.some(item => item.id === input.messageId)) {
+      let received = false;
+      try {
+        const lookup = await client.call({ type: "session.narrative", payload: { sessionId, itemId: input.messageId ?? null, throughRoundId: null, cursor: null, limit: null } });
+        if (lookup?.type !== "sessionNarrative") throw new Error("未能核对原消息，请重试。");
+        received = lookup.data.items.some(item => item.id === input.messageId);
+      } catch (error) {
+        // Absence is the only lookup failure that permits an idempotent resend.
+        // Transport and authorization failures leave the receipt unresolved.
+        if (!(error instanceof ProtocolError_ && error.detail.code === "notFound")) throw error;
+      }
+      if (get().client !== client) return;
+      if (received) {
         saveInputReceipt(machine, sessionId, input, true);
         if (get().client === client) patchTimeline(sessionId, set, timeline => ({ inputOutbox: timeline.inputOutbox?.filter(item => item.messageId !== input.messageId) }));
         return;
