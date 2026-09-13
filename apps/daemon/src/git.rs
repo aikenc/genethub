@@ -3,7 +3,7 @@
 //! No libgit2: linking it would add megabytes to a binary with a hard size
 //! budget, and every machine that has a checkout already has the CLI.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -16,6 +16,35 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
+
+/// Resolve an explicitly selected worktree without inheriting a parent repo.
+/// A worktree's private Git directory and common repository can differ.
+pub(crate) async fn repository_directories(root: &Path) -> Result<(PathBuf, PathBuf)> {
+    let marker = root.join(".git");
+    let metadata = crate::config::sensitive_metadata(&marker)
+        .context("gitRepositoryRequired: select an actual Git worktree root")?;
+    crate::config::reject_link_or_reparse(&marker, &metadata)?;
+    if !metadata.is_dir() && !metadata.is_file() {
+        anyhow::bail!("gitRepositoryRequired: .git must be a directory or worktree file");
+    }
+    let canonical = root.canonicalize()?;
+    let top = git(root, &["rev-parse", "--show-toplevel"]).await?;
+    if crate::guest_paths::guest_path(Path::new(top.trim())).canonicalize()? != canonical {
+        anyhow::bail!("wrongProjectRoot: task directory is not the selected Git worktree root");
+    }
+    let resolve = |value: &str| -> Result<PathBuf> {
+        let path = crate::guest_paths::guest_path(Path::new(value.trim()));
+        Ok(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            canonical.join(path)
+        }
+        .canonicalize()?)
+    };
+    let private = resolve(&git(root, &["rev-parse", "--git-dir"]).await?)?;
+    let common = resolve(&git(root, &["rev-parse", "--git-common-dir"]).await?)?;
+    Ok((private, common))
+}
 
 async fn git(root: &Path, args: &[&str]) -> Result<String> {
     let mut child = Command::new("git")

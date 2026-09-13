@@ -17,6 +17,9 @@ use super::{query, EXIT_OK};
 
 #[derive(Debug)]
 enum Command {
+    Open {
+        root: String,
+    },
     Inspect {
         workspace_id: Option<String>,
     },
@@ -33,8 +36,13 @@ enum Command {
     },
     Builder {
         workspace_id: Option<String>,
+        target_workspace_id: Option<String>,
         space_name: String,
         operation: AgentSpaceBuilderOperation,
+        plan: bool,
+        plan_digest: Option<String>,
+        action_id: Option<String>,
+        expected_revision: Option<u64>,
     },
     Bootstrap {
         workspace_id: Option<String>,
@@ -74,6 +82,19 @@ pub async fn space(args: &[String], selection: &Selection) -> i32 {
 
 async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
     match command {
+        Command::Open { root } => {
+            let Reply::Workspace(workspace) = rpc
+                .call(Request::WorkspaceOpen { root })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "workspace.open returned the wrong reply",
+                ));
+            };
+            output::succeed("space.open", json!({"workspace": workspace}));
+            Ok(EXIT_OK)
+        }
         Command::Inspect { workspace_id } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let workspaces = query::list_workspaces(rpc).await?;
@@ -183,16 +204,25 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
         }
         Command::Builder {
             workspace_id,
+            target_workspace_id,
             space_name,
             operation,
+            plan,
+            plan_digest,
+            action_id,
+            expected_revision,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::AgentSpaceBuilder(report) = rpc
                 .call(Request::AgentSpaceBuilder {
                     workspace_id,
-                    target_workspace_id: None,
+                    target_workspace_id,
                     space_name,
                     operation,
+                    plan: plan.then_some(true),
+                    plan_digest,
+                    action_id,
+                    expected_revision,
                 })
                 .await
                 .map_err(query::rpc_error)?
@@ -445,6 +475,12 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
     let sub = args.get(1).map(String::as_str).unwrap_or_default();
     let rest = |from: usize| -> &[String] { args.get(from..).unwrap_or_default() };
     match (verb, sub) {
+        ("open", root) if args.len() == 2 => {
+            let root = crate::guest_paths::inbound_absolute(root)
+                .ok_or_else(|| CliFailure::invalid_args("space open requires an absolute directory or code-workspace path"))?;
+            Ok(Command::Open { root: root.to_string_lossy().into_owned() })
+        }
+        ("open", _) => Err(CliFailure::invalid_args("usage: genet space open <absolute-directory-or-code-workspace>")),
         ("inspect", _) => {
             let mut values = Values::parse(rest(1))?;
             Ok(Command::Inspect {
@@ -534,6 +570,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
         }
         ("builder", action) => {
             let mut values = Values::parse(rest(2))?;
+            values.validate_change_mode()?;
             let space_name = values.name.take().ok_or_else(|| {
                 CliFailure::invalid_args("space builder 需要 --name <agent-space>")
             })?;
@@ -558,10 +595,22 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                     "--dry-run 与 --require-no-post-commands 只用于 space builder build",
                 ));
             }
+            if (values.plan || values.plan_digest.is_some() || values.action_id.is_some())
+                && (action != "build" || values.dry_run)
+            {
+                return Err(CliFailure::invalid_args(
+                    "Builder management plans require space builder build (without --dry-run)",
+                ));
+            }
             Ok(Command::Builder {
                 workspace_id: values.workspace.take(),
+                target_workspace_id: values.target_workspace.take(),
                 space_name,
                 operation,
+                plan: values.plan,
+                plan_digest: values.plan_digest.take(),
+                action_id: values.action_id.take(),
+                expected_revision: values.expected_revision.or(values.revision),
             })
         }
         ("bootstrap", "list") => {
@@ -623,6 +672,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 #[derive(Default)]
 struct Values {
     workspace: Option<String>,
+    target_workspace: Option<String>,
     component: Option<String>,
     role: Option<String>,
     parent: Option<String>,
@@ -672,6 +722,7 @@ impl Values {
             };
             match flag {
                 "--workspace" => values.workspace = Some(next(&mut index)?),
+                "--target-workspace" => values.target_workspace = Some(next(&mut index)?),
                 "--component" => values.component = Some(next(&mut index)?),
                 "--role" => values.role = Some(next(&mut index)?),
                 "--parent" => values.parent = Some(next(&mut index)?),

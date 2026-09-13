@@ -7,6 +7,7 @@
 
 mod diagnostic;
 mod manifest;
+pub(crate) mod management;
 mod ownership;
 mod planner;
 
@@ -95,6 +96,7 @@ impl From<Diagnostic> for genehub_proto::AgentSpaceBuilderDiagnostic {
 impl From<Report> for genehub_proto::AgentSpaceBuilderReport {
     fn from(report: Report) -> Self {
         Self {
+            management_plan: None,
             schema: report.schema.to_string(),
             builder_version: report.builder_version.to_string(),
             command: report.command.to_string(),
@@ -138,6 +140,17 @@ pub fn run(
     space_root: &Path,
     command: Command,
     require_no_post_commands: bool,
+) -> BuilderResult<Report> {
+    run_bound(project_root, space_root, command, require_no_post_commands, None)
+}
+
+/// Apply the same captured projection that was previewed in a PM plan.
+pub(crate) fn run_bound(
+    project_root: &Path,
+    space_root: &Path,
+    command: Command,
+    require_no_post_commands: bool,
+    expected_input_digest: Option<&str>,
 ) -> BuilderResult<Report> {
     let project_root = project_root.canonicalize().map_err(|error| {
         BuilderError(Diagnostic::error(
@@ -223,6 +236,11 @@ pub fn run(
 
             let name = plan.manifest.name.clone();
             let warnings = plan.warnings.clone();
+            let input_digest = sha256_bytes(&serde_json::to_vec(&model_details(&plan))
+                .expect("Builder model serializes"));
+            if expected_input_digest.is_some_and(|expected| expected != input_digest) {
+                return fail(Diagnostic::error("PB019", "Builder inputs changed; obtain a new management plan"));
+            }
             // The embedded CLI is always a structured JSON consumer. Match
             // PipeBuilder's `--format json`: check, explain, and dry-run all
             // carry the complete planned model.

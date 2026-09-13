@@ -2,7 +2,9 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
-const cli = process.env.GENEHUB_CLI;
+const nativePath = (value) => process.platform === "win32" && /^\/[a-z](?:\/|$)/i.test(value)
+  ? `${value[1]}:${value.slice(2) || "/"}` : value;
+const cli = nativePath(process.env.GENEHUB_CLI ?? "");
 const sessionId = process.env.GENEHUB_SESSION_ID;
 if (!cli || !path.isAbsolute(cli)) throw new Error("GENEHUB_CLI must be an absolute product command");
 if (!sessionId) throw new Error("evaluation must run inside a WorkflowManager Session");
@@ -27,7 +29,7 @@ function genet(args) {
 
 const history = genet(["workflow", "history", "--limit", "20"]);
 const completed = (history.runs ?? []).filter((run) => run.status === "completed");
-if (completed.length === 0) throw new Error("evaluation needs at least one completed Workflow Run");
+const proposal = process.argv[2] ? JSON.parse(readFileSync(process.argv[2], "utf8")) : {};
 
 let messages = 0;
 const nodeDurations = [];
@@ -55,16 +57,11 @@ for (const run of completed) {
     });
   }
 }
-if (nodeDurations.length === 0) throw new Error("completed Runs expose no measurable node durations");
 const slowestNode = [...nodeDurations].sort((left, right) => right.durationMs - left.durationMs)[0];
 
 const project = genet(["workflow", "inspect"]);
-if (!project.candidateDigest || !project.activeDigest || !project.sourceChanged) {
-  throw new Error("evaluation expects a compilable Candidate distinct from the active DCG");
-}
-if (project.candidateDigest === project.activeDigest) {
-  throw new Error("Candidate digest did not change");
-}
+project.root = nativePath(project.root);
+if (!project.candidateDigest) throw new Error(project.candidateError ?? "Candidate did not compile");
 
 // `workflow inspect.root` deliberately names the versioned Workflow source,
 // not the repository. Walk from `<project>/.genethub/workflow` to the Git
@@ -82,15 +79,10 @@ const untrackedResult = spawnSync("git", ["ls-files", "--others", "--exclude-sta
 if (untrackedResult.status !== 0) {
   throw new Error(untrackedResult.stderr || "git untracked-file scan failed");
 }
-const changedFiles = [...new Set(
+const allChangedFiles = [...new Set(
   `${changedResult.stdout}\n${untrackedResult.stdout}`.split("\n").filter(Boolean),
 )].sort();
-if (
-  changedFiles.length === 0 ||
-  changedFiles.some((file) => !file.startsWith(".genethub/workflow/"))
-) {
-  throw new Error(`evaluation changes must be limited to project Workflow assets: ${changedFiles.join(",")}`);
-}
+const changedFiles = allChangedFiles.filter((file) => file.startsWith(".genethub/workflow/"));
 
 const workflowFiles = readdirSync(path.join(project.root, "workflows"), { withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.endsWith(".yaml"))
@@ -100,26 +92,36 @@ const candidateRoles = [...new Set(workflowFiles.flatMap((file) => {
   return [...source.matchAll(/^\s+role:\s*([A-Za-z0-9._-]+)\s*$/gm)].map((match) => match[1]);
 }))].sort();
 if (candidateRoles.length === 0) throw new Error("Candidate references no agent.session roles");
-const executorWorkspaceIds = [...new Set(completed.map((run) => run.executorWorkspaceId).filter(Boolean))];
-if (executorWorkspaceIds.length === 0) throw new Error("completed Runs expose no Executor AgentSpace");
-for (const executorWorkspaceId of executorWorkspaceIds) {
-  const children = genet(["space", "children", "--workspace", executorWorkspaceId]).children ?? [];
-  const availableRoles = new Set(children.flatMap((child) =>
+const config = readFileSync(path.join(project.root, "project.yaml"), "utf8");
+const executorPath = config.match(/^  executorPath:\s*(\S+)\s*$/m)?.[1];
+const workspaces = (genet(["workspace", "list"]).workspaces ?? [])
+  .map((space) => ({ ...space, root: nativePath(space.root) }));
+const selectedExecutor = executorPath && workspaces.find((space) => path.resolve(space.root) === path.resolve(projectRoot, executorPath));
+const children = selectedExecutor ? genet(["space", "children", "--workspace", selectedExecutor.id]).children ?? [] : [];
+const availableRoles = children.flatMap((child) =>
     (child.agentSpace?.components ?? [])
       .filter((component) => component.componentId === "worker" && component.enabled && component.role)
       .map((component) => component.role)
-  ));
-  const unavailable = candidateRoles.filter((role) => !availableRoles.has(role));
-  if (unavailable.length > 0) {
-    throw new Error(
-      `Candidate roles have no enabled direct Worker on Executor ${executorWorkspaceId}: ${unavailable.join(",")}`,
-    );
-  }
-}
+);
+const unavailableRoles = candidateRoles.filter((role) => availableRoles.filter((available) => available === role).length !== 1);
+const carrierRolesReady = Boolean(selectedExecutor) && unavailableRoles.length === 0;
 
 const report = {
   schema: "genehub.workflow-evaluation.v1",
   status: "passed",
+  scope: "structure",
+  improvementVerdict: "unproven",
+  carrierRolesReady,
+  trialReadiness: "unverified",
+  executorWorkspaceId: selectedExecutor?.id ?? null,
+  unavailableRoles,
+  missingEvidence: [
+    ...(completed.length ? [] : ["completed baseline Run"]),
+    ...(nodeDurations.length ? [] : ["measured node durations"]),
+    ...(carrierRolesReady ? [] : ["selected candidate Executor and exactly one enabled Worker per role"]),
+    "Builder verification, task resources and authorized trial budget",
+    "comparable candidate trial and independent WR assessment",
+  ],
   activeDigest: project.activeDigest,
   candidateDigest: project.candidateDigest,
   activationRevision: project.activationRevision,
@@ -127,24 +129,25 @@ const report = {
   analyzedMessages: messages,
   candidateWorkerRoles: candidateRoles,
   nodeDurations,
-  finding: {
+  finding: slowestNode ? {
     code: "longest-node",
     runId: slowestNode.runId,
     nodeId: slowestNode.nodeId,
     durationMs: slowestNode.durationMs,
-  },
-  hypothesis:
-    "Move the smallest relevant static and playability checks into the implementation handoff so Reviewer feedback is less likely to trigger avoidable rework.",
-  comparisonPlan:
-    "Keep this Candidate inactive, run the same journey with it explicitly selected, then compare node duration, retry count, evidence completeness, and total delivery time before activation.",
+  } : null,
+  hypothesis: proposal.hypothesis ?? (slowestNode
+    ? `Investigate ${slowestNode.nodeId} (${slowestNode.durationMs} ms); duration alone does not identify its cause or prove a proposed improvement.`
+    : null),
+  comparisonPlan: proposal.comparisonPlan ?? "Keep the Candidate inactive; fix input, acceptance, budget and environment, run the candidate, and ask WR to compare actual coverage, rework and cost. This plan has not been executed.",
   changedFiles,
+  unrelatedChangedFiles: allChangedFiles.filter((file) => !changedFiles.includes(file)),
   checks: [
     "candidate.compiles",
-    "candidate.remainsInactive",
-    "completedRuns.haveStructuredTimeline",
-    "completedRuns.haveMeasuredNodeDurations",
-    "changes.workflowAssetsOnly",
-    "candidate.rolesHaveAttachedWorkers",
+    ...(project.sourceChanged ? ["candidate.remainsInactive"] : []),
+    ...(completed.length ? ["completedRuns.haveStructuredTimeline"] : []),
+    ...(nodeDurations.length ? ["completedRuns.haveMeasuredNodeDurations"] : []),
+    "changes.workflowAssetsEnumerated",
+    ...(carrierRolesReady ? ["candidate.rolesHaveAttachedWorkers"] : []),
   ],
   createdAt: new Date().toISOString(),
 };

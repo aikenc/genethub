@@ -30,3 +30,8 @@ workflows:
     match:
       kind: game
       complexity: review
+  - id: game-review-and-improve
+    path: game-review-and-improve.yaml
+    match:
+      kind: game
+      complexity: review-and-improve

@@ -220,6 +220,19 @@ pub enum Request {
         target_workspace_id: Option<String>,
         space_name: String,
         operation: AgentSpaceBuilderOperation,
+        /// Preview an exact build under the existing PM management binding.
+        #[serde(default)]
+        #[ts(optional)]
+        plan: Option<bool>,
+        #[serde(default)]
+        #[ts(optional)]
+        plan_digest: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        action_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional, type = "number")]
+        expected_revision: Option<u64>,
     },
     /// Plans or applies a versioned project-owned team/DCG asset bundle.
     #[serde(rename = "project.bootstrap", rename_all = "camelCase")]

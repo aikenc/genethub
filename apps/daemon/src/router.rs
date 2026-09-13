@@ -162,18 +162,22 @@ pub async fn handle(
     request: Request,
 ) -> Handled {
     let needed = crate::authz::required(&request);
-    let recovery_configuration = if !caller.allows(needed) {
+    let project_management = if !caller.allows(needed) {
         match (&request, caller.session_controller_id()) {
-            (Request::AgentSpaceConfigure { workspace_id, .. }, Some(session_id)) => {
-                match state.workspaces.project_root(workspace_id).await {
-                    Ok(project) => crate::workflow::exception_authority(state, &project, session_id).await.unwrap_or(false),
+            (Request::AgentSpaceConfigure { workspace_id, operation, .. }, Some(session_id)) => {
+                match agent_space_management_project(state, caller, workspace_id, operation).await {
+                    Ok(project) => state.project_control.is_bound(&project, session_id)
+                        || crate::workflow::exception_authority(state, &project, session_id).await.unwrap_or(false),
                     Err(_) => false,
                 }
+            }
+            (Request::WorkspaceOpen { root }, Some(session_id)) => {
+                authorize_pm_space_open(state, caller, session_id, root).await.is_ok()
             }
             _ => false,
         }
     } else { false };
-    if !caller.allows(needed) && !recovery_configuration {
+    if !caller.allows(needed) && !project_management {
         return Handled::err(
             ErrorCode::Unauthorized,
             format!("caller lacks the {} capability", needed.as_str()),
@@ -192,6 +196,41 @@ pub async fn handle(
         state.diagnostics.record("rpc", operation, outcome, code);
     }
     handled
+}
+
+/// A bound PM may register its already-built direct project Spaces. This is
+/// project management, not the machine-wide Settings capability.
+async fn authorize_pm_space_open(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    session_id: &str,
+    root: &str,
+) -> anyhow::Result<()> {
+    let session = state.sessions.summary(session_id).await?;
+    let project_id = &session.workspace_id;
+    authorize_project_workflow_mutation(state, caller, project_id)
+        .await.map_err(anyhow::Error::msg)?;
+    if !state.project_control.is_bound(project_id, session_id) {
+        anyhow::bail!("projectControlRequired: only the bound PM registers prepared Spaces");
+    }
+    let project = state.workspaces.project_entry(project_id).await?;
+    let requested = crate::guest_paths::inbound_absolute(root)
+        .ok_or_else(|| anyhow::anyhow!("prepared Space path must be absolute"))?
+        .canonicalize()?;
+    let space_root = if requested.is_dir() {
+        requested.clone()
+    } else {
+        requested.parent().ok_or_else(|| anyhow::anyhow!("Space file has no parent"))?.to_path_buf()
+    };
+    let spaces = project.root.join("spaces").canonicalize()?;
+    if space_root.parent() != Some(spaces.as_path()) {
+        anyhow::bail!("prepared Space must be a direct child of this project's spaces directory");
+    }
+    let verified = crate::agent_space_builder::verify_space(&project.root, &space_root)?;
+    if requested.is_file() && requested != verified.workspace_path.canonicalize()? {
+        anyhow::bail!("open the Builder-verified workspace entry");
+    }
+    Ok(())
 }
 
 /// Keeps a Workflow-managed child human-read-only without inventing a second
@@ -365,6 +404,43 @@ async fn authorize_agent_space_change(
         }
         _ => Err("只有认证用户或获得项目控制绑定的普通 Session 可以改组 AgentSpace".into()),
     }
+}
+
+/// A newly built, uncomposed child has no ownership yet. Its physical location
+/// and the already authorized destination project allow PM to attach it without
+/// giving PM authority over unrelated roots or existing teams.
+async fn agent_space_management_project(
+    state: &Shared,
+    caller: &crate::authz::Principal,
+    workspace_id: &str,
+    operation: &genehub_proto::AgentSpaceOperation,
+) -> Result<String, String> {
+    let project = state.workspaces.project_root(workspace_id).await
+        .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
+    if let genehub_proto::AgentSpaceOperation::SetParent { parent_workspace_id: Some(parent) } = operation {
+        authorize_agent_space_change(state, caller, parent).await?;
+        if let Some(session) = caller.session_controller_id() {
+            let destination = state.workspaces.project_root(parent).await
+                .map_err(|error| format!("无法确认目标项目：{error:#}"))?;
+            let current = state.workspaces.agent_space(workspace_id).await
+                .map_err(|error| format!("无法读取 AgentSpace：{error:#}"))?;
+            if current.revision == 0 && current.parent_workspace_id.is_none()
+                && current.components.is_empty() && state.project_control.is_bound(&destination, session)
+            {
+                let child = state.workspaces.get(workspace_id).await
+                    .map_err(|error| format!("{error:#}"))?;
+                let owner = state.workspaces.get(&destination).await
+                    .map_err(|error| format!("{error:#}"))?;
+                let child_root = child.root.canonicalize().map_err(|error| format!("{error:#}"))?;
+                let spaces = owner.root.join("spaces").canonicalize().map_err(|error| format!("{error:#}"))?;
+                if child_root.parent() == Some(spaces.as_path()) {
+                    return Ok(destination);
+                }
+            }
+        }
+    }
+    authorize_agent_space_change(state, caller, workspace_id).await?;
+    Ok(project)
 }
 
 async fn agent_space_change_facts(
@@ -558,6 +634,7 @@ async fn dispatch(
                 "service.preview.v1".to_string(),
                 "process.services.v1".to_string(),
                 "workflow.control.v1".to_string(),
+                "agentSpace.builderPlans.v1".to_string(),
                 "session.input.v1".to_string(),
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
@@ -1880,14 +1957,10 @@ async fn dispatch(
             expected_revision,
             operation,
         } => {
-            if let Err(message) = authorize_agent_space_change(state, caller, &workspace_id).await {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
-            if let genehub_proto::AgentSpaceOperation::SetParent { parent_workspace_id: Some(parent) } = &operation {
-                if let Err(message) = authorize_agent_space_change(state, caller, parent).await {
-                    return Handled::err(ErrorCode::Forbidden, message);
-                }
-            }
+            let project_id = match agent_space_management_project(state, caller, &workspace_id, &operation).await {
+                Ok(project) => project,
+                Err(message) => return Handled::err(ErrorCode::Forbidden, message),
+            };
             let (current, canonical_root, plan_digest) =
                 match agent_space_change_facts(state, &workspace_id, expected_revision, &operation)
                     .await
@@ -1900,10 +1973,6 @@ async fn dispatch(
             let approval = if let Some(session_id) = caller.session_controller_id() {
                 let detail = serde_json::to_string_pretty(&operation)
                     .unwrap_or_else(|_| format!("{operation:?}"));
-                let project_id = match state.workspaces.project_root(&workspace_id).await {
-                    Ok(id) => id,
-                    Err(error) => return failed(error),
-                };
                 match state.project_control.issue_management(crate::project_control::ChallengeSpec {
                             controller_session_id: session_id.into(),
                             workspace_id: workspace_id.clone(),
@@ -1943,14 +2012,10 @@ async fn dispatch(
             plan_digest,
             action_id,
         } => {
-            if let Err(message) = authorize_agent_space_change(state, caller, &workspace_id).await {
-                return Handled::err(ErrorCode::Forbidden, message);
-            }
-            if let genehub_proto::AgentSpaceOperation::SetParent { parent_workspace_id: Some(parent) } = &operation {
-                if let Err(message) = authorize_agent_space_change(state, caller, parent).await {
-                    return Handled::err(ErrorCode::Forbidden, message);
-                }
-            }
+            let project_id = match agent_space_management_project(state, caller, &workspace_id, &operation).await {
+                Ok(project) => project,
+                Err(message) => return Handled::err(ErrorCode::Forbidden, message),
+            };
             if let (Some(session_id), Some(plan_digest), Some(action_id)) = (
                 caller.session_controller_id(),
                 plan_digest.as_deref(),
@@ -1991,7 +2056,7 @@ async fn dispatch(
                 let Some(plan_digest) = plan_digest.as_deref() else {
                     return Handled::err(
                         ErrorCode::Forbidden,
-                        "approvalRequired: Agent 修改 Component 或 Parent 前必须先使用 --plan 并由用户确认",
+                        "approvalRequired: Agent 修改 Component 或 Parent 前必须先使用 --plan；仅在计划返回 challenge 时请求对应授权",
                     );
                 };
                 let Some(action_id) = action_id.as_deref() else {
@@ -2000,7 +2065,7 @@ async fn dispatch(
                 if current_plan != plan_digest {
                     return Handled::err(
                         ErrorCode::Conflict,
-                        "approvalStale: AgentSpace facts changed; create and approve a new plan",
+                        "approvalStale: AgentSpace facts changed; create a fresh plan and resolve any returned authorization challenge",
                     );
                 }
                 let challenge = match state
@@ -2017,7 +2082,7 @@ async fn dispatch(
                         None,
                         &current.builder_lock_digest,
                         action_id,
-                        crate::workflow::exception_authority(state, &state.workspaces.project_root(&workspace_id).await.unwrap_or_else(|_| workspace_id.clone()), session_id).await.unwrap_or(false),
+                        crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false),
                     )
                     .await
                 {
@@ -2122,12 +2187,27 @@ async fn dispatch(
             target_workspace_id,
             space_name,
             operation,
+            plan,
+            plan_digest,
+            action_id,
+            expected_revision,
         } => {
+            let plan = plan.unwrap_or(false);
+            let managed_build = plan || plan_digest.is_some() || action_id.is_some();
+            let read_only = matches!(&operation,
+                genehub_proto::AgentSpaceBuilderOperation::Check
+                | genehub_proto::AgentSpaceBuilderOperation::Explain
+                | genehub_proto::AgentSpaceBuilderOperation::Verify
+                | genehub_proto::AgentSpaceBuilderOperation::Build { dry_run: true, .. });
+            let recovery = match caller.session_controller_id() {
+                Some(session) => crate::workflow::exception_authority(state, &workspace_id, session).await.unwrap_or(false),
+                None => false,
+            };
             if let Some(session_id) = caller.session_controller_id() {
-                if !crate::workflow::exception_authority(state, &workspace_id, session_id).await.unwrap_or(false) {
+                if !read_only && !recovery && !(managed_build && state.project_control.is_bound(&workspace_id, session_id)) {
                     return Handled::err(
                         ErrorCode::Forbidden,
-                        "AgentSpaceBuilder 写操作由 Bootstrap transaction、用户界面或异常处置中的项目 PM 调用",
+                        "AgentSpaceBuilder: 已授权项目 PM 请先使用 space builder build --plan，再带计划身份 apply；初始化和清理由用户入口或异常恢复执行",
                     );
                 }
             }
@@ -2177,6 +2257,15 @@ async fn dispatch(
                 }
                 None => project.root.join("spaces").join(&space_name),
             };
+            if managed_build {
+                return match crate::agent_space_builder::management::build(
+                    state, &workspace_id, &space_root, &operation, caller.session_controller_id(),
+                    plan, plan_digest.as_deref(), action_id.as_deref(), expected_revision, recovery,
+                ).await {
+                    Ok(report) => Handled::ok(Reply::AgentSpaceBuilder(report)),
+                    Err(error) => Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                };
+            }
             let (command, require_no_post_commands) = match operation {
                 genehub_proto::AgentSpaceBuilderOperation::Init => {
                     (crate::agent_space_builder::Command::Init, true)

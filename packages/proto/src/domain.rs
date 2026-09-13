@@ -370,7 +370,22 @@ pub struct AgentSpaceBuilderDiagnostic {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
+pub struct AgentSpaceBuilderPlan {
+    pub plan_digest: String,
+    #[ts(type = "number")]
+    pub expected_revision: u64,
+    pub target_root: String,
+    pub operation: AgentSpaceBuilderOperation,
+}
+
+/// Builder output, optionally carrying an exact PM management plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
 pub struct AgentSpaceBuilderReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub management_plan: Option<AgentSpaceBuilderPlan>,
     pub schema: String,
     pub builder_version: String,
     pub command: String,

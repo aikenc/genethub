@@ -1004,17 +1004,8 @@ pub async fn dispatch(
         if executor_workspace.as_ref().map(|space| &space.id)
             == formal_executor.as_ref().map(|space| &space.id)
             || formal_root.starts_with(&execution_root)
-            || execution_root.starts_with(&formal_root.join("spaces"))
         {
-            bail!("experimentIsolation: an inactive Candidate needs a distinct Executor, squad and execution repository");
-        }
-        let experimental_git = execution_root.join(".git");
-        if !experimental_git.is_dir()
-            || fs::symlink_metadata(&experimental_git)?
-                .file_type()
-                .is_symlink()
-        {
-            bail!("experimentIsolation: execution root must have its own Git directory, not the formal repository or a shared worktree");
+            bail!("experimentIsolation: an inactive Candidate needs a distinct Executor, squad and task directory");
         }
     }
     let executor_workspace_id = executor_workspace
@@ -1031,6 +1022,8 @@ pub async fn dispatch(
         .get(&entry.id)
         .cloned()
         .ok_or_else(|| anyhow!("活动 DCG Candidate 缺少 Workflow：{}", entry.id))?;
+    // A later node may create a repository, or a conditional branch may never
+    // use one. Validate its real Git boundary when acquiring that node's lease.
     let diagnostic_role = candidate
         .project
         .diagnostic_role
@@ -1807,6 +1800,27 @@ async fn verify_evidence(
     Ok(())
 }
 
+async fn validate_execution_repository(
+    execution_root: &Path,
+    repository: &Path,
+    experimental: bool,
+) -> Result<()> {
+    let (private, common) = crate::git::repository_directories(repository).await?;
+    if experimental {
+        let root = execution_root.canonicalize()?;
+        if !private.starts_with(&root) || !common.starts_with(&root) {
+            bail!("experimentIsolation: Git node metadata must belong to the test directory, not the formal repository or an external shared worktree");
+        }
+        // A --shared clone can still depend on the formal object store even
+        // though its .git directory is local. Keep trial repositories complete.
+        let alternates = common.join("objects/info/alternates");
+        if alternates.exists() && !fs::read_to_string(&alternates)?.trim().is_empty() {
+            bail!("experimentIsolation: copy Git objects without shared alternates before running this Candidate");
+        }
+    }
+    Ok(())
+}
+
 async fn acquire_lease(
     state: &Shared,
     runtime: &RuntimeStore,
@@ -1818,6 +1832,11 @@ async fn acquire_lease(
     if policy.ttl_seconds == 0 || policy.ttl_seconds > MAX_LEASE_SECONDS {
         bail!("writeLease.ttlSeconds 必须在 1..={MAX_LEASE_SECONDS} 之间");
     }
+    validate_execution_repository(
+        run.execution_root.as_deref().map(Path::new).unwrap_or(&runtime.project_root),
+        repository,
+        run.experimental,
+    ).await?;
     let status = crate::git::status(repository).await?;
     if !status.clean {
         bail!("目标 Workspace 工作区不干净，不能取得直接写入租约");

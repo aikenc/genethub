@@ -1,5 +1,9 @@
 # PM input and workflow control
 
+The domain model and the distinction between Workflow definitions, Executor
+carriers and test projects are documented in
+[Workflow and Executor](./workflow-executor-model.md).
+
 A Session describes the PM's own execution. `workSummary` derives task state from
 its original requests and related Runs. An idle PM with a running Worker remains
 an active task; user questions start or continue only the PM. Lists, filters and
@@ -172,3 +176,32 @@ project or creating a PM team. Team topology and Pack upgrades remain explicit.
 A project with an existing takeover binding allows its ordinary root PM conversations to dispatch work. The runtime still rejects managed/cross-project callers and preserves per-request ownership, cancellation fences and budgets. Delegating work does not transfer the configuration controller or grant Builder/upgrade/component authority; those retain controller and exceptional-recovery checks.
 
 Game Pack v5 routes `game/assessment` and `game/review` to Game Reviewer, returning reports without implementing changes. `workflow/review` remains process diagnosis/evaluation. Old projects use the standard digest-checked Pack upgrade; in-flight Run definitions are retained.
+## Preparing another Executor
+
+The built-in PM Skill prepares a candidate carrier through the existing Space
+commands. `space open <absolute-directory-or-code-workspace>` exposes the existing
+Workspace registration operation without creating a Session. A project's bound
+ordinary PM may attach a newly built, uncomposed direct `spaces/` child to its
+project tree, then configure its components with the existing revision plans.
+
+For Builder writes, obtain `space builder build --name <space>
+--require-no-post-commands --plan`, inspect `managementPlan`, then apply with
+`--plan-digest`, `--expected-revision` and a stable `--action-id`. The plan binds
+the project revision, target identity and planned source/output digests. Changed
+facts require a new plan; replaying a completed action returns its recorded
+report. Existing project management authority covers this build, while unbound
+PM and managed Workers remain unable to use it. Active executions prevent
+rebuilding their registered sources. Check/explain/verify remain inspection
+operations; initialization and cleanup retain their existing authority rules.
+To build a registered target such as the project PM itself, add
+`--target-workspace <id>` and use that target's manifest name with `--name`.
+This selects the existing Builder target field and grants no additional authority.
+The RPC capability gate recognizes these narrowly scoped project management
+operations. A bound PM can register a Builder-verified direct `spaces/` child;
+it does not gain machine-wide Settings authority or access to unrelated roots.
+
+Pack version 7 supplies preparation and review-before-repair guidance. Its
+`game-review-and-improve` Workflow starts with review and allows two repair and
+re-review rounds. The report checker validates declared coverage and versions;
+it does not attest execution of the referenced checks. See the installed PM and
+Reviewer Skill references for their report and preparation contracts.

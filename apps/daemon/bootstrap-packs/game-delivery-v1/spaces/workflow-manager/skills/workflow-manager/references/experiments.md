@@ -1,22 +1,60 @@
-# Experimental execution
+# Workflow trials
 
-PM coordinates the decision and remains the user's conversation. Prepare the source and experiment plan; a managed WorkflowManager cannot dispatch another Workflow. Return the plan and candidate digest to PM for dispatch.
+PM understands the human's goal and delegates Workflow creation to WM. The
+Executor and its squad carry the new Workflow; test directories, repositories
+and data validate that carrier. One Executor may run several catalog Workflows.
+PM owns preparation and dispatch. Managed WM returns its plan and Candidate;
+it cannot recursively dispatch or borrow PM's identity.
 
-1. Fix the requirement/acceptance revisions, baseline commit and cases, expected benefit, cost ceiling and stopping conditions. Select a separate project-owned directory, such as `experiments/v2`, with its own Git repository. Copy the approved baseline without private Session state, secrets or live output destinations. An external write that cannot be redirected safely is a concrete blocker; do not silently reuse it.
-2. Prepare a separate Executor and squad under `spaces/`, e.g. `executor-v2`, `coder-v2`, `reviewer-v2`, and the specialist roles required by this project's catalog. Give their code-workspaces the experimental project directory as their task folder. Copy and adjust the approved Skill/prompt/model source. Builder writes require the user interface or a user terminal; managed Agents must return the concrete source and operation plan to PM to guide the user, not invoke them under a session caller. The user builds and verifies with `genet space builder build --name <space-name> --require-no-post-commands` and `space builder verify`.
-3. Use the existing AgentSpace plans and Human-approved changes to attach the new Executor to the PM project, then its Workers to that Executor. Set Parent before mounting components so the new Space is verified within the owning project. Mount `worker` before its `reviewer` extension. Preserve the formal team; do not reparent or rename it as an experiment. If a guard reports an active-resource conflict, surface it rather than bypassing it.
-4. In the candidate's `.genethub/workflow/project.yaml`, set the complete execution binding:
+1. Fix intent, requirement/checklist revisions, baseline, comparison cases,
+   expected benefit, cost ceiling and stopping conditions. Describe Workflow
+   changes and the necessary Executor/Worker Skills, prompts, models and roles.
+   Separate known facts from hypotheses.
+2. PM prepares the carrier using the project-manager Skill's
+   `references/workflow-trials.md` and `scripts/prepare-executor.mjs`. It uses
+   existing project authorization, exact Builder plans and component receipts.
+   Do not hand ordinary authorized commands back to the user. Preserve source
+   customizations; resolve conflicting sources or active Runs before rebuilding.
+3. Default material is under
+   `spaces/<new-executor>/.genethub/temp/exp/<testname>/`. This is an ordinary
+   directory: create zero, one or several independent repositories as needed.
+   Preserve required branch/tag/history semantics. Worktrees may come from the
+   experiment's own repository, with Git common data inside the execution
+   material boundary. Never share formal Git metadata or object alternates.
+   Workers see the specific material subtree, not the Executor's private
+   Session storage. Declare external destinations and redirect trial writes.
+4. Prepare the complete candidate source binding, for example:
 
-```yaml
-execution:
-  executorPath: spaces/executor-v2
-  root: experiments/v2
-```
+   ```yaml
+   execution:
+     executorPath: spaces/executor-v2
+     root: spaces/executor-v2/.genethub/temp/exp/review-first/project
+   ```
 
-The formal v1 candidate retains `executorPath: spaces/executor` and `root: .`. Candidate digests bind this configuration along with the workflows, role/model configuration and prompts. Every required role must have its own enabled, Builder-verified Worker attached to the selected Executor. The approved Skills stay Builder-verified; changing registered sources requires rebuilding and updating their binding, and may block an in-flight Run instead of reinterpreting it.
+   Editable definitions currently stay at the PM project's `.genethub/workflow/`.
+   Candidate identity includes that source binding; a Run pins its definition
+   and actual carrier. Test project branches are independent of formal Git.
+   A role YAML does not register a Worker: exactly one enabled direct Worker
+   per referenced role must exist before dispatch.
+5. Compile with `workflow inspect`, evaluate structure, and return the digest.
+   PM dispatches `workflow dispatch --workflow <id> --candidate <digest>
+   --task <stable-key> --no-wait --message <goal-baseline-budget>`. This captures
+   the inactive Candidate without activation. It needs a distinct Executor and
+   task directory. Git write leases validate the node's actual repository when
+   acquired; plain material directories need no fabricated Git repository.
+6. WR compares actual coverage, artifact/check versions, rework, failures, time,
+   measured cost and human effort on comparable inputs. Disclose missing evidence
+   and environment differences. Compilation and WM self-evaluation do not prove
+   improvement.
+7. PM may retain the tested new carrier, bind it to the intended formal task
+   directory, verify that binding and activate with the current activation
+   revision. This creates a new full Candidate digest; keep tested file and
+   Builder identities for comparison. Returning to the old Executor is optional
+   and requires configuration equivalence. Existing Runs retain their snapshots;
+   rollback restores the previous full binding for future Runs. Test materials
+   are not automatically merged.
 
-5. Compile with `genet workflow inspect` and return its candidate digest. PM runs `genet workflow dispatch --workflow <workflow-id> --candidate <digest> --task <unique-experiment-key> --no-wait --message <goal-baseline-cases-budget>`. An explicit inactive candidate is captured durably, requires a distinct Executor and independent Git directory, and does not activate itself. A changed or unavailable digest is rejected. Retrying the same PM task and payload returns the original Run; a changed payload requires a new key.
-6. WR compares actual artifacts and requirements, regression, rework, time, human effort and cost. Record missing evidence and confounders. PM decides whether to continue, reject or adopt within the user's authorization and agreed budget. Source compilation and engineering Reviewer approval alone are not this comparison.
-7. After adoption is justified, PM uses `genet workflow activate --candidate <reviewed-digest> --revision <current-activation-revision>`. This CAS switches the complete candidate/execution binding for future Runs. Existing Runs keep their original binding. Roll back with the previous digest and the current revision; do not rewrite historical results or pretend to undo external side effects.
-
-Trial bindings provide separate repositories and squads, not an OS sandbox for arbitrary external tools. Declare and redirect external destinations explicitly. Archive unsuccessful experiment directories only after their Runs have ended; retain Run/report/digest references, and use the existing approved Space lifecycle/removal actions for registered resources.
+Clean material only after no active Run or adopted binding refers to it.
+Material cleanup does not delete the Workflow or its Executor. Keep Run and
+report references. This structure is not an OS sandbox or a guarantee about
+arbitrary external tool side effects.

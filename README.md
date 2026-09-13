@@ -249,6 +249,7 @@ node apps/desktop/scripts/bundle.mjs
 | [engineering-laws.md](./docs/engineering-laws.md) | 实现与提交之前：哪些事不许做 |
 | [third-party-agents.md](./docs/third-party-agents.md) | 接入 Claude Code、Codex、OpenCode、Cursor 或自定义 ACP agent |
 | [daemon.md](./docs/daemon.md) | 修改会话内核、工作区、设备、传输或存储 |
+| [workflow-executor-model.md](./docs/workflow-executor-model.md) | 理解 PM、WM、Workflow、Executor、测试项目与运行记录的分工 |
 | [web-workbench.md](./docs/web-workbench.md) | 修改工作台、宿主适配与移动端体验 |
 | [relay.md](./docs/relay.md) | 部署或开发 Fabric Relay |
 | [self-hosting.md](./docs/self-hosting.md) | 自建完整的远程访问闭环 |

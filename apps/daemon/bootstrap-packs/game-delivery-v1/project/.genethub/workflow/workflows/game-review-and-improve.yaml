@@ -1,0 +1,77 @@
+schema: genehub.workflow.definition.v2
+id: game-review-and-improve
+version: 1
+nodes:
+  - id: review-existing
+    uses: agent.session
+    with:
+      role: reviewer
+    completion:
+      all:
+        - key: review
+          verify: value.equals
+          expected: approved
+        - key: checks
+          verify: value.nonEmpty
+        - key: report
+          verify: value.nonEmpty
+  - id: repair
+    uses: agent.session
+    with:
+      role: coder
+      writeLease:
+        targetRef: current
+        ttlSeconds: 900
+    completion:
+      all:
+        - key: commit
+          verify: git.commitOnTarget
+        - key: checks
+          verify: value.nonEmpty
+  - id: publish
+    uses: result.publish
+structure:
+  body:
+    id: review-and-improve
+    type: sequence
+    steps:
+      - id: initial-review
+        type: task
+        activity: review-existing
+        accept: [completed, changesRequested]
+      - id: repairs
+        type: loop
+        maxRounds: 2
+        initial:
+          op: object
+          fields:
+            approved:
+              op: eq
+              left: {op: ref, path: /results/initial-review/outcome}
+              right: {op: literal, value: completed}
+            feedback: {op: ref, path: /results/initial-review}
+        condition:
+          op: not
+          value: {op: ref, path: /vars/approved}
+        body:
+          id: repair-and-review
+          type: sequence
+          steps:
+            - id: repair-step
+              type: task
+              activity: repair
+            - id: re-review
+              type: task
+              activity: review-existing
+              accept: [completed, changesRequested]
+        update:
+          op: object
+          fields:
+            approved:
+              op: eq
+              left: {op: ref, path: /results/re-review/outcome}
+              right: {op: literal, value: completed}
+            feedback: {op: ref, path: /results/re-review}
+      - id: publish-result
+        type: task
+        activity: publish

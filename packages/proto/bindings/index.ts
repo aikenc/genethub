@@ -45,7 +45,12 @@ export type AgentSpaceBuilderOperation = { "kind": "init" } | { "kind": "check" 
 /**
  * Structured AgentSpaceBuilder result returned by the production RPC/CLI.
  */
-export type AgentSpaceBuilderReport = { schema: string, builderVersion: string, command: string, status: string, pipespaceRoot: string, pipespace?: string, diagnostics: Array<AgentSpaceBuilderDiagnostic>, summary: unknown, details?: unknown, };
+export type AgentSpaceBuilderPlan = { planDigest: string, expectedRevision: number, targetRoot: string, operation: AgentSpaceBuilderOperation, };
+
+/**
+ * Builder output, optionally carrying an exact PM management plan.
+ */
+export type AgentSpaceBuilderReport = { managementPlan?: AgentSpaceBuilderPlan, schema: string, builderVersion: string, command: string, status: string, pipespaceRoot: string, pipespace?: string, diagnostics: Array<AgentSpaceBuilderDiagnostic>, summary: unknown, details?: unknown, };
 
 /**
  * Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.
@@ -963,7 +968,11 @@ workspaceId: string,
  * Existing Workspace to check/build. Absent preserves the CLI's
  * `<project>/spaces/<spaceName>` creation contract.
  */
-targetWorkspaceId: string | null, spaceName: string, operation: AgentSpaceBuilderOperation, } } | { "type": "project.bootstrap", "payload": { workspaceId: string, packId: string, apply: boolean, agentId: string | null, modelId: string | null, 
+targetWorkspaceId: string | null, spaceName: string, operation: AgentSpaceBuilderOperation, 
+/**
+ * Preview an exact build under the existing PM management binding.
+ */
+plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "project.bootstrap", "payload": { workspaceId: string, packId: string, apply: boolean, agentId: string | null, modelId: string | null, 
 /**
  * Required for apply and copied verbatim from the preceding plan.
  */
