@@ -3,22 +3,26 @@ import path from "node:path";
 
 /** Observe source edits, including edits restored before the final digest.
  * Avoid recursive fs.watch traversing dependency symlink forests and build caches. */
-export function watchInputs(roots: string[], artifactFiles: string[]) {
+export function watchInputs(roots: string[], artifactFiles: string[], excludedPaths: string[] = []) {
   let changed = false, complete = true;
   const errors = new Set<string>();
   const artifacts = new Set(artifactFiles.map(p => path.resolve(p)));
+  const excluded = excludedPaths.map(p => path.resolve(p));
   const watchers = new Map<string, ReturnType<typeof watch>>();
   const fail = (error: unknown) => { complete = false; errors.add((error as NodeJS.ErrnoException)?.code ?? "watch-error"); };
+  const isExcluded = (file: string) => excluded.some(directory => file === directory || file.startsWith(`${directory}${path.sep}`));
   const ignored = (root: string, file: string) => {
     const parts = path.relative(root, file).split(path.sep);
-    return parts.includes(".git") || parts.includes("node_modules") || parts[0] === "target";
+    return isExcluded(file) || parts.includes(".git") || parts.includes("node_modules") || parts[0] === "target";
   };
   function add(root: string, directory: string, artifactOnly = false) {
+    if (isExcluded(directory)) return;
     if (watchers.has(directory)) return;
     try {
       const watcher = watch(directory, (_event, name) => {
         if (!name) { complete = false; errors.add("missing-event-name"); return; }
         const file = path.resolve(directory, String(name));
+        if (isExcluded(file)) return;
         if (artifactOnly ? !artifacts.has(file) : ignored(root, file)) return;
         changed = true;
         // New directories must also be observed; the creation already invalidated this input.

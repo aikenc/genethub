@@ -216,7 +216,11 @@ async function main(): Promise<number> {
         artifact: { path: null, hash: null, kind: "preflight-not-executed" },
         bundle: undefined,
       } : captureInputs();
-      if (!preflightBlocked) inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle!.files.map(f => f.path));
+      if (!preflightBlocked) inputWatch = watchInputs(
+        [openRoot, ...(cloudRoot ? [cloudRoot] : [])],
+        inputsAtStart.bundle!.files.map(f => f.path),
+        [store.dir],
+      );
       const governanceDigest = checkGovernance(openRoot, cloudRoot).digest;
       const resumeBinding = preflightBlocked ? undefined : {
         common: digest({ inputsAtStart, catalog: catalogDigest(cases), gate, selection,
