@@ -3498,14 +3498,9 @@ impl SessionManager {
             return;
         }
         let result: Result<()> = async {
-            if let Some((request_id, continuation)) = self.prepare_human_delivery(&live).await? {
-                self.continue_after_human_response(
-                    &live,
-                    providers,
-                    continuation,
-                    Some(request_id),
-                )
-                .await?;
+            if let Some((request_id, continuation)) = self.prepare_human_delivery(live).await? {
+                self.continue_after_human_response(live, providers, continuation, Some(request_id))
+                    .await?;
             }
             Ok(())
         }
@@ -3529,9 +3524,9 @@ impl SessionManager {
                     ),
                 },
             };
-            apply(&live, &event).await;
+            apply(live, &event).await;
             live.publish(event).await;
-            if let Err(save_error) = flush_turn(&live, &self.store).await {
+            if let Err(save_error) = flush_turn(live, &self.store).await {
                 tracing::error!(%save_error, "could not persist continuation failure");
             }
         }

@@ -110,7 +110,7 @@ async fn run_inner(args: &Value, cwd: &Path) -> Result<ToolResult, String> {
         _ => return Err("command is not available to evidence-only analysis".into()),
     };
     let rest = &argv[start..];
-    if rest.len() % 2 != 0
+    if !rest.len().is_multiple_of(2)
         || rest
             .chunks(2)
             .any(|pair| !flags.contains(&pair[0].as_str()) || pair[1].starts_with('-'))

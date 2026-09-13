@@ -881,9 +881,11 @@ async fn dispatch(
                 &workflow_id,
                 &task_id,
                 &prompt,
-                candidate_digest.as_deref(),
-                retry_of.as_deref(),
-                resume_cancelled.unwrap_or(false),
+                crate::workflow::DispatchOptions {
+                    candidate_digest: candidate_digest.as_deref(),
+                    retry_of: retry_of.as_deref(),
+                    resume_cancelled: resume_cancelled.unwrap_or(false),
+                },
             )
             .await
             {
@@ -977,9 +979,11 @@ async fn dispatch(
                 &run_id,
                 &node_id,
                 expected_revision,
-                evidence,
-                outcome.unwrap_or_default(),
-                reason,
+                crate::workflow::Completion {
+                    evidence,
+                    outcome: outcome.unwrap_or_default(),
+                    reason,
+                },
             )
             .await
             {
@@ -2284,9 +2288,9 @@ async fn dispatch(
                 None => false,
             };
             if let Some(session_id) = caller.session_controller_id() {
-                if !read_only
-                    && !recovery
-                    && !(managed_build && state.project_control.is_bound(&workspace_id, session_id))
+                if !(read_only
+                    || recovery
+                    || managed_build && state.project_control.is_bound(&workspace_id, session_id))
                 {
                     return Handled::err(
                         ErrorCode::Forbidden,

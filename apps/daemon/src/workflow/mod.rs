@@ -941,17 +941,26 @@ async fn resolve_execution_binding(
     Ok((executor, root))
 }
 
-pub async fn dispatch(
+pub(crate) struct DispatchOptions<'a> {
+    pub candidate_digest: Option<&'a str>,
+    pub retry_of: Option<&'a str>,
+    pub resume_cancelled: bool,
+}
+
+pub(crate) async fn dispatch(
     state: &Shared,
     root_workspace_id: &str,
     parent_session_id: &str,
     workflow_id: &str,
     task_id: &str,
     task_prompt: &str,
-    candidate_digest: Option<&str>,
-    retry_of: Option<&str>,
-    resume_cancelled: bool,
+    options: DispatchOptions<'_>,
 ) -> Result<Transition> {
+    let DispatchOptions {
+        candidate_digest,
+        retry_of,
+        resume_cancelled,
+    } = options;
     validate_id(task_id, "taskId")?;
     let parent = state.sessions.summary(parent_session_id).await?;
     if parent.workspace_id != root_workspace_id {
@@ -1323,17 +1332,26 @@ pub async fn executor_flow(
     })
 }
 
-pub async fn complete(
+pub(crate) struct Completion {
+    pub evidence: BTreeMap<String, String>,
+    pub outcome: genehub_proto::WorkflowNodeOutcome,
+    pub reason: Option<String>,
+}
+
+pub(crate) async fn complete(
     state: &Shared,
     root_workspace_id: &str,
     caller_session_id: &str,
     run_id: &str,
     node_id: &str,
     expected_revision: u64,
-    evidence: BTreeMap<String, String>,
-    outcome: genehub_proto::WorkflowNodeOutcome,
-    reason: Option<String>,
+    completion: Completion,
 ) -> Result<Transition> {
+    let Completion {
+        evidence,
+        outcome,
+        reason,
+    } = completion;
     validate_id(run_id, "runId")?;
     validate_id(node_id, "nodeId")?;
     let workspace = state.workspaces.get(root_workspace_id).await?;

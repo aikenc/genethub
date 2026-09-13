@@ -383,10 +383,10 @@ pub(crate) fn validate_state(program: &Program, state: &EngineState) -> Result<(
                 return Err(Error::State("child is outside its structured scope".into()));
             }
             if !owned.insert(child)
-                || !state
+                || state
                     .frames
                     .get(&child)
-                    .is_some_and(|f| f.parent == Some(*id))
+                    .is_none_or(|f| f.parent != Some(*id))
             {
                 return Err(Error::State("invalid child ownership".into()));
             }
