@@ -1,15 +1,65 @@
 //! Request lineage and finite shared bounds live on the existing Run records.
 use super::*;
 
-pub(super) const MAX_REQUEST_RUNS: usize = 3;
-pub(super) const REQUEST_DEADLINE_MS: i64 = 2 * 60 * 60 * 1000;
-pub(super) const MAX_LLM_ROUNDS: u64 = 256;
+pub(super) const DEFAULT_MAX_REQUEST_RUNS: u32 = 3;
+pub(super) const DEFAULT_REQUEST_DEADLINE_MS: u64 = 2 * 60 * 60 * 1000;
+pub(super) const DEFAULT_MAX_LLM_ROUNDS: u64 = 256;
+pub(super) const MAX_CONFIGURED_REQUEST_RUNS: u32 = 64;
+pub(super) const MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
+pub(super) const MAX_CONFIGURED_LLM_ROUNDS: u64 = 8_192;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RequestBudget {
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default = "default_max_runs")]
+    pub max_runs: u32,
+    #[serde(default = "default_deadline_ms")]
+    pub deadline_ms: u64,
+    #[serde(default = "default_max_llm_rounds")]
+    pub max_llm_rounds: u64,
+}
+
+impl Default for RequestBudget {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            max_runs: DEFAULT_MAX_REQUEST_RUNS,
+            deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
+            max_llm_rounds: DEFAULT_MAX_LLM_ROUNDS,
+        }
+    }
+}
+
+impl RequestBudget {
+    pub(super) fn status(&self) -> WorkflowRequestBudgetStatus {
+        WorkflowRequestBudgetStatus {
+            revision: self.revision,
+            max_runs: self.max_runs,
+            deadline_ms: self.deadline_ms,
+            max_llm_rounds: self.max_llm_rounds,
+        }
+    }
+}
+
+fn default_max_runs() -> u32 {
+    DEFAULT_MAX_REQUEST_RUNS
+}
+fn default_deadline_ms() -> u64 {
+    DEFAULT_REQUEST_DEADLINE_MS
+}
+fn default_max_llm_rounds() -> u64 {
+    DEFAULT_MAX_LLM_ROUNDS
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RequestLink {
     pub original_message_id: String,
     pub root_run_id: String,
+    #[serde(default)]
+    pub budget: RequestBudget,
     pub retry_of: Option<String>,
     #[serde(default)]
     pub cancelled: bool,
@@ -17,6 +67,13 @@ pub(super) struct RequestLink {
     pub cancelled_at_ms: i64,
     #[serde(default)]
     pub resume_message_id: Option<String>,
+}
+
+pub(super) fn budget(run: &RunRecord) -> RequestBudget {
+    run.request
+        .as_ref()
+        .map(|request| request.budget.clone())
+        .unwrap_or_default()
 }
 
 pub(super) fn group_id(run: &RunRecord) -> &str {
@@ -68,7 +125,9 @@ pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64
         .map(|a| a.llm_rounds)
         .sum::<u64>()
         + activities(run).map(|a| a.llm_rounds).sum::<u64>();
-    Ok(calls >= MAX_LLM_ROUNDS || (!run.supervision.waiting && elapsed >= REQUEST_DEADLINE_MS))
+    let budget = budget(&load_run(runtime, group_id(run))?);
+    Ok(calls >= budget.max_llm_rounds
+        || (!run.supervision.waiting && elapsed >= budget.deadline_ms.min(i64::MAX as u64) as i64))
 }
 
 pub(super) fn request_lock(runtime: &RuntimeStore, root: &str) -> Result<ExclusiveFileLock> {
@@ -132,6 +191,11 @@ pub(super) async fn association(
                 .unwrap_or_else(|| format!("legacy:{}", root.id)),
             root_run_id: root.id,
             retry_of: Some(previous.id),
+            budget: root
+                .request
+                .as_ref()
+                .map(|request| request.budget.clone())
+                .unwrap_or_default(),
             ..Default::default()
         });
     }
@@ -157,14 +221,18 @@ pub(super) async fn admit(
         .into_iter()
         .filter(|run| group_id(run) == link.root_run_id)
         .collect::<Vec<_>>();
-    if group.len() >= MAX_REQUEST_RUNS {
-        bail!("requestBudgetExceeded: the original request has reached its {MAX_REQUEST_RUNS} Run limit");
+    let budget = budget(&root);
+    if group.len() >= budget.max_runs as usize {
+        bail!(
+            "requestBudgetExceeded: the original request has reached its {} Run limit",
+            budget.max_runs
+        );
     }
     if group
         .iter()
         .map(|run| execution_ms(run, now_ms()))
         .sum::<i64>()
-        >= REQUEST_DEADLINE_MS
+        >= budget.deadline_ms.min(i64::MAX as u64) as i64
     {
         bail!("requestBudgetExceeded: the original request has exceeded its execution deadline");
     }
@@ -173,7 +241,7 @@ pub(super) async fn admit(
         .flat_map(activities)
         .map(|activity| activity.llm_rounds)
         .sum::<u64>()
-        >= MAX_LLM_ROUNDS
+        >= budget.max_llm_rounds
     {
         bail!("requestBudgetExceeded: the original request has exhausted its LLM call allowance");
     }

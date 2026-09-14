@@ -954,7 +954,7 @@ cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1921,6 +1921,13 @@ bootstrapPackDigest?: string,
 activationHistory: Array<WorkflowActivationStatus>, };
 
 /**
+ * Mutable limits shared by one Human request and all Workflow retry Runs.
+ * Its revision is separate from the graph revision so a PM can adjust a
+ * running request without racing a Worker node completion.
+ */
+export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, deadlineMs: number, maxLlmRounds: number, };
+
+/**
  * Durable status of one project Workflow run. Node meaning comes entirely
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
@@ -1929,7 +1936,7 @@ export type WorkflowRunStatus = {
 /**
  * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
  */
-structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, 
+structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, requestBudget: WorkflowRequestBudgetStatus, 
 /**
  * Why execution is blocked, stopping or cancelled.
  */

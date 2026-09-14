@@ -66,6 +66,14 @@ enum Command {
         run_id: String,
         revision: u64,
     },
+    Budget {
+        workspace_id: Option<String>,
+        run_id: String,
+        revision: u64,
+        max_runs: Option<u32>,
+        deadline_seconds: Option<u64>,
+        max_llm_rounds: Option<u64>,
+    },
 }
 
 pub async fn workflow(args: &[String], selection: &Selection) -> i32 {
@@ -381,6 +389,34 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.cancelling", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
+        Command::Budget {
+            workspace_id,
+            run_id,
+            revision,
+            max_runs,
+            deadline_seconds,
+            max_llm_rounds,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc
+                .call(Request::WorkflowBudget {
+                    workspace_id,
+                    run_id,
+                    expected_revision: revision,
+                    max_runs,
+                    deadline_seconds,
+                    max_llm_rounds,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.budget with the wrong reply",
+                ));
+            };
+            output::succeed("workflow.budgetUpdated", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
     }
 }
 
@@ -694,8 +730,26 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --revision <current>"))?,
         }),
+        "budget" => {
+            if values.max_runs.is_none()
+                && values.deadline_seconds.is_none()
+                && values.max_llm_rounds.is_none()
+            {
+                return Err(CliFailure::invalid_args(
+                    "workflow budget 至少需要 --max-runs、--deadline-seconds 或 --max-llm-rounds",
+                ));
+            }
+            Ok(Command::Budget {
+                workspace_id: values.workspace.take(),
+                run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow budget 需要 --run <id>"))?,
+                revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow budget 需要 --revision <requestBudget.revision>"))?,
+                max_runs: values.max_runs,
+                deadline_seconds: values.deadline_seconds,
+                max_llm_rounds: values.max_llm_rounds,
+            })
+        }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel ...",
+            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|budget ...",
         )),
     }
 }
@@ -720,6 +774,9 @@ struct Values {
     revision: Option<u64>,
     timeout: Option<u64>,
     limit: Option<u32>,
+    max_runs: Option<u32>,
+    deadline_seconds: Option<u64>,
+    max_llm_rounds: Option<u64>,
     wait: Option<bool>,
     evidence: BTreeMap<String, String>,
 }
@@ -787,6 +844,27 @@ impl Values {
                     if values.limit == Some(0) {
                         return Err(CliFailure::invalid_args("--limit 需要正整数"));
                     }
+                }
+                "--max-runs" => {
+                    let value = next(&mut index)?;
+                    values.max_runs = Some(
+                        value
+                            .parse::<u32>()
+                            .map_err(|_| CliFailure::invalid_args("--max-runs 需要正整数"))?,
+                    );
+                }
+                "--deadline-seconds" => {
+                    let value = next(&mut index)?;
+                    values.deadline_seconds = Some(value.parse::<u64>().map_err(|_| {
+                        CliFailure::invalid_args("--deadline-seconds 需要正整数秒")
+                    })?);
+                }
+                "--max-llm-rounds" => {
+                    let value = next(&mut index)?;
+                    values.max_llm_rounds =
+                        Some(value.parse::<u64>().map_err(|_| {
+                            CliFailure::invalid_args("--max-llm-rounds 需要正整数")
+                        })?);
                 }
                 "--wait" => values.wait = Some(true),
                 "--no-wait" => values.wait = Some(false),

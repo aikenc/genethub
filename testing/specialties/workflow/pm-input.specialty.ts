@@ -37,10 +37,14 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
           "CLI discovery omitted durable message identity or its task reference");
         const checker = command("workflow.check");
         const cancel = command("workflow.cancel");
-        t.assertions.assert(!checker.mutation && cancel.mutation && !cancel.routable,
+        const budget = command("workflow.budget");
+        t.assertions.assert(!checker.mutation && cancel.mutation && budget.mutation && !cancel.routable && !budget.routable,
           "workflow discovery confused inspection, mutation or local project routing");
         t.assertions.assert(cancel.outputSchema.properties.type.const === "workflow.cancelling",
           "cancellation discovery claimed confirmed cleanup at admission");
+        t.assertions.assert(budget.outputSchema.properties.type.const === "workflow.budgetUpdated"
+          && budget.inputSchema.properties.maxRuns && budget.inputSchema.properties.maxLlmRounds,
+          "workflow discovery omitted PM budget controls or their durable result");
       }
       const respond = () => {
         const call = calls++;

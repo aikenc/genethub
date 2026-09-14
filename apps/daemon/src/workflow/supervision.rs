@@ -208,7 +208,8 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
         return;
     }
     if kind.starts_with("human:")
-        && run.supervision.notices.len() >= request::MAX_LLM_ROUNDS as usize + 8
+        && run.supervision.notices.len()
+            >= request::budget(run).max_llm_rounds.min(usize::MAX as u64) as usize + 8
     {
         return; // Current questions stay visible even when automatic PM wakeups reach their bound.
     }

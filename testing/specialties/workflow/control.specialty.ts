@@ -13,12 +13,12 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
     id: `specialty.workflow-control.${scenario}${structured ? ".structured" : ""}`,
     title: `Project workflow recovery across ${scenario}`,
     oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics",
-    catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
+    catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM cannot raise an exhausted request budget", "a stale budget update overwrites a PM decision", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
     tags: ["core", ...(structured ? ["structured-workflow"] : []), ...(wr ? ["pm-exception-recovery"] : []), "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
-    productInterfaces: ["genet workflow", "session.send", "session.get", "session.list", "workflow.cancel", "workflow.check", ".genethub/workflow"],
+    productInterfaces: ["genet workflow", "session.send", "session.get", "session.list", "workflow.cancel", "workflow.budget", "workflow.check", ".genethub/workflow"],
   }, async t => {
     t.data.git.init(t.env.workspace);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -140,6 +140,32 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
           await t.tools.waitUntil(async () => { const s = await snapshot(); return s.summary.status === "idle" && !s.summary.inputSummary?.pendingMessageIds.includes("u_limit"); }, 30_000);
           t.assertions.assert((await history()).length === 3, "new dispatch key bypassed shared attempt limit");
           t.assertions.assert(JSON.stringify(opened.mock.requests).includes("requestBudgetExceeded"), "budget refusal was not visible to PM");
+
+          const beforeBudget = await get(original);
+          t.assertions.assert(beforeBudget.requestBudget.maxRuns === 3 && beforeBudget.requestBudget.revision === 0,
+            "default request budget was not projected to PM");
+          workerCalls = 0;
+          nextCommand = `"$GENEHUB_CLI" workflow budget --run ${quote(original)} --revision ${beforeBudget.requestBudget.revision} --max-runs 4 --deadline-seconds 10800 --max-llm-rounds 512 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task control-4 --retry-of ${quote(original)} --message "预算已调整，继续原任务" --no-wait`;
+          await send("u_budget", "放开这条请求的预算，继续跑。", original);
+          await t.tools.waitUntil(async () => (await history()).length === 4, 35_000);
+          run = (await history()).find(other => other.taskId === "control-4")!;
+          t.assertions.assert(run.requestRunId === original, "budget update reset original request identity");
+          t.assertions.assert(run.requestBudget.revision === 1 && run.requestBudget.maxRuns === 4
+            && run.requestBudget.deadlineMs === 10_800_000 && run.requestBudget.maxLlmRounds === 512,
+            "raised shared budget was not visible on the retry Run");
+          await waitTerminal();
+          const root = await get(original);
+          t.assertions.assert(root.requestBudget.revision === 1 && root.requestBudget.maxRuns === 4,
+            "retry execution lost the PM budget decision");
+          if (root.executorSessionId) {
+            const flow = await opened.client.call({ type: "session.flow", payload: { sessionId: root.executorSessionId } });
+            t.assertions.assert(flow?.type === "sessionFlow" && flow.data.messages.some(message => message.kind === "run.budgetUpdated"),
+              "budget update was not retained in the Executor control timeline");
+          }
+          const stale = spawnSync(opened.daemon.genet, ["workflow", "budget", "--run", original, "--revision", "0", "--max-runs", "5"],
+            { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" });
+          t.assertions.assert(stale.status !== 0 && `${stale.stdout}${stale.stderr}`.includes("预算 revision 冲突"),
+            "stale budget update overwrote the PM decision");
         }
       } else {
         await t.tools.waitUntil(() => workerCalls > 0, 30_000);

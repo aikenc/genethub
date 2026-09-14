@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::{
     ExecutorFlowStatus, FlowMessageStatus, ManagedSessionInfo, SessionSummary,
     SessionUserInteraction, WorkflowActivationStatus, WorkflowCatalogEntryStatus,
-    WorkflowNodeRunStatus, WorkflowProjectStatus, WorkflowRunStatus,
+    WorkflowNodeRunStatus, WorkflowProjectStatus, WorkflowRequestBudgetStatus, WorkflowRunStatus,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,7 +31,7 @@ mod structured;
 mod supervision;
 pub(crate) use check::check;
 pub(crate) use control::{
-    cancel, maintain, start_assigned, summarize_sessions, validate_input_target,
+    budget, cancel, maintain, start_assigned, summarize_sessions, validate_input_target,
 };
 
 const SOURCE_DIR: &str = ".genethub/workflow";
@@ -988,7 +988,7 @@ pub(crate) async fn dispatch(
             bail!("taskConflict: this task key already identifies a different delegation; use a new task key");
         }
         return Ok(Transition {
-            status: run_status(&previous),
+            status: run_status(&runtime, &previous)?,
             sessions: Vec::new(),
         });
     }
@@ -1149,7 +1149,7 @@ pub(crate) async fn dispatch(
         run.revision = 1;
         save_run(&runtime, &run)?;
         return Ok(Transition {
-            status: run_status(&run),
+            status: run_status(&runtime, &run)?,
             sessions: Vec::new(),
         });
     }
@@ -1186,7 +1186,7 @@ pub(crate) async fn dispatch(
         release_leases(&runtime, &run).await?;
     }
     Ok(Transition {
-        status: run_status(&run),
+        status: run_status(&runtime, &run)?,
         sessions,
     })
 }
@@ -1220,7 +1220,7 @@ pub async fn abort_launch(state: &Shared, root_workspace_id: &str, run_id: &str)
 
 pub(crate) fn get(runtime: &RuntimeStore, run_id: &str) -> Result<WorkflowRunStatus> {
     validate_id(run_id, "runId")?;
-    Ok(run_status(&load_run(runtime, run_id)?))
+    run_status(runtime, &load_run(runtime, run_id)?)
 }
 
 pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<WorkflowRunStatus>> {
@@ -1233,7 +1233,7 @@ pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<Workflow
             .then_with(|| right.id.cmp(&left.id))
     });
     runs.truncate(limit);
-    Ok(runs.iter().map(run_status).collect())
+    runs.iter().map(|run| run_status(runtime, run)).collect()
 }
 
 fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
@@ -1324,10 +1324,12 @@ pub async fn executor_flow(
         bail!("Executor Run snapshot identity does not match its Session");
     }
     let messages = run.flow_messages.iter().map(flow_message_status).collect();
+    let project = state.workspaces.get(&run.workspace_id).await?;
+    let runtime = RuntimeStore::new(&state.paths.root, &run.workspace_id, &project.root)?;
     Ok(ExecutorFlowStatus {
         schema: "genehub.executor-flow.status.v1".into(),
         executor_session_id: executor_session_id.into(),
-        run: run_status(&run),
+        run: run_status(&runtime, &run)?,
         messages,
     })
 }
@@ -1418,7 +1420,7 @@ pub(crate) async fn complete(
     )?;
     save_run(&runtime, &run)?;
     Ok(Transition {
-        status: run_status(&run),
+        status: run_status(&runtime, &run)?,
         sessions,
     })
 }
@@ -3274,6 +3276,35 @@ fn push_flow_message(run: &mut RunRecord, message: FlowMessage) {
     }
 }
 
+fn record_budget_update(
+    run: &mut RunRecord,
+    sender_session_id: &str,
+    previous: &WorkflowRequestBudgetStatus,
+    current: &WorkflowRequestBudgetStatus,
+) -> Result<()> {
+    let Some(executor_session_id) = run.executor_session_id.clone() else {
+        return Ok(());
+    };
+    let message = FlowMessage {
+        schema: FLOW_MESSAGE_SCHEMA.into(),
+        message_id: flow_message_id(&run.id, "run.budgetUpdated", None, current.revision),
+        kind: "run.budgetUpdated".into(),
+        project_workspace_id: run.workspace_id.clone(),
+        executor_session_id: executor_session_id.clone(),
+        run_id: run.id.clone(),
+        node_id: None,
+        attempt: None,
+        sender_session_id: sender_session_id.into(),
+        recipient_session_id: executor_session_id,
+        causation_id: None,
+        expected_revision: None,
+        payload: serde_json::json!({"previous": previous, "current": current}),
+        created_at_ms: now_ms(),
+    };
+    push_flow_message(run, message);
+    Ok(())
+}
+
 fn flow_message(
     run: &RunRecord,
     kind: &str,
@@ -3413,8 +3444,13 @@ fn lock_run(runtime: &RuntimeStore, run_id: &str) -> Result<ExclusiveFileLock> {
     lock_exclusive_file(&path, "Workflow Run 正由另一个请求修改")
 }
 
-fn run_status(run: &RunRecord) -> WorkflowRunStatus {
-    WorkflowRunStatus {
+fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStatus> {
+    let root = if request::group_id(run) == run.id {
+        run.clone()
+    } else {
+        load_run(runtime, request::group_id(run))?
+    };
+    Ok(WorkflowRunStatus {
         structure: structured::projection(run),
         diagnostics: Some(
             run.supervision
@@ -3430,6 +3466,7 @@ fn run_status(run: &RunRecord) -> WorkflowRunStatus {
         ),
         request_run_id: Some(request::group_id(run).into()),
         report_pending: Some(supervision::report_pending(run)),
+        request_budget: request::budget(&root).status(),
         reason: run.stop.as_ref().map(|stop| stop.reason.clone()),
         cleanup_error: run
             .stop
@@ -3477,7 +3514,7 @@ fn run_status(run: &RunRecord) -> WorkflowRunStatus {
             .collect(),
         created_at_ms: run.created_at_ms,
         updated_at_ms: run.updated_at_ms,
-    }
+    })
 }
 
 fn flow_message_status(message: &FlowMessage) -> FlowMessageStatus {

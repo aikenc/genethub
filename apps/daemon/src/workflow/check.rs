@@ -162,7 +162,12 @@ pub(crate) async fn check(
             .try_fold(0u64, |sum, activity| {
                 activity.tokens.map(|tokens| sum.saturating_add(tokens))
             });
-        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；执行期限 {} 毫秒（明确 Human 等待单列）", request::group_id(&run), group.len(), request::MAX_REQUEST_RUNS, calls, request::MAX_LLM_ROUNDS, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), request::REQUEST_DEADLINE_MS));
+        let budget = group
+            .iter()
+            .find(|other| other.id == request::group_id(&run))
+            .map(|root| request::budget(root))
+            .unwrap_or_default();
+        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；执行期限 {} 毫秒；预算 revision {}（明确 Human 等待单列）", request::group_id(&run), group.len(), budget.max_runs, calls, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), budget.deadline_ms, budget.revision));
         if let Some(problem) = &run.supervision.finding {
             finding(None, "diagnosis", "warning", problem.clone());
         }
@@ -185,7 +190,7 @@ pub(crate) async fn check(
                 ),
             );
         }
-        report.runs.push(run_status(&run));
+        report.runs.push(run_status(&runtime, &run)?);
     }
     Ok(report)
 }

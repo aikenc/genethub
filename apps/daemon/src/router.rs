@@ -1023,6 +1023,36 @@ async fn dispatch(
             }
         }
 
+        Request::WorkflowBudget {
+            workspace_id,
+            run_id,
+            expected_revision,
+            max_runs,
+            deadline_seconds,
+            max_llm_rounds,
+        } => {
+            if let Err(error) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
+                return Handled::err(ErrorCode::Forbidden, error);
+            }
+            match crate::workflow::budget(
+                state,
+                &workspace_id,
+                caller.session_controller_id(),
+                &run_id,
+                expected_revision,
+                max_runs,
+                deadline_seconds,
+                max_llm_rounds,
+            )
+            .await
+            {
+                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionCreate {
             workspace_id,
             agent_id,
@@ -3020,6 +3050,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
         Request::WorkflowCancel { .. } => Some("workflow.cancel"),
+        Request::WorkflowBudget { .. } => Some("workflow.budget"),
         Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),
         Request::ProjectBootstrap { .. } => Some("project.bootstrap"),

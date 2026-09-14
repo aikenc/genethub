@@ -1006,6 +1006,22 @@ pub struct WorkflowHumanWait {
     pub title: String,
 }
 
+/// Mutable limits shared by one Human request and all Workflow retry Runs.
+/// Its revision is separate from the graph revision so a PM can adjust a
+/// running request without racing a Worker node completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowRequestBudgetStatus {
+    #[ts(type = "number")]
+    pub revision: u64,
+    pub max_runs: u32,
+    #[ts(type = "number")]
+    pub deadline_ms: u64,
+    #[ts(type = "number")]
+    pub max_llm_rounds: u64,
+}
+
 /// Durable parent/role binding for a Workflow-managed ordinary Session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -1149,6 +1165,8 @@ pub struct WorkflowRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub report_pending: Option<bool>,
+    #[serde(default)]
+    pub request_budget: WorkflowRequestBudgetStatus,
 
     /// Why execution is blocked, stopping or cancelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -176,6 +176,25 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
     },
+    /// Changes the finite budget shared by an original request and every
+    /// retry. `expectedRevision` is the budget revision exposed by
+    /// `workflow.get`, independent of a Run's graph revision.
+    #[serde(rename = "workflow.budget", rename_all = "camelCase")]
+    WorkflowBudget {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        max_runs: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        deadline_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "number")]
+        max_llm_rounds: Option<u64>,
+    },
     /// Mounts, configures or removes one responsibility on an already-open,
     /// PipeBuilder-verified AgentSpace, or moves it in the ownership tree.
     ///

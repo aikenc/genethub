@@ -389,6 +389,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowDispatch { .. }
         | Request::WorkflowComplete { .. }
         | Request::WorkflowCancel { .. }
+        | Request::WorkflowBudget { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
         | Request::SessionArtifactChunk { .. }

@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 57] = [
+const COMMAND_NAMES: [&str; 58] = [
     "schema",
     "context",
     "capabilities",
@@ -52,6 +52,7 @@ const COMMAND_NAMES: [&str; 57] = [
     "workflow.check",
     "workflow.complete",
     "workflow.cancel",
+    "workflow.budget",
     "machine.list",
     "machine.show",
     "machine.pair",
@@ -117,6 +118,7 @@ fn mutates(name: &str) -> bool {
             | "workflow.dispatch"
             | "workflow.complete"
             | "workflow.cancel"
+            | "workflow.budget"
             | "machine.pair"
             | "machine.forget"
             | "device.invite"
@@ -1283,6 +1285,17 @@ fn command_schema(name: &str) -> Value {
             json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}}),
             &["runId", "revision"],
         ),
+        "workflow.budget" => workflow_schema(
+            "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--deadline-seconds <n>] [--max-llm-rounds <n>]",
+            json!({
+                "runId": {"type": "string", "minLength": 1},
+                "revision": {"type": "integer", "minimum": 0, "description": "current requestBudget.revision from workflow get"},
+                "maxRuns": {"type": "integer", "minimum": 1, "maximum": 64, "description": "--max-runs"},
+                "deadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 604800, "description": "--deadline-seconds"},
+                "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds"}
+            }),
+            &["runId", "revision"],
+        ),
         "session.respond" => (
             "genet session respond <id> --request <rid> --choose <optionId>",
             true,
@@ -1425,6 +1438,7 @@ fn command_schema(name: &str) -> Value {
             "workflow.activate" => single_output("workflow.activated"),
             "workflow.complete" => single_output("workflow.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),
+            "workflow.budget" => single_output("workflow.budgetUpdated"),
             "workflow.dispatch" => json!({
                 "type": "object",
                 "$comment": "JSON Lines; --no-wait ends with workflow.started, --wait continues to workflow.result",

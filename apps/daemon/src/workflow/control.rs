@@ -278,7 +278,7 @@ pub(crate) async fn cancel(
         .as_ref()
         .is_some_and(|request| request.cancelled)
     {
-        return Ok(run_status(&run));
+        return run_status(&runtime, &run);
     }
     if run.revision != expected_revision {
         bail!("Workflow revision 冲突：先重新读取 workflow get");
@@ -321,7 +321,84 @@ pub(crate) async fn cancel(
         current.updated_at_ms = now_ms();
         save_run(&runtime, &current)?;
     }
-    Ok(run_status(&load_run(&runtime, run_id)?))
+    run_status(&runtime, &load_run(&runtime, run_id)?)
+}
+
+pub(crate) async fn budget(
+    state: &Shared,
+    workspace_id: &str,
+    actor_session_id: Option<&str>,
+    run_id: &str,
+    expected_revision: u64,
+    max_runs: Option<u32>,
+    deadline_seconds: Option<u64>,
+    max_llm_rounds: Option<u64>,
+) -> Result<WorkflowRunStatus> {
+    validate_id(run_id, "runId")?;
+    if max_runs.is_none() && deadline_seconds.is_none() && max_llm_rounds.is_none() {
+        bail!("workflow.budget 至少需要一个预算上限");
+    }
+    if max_runs.is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_REQUEST_RUNS) {
+        bail!(
+            "maxRuns 必须在 1..={} 之间",
+            request::MAX_CONFIGURED_REQUEST_RUNS
+        );
+    }
+    if deadline_seconds
+        .is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS)
+    {
+        bail!(
+            "deadlineSeconds 必须在 1..={} 之间",
+            request::MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS
+        );
+    }
+    if max_llm_rounds.is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_LLM_ROUNDS)
+    {
+        bail!(
+            "maxLlmRounds 必须在 1..={} 之间",
+            request::MAX_CONFIGURED_LLM_ROUNDS
+        );
+    }
+    let workspace = state.workspaces.get(workspace_id).await?;
+    let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
+    let selected = load_run(&runtime, run_id)?;
+    if selected.workspace_id != workspace_id {
+        bail!("Workflow Run 不属于请求的 Workspace");
+    }
+    let root_id = request::group_id(&selected).to_string();
+    let _guard = lock_run(&runtime, &root_id)?;
+    let _request = request::request_lock(&runtime, &root_id)?;
+    let mut root = load_run(&runtime, &root_id)?;
+    let mut link = root.request.take().unwrap_or_else(|| request::RequestLink {
+        root_run_id: root.id.clone(),
+        original_message_id: format!("legacy:{}", root.id),
+        ..Default::default()
+    });
+    if link.budget.revision != expected_revision {
+        bail!("Workflow 预算 revision 冲突：先重新读取 workflow get");
+    }
+    let previous = link.budget.status();
+    if let Some(value) = max_runs {
+        link.budget.max_runs = value;
+    }
+    if let Some(value) = deadline_seconds {
+        link.budget.deadline_ms = value
+            .checked_mul(1000)
+            .ok_or_else(|| anyhow!("deadlineSeconds 超出范围"))?;
+    }
+    if let Some(value) = max_llm_rounds {
+        link.budget.max_llm_rounds = value;
+    }
+    link.budget.revision = link.budget.revision.saturating_add(1);
+    let current = link.budget.status();
+    root.request = Some(link);
+    let sender = actor_session_id
+        .unwrap_or(root.parent_session_id.as_str())
+        .to_string();
+    record_budget_update(&mut root, &sender, &previous, &current)?;
+    root.updated_at_ms = now_ms();
+    save_run(&runtime, &root)?;
+    run_status(&runtime, &root)
 }
 
 static RECONCILING: LazyLock<Mutex<BTreeSet<PathBuf>>> =
