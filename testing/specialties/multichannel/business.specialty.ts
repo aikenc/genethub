@@ -22,7 +22,7 @@ async function connect(t: CaseContext, o: Opened, link?: Awaited<ReturnType<type
   const errors: string[] = [];
   const client = new Client({ ...endpoint, ...(link ? { url: link.urlFor(endpoint.url) } : {}), rtcEnabled: false,
     connectTimeoutMs: 5000, helloTimeoutMs: 5000,
-    onDiagnostic(e) { if (e.kind === "error") { errors.push(String(e.detail.message)); if (errors.length > 3) errors.shift(); } },
+    onError(error) { errors.push(error instanceof Error ? error.message : String(error)); if (errors.length > 3) errors.shift(); },
     socketFactory: u => new WebSocket(u) as unknown as WebSocketLike,
     redial: async () => { const fresh = daemonEndpoint(o.daemon); return { ...fresh, ...(link ? { url: link.urlFor(fresh.url) } : {}) }; },
   });
@@ -65,7 +65,7 @@ defineSpecialty(meta("saturated-capacity-releases-slot", "Closing a client relea
       for (let n = 0; n < 16; n++) {
         try { peers.push(await connect(t, o)); } catch (error) { refusal = String(error); break; }
       }
-      t.assertions.assert(peers.length > 0 && /ResourceExhausted/.test(refusal), "admission was not demonstrably saturated");
+      t.assertions.assert(peers.length > 0 && /ResourceExhausted/.test(refusal), `admission was not demonstrably saturated: admitted=${peers.length}; ${refusal}`);
       for (const peer of peers) t.assertions.assert((await peer.call({ type: "workspace.list" }))?.type === "workspaces", "saturation evicted an existing client");
       peers.pop()!.close();
       const start = performance.now();

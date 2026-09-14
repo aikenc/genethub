@@ -144,14 +144,19 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
           const beforeBudget = await get(original);
           t.assertions.assert(beforeBudget.requestBudget.maxRuns === 3 && beforeBudget.requestBudget.revision === 0,
             "default request budget was not projected to PM");
+          const executionMs = (await history()).reduce((total, prior) => total + prior.updatedAtMs - prior.createdAtMs, 0);
+          const amendedDeadlineSeconds = Math.ceil(executionMs / 1000) + 10;
+          // Real stopped time, not a patched runtime clock: a budget amendment
+          // must not charge this wait as execution and refuse the next admission.
+          await new Promise(resolve => setTimeout(resolve, 11_000));
           workerCalls = 0;
-          nextCommand = `"$GENEHUB_CLI" workflow budget --run ${quote(original)} --revision ${beforeBudget.requestBudget.revision} --max-runs 4 --deadline-seconds 10800 --max-llm-rounds 512 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task control-4 --retry-of ${quote(original)} --message "预算已调整，继续原任务" --no-wait`;
+          nextCommand = `"$GENEHUB_CLI" workflow budget --run ${quote(original)} --revision ${beforeBudget.requestBudget.revision} --max-runs 4 --deadline-seconds ${amendedDeadlineSeconds} --max-llm-rounds 512 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task control-4 --retry-of ${quote(original)} --message "预算已调整，继续原任务" --no-wait`;
           await send("u_budget", "放开这条请求的预算，继续跑。", original);
           await t.tools.waitUntil(async () => (await history()).length === 4, 35_000);
           run = (await history()).find(other => other.taskId === "control-4")!;
           t.assertions.assert(run.requestRunId === original, "budget update reset original request identity");
           t.assertions.assert(run.requestBudget.revision === 1 && run.requestBudget.maxRuns === 4
-            && run.requestBudget.deadlineMs === 10_800_000 && run.requestBudget.maxLlmRounds === 512,
+            && run.requestBudget.deadlineMs === amendedDeadlineSeconds * 1000 && run.requestBudget.maxLlmRounds === 512,
             "raised shared budget was not visible on the retry Run");
           await waitTerminal();
           const root = await get(original);

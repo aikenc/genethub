@@ -86,13 +86,13 @@ defineSpecialty({
     const installed = await opened.client.call({ type: "workspace.list" });
     t.assertions.assert(installed?.type === "workspaces" && installed.data.find(space => space.id === opened.workspaceId)?.agentSpace?.components.some(component => component.componentId === "pm" && component.enabled), `bootstrap did not install PM: ${JSON.stringify(installed)}`);
     const source = path.join(opened.workspaceRoot, ".genethub/workflow");
-    const workflowFile = path.join(source, "workflows/game-feature.yaml");
+    const workflowFile = path.join(source, "workflows/game-dev.yaml");
     const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
     const roleSchema = readFileSync(roleFile, "utf8").split("\n")[0]?.split(": ")[1];
     writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
     writeFileSync(path.join(source, "prompts/exception-worker.md"), "EXCEPTION_TEST_WORKER: complete assigned node only.");
-    writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-feature", version: 1, entry: "check", nodes: [
+    writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-dev", version: 1, entry: "check", nodes: [
       { id: "check", uses: "agent.session", with: { role: "coder", workspace: "." }, completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] } },
       { id: "publish", uses: "result.publish" },
     ] }));
@@ -117,7 +117,7 @@ defineSpecialty({
     const other = owner;
     owner = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     t.assertions.assert(other !== owner, "test did not create a second PM Session");
-    const dispatch = (task: string) => `"$GENEHUB_CLI" workflow dispatch --workflow game-feature --task ${task} --message recover --no-wait`;
+    const dispatch = (task: string) => `"$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${task} --message recover --no-wait`;
     const denied = await runCommand(other, "u_normal_denied", '"$GENEHUB_CLI" workflow activate --revision 0');
     t.assertions.assert(denied.includes("forbidden") && (await history()).length === 0, `normal unbound PM gained management: ${denied}`);
     const status = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });

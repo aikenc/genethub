@@ -24,6 +24,44 @@ and `object.fields`. Conditions must be boolean, not strings. A missing referenc
 is an error; use exists when absence is expected. No script or model call runs
 inside expression evaluation.
 
+`add` performs checked i64 addition; `append` adds one value to a bounded array;
+`contains` tests exact JSON membership. Do not build a script language in prompts.
+`sequence.output` optionally projects its completed result (an empty sequence can
+return a value). `forEach.initial/update` reuse loop-local `vars`, require serial
+concurrency, and return the final accumulator; update reads the completed item
+value at `/results`. Nested loops own their vars; use `call.input` to bind an
+outer value before entering a nested scope. Item bodies start with fresh results.
+
+`{id: exit, type: break, value: <expression>}` exits the nearest lexical loop or
+serial foreach. It skips remaining children and that iteration's update; return
+the data to retain explicitly. It cannot cross call/parallel boundaries. System
+failure, cancellation, timeout and exhausted budgets are not business break values.
+Keep fixed control definitions with dynamic plan data; no runtime graph rewriting.
+
+For structured Worker data, declare `completion.output` on the activity, then
+submit `workflow complete --output '<JSON>'`. Tasks consume `/results/<step>/output`
+(or `/results/output` when a task is the loop body). This is a closed shape
+vocabulary, not JSON Schema: `object.properties` are all required and additional
+keys are forbidden; `array.items/minItems/maxItems`, `string.enum/minLength`,
+`integer`, `boolean` and `null` are supported. Arrays require maxItems, at most 4096.
+Data is limited to 256 KiB, depth 32 and 16384 values; schema depth/size is also
+bounded. An omitted output remains compatible with old nodes; explicit null is
+data. Evidence requirements remain separate. A completed assessment may return a
+negative business verdict; inability to perform it uses a negative node outcome.
+
+Iterate the frozen acceptance criteria, not a model's claimed checklist coverage.
+Retain item identity, contract and actual result; re-review the same contract.
+Keeping the baseline in Workflow/prompts includes it in the Candidate identity;
+arbitrary external files or Space Skills are not silently snapshotted by this.
+Structured coverage proves declarations, not that the reported checks ran.
+`workflow get` exposes node output and `structure.outcome`; a Run ending without
+publication must not be described as a successful business delivery.
+
+Use `workflow inspect --candidate <digest>` when selecting a candidate: its
+`selectedDigest`, default and catalog refer to that version. Candidate dispatch
+uses the same selected catalog. This never activates it or changes default formal
+routing, and existing isolated Executor/task-directory requirements still apply.
+
 For review loops, the review task explicitly accepts `[completed,
 changesRequested]`. The host still verifies approved evidence for completed.
 Use the review outcome to update approval, and carry the review report in vars

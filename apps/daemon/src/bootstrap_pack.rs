@@ -1493,7 +1493,7 @@ mod tests {
             .any(|file| file.relative == "game-project.code-workspace"));
         assert!(rendered
             .iter()
-            .any(|file| file.relative.ends_with("game-project.yaml")));
+            .any(|file| file.relative.ends_with("game-dev.yaml")));
         let pm_skill = rendered
             .iter()
             .find(|file| file.relative == ".pipebuilder/skills/project-manager/SKILL.md")

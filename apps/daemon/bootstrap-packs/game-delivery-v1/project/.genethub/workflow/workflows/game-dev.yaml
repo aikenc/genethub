@@ -1,0 +1,245 @@
+# Project-owned business policy. The engine knows only data and control blocks.
+schema: genehub.workflow.definition.v2
+id: game-dev
+version: 1
+nodes:
+  - id: requirements
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          decision: {type: string, enum: [go, noGo, needsAuthorization]}
+          scope: {type: string, minLength: 1}
+          feasibility: {type: string, minLength: 1}
+          risks: {type: string, minLength: 1}
+          budgetAdvice: {type: string, minLength: 1}
+          milestones:
+            type: array
+            maxItems: 32
+            items:
+              type: object
+              properties:
+                id: {type: string, minLength: 1}
+                goal: {type: string, minLength: 1}
+                criteria:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  items:
+                    type: object
+                    properties:
+                      id: {type: string, minLength: 1}
+                      requirement: {type: string, minLength: 1}
+                      method: {type: string, minLength: 1}
+  - id: implement
+    uses: agent.session
+    with:
+      role: coder
+      writeLease: {targetRef: current, ttlSeconds: 900}
+    completion:
+      all:
+        - {key: commit, verify: git.commitOnTarget}
+        - {key: checks, verify: value.nonEmpty}
+  - id: acceptance
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          passed: {type: boolean}
+          finding: {type: string, minLength: 1}
+          evidence: {type: string, minLength: 1}
+  - id: publish
+    uses: result.publish
+structure:
+  body:
+    id: delivery
+    type: sequence
+    output: {op: ref, path: /results/planning}
+    steps:
+      - id: planning
+        type: loop
+        # Initial plan plus at most two replans, within the same request budget.
+        maxRounds: 3
+        initial: {op: literal, value: {accepted: [], delivered: [], feedback: null, done: false}}
+        condition: {op: not, value: {op: ref, path: /vars/done}}
+        update: {op: ref, path: /results}
+        body:
+          id: plan-and-deliver
+          type: sequence
+          output: {op: ref, path: /results/plan-decision}
+          steps:
+            - id: assess-requirements
+              type: task
+              activity: requirements
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: requirements}
+                  accepted: {op: ref, path: /vars/accepted}
+                  delivered: {op: ref, path: /vars/delivered}
+                  previousFailure: {op: ref, path: /vars/feedback}
+            - id: plan-decision
+              type: if
+              condition:
+                op: all
+                values:
+                  - {op: eq, left: {op: ref, path: /results/assess-requirements/output/decision}, right: {op: literal, value: go}}
+                  - {op: exists, path: /results/assess-requirements/output/milestones/0}
+              else:
+                id: stop-with-assessment
+                type: break
+                value:
+                  op: object
+                  fields:
+                    done: {op: literal, value: false}
+                    accepted: {op: ref, path: /vars/accepted}
+                    delivered: {op: ref, path: /vars/delivered}
+                    assessment: {op: ref, path: /results/assess-requirements/output}
+              then:
+                id: milestones
+                type: forEach
+                items: {op: ref, path: /results/assess-requirements/output/milestones}
+                key: {op: ref, path: /item/id}
+                maxConcurrency: 1
+                failure: failFast
+                initial:
+                  op: object
+                  fields:
+                    accepted: {op: ref, path: /vars/accepted}
+                    delivered: {op: ref, path: /vars/delivered}
+                    feedback: {op: literal, value: null}
+                    done: {op: literal, value: true}
+                update: {op: ref, path: /results}
+                body:
+                  id: reuse-or-deliver
+                  type: if
+                  # Reuse only an identical accepted contract, not just its ID.
+                  condition: {op: contains, array: {op: ref, path: /vars/accepted}, value: {op: ref, path: /item}}
+                  then:
+                    id: reuse-accepted
+                    type: sequence
+                    steps: []
+                    output: {op: ref, path: /vars}
+                  else:
+                    id: deliver-milestone
+                    type: sequence
+                    output: {op: ref, path: /results/retain-delivery}
+                    steps:
+                      - id: attempt-milestone
+                        type: call
+                        procedure: milestone
+                        input:
+                          op: object
+                          fields:
+                            contract: {op: ref, path: /item}
+                            delivered: {op: ref, path: /vars/delivered}
+                      - id: stop-on-rejection
+                        type: if
+                        condition: {op: not, value: {op: ref, path: /results/attempt-milestone/approved}}
+                        then:
+                          id: break-for-replan
+                          type: break
+                          value:
+                            op: object
+                            fields:
+                              accepted: {op: ref, path: /vars/accepted}
+                              delivered: {op: ref, path: /vars/delivered}
+                              feedback:
+                                op: object
+                                fields:
+                                  contract: {op: ref, path: /item}
+                                  result: {op: ref, path: /results/attempt-milestone}
+                              done: {op: literal, value: false}
+                      - id: retain-delivery
+                        type: sequence
+                        steps: []
+                        output:
+                          op: object
+                          fields:
+                            accepted: {op: append, array: {op: ref, path: /vars/accepted}, value: {op: ref, path: /item}}
+                            delivered:
+                              op: append
+                              array: {op: ref, path: /vars/delivered}
+                              value:
+                                op: object
+                                fields:
+                                  contract: {op: ref, path: /item}
+                                  result: {op: ref, path: /results/attempt-milestone}
+                            feedback: {op: literal, value: null}
+                            done: {op: literal, value: true}
+      - id: publish-only-accepted
+        type: if
+        condition: {op: ref, path: /results/planning/done}
+        then: {id: publish-result, type: task, activity: publish}
+  procedures:
+    milestone:
+      id: milestone-delivery
+      type: loop
+      maxRounds: 2
+      initial: {op: literal, value: {attempt: 0, approved: false, feedback: null, artifact: null}}
+      condition:
+        op: all
+        values:
+          - {op: not, value: {op: ref, path: /vars/approved}}
+          - {op: lt, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 2}}
+      update:
+        op: object
+        fields:
+          attempt: {op: add, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 1}}
+          approved: {op: ref, path: /results/check-items/approved}
+          feedback: {op: ref, path: /results/check-items/items}
+          artifact: {op: ref, path: /results/check-items/artifact}
+      body:
+        id: implement-and-check
+        type: sequence
+        steps:
+          - id: implementation
+            type: task
+            activity: implement
+            input:
+              op: object
+              fields:
+                phase: {op: literal, value: implementation}
+                contract: {op: ref, path: /input/contract}
+                delivered: {op: ref, path: /input/delivered}
+                feedback: {op: ref, path: /vars/feedback}
+          - id: check-items
+            type: forEach
+            items: {op: ref, path: /input/contract/criteria}
+            key: {op: ref, path: /item/id}
+            maxConcurrency: 1
+            failure: failFast
+            initial:
+              op: object
+              fields:
+                approved: {op: literal, value: true}
+                items: {op: literal, value: []}
+                artifact: {op: ref, path: /results/implementation/evidence}
+            body:
+              id: check-item
+              type: task
+              activity: acceptance
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: acceptance-item}
+                  contract: {op: ref, path: /input/contract}
+                  criterion: {op: ref, path: /item}
+                  artifact: {op: ref, path: /vars/artifact}
+            update:
+              op: object
+              fields:
+                approved: {op: all, values: [{op: ref, path: /vars/approved}, {op: ref, path: /results/output/passed}]}
+                artifact: {op: ref, path: /vars/artifact}
+                items:
+                  op: append
+                  array: {op: ref, path: /vars/items}
+                  value:
+                    op: object
+                    fields:
+                      criterion: {op: ref, path: /item}
+                      review: {op: ref, path: /results/output}

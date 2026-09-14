@@ -396,7 +396,11 @@ pub(crate) async fn budget(
         .unwrap_or(root.parent_session_id.as_str())
         .to_string();
     record_budget_update(&mut root, &sender, &previous, &current)?;
-    root.updated_at_ms = now_ms();
+    // Terminal updated_at is the execution cutoff, not the time of later
+    // budget decisions. The control message carries its own audit timestamp.
+    if matches!(root.status.as_str(), "running" | "stopping" | "cancelling") {
+        root.updated_at_ms = now_ms();
+    }
     save_run(&runtime, &root)?;
     run_status(&runtime, &root)
 }

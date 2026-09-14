@@ -55,7 +55,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
     id: outcome === "approved" ? "specialty.workflow.executor-session-flow" : `specialty.workflow.executor-session-flow.${outcome}`,
     title: "Executor Session drives Coder and Reviewer with structured messages",
     oracle:
-      "one ordinary PM turn discovers and applies the game Bootstrap Pack, commits its project assets, and dispatches the project DCG; one non-LLM Executor Session owns the Run snapshot and structured timeline while Coder and Reviewer execute in their attached AgentSpaces",
+      "one ordinary PM turn discovers and applies the current Pack, then runs the preserved v7 repair configuration; one non-LLM Executor Session owns its snapshot and timeline while Workers execute in attached AgentSpaces; v8 business semantics have separate Pack journeys",
     catches: [
       "the PM has to know a hard-coded Pack id that cannot be discovered",
       "bootstrap leaves the project dirty so the first Coder cannot obtain its write lease",
@@ -95,6 +95,10 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       const projectId = projectReply?.type === "workspace" ? projectReply.data.id : "";
 
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
+      const legacyDevelopment = readFileSync(path.join(t.openRoot, "testing/fixtures/workflow/pack-v7-development.yaml"), "utf8");
+      // Keep the old repair/finishing frontier oracle independent of changes to
+      // the current Pack's business method. Use real source/commit/activation.
+      const installLegacy = `node -e ${shellArg(`require('fs').writeFileSync('.genethub/workflow/workflows/game-dev.yaml',${JSON.stringify(legacyDevelopment)})`)} && git add .genethub/workflow/workflows/game-dev.yaml && git commit -m 'select preserved v7 repair method' && "$GENEHUB_CLI" workflow activate --revision 1`;
       const gameHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Asteroid Garden</title><style>body{margin:0;background:#08152b;color:#fff;font:16px sans-serif;text-align:center}canvas{background:#10264c;border:2px solid #79e8ff;margin:20px}</style></head><body><h1>Asteroid Garden</h1><p>方向键移动，收集星种</p><canvas id="game" width="640" height="360"></canvas><script>const c=document.querySelector('#game'),x=c.getContext('2d');let px=320,score=0;addEventListener('keydown',e=>{px+=e.key==='ArrowLeft'?-20:e.key==='ArrowRight'?20:0;score++;draw()});function draw(){x.fillStyle='#10264c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#79e8ff';x.fillRect(px,300,28,28);x.fillStyle='#fff';x.fillText('星种 '+score,20,30)}draw()</script></body></html>`;
       let pmStage = 0;
       const coderOperations = new Set<string>();
@@ -209,7 +213,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             tool: {
               name: "bash",
               arguments: {
-                command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(planDigest)} --expected-revision ${expectedRevision} --action-id bootstrap-asteroid-garden && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --kind game --complexity project --task asteroid-garden --no-wait --message "制作一个可玩的太空花园小游戏，方向键移动、收集星种并显示得分。"`,
+                command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(planDigest)} --expected-revision ${expectedRevision} --action-id bootstrap-asteroid-garden && cat .pipebuilder/skills/project-manager/SKILL.md && ${installLegacy} && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task asteroid-garden --no-wait --message "制作一个可玩的太空花园小游戏，方向键移动、收集星种并显示得分。"`,
               },
             },
           };
@@ -432,7 +436,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         t.assertions.assert(git(projectRoot, ["rev-parse", "HEAD"]) === repair?.evidence.commit, "repair evidence does not name the actual target commit");
       }
       t.assertions.assert(run!.nodes.some(n=>n.uses === "result.publish" && n.status === "completed") === (outcome !== "exhausted"), "publication ignored final review");
-      t.assertions.assert(!!run!.structure,"default development template is not structured");
+      t.assertions.assert(!!run!.structure,"preserved repair method is not structured");
       t.assertions.assert(workers.every(worker => worker.status === "closed"), "terminal nodes left live execution owners");
 
       const executorRoot = path.join(projectRoot, "spaces", "executor");

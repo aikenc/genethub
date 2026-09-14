@@ -440,7 +440,7 @@ defineSpecialty(
       t.assertions.assert(inspected.status === 0, `installed workflow is not inspectable: ${inspected.text}`);
       t.assertions.assert(
         readFileSync(path.join(approved.root, ".genethub/workflow/project.yaml"), "utf8").includes(
-          "defaultWorkflow: game-project",
+          "defaultWorkflow: game-dev",
         ),
         "Pack did not install the game delivery DCG",
       );

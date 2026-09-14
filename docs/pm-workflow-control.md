@@ -200,8 +200,26 @@ The RPC capability gate recognizes these narrowly scoped project management
 operations. A bound PM can register a Builder-verified direct `spaces/` child;
 it does not gain machine-wide Settings authority or access to unrelated roots.
 
-Pack version 7 supplies preparation and review-before-repair guidance. Its
+Pack version 8 unifies default development into project-owned `game-dev`: a
+single Executor Run reviews requirements, consumes a finite milestone plan,
+implements and checks each fixed criterion, and carries accepted results through
+bounded repair/replanning. The kernel contains no game or milestone rules. PM
+delegates Workflow requirements to WM, aligns goals and budget, samples facts,
+and corrects its own decisions and methods using existing history, get/check and
+Builder/Space facilities. No additional PM state machine or ledger is required.
+No-go/missing authorization can complete an assessment without publication;
+PM must inspect `structure.outcome.value.done` before claiming delivery.
+Budget amendments retain a terminal Run's execution cutoff; stopped waiting
+does not become execution cost. The budget control message keeps its own time.
+
+The independent
 `game-review-and-improve` Workflow starts with review and allows two repair and
 re-review rounds. The report checker validates declared coverage and versions;
 it does not attest execution of the referenced checks. See the installed PM and
 Reviewer Skill references for their report and preparation contracts.
+
+Upgrade uses versioned file digests, protects customizations and in-flight Runs,
+and preserves old Run snapshots. Version 7 is an explicit upgrade source. Legacy
+unreferenced YAML files in an upgraded project may remain for recovery; only
+`game-dev` is the new default catalog entry. Installing a new daemon does not
+rewrite a project's installed Skill or activate its customized candidate.

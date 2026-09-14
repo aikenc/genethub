@@ -1,5 +1,6 @@
+# Pack v7 compatibility fixture, preserved when v8 changed the default business method.
 schema: genehub.workflow.definition.v2
-id: game-project
+id: game-dev
 version: 3
 nodes:
   - id: implement

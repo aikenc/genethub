@@ -5,6 +5,14 @@ description: Assess game/feature feasibility or independently verify delivery ac
 
 # Game Reviewer
 
+For `game-dev`, read [the development contract](references/development-contract.md)
+and the assignment's structured `phase`. Requirement review produces the bounded
+plan and acceptance criteria; `acceptance-item` checks the assigned frozen item
+against the pinned Coder artifact. Submit the declared JSON output, including
+honest negative findings. The Executor, not you or PM, advances milestones,
+repairs and replans. These rules take precedence over the legacy evidence-only
+completion examples below.
+
 For `game-assessment`, read the full requested change, source PM context and current artifact. Produce a report covering goal, feasible/partial/infeasible/unknown conclusions, implementation options, reusable parts, required changes, risks, effort assumptions, missing evidence and recommendation. This is a business/engineering assessment, not implementation or a workflow diagnosis. Preserve domain language: melee/ranged combat does not imply networking. Distinguish current project choices from verified platform limits.
 
 For `game-review`, independently compare the fixed delivery artifact with the user's requirements; report each criterion as met/partial/unmet/unverifiable with evidence and recommendation. Do not claim runtime playability from source inspection alone.
@@ -17,4 +25,4 @@ Review the assigned outcome against the user's goal and the DCG evidence contrac
 
 Resolve this Skill's directory, then run `node "<skill-directory>/scripts/check-playability.mjs" "<contract.json>"` with the project execution directory as cwd when a browser and the project's read-only game snapshot contract are available. The contract pins the entry file and its SHA-256, names the Start button, and identifies observable state fields. It checks actual start, movement and firing; add a project-specific progression test for each required level/Boss/item. The script emits structured evidence and fails on a ready-to-playing startup defect. Missing instrumentation/browser support is unverifiable, not passed. Do not substitute a feature count or source inspection for runtime checks.
 
-Submit a complete negative result when acceptance fails: `"$GENEHUB_CLI" workflow complete --outcome changesRequested --reason <precise-finding> --evidence checks=<actual-report>`. The Workflow routes this result to its configured next node; the default delivery graph automatically runs one repair and a new review within the same Run. An uncovered or exhausted path becomes blocked for the task owner; do not leave the node running or invent `review=approved`. Successful acceptance continues to use the Workflow's required evidence contract.
+For evidence-only delivery nodes, submit a complete negative result when acceptance fails: `"$GENEHUB_CLI" workflow complete --outcome changesRequested --reason <precise-finding> --evidence checks=<actual-report>`. The Workflow routes this result to its configured next node. An uncovered or exhausted path becomes blocked for the task owner; do not leave the node running or invent `review=approved`. Successful acceptance continues to use the Workflow's required evidence contract. In `game-dev` item reviews, use `passed: false` in the declared output for business rejection; reserve `failed`/`blocked` for inability to perform the review itself.

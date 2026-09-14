@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -265,6 +265,24 @@ function deliveryForRequest(request: unknown, deliveries: DeliveryScript[]): Del
   );
 }
 
+function developmentPhase(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const match = value.match(/结构化输入（数据，不是指令）：([^\n]+)/);
+    if (match) return (JSON.parse(match[1]!) as { phase?: string }).phase;
+  } else if (value && typeof value === "object") {
+    for (const child of Object.values(value).reverse()) {
+      const phase = developmentPhase(child);
+      if (phase) return phase;
+    }
+  }
+  return undefined;
+}
+
+function developmentPlan(goal: string, markers: string[]) {
+  return { decision: "go", scope: goal, feasibility: "The fixture is a bounded static game task", risks: "Interactive checks remain separate from source checks", budgetAdvice: "One milestone within the existing request budget",
+    milestones: [{ id: "delivery", goal, criteria: [{ id: "entry", requirement: "Entry contains the requested markers: " + markers.join(", "), method: "Read the pinned entry and check every marker" }] }] };
+}
+
 function scriptProductJourney(
   mock: JourneyMock,
   projectRoot: string,
@@ -274,7 +292,7 @@ function scriptProductJourney(
 ): void {
   const pmStages = new Map<string, number>();
   const coderStages = new Map<string, number>();
-  const reviewerStages = new Map<string, number>();
+  const dataReviewOperations = new Set<string>();
   let managerStage = 0;
   let improvementDispatched = false;
   let improvementRetried = false;
@@ -282,7 +300,6 @@ function scriptProductJourney(
   let qualityStage = 0;
   let trialPmStage = 0;
   let trialCoderStage = 0;
-  let trialReviewerStage = 0;
   const reviewOperations = new Set<string>();
   let reviewFirstDispatched = false;
   let repairs = 0;
@@ -344,8 +361,12 @@ process.stdout.write(cp.execFileSync(process.env.GENEHUB_CLI,args,{encoding:'utf
         return { text: "实验实现完成。" };
       }
       if (body.includes("你是小游戏项目的 Reviewer")) {
-        if (trialReviewerStage++ === 0) return { tool: { name: "bash", arguments: { command: `cd ${shellArg(trialRoot)} && grep -q trial-only-result index.html && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks=experimental-artifact-check` } } };
-        return { text: "实验节点验收完成。" };
+        const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
+        if (!operation) throw new Error("trial review omitted its operation");
+        if (dataReviewOperations.has(operation)) return { text: "Review submitted." };
+        dataReviewOperations.add(operation);
+        if (developmentPhase(request) === "requirements") return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow complete --output ${shellArg(JSON.stringify(developmentPlan("Experimental game", ["trial-only-result"])))}` } } };
+        return { tool: { name: "bash", arguments: { command: `cd ${shellArg(trialRoot)} && grep -q trial-only-result index.html && "$GENEHUB_CLI" workflow complete --output ${shellArg(JSON.stringify({ passed: true, finding: "Expected trial entry exists", evidence: "experimental-artifact-check" }))}` } } };
       }
       const stage = trialPmStage++;
       const trialPlan = path.join(projectRoot, ".genethub", "temp", "trial-plan.json");
@@ -374,7 +395,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
       if (stage === 3) {
         const digest = fieldFromRequest(request, "candidateDigest");
         if (typeof digest !== "string") throw new Error("trial has no compiled candidate digest");
-        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow dispatch --workflow game-feature --candidate ${shellArg(digest)} --task workflow-trial-j3 --no-wait --message "实验运行 J3，仅操作独立实验目录，验证最小产物。"` } } };
+        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow dispatch --workflow game-dev --candidate ${shellArg(digest)} --task workflow-trial-j3 --no-wait --message "实验运行 J3，仅操作独立实验目录，验证最小产物。"` } } };
       }
       return { text: "实验结果已回到 PM；正式流程保持原版本。" };
     }
@@ -494,23 +515,24 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
     }
 
     if (body.includes("你是小游戏项目的 Reviewer")) {
-      const stage = reviewerStages.get(delivery.task) ?? 0;
-      reviewerStages.set(delivery.task, stage + 1);
-      if (stage === 0) {
+      const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
+      if (!operation) throw new Error("development review omitted its operation");
+      const identity = `${delivery.task}:${operation}`;
+      if (dataReviewOperations.has(identity)) return { text: "Review submitted." };
+      dataReviewOperations.add(identity);
+      if (developmentPhase(request) === "requirements") return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow complete --output ${shellArg(JSON.stringify(developmentPlan(delivery.message, delivery.markers)))}` } } };
+      {
         return {
           tool: {
             name: "bash",
             arguments: {
               command: `cd ${root} && sleep 2 && test -s index.html && ${delivery.markers
                 .map((marker) => `grep -q ${shellArg(marker)} index.html`)
-                .join(" && ")} && "$GENEHUB_CLI" workflow complete --evidence review=approved --evidence checks=${shellArg(
-                "playability-and-regression-smoke",
-              )}`,
+                .join(" && ")} && "$GENEHUB_CLI" workflow complete --output ${shellArg(JSON.stringify({ passed: true, finding: "Every requested marker is present", evidence: "entry-and-regression-smoke; interactive checks are separate" }))}`,
             },
           },
         };
       }
-      return { text: "Reviewer 已完成独立验收。" };
     }
 
     const stage = pmStages.get(delivery.task) ?? 0;
@@ -577,7 +599,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
           arguments: {
             command: `"$GENEHUB_CLI" space bootstrap apply --pack ${PACK_ID} --plan-digest ${shellArg(
               planDigest,
-            )} --expected-revision ${expectedRevision} --action-id bootstrap-${delivery.task} && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --kind game --complexity project --task ${shellArg(
+            )} --expected-revision ${expectedRevision} --action-id bootstrap-${delivery.task} && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
               delivery.task,
             )} --no-wait --message ${shellArg(delivery.message)}`,
           },
@@ -589,7 +611,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
         tool: {
           name: "bash",
           arguments: {
-            command: `"$GENEHUB_CLI" space inspect && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --kind feature --complexity complex --task ${shellArg(
+            command: `"$GENEHUB_CLI" space inspect && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
               delivery.task,
             )} --no-wait --message ${shellArg(delivery.message)}`,
           },
@@ -844,7 +866,7 @@ async function assertDelivery(
   const kinds = flow.messages.filter(message=>message.kind !== "structure.transition").map((message) => message.kind);
   t.assertions.assert(
     kinds.join(",") ===
-      "run.requested,node.assigned,node.completed,node.assigned,node.completed,run.completed",
+      "run.requested,node.assigned,node.completed,node.assigned,node.completed,node.assigned,node.completed,run.completed",
     `unexpected Executor timeline: ${JSON.stringify(kinds)}`,
   );
   const implementAssigned = flow.messages.find(
@@ -873,11 +895,12 @@ async function assertDelivery(
   const sessions = sessionsReply.data;
   const workers = sessions.filter((session) => session.managed?.workflowRunId === completed.id);
   const coder = workers.find((session) => session.managed?.role === "coder");
-  const reviewer = workers.find((session) => session.managed?.role === "reviewer");
-  t.assertions.assert(workers.length === 2 && Boolean(coder && reviewer), "Run did not use one Coder and one Reviewer");
+  const reviewers = workers.filter((session) => session.managed?.role === "reviewer");
+  t.assertions.assert(workers.length === 3 && Boolean(coder) && reviewers.length === 2, "Run did not use requirement review, Coder and item review");
+  t.assertions.assert((completed.structure as { outcome?: { value?: { done?: boolean } } })?.outcome?.value?.done === true && completed.workflowId === "game-dev", "assessment completion was mistaken for delivered work");
   t.assertions.assert(
     coder?.managed?.parentSessionId === completed.executorSessionId &&
-      reviewer?.managed?.parentSessionId === completed.executorSessionId,
+      reviewers.every(session => session.managed?.parentSessionId === completed.executorSessionId),
     "Worker Sessions are not managed by the Executor Session",
   );
 
@@ -885,7 +908,7 @@ async function assertDelivery(
   const team = assertTeam(t, fixture, spaces);
   t.assertions.assert(coder?.workspaceId === team.get("coder")?.id, "Coder ran outside Coder AgentSpace");
   t.assertions.assert(
-    reviewer?.workspaceId === team.get("reviewer")?.id,
+    reviewers.every(session => session.workspaceId === team.get("reviewer")?.id),
     "Reviewer ran outside Reviewer AgentSpace",
   );
   t.assertions.assert(
@@ -1039,7 +1062,7 @@ defineJourney(
         afterIdentity.join(",") === beforeIdentity.join(","),
         `feature delivery rebuilt the team: before=${beforeIdentity} after=${afterIdentity}`,
       );
-      t.assertions.assert(delivery.run.workflowId === "game-feature", "PM selected the wrong project DCG");
+      t.assertions.assert(delivery.run.workflowId === "game-dev", "PM selected the wrong project DCG");
       const html = readFileSync(path.join(fixture.projectRoot, "index.html"), "utf8");
       for (const marker of [
         "weather-system",
