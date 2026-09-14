@@ -347,13 +347,37 @@ describe("RPC exchanges are independent logical streams", () => {
   });
 
   it("does not replay a request whose outcome became unknown", async () => {
-    const { client, socket } = await connected();
+    const diagnostics: Array<{ kind: string; detail: Record<string, unknown> }> = [];
+    const { client, socket } = await connected({
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
     const request = client.call({ type: "agent.list" });
     await waitFor(() => socket.sent.some((message) => message.type === "agent.list"));
     socket.endSession();
 
     await expect(request).rejects.toBeInstanceOf(ConnectionOutcomeUnknownError);
     expect(socket.sent.filter(message => message.type === "agent.list")).toHaveLength(1);
+    const finish = diagnostics.find(
+      (event) =>
+        event.kind === "operation" &&
+        event.detail.operation === "agent.list" &&
+        event.detail.phase === "finish",
+    );
+    expect(finish?.detail.outcome).toBe("ConnectionOutcomeUnknownError");
+    expect(finish?.detail).toMatchObject({
+      closeCode: null,
+      hasCloseReason: false,
+    });
+    const error = diagnostics.find(
+      (event) => event.kind === "error" && event.detail.operation === "agent.list",
+    );
+    expect(error?.detail).toMatchObject({
+      errorName: "ConnectionOutcomeUnknownError",
+      operation: "agent.list",
+      closeCode: null,
+      hasCloseReason: false,
+    });
+    expect(error?.detail.message).toBeUndefined();
     client.close();
   });
 
