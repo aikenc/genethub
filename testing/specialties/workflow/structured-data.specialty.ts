@@ -23,7 +23,7 @@ function assignment(value: unknown): { kind: string; value?: number; previous?: 
   return undefined;
 }
 
-for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "shape-reject", "null", "bounds", "overflow", "host-failure", "budget"] as const) defineSpecialty({
+for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "shape-reject", "optional-object", "null", "bounds", "overflow", "host-failure", "budget"] as const) defineSpecialty({
   id: `specialty.workflow.structured-data.${scenario}`,
   title: `Structured ${scenario} preserves data and local control through real Workers`,
   oracle: "One Run consumes a Worker-produced array, persists typed outputs and a serial accumulator; a local exit prevents later item effects but permits its enclosing sequence, while cancellation and host failure cannot be swallowed",
@@ -46,7 +46,8 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
     await cli(["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
     const source = path.join(opened.workspaceRoot, ".genethub/workflow");
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "DATA_WORKER: process only your structured assignment; report actual outputs.\n");
-    const outputShape = { type: "object", properties: { ok: { type: "boolean" }, value: { type: "integer" }, details: { type: "string", enum: ["checked"] } } };
+    const outputShape = { type: "object", properties: { ok: { type: "boolean" }, value: { type: "integer" }, details: { type: "string", enum: ["checked"] } },
+      ...(scenario === "optional-object" ? { required: ["ok", "value"], additionalProperties: false } : {}) };
     const next = object({ count: { op: "add", left: ref("/vars/count"), right: literal(1) },
       items: { op: "append", array: ref("/vars/items"), value: ref("/results/work/output/value") }, stopped: literal(null) });
     const body = { id: "item-body", type: "sequence", steps: [
@@ -88,7 +89,9 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
       if (seen.has(operation)) return { text: "Result submitted." };
       seen.add(operation);
       const rejects = ["break", "restart"].includes(scenario) && input.kind === "work" && input.value === 2;
-      const output = input.kind === "null" ? null : input.kind === "plan" ? [1, 2, 3, 4, 5] : { ok: !rejects, value: (input.value ?? 0) * 10, details: "checked" };
+      const output = input.kind === "null" ? null : input.kind === "plan" ? [1, 2, 3, 4, 5]
+        : scenario === "optional-object" ? { ok: !rejects, value: (input.value ?? 0) * 10 }
+        : { ok: !rejects, value: (input.value ?? 0) * 10, details: "checked" };
       const bad = scenario === "shape-reject" && input.kind === "work" && input.value === 1
         ? [undefined, { value: 10, details: "checked" }, { ok: true, value: "10", details: "checked" }, { ok: true, value: 10, details: "misspelled" }, { ok: true, value: 10, details: "checked", extra: true }]
         : scenario === "bounds" && input.kind === "plan" ? [[], Array.from({ length: 9 }, () => 1), Array.from({ length: 4097 }, () => 1)] : [];
