@@ -23,7 +23,7 @@ const manifest: RunManifest = {
   qualification: { gate: "change", policyVersion: "gates.v1", qualified: false, reasons: ["failed cases present"] },
   environments: 1,
   resultsPath: "/run/results.ndjson",
-  leak: { processes: 0, ports: 0 },
+  leak: { processes: 0, ports: null },
 };
 
 const failure: UnitResult = {

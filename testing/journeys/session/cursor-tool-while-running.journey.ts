@@ -9,6 +9,8 @@ defineJourney(
     oracle: "a tool event arrives at least 250ms before turnCompleted when Cursor writes ping.txt",
     catches: ["ACP timeline flushed only at turn end"],
     tags: ["third-party", "session", "parity"],
+    llm: { default: "real" },
+    resources: { pool: "real-llm" },
     expectedDurationMs: 120_000,
     timeoutMs: 210_000,
     surfaces: ["daemon", "agent", "workbench-client"],

@@ -44,6 +44,16 @@ pub struct Config {
     #[serde(default)]
     pub workspace_roots: Vec<WorkspaceRootEntry>,
     pub workspaces: Vec<WorkspaceEntry>,
+    /// AgentSpace tree position and mounted components keyed by workspace id.
+    /// Kept outside WorkspaceEntry so ordinary folder registrations remain a
+    /// neutral, backwards-compatible filesystem fact.
+    #[serde(default)]
+    pub agent_spaces: Vec<AgentSpaceEntry>,
+    /// The exclusive `pm` / `workerRole` shape this model replaced. Read once
+    /// so an existing installation keeps its project tree, then never written
+    /// again: two writable shapes would be two sources of truth.
+    #[serde(default, rename = "pipeSpaces", skip_serializing)]
+    pub(crate) legacy_pipe_spaces: Vec<LegacyPipeSpaceEntry>,
     /// Identifies one lifetime of the local workspace catalogue.
     ///
     /// This is deliberately unrelated to the machine identity and to any Hub
@@ -73,6 +83,8 @@ impl Default for Config {
             speech: SpeechConfig::default(),
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),
+            agent_spaces: Vec::new(),
+            legacy_pipe_spaces: Vec::new(),
             workspace_catalog_generation: String::new(),
             workspace_catalog_revision: 0,
             replay_window: 2048,
@@ -210,6 +222,65 @@ pub struct WorkspaceEntry {
     pub is_git_repo: bool,
 }
 
+/// Where one AgentSpace sits in the ownership tree, and what it is.
+///
+/// `revision` covers the parent, the lifecycle and the whole component set at
+/// once. One counter rather than one per field: callers reason about "the
+/// registration I read", and a component change can invalidate a parent
+/// decision just as much as a reparent can.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpaceEntry {
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_workspace_id: Option<String>,
+    pub revision: u64,
+    pub lifecycle: String,
+    pub builder_lock_digest: String,
+    #[serde(default)]
+    pub components: Vec<AgentComponentEntry>,
+    /// User-facing Session starters supplied by the owning Bootstrap Pack.
+    /// Empty for hand-composed Spaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guidance: Vec<String>,
+    /// Provenance of a Pack-created Space. This is display/reconciliation
+    /// metadata, never an authority source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_pack: Option<AgentSpacePackEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpacePackEntry {
+    pub id: String,
+    pub version: u32,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentComponentEntry {
+    pub component_id: String,
+    pub schema_version: u32,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LegacyPipeSpaceEntry {
+    workspace_id: String,
+    #[serde(default)]
+    parent_workspace_id: Option<String>,
+    #[serde(default)]
+    pm: bool,
+    #[serde(default)]
+    worker_role: Option<String>,
+    lifecycle: String,
+    builder_lock_digest: String,
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
@@ -238,6 +309,7 @@ impl Config {
                 let mut config: Self = serde_json::from_value(value)
                     .with_context(|| format!("parsing {}", path.display()))?;
                 config.normalize_workspace_paths();
+                config.adopt_legacy_pipe_spaces();
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -248,6 +320,63 @@ impl Config {
     pub fn save(&self, path: &Path) -> Result<()> {
         let body = serde_json::to_string_pretty(self)?;
         save_private(path, body.as_bytes())
+    }
+
+    /// Reads the exclusive-role registrations an older build wrote and states
+    /// them as component mounts.
+    ///
+    /// Directional on purpose. The old shape cannot express a Space with two
+    /// responsibilities, so a round trip through it would silently drop one;
+    /// the legacy field is therefore never written back. An entry already
+    /// present in `agentSpaces` wins, which makes a partially upgraded config
+    /// converge instead of resurrecting a stale relationship.
+    fn adopt_legacy_pipe_spaces(&mut self) {
+        for legacy in std::mem::take(&mut self.legacy_pipe_spaces) {
+            if self
+                .agent_spaces
+                .iter()
+                .any(|space| space.workspace_id == legacy.workspace_id)
+            {
+                continue;
+            }
+            let mut components = Vec::new();
+            if legacy.pm {
+                components.push(AgentComponentEntry {
+                    component_id: crate::agent_space::COMPONENT_PM.to_string(),
+                    schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
+                    enabled: true,
+                    role: None,
+                });
+            }
+            match legacy.worker_role.as_deref() {
+                None => {}
+                Some(crate::agent_space::LEGACY_EXECUTOR_ROLE) => {
+                    components.push(AgentComponentEntry {
+                        component_id: crate::agent_space::COMPONENT_EXECUTOR.to_string(),
+                        schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
+                        enabled: true,
+                        role: None,
+                    });
+                }
+                Some(role) => components.push(AgentComponentEntry {
+                    component_id: crate::agent_space::COMPONENT_WORKER.to_string(),
+                    schema_version: crate::agent_space::COMPONENT_SCHEMA_VERSION,
+                    enabled: true,
+                    role: Some(role.to_string()),
+                }),
+            }
+            components.sort_by(|left, right| left.component_id.cmp(&right.component_id));
+            self.agent_spaces.push(AgentSpaceEntry {
+                workspace_id: legacy.workspace_id,
+                parent_workspace_id: legacy.parent_workspace_id,
+                revision: 1,
+                lifecycle: legacy.lifecycle,
+                builder_lock_digest: legacy.builder_lock_digest,
+                components,
+                guidance: Vec::new(),
+                bootstrap_pack: None,
+            });
+        }
     }
 
     /// Rewrites workspace roots from a Windows host's spelling into the
@@ -661,6 +790,136 @@ mod tests {
         assert_eq!(config.port, 0);
         assert!(!config.lan_enabled);
         assert!(!config.speech.stub_enabled);
+    }
+
+    #[test]
+    fn config_before_agent_space_relationships_loads_with_an_empty_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().remove("agentSpaces");
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+
+        assert!(loaded.agent_spaces.is_empty());
+    }
+
+    #[test]
+    fn exclusive_role_registrations_are_read_as_mounted_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "pipeSpaces".into(),
+            serde_json::json!([
+                {
+                    "workspaceId": "ws_project",
+                    "pm": true,
+                    "lifecycle": "persistent",
+                    "builderLockDigest": "sha256:project",
+                },
+                {
+                    "workspaceId": "ws_executor",
+                    "parentWorkspaceId": "ws_project",
+                    "pm": false,
+                    "workerRole": "workflow-executor",
+                    "lifecycle": "pooled",
+                    "builderLockDigest": "sha256:executor",
+                },
+                {
+                    "workspaceId": "ws_tester",
+                    "parentWorkspaceId": "ws_project",
+                    "pm": false,
+                    "workerRole": "tester",
+                    "lifecycle": "persistent",
+                    "builderLockDigest": "sha256:tester",
+                },
+            ]),
+        );
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+
+        let components = |workspace_id: &str| {
+            loaded
+                .agent_spaces
+                .iter()
+                .find(|space| space.workspace_id == workspace_id)
+                .map(|space| {
+                    space
+                        .components
+                        .iter()
+                        .map(|component| (component.component_id.clone(), component.role.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap()
+        };
+        assert_eq!(components("ws_project"), vec![("pm".into(), None)]);
+        assert_eq!(components("ws_executor"), vec![("executor".into(), None)]);
+        assert_eq!(
+            components("ws_tester"),
+            vec![("worker".into(), Some("tester".into()))],
+            "an ordinary worker role becomes the worker component's role"
+        );
+        assert!(loaded
+            .agent_spaces
+            .iter()
+            .all(|space| space.revision == 1 && !space.builder_lock_digest.is_empty()));
+
+        loaded.save(&path).unwrap();
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(
+            rewritten.get("pipeSpaces").is_none(),
+            "the replaced shape is never written back, so there is only one truth on disk"
+        );
+        assert_eq!(
+            Config::load(&path).unwrap().agent_spaces,
+            loaded.agent_spaces,
+            "the migrated registry survives the rewrite it just caused"
+        );
+    }
+
+    #[test]
+    fn an_already_migrated_registration_is_not_overwritten_by_the_legacy_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut value = serde_json::to_value(Config {
+            agent_spaces: vec![AgentSpaceEntry {
+                workspace_id: "ws_project".into(),
+                parent_workspace_id: None,
+                revision: 7,
+                lifecycle: "persistent".into(),
+                builder_lock_digest: "sha256:current".into(),
+                components: vec![AgentComponentEntry {
+                    component_id: "executor".into(),
+                    schema_version: 1,
+                    enabled: true,
+                    role: None,
+                }],
+                guidance: Vec::new(),
+                bootstrap_pack: None,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        value.as_object_mut().unwrap().insert(
+            "pipeSpaces".into(),
+            serde_json::json!([{
+                "workspaceId": "ws_project",
+                "pm": true,
+                "lifecycle": "ephemeral",
+                "builderLockDigest": "sha256:stale",
+            }]),
+        );
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+
+        assert_eq!(loaded.agent_spaces.len(), 1);
+        assert_eq!(loaded.agent_spaces[0].revision, 7);
+        assert_eq!(loaded.agent_spaces[0].lifecycle, "persistent");
     }
 
     #[test]

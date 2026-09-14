@@ -139,6 +139,18 @@ async function onPrompt(id, params) {
 
   if (args.delayMs > 0) await sleep(args.delayMs);
 
+  if (args.profile === "native-plan") {
+    const text = (params.prompt ?? []).map(p => p.text ?? "").join("\n");
+    if (text.includes("The user approved the interrupted plan")) {
+      journal("approved-continuation", { sessionId });
+      messageChunk(sessionId, "native plan continued");
+      pendingPrompt = null;
+      respond(id, { stopReason: "end_turn" });
+    } else {
+      write({ jsonrpc: "2.0", id: "native-plan-request", method: "cursor/create_plan", params: { toolCallId: "plan-tool", name: "Native Agent plan", plan: "Report completion after Human approval", todos: [] } });
+    }
+    return;
+  }
   switch (args.profile) {
     case "normal": {
       for (let i = 0; i < args.chunks; i += 1) messageChunk(sessionId, `chunk-${i} `);
@@ -225,7 +237,10 @@ function onCancel() {
 
 async function onFrame(frame) {
   const { id, method, params } = frame;
-  if (typeof method !== "string") return;
+  if (typeof method !== "string") {
+    if (id === "native-plan-request") journal("plan-cancellation", { result: frame.result });
+    return;
+  }
   if (method !== "session/update") journal("rpc", { method, id: id ?? null });
 
   switch (method) {
@@ -245,6 +260,7 @@ async function onFrame(frame) {
         protocolVersion: PROTOCOL_VERSION,
         agentCapabilities: {
           loadSession: false,
+          ...(args.profile === "native-plan" ? { sessionCapabilities: { resume: {} } } : {}),
           promptCapabilities: { image: true, embeddedContext: true },
         },
       });
@@ -261,6 +277,12 @@ async function onFrame(frame) {
       // The handshake is over, so a profile that must go deaf can go deaf now
       // without breaking session setup.
       if (args.profile === "stdin-never-drains") stopReadingStdin();
+      return;
+    }
+    case "session/resume": {
+      currentSessionId = params.sessionId;
+      journal("resumed", { sessionId: currentSessionId });
+      respond(id, {});
       return;
     }
     case "session/prompt": {

@@ -24,6 +24,7 @@ export interface DefineInput {
   surfaces: string[];
   productInterfaces?: string[];
   requiredArtifacts?: string[];
+  requiredRepos?: CaseMeta["requiredRepos"];
   requirements?: CaseMeta["requirements"];
   doubleExceptions?: CaseMeta["doubleExceptions"];
   retention?: boolean;
@@ -49,6 +50,7 @@ function register(kind: CaseKind, input: DefineInput, run: CaseDefinition["run"]
     surfaces: input.surfaces,
     productInterfaces: input.productInterfaces,
     requiredArtifacts: input.requiredArtifacts,
+    requiredRepos: input.requiredRepos,
     requirements: input.requirements,
     doubleExceptions: input.doubleExceptions,
     retention: input.retention,

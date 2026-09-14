@@ -18,6 +18,7 @@ import {
   type SpeechTextRange,
 } from "../speech/SpeechComposer";
 import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
+import { readLocalDraft, saveLocalDraft } from "./localConversation";
 import { ComposerControls } from "./ComposerControls";
 import type { ComposerDraftInsert, ForwardDraft } from "./store";
 
@@ -113,7 +114,10 @@ const COMPOSER_PHONE_DOCK =
  * of commands and skills that are invisible outside its own terminal.
  */
 export function Composer({
+  layout = "overlay",
+  persistenceKey,
   phase,
+  durableInput = false,
   disabled,
   disabledReason,
   agents,
@@ -145,7 +149,11 @@ export function Composer({
   minimized,
   onExpand,
 }: {
+  /** Overview reserves space; existing timelines retain their overlay contract. */
+  layout?: "overlay" | "inline";
+  persistenceKey?: string;
   phase: ComposerPhase;
+  durableInput?: boolean;
   disabled?: boolean;
   /** Why this transcript cannot accept a new turn, when the state is durable. */
   disabledReason?: string;
@@ -200,7 +208,9 @@ export function Composer({
   minimized?: boolean;
   onExpand?(): void;
 }) {
-  const [draft, setDraft] = useState("");
+  const [saved] = useState(() => persistenceKey ? readLocalDraft(persistenceKey) : { text: "", attachments: [], missingAttachments: 0 });
+  const [draft, setDraft] = useState(saved.text);
+  const [missingAttachments, setMissingAttachments] = useState(saved.missingAttachments);
   // Only while a turn is running, and only every few seconds: the number this
   // feeds is read in minutes, and a per-second timer on the composer would cost
   // more than the precision is worth.
@@ -213,8 +223,11 @@ export function Composer({
     return () => clearInterval(timer);
   }, [watchingQuiet]);
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [pasteNotice, setPasteNotice] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
+  useEffect(() => {
+    if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments });
+  }, [persistenceKey, draft, attachments, missingAttachments]);
+  const [pasteNotice, setPasteNotice] = useState<string | null>(saved.missingAttachments ? `${saved.missingAttachments} 个附件未能恢复，请重新选择后发送。` : ("recoveryNotice" in saved ? saved.recoveryNotice ?? null : null));
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -316,7 +329,7 @@ export function Composer({
     // used to reach the daemon mid-turn and come back as "a turn is already
     // running in this session", which describes our own key handler rather than
     // anything the reader did wrong.
-    if (phase !== "idle" || disabled || speechInput.busy) return;
+    if (phase === "sending" || (!durableInput && phase !== "idle") || disabled || speechInput.busy) return;
     const text = draft.trim();
     if (!text && attachments.length === 0 && !forwardDraft) return;
     // The parked capsule travels ahead of the user's own words, inside the
@@ -332,6 +345,8 @@ export function Composer({
     setActiveSpeechSpan(null);
     setDraft("");
     setAttachments([]);
+    setMissingAttachments(0);
+    if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
     setDismissed(false);
     onSend(payload, outgoing);
     if (forwardDraft) onClearForwardDraft?.();
@@ -421,10 +436,10 @@ export function Composer({
       // The transparent shell overlays the full-height transcript. Only its
       // interactive children catch taps; TimelineView reserves this measured
       // height at the end of its scroll *content*, not from its viewport.
-      className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3 pt-2 md:px-4 max-md:px-0"
+      className={`pointer-events-none ${layout === "inline" ? "relative shrink-0" : "absolute inset-x-0 bottom-0"} z-10 px-3 pt-2 md:px-4 max-md:px-0`}
       style={{
         // Lift only for the on-screen keyboard (`shell/viewport.ts`: the
-        // shell is covered, not shrunk). The home-indicator inset lives
+        // remaining overlap after any viewport resize). The home-indicator inset lives
         // *inside* the card so the opaque surface reaches the window edge
         // on a phone; putting it on this transparent shell left a strip of
         // transcript showing under the rounded card.
@@ -781,7 +796,7 @@ export function Composer({
                   type="button"
                   aria-label="语音输入"
                   title="语音转文字"
-                  disabled={disabled || phase !== "idle"}
+                  disabled={disabled || (!durableInput && phase !== "idle")}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => {
                     setDismissed(true);
@@ -813,7 +828,7 @@ export function Composer({
                   : "添加文件（当前 Agent 不支持附件）"
               }
               title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
-              disabled={disabled || phase !== "idle" || speechInput.busy || !attachmentsSupported}
+              disabled={disabled || (!durableInput && phase !== "idle") || speechInput.busy || !attachmentsSupported}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
@@ -841,6 +856,10 @@ export function Composer({
               </button>
             ) : phase === "running" ? (
               <div className="flex shrink-0 items-center gap-1.5">
+                {durableInput && (draft.trim() || attachments.length || forwardDraft) ? <button
+                  type="button" aria-label="发送补充消息" title="发送提问或新要求，由当前 Agent 接续处理"
+                  disabled={disabled || speechInput.busy} onMouseDown={event => event.preventDefault()}
+                  onClick={() => send()} className="min-h-9 rounded-full px-3 text-xs text-accent disabled:opacity-30">发送补充</button> : null}
                 {quiet ? (
                   // Next to Stop, because that is the decision it informs.
                   <span className="whitespace-nowrap text-[10px] leading-none text-muted" title="智能体已接受这一轮，但有一段时间没有新内容了。这不代表它出了问题——长任务本来就会安静很久。">
@@ -850,6 +869,7 @@ export function Composer({
                 <button
                   type="button"
                   aria-label="停止"
+                  title="停止当前 Agent 本轮回复"
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={onInterrupt}
                   className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full border border-line text-muted hover:border-danger hover:text-danger focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:w-6"

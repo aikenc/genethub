@@ -10,6 +10,7 @@ members = [
     "packages/frontdoor",
     "packages/http",
     "packages/identity",
+    "packages/workflow-engine",
     "packages/native",
     "packages/wasi-guest",
     "packages/proto",
@@ -25,6 +26,7 @@ default-members = [
     "packages/frontdoor",
     "packages/http",
     "packages/identity",
+    "packages/workflow-engine",
     "packages/native",
     "packages/proto",
 ]
@@ -61,6 +63,7 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "process", "sync", "time", "fs", "signal"] }
 ts-rs = "10"

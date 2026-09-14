@@ -1,0 +1,12 @@
+{
+  "folders": [
+    {
+      "name": "workflow-reviewer",
+      "path": "."
+    },
+    {
+      "name": "project",
+      "path": "../.."
+    }
+  ]
+}

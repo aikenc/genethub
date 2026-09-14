@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { useWorkbench } from "../session/store";
 
@@ -14,6 +14,8 @@ import { useWorkbench } from "../session/store";
  * always what just happened.
  */
 export function LogsPanel({ onOpenDirectory }: { onOpenDirectory?: () => void }) {
+  const [copyError, setCopyError] = useState("");
+  const entries = useWorkbench(state => state.interfaceLogs);
   const log = useWorkbench((state) => state.log);
   const loadLog = useWorkbench((state) => state.loadLog);
   const client = useWorkbench((state) => state.client);
@@ -24,6 +26,27 @@ export function LogsPanel({ onOpenDirectory }: { onOpenDirectory?: () => void })
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+      <section aria-label="界面日志" className="shrink-0 rounded-lg border border-line p-3">
+        <div className="flex flex-wrap items-center gap-2"><h2 className="mr-auto font-medium">界面日志</h2>
+          <button type="button" className="min-h-11 rounded px-3 text-sm hover:bg-raised" disabled={!entries.length} onClick={async () => {
+            setCopyError("");
+            try {
+              if (!navigator.clipboard) throw new Error("当前浏览器不支持复制，请手动选择日志。");
+              await navigator.clipboard.writeText(entries.map(entry => `${new Date(entry.at).toLocaleString()} ${entry.machine} ${entry.message}`).join("\n"));
+            } catch (error) { setCopyError(error instanceof Error ? error.message : "复制失败"); }
+          }}>复制界面日志</button>
+          <button type="button" className="min-h-11 rounded px-3 text-sm hover:bg-raised" disabled={!entries.length} onClick={() => useWorkbench.setState({interfaceLogs: [], notice: null})}>清空界面日志</button>
+        </div>
+        <p className="mb-2 text-xs text-muted">记录当前页面收到的提示和错误，最多保留 100 条；刷新页面后清空。</p>
+        {copyError && <p role="alert" className="text-sm text-danger">{copyError}</p>}
+        <div className="max-h-48 overflow-y-auto overscroll-contain text-xs">
+          {!entries.length ? <p className="text-muted">暂无界面日志。</p> : <ol className="space-y-2">{entries.map((entry, index) => <li key={index} className="break-words border-b border-line pb-2">
+            <p className="text-muted"><time>{new Date(entry.at).toLocaleString()}</time>{entry.machine && ` · ${entry.machine}`}</p>
+            <p className="whitespace-pre-wrap">{entry.message}</p>
+          </li>)}</ol>}
+        </div>
+      </section>
+      <h2 className="shrink-0 font-medium">设备日志</h2>
       <div className="flex flex-wrap items-center gap-2">
         {(log?.files ?? []).map((file) => (
           <button

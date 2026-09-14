@@ -1,0 +1,10 @@
+{
+  "schema": "pipespace.v1",
+  "name": "workflow-manager",
+  "description": "Project Workflow analysis and Candidate improvement Space.",
+  "agents": ["codex", "cursor", "codebuddy", "claude-code"],
+  "skills": ["workflow-manager"],
+  "tags": ["worker", "workflow-manager", "executor"],
+  "skillProviders": [{"type": "folder", "path": "skills"}],
+  "children": {"scanDepth": 0}
+}

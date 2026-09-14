@@ -158,6 +158,8 @@ mod tests {
                 })
                 .collect(),
             workspace_file: None,
+            agent_space: None,
+            pipe_space: None,
         }
     }
 

@@ -1,4 +1,4 @@
-import type { AgentInfo, SequencedEvent, SessionSummary } from "@genehub/proto";
+import type { AgentInfo, SequencedEvent, SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
@@ -542,7 +542,7 @@ describe("a message that has been sent and not yet confirmed", () => {
 });
 
 describe("live session status in the sidebar", () => {
-  it("tracks running, waiting, failed and completed events immediately", async () => {
+  it("tracks turn events while preserving an unresolved Human request", async () => {
     const { client, fire } = stubClient();
     useWorkbench.setState({ client });
     await useWorkbench.getState().selectSession("s1");
@@ -593,7 +593,138 @@ describe("live session status in the sidebar", () => {
         },
       },
     });
-    expect(useWorkbench.getState().sessions[0]?.status).toBe("idle");
+    expect(useWorkbench.getState().sessions[0]?.status).toBe("waiting");
+  });
+
+  it("refreshes the AgentSpace tree when a polled background turn finishes", async () => {
+    const running: SessionSummary = { ...SESSION, status: "running" };
+    const root: WorkspaceInfo = {
+      id: "w1",
+      name: "game",
+      root: "/tmp/game",
+      isGitRepo: true,
+      folders: [{ name: "game", root: "/tmp/game", rootHandle: "r_game" }],
+      agentSpace: {
+        revision: 1,
+        lifecycle: "persistent",
+        builderLockDigest: "sha256:game",
+        components: [{ componentId: "pm", enabled: true, schemaVersion: 1 }],
+        guidance: [],
+      },
+    };
+    const executor: WorkspaceInfo = {
+      id: "w2",
+      name: "executor",
+      root: "/tmp/game/spaces/executor",
+      isGitRepo: false,
+      folders: [
+        {
+          name: "executor",
+          root: "/tmp/game/spaces/executor",
+          rootHandle: "r_executor",
+        },
+      ],
+      agentSpace: {
+        revision: 1,
+        parentWorkspaceId: root.id,
+        lifecycle: "pooled",
+        builderLockDigest: "sha256:executor",
+        components: [{ componentId: "executor", enabled: true, schemaVersion: 1 }],
+        guidance: [],
+      },
+    };
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [{ ...running, status: "idle" }] };
+        }
+        if (request.type === "workspace.list") {
+          return { type: "workspaces", data: [root, executor] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [running], workspaces: [root] });
+
+    await useWorkbench.getState().refreshSessions();
+
+    expect(calls).toEqual(["session.list", "workspace.list"]);
+    expect(useWorkbench.getState().workspaces.map(({ id }) => id)).toEqual(["w1", "w2"]);
+  });
+
+  it("does not turn stable Session polling into AgentSpace polling", async () => {
+    const idle: SessionSummary = { ...SESSION, status: "idle" };
+    const calls: string[] = [];
+    const client = {
+      call: async (request: { type: string }) => {
+        calls.push(request.type);
+        if (request.type === "session.list") {
+          return { type: "sessions", data: [idle] };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client, sessions: [idle] });
+
+    await useWorkbench.getState().refreshSessions();
+
+    expect(calls).toEqual(["session.list"]);
+  });
+});
+
+describe("Human interaction acknowledgement", () => {
+  it("shows submission immediately and continuation when approval resolves", async () => {
+    const stub = stubClient();
+    let finish!: (reply: { type: "ack" }) => void;
+    const response = new Promise<{ type: "ack" }>((resolve) => {
+      finish = resolve;
+    });
+    const client = {
+      ...stub.client,
+      call: vi.fn(async () => response),
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+    await useWorkbench.getState().selectSession("s1");
+    stub.fire({
+      seq: 1,
+      sessionId: "s1",
+      event: {
+        type: "permissionRequested",
+        request: {
+          id: "plan-1",
+          kind: "planApproval",
+          title: "初始化 PM 项目",
+          options: [{ id: "yes", label: "确认并继续", kind: "allowOnce" }],
+        },
+      },
+    });
+
+    const answering = useWorkbench
+      .getState()
+      .answerPermission({ outcome: "selected", optionId: "yes" });
+    expect(useWorkbench.getState().timeline.permissionProgress).toEqual({
+      requestId: "plan-1",
+      stage: "submitting",
+      message: "正在提交计划确认…",
+    });
+
+    stub.fire({
+      seq: 2,
+      sessionId: "s1",
+      event: {
+        type: "permissionResolved",
+        requestId: "plan-1",
+        outcome: { outcome: "selected", optionId: "yes" },
+      },
+    });
+    expect(useWorkbench.getState().timeline.permissionProgress?.message).toBe(
+      "计划确认已保存，等待 Agent 恢复执行。",
+    );
+
+    finish({ type: "ack" });
+    await answering;
   });
 });
 
@@ -742,7 +873,10 @@ describe("forking a completed turn", () => {
         target: { agentId: "claude", workspaceId: "w2" },
       },
     });
-    expect(useWorkbench.getState().sessions[0]).toEqual(forked);
+    expect(useWorkbench.getState().sessions[0]).toEqual({
+      ...forked,
+      interactionSummary: { count: 0, requests: [] },
+    });
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });
@@ -1610,7 +1744,7 @@ describe("renaming a workspace", () => {
 });
 
 describe("removing a workspace registration", () => {
-  it("drops its local navigation state while keeping another workspace intact", async () => {
+  it("drops its local navigation state while preserving historical sessions", async () => {
     const first = {
       id: "w1",
       name: "first",
@@ -1630,11 +1764,14 @@ describe("removing a workspace registration", () => {
     const client = {
       unsubscribe,
       call: async (request: { type: string }) => {
+        if (request.type === "workspace.list") {
+          return { type: "workspaces", data: [first, second] };
+        }
         if (request.type === "workspace.remove") {
           return { type: "workspaces", data: [second] };
         }
         if (request.type === "session.list") {
-          return { type: "sessions", data: [other] };
+          return { type: "sessions", data: [SESSION, other] };
         }
         return undefined;
       },
@@ -1656,7 +1793,7 @@ describe("removing a workspace registration", () => {
     await useWorkbench.getState().removeWorkspace("w1");
 
     expect(useWorkbench.getState().workspaces).toEqual([second]);
-    expect(useWorkbench.getState().sessions).toEqual([other]);
+    expect(useWorkbench.getState().sessions).toEqual([SESSION, other]);
     expect(useWorkbench.getState().tabs.map((tab) => tab.id)).toEqual(["chat:s2"]);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
     expect(unsubscribe).toHaveBeenCalledWith("s1");

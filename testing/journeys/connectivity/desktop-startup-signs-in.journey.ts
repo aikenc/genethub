@@ -35,6 +35,7 @@ defineJourney(
       "pairing approval never turns the daemon paired",
     ],
     tags: ["core", "connectivity", "desktop", "hub"],
+    requiredRepos: ["cloud"],
     llm: { default: "none" },
     expectedDurationMs: 30_000,
     timeoutMs: 120_000,

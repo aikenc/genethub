@@ -67,6 +67,10 @@ export async function runRustLegacyUnit(
       JOURNEY_LLM: unit.meta.llm.default === "real" ? "real" : "mock",
       CARGO_TERM_COLOR: "never",
       RUSTUP_TOOLCHAIN: process.env.RUSTUP_TOOLCHAIN || "1.95.0",
+      // The frozen harness embeds the full daemon inside libtest's worker
+      // thread. Its default stack is smaller than the standalone daemon's;
+      // keep a bounded test-only budget as protocol and workflow types grow.
+      RUST_MIN_STACK: process.env.RUST_MIN_STACK || String(16 * 1024 * 1024),
       ...(wasm ? { GENET_APP_WASM: wasm } : {}),
     },
   });

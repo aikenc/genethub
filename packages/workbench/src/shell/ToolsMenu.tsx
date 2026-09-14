@@ -13,12 +13,16 @@ export function ToolsMenu({
   extraTabs,
   onNavigate,
   children,
+  leading,
   density = "desktop",
+  scope = "all",
 }: {
   extraTabs: ExtraTab[];
   onNavigate(): void;
   children?: ReactNode;
+  leading?: ReactNode;
   density?: "desktop" | "phone";
+  scope?: "all" | "global";
 }) {
   const { openTab, setRightPanel } = useWorkbench();
   const phone = density === "phone";
@@ -41,11 +45,12 @@ export function ToolsMenu({
 
   return (
     <nav className={`flex flex-1 flex-col overflow-y-auto ${phone ? "gap-3 p-3" : "gap-3 p-3"}`}>
-      <Section title="工作区" phone={phone}>
+      {leading}
+      {scope === "all" ? <Section title="专家" phone={phone}>
         <Entry phone={phone} label="变更" onClick={openChanges} />
         <Entry phone={phone} label="文件" onClick={openFiles} />
         <Entry phone={phone} label="终端" onClick={() => go("terminal")} />
-        {extraTabs.map((tab) => (
+        {extraTabs.filter((tab) => !tab.scope || tab.scope === "workspace").map((tab) => (
           <Entry
             key={tab.id}
             phone={phone}
@@ -53,12 +58,15 @@ export function ToolsMenu({
             onClick={() => go(`extra:${tab.id}`, tab.label)}
           />
         ))}
-      </Section>
+      </Section> : null}
       <Section title="全局" phone={phone}>
+        {extraTabs.filter((tab) => tab.scope === "global" || tab.scope === "machine").map((tab) => <Entry key={tab.id} phone={phone} label={tab.label} onClick={() => go(`extra:${tab.id}`, tab.label)} />)}
+        <Entry phone={phone} label="日志" onClick={() => go("logs")} />
         <Entry phone={phone} label="此电脑的后台进程" onClick={() => go("processes")} />
         <Entry phone={phone} label="设备" onClick={() => go("devices")} />
         <Entry phone={phone} label="联调" onClick={() => { openClientDebug(); onNavigate(); }} />
-        <Entry phone={phone} label="设置" onClick={() => go("settings")} />
+        <Entry phone={phone} label="系统设置" onClick={() => go("settings")} />
+        {/* Extensions own their navigation; portal dialog events also bubble here. */}
         {children ? (
           <div
             className={
@@ -66,7 +74,6 @@ export function ToolsMenu({
                 ? "[&_button]:min-h-11 [&_button]:w-full [&_button]:justify-start [&_button]:rounded-xl [&_button]:px-4 [&_button]:text-left [&_button]:text-base [&_button]:shadow-none"
                 : "[&_button]:min-h-10 [&_button]:w-full [&_button]:justify-start [&_button]:rounded-lg [&_button]:px-3 [&_button]:text-left [&_button]:text-sm [&_button]:shadow-none"
             }
-            onClick={onNavigate}
           >
             {children}
           </div>

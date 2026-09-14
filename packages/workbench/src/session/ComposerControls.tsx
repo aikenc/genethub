@@ -101,8 +101,8 @@ export function ComposerControls({
   });
   const summary = [
     selection.current
-      ? `Agent：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
-      : "Agent：未选择",
+      ? `执行引擎：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
+      : "执行引擎：未选择",
     model ? `模型：${model.fullLabel}` : null,
     effort ? `思考强度：${effort.fullLabel}` : null,
     ...runtimeBadges.map(({ axis, value }) => `${axis.label}：${value.label}`),

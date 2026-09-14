@@ -1,0 +1,23 @@
+schema: genehub.workflow.definition.v1
+id: direct-change
+version: 1
+entry: implement
+nodes:
+  - id: implement
+    uses: agent.session
+    with:
+      role: worker
+      workspace: .
+      writeLease:
+        targetRef: current
+        ttlSeconds: 3600
+    completion:
+      all:
+        - key: commit
+          verify: git.commitOnTarget
+        - key: checks
+          verify: value.nonEmpty
+    on:
+      completed: [publish]
+  - id: publish
+    uses: result.publish

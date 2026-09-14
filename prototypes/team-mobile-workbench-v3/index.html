@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light">
+<title>GeneHub · 团队协作工作台 · 第三版 · 现有协议交互原型</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="studio" aria-label="原型演示控制">
+  <div class="studio-title">GENEHUB <span>团队协作 · 交互研究 03</span></div>
+  <div class="spacer"></div>
+  <div class="demo-label">第三版 · 演示数据</div>
+  <div class="view-options" aria-label="预览宽度"><button class="active" id="desktopView" type="button" aria-pressed="true">桌面</button><button id="phoneView" type="button" aria-pressed="false">手机</button></div>
+  <select id="scenario" aria-label="切换演示场景"><option value="normal">协作进行中</option><option value="approval">等待授权</option><option value="blocked">执行受阻</option></select>
+  <button id="connectionToggle" type="button">模拟断线</button><button class="reset" id="reset" type="button">重置</button><button id="about" type="button">设计说明</button>
+</header>
+<div class="stage"><div class="device" id="device"><div id="app"></div><div id="overlay"></div><div class="toast" id="toast" role="status" aria-live="polite"></div></div></div>
+<noscript>这是可交互的静态原型，需要开启 JavaScript。设计研究可阅读同目录 README.md。</noscript>
+<script src="app.js" defer></script>
+</body>
+</html>

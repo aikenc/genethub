@@ -347,7 +347,7 @@ export function PreviewFloat({
         tabIndex={expanded ? undefined : 0}
         className={
           expanded
-            ? "fixed inset-0 z-40 flex flex-col bg-bg text-fg"
+            ? "safe-area-page fixed inset-0 z-40 flex flex-col bg-bg text-fg"
             : "fixed z-40 flex flex-col overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-lg"
         }
         style={

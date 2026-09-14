@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type { ArtifactIdentity, RepoIdentity } from "../types.ts";
+import { GENET, locateRuntimeArtifact } from "./artifacts.ts";
 
 function git(cwd: string, args: string[]): string {
   const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
@@ -54,21 +55,9 @@ export function snapshotHasher(): (file: string) => string {
 }
 
 export function artifactIdentity(openRoot: string, hashFile = snapshotHasher()): ArtifactIdentity {
-  const override = process.env.GENET_E2E_DAEMON?.trim();
-  if (override) {
-    return { path: override, hash: existsSync(override) ? hashFile(override) : null, kind: "override" };
-  }
-  const suffix = process.platform === "win32" ? ".exe" : "";
-  const names = ["genet-local", "genet-dev", "genet-beta", "genet"];
-  for (const profile of ["iterate", "debug", "release"] as const) {
-    for (const name of names) {
-      const candidate = path.join(openRoot, "target", profile, `${name}${suffix}`);
-      if (!existsSync(candidate)) continue;
-      const hash = hashFile(candidate);
-      return { path: candidate, hash, kind: name };
-    }
-  }
-  return { path: null, hash: null, kind: "missing" };
+  const artifact = locateRuntimeArtifact(openRoot, GENET);
+  if (!artifact.path) return { path: null, hash: null, kind: "missing" };
+  return { path: artifact.path, hash: hashFile(artifact.path), kind: path.basename(artifact.path) };
 }
 
 export function runsIgnored(spaceRoot: string): boolean {

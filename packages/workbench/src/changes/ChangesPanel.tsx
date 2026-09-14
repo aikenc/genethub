@@ -1,5 +1,5 @@
 import type { GitChangeKind } from "@genehub/proto";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useWorkbench } from "../session/store";
 
@@ -10,8 +10,44 @@ import { useWorkbench } from "../session/store";
  * read beats a paragraph claiming the work is done. Committing is here for the
  * same reason — reviewing and recording a change belong in the same place.
  */
-export function ChangesPanel() {
-  const { git, diff, refreshGit, loadDiff, commit, client } = useWorkbench();
+export function ChangesPanel({ workspaceId }: { workspaceId?: string } = {}) {
+  const { git: sharedGit, diff: sharedDiff, refreshGit: sharedRefresh, loadDiff: sharedLoadDiff, commit: sharedCommit, client } = useWorkbench();
+  const [localGit, setLocalGit] = useState<typeof sharedGit>(null);
+  const [localDiff, setLocalDiff] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const owner = useRef({ client, workspaceId });
+  owner.current = { client, workspaceId };
+  const diffSequence = useRef(0);
+  const git = workspaceId ? localGit : sharedGit;
+  const diff = workspaceId ? localDiff : sharedDiff;
+  const refreshGit = useCallback(async () => {
+    if (!workspaceId) return sharedRefresh();
+    if (!client) return;
+    try {
+      const reply = await client.call({ type: "git.status", payload: { workspaceId } });
+      if (owner.current.client !== client || owner.current.workspaceId !== workspaceId) return;
+      if (reply?.type === "gitStatus") { setLocalGit(reply.data); setError(null); }
+    } catch (cause) { setError(String(cause)); }
+  }, [client, workspaceId, sharedRefresh]);
+  const loadDiff = async (path?: string) => {
+    if (!workspaceId) return sharedLoadDiff(path);
+    if (!client) return;
+    const sequence = ++diffSequence.current;
+    try {
+      const reply = await client.call({ type: "git.diff", payload: { workspaceId, path: path ?? null } });
+      if (owner.current.client !== client || owner.current.workspaceId !== workspaceId || sequence !== diffSequence.current) return;
+      if (reply?.type === "gitDiff") setLocalDiff(reply.data.diff);
+    } catch (cause) { setError(String(cause)); }
+  };
+  const commit = async (message: string) => {
+    if (!workspaceId) return sharedCommit(message);
+    if (!client) return;
+    try {
+      await client.call({ type: "git.commit", payload: { workspaceId, message, paths: [] } });
+      setLocalDiff(null);
+      await refreshGit();
+    } catch (cause) { setError(String(cause)); throw cause; }
+  };
   const [selected, setSelected] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -34,6 +70,7 @@ export function ChangesPanel() {
           </button>
         </div>
 
+        {error ? <p role="alert" className="p-2 text-xs text-danger">{error}</p> : null}
         <ul className="flex-1 overflow-y-auto p-1 text-sm">
           {(git?.changes ?? []).map((change) => (
             <li key={`${change.path}:${String(change.staged)}`}>
@@ -76,6 +113,8 @@ export function ChangesPanel() {
                 await commit(message.trim());
                 setMessage("");
                 setSelected(null);
+              } catch (cause) {
+                setError(String(cause));
               } finally {
                 setBusy(false);
               }

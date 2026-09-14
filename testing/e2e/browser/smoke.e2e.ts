@@ -1,4 +1,4 @@
-import { defineE2e } from "../../framework/public.ts";
+import { defineE2e, openBrowser } from "../../framework/public.ts";
 
 defineE2e(
   {
@@ -14,9 +14,11 @@ defineE2e(
     surfaces: ["browser"],
   },
   async (t) => {
-    if(!t.browser) throw new Error('browser context missing');
-    const page=await t.browser.newPage();
-    await page.goto('about:blank');
-    t.assertions.assert(await page.evaluate(()=>navigator.userAgent.includes('Chrome')), 'a real Chromium page is required');
+    const browser = await openBrowser();
+    try {
+      await browser.page.goto("about:blank");
+      await browser.page.evaluate(() => { document.body.textContent = "registered-e2e-body"; });
+      t.assertions.assert(await browser.page.locator("body").textContent() === "registered-e2e-body", "registered browser body did not execute");
+    } finally { await browser.close(); }
   },
 );

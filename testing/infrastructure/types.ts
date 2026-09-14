@@ -58,6 +58,12 @@ export interface CaseMeta {
   surfaces: string[];
   productInterfaces?: string[];
   requiredArtifacts?: string[];
+  /**
+   * Repositories this case cannot run without, beyond the open tree. Declared
+   * so a run refuses up front instead of spending the whole gate and then
+   * reporting the case blocked.
+   */
+  requiredRepos?: Array<"cloud">;
   requirements?: Array<{ kind: "python"; env: string; minVersion: [number, number]; modules: string[] }>;
   doubleExceptions?: DoubleException[];
   retention?: boolean;
@@ -145,6 +151,8 @@ export interface RunManifest {
   inputDrift?: boolean;
   inputObservation?: { changed: boolean; complete: boolean };
   artifactBundle?: { files: Array<{ path: string; hash: string }>; hash: string; runtime: { node: string; platform: string; arch: string } };
+  /** Artifacts not proven current by this run build preflight. */
+  unprovenArtifacts?: string[];
   selection?: { tags: string[]; cases: string[]; reason: string };
   preflight?: { issues: Array<{ caseId: string; reason: string }>; checked: number };
   resumeBinding?: { common: string; cases: Record<string, string> };

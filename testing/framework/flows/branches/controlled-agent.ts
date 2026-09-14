@@ -12,6 +12,7 @@ import {
   requireAgentReady,
   type ProductSession,
 } from "../main/index.ts";
+import { runGenetAsync } from "../../drivers/cli.ts";
 
 /** Terminal round outcomes as they appear on the wire. A round that reaches
  * neither is the freeze this whole group of cases is about. */
@@ -129,8 +130,13 @@ export async function openControlledAgentSession(input: {
       },
       async dispose() {
         opened.client.close();
-        opened.daemon.stop();
-        await opened.mock.stop();
+        // Let the WebSocket close handshake and pending callbacks drain while
+        // the daemon stops; a synchronous child command blocks this event loop.
+        try {
+          await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
+        } finally {
+          await opened.mock.stop();
+        }
       },
     };
   } catch (error) {

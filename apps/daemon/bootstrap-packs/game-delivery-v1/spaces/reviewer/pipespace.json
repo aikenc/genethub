@@ -1,0 +1,10 @@
+{
+  "schema": "pipespace.v1",
+  "name": "reviewer",
+  "description": "Reusable read-oriented game delivery Reviewer.",
+  "agents": ["codex", "cursor", "codebuddy", "claude-code"],
+  "skills": ["game-reviewer"],
+  "tags": ["worker", "reviewer"],
+  "skillProviders": [{"type": "folder", "path": "skills"}],
+  "children": {"scanDepth": 0}
+}

@@ -13,7 +13,8 @@ use crate::os_process::{Child, ChildStdin, Command};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, CommandInfo, ItemDelta, ModelInfo, PermissionOutcome, ProbeState,
+    Capabilities, Catalog, CommandInfo, InteractionOption, InteractionQuestion, ItemDelta,
+    ModelInfo, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
     SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
@@ -124,9 +125,10 @@ impl AgentAdapter for GenetAdapter {
             set_effort: true,
             // No permission modes: it has no approval flow to have policy about.
             set_mode: false,
-            // No approval flow of its own yet, so the frontend must not render
-            // approval controls for it.
-            permissions: false,
+            // Structured user questions are durable stopped interactions. A
+            // daemon-authored plan challenge may be rendered as PlanApproval,
+            // but never elevates this Agent's permission mode.
+            permissions: true,
             resume: true,
             fork: false,
             attachments: false,
@@ -244,6 +246,11 @@ impl AgentAdapter for GenetAdapter {
             .current_dir(&config.cwd)
             .env(crate::channel::ENV_AGENT_HOME, &home);
         super::apply_session_environment(&mut command, &config);
+        command.env_remove("GENEHUB_EVIDENCE_SCOPE");
+        if let Some(scope) = &config.evidence_scope {
+            command.env("GENEHUB_EVIDENCE_SCOPE", serde_json::to_string(scope)?);
+        }
+
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
         }
@@ -434,7 +441,9 @@ impl AgentSession for GenetSession {
     }
 
     async fn respond_permission(&self, _request: &str, _outcome: PermissionOutcome) -> Result<()> {
-        Err(anyhow!("the built-in agent does not request approvals"))
+        Err(anyhow!(
+            "built-in Agent interactions resume as a new turn and have no live approval channel"
+        ))
     }
 
     fn persistence(&self) -> Option<super::PersistHandle> {
@@ -494,6 +503,45 @@ async fn translate_stream(
     }
 }
 
+fn builtin_questions(frame: &Value) -> Option<Vec<InteractionQuestion>> {
+    let raw = frame.get("questions")?.as_array()?;
+    if !(1..=3).contains(&raw.len()) {
+        return None;
+    }
+    raw.iter()
+        .map(|question| {
+            let id = question.get("id")?.as_str()?.trim();
+            let prompt = question.get("question")?.as_str()?.trim();
+            if id.is_empty() || prompt.is_empty() {
+                return None;
+            }
+            let options = question
+                .get("options")?
+                .as_array()?
+                .iter()
+                .enumerate()
+                .map(|(index, option)| {
+                    let label = option.get("label")?.as_str()?.trim();
+                    (!label.is_empty()).then(|| InteractionOption {
+                        id: index.to_string(),
+                        label: label.to_string(),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if !(1..=3).contains(&options.len()) {
+                return None;
+            }
+            Some(InteractionQuestion {
+                id: id.to_string(),
+                prompt: prompt.to_string(),
+                allow_multiple: false,
+                allow_freeform: true,
+                options,
+            })
+        })
+        .collect()
+}
+
 fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sender<SessionEvent>) {
     let Some(kind) = frame.get("type").and_then(Value::as_str) else {
         return;
@@ -523,6 +571,28 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             turn_id: turn_id.clone(),
             started_at_ms: 0,
         }),
+
+        "user_input_requested" => {
+            let Some(questions) = builtin_questions(frame) else {
+                return;
+            };
+            let request_id = frame
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .unwrap_or("user-input")
+                .to_string();
+            emit(SessionEvent::PermissionRequested {
+                request: PermissionRequest {
+                    id: request_id.clone(),
+                    kind: PermissionRequestKind::Question,
+                    title: questions[0].prompt.clone(),
+                    detail: None,
+                    tool_call_id: Some(request_id),
+                    options: Vec::new(),
+                    questions: Some(questions),
+                },
+            });
+        }
 
         "text_start" => {
             let id = state.next_item_id();
@@ -1111,6 +1181,40 @@ mod tests {
         TurnState {
             id: Some("t1".into()),
             ..TurnState::default()
+        }
+    }
+
+    #[test]
+    fn built_in_user_input_becomes_a_structured_stopped_interaction() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({
+                "type": "user_input_requested",
+                "toolCallId": "ask_takeover",
+                "questions": [{
+                    "id": "pm-bootstrap-challenge",
+                    "header": "项目接管",
+                    "question": "是否转换为 PM 项目？",
+                    "options": [
+                        {"label": "确认", "description": "apply once"},
+                        {"label": "暂不", "description": "leave unchanged"}
+                    ]
+                }]
+            }),
+            &mut state,
+            &tx,
+        );
+
+        match drain(&mut rx).as_slice() {
+            [SessionEvent::PermissionRequested { request }] => {
+                assert_eq!(request.id, "ask_takeover");
+                assert_eq!(request.kind, PermissionRequestKind::Question);
+                let questions = request.questions.as_ref().expect("structured questions");
+                assert_eq!(questions[0].id, "pm-bootstrap-challenge");
+                assert_eq!(questions[0].options[0].label, "确认");
+            }
+            other => panic!("unexpected events: {other:?}"),
         }
     }
 

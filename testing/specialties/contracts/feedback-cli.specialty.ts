@@ -11,6 +11,7 @@ defineSpecialty({
   oracle: "Real CLI processes on isolated Git fixtures: no work before failed preflight, live inspection, exact-input passed reuse, failure and drift rejection",
   catches: ["601 cases selected for a narrow feedback", "late Python prerequisite failure", "inspect unavailable until completion", "rerun turns a failure green", "reused stale input"],
   tags: ["core", "contract", "feedback-tooling"], expectedDurationMs: 20000, timeoutMs: 120000,
+  requiredArtifacts: [],
   resources: { environments: 1, cpu: 1 }, surfaces: ["testctl", "git", "os-process"],
 }, async t => {
   const repo = join(t.env.root, "cli-repo"), space = join(t.env.root, "cli-space");
@@ -26,7 +27,7 @@ defineSpecialty({
   const file = join(repo, "testing", "probe.specialty.ts");
   writeFileSync(file, `import {defineSpecialty,BlockedError} from ${JSON.stringify(pathToFileURL(join(t.openRoot, "testing/framework/public.ts")).href)};
     import {appendFileSync,existsSync} from 'node:fs';
-    const meta={title:'CLI fixture',oracle:'observable marker',catches:[],tags:['fixture'],expectedDurationMs:10,timeoutMs:10000,surfaces:['fixture']};
+    const meta={title:'CLI fixture',oracle:'observable marker',catches:[],tags:['fixture'],expectedDurationMs:10,timeoutMs:10000,surfaces:['fixture'],requiredArtifacts:[]};
     for(const name of ['passed','blocked','failed','slow','python','timeout']) defineSpecialty({...meta,id:'fixture.'+name,
       ...(name==='timeout'?{timeoutMs:100}:{}),
       ...(name==='python'?{requirements:[{kind:'python',env:'TESTCTL_FIXTURE_PYTHON',minVersion:[3,0],modules:['json']}]}:{})},async()=>{

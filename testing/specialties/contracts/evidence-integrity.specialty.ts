@@ -36,6 +36,25 @@ defineSpecialty({
 });
 
 defineSpecialty({
+  id: "specialty.contracts.input-run-evidence-excluded", title: "A run's own evidence does not invalidate its source input",
+  oracle: "Writing results below the explicitly excluded current run directory leaves the input observation unchanged",
+  catches: ["testctl disqualifies every in-repository PipeSpace run because it observes its own results"],
+  tags: ["core", "contract", "network-audit-fix"], llm: { default: "none" }, expectedDurationMs: 200, timeoutMs: 5000, surfaces: ["filesystem", "testctl-evidence"],
+}, async t => {
+  const root = join(t.env.root, "watched-repository");
+  const run = join(root, "pipespaces", "dev", "runs", "current");
+  mkdirSync(run, { recursive: true });
+  writeFileSync(join(root, "module.ts"), "source");
+  const watcher = watchInputs([root], [], [run]);
+  try {
+    writeFileSync(join(run, "results.ndjson"), '{"status":"passed"}\n');
+    await new Promise(r => setTimeout(r, 100));
+    const result = watcher.stop();
+    t.assertions.assert(result.complete && !result.changed, "current run evidence invalidated its own input observation");
+  } finally { watcher.stop(); }
+});
+
+defineSpecialty({
   id: "specialty.contracts.process-output-drained", title: "Process completion includes the final result footer",
   oracle: "A real child fills stdout and stderr before exit; awaiting completion retains both final markers with bounded diagnostic tails",
   catches: ["exit event races buffered TAP footer", "unbounded adapter output"],

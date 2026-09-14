@@ -4,8 +4,11 @@
 //! real daemon in-process instead of asserting against a mock of one.
 
 pub mod adapter;
+pub mod agent_space;
+pub mod agent_space_builder;
 pub mod authz;
 pub(crate) mod blocking;
+pub mod bootstrap_pack;
 pub mod channel_auth;
 pub mod cli_front;
 pub mod client_debug;
@@ -39,6 +42,7 @@ pub use genet_frontdoor::lifecycle;
 pub mod logs;
 pub mod process;
 pub mod processes;
+pub mod project_control;
 pub mod provider;
 pub mod pty;
 pub mod remote;
@@ -51,6 +55,7 @@ pub mod state;
 pub mod transport;
 pub mod updates;
 pub mod version;
+pub mod workflow;
 pub mod workspace;
 
 use anyhow::Result;
@@ -62,6 +67,8 @@ pub struct Daemon {
     pub state: Shared,
     pub port: u16,
     listener: tokio::task::JoinHandle<()>,
+    session_deliveries: tokio::task::JoinHandle<()>,
+    workflow_control: tokio::task::JoinHandle<()>,
 }
 
 impl Daemon {
@@ -87,7 +94,35 @@ impl Daemon {
         remote.attach(&state).await;
         let _ = state.remote.set(remote);
 
+        // One per-Session dispatcher delivers chat and Human decisions. Slow
+        // native handovers run independently rather than blocking other Sessions.
+        let session_deliveries = tokio::spawn({
+            let state = state.clone();
+            async move {
+                if let Err(error) = state.sessions.recover_deliveries().await {
+                    tracing::error!(%error, "recovering accepted messages failed");
+                }
+                let mut ticks = tokio::time::interval(std::time::Duration::from_millis(250));
+                loop {
+                    ticks.tick().await;
+                    state.sessions.dispatch_deliveries(&state).await;
+                }
+            }
+        });
+        let workflow_control = tokio::spawn({
+            let state = state.clone();
+            async move {
+                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticks.tick().await;
+                    workflow::maintain(&state).await;
+                }
+            }
+        });
         Ok(Daemon {
+            session_deliveries,
+            workflow_control,
             state,
             port: listener.port,
             listener: listener.handle,
@@ -113,6 +148,11 @@ impl Daemon {
     /// Ordering matters: sessions first, so agents get their shutdown before
     /// the runtime goes away and leaves them orphaned.
     pub async fn shutdown(self) {
+        self.session_deliveries.abort();
+        let _ = self.session_deliveries.await;
+        self.workflow_control.abort();
+        let _ = self.workflow_control.await;
+        self.state.workflow_tasks.stop().await;
         self.state.sessions.shutdown().await;
         self.state.terminals.close_all().await;
         if let Some(link) = self.state.link.get() {

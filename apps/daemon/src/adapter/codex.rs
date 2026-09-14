@@ -2600,12 +2600,15 @@ fn tool_status(item: &Value, settled: bool) -> ToolStatus {
         return ToolStatus::Error;
     }
     match item.get("status").and_then(Value::as_str) {
-        Some("inProgress" | "running" | "pending") => ToolStatus::Running,
-        Some("completed" | "success") => ToolStatus::Ok,
         Some("failed" | "error" | "errored") => ToolStatus::Error,
         Some("canceled" | "cancelled" | "interrupted" | "aborted") => ToolStatus::Canceled,
-        // No status of its own: which frame this is says as much.
+        Some("completed" | "success") => ToolStatus::Ok,
+        // `item/completed` is the lifecycle authority. Some code-mode custom
+        // tools preserve their last `inProgress` field in that final frame;
+        // trusting the stale field leaves a tool card running forever after
+        // its turn has already ended.
         _ if settled => ToolStatus::Ok,
+        Some("inProgress" | "running" | "pending") => ToolStatus::Running,
         _ => ToolStatus::Running,
     }
 }
@@ -3511,6 +3514,40 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// A completed lifecycle frame wins over a stale status field. Code-mode
+    /// wrappers can finish an item without rewriting their last `inProgress`
+    /// value; rendering that contradiction as running leaves a permanent fake
+    /// spinner after the turn has ended (fb_hih4FD8UDpiw).
+    #[test]
+    fn a_completed_item_cannot_leave_a_tool_card_running() {
+        let (events, mut seen) = broadcast::channel(4);
+        let mut state = state();
+        item_frame(
+            &json!({
+                "type": "commandExecution",
+                "id": "approval-command",
+                "status": "inProgress",
+                "command": ["genet", "space", "approval", "request"],
+                "aggregatedOutput": "",
+                "exitCode": null,
+            }),
+            true,
+            &mut state,
+            &events,
+        );
+
+        assert!(matches!(
+            seen.try_recv().expect("the settled tool card"),
+            SessionEvent::Item {
+                item: TimelineItem::ToolCall {
+                    status: ToolStatus::Ok,
+                    ..
+                },
+                ..
+            }
+        ));
     }
 
     /// An item type nobody here has seen must still reach the screen: a missing

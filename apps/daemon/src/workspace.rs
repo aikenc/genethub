@@ -6,13 +6,14 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
-    DirectoryEntry, DirectoryListing, FileNode, WorkspaceFolderInfo, WorkspaceInfo,
+    AgentSpaceHealth, AgentSpaceOperation, DirectoryEntry, DirectoryListing, FileNode,
+    WorkspaceFolderInfo, WorkspaceInfo,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
-use crate::config::{Config, WorkspaceEntry, WorkspaceFolderEntry};
+use crate::config::{AgentSpaceEntry, Config, WorkspaceEntry, WorkspaceFolderEntry};
 use crate::session::WorkspaceHomes;
 
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
@@ -45,6 +46,16 @@ pub struct Workspaces {
     /// anything until it is told where each workspace is. Registration happens
     /// wherever an entry does, so the two can never disagree.
     homes: WorkspaceHomes,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BootstrapSpaceRegistration {
+    pub workspace_id: String,
+    pub parent_workspace_id: Option<String>,
+    pub lifecycle: String,
+    pub components: Vec<(String, Option<String>)>,
+    pub guidance: Vec<String>,
+    pub pack: Option<crate::config::AgentSpacePackEntry>,
 }
 
 /// Empty path asks for machine roots. Elsewhere `None` still means home.
@@ -273,6 +284,39 @@ impl Workspaces {
         self.collapse_same_directory_projects(&mut entries).await;
     }
 
+    /// Captures the durable registry before a multi-step Kernel transaction.
+    /// The snapshot never leaves the daemon and is used only for compensation
+    /// if a Bootstrap Pack fails before it can publish a completed receipt.
+    pub(crate) async fn config_snapshot(&self) -> Config {
+        self.config.read().await.clone()
+    }
+
+    /// Restores one transaction-local registry snapshot and its Session-home
+    /// projection. Callers serialize the encompassing mutation and may only
+    /// use a snapshot they took immediately before that mutation.
+    pub(crate) async fn restore_config_snapshot(&self, snapshot: Config) -> Result<()> {
+        let mut entries = self.entries.write().await;
+        let mut config = self.config.write().await;
+        snapshot.save(&self.config_path)?;
+
+        for workspace_id in entries.keys() {
+            self.homes.detach(workspace_id);
+        }
+        let restored = snapshot
+            .workspaces
+            .iter()
+            .cloned()
+            .map(|entry| (entry.id.clone(), entry))
+            .collect::<HashMap<_, _>>();
+        for entry in restored.values().filter(|entry| !entry.removed) {
+            self.homes
+                .attach_project(&entry.id, &session_project_key(entry), &entry.root);
+        }
+        *entries = restored;
+        *config = snapshot;
+        Ok(())
+    }
+
     /// Gives a machine that has never been used somewhere to work.
     ///
     /// Without this the first thing a new install can do is refuse: no
@@ -297,13 +341,12 @@ impl Workspaces {
     }
 
     pub async fn list(&self) -> Vec<WorkspaceInfo> {
-        let mut out: Vec<WorkspaceInfo> = self
-            .entries
-            .read()
-            .await
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        let mut out: Vec<WorkspaceInfo> = entries
             .values()
             .filter(|entry| !entry.removed)
-            .map(describe)
+            .map(|entry| self.describe_with_space(entry, &config))
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
@@ -342,6 +385,453 @@ impl Workspaces {
             .cloned()
             .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
         hydrate_entry(entry, &self.config.read().await.workspace_roots)
+    }
+
+    /// Resolves a Workspace that may own a project DCG.
+    ///
+    /// Unregistered folders remain accepted for V1 migration. Once an
+    /// AgentSpace registration exists, only a project root is an entry: which
+    /// components it mounts is deliberately irrelevant to this decision, so a
+    /// Space that both manages the project and executes nodes still qualifies.
+    /// Registered Spaces are reverified here so a drifted Builder projection
+    /// cannot mutate or execute the project's control graph.
+    pub async fn project_entry(&self, id: &str) -> Result<WorkspaceEntry> {
+        let entries = self.entries.read().await;
+        let entry = entries
+            .get(id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        let config = self.config.read().await;
+        if let Some(space) = config
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == id)
+        {
+            if space.parent_workspace_id.is_some() {
+                anyhow::bail!("子 AgentSpace 不能作为项目 DCG 入口；请回到项目根 AgentSpace");
+            }
+            verify_pipe_space(&entry.root, &entry)?;
+        }
+        hydrate_entry(entry, &config.workspace_roots)
+    }
+
+    /// The current registration, or a revision-zero placeholder for a folder
+    /// that has never been registered. Callers compare `revision` before they
+    /// act, so "not registered yet" and "registered at revision 1" have to be
+    /// the same shape.
+    pub async fn agent_space(&self, workspace_id: &str) -> Result<AgentSpaceEntry> {
+        let config = self.config.read().await;
+        Ok(existing_or_unregistered(&config, workspace_id))
+    }
+
+    /// The project this Space belongs to, which is the topmost ancestor in the
+    /// ownership tree. An unregistered or detached Space is its own project.
+    pub async fn project_root(&self, workspace_id: &str) -> Result<String> {
+        let config = self.config.read().await;
+        Ok(crate::agent_space::project_root(
+            &config.agent_spaces,
+            workspace_id,
+        ))
+    }
+
+    /// Applies one operation to an already-open, PipeBuilder-verified
+    /// AgentSpace under a compare-and-set on the registration revision.
+    ///
+    /// The lock digest is re-verified on every call, not just at first
+    /// registration: a Space whose generated projection has drifted must not
+    /// be able to gain a responsibility or move in the tree.
+    pub async fn configure_agent_space(
+        &self,
+        workspace_id: &str,
+        expected_revision: u64,
+        operation: &AgentSpaceOperation,
+    ) -> Result<WorkspaceInfo> {
+        let entries = self.entries.read().await;
+        let entry = entries
+            .get(workspace_id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such workspace: {workspace_id}"))?;
+        let config_view = self.config.read().await;
+        let current = existing_or_unregistered(&config_view, workspace_id);
+        let project_workspace_id = match operation {
+            AgentSpaceOperation::SetParent {
+                parent_workspace_id: Some(parent_id),
+            } => crate::agent_space::project_root(&config_view.agent_spaces, parent_id),
+            _ => current
+                .parent_workspace_id
+                .as_deref()
+                .map(|parent| crate::agent_space::project_root(&config_view.agent_spaces, parent))
+                .unwrap_or_else(|| workspace_id.to_string()),
+        };
+        let project_root = entries
+            .get(&project_workspace_id)
+            .filter(|entry| !entry.removed)
+            .map(|entry| entry.root.clone())
+            .ok_or_else(|| anyhow!("no such project workspace: {project_workspace_id}"))?;
+        let lock_digest = verify_pipe_space(&project_root, &entry)?;
+        if let AgentSpaceOperation::SetParent {
+            parent_workspace_id: Some(parent_id),
+        } = operation
+        {
+            let parent = entries
+                .get(parent_id.as_str())
+                .filter(|entry| !entry.removed)
+                .ok_or_else(|| anyhow!("no such parent workspace: {parent_id}"))?;
+            verify_pipe_space(&project_root, parent)?;
+        }
+        drop(config_view);
+        drop(entries);
+
+        let mut config = self.config.write().await;
+        let current = existing_or_unregistered(&config, workspace_id);
+        if current.revision != expected_revision {
+            anyhow::bail!(
+                "AgentSpace {workspace_id} is at revision {}, not {expected_revision}",
+                current.revision
+            );
+        }
+        let mut proposed = crate::agent_space::apply(&current, operation)?;
+        proposed.builder_lock_digest = lock_digest;
+        proposed.revision = current.revision.saturating_add(1);
+        crate::agent_space::check_tree(&config.agent_spaces, &proposed)?;
+
+        let mut next = config.clone();
+        match next
+            .agent_spaces
+            .iter_mut()
+            .find(|space| space.workspace_id == workspace_id)
+        {
+            Some(existing) => *existing = proposed,
+            None => next.agent_spaces.push(proposed),
+        }
+        next.save(&self.config_path)?;
+        *config = next;
+        Ok(self.describe_with_space(&entry, &config))
+    }
+
+    /// Commits a Bootstrap Pack's complete AgentSpace relationship set in one
+    /// config write. Files and Builder projections are prepared before this
+    /// call; a conflict therefore leaves them as ordinary, unattached
+    /// workspaces rather than publishing half a team.
+    pub(crate) async fn apply_bootstrap_space_plan(
+        &self,
+        project_workspace_id: &str,
+        expected_project_revision: u64,
+        plan: &[BootstrapSpaceRegistration],
+    ) -> Result<Vec<WorkspaceInfo>> {
+        let entries = self.entries.read().await;
+        let project = entries
+            .get(project_workspace_id)
+            .filter(|entry| !entry.removed)
+            .ok_or_else(|| anyhow!("no such project workspace: {project_workspace_id}"))?;
+        let mut verified = HashMap::new();
+        for desired in plan {
+            let entry = entries
+                .get(&desired.workspace_id)
+                .filter(|entry| !entry.removed)
+                .ok_or_else(|| {
+                    anyhow!("Bootstrap workspace is not open: {}", desired.workspace_id)
+                })?;
+            let digest = verify_pipe_space(&project.root, entry)?;
+            verified.insert(desired.workspace_id.clone(), digest);
+        }
+
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        let project_current = existing_or_unregistered(&next, project_workspace_id);
+        if project_current.revision != expected_project_revision {
+            anyhow::bail!(
+                "revisionConflict: project AgentSpace is at revision {}, not {expected_project_revision}",
+                project_current.revision
+            );
+        }
+        for desired in plan {
+            let current = existing_or_unregistered(&next, &desired.workspace_id);
+            if current.revision > 0 && current.parent_workspace_id != desired.parent_workspace_id {
+                anyhow::bail!(
+                    "Bootstrap Pack cannot reparent an existing AgentSpace: {}",
+                    desired.workspace_id
+                );
+            }
+            if current.revision > 0 && current.lifecycle != desired.lifecycle {
+                anyhow::bail!(
+                    "Bootstrap Pack cannot replace an existing AgentSpace lifecycle: {}",
+                    desired.workspace_id
+                );
+            }
+            let mut proposed = current.clone();
+            proposed.parent_workspace_id = desired.parent_workspace_id.clone();
+            proposed.lifecycle = desired.lifecycle.clone();
+            for (component_id, role) in &desired.components {
+                if let Some(existing) = proposed
+                    .components
+                    .iter()
+                    .find(|component| component.component_id == *component_id)
+                {
+                    if !existing.enabled || existing.role != *role {
+                        anyhow::bail!(
+                            "Bootstrap Pack conflicts with existing component {component_id} on {}",
+                            desired.workspace_id
+                        );
+                    }
+                    continue;
+                }
+                proposed = crate::agent_space::apply(
+                    &proposed,
+                    &AgentSpaceOperation::SetComponent {
+                        component_id: component_id.clone(),
+                        enabled: true,
+                        role: role.clone(),
+                    },
+                )?;
+            }
+            proposed.builder_lock_digest = verified
+                .get(&desired.workspace_id)
+                .expect("every planned Space was verified")
+                .clone();
+            for prompt in &desired.guidance {
+                if !proposed.guidance.contains(prompt) {
+                    proposed.guidance.push(prompt.clone());
+                }
+            }
+            proposed.bootstrap_pack = desired.pack.clone();
+            if proposed != current {
+                proposed.revision = current.revision.saturating_add(1);
+            }
+            crate::agent_space::check_tree(&next.agent_spaces, &proposed)?;
+            match next
+                .agent_spaces
+                .iter_mut()
+                .find(|space| space.workspace_id == desired.workspace_id)
+            {
+                Some(existing) => *existing = proposed,
+                None => next.agent_spaces.push(proposed),
+            }
+        }
+        next.save(&self.config_path)?;
+        *config = next;
+
+        Ok(plan
+            .iter()
+            .filter_map(|desired| entries.get(&desired.workspace_id))
+            .map(|entry| self.describe_with_space(entry, &config))
+            .collect())
+    }
+
+    fn describe_with_space(&self, entry: &WorkspaceEntry, config: &Config) -> WorkspaceInfo {
+        let mut info = describe(entry);
+        apply_space_projection(&mut info, config);
+        apply_space_health(&mut info, entry, config);
+        info
+    }
+
+    /// Resolves the one reusable child Space that mounts `component_id` for
+    /// this project, and revalidates both identities at the moment the child
+    /// is bound to work.
+    ///
+    /// Direct children only: a grandchild belongs to a subteam's own
+    /// scheduling boundary, and a Space with no registration at all keeps the
+    /// pre-AgentSpace in-place path so existing directory projects still run.
+    pub async fn reusable_component_space(
+        &self,
+        project_workspace_id: &str,
+        component_id: &str,
+    ) -> Result<Option<WorkspaceEntry>> {
+        self.reusable_component_space_at(project_workspace_id, component_id, None)
+            .await
+    }
+
+    pub async fn reusable_component_space_at(
+        &self,
+        project_workspace_id: &str,
+        component_id: &str,
+        selected_root: Option<&Path>,
+    ) -> Result<Option<WorkspaceEntry>> {
+        // Workspace mutations consistently acquire entries before config.
+        // Preserve that order here so an open/remove cannot deadlock against
+        // a concurrent Workflow dispatch.
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        let project = match config
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == project_workspace_id)
+        {
+            None => return Ok(None), // pre-AgentSpace project; migration remains possible
+            Some(space) if space.parent_workspace_id.is_none() => space,
+            Some(_) => anyhow::bail!("Workflow dispatch requires a project-root AgentSpace"),
+        };
+        let matches = config
+            .agent_spaces
+            .iter()
+            .filter(|space| {
+                space.parent_workspace_id.as_deref() == Some(project_workspace_id)
+                    && crate::agent_space::has_enabled_component(space, component_id)
+                    && space.lifecycle != "ephemeral"
+                    && selected_root.is_none_or(|root| {
+                        entries.get(&space.workspace_id).is_some_and(|entry| {
+                            entry.root.canonicalize().ok().as_deref() == Some(root)
+                        })
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            anyhow::bail!(
+                "project AgentSpace must have exactly one reusable {component_id} child; found {}",
+                matches.len()
+            );
+        }
+        let relation = &matches[0];
+        let child = entries
+            .get(&relation.workspace_id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("registered {component_id} AgentSpace is not open"))?;
+        let project_entry = entries
+            .get(&project.workspace_id)
+            .filter(|entry| !entry.removed)
+            .ok_or_else(|| anyhow!("project AgentSpace is not open"))?;
+        let current_digest = verify_pipe_space(&project_entry.root, &child)?;
+        if current_digest != relation.builder_lock_digest {
+            anyhow::bail!("registered {component_id} AgentSpace changed since project binding");
+        }
+        let project_digest = verify_pipe_space(&project_entry.root, project_entry)?;
+        if project_digest != project.builder_lock_digest {
+            anyhow::bail!("project AgentSpace changed since project binding");
+        }
+        Ok(Some(child))
+    }
+
+    /// The direct children this Space may dispatch to, refusing outright when
+    /// it does not mount an enabled `executor`.
+    ///
+    /// Structure and scheduling are separate questions on one tree: being
+    /// somebody's parent is ownership, and only the executor component is
+    /// permission to command.
+    pub async fn schedulable_children(
+        &self,
+        executor_workspace_id: &str,
+    ) -> Result<Vec<WorkspaceInfo>> {
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        let executor = config
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == executor_workspace_id)
+            .ok_or_else(|| anyhow!("no such AgentSpace: {executor_workspace_id}"))?;
+        if !crate::agent_space::has_enabled_component(
+            executor,
+            crate::agent_space::COMPONENT_EXECUTOR,
+        ) {
+            anyhow::bail!("this AgentSpace does not mount an enabled executor component");
+        }
+        Ok(
+            crate::agent_space::schedulable_children(&config.agent_spaces, executor_workspace_id)
+                .into_iter()
+                .filter_map(|space| {
+                    entries
+                        .get(&space.workspace_id)
+                        .filter(|entry| !entry.removed)
+                        .map(|entry| self.describe_with_space(entry, &config))
+                })
+                .collect(),
+        )
+    }
+
+    /// Resolves exactly one direct Worker for a project-defined role.
+    ///
+    /// The Executor's child boundary is intentional: a child may itself mount
+    /// `executor` (WorkflowManager is the first example), but that only gives
+    /// it authority over *its* children. Its parent may still assign work to
+    /// the child in the role carried by the child's `worker` component.
+    pub async fn worker_space_for_role(
+        &self,
+        executor_workspace_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceEntry> {
+        if !crate::agent_space::valid_role(role) {
+            anyhow::bail!("invalid Workflow worker role: {role}");
+        }
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        let executor = config
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == executor_workspace_id)
+            .ok_or_else(|| anyhow!("no such Executor AgentSpace: {executor_workspace_id}"))?;
+        if !crate::agent_space::has_enabled_component(
+            executor,
+            crate::agent_space::COMPONENT_EXECUTOR,
+        ) {
+            anyhow::bail!("the scheduling AgentSpace does not mount an enabled executor component");
+        }
+        let matches = config
+            .agent_spaces
+            .iter()
+            .filter(|space| {
+                space.parent_workspace_id.as_deref() == Some(executor_workspace_id)
+                    && crate::agent_space::enabled_component(
+                        space,
+                        crate::agent_space::COMPONENT_WORKER,
+                    )
+                    .and_then(|component| component.role.as_deref())
+                        == Some(role)
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            anyhow::bail!(
+                "Executor AgentSpace must have exactly one direct Worker for role {role}; found {}",
+                matches.len()
+            );
+        }
+        let worker_relation = matches[0];
+        let worker = entries
+            .get(&worker_relation.workspace_id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("the Worker AgentSpace for role {role} is not open"))?;
+
+        let mut root_id = executor.workspace_id.as_str();
+        let mut cursor = executor;
+        for _ in 0..64 {
+            let Some(parent_id) = cursor.parent_workspace_id.as_deref() else {
+                break;
+            };
+            root_id = parent_id;
+            cursor = config
+                .agent_spaces
+                .iter()
+                .find(|space| space.workspace_id == parent_id)
+                .ok_or_else(|| anyhow!("AgentSpace tree has a missing parent: {parent_id}"))?;
+        }
+        if cursor.parent_workspace_id.is_some() {
+            anyhow::bail!("AgentSpace tree exceeds the supported depth");
+        }
+        let project = entries
+            .get(root_id)
+            .filter(|entry| !entry.removed)
+            .ok_or_else(|| anyhow!("the project AgentSpace is not open"))?;
+
+        for (relation, entry, label) in [
+            (executor, entries.get(executor_workspace_id), "Executor"),
+            (
+                worker_relation,
+                entries.get(&worker_relation.workspace_id),
+                "Worker",
+            ),
+        ] {
+            let entry = entry
+                .filter(|entry| !entry.removed)
+                .ok_or_else(|| anyhow!("the {label} AgentSpace is not open"))?;
+            let digest = verify_pipe_space(&project.root, entry)?;
+            if digest != relation.builder_lock_digest {
+                anyhow::bail!("registered {label} AgentSpace changed since project binding");
+            }
+        }
+        Ok(worker)
     }
 
     /// Resolves `<rootHandle>/<recursive relative path>` inside one project.
@@ -470,7 +960,7 @@ impl Workspaces {
             updated.name = existing.name.clone();
             updated.removed = false;
             if updated == existing {
-                return Ok(describe(&existing));
+                return Ok(self.describe_with_space(&existing, &config));
             }
 
             let catalog_changed = existing.removed
@@ -489,7 +979,7 @@ impl Workspaces {
             *config = next;
             attach_project_home(&self.homes, &updated);
             entries.insert(updated.id.clone(), updated.clone());
-            return Ok(describe(&updated));
+            return Ok(self.describe_with_space(&updated, &config));
         }
 
         let entry = candidate;
@@ -502,7 +992,92 @@ impl Workspaces {
         attach_project_home(&self.homes, &entry);
         entries.insert(entry.id.clone(), entry.clone());
 
-        Ok(describe(&entry))
+        Ok(self.describe_with_space(&entry, &config))
+    }
+
+    /// The saved workspace file is the source of folder membership. Serialize
+    /// local changes, validate before replacing it, and preserve the registry ID.
+    pub async fn add_root(&self, id: &str, requested: &Path) -> Result<WorkspaceInfo> {
+        let root = crate::guest_paths::guest_path(requested).canonicalize()?;
+        anyhow::ensure!(root.is_dir(), "the new root must be a directory");
+        let mut entries = self.entries.write().await;
+        let existing = entries
+            .get(id)
+            .filter(|entry| !entry.removed)
+            .cloned()
+            .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
+        let path = existing
+            .workspace_file
+            .as_ref()
+            .ok_or_else(|| anyhow!("adding roots requires a .code-workspace Agent"))?;
+        let original = std::fs::read_to_string(path)?;
+        anyhow::ensure!(
+            original.len() as u64 <= MAX_WORKSPACE_FILE_BYTES,
+            "workspace file exceeds size limit"
+        );
+        // Read fresh disk contents: never replace external edits with our cached folders.
+        let current = parse_code_workspace(path, &original)?;
+        let mut document: serde_json::Value = json5::from_str(&original)?;
+        if !current.folders.iter().any(|folder| folder.root == root) {
+            anyhow::ensure!(
+                current.folders.len() < MAX_WORKSPACE_FOLDERS,
+                "workspace folder limit reached"
+            );
+            // The wire uses guest paths, but VS Code must also understand this
+            // saved file on a Windows host. Convert mounted volumes at this
+            // file-format boundary only; protocol paths stay unchanged.
+            let absolute = crate::guest_paths::windows_volumes()
+                .iter()
+                .find_map(|volume| {
+                    root.strip_prefix(&volume.guest).ok().map(|relative| {
+                        format!("{}:/{}", volume.letter, relative.to_string_lossy())
+                    })
+                })
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            document
+                .get_mut("folders")
+                .and_then(serde_json::Value::as_array_mut)
+                .ok_or_else(|| anyhow!("workspace folders must be an array"))?
+                .push(serde_json::json!({"path": absolute}));
+        }
+        let body = if current.folders.iter().any(|folder| folder.root == root) {
+            original.clone()
+        } else {
+            format!("{}\n", serde_json::to_string_pretty(&document)?)
+        };
+        anyhow::ensure!(
+            body.len() as u64 <= MAX_WORKSPACE_FILE_BYTES,
+            "workspace file exceeds size limit"
+        );
+        let mut updated = parse_code_workspace(path, &body)?;
+        updated.id = existing.id.clone();
+        updated.name = existing.name.clone();
+        let mut config = self.config.write().await;
+        let mut next = config.clone();
+        for folder in &mut updated.folders {
+            folder.root_handle = next.ensure_workspace_root(&folder.root);
+        }
+        *next
+            .workspaces
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| anyhow!("workspace missing from config"))? = updated.clone();
+        if updated != existing {
+            next.workspace_catalog_revision = next.workspace_catalog_revision.saturating_add(1);
+        }
+        if body != original {
+            replace_workspace_file(path, &original, &body)?;
+        }
+        if let Err(error) = next.save(&self.config_path) {
+            if body != original {
+                replace_workspace_file(path, &body, &original)
+                    .context("registry save failed; workspace file rollback also failed")?;
+            }
+            return Err(error);
+        }
+        *config = next;
+        entries.insert(id.to_owned(), updated.clone());
+        Ok(self.describe_with_space(&updated, &config))
     }
 
     /// Removes a project from the active registry without touching its files or
@@ -515,7 +1090,19 @@ impl Workspaces {
             .cloned()
             .ok_or_else(|| anyhow!("no such workspace: {id}"))?;
         if entry.removed {
-            return Ok(active_descriptions(entries.values()));
+            let config = self.config.read().await;
+            return Ok(active_descriptions(entries.values(), &config));
+        }
+        let config_snapshot = self.config.read().await;
+        let has_active_children = config_snapshot.agent_spaces.iter().any(|space| {
+            space.parent_workspace_id.as_deref() == Some(id)
+                && entries
+                    .get(&space.workspace_id)
+                    .is_some_and(|child| !child.removed)
+        });
+        drop(config_snapshot);
+        if has_active_children {
+            anyhow::bail!("remove or re-parent this AgentSpace's children first");
         }
 
         let mut updated = entry;
@@ -534,7 +1121,7 @@ impl Workspaces {
         entries.insert(id.to_string(), updated);
         self.homes.detach(id);
 
-        Ok(active_descriptions(entries.values()))
+        Ok(active_descriptions(entries.values(), &config))
     }
 
     /// Changes only the label shown to the user; the directory itself stays put.
@@ -570,7 +1157,7 @@ impl Workspaces {
         *config = next;
         entries.insert(id.to_string(), updated.clone());
 
-        Ok(describe(&updated))
+        Ok(self.describe_with_space(&updated, &config))
     }
 
     /// One directory is one project. A leftover folder entry and a
@@ -630,13 +1217,108 @@ impl Workspaces {
 
 fn active_descriptions<'a>(
     entries: impl Iterator<Item = &'a WorkspaceEntry>,
+    config: &Config,
 ) -> Vec<WorkspaceInfo> {
     let mut out: Vec<_> = entries
         .filter(|entry| !entry.removed)
-        .map(describe)
+        .map(|entry| {
+            let mut info = describe(entry);
+            apply_space_projection(&mut info, config);
+            apply_space_health(&mut info, entry, config);
+            info
+        })
         .collect();
     out.sort_by(|left, right| left.name.cmp(&right.name));
     out
+}
+
+/// The registration this Workspace carries, plus the older exclusive-role
+/// view derived from it. One lookup, one truth, two shapes on the wire.
+fn apply_space_projection(info: &mut WorkspaceInfo, config: &Config) {
+    let Some(space) = config
+        .agent_spaces
+        .iter()
+        .find(|space| space.workspace_id == info.id)
+    else {
+        return;
+    };
+    info.agent_space = Some(crate::agent_space::describe(space));
+    info.pipe_space = Some(crate::agent_space::describe_legacy(space));
+}
+
+fn apply_space_health(info: &mut WorkspaceInfo, entry: &WorkspaceEntry, config: &Config) {
+    let Some(space) = config
+        .agent_spaces
+        .iter()
+        .find(|space| space.workspace_id == entry.id)
+    else {
+        return;
+    };
+    let mut reasons = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = space;
+    let root_id = loop {
+        if !seen.insert(cursor.workspace_id.as_str()) {
+            reasons.push("cycle: AgentSpace Parent relationship contains a cycle".to_string());
+            break cursor.workspace_id.as_str();
+        }
+        let Some(parent_id) = cursor.parent_workspace_id.as_deref() else {
+            break cursor.workspace_id.as_str();
+        };
+        let Some(parent) = config
+            .agent_spaces
+            .iter()
+            .find(|candidate| candidate.workspace_id == parent_id)
+        else {
+            reasons.push(format!("missingParent: {parent_id}"));
+            break cursor.workspace_id.as_str();
+        };
+        cursor = parent;
+    };
+    if let Some(project) = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == root_id && !workspace.removed)
+    {
+        match verify_pipe_space(&project.root, entry) {
+            Ok(digest) if digest == space.builder_lock_digest => {}
+            Ok(_) => reasons.push("builderLockDrift: verified lock digest changed".into()),
+            Err(error) => reasons.push(format!("builderVerifyFailed: {error:#}")),
+        }
+    } else {
+        reasons.push(format!("missingProjectRoot: {root_id}"));
+    }
+    if let Some(agent_space) = info.agent_space.as_mut() {
+        agent_space.health = Some(AgentSpaceHealth {
+            status: if reasons.is_empty() {
+                "healthy".into()
+            } else {
+                "unhealthy".into()
+            },
+            reasons,
+        });
+    }
+}
+
+/// A folder with no registration answers the same questions as a registered
+/// one, at revision zero. Callers therefore never branch on "does a
+/// registration exist" before they can compare-and-set.
+fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEntry {
+    config
+        .agent_spaces
+        .iter()
+        .find(|space| space.workspace_id == workspace_id)
+        .cloned()
+        .unwrap_or_else(|| AgentSpaceEntry {
+            workspace_id: workspace_id.to_string(),
+            parent_workspace_id: None,
+            revision: 0,
+            lifecycle: "persistent".into(),
+            builder_lock_digest: String::new(),
+            components: Vec::new(),
+            guidance: Vec::new(),
+            bootstrap_pack: None,
+        })
 }
 
 fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
@@ -658,7 +1340,19 @@ fn describe(entry: &WorkspaceEntry) -> WorkspaceInfo {
             .workspace_file
             .as_ref()
             .map(|path| path.display().to_string()),
+        agent_space: None,
+        pipe_space: None,
     }
+}
+
+/// Verify one AgentSpace through the daemon-owned AgentSpaceBuilder. The
+/// former hand-written lock reader duplicated only part of PipeBuilder's
+/// ownership contract and could accept a JSON-shaped lock that the builder
+/// itself rejected.
+fn verify_pipe_space(project_root: &Path, entry: &WorkspaceEntry) -> Result<String> {
+    crate::agent_space_builder::verify_space(project_root, &entry.root)
+        .map(|verified| verified.lock_digest)
+        .map_err(|error| anyhow!("AgentSpaceBuilder verification failed: {error}"))
 }
 
 fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
@@ -681,6 +1375,42 @@ fn folder_workspace(root: PathBuf, name: Option<String>) -> WorkspaceEntry {
     }
 }
 
+/// Atomic replacement using the existing cross-platform rename primitive.
+/// An external edit detected before publication is rejected instead of overwritten.
+fn replace_workspace_file(path: &Path, expected: &str, body: &str) -> Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("workspace file has no parent"))?;
+    let temporary = parent.join(format!(".genehub-workspace-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        #[cfg(not(target_family = "wasm"))]
+        let permissions = std::fs::metadata(path)?.permissions();
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(body.as_bytes())?;
+        #[cfg(not(target_family = "wasm"))]
+        file.set_permissions(permissions)?;
+        file.sync_all()?;
+        drop(file);
+        anyhow::ensure!(
+            std::fs::read_to_string(path)? == expected,
+            "workspace file changed; reopen and retry"
+        );
+        crate::config::replace_private(&temporary, path)?;
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
     let metadata = std::fs::metadata(path)
         .with_context(|| format!("reading workspace file {}", path.display()))?;
@@ -693,7 +1423,11 @@ fn code_workspace(path: &Path) -> Result<WorkspaceEntry> {
     }
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading workspace file {} as UTF-8", path.display()))?;
-    let parsed: CodeWorkspace = json5::from_str(&source)
+    parse_code_workspace(path, &source)
+}
+
+fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
+    let parsed: CodeWorkspace = json5::from_str(source)
         .with_context(|| format!("parsing workspace file {}", path.display()))?;
     if parsed.folders.is_empty() {
         anyhow::bail!("workspace file must contain at least one folder");
@@ -984,6 +1718,24 @@ fn safe_catalog_name(name: &str, local_workspace_id: &str) -> String {
 mod tests {
     use super::*;
 
+    fn write_verified_pipe_space(project: &Path, root: &Path) {
+        std::fs::create_dir_all(project).unwrap();
+        crate::agent_space_builder::run(
+            project,
+            root,
+            crate::agent_space_builder::Command::Init,
+            true,
+        )
+        .unwrap();
+        crate::agent_space_builder::run(
+            project,
+            root,
+            crate::agent_space_builder::Command::Build { dry_run: false },
+            true,
+        )
+        .unwrap();
+    }
+
     async fn workspaces(dir: &Path) -> Workspaces {
         let config = Arc::new(RwLock::new(Config::default()));
         Workspaces::new(config, dir.join("config.json"), WorkspaceHomes::default())
@@ -1001,6 +1753,7 @@ mod tests {
         assert_eq!(first.id, second.id, "the same folder is one workspace");
         assert_eq!(first.name, "project");
         assert_eq!(spaces.list().await.len(), 1);
+        assert_eq!(spaces.project_entry(&first.id).await.unwrap().id, first.id);
     }
 
     #[tokio::test]
@@ -1743,5 +2496,439 @@ mod tests {
         assert_eq!(spaces.catalog().await.revision, 1);
         spaces.rename(&opened.id, "renamed").await.unwrap();
         assert_eq!(spaces.catalog().await.revision, 2);
+    }
+
+    /// Opens the named directories as verified AgentSpaces and returns their
+    /// workspace ids in the order given.
+    async fn open_verified(dir: &Path, names: &[&str]) -> (Workspaces, Vec<String>) {
+        let project = dir.join(names[0]);
+        write_verified_pipe_space(&project, &project);
+        for name in &names[1..] {
+            write_verified_pipe_space(&project, &project.join("spaces").join(name));
+        }
+        let spaces = workspaces(dir).await;
+        let mut ids = Vec::new();
+        ids.push(spaces.open(&project, None).await.unwrap().id);
+        for name in &names[1..] {
+            ids.push(
+                spaces
+                    .open(&project.join("spaces").join(name), None)
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        (spaces, ids)
+    }
+
+    /// Mounts one enabled component at whatever revision the Space is on.
+    /// Tests that care about the compare-and-set call the RPC surface
+    /// directly with an explicit revision instead.
+    async fn mount(
+        spaces: &Workspaces,
+        workspace_id: &str,
+        component_id: &str,
+        role: Option<&str>,
+    ) -> Result<WorkspaceInfo> {
+        let revision = spaces.agent_space(workspace_id).await?.revision;
+        spaces
+            .configure_agent_space(
+                workspace_id,
+                revision,
+                &AgentSpaceOperation::SetComponent {
+                    component_id: component_id.into(),
+                    enabled: true,
+                    role: role.map(str::to_string),
+                },
+            )
+            .await
+    }
+
+    async fn attach(
+        spaces: &Workspaces,
+        workspace_id: &str,
+        parent: &str,
+    ) -> Result<WorkspaceInfo> {
+        let revision = spaces.agent_space(workspace_id).await?.revision;
+        spaces
+            .configure_agent_space(
+                workspace_id,
+                revision,
+                &AgentSpaceOperation::SetParent {
+                    parent_workspace_id: Some(parent.to_string()),
+                },
+            )
+            .await
+    }
+
+    async fn set_lifecycle(
+        spaces: &Workspaces,
+        workspace_id: &str,
+        lifecycle: &str,
+    ) -> Result<WorkspaceInfo> {
+        let revision = spaces.agent_space(workspace_id).await?.revision;
+        spaces
+            .configure_agent_space(
+                workspace_id,
+                revision,
+                &AgentSpaceOperation::SetLifecycle {
+                    lifecycle: lifecycle.into(),
+                },
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn project_and_reusable_executor_are_registered_as_mounted_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project", "executor"]).await;
+        let (project, executor) = (ids[0].clone(), ids[1].clone());
+
+        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap();
+        attach(&spaces, &executor, &project).await.unwrap();
+        mount(
+            &spaces,
+            &executor,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
+        set_lifecycle(&spaces, &executor, "pooled").await.unwrap();
+
+        let listed = spaces.list().await;
+        let find = |id: &str| {
+            listed
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .unwrap()
+                .clone()
+        };
+        let project_space = find(&project).agent_space.unwrap();
+        assert!(project_space.parent_workspace_id.is_none());
+        assert_eq!(
+            project_space
+                .components
+                .iter()
+                .map(|component| component.component_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![crate::agent_space::COMPONENT_PM]
+        );
+        assert!(find(&project).pipe_space.unwrap().pm);
+
+        let executor_space = find(&executor).agent_space.unwrap();
+        assert_eq!(
+            executor_space.parent_workspace_id.as_deref(),
+            Some(project.as_str())
+        );
+        assert_eq!(executor_space.lifecycle, "pooled");
+        assert_eq!(
+            executor_space.revision, 3,
+            "attach, mount and lifecycle each advance the one registration revision"
+        );
+        assert_eq!(
+            find(&executor).pipe_space.unwrap().worker_role.as_deref(),
+            Some(crate::agent_space::LEGACY_EXECUTOR_ROLE),
+            "the older exclusive-role shape is still readable"
+        );
+
+        let first = spaces
+            .reusable_component_space(&project, crate::agent_space::COMPONENT_EXECUTOR)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = spaces
+            .reusable_component_space(&project, crate::agent_space::COMPONENT_EXECUTOR)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.id, executor);
+        assert_eq!(
+            second.id, executor,
+            "a later Run reuses the same execution carrier"
+        );
+        assert_eq!(
+            spaces.project_entry(&project).await.unwrap().id,
+            project,
+            "a project root owns its DCG"
+        );
+        let error = spaces.project_entry(&executor).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("子 AgentSpace 不能作为项目 DCG 入口"));
+    }
+
+    #[tokio::test]
+    async fn one_space_can_manage_the_project_and_drive_the_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project"]).await;
+        let project = ids[0].clone();
+
+        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap();
+        let info = mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(info.agent_space.as_ref().unwrap().components.len(), 2);
+        assert_eq!(
+            spaces.project_entry(&project).await.unwrap().id,
+            project,
+            "mounting the executor component does not cost a project root its DCG"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subteam_owns_its_own_workers_and_the_project_cannot_reach_past_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project", "team", "coder"]).await;
+        let (project, team, coder) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+
+        mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
+        attach(&spaces, &team, &project).await.unwrap();
+        mount(
+            &spaces,
+            &team,
+            crate::agent_space::COMPONENT_WORKER,
+            Some("coder"),
+        )
+        .await
+        .unwrap();
+        mount(&spaces, &team, crate::agent_space::COMPONENT_EXECUTOR, None)
+            .await
+            .unwrap();
+        attach(&spaces, &coder, &team).await.unwrap();
+        mount(
+            &spaces,
+            &coder,
+            crate::agent_space::COMPONENT_WORKER,
+            Some("coder"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            spaces
+                .schedulable_children(&project)
+                .await
+                .unwrap()
+                .iter()
+                .map(|space| space.id.clone())
+                .collect::<Vec<_>>(),
+            vec![team.clone()],
+            "the project sees the subteam itself, never the subteam's Workers"
+        );
+        assert_eq!(
+            spaces
+                .schedulable_children(&team)
+                .await
+                .unwrap()
+                .iter()
+                .map(|space| space.id.clone())
+                .collect::<Vec<_>>(),
+            vec![coder.clone()]
+        );
+        let error = spaces.schedulable_children(&coder).await.unwrap_err();
+        assert!(
+            error.to_string().contains("enabled executor component"),
+            "a Worker cannot enumerate anything: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_resolves_one_direct_worker_by_project_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) =
+            open_verified(dir.path(), &["project", "executor", "coder", "reviewer"]).await;
+        let (project, executor, coder, reviewer) = (
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[2].clone(),
+            ids[3].clone(),
+        );
+
+        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap();
+        attach(&spaces, &executor, &project).await.unwrap();
+        mount(
+            &spaces,
+            &executor,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap();
+        for (worker, role) in [(&coder, "coder"), (&reviewer, "reviewer")] {
+            attach(&spaces, worker, &executor).await.unwrap();
+            mount(
+                &spaces,
+                worker,
+                crate::agent_space::COMPONENT_WORKER,
+                Some(role),
+            )
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            spaces
+                .worker_space_for_role(&executor, "coder")
+                .await
+                .unwrap()
+                .id,
+            coder
+        );
+        assert_eq!(
+            spaces
+                .worker_space_for_role(&executor, "reviewer")
+                .await
+                .unwrap()
+                .id,
+            reviewer
+        );
+        let error = spaces
+            .worker_space_for_role(&executor, "tester")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("found 0"));
+    }
+
+    #[tokio::test]
+    async fn structure_alone_never_grants_the_right_to_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project", "coder"]).await;
+        let (project, coder) = (ids[0].clone(), ids[1].clone());
+
+        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap();
+        attach(&spaces, &coder, &project).await.unwrap();
+        mount(
+            &spaces,
+            &coder,
+            crate::agent_space::COMPONENT_WORKER,
+            Some("coder"),
+        )
+        .await
+        .unwrap();
+
+        let error = spaces.schedulable_children(&project).await.unwrap_err();
+        assert!(
+            error.to_string().contains("enabled executor component"),
+            "being the parent is ownership, not permission to command: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_requires_the_revision_the_caller_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project"]).await;
+        let project = ids[0].clone();
+
+        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap();
+        let error = spaces
+            .configure_agent_space(
+                &project,
+                0,
+                &AgentSpaceOperation::SetComponent {
+                    component_id: crate::agent_space::COMPONENT_EXECUTOR.into(),
+                    enabled: true,
+                    role: None,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("is at revision 1, not 0"),
+            "a caller working from a stale read is told so: {error}"
+        );
+        assert_eq!(
+            spaces.agent_space(&project).await.unwrap().components.len(),
+            1,
+            "the refused call left nothing behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_folder_reports_a_revision_zero_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let plain = spaces.open(&plain, None).await.unwrap();
+
+        let space = spaces.agent_space(&plain.id).await.unwrap();
+        assert_eq!(space.revision, 0);
+        assert!(space.components.is_empty());
+        assert!(
+            plain.agent_space.is_none() && plain.pipe_space.is_none(),
+            "an ordinary folder stays a neutral filesystem fact on the wire"
+        );
+        assert!(
+            spaces
+                .reusable_component_space(&plain.id, crate::agent_space::COMPONENT_EXECUTOR)
+                .await
+                .unwrap()
+                .is_none(),
+            "a directory project keeps the pre-AgentSpace in-place path"
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_rejects_pipespace_artifact_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        write_verified_pipe_space(&project, &project);
+        std::fs::write(project.join("AGENTS.md"), "tampered\n").unwrap();
+        let spaces = workspaces(dir.path()).await;
+        let project = spaces.open(&project, None).await.unwrap();
+        let error = mount(&spaces, &project.id, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("drifted"));
+    }
+
+    #[tokio::test]
+    async fn a_drifted_space_cannot_gain_a_further_responsibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(dir.path(), &["project"]).await;
+        let project = ids[0].clone();
+        mount(&spaces, &project, crate::agent_space::COMPONENT_PM, None)
+            .await
+            .unwrap();
+
+        std::fs::write(dir.path().join("project/AGENTS.md"), "tampered\n").unwrap();
+        let error = mount(
+            &spaces,
+            &project,
+            crate::agent_space::COMPONENT_EXECUTOR,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("drifted"),
+            "the lock is re-verified on every change, not only at registration: {error}"
+        );
     }
 }

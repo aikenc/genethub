@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { resolveAgentPresentation } from "../presentation/catalog/resolve";
 import { SessionStatusIcon } from "../shell/SessionStatusIcon";
+import { buildAgentSpaceTree } from "../workspace/agent-space-tree";
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { formatClock } from "./selectionCopy";
 
@@ -14,15 +15,19 @@ import { formatClock } from "./selectionCopy";
  */
 export function SessionListItem({
   session,
+  relatedSessions,
   agent,
   workspace,
+  workspaceLabel,
   selected,
   onSelect,
 }: {
   session: SessionSummary;
+  relatedSessions?: readonly SessionSummary[];
   agent?: AgentInfo;
   /** Resolved from the session's own machine; absent only when it is gone. */
   workspace?: WorkspaceInfo;
+  workspaceLabel?: string;
   selected: boolean;
   onSelect(): void;
 }) {
@@ -36,15 +41,16 @@ export function SessionListItem({
         selected ? "bg-accent/10 text-fg" : "text-muted hover:bg-raised hover:text-fg"
       }`}
     >
-      <SessionStatusIcon status={session.status} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-fg">{session.title || "新会话"}</span>
+        <span className="block text-[11px]"><SessionStatusIcon session={session} sessions={relatedSessions} showLabel /></span>
         <span className="block truncate text-[10px] text-faint">
           {agent ? resolveAgentPresentation(agent).label : session.agentId} ·{" "}
           {formatClock(session.updatedAtMs)}
+          {session.managed ? ` · 受管 ${session.managed.role}` : ""}
         </span>
       </span>
-      {workspace ? <WorkspaceAffordance workspace={workspace} /> : null}
+      {workspace ? <WorkspaceAffordance workspace={workspace} label={workspaceLabel} /> : null}
     </button>
   );
 }
@@ -77,6 +83,7 @@ export function SessionPicker({
   excludeId?: string;
 }) {
   const [query, setQuery] = useState("");
+  const workspaceTree = useMemo(() => buildAgentSpaceTree(workspaces), [workspaces]);
 
   const listed = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -112,8 +119,10 @@ export function SessionPicker({
             <SessionListItem
               key={session.id}
               session={session}
+              relatedSessions={sessions}
               agent={agents.find((entry) => entry.id === session.agentId)}
               workspace={workspaces.find((entry) => entry.id === session.workspaceId)}
+              workspaceLabel={workspaceTree.breadcrumbById[session.workspaceId]}
               selected={session.id === selectedId}
               onSelect={() => onSelect(session.id)}
             />

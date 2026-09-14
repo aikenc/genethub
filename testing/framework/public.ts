@@ -26,6 +26,7 @@ export {
 } from "./drivers/cli.ts";
 
 export type { CaseContext } from "./context.ts";
+export { openBrowser, openWorkbenchPage } from "./drivers/browser.ts";
 export { assertions } from "./assertions/index.ts";
 export { connectProductClient } from "./drivers/client.ts";
 export type { ClientDiagnosticEvent } from "@genehub/workbench/client";
@@ -89,3 +90,5 @@ export { runNodeUnit } from "../infrastructure/public.ts";
 export { registerControlledAgent, readControlledAgentJournal } from "../infrastructure/public.ts";
 
 export { createScheduler, defaultBudget, claimNext, completeUnit, hasClaimable } from "../infrastructure/public.ts";
+
+export { selectForGate } from "../policies/gates.ts";

@@ -296,10 +296,11 @@ mod tests {
         assert_eq!(guest_form(exe), guest);
         assert_eq!(guest_form(verbatim), guest);
         for raw in [exe, verbatim, guest] {
-            let path = PathBuf::from(guest_form(raw).as_ref());
-            assert!(path.is_absolute(), "{raw}");
+            // This is the WASI guest spelling. Native Windows `Path` parsing
+            // does not consider `/c/...` absolute even though the guest does.
+            assert!(guest_form(raw).starts_with('/'), "{raw}");
         }
-        assert!(!Path::new(guest_form("genet-beta").as_ref()).is_absolute());
-        assert!(!Path::new(guest_form("genet").as_ref()).is_absolute());
+        assert!(!guest_form("genet-beta").starts_with('/'));
+        assert!(!guest_form("genet").starts_with('/'));
     }
 }

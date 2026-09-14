@@ -1,13 +1,10 @@
 /**
  * How much of the window the on-screen keyboard is covering, as a CSS variable.
  *
- * The shell is a fixed box the size of the layout viewport (`theme.css`), which
- * is what stops iOS scrolling the whole page to reveal a focused field. The
- * cost of that is that the keyboard then covers the bottom of the box instead
- * of pushing it up, so the composer would be typed into from behind the
- * keyboard. Safari does not honour `interactive-widget=resizes-content`, and
- * the visual viewport is the only thing that knows the keyboard is there at
- * all.
+ * The fixed shell follows the dynamic viewport. Only the part still obscured
+ * by an overlay keyboard becomes composer padding. Resizing keyboards already
+ * reduce the shell; pinch zoom is not keyboard coverage. All coordinates are
+ * converted to the current UI zoom before entering CSS.
  *
  * Published as `--keyboard` rather than through React state on purpose: this
  * changes on every frame of the keyboard's animation, and a re-render of the
@@ -19,9 +16,16 @@ export function watchViewport(): () => void {
   if (!viewport || !root) return () => {};
 
   const apply = () => {
+    const focused = document.activeElement;
+    const editing = focused instanceof HTMLElement &&
+      (focused.matches("input, textarea") || focused.isContentEditable);
+    const zoom = Number.parseFloat(getComputedStyle(root).zoom) || 1;
+    // Body uses the dynamic viewport. Measure its actual lower edge so Chrome
+    // resizes-content and Safari overlay keyboards do not compensate twice.
+    const bottom = document.body.getBoundingClientRect().bottom;
     root.style.setProperty(
       "--keyboard",
-      `${keyboardCoveredPx(globalThis.innerHeight, viewport)}px`,
+      `${editing && Math.abs(viewport.scale - 1) < 0.01 ? keyboardCoveredPx(bottom, viewport) / zoom : 0}px`,
     );
   };
 
@@ -30,9 +34,20 @@ export function watchViewport(): () => void {
   // The visual viewport also moves without resizing — a pinch, or the moment
   // Safari decides to scroll it anyway — and the keyboard is still there.
   viewport.addEventListener("scroll", apply);
+  window.addEventListener("resize", apply);
+  window.addEventListener("pageshow", apply);
+  document.addEventListener("focusin", apply);
+  document.addEventListener("focusout", apply);
+  const observer = new MutationObserver(apply);
+  observer.observe(root, { attributes: true, attributeFilter: ["data-ui-scale"] });
   return () => {
     viewport.removeEventListener("resize", apply);
     viewport.removeEventListener("scroll", apply);
+    window.removeEventListener("resize", apply);
+    window.removeEventListener("pageshow", apply);
+    document.removeEventListener("focusin", apply);
+    document.removeEventListener("focusout", apply);
+    observer.disconnect();
     root.style.removeProperty("--keyboard");
   };
 }

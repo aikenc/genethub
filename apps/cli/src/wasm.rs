@@ -40,6 +40,27 @@ fn cargo_target(dir: &Path) -> Option<&Path> {
     dir.parent()
 }
 
+fn component_candidates(dir: &Path) -> Vec<PathBuf> {
+    let mut components = Vec::new();
+    if let Some(target) = cargo_target(dir) {
+        // A Cargo checkout can contain an old component copied beside a CLI
+        // by an earlier packaging step. Prefer Cargo's canonical cross-target
+        // outputs so that a current CLI cannot silently launch that stale copy.
+        for profile in ["iterate", "debug", "release"] {
+            components.push(
+                target
+                    .join("wasm32-wasip2")
+                    .join(profile)
+                    .join("genehub_guest.wasm"),
+            );
+        }
+    }
+    // Published installs put the paired component beside the CLI. This is also
+    // the last-resort layout for source builds that have no cross-target output.
+    components.push(dir.join("genehub_guest.wasm"));
+    components
+}
+
 fn host_name() -> String {
     if cfg!(windows) {
         format!("{}.exe", channel::HOST_BINARY)
@@ -74,19 +95,7 @@ pub fn locate() -> Result<Guest, String> {
             )
         })?;
 
-    let mut components = vec![dir.join("genehub_guest.wasm")];
-    if let Some(target) = target {
-        // Prefer iterate over a leftover fat-LTO release artifact so local
-        // and Dev/Beta Live rebuilds do not silently pick the slow profile.
-        for profile in ["iterate", "debug", "release"] {
-            components.push(
-                target
-                    .join("wasm32-wasip2")
-                    .join(profile)
-                    .join("genehub_guest.wasm"),
-            );
-        }
-    }
+    let components = component_candidates(&dir);
     let component = std::env::var("GENEHUB_LOCAL_COMPONENT")
         .ok()
         .filter(|value| !value.is_empty())
@@ -102,6 +111,38 @@ pub fn locate() -> Result<Guest, String> {
         })?;
 
     Ok(Guest { host, component })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cargo_layout_prefers_the_cross_target_component() {
+        let target = PathBuf::from("target-root");
+        let cli_dir = target.join("iterate");
+        let candidates = component_candidates(&cli_dir);
+
+        assert_eq!(
+            candidates.first(),
+            Some(
+                &target
+                    .join("wasm32-wasip2")
+                    .join("iterate")
+                    .join("genehub_guest.wasm")
+            )
+        );
+        assert_eq!(candidates.last(), Some(&cli_dir.join("genehub_guest.wasm")));
+    }
+
+    #[test]
+    fn installed_layout_uses_the_component_beside_the_cli() {
+        let cli_dir = PathBuf::from("installed-bin");
+        assert_eq!(
+            component_candidates(&cli_dir),
+            vec![cli_dir.join("genehub_guest.wasm")]
+        );
+    }
 }
 
 /// Whoever spawns the shell tells it which CLI is the front door; the shell

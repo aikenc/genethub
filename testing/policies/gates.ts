@@ -20,6 +20,15 @@ export function selectForGate(
       ? { include: true, reason: "public business multichannel contract" }
       : { include: false, reason: "not multichannel" };
   }
+  // L13 keeps every frozen legacy case required until its individual parity is
+  // proven. Some of those cases use a real provider, so this obligation must
+  // take precedence over the normal release-only real-provider policy.
+  if (item.runner === "rust-legacy") {
+    return { include: true, reason: "L13: frozen legacy required until verified parity" };
+  }
+  if (item.llm.default === "real" && gate !== "beta" && gate !== "stable") {
+    return { include: false, reason: "real LLM canary is release-only" };
+  }
   if (gate === "infra-compact") {
     return item.tags.includes("infra-compact")
       ? { include: true, reason: "infra compact" }
@@ -45,8 +54,10 @@ export function selectForGate(
       ? { include: true, reason: "release browser matrix" }
       : { include: false, reason: "playwright not in this gate" };
   }
-  if (item.runner === "rust-legacy") {
-    return { include: true, reason: "L13: frozen legacy required until verified parity" };
+  if (item.kind === "e2e") {
+    return gate === "beta" || gate === "stable"
+      ? { include: true, reason: "release platform matrix" }
+      : { include: false, reason: "e2e platform matrix not in this gate" };
   }
   if (item.tags.includes("v1-wasm")) {
     return { include: false, reason: "v1 signed-wasm role, not on this tree" };
@@ -87,6 +98,8 @@ export function qualificationReasons(input: {
   requiredCloudSha?: string;
   requiredArtifactHash?: string;
   requiredNotExecuted?: string[];
+  unprovenArtifacts?: string[];
+  leakedProcessGroups?: number;
 }): string[] {
   const reasons: string[] = [];
   if (input.failed > 0) reasons.push("failed cases present");
@@ -113,6 +126,18 @@ export function qualificationReasons(input: {
   }
   if (input.requiredNotExecuted && input.requiredNotExecuted.length > 0) {
     reasons.push(`required cases not executed: ${input.requiredNotExecuted.join(",")}`);
+  }
+  if (
+    (input.gate === "dev" || input.gate === "beta" || input.gate === "stable") &&
+    input.unprovenArtifacts &&
+    input.unprovenArtifacts.length > 0
+  ) {
+    reasons.push(
+      `release gate cannot accept an unproven build: ${input.unprovenArtifacts.join(",")}`,
+    );
+  }
+  if (input.leakedProcessGroups && input.leakedProcessGroups > 0) {
+    reasons.push(`${input.leakedProcessGroups} unit process group(s) survived the run`);
   }
   return reasons;
 }

@@ -11,7 +11,6 @@
 
 use std::path::PathBuf;
 
-use crate::config::Paths;
 use serde::{Deserialize, Serialize};
 
 use super::output::CliFailure;
@@ -59,12 +58,12 @@ struct Persisted {
 }
 
 pub fn file() -> Result<PathBuf, CliFailure> {
-    Paths::discover()
-        .map(|paths| paths.machines_file())
+    super::local_state()
+        .map(|state| state.paths.machines_file())
         .map_err(|error| {
             CliFailure::business(
                 "storeUnavailable",
-                format!("locate the data directory: {error:#}"),
+                format!("locate the daemon data directory: {error}"),
                 None,
             )
         })

@@ -31,6 +31,7 @@ use crate::config::ProviderConfig;
 /// Everything an adapter needs to start a session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
+    pub evidence_scope: Option<genehub_proto::SessionEvidenceScope>,
     pub session_id: String,
     pub cwd: PathBuf,
     pub model_id: Option<String>,
@@ -52,6 +53,10 @@ pub struct SessionConfig {
     /// Absolute front-door CLI selected by the channel launcher. Every Agent
     /// receives the same binding; absence is explicit and never guessed.
     pub front_door_cli: Option<PathBuf>,
+    /// Session-bound proof accepted only by this daemon's local CLI front.
+    /// It lets an ordinary Agent act as a Workflow controller without turning
+    /// that Agent or Session into a separate product type.
+    pub controller_token: Option<String>,
     /// Where the adapter may keep agent-private state for this session.
     pub scratch_dir: PathBuf,
     /// Provider credentials, keyed by provider id.
@@ -399,6 +404,14 @@ pub(super) fn apply_session_environment(
     config: &SessionConfig,
 ) {
     command.env("GENEHUB_SESSION_ID", &config.session_id);
+    match &config.controller_token {
+        Some(token) => {
+            command.env("GENEHUB_CONTROLLER_TOKEN", token);
+        }
+        None => {
+            command.env_remove("GENEHUB_CONTROLLER_TOKEN");
+        }
+    }
     match &config.front_door_cli {
         Some(path) => {
             command.env("GENEHUB_CLI", path);
@@ -668,6 +681,7 @@ mod tests {
     fn every_agent_process_receives_the_exact_front_door_binding() {
         let mut command = crate::os_process::Command::new("agent");
         let config = SessionConfig {
+            evidence_scope: None,
             session_id: "s-bound".into(),
             cwd: PathBuf::from("/workspace"),
             model_id: None,
@@ -677,6 +691,7 @@ mod tests {
             additional_system_prompt: None,
             skills_dir: None,
             front_door_cli: Some(PathBuf::from("/opt/genehub/genet-beta")),
+            controller_token: Some("session-proof".into()),
             scratch_dir: PathBuf::from("/scratch"),
             providers: Default::default(),
             resume: None,
@@ -697,5 +712,9 @@ mod tests {
             Some(&Some("/opt/genehub/genet-beta".into()))
         );
         assert_eq!(env.get("GENEHUB_SESSION_ID"), Some(&Some("s-bound".into())));
+        assert_eq!(
+            env.get("GENEHUB_CONTROLLER_TOKEN"),
+            Some(&Some("session-proof".into()))
+        );
     }
 }

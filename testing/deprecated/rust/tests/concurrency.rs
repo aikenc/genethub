@@ -390,6 +390,7 @@ async fn concurrent_user_journey_matches_profile() -> Result<()> {
                 session_id: session_id.clone(),
                 since_seq: None,
                 expand_last_round: false,
+                recent_rounds: None,
             })
         }))
         .await;
@@ -439,6 +440,7 @@ async fn concurrent_user_journey_matches_profile() -> Result<()> {
                     session_id: session_id.clone(),
                     since_seq: None,
                     expand_last_round: true,
+                    recent_rounds: None,
                 })
                 .await?,
             Reply::Subscribed { .. }
@@ -766,6 +768,8 @@ async fn run_turn_phase(
             let started = Instant::now();
             let reply = sender
                 .call(Request::SessionSend {
+                    message_id: None,
+                    task_run_id: None,
                     text: format!(
                         "Investigate the fixture and report evidence for {phase} task {session_id}."
                     ),
@@ -851,6 +855,7 @@ async fn poll_browser(
                 session_id: session.id.clone(),
                 since_seq: None,
                 expand_last_round: true,
+                recent_rounds: None,
             },
         )
         .await?;

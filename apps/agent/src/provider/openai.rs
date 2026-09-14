@@ -112,7 +112,7 @@ pub async fn stream(
                 for call in calls {
                     let index = call["index"].as_u64().unwrap_or(0);
                     let entry = tool_calls.entry(index).or_default();
-                    if let Some(id) = call["id"].as_str() {
+                    if let Some(id) = call["id"].as_str().filter(|id| !id.is_empty()) {
                         entry.id = id.to_string();
                     }
                     if let Some(name) = call["function"]["name"].as_str() {

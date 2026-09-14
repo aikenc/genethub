@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { catalogDigest, loadCatalog } from "../infrastructure/engine/catalog.ts";
 import { artifactBundleIdentity, artifactIdentity, repoIdentity, runsIgnored, snapshotHasher } from "../infrastructure/engine/git.ts";
 import { planCases } from "../infrastructure/engine/planner.ts";
+import { preflightRun } from "../infrastructure/engine/preflight.ts";
+import { unreapedProcessGroups } from "../infrastructure/environment/cleanup.ts";
 import { addResult, emptyCounts, rollupStatus } from "../infrastructure/engine/result.ts";
 import {
   claimNext,
@@ -61,6 +63,7 @@ function usage(): string {
   governance check [--open <path>] [--cloud <path>]
   plan --gate <gate> [--open <path>] [--cloud <path>] [--tags <tag>] [--case <id>] [--reason <scope explanation>]
   run --space <abs> --gate <gate> --topic <slug> [--environments 16] [--summary-language <en|zh-CN>] [--open] [--cloud] [--max-run-ms] [--case <id>|--tags <tag>] [--reason <text>] [--resume <finalized-run>]
+      [--no-build]
   dev-feedback requires explicit --case/--tags and --reason; it is scoped evidence, never full release qualification.
   Selected dependencies are checked before execution. Progress is on stderr and inspect works while running.
   --resume creates new evidence; only matching passed results are reused, failed/unstable retries are refused.
@@ -141,12 +144,29 @@ async function main(): Promise<number> {
     const summaryLanguage = parseSummaryLanguage(flag(args, "--summary-language", "en"));
     const environments = Number(flag(args, "--environments", "16")) || 16;
     const maxRunMs = Number(flag(args, "--max-run-ms", "0")) || 0;
+    // Every refusal below names the value it received and the shape it wanted.
+    // "--space is required" and "space runs/ is not gitignored" both read like
+    // the flag was wrong when the usual mistake is passing a PipeSpace *name*
+    // where an absolute path belongs.
     if (!space) {
-      process.stderr.write("--space is required\n");
+      process.stderr.write(
+        "--space is required: the absolute path of the PipeSpace directory that will hold runs/,\n" +
+          "for example --space /path/to/genethub-spaces/spaces/dev-agent (a space name is not a path)\n",
+      );
+      return 2;
+    }
+    if (!existsSync(space) || !statSync(space).isDirectory()) {
+      process.stderr.write(
+        `--space must be an existing directory; ${space} is not one.\n` +
+          "Pass the absolute path of the PipeSpace directory, not its name.\n",
+      );
       return 2;
     }
     if (!runsIgnored(space)) {
-      process.stderr.write("space runs/ is not gitignored\n");
+      process.stderr.write(
+        `${path.join(space, "runs")} is not gitignored, so a run would commit its own evidence.\n` +
+          "Add runs/ to that repository's ignore rules, then rerun.\n",
+      );
       return 2;
     }
     const captureInputs = () => {
@@ -160,6 +180,14 @@ async function main(): Promise<number> {
     const cases = await loadCatalog({ openRoot, cloudRoot });
     const selection = { tags: valuesOf(args, "--tags"), cases: valuesOf(args, "--case"), reason: flag(args, "--reason").trim() };
     const plan = planCases(cases, gate, selection.tags, selection.cases, selection.reason);
+    const prerequisites = await preflight(plan.units.map(unit => unit.meta));
+    const productPreflight = prerequisites.issues.length ? { refusals: [], unprovenArtifacts: [] } : preflightRun({
+      units: plan.units, openRoot, cloudRoot, build: !has(args, "--no-build"),
+    });
+    if (productPreflight.refusals.length) {
+      process.stderr.write(`${productPreflight.refusals.join("\n")}\n`);
+      return 2;
+    }
     const store = createRunStore(space, topic);
     const startedAt = new Date();
     const results: UnitResult[] = [];
@@ -179,7 +207,6 @@ async function main(): Promise<number> {
     heartbeat.unref();
     let inputWatch: ReturnType<typeof watchInputs> | undefined;
     try {
-      const prerequisites = await preflight(plan.units.map(unit => unit.meta));
       const preflightBlocked = prerequisites.issues.length > 0;
       phase = "fingerprinting"; progress(); announce();
       // Failed preconditions do not require hashing large binaries or starting any test environments.
@@ -189,7 +216,11 @@ async function main(): Promise<number> {
         artifact: { path: null, hash: null, kind: "preflight-not-executed" },
         bundle: undefined,
       } : captureInputs();
-      if (!preflightBlocked) inputWatch = watchInputs([openRoot, ...(cloudRoot ? [cloudRoot] : [])], inputsAtStart.bundle!.files.map(f => f.path));
+      if (!preflightBlocked) inputWatch = watchInputs(
+        [openRoot, ...(cloudRoot ? [cloudRoot] : [])],
+        inputsAtStart.bundle!.files.map(f => f.path),
+        [store.dir],
+      );
       const governanceDigest = checkGovernance(openRoot, cloudRoot).digest;
       const resumeBinding = preflightBlocked ? undefined : {
         common: digest({ inputsAtStart, catalog: catalogDigest(cases), gate, selection,
@@ -229,7 +260,7 @@ async function main(): Promise<number> {
         if (unit.meta.runner === "playwright") {
           env.TESTCTL_BROWSER_ARTIFACTS = path.join(
             store.dir,
-            "failures",
+            unit.meta.retention ? "reports" : "failures",
             unit.caseId.replace(/[^\w.-]+/g, "_"),
           );
         }
@@ -241,10 +272,10 @@ async function main(): Promise<number> {
           store.writeResult(result);
           progress();
           if (result.status !== "passed") process.stderr.write(`[testctl] ${result.status}: ${result.caseId}; inspect --run ${store.dir} --case ${result.caseId}\n`);
-          if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS) {
+          if (result.status === "passed" && env.TESTCTL_BROWSER_ARTIFACTS && !unit.meta.retention) {
             rmSync(env.TESTCTL_BROWSER_ARTIFACTS, { recursive: true, force: true });
           }
-          if (result.status === "failed" || result.status === "blocked" || result.status === "unstable") {
+          if (result.status === "failed" || result.status === "blocked" || result.status === "unstable" || result.status === "interrupted") {
             store.writeFailure(
               result,
               [result.message ?? result.blockedReason ?? result.status, result.diagnostic].filter(Boolean).join("\n\n"),
@@ -333,6 +364,8 @@ async function main(): Promise<number> {
         requiredCloudSha: process.env.TESTCTL_REQUIRE_CLOUD_SHA,
         requiredArtifactHash: process.env.TESTCTL_REQUIRE_ARTIFACT_HASH,
         requiredNotExecuted: requiredCases.filter((id) => !executed.has(id)),
+        unprovenArtifacts: productPreflight.unprovenArtifacts,
+        leakedProcessGroups: unreapedProcessGroups(),
       });
       const inputObservation = inputWatch?.stop() ?? { changed: false, complete: false };
       inputWatch = undefined;
@@ -386,6 +419,7 @@ async function main(): Promise<number> {
         artifactBundle: inputsAtStart.bundle,
         inputObservation,
         inputDrift,
+        unprovenArtifacts: productPreflight.unprovenArtifacts,
       };
       const failed = results.filter((item) => item.status !== "passed" && item.status !== "not-applicable");
       const slowest = [...results].sort((a, b) => b.durationMs - a.durationMs).slice(0, 5);

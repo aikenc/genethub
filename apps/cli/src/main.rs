@@ -20,11 +20,13 @@ const FORWARDED: &[&str] = &[
     "context",
     "capabilities",
     "workspace",
+    "space",
     "session",
     "agent",
     "shell",
     "speech",
     "client",
+    "workflow",
     "process",
     "machine",
     "device",
@@ -156,6 +158,8 @@ pub fn usage() -> i32 {
   genet session list [--workspace <id>]
                                     list local daemon sessions
   genet session get <id>            get one session snapshot
+  genet session send <id> --message-id <stable-id> [--task-run <run-id>] \"<text>\"
+                                    durably accept PM input; inspect the session for its answer
   genet session inspect <id>        inspect session structure and coverage
   genet session narrative <id>      read a bounded narrative page
   genet session rounds <id>         read a bounded round-summary page
@@ -190,6 +194,43 @@ pub fn usage() -> i32 {
   genet speech runtime register --command <absolute-path> [--arg <value>...]
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
+  genet workflow init              initialize .genethub/workflow in this project
+  genet workflow inspect           validate and list project workflows
+  genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
+                                    route through the project workflow catalog
+  genet workflow get --run <id>    read one durable workflow run
+  genet workflow check [--run <id>]
+                                    inspect graph exits, execution and evidence without an LLM
+  genet workflow cancel --run <id> --revision <n>
+                                    fence the original request, then stop its squad
+  genet workflow dispatch ... --retry-of <run> [--resume-cancelled]
+                                    share the original request bounds; recovery needs new user input
+  genet workflow history [--limit <n>]
+                                    list recent Runs for Workflow analysis
+  genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
+                                    submit exact node evidence from its managed session
+                              [--outcome changesRequested|failed|blocked --reason <text>]
+                                    finish a negative review through its explicit or default exit
+  genet space inspect              which responsibilities this AgentSpace carries
+  genet space children             the direct Workers this Executor may dispatch to
+  genet space component set --component <pm|executor|worker|reviewer> [--role <r>]
+                              [--disabled] [--revision <n>]
+                                    mount or reconfigure one responsibility
+  genet space component remove --component <id> [--revision <n>]
+                                    unmount one responsibility
+  genet space parent set (--parent <id> | --detach) [--revision <n>]
+                                    move this AgentSpace in the ownership tree
+  genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
+  genet space builder init|check|explain|build|verify|clean --name <agent-space>
+                                    run the daemon-owned AgentSpaceBuilder inside this project
+  genet space bootstrap list       discover versioned project team/workflow packs
+  genet space bootstrap plan --pack <id> [--agent <id>] [--model <id>]
+  genet space bootstrap apply --pack <id> --plan-digest <digest> --action-id <id> --expected-revision <n> [--agent <id>] [--model <id>]
+                                    install a versioned project team and workflow pack
+  genet space approval request --challenge <id>
+                                    ask the Human to approve one daemon-authored plan; never approves it
+  genet session components <id>     which responsibilities are live in this session
+  genet session flow <id>           read an Executor Session's structured DCG timeline
   genet session send <id> \"<text>\"  continue a session
   genet session respond <id> --request <rid> --choose <optionId>
                                     answer what a waiting session asked

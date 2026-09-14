@@ -237,6 +237,7 @@ impl AgentAdapter for AcpAdapter {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let turn = Arc::new(Mutex::new(TurnState::default()));
+        let interactions = Arc::new(Mutex::new(Vec::new()));
 
         // Kept: a bridge that exits explains itself on stderr, and that used to
         // be logged below the default filter and then thrown away.
@@ -249,6 +250,7 @@ impl AgentAdapter for AcpAdapter {
             stdin: stdin.clone(),
             events: events.clone(),
             pending: pending.clone(),
+            interactions: interactions.clone(),
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
             child: child.clone(),
@@ -270,9 +272,14 @@ impl AgentAdapter for AcpAdapter {
             additional_system_prompt: config.additional_system_prompt.clone(),
         };
 
-        session
-            .tasks
-            .spawn(read_loop(stdout, stdin, events, pending.clone(), turn));
+        session.tasks.spawn(read_loop(
+            stdout,
+            stdin,
+            events,
+            pending.clone(),
+            turn,
+            interactions,
+        ));
         session.tasks.spawn(watch_for_exit(child.clone(), pending));
 
         session.initialize(&config).await?;
@@ -578,6 +585,8 @@ struct AcpSession {
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
+    interactions: Arc<Mutex<Vec<Value>>>,
+
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
@@ -859,13 +868,40 @@ impl AgentSession for AcpSession {
     }
 
     async fn interrupt(&self) -> Result<()> {
+        // ACP cancellation must also resolve each outstanding server request;
+        // the future Human answer belongs to GeneHub's durable interaction.
+        let requests = std::mem::take(&mut *self.interactions.lock().await);
+        let mut terminal = (!requests.is_empty()).then(|| self.events.subscribe());
+        for id in requests {
+            self.write(json!({ "jsonrpc": "2.0", "id": id,
+                "result": { "outcome": { "outcome": "cancelled" } } }))
+                .await?;
+        }
         let session_id = self.session_id().await?;
         self.write(json!({
             "jsonrpc": "2.0",
             "method": "session/cancel",
             "params": { "sessionId": session_id },
         }))
-        .await
+        .await?;
+        if let Some(events) = &mut terminal {
+            // Let the peer persist cancellation before closing its process.
+            // This bounded protocol drain never waits for the Human.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while let Ok(event) = events.recv().await {
+                    if matches!(
+                        event,
+                        SessionEvent::TurnCanceled { .. }
+                            | SessionEvent::TurnCompleted { .. }
+                            | SessionEvent::TurnFailed { .. }
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await;
+        }
+        Ok(())
     }
 
     async fn pid(&self) -> Option<u32> {
@@ -1651,6 +1687,7 @@ async fn read_loop(
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
     turn: Arc<Mutex<TurnState>>,
+    interactions: Arc<Mutex<Vec<Value>>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -1689,6 +1726,7 @@ async fn read_loop(
                 tracing::warn!("ACP permission request had no numeric id");
                 continue;
             };
+            interactions.lock().await.push(json!(id));
             translate_permission(id, &params, &events);
             continue;
         }
@@ -1697,7 +1735,9 @@ async fn read_loop(
                 tracing::warn!("Cursor question request had no id");
                 continue;
             };
+            interactions.lock().await.push(id.clone());
             if !translate_cursor_question(id, &params, &events) {
+                interactions.lock().await.retain(|pending| pending != id);
                 let response =
                     rpc_error(id, -32602, "Cursor question request has no valid questions");
                 let mut input = stdin.lock().await;
@@ -1712,6 +1752,7 @@ async fn read_loop(
                 tracing::warn!("Cursor plan request had no id");
                 continue;
             };
+            interactions.lock().await.push(id.clone());
             translate_cursor_plan(id, &params, &events);
             continue;
         }

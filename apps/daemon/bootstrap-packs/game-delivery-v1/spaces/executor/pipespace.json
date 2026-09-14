@@ -1,0 +1,10 @@
+{
+  "schema": "pipespace.v1",
+  "name": "executor",
+  "description": "Reusable deterministic DCG execution control plane.",
+  "agents": ["codex", "cursor", "codebuddy", "claude-code"],
+  "skills": ["workflow-executor"],
+  "tags": ["executor"],
+  "skillProviders": [{"type": "folder", "path": "skills"}],
+  "children": {"scanDepth": 0}
+}

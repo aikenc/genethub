@@ -11,5 +11,7 @@ import type { ReactNode } from "react";
 export interface ExtraTab {
   id: string;
   label: string;
+  /** Omitted keeps the existing workspace placement for older hosts. */
+  scope?: "global" | "machine" | "workspace";
   render(): ReactNode;
 }

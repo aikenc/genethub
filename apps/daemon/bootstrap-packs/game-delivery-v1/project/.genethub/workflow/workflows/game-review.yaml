@@ -1,0 +1,17 @@
+schema: genehub.workflow.definition.v1
+id: game-review
+version: 1
+entry: assess
+nodes:
+  - id: assess
+    uses: agent.session
+    with:
+      role: reviewer
+    completion:
+      all:
+        - key: report
+          verify: value.nonEmpty
+    on:
+      completed: [publish]
+  - id: publish
+    uses: result.publish

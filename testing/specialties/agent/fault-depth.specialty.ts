@@ -205,6 +205,10 @@ agentCase(
   "twenty refreshes retain one ready genet entry with the same unique model and mode ids",
   ["refresh duplicates agents", "catalog races return empty", "model or mode ids accumulate duplicates"],
   async (t) => {
+    // This case verifies the built-in catalog. Keep optional host-installed
+    // CLIs out of its PATH so their login or initialize timeouts cannot turn a
+    // deterministic catalog check into a machine-dependent integration test.
+    t.env.env.PATH = path.dirname(process.execPath);
     await withAgent(t, async (opened) => {
       let baselineModels: string[] | undefined;
       let baselineModes: string[] | undefined;
