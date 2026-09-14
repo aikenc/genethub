@@ -1073,27 +1073,36 @@ export class Client {
         });
         pending.resolve(reply);
       }, (error: unknown) => {
+        const rejected =
+          error instanceof ProtocolError_ ||
+          error instanceof ClientRequestTimeoutError ||
+          this.stopped
+            ? error
+            : this.epoch !== epoch || endpoint.state === "closed"
+              ? new ConnectionOutcomeUnknownError(this.lastClose)
+              : error;
         this.diagnostic("operation", {
           ...diagnosticContext(pending.request),
           operation: pending.operation,
           requestId: pending.id,
           phase: "finish",
-          outcome: errorName(error),
+          outcome: errorName(rejected),
           transport,
           durationMs: Math.round(this.now() - started),
           requestBytes: pending.bytes,
+          closeCode: this.lastClose?.code ?? null,
+          hasCloseReason: Boolean(this.lastClose?.reason),
         });
-        if (
-          error instanceof ProtocolError_ ||
-          error instanceof ClientRequestTimeoutError ||
-          this.stopped
-        ) {
-          pending.reject(error);
-        } else if (this.epoch !== epoch || endpoint.state === "closed") {
-          pending.reject(new ConnectionOutcomeUnknownError(this.lastClose));
-        } else {
-          pending.reject(error);
+        if (rejected instanceof ConnectionOutcomeUnknownError) {
+          this.diagnostic("error", {
+            errorName: errorName(rejected),
+            operation: pending.operation,
+            requestId: pending.id,
+            closeCode: this.lastClose?.code ?? null,
+            hasCloseReason: Boolean(this.lastClose?.reason),
+          });
         }
+        pending.reject(rejected);
       })
       .finally(() => {
         this.active.delete(pending);
@@ -1890,8 +1899,9 @@ export class Client {
 
   private report(error: unknown): void {
     this.diagnostic("error", {
-      name: errorName(error),
-      message: error instanceof Error ? error.message : String(error),
+      errorName: errorName(error),
+      closeCode: this.lastClose?.code ?? null,
+      hasCloseReason: Boolean(this.lastClose?.reason),
     });
     try {
       this.options.onError?.(error);
