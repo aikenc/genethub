@@ -950,7 +950,11 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, candidateDigest?: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+/**
+ * Bounded business data, checked against the node's declared output shape.
+ */
+output?: unknown, 
 /**
  * Absent retains the existing successful-completion contract.
  */
@@ -1884,12 +1888,16 @@ export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: 
  */
 export type WorkflowNodeOutcome = "completed" | "changesRequested" | "failed" | "blocked";
 
-export type WorkflowNodeRunStatus = { assignedAtMs?: number, lastActivityAtMs?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
+export type WorkflowNodeRunStatus = { output?: unknown, assignedAtMs?: number, lastActivityAtMs?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
 
 /**
  * Project-owned Workflow catalog projected by the daemon after validation.
  */
-export type WorkflowProjectStatus = { schema: string, root: string, defaultWorkflow: string, workflows: Array<WorkflowCatalogEntryStatus>, 
+export type WorkflowProjectStatus = { 
+/**
+ * The catalog/default below belong to this exact version, not necessarily Active.
+ */
+selectedDigest?: string, schema: string, root: string, defaultWorkflow: string, workflows: Array<WorkflowCatalogEntryStatus>, 
 /**
  * Digest of the project source as it exists now, whether or not it has
  * been promoted for execution.

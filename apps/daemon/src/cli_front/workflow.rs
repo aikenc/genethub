@@ -26,6 +26,7 @@ enum Command {
     },
     Inspect {
         workspace_id: Option<String>,
+        candidate_digest: Option<String>,
     },
     Dispatch {
         retry_of: Option<String>,
@@ -58,6 +59,7 @@ enum Command {
         node_id: Option<String>,
         revision: Option<u64>,
         evidence: BTreeMap<String, String>,
+        output: Option<serde_json::Value>,
         outcome: Option<genehub_proto::WorkflowNodeOutcome>,
         reason: Option<String>,
     },
@@ -148,10 +150,16 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.activated", serde_json::to_value(project).unwrap());
             Ok(EXIT_OK)
         }
-        Command::Inspect { workspace_id } => {
+        Command::Inspect {
+            workspace_id,
+            candidate_digest,
+        } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::WorkflowProject(project) = rpc
-                .call(Request::WorkflowInspect { workspace_id })
+                .call(Request::WorkflowInspect {
+                    workspace_id,
+                    candidate_digest,
+                })
                 .await
                 .map_err(query::rpc_error)?
             else {
@@ -179,6 +187,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             let Reply::WorkflowProject(project) = rpc
                 .call(Request::WorkflowInspect {
                     workspace_id: workspace_id.clone(),
+                    candidate_digest: candidate_digest.clone(),
                 })
                 .await
                 .map_err(query::rpc_error)?
@@ -187,6 +196,16 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                     "the daemon answered workflow.inspect with the wrong reply",
                 ));
             };
+            if candidate_digest
+                .as_ref()
+                .is_some_and(|digest| project.selected_digest.as_ref() != Some(digest))
+            {
+                return Err(CliFailure::business(
+                    "workflowVersionUnavailable",
+                    "daemon 未返回所选 Candidate 的 catalog；更新 daemon 后再试",
+                    None,
+                ));
+            }
             let workflow_id = select_workflow(&project, workflow_id, kind, complexity)?;
             let Reply::WorkflowRun(started) = rpc
                 .call(Request::WorkflowDispatch {
@@ -294,6 +313,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             node_id,
             revision,
             evidence,
+            output,
             outcome,
             reason,
         } => {
@@ -341,6 +361,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                         node_id: node_id.clone(),
                         expected_revision,
                         evidence: evidence.clone(),
+                        output: output.clone(),
                         outcome,
                         reason: reason.clone(),
                     })
@@ -682,6 +703,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
         }),
         "inspect" => Ok(Command::Inspect {
             workspace_id: values.workspace.take(),
+            candidate_digest: values.candidate.take(),
         }),
         "dispatch" => {
             let prompt = values.positionals.join(" ").trim().to_string();
@@ -722,6 +744,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             node_id: values.node.take(),
             revision: values.revision,
             evidence: values.evidence,
+            output: values.output,
             outcome: values.outcome,
             reason: values.reason,
         }),
@@ -779,6 +802,7 @@ struct Values {
     max_llm_rounds: Option<u64>,
     wait: Option<bool>,
     evidence: BTreeMap<String, String>,
+    output: Option<serde_json::Value>,
 }
 
 impl Values {
@@ -868,6 +892,18 @@ impl Values {
                 }
                 "--wait" => values.wait = Some(true),
                 "--no-wait" => values.wait = Some(false),
+                "--output" => {
+                    if values.output.is_some() {
+                        return Err(CliFailure::invalid_args("--output 只能指定一次"));
+                    }
+                    let value = next(&mut index)?;
+                    if value.len() > 256 * 1024 {
+                        return Err(CliFailure::invalid_args("--output 超过 256 KiB"));
+                    }
+                    values.output = Some(serde_json::from_str(&value).map_err(|_| {
+                        CliFailure::invalid_args("--output 需要有效 JSON（不是文件路径）")
+                    })?);
+                }
                 "--evidence" => {
                     let value = next(&mut index)?;
                     let (key, value) = value.split_once('=').ok_or_else(|| {

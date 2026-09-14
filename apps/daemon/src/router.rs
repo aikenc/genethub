@@ -746,7 +746,10 @@ async fn dispatch(
             Handled::ok(Reply::Agents(state.registry.refresh(&providers).await))
         }
 
-        Request::WorkflowInspect { workspace_id } => {
+        Request::WorkflowInspect {
+            workspace_id,
+            candidate_digest,
+        } => {
             let workspace = match state.workspaces.project_entry(&workspace_id).await {
                 Ok(workspace) => workspace,
                 Err(error) => {
@@ -761,7 +764,11 @@ async fn dispatch(
                 Ok(runtime) => runtime,
                 Err(error) => return failed(error),
             };
-            match crate::workflow::inspect(&workspace.root, &runtime) {
+            match crate::workflow::inspect_selected(
+                &workspace.root,
+                &runtime,
+                candidate_digest.as_deref(),
+            ) {
                 Ok(status) => Handled::ok(Reply::WorkflowProject(status)),
                 Err(error) => failed(error),
             }
@@ -963,6 +970,7 @@ async fn dispatch(
             node_id,
             expected_revision,
             evidence,
+            output,
             outcome,
             reason,
         } => {
@@ -981,6 +989,7 @@ async fn dispatch(
                 expected_revision,
                 crate::workflow::Completion {
                     evidence,
+                    output,
                     outcome: outcome.unwrap_or_default(),
                     reason,
                 },

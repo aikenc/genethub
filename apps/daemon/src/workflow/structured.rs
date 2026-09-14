@@ -126,7 +126,13 @@ pub(super) fn settled(run: &mut RunRecord, id: &str) -> Result<()> {
                     outcome: engine::Outcome {
                         code: code.into(),
                         success: code == "completed",
-                        value: serde_json::json!({"outcome":code,"evidence":record.evidence,"reason":record.reason}),
+                        value: {
+                            let mut value = serde_json::json!({"outcome":code,"evidence":record.evidence,"reason":record.reason});
+                            if let Some(output) = &record.output {
+                                value["output"] = output.clone();
+                            }
+                            value
+                        },
                     },
                 },
             },
@@ -232,6 +238,7 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 run.nodes.insert(
                     id.clone(),
                     NodeRecord {
+                        output: None,
                         scope: engine::ancestry(&p, run.engine.as_ref().unwrap(), op.frame)?,
                         definition_id: Some(op.activity.clone()),
                         activity: Default::default(),
@@ -404,6 +411,7 @@ pub(super) fn projection(run: &RunRecord) -> Option<serde_json::Value> {
         "schema":"genehub.workflow.structure.v1",
         "definition":run.definition.structure,
         "revision":snapshot.revision,
+        "outcome":snapshot.outcome,
         "active":active.as_ref().ok(),
         "error":active.as_ref().err().map(|e|e.to_string()),
         "instances":run.nodes.iter().map(|(id,node)| serde_json::json!({

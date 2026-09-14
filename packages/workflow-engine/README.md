@@ -25,7 +25,9 @@ addresses alongside the existing node evidence records.
 
 ## Control language
 
-- `sequence` executes children in order.
+- `sequence` executes children in order and returns their named results. Optional
+  `output` evaluates an expression after normal completion (also useful for a
+  zero-step value block); it never runs after a failed child or `break`.
 - `if` selects a branch; omitted `else` is successful no-op.
 - `choice` selects the first true branch, otherwise its required default.
 - `loop` evaluates its condition before each iteration, including the first.
@@ -35,11 +37,22 @@ addresses alongside the existing node evidence records.
   `failFast` stops the execution and requires host cleanup before terminal state.
 - `forEach` freezes its finite input array and applies a concurrency bound.
   Optional `key` expressions supply unique string/integer identities; otherwise
-  item addresses use indices in that immutable array.
+  item addresses use indices in that immutable array. Optional `initial` and
+  `update` must be supplied together with `maxConcurrency: 1`: `vars` is the
+  accumulator, `update` sees the completed item's value in `results` and the
+  current `item`, and normal completion returns the accumulator. Without these
+  fields the existing keyed-results behavior is unchanged.
+- `break` returns its `value` from the nearest lexical `loop` or serial `forEach`.
+  Intermediate sequence/choice/if blocks do not execute their remaining work.
+  A break may not cross a procedure or parallel boundary; nested local loops
+  inside those boundaries can still break. It is internal control, not an
+  activity outcome that a Worker can forge. The iteration's `update` does not
+  run on break; include the desired accumulated data in the explicit value.
 - `call` invokes a pinned local procedure. Recursive calls are rejected.
 
 Expressions are JSON data: literals, JSON Pointer references, object construction,
-strict equality/integer comparison and boolean logic. No scripts, I/O or implicit
+strict equality/integer comparison/addition, array append/membership and boolean
+logic. `add` rejects i64 overflow; `append` is bounded to 4096 items. No scripts, I/O or implicit
 truth conversion. Missing/type-invalid conditions block rather than choosing a
 business fallback. Loop limits, total operation limits, frontier size, call depth
 and per-transition fuel bound progress. A total control-step cap also bounds
@@ -57,6 +70,21 @@ roles, evidence checks, write leases, PM permissions and cancellation remain hos
 capabilities. Legacy v1 DAG Runs continue on their original path. `result.publish`
 currently publishes the local Run result; it is not a network release adapter.
 No automatic retry of uncertain external side effects is provided.
+
+Workers submit JSON business data through the existing `workflow complete
+--output <json>` command. The host validates bounds and an optional
+`completion.output` data shape, persists the output with the node, then retires
+resources before feeding `{outcome, evidence, reason, output}` to the engine.
+Legacy nodes omit output. `workflow get` and Executor Flow expose the same data.
+Objects, finite arrays, string enums, integers, booleans and null are the closed
+shape vocabulary; this is not full JSON Schema, a scripting validator, or proof
+that the Worker actually ran its reported checks. Business meanings and acceptance
+policies belong to the project Workflow/Pack.
+
+Absent new fields are omitted from serialized definitions and state, preserving
+the digests of old programs. New control syntax requires an updated daemon;
+older engines reject unknown blocks rather than silently executing a different
+flow. Cancellation, deadlines and host aborts still take priority over local exits.
 
 Specialty tests live in `testing/specialties/workflow/structured-flow.specialty.ts`
 and exercise the real public workflow interfaces and real Worker file effects.

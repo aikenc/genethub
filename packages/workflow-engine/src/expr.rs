@@ -36,6 +36,37 @@ impl Expr {
                 };
                 Value::Bool(less)
             }
+            Self::Add { left, right } => {
+                let a = left.evaluate(context)?;
+                let b = right.evaluate(context)?;
+                let sum = a
+                    .as_i64()
+                    .zip(b.as_i64())
+                    .and_then(|(a, b)| a.checked_add(b))
+                    .ok_or_else(|| {
+                        Error::Condition("add requires integers without i64 overflow".into())
+                    })?;
+                Value::from(sum)
+            }
+            Self::Append { array, value } => {
+                let mut items = array
+                    .evaluate(context)?
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| Error::Condition("append requires an array".into()))?;
+                if items.len() >= 4096 {
+                    return Err(Error::Condition("append exceeds 4096 items".into()));
+                }
+                items.push(value.evaluate(context)?);
+                Value::Array(items)
+            }
+            Self::Contains { array, value } => {
+                let array = array.evaluate(context)?;
+                let items = array
+                    .as_array()
+                    .ok_or_else(|| Error::Condition("contains requires an array".into()))?;
+                Value::Bool(items.contains(&value.evaluate(context)?))
+            }
             Self::Not { value } => Value::Bool(!value.condition(context)?),
             Self::All { values } => {
                 let mut result = true;
@@ -93,9 +124,13 @@ impl Expr {
                     value.validate(depth + 1, remaining)?;
                 }
             }
-            Self::Eq { left, right } | Self::Lt { left, right } => {
+            Self::Eq { left, right } | Self::Lt { left, right } | Self::Add { left, right } => {
                 left.validate(depth + 1, remaining)?;
                 right.validate(depth + 1, remaining)?;
+            }
+            Self::Append { array, value } | Self::Contains { array, value } => {
+                array.validate(depth + 1, remaining)?;
+                value.validate(depth + 1, remaining)?;
             }
             Self::Not { value } => value.validate(depth + 1, remaining)?,
             Self::All { values } | Self::Any { values } => {

@@ -1241,7 +1241,7 @@ fn command_schema(name: &str) -> Value {
             "genet workflow init [--workspace <id>] [--agent <id>] [--model <id>]",
             json!({"agentId": {"type": "string"}, "modelId": {"type": "string"}}), &[],
         ),
-        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>]", json!({}), &[]),
+        "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>] [--candidate <digest>]", json!({"candidateDigest":{"type":"string","description":"Inspect this immutable candidate catalog; does not activate it"}}), &[]),
         "workflow.activate" => workflow_schema(
             "genet workflow activate [--workspace <id>] [--candidate <digest>] --revision <n>",
             json!({"candidateDigest": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
@@ -1271,11 +1271,12 @@ fn command_schema(name: &str) -> Value {
             json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}}), &[],
         ),
         "workflow.complete" => workflow_schema(
-            "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--outcome completed|changesRequested|failed|blocked] [--reason <text>]",
+            "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--output <json>] [--outcome completed|changesRequested|failed|blocked] [--reason <text>]",
             json!({
                 "runId": {"type": "string"}, "nodeId": {"type": "string"},
                 "revision": {"type": "integer", "minimum": 0},
                 "evidence": {"type": "object", "additionalProperties": {"type": "string"}, "description": "--evidence key=value; success uses the graph's evidence requirements"},
+                "output": {"description": "--output JSON business data (256 KiB, depth 32); checked against completion.output when declared, separate from evidence"},
                 "outcome": {"enum": ["completed", "changesRequested", "failed", "blocked"], "default": "completed"},
                 "reason": {"type": "string", "minLength": 1, "description": "required for a negative outcome"}
             }), &[],

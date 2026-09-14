@@ -43,7 +43,12 @@ pub fn compile(definition: Definition) -> Result<Program> {
         ));
     }
     let mut nodes = BTreeMap::new();
-    fn walk(block: &Block, nodes: &mut BTreeMap<String, Block>, depth: usize) -> Result<()> {
+    fn walk(
+        block: &Block,
+        nodes: &mut BTreeMap<String, Block>,
+        depth: usize,
+        can_break: bool,
+    ) -> Result<()> {
         if depth > 32 || nodes.len() >= 1024 {
             return Err(Error::Definition(
                 "structure exceeds size/depth bounds".into(),
@@ -62,27 +67,27 @@ pub fn compile(definition: Definition) -> Result<Program> {
             return Err(Error::Definition(format!("duplicate block {}", block.id)));
         }
         match &block.kind {
-            BlockKind::Sequence { steps } => {
+            BlockKind::Sequence { steps, .. } => {
                 for child in steps {
-                    walk(child, nodes, depth + 1)?;
+                    walk(child, nodes, depth + 1, can_break)?;
                 }
             }
             BlockKind::Parallel { branches, .. } => {
                 for child in branches {
-                    walk(child, nodes, depth + 1)?;
+                    walk(child, nodes, depth + 1, false)?;
                 }
             }
             BlockKind::If { then, r#else, .. } => {
-                walk(then, nodes, depth + 1)?;
+                walk(then, nodes, depth + 1, can_break)?;
                 if let Some(child) = r#else {
-                    walk(child, nodes, depth + 1)?;
+                    walk(child, nodes, depth + 1, can_break)?;
                 }
             }
             BlockKind::Choice { branches, default } => {
                 for branch in branches {
-                    walk(&branch.body, nodes, depth + 1)?;
+                    walk(&branch.body, nodes, depth + 1, can_break)?;
                 }
-                walk(default, nodes, depth + 1)?;
+                walk(default, nodes, depth + 1, can_break)?;
             }
             BlockKind::Loop {
                 body, max_rounds, ..
@@ -90,11 +95,13 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 if *max_rounds > 10_000 {
                     return Err(Error::Definition("loop round limit exceeds 10000".into()));
                 }
-                walk(body, nodes, depth + 1)?;
+                walk(body, nodes, depth + 1, true)?;
             }
             BlockKind::ForEach {
                 body,
                 max_concurrency,
+                initial,
+                update,
                 ..
             } => {
                 if *max_concurrency == 0 || *max_concurrency > 64 {
@@ -102,7 +109,19 @@ pub fn compile(definition: Definition) -> Result<Program> {
                         "foreach requires concurrency 1..64".into(),
                     ));
                 }
-                walk(body, nodes, depth + 1)?;
+                if initial.is_some() != update.is_some()
+                    || (initial.is_some() && *max_concurrency != 1)
+                {
+                    return Err(Error::Definition(
+                        "foreach initial/update must be paired and serial".into(),
+                    ));
+                }
+                walk(body, nodes, depth + 1, *max_concurrency == 1)?;
+            }
+            BlockKind::Break { .. } if !can_break => {
+                return Err(Error::Definition(
+                    "break requires a lexical loop or serial foreach; it cannot cross a call or parallel boundary".into(),
+                ));
             }
             BlockKind::Task {
                 activity, accept, ..
@@ -113,13 +132,13 @@ pub fn compile(definition: Definition) -> Result<Program> {
                     ));
                 }
             }
-            BlockKind::Call { .. } => {}
+            BlockKind::Call { .. } | BlockKind::Break { .. } => {}
         }
         Ok(())
     }
-    walk(&definition.body, &mut nodes, 0)?;
+    walk(&definition.body, &mut nodes, 0, false)?;
     for body in definition.procedures.values() {
-        walk(body, &mut nodes, 0)?;
+        walk(body, &mut nodes, 0, false)?;
     }
     fn calls(
         block: &Block,
@@ -152,7 +171,7 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 calls(body, definition, stack, depth + 1, visits)?;
                 stack.pop();
             }
-            BlockKind::Sequence { steps } => {
+            BlockKind::Sequence { steps, .. } => {
                 for c in steps {
                     calls(c, definition, stack, depth + 1, visits)?;
                 }
@@ -197,6 +216,11 @@ pub fn compile(definition: Definition) -> Result<Program> {
         let mut check = |expr: &Expr| expr.validate(0, &mut expression_budget);
         match &block.kind {
             BlockKind::Task { input, .. } | BlockKind::Call { input, .. } => check(input)?,
+            BlockKind::Break { value } => check(value)?,
+            BlockKind::Sequence {
+                output: Some(output),
+                ..
+            } => check(output)?,
             BlockKind::If { condition, .. } => check(condition)?,
             BlockKind::Choice { branches, .. } => {
                 for branch in branches {
@@ -213,10 +237,22 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 check(initial)?;
                 check(update)?;
             }
-            BlockKind::ForEach { items, key, .. } => {
+            BlockKind::ForEach {
+                items,
+                key,
+                initial,
+                update,
+                ..
+            } => {
                 check(items)?;
                 if let Some(key) = key {
                     check(key)?;
+                }
+                if let Some(initial) = initial {
+                    check(initial)?;
+                }
+                if let Some(update) = update {
+                    check(update)?;
                 }
             }
             _ => {}

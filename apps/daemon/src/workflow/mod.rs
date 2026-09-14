@@ -26,6 +26,7 @@ use crate::state::Shared;
 
 mod check;
 mod control;
+mod output;
 mod request;
 mod structured;
 mod supervision;
@@ -159,6 +160,8 @@ fn default_lease_seconds() -> u64 {
 struct CompletionDefinition {
     #[serde(default)]
     all: Vec<EvidenceRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output: Option<output::Shape>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -544,6 +547,12 @@ struct FlowMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NodeRecord {
+    #[serde(
+        default,
+        deserialize_with = "genehub_proto::deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
+    output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scope: Vec<workflow_engine::FrameView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,6 +740,14 @@ pub(crate) fn activate_bootstrap_source(
 }
 
 pub(crate) fn inspect(root: &Path, runtime: &RuntimeStore) -> Result<WorkflowProjectStatus> {
+    inspect_selected(root, runtime, None)
+}
+
+pub(crate) fn inspect_selected(
+    root: &Path,
+    runtime: &RuntimeStore,
+    requested: Option<&str>,
+) -> Result<WorkflowProjectStatus> {
     let root = root
         .canonicalize()
         .with_context(|| format!("读取项目根目录：{}", root.display()))?;
@@ -740,14 +757,25 @@ pub(crate) fn inspect(root: &Path, runtime: &RuntimeStore) -> Result<WorkflowPro
         .map(|activation| load_candidate(runtime, &activation.active_digest))
         .transpose()?;
     let source = root.join(SOURCE_DIR);
-    let (candidate, candidate_error) =
-        match source_root(&root).and_then(|source| compile_candidate(&source)) {
-            Ok(candidate) => (Some(candidate), None),
-            Err(error) if active.is_some() => (None, Some(format!("{error:#}"))),
-            Err(error) => return Err(error),
-        };
-    let effective = active
+    let (candidate, candidate_error) = match source_root(&root)
+        .and_then(|source| compile_candidate(&source))
+    {
+        Ok(candidate) => (Some(candidate), None),
+        Err(error) if active.is_some() || requested.is_some() => (None, Some(format!("{error:#}"))),
+        Err(error) => return Err(error),
+    };
+    let selected = requested
+        .map(|digest| {
+            if let Some(candidate) = candidate.as_ref().filter(|c| c.digest == digest) {
+                Ok(candidate.clone())
+            } else {
+                load_candidate(runtime, digest)
+            }
+        })
+        .transpose()?;
+    let effective = selected
         .as_ref()
+        .or(active.as_ref())
         .or(candidate.as_ref())
         .expect("an active or compilable candidate exists");
     let mut workflows = Vec::new();
@@ -768,6 +796,7 @@ pub(crate) fn inspect(root: &Path, runtime: &RuntimeStore) -> Result<WorkflowPro
         });
     }
     Ok(WorkflowProjectStatus {
+        selected_digest: Some(effective.digest.clone()),
         schema: effective.project.schema.clone(),
         root: source.display().to_string(),
         default_workflow: effective.project.default_workflow.clone(),
@@ -1130,6 +1159,7 @@ pub(crate) async fn dispatch(
         run.nodes.insert(
             node.id.clone(),
             NodeRecord {
+                output: None,
                 definition_id: None,
                 scope: Vec::new(),
                 activity: Default::default(),
@@ -1336,6 +1366,7 @@ pub async fn executor_flow(
 
 pub(crate) struct Completion {
     pub evidence: BTreeMap<String, String>,
+    pub output: Option<serde_json::Value>,
     pub outcome: genehub_proto::WorkflowNodeOutcome,
     pub reason: Option<String>,
 }
@@ -1351,6 +1382,7 @@ pub(crate) async fn complete(
 ) -> Result<Transition> {
     let Completion {
         evidence,
+        output,
         outcome,
         reason,
     } = completion;
@@ -1384,6 +1416,19 @@ pub(crate) async fn complete(
         bail!("当前 Session 不是节点 {node_id} 的执行者");
     }
     let event = control::outcome_event(outcome);
+    if let Some(value) = &output {
+        output::bounded(value)?;
+        if let Some(shape) = &node.completion.output {
+            shape.verify(value, "")?;
+        }
+    } else if node.completion.output.is_some()
+        && outcome == genehub_proto::WorkflowNodeOutcome::Completed
+    {
+        bail!(
+            "节点 {} 需要按 completion.output 提交结构化 output",
+            node.id
+        );
+    }
     if outcome == genehub_proto::WorkflowNodeOutcome::Completed {
         verify_evidence(&workspace.root, &run, &node, &evidence).await?;
     } else {
@@ -1394,6 +1439,7 @@ pub(crate) async fn complete(
     // after process cleanup, so evidence cannot race an old writer's final tools.
     record.status = "finishing".into();
     record.evidence = evidence;
+    record.output = output;
     record.outcome = Some(outcome);
     record.reason = reason.clone();
     let targets = node.on.get(event).cloned().unwrap_or_default();
@@ -1699,10 +1745,14 @@ fn managed_prompt(
         .map(|requirement| format!("`{}`（{}）", requirement.key, requirement.verify))
         .collect::<Vec<_>>()
         .join("、");
+    let output_contract = node.completion.output.as_ref().map(|shape| format!(
+        "\n本节点成功完成还需 `--output <JSON>`，数据形状为 {}。object 的 properties 必须全部提供且不得添加其他字段；这不是完整 JSON Schema。\n",
+        serde_json::to_string(shape).expect("output shape serializes"),
+    )).unwrap_or_default();
     format!(
         "{}\n\n<genehub_managed_session>\n\
 你正在普通 Session 中执行项目 Workflow `{}` 的节点 `{}`，角色标签为 `{}`。本会话由根会话委托，\
-对用户界面只读；不要把技术执行转回根会话。节点完成标准来自项目配置，需要证据：{}。\n\
+对用户界面只读；不要把技术执行转回根会话。节点完成标准来自项目配置，需要证据：{}。{}\n\
 当前 cwd 是本角色的 AgentSpace 根目录；任务工作目录（JSON 字符串）是 {}。在任务工作目录中完成代码、测试和 Git 操作，\
 但只遵守本角色 AgentSpace 中的职责、Skill 与 Hook，不要代行项目 PM 或其他角色。\n\
 完成后先运行 `\"$GENEHUB_CLI\" workflow get` 读取本受管会话绑定的最新 revision，\
@@ -1718,6 +1768,7 @@ fn managed_prompt(
         node.id,
         role.id,
         if evidence.is_empty() { "无额外证据" } else { &evidence },
+        output_contract,
         task_cwd,
     )
 }
@@ -1740,7 +1791,7 @@ fn task_message(run: &RunRecord, node: &NodeDefinition) -> String {
         .filter_map(|previous| {
             run.nodes.get(&previous.id).map(|result| serde_json::json!({
             "nodeId": previous.id, "sessionId": result.session_id, "outcome": result.outcome,
-            "reason": result.reason, "evidence": result.evidence
+            "reason": result.reason, "evidence": result.evidence, "output": result.output
         }))
         })
         .collect::<Vec<_>>();
@@ -2647,7 +2698,12 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
         {
             bail!("result.publish 节点 {} 不能声明 with 输入", node.id);
         }
-        if node.uses == "result.publish" && !node.completion.all.is_empty() {
+        if let Some(shape) = &node.completion.output {
+            shape.validate()?;
+        }
+        if node.uses == "result.publish"
+            && (!node.completion.all.is_empty() || node.completion.output.is_some())
+        {
             bail!(
                 "result.publish 节点 {} 会立即发布，不能声明 completion 证据",
                 node.id
@@ -3414,7 +3470,7 @@ fn record_flow_completion(
         worker_session_id,
         &executor_session_id,
         Some(expected_revision),
-        serde_json::json!({"accepted": true, "outcome": run.nodes[node_id].outcome, "reason": run.nodes[node_id].reason}),
+        serde_json::json!({"accepted": true, "outcome": run.nodes[node_id].outcome, "reason": run.nodes[node_id].reason, "output": run.nodes[node_id].output}),
     )?;
     push_flow_message(run, completed);
     record_assigned_messages(run, sessions)?;
@@ -3501,6 +3557,7 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
             .nodes
             .iter()
             .map(|(id, node)| WorkflowNodeRunStatus {
+                output: node.output.clone(),
                 assigned_at_ms: Some(node.assigned_at_ms),
                 last_activity_at_ms: Some(node.activity.last_at_ms),
                 outcome: node.outcome,
@@ -4214,6 +4271,7 @@ mod tests {
         assert!(validate_definition(&publish(
             NodeInputs::default(),
             CompletionDefinition {
+                output: None,
                 all: vec![EvidenceRequirement {
                     key: "checks".into(),
                     verify: "value.nonEmpty".into(),
@@ -4273,6 +4331,7 @@ mod tests {
             nodes: BTreeMap::from([(
                 "publish".into(),
                 NodeRecord {
+                    output: None,
                     definition_id: None,
                     scope: Vec::new(),
                     activity: Default::default(),

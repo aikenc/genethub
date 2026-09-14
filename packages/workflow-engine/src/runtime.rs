@@ -17,6 +17,7 @@ pub fn start(program: &Program, request: StartRequest) -> Result<Transition> {
         context: context(request.input),
         cursor: Cursor::Enter,
         outcome: None,
+        breaking: false,
     };
     let state = EngineState {
         format_version: FORMAT,
@@ -303,6 +304,19 @@ pub(crate) fn validate_state(program: &Program, state: &EngineState) -> Result<(
         if state.status != Status::Running {
             continue;
         }
+        if frame.breaking
+            && (!matches!(frame.cursor, Cursor::Done)
+                || !frame.outcome.as_ref().is_some_and(|o| o.success)
+                || !matches!(
+                    block.kind,
+                    BlockKind::Break { .. }
+                        | BlockKind::Sequence { .. }
+                        | BlockKind::If { .. }
+                        | BlockKind::Choice { .. }
+                ))
+        {
+            return Err(Error::State("invalid local break state".into()));
+        }
         let children: Vec<u64> = match (&block.kind, &frame.cursor) {
             (_, Cursor::Enter) if frame.outcome.is_none() => vec![],
             (_, Cursor::Done) if frame.outcome.is_some() => vec![],
@@ -311,7 +325,7 @@ pub(crate) fn validate_state(program: &Program, state: &EngineState) -> Result<(
             {
                 vec![]
             }
-            (BlockKind::Sequence { steps }, Cursor::Sequence { next, child })
+            (BlockKind::Sequence { steps, .. }, Cursor::Sequence { next, child })
                 if *next <= steps.len() && frame.context["results"].is_object() =>
             {
                 child.iter().copied().collect()
@@ -351,7 +365,7 @@ pub(crate) fn validate_state(program: &Program, state: &EngineState) -> Result<(
         for child in children {
             let child_name = state.frames.get(&child).map(|f| f.node.as_str());
             let allowed = match (&block.kind, &frame.cursor) {
-                (BlockKind::Sequence { steps }, Cursor::Sequence { next, .. }) => steps
+                (BlockKind::Sequence { steps, .. }, Cursor::Sequence { next, .. }) => steps
                     .get(*next)
                     .is_some_and(|b| Some(b.id.as_str()) == child_name),
                 (BlockKind::Loop { body, .. } | BlockKind::ForEach { body, .. }, _) => {
@@ -458,6 +472,7 @@ fn child(
             context: ctx,
             cursor: Cursor::Enter,
             outcome: None,
+            breaking: false,
         },
     );
     history.push(HistoryEntry {
@@ -469,12 +484,13 @@ fn child(
     });
     Ok(id)
 }
-fn collected(state: &mut EngineState, id: u64) -> Option<(String, Outcome)> {
+fn collected(state: &mut EngineState, id: u64) -> Option<(String, Outcome, bool)> {
     let frame = state.frames.get(&id)?;
     let result = frame.outcome.clone()?;
     let name = frame.node.clone();
+    let breaking = frame.breaking;
     state.frames.remove(&id);
-    Some((name, result))
+    Some((name, result, breaking))
 }
 fn results_value(results: &BTreeMap<String, Outcome>) -> Value {
     Value::Object(
@@ -532,6 +548,16 @@ fn step(
             state.frames.get_mut(&id).unwrap().cursor = Cursor::Task { operation: op };
         }
         (BlockKind::Task { .. }, Cursor::Task { .. }) => return Ok(false),
+        (BlockKind::Break { value }, Cursor::Enter) => {
+            complete(
+                state,
+                id,
+                Outcome::completed(value.evaluate(&frame.context)?),
+                history,
+            )?;
+            state.frames.get_mut(&id).unwrap().breaking = true;
+            history.last_mut().expect("completion history").event = "break".into();
+        }
         (BlockKind::Sequence { .. }, Cursor::Enter) => {
             state.frames.get_mut(&id).unwrap().cursor = Cursor::Sequence {
                 next: 0,
@@ -539,18 +565,19 @@ fn step(
             }
         }
         (
-            BlockKind::Sequence { steps },
+            BlockKind::Sequence { steps, output },
             Cursor::Sequence {
                 mut next,
                 child: active,
             },
         ) => {
             if let Some(active) = active {
-                let Some((name, result)) = collected(state, active) else {
+                let Some((name, result, breaking)) = collected(state, active) else {
                     return Ok(false);
                 };
-                if !result.success {
+                if breaking || !result.success {
                     complete(state, id, result, history)?;
+                    state.frames.get_mut(&id).unwrap().breaking = breaking;
                     return Ok(true);
                 }
                 state.frames.get_mut(&id).unwrap().context["results"][name] = result.value;
@@ -564,12 +591,12 @@ fn step(
                     child: Some(c),
                 };
             } else {
-                complete(
-                    state,
-                    id,
-                    Outcome::completed(state.frames[&id].context["results"].clone()),
-                    history,
-                )?;
+                let ctx = &state.frames[&id].context;
+                let value = match output {
+                    Some(output) => output.evaluate(ctx)?,
+                    None => ctx["results"].clone(),
+                };
+                complete(state, id, Outcome::completed(value), history)?;
             }
         }
         (
@@ -612,10 +639,14 @@ fn step(
             BlockKind::If { .. } | BlockKind::Choice { .. } | BlockKind::Call { .. },
             Cursor::Selected { child },
         ) => {
-            let Some((_, result)) = collected(state, child) else {
+            let Some((_, result, breaking)) = collected(state, child) else {
                 return Ok(false);
             };
+            if breaking && matches!(block.kind, BlockKind::Call { .. }) {
+                return Err(Error::State("break crossed a procedure boundary".into()));
+            }
             complete(state, id, result, history)?;
+            state.frames.get_mut(&id).unwrap().breaking = breaking;
         }
         (BlockKind::Loop { initial, .. }, Cursor::Enter) => {
             let vars = initial.evaluate(&frame.context)?;
@@ -640,10 +671,10 @@ fn step(
             },
         ) => {
             if let Some(c) = active {
-                let Some((_, result)) = collected(state, c) else {
+                let Some((_, result, breaking)) = collected(state, c) else {
                     return Ok(false);
                 };
-                if !result.success {
+                if breaking || !result.success {
                     complete(state, id, result, history)?;
                     return Ok(true);
                 }
@@ -707,7 +738,7 @@ fn step(
                 mut results,
             },
         ) => {
-            let changed = gather(state, &mut children, &mut results);
+            let changed = gather(state, &mut children, &mut results)?;
             if *failure == FailurePolicy::FailFast && results.values().any(|r| !r.success) {
                 stop(
                     state,
@@ -721,7 +752,15 @@ fn step(
                 return Ok(changed);
             }
         }
-        (BlockKind::ForEach { items, key, .. }, Cursor::Enter) => {
+        (
+            BlockKind::ForEach {
+                items,
+                key,
+                initial,
+                ..
+            },
+            Cursor::Enter,
+        ) => {
             let items = items
                 .evaluate(&frame.context)?
                 .as_array()
@@ -753,7 +792,15 @@ fn step(
                 }
                 keys.push(identity);
             }
-            state.frames.get_mut(&id).unwrap().cursor = Cursor::ForEach {
+            let vars = initial
+                .as_ref()
+                .map(|e| e.evaluate(&frame.context))
+                .transpose()?;
+            let f = state.frames.get_mut(&id).unwrap();
+            if let Some(vars) = vars {
+                f.context["vars"] = vars;
+            }
+            f.cursor = Cursor::ForEach {
                 items,
                 keys,
                 next: 0,
@@ -766,6 +813,7 @@ fn step(
                 body,
                 max_concurrency,
                 failure,
+                update,
                 ..
             },
             Cursor::ForEach {
@@ -776,7 +824,32 @@ fn step(
                 mut results,
             },
         ) => {
-            let mut changed = gather(state, &mut children, &mut results);
+            // A serial child is already settled (including host cleanup) before
+            // it can break. There are no sibling activities to cancel or race.
+            if *max_concurrency == 1 {
+                if let Some(active) = children.values().next().copied() {
+                    if state.frames[&active].breaking {
+                        let (_, result, _) = collected(state, active)
+                            .ok_or_else(|| Error::State("unfinished break".into()))?;
+                        complete(state, id, result, history)?;
+                        return Ok(true);
+                    }
+                    if let (Some(update), Some(result)) =
+                        (update, state.frames[&active].outcome.as_ref())
+                    {
+                        let value = result.value.clone();
+                        let f = state.frames.get_mut(&id).unwrap();
+                        f.context["item"] = next
+                            .checked_sub(1)
+                            .and_then(|i| items.get(i))
+                            .ok_or_else(|| Error::State("invalid serial foreach cursor".into()))?
+                            .clone();
+                        f.context["results"] = value;
+                        f.context["vars"] = update.evaluate(&f.context)?;
+                    }
+                }
+            }
+            let mut changed = gather(state, &mut children, &mut results)?;
             if *failure == FailurePolicy::FailFast && results.values().any(|r| !r.success) {
                 stop(
                     state,
@@ -796,8 +869,11 @@ fn step(
                 return Ok(true);
             }
             while next < items.len() && children.len() < *max_concurrency {
-                let mut ctx = frame.context.clone();
+                let mut ctx = state.frames[&id].context.clone();
                 ctx["item"] = items[next].clone();
+                if update.is_some() {
+                    ctx["results"] = json!({});
+                }
                 children.insert(
                     keys[next].clone(),
                     child(state, program, id, body, ctx, history)?,
@@ -806,7 +882,16 @@ fn step(
                 changed = true;
             }
             if children.is_empty() && next == items.len() {
-                finish_group(state, id, &results, history)?;
+                if update.is_some() && results.values().all(|r| r.success) {
+                    complete(
+                        state,
+                        id,
+                        Outcome::completed(state.frames[&id].context["vars"].clone()),
+                        history,
+                    )?;
+                } else {
+                    finish_group(state, id, &results, history)?;
+                }
             } else {
                 state.frames.get_mut(&id).unwrap().cursor = Cursor::ForEach {
                     items,
@@ -848,16 +933,19 @@ fn gather(
     state: &mut EngineState,
     children: &mut BTreeMap<String, u64>,
     results: &mut BTreeMap<String, Outcome>,
-) -> bool {
+) -> Result<bool> {
     let mut changed = false;
     for (name, id) in children.clone() {
-        if let Some((_, result)) = collected(state, id) {
+        if let Some((_, result, breaking)) = collected(state, id) {
+            if breaking {
+                return Err(Error::State("break crossed a parallel boundary".into()));
+            }
             children.remove(&name);
             results.insert(name, result);
             changed = true;
         }
     }
-    changed
+    Ok(changed)
 }
 fn finish_group(
     state: &mut EngineState,

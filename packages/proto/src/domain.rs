@@ -1085,6 +1085,10 @@ pub struct WorkflowCheckReport {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowProjectStatus {
+    /// The catalog/default below belong to this exact version, not necessarily Active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub selected_digest: Option<String>,
     pub schema: String,
     pub root: String,
     pub default_workflow: String,
@@ -1269,6 +1273,13 @@ pub struct ExecutorFlowStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowNodeRunStatus {
+    #[serde(
+        default,
+        deserialize_with = "crate::deserialize_present_json",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional, type = "unknown")]
+    pub output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub assigned_at_ms: Option<i64>,

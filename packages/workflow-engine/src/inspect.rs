@@ -29,6 +29,7 @@ pub fn inspect(program: &Program, state: &EngineState) -> Result<Vec<FrameView>>
                 BlockKind::Parallel { .. } => "parallel",
                 BlockKind::ForEach { .. } => "forEach",
                 BlockKind::Call { .. } => "call",
+                BlockKind::Break { .. } => "break",
             };
             FrameView {
                 id: *id,
@@ -49,7 +50,9 @@ pub fn inspect(program: &Program, state: &EngineState) -> Result<Vec<FrameView>>
                     Cursor::Loop { entered, .. } => Some(entered),
                     _ => None,
                 },
-                status: if let Some(result) = &frame.outcome {
+                status: if frame.breaking {
+                    "breaking".into()
+                } else if let Some(result) = &frame.outcome {
                     result.code.clone()
                 } else if matches!(frame.cursor, Cursor::Enter) {
                     "pending".into()

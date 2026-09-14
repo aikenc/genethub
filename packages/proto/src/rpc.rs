@@ -92,7 +92,12 @@ pub enum Request {
     /// its optional PM marker is irrelevant. This is a pure projection and
     /// starts no Agent.
     #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
-    WorkflowInspect { workspace_id: String },
+    WorkflowInspect {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        candidate_digest: Option<String>,
+    },
     /// Applies the deterministic genesis pack and activates its first
     /// Candidate. Only a local user or an ordinary main Session in this
     /// project may request the mutation.
@@ -159,6 +164,14 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
         evidence: std::collections::BTreeMap<String, String>,
+        /// Bounded business data, checked against the node's declared output shape.
+        #[serde(
+            default,
+            deserialize_with = "crate::deserialize_present_json",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[ts(optional, type = "unknown")]
+        output: Option<serde_json::Value>,
         /// Absent retains the existing successful-completion contract.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]

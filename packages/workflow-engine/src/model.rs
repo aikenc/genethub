@@ -54,6 +54,9 @@ pub enum BlockKind {
     },
     Sequence {
         steps: Vec<Block>,
+        /// Defaults to the named child results. Evaluated only on normal completion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<Expr>,
     },
     If {
         condition: Expr,
@@ -90,7 +93,14 @@ pub enum BlockKind {
         body: Box<Block>,
         #[serde(default)]
         failure: FailurePolicy,
+        /// Optional serial fold. Uses the same local vars/update convention as loop.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial: Option<Expr>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update: Option<Expr>,
     },
+    /// Exits the nearest lexical loop or serial forEach, returning this value.
+    Break { value: Expr },
     Call {
         procedure: String,
         #[serde(default = "context_expr")]
@@ -133,6 +143,9 @@ pub enum Expr {
     Object { fields: BTreeMap<String, Expr> },
     Eq { left: Box<Expr>, right: Box<Expr> },
     Lt { left: Box<Expr>, right: Box<Expr> },
+    Add { left: Box<Expr>, right: Box<Expr> },
+    Append { array: Box<Expr>, value: Box<Expr> },
+    Contains { array: Box<Expr>, value: Box<Expr> },
     Not { value: Box<Expr> },
     All { values: Vec<Expr> },
     Any { values: Vec<Expr> },
@@ -180,6 +193,9 @@ pub struct Frame {
     pub context: Value,
     pub cursor: Cursor,
     pub outcome: Option<Outcome>,
+    /// Internal control, separate from activity outcome codes. Never set by a Worker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) breaking: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "camelCase", deny_unknown_fields)]

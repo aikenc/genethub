@@ -22,6 +22,17 @@ pub use rpc::*;
 pub use speech::*;
 pub use timeline::*;
 
+/// Preserve an explicitly supplied JSON null, distinct from an omitted field.
+/// Use with serde(default) on optional JSON data fields.
+pub fn deserialize_present_json<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
