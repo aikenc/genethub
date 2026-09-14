@@ -80,8 +80,9 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     const executor = await makeSpace("trial-executor", opened.workspaceId, "executor");
     await makeSpace("trial-worker", executor.id, "worker");
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "TRIAL_MATERIAL_WORKER: verify and write only in the assigned material, preserving its branches.");
-    writeFileSync(path.join(source, "project.yaml"), JSON.stringify({ schema: "genehub.workflow.project.v1", defaultWorkflow: "direct-change", execution: { executorPath: "spaces/trial-executor", root: path.relative(root, material) } }));
-    writeFileSync(path.join(source, "workflows/direct-change.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
+    writeFileSync(path.join(source, "project.yaml"), JSON.stringify({ schema: "genehub.workflow.project.v1", defaultWorkflow: "trial-data", execution: { executorPath: "spaces/trial-executor", root: path.relative(root, material) } }));
+    writeFileSync(path.join(source, "workflows/catalog.yaml"), JSON.stringify({ schema: "genehub.workflow.catalog.v1", workflows: [{ id: "trial-data", path: "direct-change.yaml", match: { kind: "data", complexity: "batch" } }] }));
+    writeFileSync(path.join(source, "workflows/direct-change.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "trial-data", version: 2,
       nodes: repositories.map((repository, index) => ({ id: `work-${index}`, uses: "agent.session", with: { role: "worker", workspace: repository,
         ...(scenario === "plain" ? {} : { writeLease: { targetRef: "current", ttlSeconds: 900 } }) },
         completion: { all: [{ key: scenario === "plain" ? "done" : "commit", verify: scenario === "plain" ? "value.nonEmpty" : "git.commitOnTarget" }] } })),
@@ -89,6 +90,8 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     }));
     const inspected = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });
     if (inspected?.type !== "workflowProject" || !inspected.data.candidateDigest) throw new Error("test Candidate did not compile");
+    const selected = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId, candidateDigest: inspected.data.candidateDigest } });
+    t.assertions.assert(selected?.type === "workflowProject" && selected.data.selectedDigest === inspected.data.candidateDigest && selected.data.defaultWorkflow === "trial-data" && inspected.data.defaultWorkflow === "direct-change", "explicit candidate inspection projected the Active catalog");
     const seen = new Set<string>();
     let dispatched = false;
     opened.mock.script(...Array.from({ length: 12 }, () => ({ respond: (request: unknown) => {
@@ -96,7 +99,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
       if (!body.includes("TRIAL_MATERIAL_WORKER")) {
         if (dispatched) return { text: "Observed the workflow result." };
         dispatched = true;
-        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --candidate ${q(inspected.data.candidateDigest!)} --task trial-material --message 'Verify actual experimental material' --no-wait` } } };
+        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow dispatch --kind data --complexity batch --candidate ${q(inspected.data.candidateDigest!)} --task trial-material --message 'Verify actual experimental material' --no-wait` } } };
       }
       const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
       if (!operation) throw new Error("material node has no identity");
@@ -119,7 +122,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
       return Boolean(run && ["completed", "blocked", "failed"].includes(run.status)) || (!good && !run && dispatched && events.some((event) => event.type === "turnCompleted"));
     }, 45000).catch((error) => { throw new Error(`${error}; Run=${JSON.stringify(run)}; actual tool results=${JSON.stringify(toolResults()).slice(-6000)}`); });
     if (good) {
-      t.assertions.assert(run?.status === "completed" && run.executorWorkspaceId === executor.id && run.executionRoot === material, `material execution failed: ${JSON.stringify(run)}`);
+      t.assertions.assert(run?.status === "completed" && run.workflowId === "trial-data" && run.dcgDigest === inspected.data.candidateDigest && run.executorWorkspaceId === executor.id && run.executionRoot === material, `material execution failed: ${JSON.stringify(run)}`);
       for (const repo of repositories) t.assertions.assert(readFileSync(path.join(material, repo, "result.txt"), "utf8") === "actual trial result", "Run completed without real material output");
     } else {
       t.assertions.assert(run?.status !== "completed", "formal repository reuse was accepted");

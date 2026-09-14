@@ -10,12 +10,17 @@ const invalid=[
   {name:"duplicate-block",structure:{body:{id:"sequence",type:"sequence",steps:[task,task]}},reason:"duplicate block"},
   {name:"missing-procedure",structure:{body:{id:"entry",type:"call",procedure:"missing"}},reason:"unknown procedure"},
   {name:"unbounded-concurrency",structure:{body:{id:"batch",type:"forEach",items:{op:"literal",value:[]},maxConcurrency:0,body:task}},reason:"concurrency"},
+  {name:"break-outside-loop",structure:{body:{id:"exit",type:"break",value:{op:"literal",value:null}}},reason:"lexical loop"},
+  {name:"break-through-call",structure:{body:{id:"loop",type:"loop",maxRounds:1,condition:{op:"literal",value:true},body:{id:"call",type:"call",procedure:"exit"}},procedures:{exit:{id:"exit",type:"break",value:{op:"literal",value:null}}}},reason:"lexical loop"},
+  {name:"parallel-break",structure:{body:{id:"batch",type:"forEach",items:{op:"literal",value:[1,2]},maxConcurrency:2,body:{id:"exit",type:"break",value:{op:"literal",value:null}}}},reason:"lexical loop"},
+  {name:"parallel-fold",structure:{body:{id:"batch",type:"forEach",items:{op:"literal",value:[]},maxConcurrency:2,initial:{op:"literal",value:[]},update:{op:"ref",path:"/vars"},body:task}},reason:"paired and serial"},
+  {name:"unpaired-fold",structure:{body:{id:"batch",type:"forEach",items:{op:"literal",value:[]},maxConcurrency:1,initial:{op:"literal",value:[]},body:task}},reason:"paired and serial"},
 ];
 for(const fixture of invalid)defineSpecialty({
  id:`specialty.workflow.structured-validation.${fixture.name}`,title:`Invalid structured ${fixture.name} cannot replace the active workflow`,
  oracle:"Public project inspection reports the source error without changing active revision or starting a Worker",
  catches:["recursive calls accepted","malformed structure silently falls back to DAG","invalid candidate changes activation"],
- tags:["core","workflow","structured-workflow"],llm:{default:"mock"},expectedDurationMs:5_000,timeoutMs:60_000,
+ tags:["core","workflow","structured-workflow","structured-data"],llm:{default:"mock"},expectedDurationMs:5_000,timeoutMs:60_000,
  resources:{environments:1,cpu:1,memoryMb:768,io:1,browser:0,pool:"standard"},surfaces:["daemon","genet-cli","workbench-client"],productInterfaces:["workflow.inspect","workflow.init","workflow.history"],
 },async t=>{
  t.data.git.init(t.env.workspace);
