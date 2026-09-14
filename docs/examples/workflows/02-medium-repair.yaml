@@ -1,0 +1,78 @@
+# 中等：单项交付，首次开发 + 最多一次修复。拒绝是业务数据，不是系统失败。
+schema: genehub.workflow.definition.v2
+id: example-medium-repair
+version: 1
+nodes:
+  - id: implement
+    uses: agent.session
+    with:
+      role: coder
+      writeLease: {targetRef: current, ttlSeconds: 900}
+    completion:
+      all:
+        - {key: commit, verify: git.commitOnTarget}
+        - {key: checks, verify: value.nonEmpty}
+  - id: review
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          approved: {type: boolean}
+          finding: {type: string, minLength: 1}
+  - id: publish
+    uses: result.publish
+structure:
+  input:
+    contract: {id: feature, goal: 修复设置保存后重新打开丢失的问题，保留既有设置格式}
+  limits: {maxOperations: 5, maxConcurrency: 1, maxFrames: 64}
+  body:
+    id: delivery
+    type: sequence
+    steps:
+      - id: repair
+        type: loop
+        maxRounds: 2
+        initial: {op: literal, value: {attempt: 0, approved: false, feedback: null, artifact: null}}
+        # 主动结束业务重试，而不是撞 maxRounds 后让整个 Run blocked。
+        condition:
+          op: all
+          values:
+            - {op: not, value: {op: ref, path: /vars/approved}}
+            - {op: lt, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 2}}
+        body:
+          id: implement-and-review
+          type: sequence
+          steps:
+            - id: write
+              type: task
+              activity: implement
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: implement}
+                  contract: {op: ref, path: /input/contract}
+                  feedback: {op: ref, path: /vars/feedback}
+            - id: check
+              type: task
+              activity: review
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: review}
+                  contract: {op: ref, path: /input/contract}
+                  artifact: {op: ref, path: /results/write/evidence}
+        update:
+          op: object
+          fields:
+            attempt: {op: add, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 1}}
+            approved: {op: ref, path: /results/check/output/approved}
+            feedback: {op: ref, path: /results/check/output}
+            artifact: {op: ref, path: /results/write/evidence}
+      - id: accepted-only
+        type: if
+        condition: {op: ref, path: /results/repair/approved}
+        then: {id: publish-result, type: task, activity: publish}
+    # 未通过也明确返回 approved:false；执行结束不等于交付成功。
+    output: {op: ref, path: /results/repair}

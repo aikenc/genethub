@@ -1,0 +1,46 @@
+# 简单：只读诊断 → 整理报告。不启动 Coder，不修改被评估项目。
+schema: genehub.workflow.definition.v2
+id: example-simple-assessment
+version: 1
+nodes:
+  - id: inspect
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          findings: {type: array, maxItems: 16, items: {type: string, minLength: 1}}
+          evidence: {type: string, minLength: 1}
+  - id: summarize
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          summary: {type: string, minLength: 1}
+structure:
+  input: {goal: 只读检查当前工程的启动说明和已知风险，给出有依据的摘要}
+  limits: {maxOperations: 2, maxConcurrency: 1, maxFrames: 16}
+  body:
+    id: assessment
+    type: sequence
+    steps:
+      - id: inspect-project
+        type: task
+        activity: inspect
+        input:
+          op: object
+          fields:
+            phase: {op: literal, value: inspect}
+            goal: {op: ref, path: /input/goal}
+      - id: report
+        type: task
+        activity: summarize
+        input:
+          op: object
+          fields:
+            phase: {op: literal, value: summarize}
+            assessment: {op: ref, path: /results/inspect-project/output}
+    output: {op: ref, path: /results/report/output}

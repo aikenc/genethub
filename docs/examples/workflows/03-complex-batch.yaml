@@ -1,0 +1,130 @@
+# 复杂：Worker 生成有限批次 → 串行迁移与验收 → 首次拒绝退出批次 → 汇总现场。
+schema: genehub.workflow.definition.v2
+id: example-complex-batch
+version: 1
+nodes:
+  - id: plan
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: array
+        minItems: 1
+        maxItems: 8
+        items:
+          type: object
+          properties:
+            id: {type: string, minLength: 1}
+            goal: {type: string, minLength: 1}
+  - id: migrate
+    uses: agent.session
+    with:
+      role: coder
+      writeLease: {targetRef: current, ttlSeconds: 900}
+    completion:
+      all:
+        - {key: commit, verify: git.commitOnTarget}
+        - {key: checks, verify: value.nonEmpty}
+  - id: review
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          approved: {type: boolean}
+          finding: {type: string, minLength: 1}
+  - id: summarize
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          summary: {type: string, minLength: 1}
+structure:
+  input: {goal: 逐模块迁移旧配置格式，任何模块验收失败即停止后续迁移并报告}
+  limits: {maxOperations: 18, maxConcurrency: 1, maxFrames: 256}
+  body:
+    id: migration
+    type: sequence
+    steps:
+      - id: discover
+        type: task
+        activity: plan
+        input:
+          op: object
+          fields:
+            phase: {op: literal, value: plan-batch}
+            goal: {op: ref, path: /input/goal}
+      - id: batch
+        type: forEach
+        items: {op: ref, path: /results/discover/output}
+        key: {op: ref, path: /item/id}
+        maxConcurrency: 1
+        failure: failFast
+        initial: {op: literal, value: {accepted: [], deliveries: [], failure: null, approved: true}}
+        update: {op: ref, path: /results}
+        body:
+          id: migrate-item
+          type: sequence
+          steps:
+            - id: write
+              type: task
+              activity: migrate
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: implement}
+                  contract: {op: ref, path: /item}
+                  accepted: {op: ref, path: /vars/accepted}
+            - id: check
+              type: task
+              activity: review
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: review}
+                  contract: {op: ref, path: /item}
+                  artifact: {op: ref, path: /results/write/evidence}
+            - id: stop-on-rejection
+              type: if
+              condition: {op: not, value: {op: ref, path: /results/check/output/approved}}
+              then:
+                id: exit-batch
+                type: break
+                # break 不执行本项 update，必须显式携带已验收结果和失败现场。
+                value:
+                  op: object
+                  fields:
+                    approved: {op: literal, value: false}
+                    accepted: {op: ref, path: /vars/accepted}
+                    deliveries: {op: ref, path: /vars/deliveries}
+                    failure:
+                      op: object
+                      fields:
+                        contract: {op: ref, path: /item}
+                        artifact: {op: ref, path: /results/write/evidence}
+                        review: {op: ref, path: /results/check/output}
+          output:
+            op: object
+            fields:
+              approved: {op: literal, value: true}
+              accepted: {op: append, array: {op: ref, path: /vars/accepted}, value: {op: ref, path: /item}}
+              deliveries: {op: append, array: {op: ref, path: /vars/deliveries}, value: {op: ref, path: /results/write/evidence}}
+              failure: {op: literal, value: null}
+      - id: report
+        type: task
+        activity: summarize
+        input:
+          op: object
+          fields:
+            phase: {op: literal, value: summarize}
+            plan: {op: ref, path: /results/discover/output}
+            batch: {op: ref, path: /results/batch}
+    output:
+      op: object
+      fields:
+        batch: {op: ref, path: /results/batch}
+        plan: {op: ref, path: /results/discover/output}
+        report: {op: ref, path: /results/report/output}

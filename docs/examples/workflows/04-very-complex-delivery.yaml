@@ -1,0 +1,262 @@
+# 特别复杂：单 Executor Run 内规划、逐里程碑交付、双路验收、有限修复及重规划。
+# 这些是项目业务策略，不是平台内置状态，也不需要 PM 逐里程碑派发。
+schema: genehub.workflow.definition.v2
+id: example-very-complex-delivery
+version: 1
+nodes:
+  - id: requirements
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          decision: {type: string, enum: [go, noGo, needsAuthorization]}
+          rationale: {type: string, minLength: 1}
+          milestones:
+            type: array
+            maxItems: 8
+            items:
+              type: object
+              properties:
+                id: {type: string, minLength: 1}
+                goal: {type: string, minLength: 1}
+                criteria:
+                  type: array
+                  minItems: 1
+                  maxItems: 4
+                  items:
+                    type: object
+                    properties:
+                      id: {type: string, minLength: 1}
+                      requirement: {type: string, minLength: 1}
+  - id: implement
+    uses: agent.session
+    with:
+      role: coder
+      writeLease: {targetRef: current, ttlSeconds: 900}
+    completion:
+      all:
+        - {key: commit, verify: git.commitOnTarget}
+        - {key: checks, verify: value.nonEmpty}
+  - id: review
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          approved: {type: boolean}
+          finding: {type: string, minLength: 1}
+  - id: publish
+    uses: result.publish
+structure:
+  input: {goal: 分阶段重构工程，保留既有行为；每个里程碑逐项验收并独立回归}
+  # 图自身的资源上界不是 PM 的预算授权；更严格的请求预算仍然优先。
+  limits: {maxOperations: 320, maxConcurrency: 4, maxFrames: 2048}
+  body:
+    id: delivery
+    type: sequence
+    output: {op: ref, path: /results/planning}
+    steps:
+      - id: planning
+        type: loop
+        maxRounds: 3
+        initial: {op: literal, value: {accepted: [], deliveries: [], feedback: null, done: false}}
+        condition: {op: not, value: {op: ref, path: /vars/done}}
+        update: {op: ref, path: /results}
+        body:
+          id: plan-and-deliver
+          type: sequence
+          output: {op: ref, path: /results/decision}
+          steps:
+            - id: assess
+              type: task
+              activity: requirements
+              input:
+                op: object
+                fields:
+                  phase: {op: literal, value: requirements}
+                  goal: {op: ref, path: /input/goal}
+                  accepted: {op: ref, path: /vars/accepted}
+                  deliveries: {op: ref, path: /vars/deliveries}
+                  previousFailure: {op: ref, path: /vars/feedback}
+            - id: decision
+              type: choice
+              branches:
+                - condition:
+                    op: all
+                    values:
+                      - {op: eq, left: {op: ref, path: /results/assess/output/decision}, right: {op: literal, value: go}}
+                      - {op: exists, path: /results/assess/output/milestones/0}
+                  body:
+                    id: milestones
+                    type: forEach
+                    items: {op: ref, path: /results/assess/output/milestones}
+                    key: {op: ref, path: /item/id}
+                    maxConcurrency: 1
+                    failure: failFast
+                    initial:
+                      op: object
+                      fields:
+                        accepted: {op: ref, path: /vars/accepted}
+                        deliveries: {op: ref, path: /vars/deliveries}
+                        feedback: {op: literal, value: null}
+                        done: {op: literal, value: true}
+                    update: {op: ref, path: /results}
+                    body:
+                      id: reuse-or-deliver
+                      type: if
+                      # 只复用完全相同的合同，ID 相同但验收变化不能跳过。
+                      condition: {op: contains, array: {op: ref, path: /vars/accepted}, value: {op: ref, path: /item}}
+                      then:
+                        id: reuse
+                        type: sequence
+                        steps: []
+                        output: {op: ref, path: /vars}
+                      else:
+                        id: deliver-one
+                        type: sequence
+                        steps:
+                          - id: attempt
+                            type: call
+                            procedure: deliver-milestone
+                            input:
+                              op: object
+                              fields:
+                                contract: {op: ref, path: /item}
+                                deliveries: {op: ref, path: /vars/deliveries}
+                          - id: rejected
+                            type: if
+                            condition: {op: not, value: {op: ref, path: /results/attempt/approved}}
+                            then:
+                              id: replan-after-rejection
+                              type: break
+                              # 退出当前 milestones；外层 planning 继续。并未跨 call 跳转。
+                              value:
+                                op: object
+                                fields:
+                                  done: {op: literal, value: false}
+                                  accepted: {op: ref, path: /vars/accepted}
+                                  deliveries: {op: ref, path: /vars/deliveries}
+                                  feedback:
+                                    op: object
+                                    fields:
+                                      contract: {op: ref, path: /item}
+                                      result: {op: ref, path: /results/attempt}
+                        output:
+                          op: object
+                          fields:
+                            done: {op: literal, value: true}
+                            accepted: {op: append, array: {op: ref, path: /vars/accepted}, value: {op: ref, path: /item}}
+                            deliveries:
+                              op: append
+                              array: {op: ref, path: /vars/deliveries}
+                              value:
+                                op: object
+                                fields:
+                                  contract: {op: ref, path: /item}
+                                  result: {op: ref, path: /results/attempt}
+                            feedback: {op: literal, value: null}
+              default:
+                id: stop-with-assessment
+                type: break
+                # 非 go / 空计划结束规划但不宣布交付，也不自行扩预算。
+                value:
+                  op: object
+                  fields:
+                    done: {op: literal, value: false}
+                    accepted: {op: ref, path: /vars/accepted}
+                    deliveries: {op: ref, path: /vars/deliveries}
+                    assessment: {op: ref, path: /results/assess/output}
+      - id: accepted-only
+        type: if
+        condition: {op: ref, path: /results/planning/done}
+        then: {id: publish-result, type: task, activity: publish}
+  procedures:
+    deliver-milestone:
+      id: repair
+      type: loop
+      maxRounds: 2
+      initial: {op: literal, value: {attempt: 0, approved: false, feedback: null, artifact: null}}
+      condition:
+        op: all
+        values:
+          - {op: not, value: {op: ref, path: /vars/approved}}
+          - {op: lt, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 2}}
+      update:
+        op: object
+        fields:
+          attempt: {op: add, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 1}}
+          approved:
+            op: all
+            values:
+              - {op: ref, path: /results/checks/criterion-batch/approved}
+              - {op: ref, path: /results/checks/regression-check/output/approved}
+          feedback: {op: ref, path: /results/checks}
+          artifact: {op: ref, path: /results/write/evidence}
+      body:
+        id: implement-and-verify
+        type: sequence
+        steps:
+          - id: write
+            type: task
+            activity: implement
+            input:
+              op: object
+              fields:
+                phase: {op: literal, value: implement}
+                contract: {op: ref, path: /input/contract}
+                deliveries: {op: ref, path: /input/deliveries}
+                feedback: {op: ref, path: /vars/feedback}
+          - id: checks
+            type: parallel
+            # 两路只读检查同一 commit；系统故障不作为普通拒绝吞掉。
+            failure: failFast
+            branches:
+              - id: criterion-batch
+                type: forEach
+                items: {op: ref, path: /input/contract/criteria}
+                key: {op: ref, path: /item/id}
+                maxConcurrency: 1
+                failure: failFast
+                initial:
+                  op: object
+                  fields:
+                    approved: {op: literal, value: true}
+                    checks: {op: literal, value: []}
+                    artifact: {op: ref, path: /results/write/evidence}
+                body:
+                  id: criterion-check
+                  type: task
+                  activity: review
+                  input:
+                    op: object
+                    fields:
+                      phase: {op: literal, value: criterion}
+                      contract: {op: ref, path: /input/contract}
+                      criterion: {op: ref, path: /item}
+                      artifact: {op: ref, path: /vars/artifact}
+                update:
+                  op: object
+                  fields:
+                    approved: {op: all, values: [{op: ref, path: /vars/approved}, {op: ref, path: /results/output/approved}]}
+                    artifact: {op: ref, path: /vars/artifact}
+                    checks:
+                      op: append
+                      array: {op: ref, path: /vars/checks}
+                      value:
+                        op: object
+                        fields:
+                          criterion: {op: ref, path: /item}
+                          review: {op: ref, path: /results/output}
+              - id: regression-check
+                type: task
+                activity: review
+                input:
+                  op: object
+                  fields:
+                    phase: {op: literal, value: regression}
+                    contract: {op: ref, path: /input/contract}
+                    deliveries: {op: ref, path: /input/deliveries}
+                    artifact: {op: ref, path: /results/write/evidence}
