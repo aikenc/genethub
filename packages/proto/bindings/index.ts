@@ -950,7 +950,11 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, candidateDigest?: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, candidateDigest?: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, 
+/**
+ * Validate current source without creating a Candidate, Run or Worker.
+ */
+draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
 /**
  * Bounded business data, checked against the node's declared output shape.
  */
@@ -1872,12 +1876,31 @@ export type WorkflowActivationStatus = { revision: number, digest: string, previ
 
 export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: string, matchKind: string | null, matchComplexity: string | null, };
 
-export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, };
+export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, draft?: WorkflowDraftReport, };
+
+export type WorkflowDiagnostic = { phase: string, code: string, severity: string, 
+/**
+ * Relative to Workflow source root; path is an RFC 6901 pointer in this file.
+ */
+file: string, path: string, message: string, hint: string, expected: string | null, actual: string | null, 
+/**
+ * Present only when the parser supplies a reliable 1-based location.
+ */
+line: number | null, column: number | null, };
 
 /**
  * Finishing a review is distinct from approving its subject.
  */
 export type WorkflowDiagnosticStatus = { sessionId: string, status: string, createdAtMs: number, error?: string, };
+
+export type WorkflowDraftEntry = { id: string, path: string, roles: Array<string>, };
+
+export type WorkflowDraftExecution = { executorPath: string, root: string, };
+
+/**
+ * Source validation is separate from carrier readiness and improvement/quality judgments.
+ */
+export type WorkflowDraftReport = { schema: string, root: string, valid: boolean, truncated: boolean, diagnostics: Array<WorkflowDiagnostic>, candidateDigest: string | null, defaultWorkflow: string | null, execution: WorkflowDraftExecution | null, workflows: Array<WorkflowDraftEntry>, };
 
 export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
 

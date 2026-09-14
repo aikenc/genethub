@@ -24,12 +24,14 @@ use sha2::{Digest, Sha256};
 use crate::bootstrap_pack::direct_workflow_digest as bootstrap_pack_digest;
 use crate::state::Shared;
 
+mod authoring;
 mod check;
 mod control;
 mod output;
 mod request;
 mod structured;
 mod supervision;
+pub(crate) use authoring::schema as authoring_schema;
 pub(crate) use check::check;
 pub(crate) use control::{
     budget, cancel, maintain, start_assigned, summarize_sessions, validate_input_target,
@@ -106,7 +108,7 @@ struct WorkflowMatch {
     complexity: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkflowDefinition {
     schema: String,
@@ -119,7 +121,7 @@ struct WorkflowDefinition {
     nodes: Vec<NodeDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NodeDefinition {
     id: String,
@@ -132,7 +134,7 @@ struct NodeDefinition {
     on: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NodeInputs {
     #[serde(default)]
@@ -143,7 +145,7 @@ struct NodeInputs {
     write_lease: Option<WriteLeaseDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WriteLeaseDefinition {
     target_ref: String,
@@ -155,7 +157,7 @@ fn default_lease_seconds() -> u64 {
     DEFAULT_LEASE_SECONDS
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CompletionDefinition {
     #[serde(default)]
@@ -164,7 +166,7 @@ struct CompletionDefinition {
     output: Option<output::Shape>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EvidenceRequirement {
     key: String,
@@ -2090,10 +2092,8 @@ fn load_project_files(source: &Path) -> Result<LoadedProjectFiles> {
     let catalog_path = existing_relative_within(source, CATALOG_FILE, "Workflow catalog")?;
     let project_bytes = read_source(&project_path)?;
     let catalog_bytes = read_source(&catalog_path)?;
-    let project: ProjectDefinition =
-        serde_yaml::from_slice(&project_bytes).context("解析 .genethub/workflow/project.yaml")?;
-    let catalog: CatalogDefinition = serde_yaml::from_slice(&catalog_bytes)
-        .context("解析 .genethub/workflow/workflows/catalog.yaml")?;
+    let project: ProjectDefinition = authoring::parse(&project_bytes, PROJECT_FILE)?;
+    let catalog: CatalogDefinition = authoring::parse(&catalog_bytes, CATALOG_FILE)?;
     if project.schema != PROJECT_SCHEMA {
         bail!("不支持的 project schema：{}", project.schema);
     }
@@ -2126,8 +2126,7 @@ fn load_bundle_from(source: &Path, entry: &CatalogEntry) -> Result<Bundle> {
     let workflow_relative = format!("workflows/{}", entry.path);
     let workflow_path = existing_relative_within(source, &workflow_relative, "Workflow 定义")?;
     let workflow_bytes = read_source(&workflow_path)?;
-    let definition: WorkflowDefinition = serde_yaml::from_slice(&workflow_bytes)
-        .with_context(|| format!("解析 Workflow {}", entry.id))?;
+    let definition: WorkflowDefinition = authoring::parse(&workflow_bytes, &workflow_relative)?;
     if !matches!(
         definition.schema.as_str(),
         DEFINITION_SCHEMA | "genehub.workflow.definition.v2"
@@ -2156,8 +2155,7 @@ fn load_bundle_from(source: &Path, entry: &CatalogEntry) -> Result<Bundle> {
         validate_id(role_id, "role id")?;
         let relative = format!("roles/{role_id}.yaml");
         let role_bytes = read_source(&existing_relative_within(source, &relative, "角色定义")?)?;
-        let mut role: RoleSnapshot =
-            serde_yaml::from_slice(&role_bytes).with_context(|| format!("解析角色 {role_id}"))?;
+        let mut role: RoleSnapshot = authoring::parse(&role_bytes, &relative)?;
         if role.schema != ROLE_SCHEMA || role.id != *role_id {
             bail!("角色文件 {relative} 的 schema 或 id 不匹配");
         }
@@ -2782,9 +2780,25 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
             bail!("structured Workflow requires v2, no entry and no node.on edges");
         }
         let program = workflow_engine::compile(structure.clone())?;
-        for activity in program.activities() {
-            if !ids.contains(&activity) {
-                bail!("structured task references missing activity {activity}");
+        for (path, activity, accept) in program.tasks() {
+            let node = definition.nodes.iter().find(|n| n.id == activity);
+            if node.is_none() {
+                return Err(authoring::definition_error(
+                    "WF_ACTIVITY",
+                    &format!("{path}/activity"),
+                    format!("structured task references missing activity {activity}"),
+                    "Use a node ID declared in this Workflow's nodes list.",
+                ));
+            }
+            if accept.iter().any(|outcome| {
+                !matches!(
+                    outcome.as_str(),
+                    "completed" | "changesRequested" | "failed" | "blocked"
+                ) || (node.is_some_and(|n| n.uses == "result.publish") && outcome != "completed")
+            }) {
+                return Err(authoring::definition_error("WF_OUTCOME", &format!("{path}/accept"),
+                    "task accepts an outcome its capability cannot emit".into(),
+                    "agent.session emits completed/changesRequested/failed/blocked; result.publish emits only completed."));
             }
         }
         return Ok(());

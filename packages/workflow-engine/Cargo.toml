@@ -5,7 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Deterministic structured workflow transitions; storage and effects belong to the host"
 
+[features]
+schema = ["dep:schemars"]
+
 [dependencies]
+schemars = { version = "1.2", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

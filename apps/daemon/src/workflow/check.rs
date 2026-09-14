@@ -6,8 +6,20 @@ pub(crate) async fn check(
     state: &Shared,
     workspace_id: &str,
     run_id: Option<&str>,
+    draft: bool,
 ) -> Result<WorkflowCheckReport> {
     let workspace = state.workspaces.get(workspace_id).await?;
+    if draft {
+        if run_id.is_some() {
+            bail!("workflow check: --draft and --run are mutually exclusive");
+        }
+        return Ok(WorkflowCheckReport {
+            checked_at_ms: now_ms(),
+            findings: Vec::new(),
+            runs: Vec::new(),
+            draft: Some(authoring::check_draft(&workspace.root)),
+        });
+    }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
     let all = all_runs(&runtime)?;
     let runs = if let Some(id) = run_id {
@@ -19,6 +31,7 @@ pub(crate) async fn check(
         checked_at_ms: now_ms(),
         findings: Vec::new(),
         runs: Vec::new(),
+        draft: None,
     };
     for run in runs {
         let mut finding = |node_id: Option<String>, code: &str, severity: &str, detail: String| {

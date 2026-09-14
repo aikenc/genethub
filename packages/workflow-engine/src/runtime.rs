@@ -197,10 +197,23 @@ pub fn advance(program: &Program, previous: &EngineState, input: Input) -> Resul
                         }
                     }
                     Err(Error::Condition(message)) => {
+                        let node = state.frames[&id].node.clone();
+                        let diagnostic = crate::Diagnostic {
+                            code: "WF_RUNTIME_EXPRESSION".into(), path: program.source_paths[&node].clone(),
+                            message: message.clone(), hint: "Inspect this frame's input/vars/results/item and the producer's output contract; missing references are not null or false.".into(),
+                            expected: None, actual: None,
+                        };
+                        history.push(HistoryEntry {
+                            frame: id,
+                            parent: state.frames[&id].parent,
+                            node,
+                            event: "condition.error".into(),
+                            detail: serde_json::to_value(&diagnostic)?,
+                        });
                         stop(
                             &mut state,
                             Status::Stopping,
-                            Outcome::failed("conditionError", message),
+                            Outcome::failed("conditionError", diagnostic.to_string()),
                         );
                         changed = true;
                         fuel -= 1;

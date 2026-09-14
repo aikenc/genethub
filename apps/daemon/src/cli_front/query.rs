@@ -236,7 +236,7 @@ fn parse_schema(args: &[String]) -> Result<Query, CliFailure> {
         _ => return Err(CliFailure::invalid_args("usage: genet schema [command]")),
     };
     if let Some(name) = command.as_deref() {
-        if !COMMAND_NAMES.contains(&name) {
+        if name != "workflow.definition" && !COMMAND_NAMES.contains(&name) {
             return Err(CliFailure::invalid_args(format!(
                 "unknown schema command '{name}'; use `genet schema` to list commands"
             )));
@@ -1025,6 +1025,7 @@ fn capabilities_data() -> Value {
 
 fn schema_data(command: Option<&str>) -> Value {
     match command {
+        Some("workflow.definition") => json!({"definition": crate::workflow::authoring_schema()}),
         Some(command) => json!({"command": command_schema(command)}),
         None => json!({
             "commands": COMMAND_NAMES.iter().map(|name| command_schema(name)).collect::<Vec<_>>()
@@ -1267,8 +1268,8 @@ fn command_schema(name: &str) -> Value {
             json!({"limit": {"type": "integer", "minimum": 1}}), &[],
         ),
         "workflow.check" => workflow_schema(
-            "genet workflow check [--workspace <id>] [--run <id>]",
-            json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}}), &[],
+            "genet workflow check [--workspace <id>] [--run <id> | --draft]",
+            json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}, "draft": {"type":"boolean", "description":"Read-only source validation; invalid draft exits nonzero with error.details.draft.diagnostics. Definition schema: schema workflow.definition"}}), &[],
         ),
         "workflow.complete" => workflow_schema(
             "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--output <json>] [--outcome completed|changesRequested|failed|blocked] [--reason <text>]",
@@ -1910,6 +1911,12 @@ mod tests {
             parse(&words(&["schema", "workspace", "list"])).unwrap(),
             Query::Schema {
                 command: Some("workspace.list".into())
+            }
+        );
+        assert_eq!(
+            parse(&words(&["schema", "workflow.definition"])).unwrap(),
+            Query::Schema {
+                command: Some("workflow.definition".into())
             }
         );
     }

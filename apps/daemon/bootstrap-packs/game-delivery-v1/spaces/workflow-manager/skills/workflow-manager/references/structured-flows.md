@@ -40,9 +40,11 @@ Keep fixed control definitions with dynamic plan data; no runtime graph rewritin
 
 For structured Worker data, declare `completion.output` on the activity, then
 submit `workflow complete --output '<JSON>'`. Tasks consume `/results/<step>/output`
-(or `/results/output` when a task is the loop body). This is a closed shape
-vocabulary, not JSON Schema: `object.properties` are all required and additional
-keys are forbidden; `array.items/minItems/maxItems`, `string.enum/minLength`,
+(or `/results/output` when a task is the loop body). This is a bounded subset,
+not a full JSON Schema evaluator. Prefer explicit `object.required: [names]` plus
+`additionalProperties: false`; optional declared keys are checked when present.
+Omitting both keywords preserves legacy all-required/closed `object.properties`;
+specifying only one is an error. `array.items/minItems/maxItems`, `string.enum/minLength`,
 `integer`, `boolean` and `null` are supported. Arrays require maxItems, at most 4096.
 Data is limited to 256 KiB, depth 32 and 16384 values; schema depth/size is also
 bounded. An omitted output remains compatible with old nodes; explicit null is

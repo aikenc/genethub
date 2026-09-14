@@ -1,4 +1,5 @@
-//! Closed, bounded data shapes, not executable validators or JSON Schema.
+//! Closed, bounded data shapes with an explicit JSON Schema-compatible object profile.
+//! Not a full JSON Schema validator: no executable code, remote refs or open objects.
 //! These validate a Worker's declared result; they cannot prove work was done.
 
 use anyhow::{bail, Result};
@@ -8,12 +9,21 @@ use std::collections::BTreeMap;
 
 pub(super) const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub(super) enum Shape {
     /// All declared properties are required; additional properties are rejected.
     Object {
         properties: BTreeMap<String, Shape>,
+        /// Omit both fields only for the legacy all-required/closed shorthand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        required: Option<Vec<String>>,
+        #[serde(
+            default,
+            rename = "additionalProperties",
+            skip_serializing_if = "Option::is_none"
+        )]
+        additional_properties: Option<bool>,
     },
     Array {
         items: Box<Shape>,
@@ -41,7 +51,24 @@ impl Shape {
             }
             *remaining -= 1;
             match shape {
-                Shape::Object { properties } => {
+                Shape::Object {
+                    properties,
+                    required,
+                    additional_properties,
+                } => {
+                    if required.is_some() != additional_properties.is_some()
+                        || additional_properties == &Some(true)
+                    {
+                        bail!("output object: declare both required and additionalProperties: false, or omit both for legacy shorthand");
+                    }
+                    if let Some(required) = required {
+                        let unique: std::collections::BTreeSet<_> = required.iter().collect();
+                        if unique.len() != required.len()
+                            || required.iter().any(|k| !properties.contains_key(k))
+                        {
+                            bail!("output required must contain unique declared property names");
+                        }
+                    }
                     if properties.len() > 64
                         || properties.keys().any(|k| k.is_empty() || k.len() > 128)
                     {
@@ -82,14 +109,30 @@ impl Shape {
 
     pub(super) fn verify(&self, value: &Value, path: &str) -> Result<()> {
         match (self, value) {
-            (Self::Object { properties }, Value::Object(values)) => {
-                if properties.len() != values.len()
-                    || properties.keys().any(|k| !values.contains_key(k))
+            (
+                Self::Object {
+                    properties,
+                    required,
+                    ..
+                },
+                Value::Object(values),
+            ) => {
+                let required: Vec<_> = required
+                    .as_ref()
+                    .map(|r| r.iter().collect())
+                    .unwrap_or_else(|| properties.keys().collect());
+                if values.keys().any(|k| !properties.contains_key(k))
+                    || required.iter().any(|k| !values.contains_key(*k))
                 {
                     bail!("output {path}: property set does not match its declared shape");
                 }
                 for (key, shape) in properties {
-                    shape.verify(&values[key], &format!("{path}/{key}"))?;
+                    if let Some(value) = values.get(key) {
+                        shape.verify(
+                            value,
+                            &format!("{path}/{}", workflow_engine::pointer_token(key)),
+                        )?;
+                    }
                 }
             }
             (

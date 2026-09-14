@@ -44,6 +44,7 @@ enum Command {
     Check {
         workspace_id: Option<String>,
         run_id: Option<String>,
+        draft: bool,
     },
     Get {
         workspace_id: Option<String>,
@@ -239,12 +240,14 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
         Command::Check {
             workspace_id,
             run_id,
+            draft,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::WorkflowCheck(report) = rpc
                 .call(Request::WorkflowCheck {
                     workspace_id,
                     run_id,
+                    draft: draft.then_some(true),
                 })
                 .await
                 .map_err(query::rpc_error)?
@@ -253,6 +256,20 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                     "the daemon answered workflow.check with the wrong reply",
                 ));
             };
+            if draft && report.draft.is_none() {
+                return Err(CliFailure::business(
+                    "workflowValidationUnavailable",
+                    "daemon 不支持草稿校验；更新同一环境后再试，不能用 Active 检查代替",
+                    None,
+                ));
+            }
+            if report.draft.as_ref().is_some_and(|d| !d.valid) {
+                return Err(CliFailure::business(
+                    "workflowValidationFailed",
+                    "Workflow 草稿未通过校验；按 details.draft.diagnostics 修正后重试",
+                    Some(serde_json::to_value(report).unwrap()),
+                ));
+            }
             output::succeed("workflow.check", serde_json::to_value(report).unwrap());
             Ok(EXIT_OK)
         }
@@ -687,6 +704,11 @@ pub(super) async fn resolve_workspace(
 fn parse(args: &[String]) -> Result<Command, CliFailure> {
     let verb = args.first().map(String::as_str).unwrap_or_default();
     let mut values = Values::parse(&args[1..])?;
+    if values.draft && (verb != "check" || values.run.is_some()) {
+        return Err(CliFailure::invalid_args(
+            "--draft 只用于 workflow check，不能与 --run 同用",
+        ));
+    }
     match verb {
         "init" => Ok(Command::Init {
             workspace_id: values.workspace.take(),
@@ -729,7 +751,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 timeout: values.timeout,
             })
         }
-        "check" => Ok(Command::Check { workspace_id: values.workspace.take(), run_id: values.run.take() }),
+        "check" => Ok(Command::Check { workspace_id: values.workspace.take(), run_id: values.run.take(), draft: values.draft }),
         "get" => Ok(Command::Get {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -779,6 +801,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 
 #[derive(Default)]
 struct Values {
+    draft: bool,
     retry_of: Option<String>,
     resume_cancelled: bool,
     outcome: Option<genehub_proto::WorkflowNodeOutcome>,
@@ -819,6 +842,7 @@ impl Values {
                     .ok_or_else(|| CliFailure::invalid_args(format!("{flag} 需要非空值")))
             };
             match flag {
+                "--draft" => values.draft = true,
                 "--retry-of" => values.retry_of = Some(next(&mut index)?),
                 "--resume-cancelled" => values.resume_cancelled = true,
                 "--outcome" => {

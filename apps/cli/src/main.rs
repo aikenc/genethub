@@ -199,7 +199,8 @@ pub fn usage() -> i32 {
   genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
                                     route through the project workflow catalog
   genet workflow get --run <id>    read one durable workflow run
-  genet workflow check [--run <id>]
+  genet workflow check [--run <id> | --draft]
+  genet schema workflow.definition
                                     inspect graph exits, execution and evidence without an LLM
   genet workflow cancel --run <id> --revision <n>
                                     fence the original request, then stop its squad

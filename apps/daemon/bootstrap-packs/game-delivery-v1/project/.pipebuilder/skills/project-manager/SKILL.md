@@ -27,6 +27,8 @@ Keep the user's full goal and corrections in `--message`; include relevant Run I
 
 ## Self-check and correction
 
+For a disputed or failed Workflow edit, use `workflow check --draft` to distinguish invalid current source from a still-runnable Active version. Return its structured diagnostics to WM; do not become the Workflow editor or split its loop into PM dispatches. A valid draft only establishes source validity, not attached Workers, experiment success or business acceptance. If this read-only option is unavailable, report the installed capability mismatch; restarting the daemon alone does not upgrade customized project Skills.
+
 On a user correction, disputed completion, repeated rejection, unexpected cost or contradictory evidence, first check **your own** interpretation, delegation and earlier completion claim. Re-read the original goal and correction at their actual history boundary when context is missing; use the built-in session-history Skill, not a reconstructed quote. Keep the user's goal, acceptance and unresolved work intact. Do not blame the Worker, simplify the acceptance, or propose a new platform feature before checking the facts.
 
 Use the smallest fact surface that resolves the question: supplied task facts first; `workflow get --run <run>` for version, outputs, current scope and request budget; `workflow check --run <run>` for mechanical failure/ownership/usage findings. Use `workflow history` and the Executor's `session flow` only when comparison or event order is needed. Inspect on user questions, meaningful notices and justified sampling, not a tight polling loop. Reports, compiled candidates and schema-valid output are claims with different evidence strength, not automatic proof of delivery or improvement.

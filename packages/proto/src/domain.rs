@@ -1078,6 +1078,61 @@ pub struct WorkflowCheckReport {
     pub checked_at_ms: i64,
     pub findings: Vec<WorkflowFinding>,
     pub runs: Vec<WorkflowRunStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub draft: Option<WorkflowDraftReport>,
+}
+
+/// Source validation is separate from carrier readiness and improvement/quality judgments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowDraftReport {
+    pub schema: String,
+    pub root: String,
+    pub valid: bool,
+    pub truncated: bool,
+    pub diagnostics: Vec<WorkflowDiagnostic>,
+    pub candidate_digest: Option<String>,
+    pub default_workflow: Option<String>,
+    pub execution: Option<WorkflowDraftExecution>,
+    pub workflows: Vec<WorkflowDraftEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowDraftExecution {
+    pub executor_path: String,
+    pub root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowDraftEntry {
+    pub id: String,
+    pub path: String,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowDiagnostic {
+    pub phase: String,
+    pub code: String,
+    pub severity: String,
+    /// Relative to Workflow source root; path is an RFC 6901 pointer in this file.
+    pub file: String,
+    pub path: String,
+    pub message: String,
+    pub hint: String,
+    pub expected: Option<String>,
+    pub actual: Option<String>,
+    /// Present only when the parser supplies a reliable 1-based location.
+    pub line: Option<u32>,
+    pub column: Option<u32>,
 }
 
 /// Project-owned Workflow catalog projected by the daemon after validation.

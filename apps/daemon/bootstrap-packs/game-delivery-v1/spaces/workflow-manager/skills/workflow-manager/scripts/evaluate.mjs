@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
@@ -12,7 +12,7 @@ if (!sessionId) throw new Error("evaluation must run inside a WorkflowManager Se
 function genet(args) {
   const result = spawnSync(cli, args, { cwd: process.cwd(), env: process.env, encoding: "utf8" });
   if (result.status !== 0) {
-    throw new Error(`${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+    throw new Error(`${args.join(" ")} failed: ${result.stdout || result.stderr}`);
   }
   let envelope;
   for (const line of result.stdout.split("\n")) {
@@ -59,9 +59,13 @@ for (const run of completed) {
 }
 const slowestNode = [...nodeDurations].sort((left, right) => right.durationMs - left.durationMs)[0];
 
+const draft = genet(["workflow", "check", "--draft"]).draft;
+if (!draft?.valid || !draft.candidateDigest || !Array.isArray(draft.workflows)) {
+  throw new Error("Current daemon did not provide a validated draft; update it rather than substituting the Active catalog");
+}
 const project = genet(["workflow", "inspect"]);
 project.root = nativePath(project.root);
-if (!project.candidateDigest) throw new Error(project.candidateError ?? "Candidate did not compile");
+if (project.candidateDigest !== draft.candidateDigest) throw new Error("Candidate changed during evaluation; rerun draft validation");
 
 // `workflow inspect.root` deliberately names the versioned Workflow source,
 // not the repository. Walk from `<project>/.genethub/workflow` to the Git
@@ -84,16 +88,9 @@ const allChangedFiles = [...new Set(
 )].sort();
 const changedFiles = allChangedFiles.filter((file) => file.startsWith(".genethub/workflow/"));
 
-const workflowFiles = readdirSync(path.join(project.root, "workflows"), { withFileTypes: true })
-  .filter((entry) => entry.isFile() && entry.name.endsWith(".yaml"))
-  .map((entry) => path.join(project.root, "workflows", entry.name));
-const candidateRoles = [...new Set(workflowFiles.flatMap((file) => {
-  const source = readFileSync(file, "utf8");
-  return [...source.matchAll(/^\s+role:\s*([A-Za-z0-9._-]+)\s*$/gm)].map((match) => match[1]);
-}))].sort();
-if (candidateRoles.length === 0) throw new Error("Candidate references no agent.session roles");
-const config = readFileSync(path.join(project.root, "project.yaml"), "utf8");
-const executorPath = config.match(/^  executorPath:\s*(\S+)\s*$/m)?.[1];
+// Compiled catalog only: quoted/inline YAML is valid, uncataloged files are not dependencies.
+const candidateRoles = [...new Set(draft.workflows.flatMap((workflow) => workflow.roles))].sort();
+const executorPath = draft.execution?.executorPath;
 const workspaces = (genet(["workspace", "list"]).workspaces ?? [])
   .map((space) => ({ ...space, root: nativePath(space.root) }));
 const selectedExecutor = executorPath && workspaces.find((space) => path.resolve(space.root) === path.resolve(projectRoot, executorPath));

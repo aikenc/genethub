@@ -140,6 +140,10 @@ pub enum Request {
     WorkflowCheck {
         workspace_id: String,
         run_id: Option<String>,
+        /// Validate current source without creating a Candidate, Run or Worker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        draft: Option<bool>,
     },
     #[serde(rename = "workflow.get", rename_all = "camelCase")]
     WorkflowGet {

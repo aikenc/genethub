@@ -915,7 +915,15 @@ async fn dispatch(
         Request::WorkflowCheck {
             workspace_id,
             run_id,
-        } => match crate::workflow::check(state, &workspace_id, run_id.as_deref()).await {
+            draft,
+        } => match crate::workflow::check(
+            state,
+            &workspace_id,
+            run_id.as_deref(),
+            draft.unwrap_or(false),
+        )
+        .await
+        {
             Ok(report) => Handled::ok(Reply::WorkflowCheck(report)),
             Err(error) => failed(error),
         },

@@ -108,38 +108,109 @@ impl Expr {
         match self {
             Self::Ref { path } | Self::Exists { path } => {
                 if path.len() > 2048 || (!path.is_empty() && !path.starts_with('/')) {
-                    return Err(Error::Definition(
-                        "references must be bounded JSON Pointers".into(),
-                    ));
+                    return Err(Error::invalid("WF_REFERENCE", "/path",
+                        "references must be bounded JSON Pointers",
+                        "Use an empty pointer or /input, /vars, /results, /item paths; escape ~ as ~0 and / as ~1."));
                 }
                 let mut chars = path.chars();
                 while let Some(c) = chars.next() {
                     if c == '~' && !matches!(chars.next(), Some('0' | '1')) {
-                        return Err(Error::Definition("invalid JSON Pointer escape".into()));
+                        return Err(Error::invalid(
+                            "WF_REFERENCE",
+                            "/path",
+                            "invalid JSON Pointer escape",
+                            "Escape ~ as ~0 and a field's / as ~1; do not use JSONPath syntax.",
+                        ));
                     }
                 }
             }
             Self::Object { fields } => {
-                for value in fields.values() {
-                    value.validate(depth + 1, remaining)?;
+                for (key, value) in fields {
+                    value
+                        .validate(depth + 1, remaining)
+                        .map_err(|e| e.at(&format!("/fields/{}", crate::pointer_token(key))))?;
                 }
             }
             Self::Eq { left, right } | Self::Lt { left, right } | Self::Add { left, right } => {
-                left.validate(depth + 1, remaining)?;
-                right.validate(depth + 1, remaining)?;
+                left.validate(depth + 1, remaining)
+                    .map_err(|e| e.at("/left"))?;
+                right
+                    .validate(depth + 1, remaining)
+                    .map_err(|e| e.at("/right"))?;
+                if !matches!(self, Self::Eq { .. }) {
+                    left.expect_type("integer").map_err(|e| e.at("/left"))?;
+                    right.expect_type("integer").map_err(|e| e.at("/right"))?;
+                } else if let (Some(l), Some(r)) = (left.known_type(), right.known_type()) {
+                    // JSON equality distinguishes kinds, not integer/float representations.
+                    if l != r && !([l, r].iter().all(|t| ["integer", "number"].contains(t))) {
+                        return Err(Self::type_error(l, r).at("/right"));
+                    }
+                }
             }
             Self::Append { array, value } | Self::Contains { array, value } => {
-                array.validate(depth + 1, remaining)?;
-                value.validate(depth + 1, remaining)?;
+                array
+                    .validate(depth + 1, remaining)
+                    .map_err(|e| e.at("/array"))?;
+                value
+                    .validate(depth + 1, remaining)
+                    .map_err(|e| e.at("/value"))?;
+                array.expect_type("array").map_err(|e| e.at("/array"))?;
             }
-            Self::Not { value } => value.validate(depth + 1, remaining)?,
+            Self::Not { value } => {
+                value
+                    .validate(depth + 1, remaining)
+                    .map_err(|e| e.at("/value"))?;
+                value.expect_type("boolean").map_err(|e| e.at("/value"))?;
+            }
             Self::All { values } | Self::Any { values } => {
-                for value in values {
-                    value.validate(depth + 1, remaining)?;
+                for (i, value) in values.iter().enumerate() {
+                    value
+                        .validate(depth + 1, remaining)
+                        .map_err(|e| e.at(&format!("/values/{i}")))?;
+                    value
+                        .expect_type("boolean")
+                        .map_err(|e| e.at(&format!("/values/{i}")))?;
                 }
             }
             Self::Literal { .. } => {}
         }
         Ok(())
+    }
+
+    // Deliberately no data-flow inference: references remain runtime-checked.
+    fn known_type(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Ref { .. } => return None,
+            Self::Literal { value } => match value {
+                Value::Null => "null",
+                Value::Bool(_) => "boolean",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+                Value::Number(_) => "number",
+            },
+            Self::Object { .. } => "object",
+            Self::Add { .. } => "integer",
+            Self::Append { .. } => "array",
+            _ => "boolean",
+        })
+    }
+    pub(crate) fn expect_type(&self, expected: &str) -> Result<()> {
+        if let Some(actual) = self.known_type() {
+            if actual != expected {
+                return Err(Self::type_error(expected, actual));
+            }
+        }
+        Ok(())
+    }
+    fn type_error(expected: &str, actual: &str) -> Error {
+        let mut error = Error::invalid("WF_EXPRESSION_TYPE", "", "expression has a statically incompatible type",
+            "Use a correctly typed literal or expression; strings are not coerced to booleans or numbers.");
+        if let Error::Invalid(d) = &mut error {
+            d.expected = Some(expected.into());
+            d.actual = Some(actual.into());
+        }
+        error
     }
 }

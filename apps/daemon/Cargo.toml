@@ -13,7 +13,7 @@ description = "GeneHub daemon: session kernel, agent adapters and client transpo
 path = "src/lib.rs"
 
 [dependencies]
-workflow-engine = { path = "../../packages/workflow-engine" }
+workflow-engine = { path = "../../packages/workflow-engine", features = ["schema"] }
 genehub-proto = { path = "../../packages/proto" }
 genet-frontdoor = { path = "../../packages/frontdoor" }
 genet-native = { path = "../../packages/native" }
@@ -30,6 +30,8 @@ json5.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+schemars = "1.2"
+serde_path_to_error = "0.1"
 thiserror.workspace = true
 toml = "0.9"
 uuid.workspace = true

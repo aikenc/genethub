@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Definition {
     /// Absolute elapsed-time limit, including user waits, fixed when started.
@@ -18,6 +19,7 @@ pub struct Definition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
     pub max_operations: u64,
@@ -35,12 +37,14 @@ impl Default for Limits {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Block {
     pub id: String,
     #[serde(flatten)]
     pub kind: BlockKind,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum BlockKind {
     Task {
@@ -120,12 +124,14 @@ fn vars_expr() -> Expr {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Branch {
     pub condition: Expr,
     pub body: Block,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum FailurePolicy {
     #[default]
@@ -135,6 +141,7 @@ pub enum FailurePolicy {
 
 /// References use JSON Pointer into {input, vars, results, item}. No I/O or code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Expr {
     Literal { value: Value },

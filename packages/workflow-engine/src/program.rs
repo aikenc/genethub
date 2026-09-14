@@ -7,6 +7,7 @@ pub struct Program {
     pub(crate) definition: Definition,
     pub(crate) nodes: BTreeMap<String, Block>,
     pub(crate) digest: String,
+    pub(crate) source_paths: BTreeMap<String, String>,
 }
 impl Program {
     pub fn definition(&self) -> &Definition {
@@ -23,6 +24,19 @@ impl Program {
                 _ => None,
             })
             .collect()
+    }
+    /// Host-side capability validation without reparsing or rewalking the graph.
+    pub fn tasks(&self) -> impl Iterator<Item = (&str, &str, &[String])> {
+        self.nodes.values().filter_map(|block| match &block.kind {
+            BlockKind::Task {
+                activity, accept, ..
+            } => Some((
+                self.source_paths[&block.id].as_str(),
+                activity.as_str(),
+                accept.as_slice(),
+            )),
+            _ => None,
+        })
     }
 }
 pub fn compile(definition: Definition) -> Result<Program> {
@@ -43,11 +57,14 @@ pub fn compile(definition: Definition) -> Result<Program> {
         ));
     }
     let mut nodes = BTreeMap::new();
+    let mut paths = BTreeMap::new();
     fn walk(
         block: &Block,
         nodes: &mut BTreeMap<String, Block>,
         depth: usize,
         can_break: bool,
+        path: &str,
+        paths: &mut BTreeMap<String, String>,
     ) -> Result<()> {
         if depth > 32 || nodes.len() >= 1024 {
             return Err(Error::Definition(
@@ -66,28 +83,77 @@ pub fn compile(definition: Definition) -> Result<Program> {
         if nodes.insert(block.id.clone(), block.clone()).is_some() {
             return Err(Error::Definition(format!("duplicate block {}", block.id)));
         }
+        paths.insert(block.id.clone(), path.into());
         match &block.kind {
             BlockKind::Sequence { steps, .. } => {
-                for child in steps {
-                    walk(child, nodes, depth + 1, can_break)?;
+                for (i, child) in steps.iter().enumerate() {
+                    walk(
+                        child,
+                        nodes,
+                        depth + 1,
+                        can_break,
+                        &format!("{path}/steps/{i}"),
+                        paths,
+                    )
+                    .map_err(|e| e.located(path))?;
                 }
             }
             BlockKind::Parallel { branches, .. } => {
-                for child in branches {
-                    walk(child, nodes, depth + 1, false)?;
+                for (i, child) in branches.iter().enumerate() {
+                    walk(
+                        child,
+                        nodes,
+                        depth + 1,
+                        false,
+                        &format!("{path}/branches/{i}"),
+                        paths,
+                    )
+                    .map_err(|e| e.located(path))?;
                 }
             }
             BlockKind::If { then, r#else, .. } => {
-                walk(then, nodes, depth + 1, can_break)?;
+                walk(
+                    then,
+                    nodes,
+                    depth + 1,
+                    can_break,
+                    &format!("{path}/then"),
+                    paths,
+                )
+                .map_err(|e| e.located(&format!("{path}/then")))?;
                 if let Some(child) = r#else {
-                    walk(child, nodes, depth + 1, can_break)?;
+                    walk(
+                        child,
+                        nodes,
+                        depth + 1,
+                        can_break,
+                        &format!("{path}/else"),
+                        paths,
+                    )
+                    .map_err(|e| e.located(&format!("{path}/else")))?;
                 }
             }
             BlockKind::Choice { branches, default } => {
-                for branch in branches {
-                    walk(&branch.body, nodes, depth + 1, can_break)?;
+                for (i, branch) in branches.iter().enumerate() {
+                    walk(
+                        &branch.body,
+                        nodes,
+                        depth + 1,
+                        can_break,
+                        &format!("{path}/branches/{i}/body"),
+                        paths,
+                    )
+                    .map_err(|e| e.located(path))?;
                 }
-                walk(default, nodes, depth + 1, can_break)?;
+                walk(
+                    default,
+                    nodes,
+                    depth + 1,
+                    can_break,
+                    &format!("{path}/default"),
+                    paths,
+                )
+                .map_err(|e| e.located(path))?;
             }
             BlockKind::Loop {
                 body, max_rounds, ..
@@ -95,7 +161,8 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 if *max_rounds > 10_000 {
                     return Err(Error::Definition("loop round limit exceeds 10000".into()));
                 }
-                walk(body, nodes, depth + 1, true)?;
+                walk(body, nodes, depth + 1, true, &format!("{path}/body"), paths)
+                    .map_err(|e| e.located(path))?;
             }
             BlockKind::ForEach {
                 body,
@@ -116,12 +183,20 @@ pub fn compile(definition: Definition) -> Result<Program> {
                         "foreach initial/update must be paired and serial".into(),
                     ));
                 }
-                walk(body, nodes, depth + 1, *max_concurrency == 1)?;
+                walk(
+                    body,
+                    nodes,
+                    depth + 1,
+                    *max_concurrency == 1,
+                    &format!("{path}/body"),
+                    paths,
+                )
+                .map_err(|e| e.located(path))?;
             }
             BlockKind::Break { .. } if !can_break => {
-                return Err(Error::Definition(
-                    "break requires a lexical loop or serial foreach; it cannot cross a call or parallel boundary".into(),
-                ));
+                return Err(Error::invalid("WF_BREAK_SCOPE", path,
+                    "break requires a lexical loop or serial foreach; it cannot cross a call or parallel boundary",
+                    "Return data across call/parallel boundaries; put the break in the enclosing serial loop."));
             }
             BlockKind::Task {
                 activity, accept, ..
@@ -136,9 +211,11 @@ pub fn compile(definition: Definition) -> Result<Program> {
         }
         Ok(())
     }
-    walk(&definition.body, &mut nodes, 0, false)?;
-    for body in definition.procedures.values() {
-        walk(body, &mut nodes, 0, false)?;
+    walk(&definition.body, &mut nodes, 0, false, "/body", &mut paths)
+        .map_err(|e| e.located("/body"))?;
+    for (name, body) in &definition.procedures {
+        let path = format!("/procedures/{}", pointer_token(name));
+        walk(body, &mut nodes, 0, false, &path, &mut paths).map_err(|e| e.located(&path))?;
     }
     fn calls(
         block: &Block,
@@ -146,6 +223,7 @@ pub fn compile(definition: Definition) -> Result<Program> {
         stack: &mut Vec<String>,
         depth: usize,
         visits: &mut usize,
+        paths: &BTreeMap<String, String>,
     ) -> Result<()> {
         *visits += 1;
         if *visits > 16384 {
@@ -159,42 +237,49 @@ pub fn compile(definition: Definition) -> Result<Program> {
         match &block.kind {
             BlockKind::Call { procedure, .. } => {
                 if stack.contains(procedure) {
-                    return Err(Error::Definition(format!(
-                        "recursive procedure {procedure}"
-                    )));
+                    return Err(Error::invalid(
+                        "WF_RECURSION",
+                        &format!("{}/procedure", paths[&block.id]),
+                        format!("recursive procedure {procedure}"),
+                        "Use a bounded loop instead of recursion.",
+                    ));
                 }
-                let body = definition
-                    .procedures
-                    .get(procedure)
-                    .ok_or_else(|| Error::Definition(format!("unknown procedure {procedure}")))?;
+                let body = definition.procedures.get(procedure).ok_or_else(|| {
+                    Error::invalid(
+                        "WF_PROCEDURE",
+                        &format!("{}/procedure", paths[&block.id]),
+                        format!("unknown procedure {procedure}"),
+                        "Declare this procedure in the same definition, or correct the reference.",
+                    )
+                })?;
                 stack.push(procedure.clone());
-                calls(body, definition, stack, depth + 1, visits)?;
+                calls(body, definition, stack, depth + 1, visits, paths)?;
                 stack.pop();
             }
             BlockKind::Sequence { steps, .. } => {
                 for c in steps {
-                    calls(c, definition, stack, depth + 1, visits)?;
+                    calls(c, definition, stack, depth + 1, visits, paths)?;
                 }
             }
             BlockKind::Parallel { branches, .. } => {
                 for c in branches {
-                    calls(c, definition, stack, depth + 1, visits)?;
+                    calls(c, definition, stack, depth + 1, visits, paths)?;
                 }
             }
             BlockKind::Loop { body, .. } | BlockKind::ForEach { body, .. } => {
-                calls(body, definition, stack, depth + 1, visits)?
+                calls(body, definition, stack, depth + 1, visits, paths)?
             }
             BlockKind::If { then, r#else, .. } => {
-                calls(then, definition, stack, depth + 1, visits)?;
+                calls(then, definition, stack, depth + 1, visits, paths)?;
                 if let Some(c) = r#else {
-                    calls(c, definition, stack, depth + 1, visits)?;
+                    calls(c, definition, stack, depth + 1, visits, paths)?;
                 }
             }
             BlockKind::Choice { branches, default } => {
                 for b in branches {
-                    calls(&b.body, definition, stack, depth + 1, visits)?;
+                    calls(&b.body, definition, stack, depth + 1, visits, paths)?;
                 }
-                calls(default, definition, stack, depth + 1, visits)?;
+                calls(default, definition, stack, depth + 1, visits, paths)?;
             }
             _ => {}
         }
@@ -207,24 +292,48 @@ pub fn compile(definition: Definition) -> Result<Program> {
         &mut Vec::new(),
         0,
         &mut visits,
-    )?;
+        &paths,
+    )
+    .map_err(|e| e.located("/body"))?;
     for (name, body) in &definition.procedures {
-        calls(body, &definition, &mut vec![name.clone()], 0, &mut visits)?;
+        calls(
+            body,
+            &definition,
+            &mut vec![name.clone()],
+            0,
+            &mut visits,
+            &paths,
+        )
+        .map_err(|e| e.located(&format!("/procedures/{}", pointer_token(name))))?;
     }
     let mut expression_budget = 16384;
     for block in nodes.values() {
-        let mut check = |expr: &Expr| expr.validate(0, &mut expression_budget);
+        let mut check = |expr: &Expr, field: &str, expected: Option<&str>| -> Result<()> {
+            let path = format!("{}{field}", paths[&block.id]);
+            expr.validate(0, &mut expression_budget)
+                .map_err(|e| e.at(&path))?;
+            if let Some(kind) = expected {
+                expr.expect_type(kind).map_err(|e| e.at(&path))?;
+            }
+            Ok(())
+        };
         match &block.kind {
-            BlockKind::Task { input, .. } | BlockKind::Call { input, .. } => check(input)?,
-            BlockKind::Break { value } => check(value)?,
+            BlockKind::Task { input, .. } | BlockKind::Call { input, .. } => {
+                check(input, "/input", None)?
+            }
+            BlockKind::Break { value } => check(value, "/value", None)?,
             BlockKind::Sequence {
                 output: Some(output),
                 ..
-            } => check(output)?,
-            BlockKind::If { condition, .. } => check(condition)?,
+            } => check(output, "/output", None)?,
+            BlockKind::If { condition, .. } => check(condition, "/condition", Some("boolean"))?,
             BlockKind::Choice { branches, .. } => {
-                for branch in branches {
-                    check(&branch.condition)?;
+                for (i, branch) in branches.iter().enumerate() {
+                    check(
+                        &branch.condition,
+                        &format!("/branches/{i}/condition"),
+                        Some("boolean"),
+                    )?;
                 }
             }
             BlockKind::Loop {
@@ -233,9 +342,9 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 update,
                 ..
             } => {
-                check(condition)?;
-                check(initial)?;
-                check(update)?;
+                check(condition, "/condition", Some("boolean"))?;
+                check(initial, "/initial", None)?;
+                check(update, "/update", None)?;
             }
             BlockKind::ForEach {
                 items,
@@ -244,15 +353,15 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 update,
                 ..
             } => {
-                check(items)?;
+                check(items, "/items", Some("array"))?;
                 if let Some(key) = key {
-                    check(key)?;
+                    check(key, "/key", None)?;
                 }
                 if let Some(initial) = initial {
-                    check(initial)?;
+                    check(initial, "/initial", None)?;
                 }
                 if let Some(update) = update {
-                    check(update)?;
+                    check(update, "/update", None)?;
                 }
             }
             _ => {}
@@ -266,5 +375,6 @@ pub fn compile(definition: Definition) -> Result<Program> {
         definition,
         nodes,
         digest,
+        source_paths: paths,
     })
 }
