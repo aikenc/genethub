@@ -14,10 +14,19 @@ machine is paired with the diagnosing installation.
 | Windows-authored relative Workspace folders contained backslashes the POSIX guest could not resolve | Interpret both separators in `.code-workspace` folder definitions before host-path conversion and canonicalization; file API paths are unchanged | `specialty.filesystem.windows-workspace-separators` uses actual public Workspace/file operations, spaces and Unicode |
 | Private evidence directory names were compared case-sensitively | Reserve `.git`, `.genethub/sessions` and `.genethub/components` case-insensitively; keep canonical root containment case-sensitive | `specialty.workflow.evidence-paths.private-case` proves denial and ordinary artifact reads through a real restricted Agent |
 | PM bootstrap canonicalized native Git output directly inside WASI | Pass `--show-toplevel` through the existing guest path converter, as `repository_directories` already does | `specialty.agent-space.bootstrap-pack` covers the ordinary path; the Windows drive spelling still needs a Windows run |
+| A diagnosis that failed before creating its Session prevented Run cleanup | Treat typed `SessionMissing` for reserved/failed diagnoses as no process to retire; existing Sessions and other errors retain normal fencing and cleanup | `specialty.workflow.trial-materials.silence-wr-start-failed` uses real silence, an unsupported read-only backend, public Session lookup and cancellation |
 
 The two new cases fail on the preceding product version: folder lookup fails,
 and a mixed-case private canary reaches the model. They do not emulate NTFS and
 do not establish behavior for junctions, short names, alternate streams or ACLs.
+
+The dev refresh also exposed a pre-existing `stopping` Run whose failed WR
+Session had never been created. Reconciliation repeatedly retried its cleanup;
+live profiling showed repeated Session metadata scans while the browser smoke
+timed out. The cleanup fix is generic, does not edit historical Run snapshots,
+and does not suppress lookup errors for ordinary Workers or running diagnoses.
+The slow smoke must still be rerun successfully; this observation alone does
+not prove that cleanup was the only source of latency.
 
 ## Audited boundaries
 

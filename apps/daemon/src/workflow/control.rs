@@ -829,12 +829,15 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
     for session_id in session_ids {
         let result: Result<()> = async {
             if let Err(error) = state.sessions.fence_execution(&session_id).await {
-                // Reservation is durable before Session creation. A request
-                // cancelled in that interval has no diagnostic process to reap.
-                let reserved = run.supervision.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.session_id == session_id && diagnostic.state == "reserved"
+                // Reservation precedes Session creation, which can fail. Both
+                // states may legitimately have no Session to fence or reap.
+                // Existing Sessions and every other lookup error still fail
+                // closed through the normal cleanup path.
+                let uncreated_diagnostic = run.supervision.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.session_id == session_id
+                        && matches!(diagnostic.state.as_str(), "reserved" | "failed")
                 });
-                if reserved && error.is::<crate::session::manager::SessionMissing>() {
+                if uncreated_diagnostic && error.is::<crate::session::manager::SessionMissing>() {
                     return Ok(());
                 }
                 return Err(error);

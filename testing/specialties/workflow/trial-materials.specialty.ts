@@ -5,13 +5,13 @@ import type { WorkflowRunStatus, WorkspaceInfo } from "@genehub/proto";
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 const q = (text: string) => `'${text.replaceAll("'", `'\\''`)}'`;
-for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo", "formal-metadata", "formal-alternates", "silence-wr", "readonly-unsupported"] as const) defineSpecialty({
+for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo", "formal-metadata", "formal-alternates", "silence-wr", "silence-wr-start-failed", "readonly-unsupported"] as const) defineSpecialty({
   id: `specialty.workflow.trial-materials.${scenario}`,
   title: `Candidate execution uses ${scenario} within its actual material boundary`,
   oracle: "Real candidate dispatch accepts ordinary data and independent Git layouts; Git-writing nodes never borrow the formal repository or its metadata/objects",
-  catches: ["every trial must be one Git repository", "Executor private test directories are rejected", "Git traverses to a parent repository", "formal Git metadata or object alternates are reused", "valid experimental worktrees are rejected", "automatic diagnosis resolves the formal root instead of the pinned trial material"],
+  catches: ["every trial must be one Git repository", "Executor private test directories are rejected", "Git traverses to a parent repository", "formal Git metadata or object alternates are reused", "valid experimental worktrees are rejected", "automatic diagnosis resolves the formal root instead of the pinned trial material", "a failed pre-Session diagnosis prevents cancellation from settling"],
   tags: ["core", "workflow", "workflow-trials"], llm: { default: "mock" },
-  expectedDurationMs: scenario === "silence-wr" ? 210000 : 15000, timeoutMs: scenario === "silence-wr" ? 300000 : 90000,
+  expectedDurationMs: scenario.startsWith("silence-wr") ? 210000 : 15000, timeoutMs: scenario.startsWith("silence-wr") ? 300000 : 90000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "git", "workbench-client"],
   productInterfaces: ["workflow.inspect", "workflow.dispatch", "workflow.history", "workflow.check", "workflow.cancel", "session.get", "agentSpace.configure", "genet space builder"],
@@ -40,9 +40,10 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     const formalHead = git(root, "rev-parse", "HEAD");
     const material = path.join(root, "spaces/trial-executor/.genethub/temp/exp", scenario);
     mkdirSync(material, { recursive: true });
-    const diagnosis = scenario === "silence-wr";
+    const diagnosis = scenario.startsWith("silence-wr");
+    const failedDiagnosticStart = scenario === "silence-wr-start-failed";
     const dataOnly = scenario === "plain" || diagnosis || scenario === "readonly-unsupported";
-    const good = ["plain", "multiple-repos", "own-worktree", "silence-wr"].includes(scenario);
+    const good = diagnosis || ["plain", "multiple-repos", "own-worktree"].includes(scenario);
     const repositories = scenario === "multiple-repos" ? ["front", "back"] : dataOnly || scenario === "parent-repo" ? ["."] : ["work"];
     if (scenario === "multiple-repos" || scenario === "own-worktree") {
       for (const name of scenario === "own-worktree" ? ["repository"] : repositories) {
@@ -90,7 +91,7 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     writeFileSync(path.join(source, "workflows/catalog.yaml"), JSON.stringify({ schema: "genehub.workflow.catalog.v1", workflows: [{ id: "trial-data", path: "direct-change.yaml", match: { kind: "data", complexity: "batch" } }, ...(diagnosis ? [{ id: "diagnose", path: "diagnose.yaml" }] : [])] }));
     if (diagnosis) {
       writeFileSync(path.join(material, "evidence.txt"), "trial-material-evidence-canary");
-      writeFileSync(path.join(source, "roles/wr.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "wr", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/wr.md" }));
+      writeFileSync(path.join(source, "roles/wr.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "wr", agentId: failedDiagnosticStart ? "tclaude" : "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/wr.md" }));
       writeFileSync(path.join(source, "prompts/wr.md"), "Only report evidence; do not modify or control the task.");
       writeFileSync(path.join(source, "workflows/diagnose.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "diagnose", version: 2,
         nodes: [{ id: "review", uses: "agent.session", with: { role: "wr" } }], structure: { body: { id: "review-step", type: "task", activity: "review" } } }));
@@ -157,20 +158,33 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
         return run.diagnostics?.some(d => ["finished", "failed", "limited"].includes(d.status)) === true;
       }, 210000);
       const diagnostic = run!.diagnostics?.[0];
-      t.assertions.assert(diagnostic?.status === "finished", `trial WR failed: ${JSON.stringify(diagnostic)}`);
-      t.assertions.assert(diagnosticCalls === 3 && run!.diagnostics?.length === 1, "diagnosis did not consume exactly the scripted evidence operations");
-      const reply = await opened.client.call({ type: "session.get", payload: { sessionId: diagnostic!.sessionId } });
-      t.assertions.assert(reply?.type === "snapshot" && reply.data.summary.workspaceId === wr!.id
-        && reply.data.summary.managed?.evidenceScope?.root === root
-        && reply.data.summary.managed?.userInteraction === "readOnly", "diagnosis lost its own Worker carrier or read-only scope");
-      const results = JSON.stringify(toolResults());
-      t.assertions.assert(results.includes("trial-material-evidence-canary"), `WR did not read the material relative to its own cwd: ${results.slice(-6000)}`);
-      t.assertions.assert(results.includes("workflow.check") && results.includes("checkedAtMs"), `WR did not receive the public CLI checker envelope: ${results.slice(-6000)}`);
+      if (failedDiagnosticStart) {
+        t.assertions.assert(diagnostic?.status === "failed" && diagnosticCalls === 0
+          && JSON.stringify(diagnostic).includes("evidenceOnlyUnsupported"),
+          `unsupported diagnostic backend did not fail before starting an Agent: ${JSON.stringify(diagnostic)}`);
+        await t.assertions.expectProtocolCode(
+          () => opened.client.call({ type: "session.get", payload: { sessionId: diagnostic!.sessionId } }),
+          "notFound",
+        );
+      } else {
+        t.assertions.assert(diagnostic?.status === "finished", `trial WR failed: ${JSON.stringify(diagnostic)}`);
+        t.assertions.assert(diagnosticCalls === 3 && run!.diagnostics?.length === 1, "diagnosis did not consume exactly the scripted evidence operations");
+        const reply = await opened.client.call({ type: "session.get", payload: { sessionId: diagnostic!.sessionId } });
+        t.assertions.assert(reply?.type === "snapshot" && reply.data.summary.workspaceId === wr!.id
+          && reply.data.summary.managed?.evidenceScope?.root === root
+          && reply.data.summary.managed?.userInteraction === "readOnly", "diagnosis lost its own Worker carrier or read-only scope");
+        const results = JSON.stringify(toolResults());
+        t.assertions.assert(results.includes("trial-material-evidence-canary"), `WR did not read the material relative to its own cwd: ${results.slice(-6000)}`);
+        t.assertions.assert(results.includes("workflow.check") && results.includes("checkedAtMs"), `WR did not receive the public CLI checker envelope: ${results.slice(-6000)}`);
+      }
       t.assertions.assert(run!.status === "running" && run!.executorWorkspaceId === executor.id && run!.executionRoot === material
         && run!.nodes.find(n => n.uses === "agent.session")?.sessionId === original.nodes.find(n => n.uses === "agent.session")?.sessionId,
         "diagnosis changed the pinned carrier, task or running Worker");
       await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: original.id, expectedRevision: run!.revision } });
       await t.tools.waitUntil(async () => (await get()).status === "cancelled", 30000);
+      const cancelled = await get();
+      t.assertions.assert(!cancelled.cleanupError && cancelled.activeNodes.length === 0,
+        "cancelled trial retained cleanup errors or active nodes after diagnosis");
     } else if (scenario === "readonly-unsupported") {
       const node = run?.nodes.find(n => n.uses === "agent.session");
       t.assertions.assert(!!run && ["blocked", "failed"].includes(run.status)
