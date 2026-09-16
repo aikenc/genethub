@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { defineSpecialty, type CaseContext } from "../../framework/public.ts";
@@ -46,6 +46,30 @@ async function writeFile(opened: Opened, relative: string, content: string): Pro
   });
   if (reply?.type !== "ack") throw new Error(`file.write ${relative} returned ${reply?.type}`);
 }
+
+pathCase(
+  "specialty.filesystem.windows-workspace-separators",
+  "Windows-authored workspace folders open with portable separators",
+  "A workspace file containing relative backslashes resolves the exact spaced Unicode folder and public file writes remain in that folder",
+  ["WASI treats a backslash-delimited relative folder as one filename", "workspace folder escapes its intended material"],
+  async (t, opened) => {
+    const directory = path.join(opened.workspaceRoot, "spaces", "审查 team");
+    const material = path.join(opened.workspaceRoot, "material", "任务 data");
+    mkdirSync(directory, { recursive: true });
+    mkdirSync(material, { recursive: true });
+    const definition = path.join(directory, "review.code-workspace");
+    writeFileSync(definition, JSON.stringify({ folders: [{ path: "." }, { path: "..\\..\\material\\任务 data" }] }));
+    const result = await opened.client.call({ type: "workspace.open", payload: { root: definition } });
+    t.assertions.assert(result?.type === "workspace", `Windows-authored folders failed: ${JSON.stringify(result)}`);
+    if (result?.type !== "workspace") return;
+    const handle = result.data.folders[1]?.rootHandle;
+    t.assertions.assert(Boolean(handle), "material root handle missing");
+    const written = await opened.client.call({ type: "file.write", payload: { workspaceId: result.data.id, path: `${handle}/canary.txt`, content: "material-only" } });
+    t.assertions.assert(written?.type === "ack", "material write failed");
+    t.assertions.assert(readFileSync(path.join(material, "canary.txt"), "utf8") === "material-only", "folder resolved to the wrong directory");
+    t.assertions.assert(!existsSync(path.join(directory, "canary.txt")), "material write landed in the role root");
+  },
+);
 
 pathCase(
   "specialty.filesystem.unicode-roundtrip",

@@ -46,7 +46,10 @@ pub fn check_path(args: &Value, cwd: &Path) -> Result<(), String> {
         .strip_prefix(&root)
         .unwrap()
         .components()
-        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        // WASI canonicalization does not promise the on-disk casing. Reserve
+        // private names case-insensitively on every host; do not lowercase the
+        // scope containment comparison (Unix paths remain case-sensitive).
+        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
         .collect::<Vec<_>>();
     if parts.iter().any(|part| part == ".git")
         || parts.windows(2).any(|parts| {

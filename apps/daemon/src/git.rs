@@ -142,7 +142,7 @@ pub(crate) async fn bootstrap_state(root: &Path) -> Result<BootstrapState> {
         .trim()
         .to_string();
     let canonical = root.canonicalize()?;
-    if Path::new(&top).canonicalize()? != canonical {
+    if crate::guest_paths::guest_path(Path::new(&top)).canonicalize()? != canonical {
         anyhow::bail!("wrongProjectRoot: current Workspace is not the direct Git top-level");
     }
     let head = git(root, &["rev-parse", "--verify", "HEAD"])

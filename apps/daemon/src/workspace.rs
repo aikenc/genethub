@@ -1461,8 +1461,11 @@ fn parse_code_workspace(path: &Path, source: &str) -> Result<WorkspaceEntry> {
         }
         // A .code-workspace written on Windows names its folders in the
         // host's spelling, which is not absolute from the guest's POSIX point
-        // of view — translate first, then classify.
-        let requested = crate::guest_paths::guest_path(Path::new(&raw));
+        // of view — translate first, then classify. Workspace definitions are
+        // portable: relative Windows separators must work in the POSIX guest
+        // too, including definitions copied to a Unix machine.
+        let portable = raw.replace('\\', "/");
+        let requested = crate::guest_paths::guest_path(Path::new(&portable));
         let requested = if requested.is_absolute() {
             requested
         } else {
