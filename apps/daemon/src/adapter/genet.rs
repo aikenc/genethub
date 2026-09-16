@@ -114,6 +114,10 @@ impl AgentAdapter for GenetAdapter {
         true
     }
 
+    fn supports_evidence_scope(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             interrupt: true,

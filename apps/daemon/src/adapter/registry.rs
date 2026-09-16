@@ -137,6 +137,23 @@ impl Registry {
             .ok_or_else(|| anyhow!("no adapter registered for '{id}'"))
     }
 
+    /// Used both before authoring succeeds and before a restricted Session is
+    /// created/resumed. Agent-specific support stays inside the adapter layer.
+    pub(crate) fn require_evidence_scope(&self, id: &str) -> Result<SharedAdapter> {
+        let adapter = self.require(id)?;
+        if !adapter.supports_evidence_scope() {
+            let supported = self
+                .adapters
+                .iter()
+                .filter(|adapter| adapter.supports_evidence_scope())
+                .map(|adapter| adapter.id())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!("evidenceOnlyUnsupported: Agent '{id}' cannot enforce a bounded read-only evidence scope. Keep evidenceOnly enabled and select a supported Agent ({supported}) with a compatible model; do not widen workspace folders or disable the evidence boundary.");
+        }
+        Ok(adapter)
+    }
+
     /// Probes every adapter and caches the result.
     ///
     /// Probing spawns processes, so the agent picker must not do it on every

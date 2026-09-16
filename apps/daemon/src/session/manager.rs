@@ -607,6 +607,9 @@ impl SessionManager {
         managed_system_prompt: String,
         stable_id: Option<String>,
     ) -> Result<SessionSummary> {
+        if managed.evidence_scope.is_some() {
+            self.registry.require_evidence_scope(agent_id)?;
+        }
         if let Some(id) = &stable_id {
             if let Ok(existing) = self.summary(id).await {
                 if existing.workspace_id != workspace_id
@@ -2719,15 +2722,15 @@ impl SessionManager {
             return Ok(());
         }
         let mut meta = live.meta.lock().await.clone();
-        if meta
+        let adapter = if meta
             .managed
             .as_ref()
             .is_some_and(|managed| managed.evidence_scope.is_some())
-            && meta.agent_id != "genet"
         {
-            anyhow::bail!("evidence-only sessions currently require the built-in GeneHub Agent");
-        }
-        let adapter = self.registry.require(&meta.agent_id)?;
+            self.registry.require_evidence_scope(&meta.agent_id)?
+        } else {
+            self.registry.require(&meta.agent_id)?
+        };
         let offered = adapter.catalog(providers).await;
         if normalize_runtime_selection(&mut meta, &offered) {
             tracing::warn!(

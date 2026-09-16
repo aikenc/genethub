@@ -136,6 +136,20 @@ budget-exhausted diagnosis is reported as such, with partial records clearly
 separated from a completed reply. OpenAI-compatible streams retain the initial
 nonempty tool ID when later argument chunks contain an empty ID.
 
+Diagnosis resolves its Worker within the Run's pinned Executor and execution
+root, including isolated trial material. The Worker's own directory remains its
+Session cwd; the project evidence root and bounded Session references do not
+change. Do not mount the whole formal project merely to work around a diagnostic
+startup error. `workflow check --draft` reports `WF_ROLE_CAPABILITY` at the role's
+`agentId` if `evidenceOnly` requires a boundary the adapter cannot enforce.
+Restricted Session creation and restart enforce the same adapter declaration;
+currently the built-in Agent supports it. Select a compatible Agent/model in a
+new Candidate, not a weaker prompt or disabled evidence boundary. Existing Runs
+retain their pinned role; updating source does not rewrite or retry a failed
+diagnosis. These boundaries are covered by
+`specialty.workflow.trial-materials.silence-wr` and
+`specialty.workflow.authoring-validation.contract`.
+
 An existing ProjectControlBinding permits routine PM management in that
 project. Exact plan digest, action ID, revision and scope checks still apply;
 initial takeover requires its original Human decision. Bootstrap plans expose

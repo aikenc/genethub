@@ -1584,9 +1584,6 @@ async fn activate(
                         run.leases.insert(node.id.clone(), lease);
                     }
                     let evidence_scope = if role.evidence_only {
-                        if role.agent_id != "genet" {
-                            bail!("evidence-only roles require the built-in GeneHub Agent; select genet or leave this review unstarted");
-                        }
                         let mut ids = BTreeSet::from([run.parent_session_id.clone()]);
                         for previous in history(runtime, 100)? {
                             ids.insert(previous.parent_session_id);

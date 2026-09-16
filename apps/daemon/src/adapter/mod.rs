@@ -132,6 +132,12 @@ pub trait AgentAdapter: Send + Sync {
 
     fn capabilities(&self) -> Capabilities;
 
+    /// Can enforce the host-provided read-only paths and bounded Session set.
+    /// A prompt or an Agent's generic plan mode is not an evidence boundary.
+    fn supports_evidence_scope(&self) -> bool {
+        false
+    }
+
     /// Is it installed and does it answer? Never an error: "not installed" is a
     /// normal state that simply hides the agent from the picker.
     async fn probe(&self) -> ProbeState;

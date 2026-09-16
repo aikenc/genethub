@@ -126,7 +126,10 @@ fn diagnostic(file: &str, error: &anyhow::Error) -> WorkflowDiagnostic {
 
 /// One causal diagnostic per failing catalog entry (deduplicated), bounded at 64.
 /// Positive metadata is derived ONLY from the final consistent compiled snapshot.
-pub(super) fn check_draft(root: &Path) -> WorkflowDraftReport {
+pub(super) fn check_draft(
+    root: &Path,
+    registry: &crate::adapter::registry::Registry,
+) -> WorkflowDraftReport {
     let mut report = WorkflowDraftReport {
         schema: "genehub.workflow.draft-check.v1".into(),
         root: root.join(SOURCE_DIR).display().to_string(),
@@ -167,6 +170,27 @@ pub(super) fn check_draft(root: &Path) -> WorkflowDraftReport {
     match compile_candidate(&source) {
         Err(error) => push(&mut report, diagnostic(PROJECT_FILE, &error)),
         Ok(candidate) => {
+            for role in candidate
+                .workflows
+                .values()
+                .flat_map(|bundle| bundle.roles.values())
+            {
+                if role.evidence_only {
+                    if let Err(error) = registry.require_evidence_scope(&role.agent_id) {
+                        push(&mut report, WorkflowDiagnostic {
+                            phase: "capability".into(), code: "WF_ROLE_CAPABILITY".into(), severity: "error".into(),
+                            file: format!("roles/{}.yaml", role.id), path: "/agentId".into(),
+                            message: format!("{error:#}"),
+                            hint: "Choose an Agent supporting evidenceOnly and a compatible model, then rerun `workflow check --draft`. Read-only interaction or a prompt alone cannot enforce the evidence boundary.".into(),
+                            expected: Some("adapter with bounded read-only evidence scope".into()), actual: Some(role.agent_id.chars().take(256).collect()),
+                            line: None, column: None,
+                        });
+                    }
+                }
+            }
+            if !report.diagnostics.is_empty() {
+                return report;
+            }
             report.valid = true;
             report.candidate_digest = Some(candidate.digest);
             report.default_workflow = Some(candidate.project.default_workflow);

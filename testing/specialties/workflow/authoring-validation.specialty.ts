@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkflowDiagnostic, WorkflowDraftReport } from "@genehub/proto";
 import { defineSpecialty, parseJson, runGenetAsync } from "../../framework/public.ts";
@@ -80,6 +80,7 @@ defineSpecialty(
       "unknown YAML fields are silently ignored",
       "string booleans are coerced",
       "draft checking changes Active or launches a Run",
+      "an evidence-only role silently accepts an adapter without restricted evidence tools",
     ],
     tags: ["core", "workflow", "workflow-authoring"],
     llm: { default: "mock" },
@@ -209,6 +210,24 @@ defineSpecialty(
         const invalidCapability = await cli(["workflow", "check", "--draft"]);
         t.assertions.assert(invalidCapability.code !== 0 && invalidCapability.stdout.includes("request.budget"), "budget capability accepted Worker inputs or completion overrides");
       }
+      writeFileSync(workflowFile, validSource);
+      const roleFile = path.join(opened.workspaceRoot, ".genethub/workflow/roles/worker.yaml");
+      const roleBefore = readFileSync(roleFile, "utf8");
+      const role = { schema: "genehub.workflow.role.v1", id: "worker", agentId: "tclaude", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" };
+      writeFileSync(roleFile, JSON.stringify(role));
+      const unsupported = await cli(["workflow", "check", "--draft"]);
+      const roleDiagnostic = diagnosticFrom(parseJson(unsupported.stdout) as CliEnvelope);
+      t.assertions.assert(unsupported.code !== 0 && roleDiagnostic.code === "WF_ROLE_CAPABILITY"
+        && roleDiagnostic.file === "roles/worker.yaml" && roleDiagnostic.path === "/agentId"
+        && roleDiagnostic.actual === "tclaude" && roleDiagnostic.hint.includes("evidenceOnly"),
+        `unsupported read-only adapter has no actionable authoring diagnostic: ${unsupported.stdout}`);
+      writeFileSync(roleFile, JSON.stringify({ ...role, agentId: "genet" }));
+      const supported = await cli(["workflow", "check", "--draft"]);
+      t.assertions.assert(supported.code === 0, "a supported evidence-only adapter was rejected");
+      writeFileSync(roleFile, JSON.stringify({ ...role, evidenceOnly: false }));
+      const unrestricted = await cli(["workflow", "check", "--draft"]);
+      t.assertions.assert(unrestricted.code === 0, "the capability check incorrectly banned ordinary third-party roles");
+      writeFileSync(roleFile, roleBefore);
       const history = await opened.client.call({
         type: "workflow.history",
         payload: { workspaceId: opened.workspaceId, limit: 10 },

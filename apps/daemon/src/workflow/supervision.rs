@@ -371,7 +371,10 @@ pub(super) async fn diagnostics(
             if run.status != "running" { bail!("Run stopped before diagnosis creation"); }
             let role = run.supervision.diagnostic_role.as_ref().ok_or_else(|| anyhow!("diagnostic role unavailable"))?;
             if !role.evidence_only { bail!("automatic diagnostics require an evidence-only role"); }
-            let execution = execution_workspace(state, &run.workspace_id, run.executor_workspace_id.as_deref(), &role.id, &runtime.project_root, None).await?;
+            // Diagnosis belongs to the same pinned carrier/material as the Run,
+            // not necessarily the project that owns its Workflow definition.
+            let task_root = run.execution_root.as_deref().map(Path::new).unwrap_or(&runtime.project_root);
+            let execution = execution_workspace(state, &run.workspace_id, run.executor_workspace_id.as_deref(), &role.id, task_root, None).await?;
             let mut boundaries = BTreeMap::new();
             for id in run.nodes.values().filter_map(|node| node.session_id.clone()).chain(std::iter::once(run.parent_session_id.clone())) {
                 if let Ok(inspection) = state.sessions.inspect(&id, None).await { boundaries.insert(id, inspection.latest_round_id); }
