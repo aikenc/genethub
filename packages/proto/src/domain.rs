@@ -47,6 +47,11 @@ pub struct ModelInfo {
     /// has no such dial, and the control belongs nowhere near it.
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// Media this model accepts as a native input. `None` means an external
+    /// Agent did not report this field; the built-in Agent always reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub input_modalities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1079,6 +1084,10 @@ pub struct ProviderInfo {
     /// The models this key can use, as the provider itself reported them — or
     /// the list the user wrote by hand.
     pub models: Vec<String>,
+    /// Per-model native input support. An empty list explicitly means text only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
     /// Why `models` is empty, in the provider's own words. The alternative is a
     /// picker that is empty for no stated reason, which sends people to the
     /// wrong place: a rejected key looks exactly like a bug in the app.

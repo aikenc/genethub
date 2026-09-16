@@ -789,8 +789,17 @@ async fn dispatch(
             label,
             dialect,
             models,
+            model_inputs,
         } => match state
-            .set_provider(&provider_id, api_key, base_url, label, dialect, models)
+            .set_provider(
+                &provider_id,
+                api_key,
+                base_url,
+                label,
+                dialect,
+                models,
+                model_inputs,
+            )
             .await
         {
             Ok(settings) => Handled::ok(Reply::Settings(settings)),

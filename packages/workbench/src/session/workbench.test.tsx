@@ -2174,6 +2174,28 @@ describe("the controls offered to the user", () => {
     expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
   });
 
+  it("offers video only when the selected model declares native video input", async () => {
+    const onSend = vi.fn();
+    const { container, rerender } = render(
+      <Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["image"] })} />,
+    );
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    expect(picker.accept).not.toContain("video/mp4");
+
+    rerender(<Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["image", "video"] })} />);
+    expect(picker.accept).toContain("video/mp4");
+    expect(screen.getByLabelText("添加图片或视频")).toBeEnabled();
+    const video = new File(["video-bytes"], "clip.mp4", { type: "video/mp4" });
+    await userEvent.upload(picker, video);
+    await screen.findByText("视频 · clip.mp4");
+    await userEvent.click(screen.getByLabelText("发送"));
+    expect(onSend).toHaveBeenCalledWith("", [], [video]);
+
+    rerender(<Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["video"] })} />);
+    expect(screen.getByLabelText("添加视频")).toBeEnabled();
+    expect(picker.accept).not.toContain("image/*");
+  });
+
   it("turns send into stop while a turn is running", async () => {
     const onInterrupt = vi.fn();
     render(<Composer {...composerProps({ phase: "running", onInterrupt })} />);

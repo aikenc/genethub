@@ -209,6 +209,7 @@ mod tests {
                 context_window: Some(1000),
                 max_tokens: None,
                 reasoning: None,
+                input_modalities: Vec::new(),
             }),
             thinking_level: "medium".into(),
             auto_compaction: true,

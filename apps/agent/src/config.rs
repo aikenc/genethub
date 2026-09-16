@@ -30,6 +30,9 @@ pub struct ModelConfig {
     pub max_tokens: Option<u64>,
     #[serde(default)]
     pub reasoning: Option<bool>,
+    /// Native media accepted by this exact model, as declared by the daemon.
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
 }
 
 impl ModelConfig {
@@ -129,6 +132,7 @@ fn env_models() -> Vec<ModelConfig> {
             context_window: Some(8192),
             max_tokens: Some(1024),
             reasoning: Some(false),
+            input_modalities: Vec::new(),
         });
     }
 
@@ -152,6 +156,7 @@ fn env_models() -> Vec<ModelConfig> {
             context_window: Some(200_000),
             max_tokens: Some(8192),
             reasoning: Some(true),
+            input_modalities: Vec::new(),
         });
     }
 
@@ -171,6 +176,7 @@ fn env_models() -> Vec<ModelConfig> {
             context_window: Some(128_000),
             max_tokens: Some(4096),
             reasoning: Some(false),
+            input_modalities: Vec::new(),
         });
     }
 
@@ -212,6 +218,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             reasoning: None,
+            input_modalities: Vec::new(),
         };
         assert_eq!(model.api(), "anthropic");
         assert_eq!(model.to_ref().reference(), "anthropic/claude");
@@ -230,6 +237,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             reasoning: None,
+            input_modalities: Vec::new(),
         };
         let models = dedupe(vec![make("a"), make("a"), make("b")]);
         assert_eq!(models.len(), 2);

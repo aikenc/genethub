@@ -1356,6 +1356,7 @@ name = "genet-agent"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "futures-util",
  "genet-http",

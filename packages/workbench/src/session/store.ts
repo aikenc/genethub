@@ -38,6 +38,7 @@ import {
 } from "../location/locator";
 import type { AddressScope } from "../location/workbench";
 import type { Client, ConnectionState } from "../protocol/client";
+import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
@@ -238,7 +239,7 @@ interface WorkbenchState {
    * returned for editing through a channel like this one; whoever picks it up
    * clears it with `restoredDraft`.
    */
-  restoreDraft: { text: string; attachments: Attachment[] } | null;
+  restoreDraft: { text: string; attachments: Attachment[]; videoFiles?: File[] } | null;
   /** Lines waiting to be appended to a session's composer without sending it. */
   composerDraftInserts: ComposerDraftInsert[];
   /** The forward capsule parked on a composer, if any. One at a time. */
@@ -338,6 +339,7 @@ interface WorkbenchState {
     dialect?: string;
     /** Written by hand, for an endpoint that cannot list its own models. */
     models?: string[];
+    modelInputs?: Record<string, string[]>;
   }): Promise<void>;
   setSpeechQwen3(input: {
     stubEnabled: boolean;
@@ -379,7 +381,7 @@ interface WorkbenchState {
   setRightPanel(panel: RightPanel): void;
   openPreviewFloat(target: PreviewFloatRequest): void;
   closePreviewFloat(): void;
-  send(text: string, attachments?: Attachment[]): Promise<void>;
+  send(text: string, attachments?: Attachment[], videoFiles?: File[]): Promise<void>;
   /** Sends a failed message again, unchanged. */
   retryPending(): Promise<void>;
   /** Takes a failed message back into the composer instead of resending it. */
@@ -1335,7 +1337,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     set({ previewFloat: null });
   },
 
-  async send(text, attachments = []) {
+  async send(text, attachments = [], videoFiles = []) {
     // The previous complaint goes away as the next attempt starts, so a stale
     // line does not get read as a description of what just happened.
     set({ notice: null });
@@ -1355,6 +1357,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const pending: PendingMessage = {
       text,
       attachments,
+      videoFiles,
       sentAtMs: Date.now(),
       error: null,
     };
@@ -1384,13 +1387,22 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       if (active) failPending(active, set, get().notice ?? "无法开始会话");
       else
         set((state) => ({
-          restoreDraft: { text, attachments },
+          restoreDraft: { text, attachments, ...(videoFiles.length > 0 ? { videoFiles } : {}) },
           timeline: { ...state.timeline, pending: null },
         }));
       return;
     }
 
     try {
+      const uploaded = await Promise.all(videoFiles.map(async (file) => {
+        const bundle = await uploadSessionArtifact(require_(get().client), sessionId, {
+          files: [{ name: file.name, mime: file.type, blob: file }],
+          metadata: { kind: "chat-video-input" },
+          summary: { eventCount: 0, frameCount: 0, recording: null },
+        });
+        return { name: file.name, mime: file.type, path: `${bundle.workspacePath}/${file.name}` };
+      }));
+      const sentAttachments = [...attachments, ...uploaded];
       // Artifact Preview URLs are bound at chat/document render time from the
       // current workspace roots. Agents emit relative/absolute file paths; the
       // daemon teaches path-linking rules (not a deployment-specific prefix).
@@ -1402,7 +1414,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         payload: {
           sessionId,
           text,
-          attachments,
+          attachments: sentAttachments,
           artifactPreviewBaseUrl: null,
           continuesRound: null,
         },
@@ -1435,7 +1447,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (!pending?.error) return;
     // Cleared first, or `send` would take this for a message already in flight.
     patchTimeline(sessionId, set, () => ({ pending: null }));
-    await get().send(pending.text, pending.attachments);
+    await get().send(pending.text, pending.attachments, pending.videoFiles);
   },
 
   editPending() {
@@ -1446,7 +1458,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     patchTimeline(sessionId, set, () => ({ pending: null }));
     set({
       notice: null,
-      restoreDraft: { text: pending.text, attachments: pending.attachments },
+      restoreDraft: {
+        text: pending.text,
+        attachments: pending.attachments,
+        ...(pending.videoFiles?.length ? { videoFiles: pending.videoFiles } : {}),
+      },
     });
   },
 
@@ -1808,7 +1824,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (reply?.type === "updateDownload") set({ download: reply.data });
   },
 
-  async setProvider({ providerId, apiKey, baseUrl, label, dialect, models }) {
+  async setProvider({ providerId, apiKey, baseUrl, label, dialect, models, modelInputs }) {
     set({ notice: null });
     const reply = await asked(set, () =>
       require_(get().client).call({
@@ -1820,6 +1836,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           label: label ?? null,
           dialect: dialect ?? null,
           models: models ?? null,
+          ...(modelInputs ? { modelInputs } : {}),
         },
       }),
     );

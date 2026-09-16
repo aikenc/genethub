@@ -17,7 +17,7 @@ import {
   type ActiveSpan,
   type SpeechTextRange,
 } from "../speech/SpeechComposer";
-import { attachmentPreviewUrl, AttachmentTooLarge, fileToAttachment, imageFilesFromClipboard } from "./attachments";
+import { attachmentPreviewUrl, fileToAttachment, imageFilesFromClipboard } from "./attachments";
 import { ComposerControls } from "./ComposerControls";
 import type { ComposerDraftInsert, ForwardDraft } from "./store";
 
@@ -124,6 +124,7 @@ export function Composer({
   runtimeValues,
   agentLocked,
   attachmentsSupported,
+  inputModalities,
   commands,
   restoreDraft,
   insertDraft,
@@ -156,15 +157,14 @@ export function Composer({
   effortId?: string | null;
   runtimeValues?: Record<string, string> | null;
   agentLocked?: boolean;
-  /** Whether the current agent forwards attachments anywhere (claude, codex,
-   * acp and opencode do today; genet does not — see `docs/roadmap.md`).
-   * Pasting an image when this is false is left as a normal, inert text paste
-   * rather than silently producing an attachment the agent will never see. */
+  /** Whether the current agent accepts attachments at all. */
   attachmentsSupported?: boolean;
+  /** Exact model media inputs; absent for external Agents with image support. */
+  inputModalities?: string[];
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];
   /** A message coming back for editing after it failed to send. */
-  restoreDraft?: { text: string; attachments: Attachment[] } | null;
+  restoreDraft?: { text: string; attachments: Attachment[]; videoFiles?: File[] } | null;
   /** One line produced outside Chat that should be appended, never sent. */
   insertDraft?: ComposerDraftInsert | null;
   /** A forward capsule parked here, sent ahead of the user's own text. */
@@ -180,7 +180,7 @@ export function Composer({
    * have is someone who had no way to tell.
    */
   lastActivityAtMs?: number | null;
-  onSend(text: string, attachments: Attachment[]): void;
+  onSend(text: string, attachments: Attachment[], videoFiles?: File[]): void;
   onInterrupt(): void;
   onPickAgent(id: string): void;
   onPickModel(id: string): void;
@@ -214,6 +214,18 @@ export function Composer({
   }, [watchingQuiet]);
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [videoFiles, setVideoFiles] = useState<File[]>([]);
+  const imageAllowed = Boolean(attachmentsSupported && (inputModalities?.includes("image") ?? true));
+  const videoAllowed = Boolean(attachmentsSupported && inputModalities?.includes("video"));
+  const fileActionLabel = !attachmentsSupported
+    ? "添加文件（当前 Agent 不支持附件）"
+    : imageAllowed && videoAllowed
+      ? "添加图片或视频"
+      : imageAllowed
+        ? "添加文件（当前仅支持图片）"
+        : videoAllowed
+          ? "添加视频"
+          : "添加文件（当前模型不支持媒体输入）";
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
@@ -318,7 +330,7 @@ export function Composer({
     // anything the reader did wrong.
     if (phase !== "idle" || disabled || speechInput.busy) return;
     const text = draft.trim();
-    if (!text && attachments.length === 0 && !forwardDraft) return;
+    if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft) return;
     // The parked capsule travels ahead of the user's own words, inside the
     // same message, so the receiver sees history first and the ask second.
     const payload = forwardDraft
@@ -332,8 +344,10 @@ export function Composer({
     setActiveSpeechSpan(null);
     setDraft("");
     setAttachments([]);
+    setVideoFiles([]);
     setDismissed(false);
-    onSend(payload, outgoing);
+    if (videoFiles.length > 0) onSend(payload, outgoing, videoFiles);
+    else onSend(payload, outgoing);
     if (forwardDraft) onClearForwardDraft?.();
   };
 
@@ -345,6 +359,7 @@ export function Composer({
     setActiveSpeechSpan(null);
     setDraft(restoreDraft.text);
     setAttachments(restoreDraft.attachments);
+    setVideoFiles(restoreDraft.videoFiles ?? []);
     onRestoreDraft?.();
     textarea.current?.focus();
   }, [restoreDraft, onRestoreDraft]);
@@ -365,11 +380,24 @@ export function Composer({
       return;
     }
     try {
-      const added = await Promise.all(files.map(fileToAttachment));
+      const images = files.filter((file) => file.type.startsWith("image/"));
+      const videos = files.filter((file) => file.type.startsWith("video/"));
+      if (images.some((file) => !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type))) {
+        throw new Error("图片仅支持 PNG、JPEG、WebP 或 GIF");
+      }
+      if (videos.some((file) => !["video/mp4", "video/webm", "video/quicktime", "video/mpeg", "video/x-msvideo"].includes(file.type))) {
+        throw new Error("视频格式当前不支持");
+      }
+      if (images.length > 0 && !imageAllowed) throw new Error("当前模型不支持图片输入");
+      if (videos.length > 0 && !videoAllowed) throw new Error("当前模型不支持视频输入");
+      if (images.length + videos.length !== files.length) throw new Error("只支持图片和视频文件");
+      if (videos.some((file) => file.size > 64 * 1024 * 1024)) throw new Error("视频超过 64MB");
+      const added = await Promise.all(images.map(fileToAttachment));
       setAttachments((current) => [...current, ...added]);
+      setVideoFiles((current) => [...current, ...videos]);
       setPasteNotice(null);
     } catch (error) {
-      setPasteNotice(error instanceof AttachmentTooLarge ? error.message : "读取文件失败");
+      setPasteNotice(error instanceof Error ? error.message : "读取文件失败");
     }
   };
 
@@ -520,7 +548,7 @@ export function Composer({
             </div>
           </div>
         ) : null}
-        {attachments.length > 0 ? (
+        {attachments.length > 0 || videoFiles.length > 0 ? (
           <div
             className="flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3"
             aria-label="待发送的文件"
@@ -540,6 +568,17 @@ export function Composer({
                 >
                   ×
                 </button>
+              </div>
+            ))}
+            {videoFiles.map((file, index) => (
+              <div key={`video-${index}`} className="group relative flex h-14 max-w-40 shrink-0 items-center rounded-lg border border-line px-2 text-xs">
+                <span className="truncate" title={file.name}>视频 · {file.name}</span>
+                <button
+                  type="button"
+                  aria-label={`移除 ${file.name}`}
+                  onClick={() => setVideoFiles((current) => current.filter((_, i) => i !== index))}
+                  className="ml-2 text-muted hover:text-fg"
+                >×</button>
               </div>
             ))}
           </div>
@@ -743,7 +782,7 @@ export function Composer({
             <input
               ref={picker}
               type="file"
-              accept="image/*"
+              accept={videoAllowed ? (imageAllowed ? "image/*,video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo" : "video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo") : "image/*"}
               multiple
               tabIndex={-1}
               className="hidden"
@@ -807,13 +846,9 @@ export function Composer({
             ) : null}
             <button
               type="button"
-              aria-label={
-                attachmentsSupported
-                  ? "添加文件（当前仅支持图片）"
-                  : "添加文件（当前 Agent 不支持附件）"
-              }
-              title={attachmentsSupported ? "添加文件（当前仅支持图片）" : "当前 Agent 不支持附件"}
-              disabled={disabled || phase !== "idle" || speechInput.busy || !attachmentsSupported}
+              aria-label={fileActionLabel}
+              title={fileActionLabel}
+              disabled={disabled || phase !== "idle" || speechInput.busy || (!imageAllowed && !videoAllowed)}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
@@ -866,7 +901,7 @@ export function Composer({
                 disabled={
                   disabled ||
                   speechInput.busy ||
-                  (draft.trim().length === 0 && attachments.length === 0 && !forwardDraft)
+                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft)
                 }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >

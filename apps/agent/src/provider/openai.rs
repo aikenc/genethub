@@ -2,12 +2,13 @@
 //! OpenRouter, vLLM and other services that copy this shape.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{reasoning_effort, ProviderEvent, Request, SseBuffer};
+use super::{media, reasoning_effort, ProviderEvent, Request, SseBuffer};
 use crate::config::ModelConfig;
 use crate::protocol::{Content, Message, StopReason, Usage};
 
@@ -42,7 +43,7 @@ pub async fn stream(
                 model.provider
             )
         })?;
-    let body = build_body(model, &request);
+    let body = build_body(model, &request)?;
 
     let response = genet_http::Client::new()
         .post(format!("{}/chat/completions", base.trim_end_matches('/')))
@@ -168,12 +169,12 @@ pub async fn stream(
     Ok(())
 }
 
-fn build_body(model: &ModelConfig, request: &Request) -> Value {
+fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
     let mut body = json!({
         "model": model.id,
         "stream": true,
         "stream_options": { "include_usage": true },
-        "messages": convert_messages(&request.system_prompt, &request.messages),
+        "messages": convert_messages(model, &request.cwd, &request.system_prompt, &request.messages)?,
     });
 
     if let Some(max_tokens) = model.max_tokens {
@@ -208,16 +209,41 @@ fn build_body(model: &ModelConfig, request: &Request) -> Value {
         }
     }
 
-    body
+    Ok(body)
 }
 
-pub fn convert_messages(system_prompt: &str, messages: &[Message]) -> Value {
+pub fn convert_messages(
+    model: &ModelConfig,
+    cwd: &Path,
+    system_prompt: &str,
+    messages: &[Message],
+) -> anyhow::Result<Value> {
     let mut out = vec![json!({ "role": "system", "content": system_prompt })];
 
     for message in messages {
         match message {
-            Message::User { content, .. } => {
-                out.push(json!({ "role": "user", "content": content }))
+            Message::User {
+                content,
+                attachments,
+                ..
+            } => {
+                if attachments.is_empty() {
+                    out.push(json!({ "role": "user", "content": content }));
+                } else {
+                    let mut parts = Vec::new();
+                    if !content.is_empty() {
+                        parts.push(json!({ "type": "text", "text": content }));
+                    }
+                    for attachment in attachments {
+                        let (kind, url) = media::data_url(model, cwd, attachment)?;
+                        parts.push(if kind == "image" {
+                            json!({ "type": "image_url", "image_url": { "url": url } })
+                        } else {
+                            json!({ "type": "video_url", "video_url": { "url": url } })
+                        });
+                    }
+                    out.push(json!({ "role": "user", "content": parts }));
+                }
             }
             Message::Assistant { content, .. } => {
                 let text = content
@@ -275,7 +301,7 @@ pub fn convert_messages(system_prompt: &str, messages: &[Message]) -> Value {
         }
     }
 
-    Value::Array(out)
+    Ok(Value::Array(out))
 }
 
 fn apply_usage(usage: &mut Usage, value: &Value) {
@@ -354,12 +380,14 @@ mod tests {
             context_window: None,
             max_tokens: Some(512),
             reasoning: None,
+            input_modalities: Vec::new(),
         }
     }
 
     #[test]
     fn system_prompt_becomes_the_first_message() {
-        let converted = convert_messages("be nice", &[Message::user("hi")]);
+        let converted =
+            convert_messages(&model(), Path::new("."), "be nice", &[Message::user("hi")]).unwrap();
         assert_eq!(converted[0]["role"], "system");
         assert_eq!(converted[0]["content"], "be nice");
         assert_eq!(converted[1]["role"], "user");
@@ -381,7 +409,7 @@ mod tests {
             error_message: None,
             timestamp: 0,
         }];
-        let converted = convert_messages("sys", &messages);
+        let converted = convert_messages(&model(), Path::new("."), "sys", &messages).unwrap();
         let call = &converted[1]["tool_calls"][0];
         assert_eq!(call["function"]["name"], "ls");
         assert_eq!(call["function"]["arguments"], r#"{"path":"src"}"#);
@@ -397,7 +425,7 @@ mod tests {
             is_error: false,
             timestamp: 0,
         }];
-        let converted = convert_messages("sys", &messages);
+        let converted = convert_messages(&model(), Path::new("."), "sys", &messages).unwrap();
         assert_eq!(converted[1]["role"], "tool");
         assert_eq!(converted[1]["tool_call_id"], "call_1");
         assert_eq!(converted[1]["content"], "a\nb");
@@ -409,12 +437,13 @@ mod tests {
             messages: vec![],
             tools: crate::tools::definitions(),
             thinking_level: level.into(),
+            cwd: ".".into(),
         }
     }
 
     #[test]
     fn function_tools_are_wrapped_for_the_chat_api() {
-        let body = build_body(&model(), &asking("medium"));
+        let body = build_body(&model(), &asking("medium")).unwrap();
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "read");
         assert_eq!(body["stream_options"]["include_usage"], true);
@@ -429,13 +458,13 @@ mod tests {
         let mut reasoner = model();
         reasoner.reasoning = Some(true);
         assert_eq!(
-            build_body(&reasoner, &asking("medium"))["reasoning_effort"],
+            build_body(&reasoner, &asking("medium")).unwrap()["reasoning_effort"],
             "medium"
         );
 
         let plain = model();
         assert_eq!(
-            build_body(&plain, &asking("medium"))["reasoning_effort"],
+            build_body(&plain, &asking("medium")).unwrap()["reasoning_effort"],
             Value::Null
         );
     }

@@ -77,6 +77,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             reasoning: None,
+            input_modalities: Vec::new(),
         }
     }
 
@@ -89,6 +90,7 @@ mod tests {
                 messages,
                 tools: vec![],
                 thinking_level: "off".into(),
+                cwd: ".".into(),
             },
             tx,
         )

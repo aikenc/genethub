@@ -129,7 +129,7 @@ impl AgentAdapter for GenetAdapter {
             permissions: false,
             resume: true,
             fork: false,
-            attachments: false,
+            attachments: true,
         }
     }
 
@@ -164,6 +164,7 @@ impl AgentAdapter for GenetAdapter {
                 // Every model, because the level is applied by the agent rather
                 // than asked of the provider.
                 efforts: THINKING_LEVELS.iter().map(|l| (*l).to_string()).collect(),
+                input_modalities: Some(model.input_modalities),
             })
             .collect();
         Catalog {
@@ -201,6 +202,13 @@ impl AgentAdapter for GenetAdapter {
 
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
         let home = config.scratch_dir.join("genet");
+        // Uploaded chat videos live at a workspace-relative artifact path even
+        // when the session's working directory is a nested project folder.
+        let workspace_root = config
+            .scratch_dir
+            .ancestors()
+            .nth(4)
+            .ok_or_else(|| anyhow!("invalid GeneHub session scratch directory"))?;
         std::fs::create_dir_all(&home).context("creating the agent scratch directory")?;
         write_models_file(&home, &config.providers)?;
 
@@ -242,7 +250,8 @@ impl AgentAdapter for GenetAdapter {
             .arg("--genehub-session-id")
             .arg(&config.session_id)
             .current_dir(&config.cwd)
-            .env(crate::channel::ENV_AGENT_HOME, &home);
+            .env(crate::channel::ENV_AGENT_HOME, &home)
+            .env("GENET_WORKSPACE_ROOT", workspace_root);
         super::apply_session_environment(&mut command, &config);
         if let Some(dir) = &config.skills_dir {
             command.env("GENEHUB_SKILLS_DIR", dir);
@@ -380,6 +389,7 @@ impl AgentSession for GenetSession {
                 "id": turn_id,
                 "type": "prompt",
                 "message": input.text,
+                "attachments": input.attachments,
             })
         };
         if let Err(broken) = self.command(command).await {
@@ -936,6 +946,7 @@ struct ConfiguredModel {
     context_window: Option<u64>,
     max_tokens: Option<u64>,
     reasoning: bool,
+    input_modalities: Vec<String>,
 }
 
 /// Turns configured providers into the models the picker offers.
@@ -976,6 +987,7 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
                 context_window: None,
                 max_tokens: None,
                 reasoning: crate::provider::reasons(id),
+                input_modalities: config.model_inputs.get(id).cloned().unwrap_or_default(),
             });
         }
     }
@@ -1015,6 +1027,7 @@ fn write_models_file(home: &std::path::Path, providers: &ProviderMap) -> Result<
                 "contextWindow": model.context_window,
                 "maxTokens": model.max_tokens,
                 "reasoning": model.reasoning,
+                "inputModalities": model.input_modalities,
             })
         })
         .collect();

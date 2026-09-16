@@ -1270,6 +1270,7 @@ fn models_from_cli_list(text: &str) -> (Vec<ModelInfo>, Option<String>) {
             context_window: None,
             reasoning: false,
             efforts: Vec::new(),
+            input_modalities: None,
         });
     }
     if default_model.is_none() {
@@ -1445,6 +1446,7 @@ fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
                         context_window: None,
                         reasoning: false,
                         efforts: Vec::new(),
+                        input_modalities: None,
                     })
                     .collect();
                 return (list, current);
@@ -1473,6 +1475,7 @@ fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
                 context_window: None,
                 reasoning: false,
                 efforts: Vec::new(),
+                input_modalities: None,
             })
             .collect();
         return (list, current);
@@ -3256,6 +3259,7 @@ mod tests {
                 context_window: None,
                 reasoning: false,
                 efforts: Vec::new(),
+                input_modalities: None,
             }],
             default_model: Some("composer-2.5[fast=true]".into()),
             ..Hello::default()

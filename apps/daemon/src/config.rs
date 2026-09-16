@@ -156,6 +156,8 @@ pub struct ProviderConfig {
     /// a gateway that only proxies — this is the only way to have anything in
     /// the picker. Non-empty means we do not ask.
     pub models: Vec<String>,
+    /// Explicit per-model media support; entries override provider discovery.
+    pub model_inputs: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

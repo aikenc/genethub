@@ -558,7 +558,12 @@ export type ModelInfo = { id: string, label: string, contextWindow?: number, rea
  * weakest first, because that is how a slider reads. Empty means this model
  * has no such dial, and the control belongs nowhere near it.
  */
-efforts: Array<string>, };
+efforts: Array<string>, 
+/**
+ * Media this model accepts as a native input. `None` means an external
+ * Agent did not report this field; the built-in Agent always reports it.
+ */
+inputModalities?: Array<string>, };
 
 export type NoticeLevel = "info" | "warning" | "error";
 
@@ -653,6 +658,10 @@ custom: boolean,
  */
 models: Array<string>, 
 /**
+ * Per-model native input support. An empty list explicitly means text only.
+ */
+modelInputs?: { [key in string]?: Array<string> }, 
+/**
  * Why `models` is empty, in the provider's own words. The alternative is a
  * picker that is empty for no stated reason, which sends people to the
  * wrong place: a rejected key looks exactly like a bug in the app.
@@ -736,7 +745,11 @@ dialect: string | null,
 /**
  * Models by hand, for an endpoint that cannot list its own.
  */
-models: Array<string> | null, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "speech.capabilities" } | { "type": "speech.settings.setQwen3", "payload": { 
+models: Array<string> | null, 
+/**
+ * Explicit input support by model id. Entries override discovery.
+ */
+modelInputs?: { [key in string]?: Array<string> }, } } | { "type": "settings.forgetProvider", "payload": { providerId: string, } } | { "type": "speech.capabilities" } | { "type": "speech.settings.setQwen3", "payload": { 
 /**
  * Selects the deterministic no-model protocol Stub. Optional so an
  * older client changing prompt terms does not change runtime mode.

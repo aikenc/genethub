@@ -5289,6 +5289,7 @@ mod tests {
                     context_window: Some(10_000),
                     reasoning: true,
                     efforts: Vec::new(),
+                    input_modalities: None,
                 }],
                 modes: Vec::new(),
                 commands: Vec::new(),
@@ -9550,6 +9551,7 @@ mod tests {
                 context_window: None,
                 reasoning: true,
                 efforts: vec!["medium".into(), "high".into()],
+                input_modalities: None,
             }],
             modes: vec![genehub_proto::ModeInfo {
                 id: "agent".into(),

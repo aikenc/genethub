@@ -209,6 +209,8 @@ export function App({
   const draft = workbench.draft;
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
+  const currentModelId = workbench.timeline.modelId ?? draft?.modelId ?? session?.modelId ?? currentAgent?.catalog.defaultModel;
+  const currentModel = currentAgent?.catalog.models.find((model) => model.id === currentModelId);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
   const composing = Boolean(workbench.activeSessionId || draft);
   // An unstarted conversation: no session on the machine, and so nothing a
@@ -967,6 +969,11 @@ export function App({
                       attachmentsSupported={
                         currentAgent?.capabilities.attachments ?? false
                       }
+                      inputModalities={
+                        currentAgent?.builtin
+                          ? (currentModel?.inputModalities ?? [])
+                          : currentModel?.inputModalities
+                      }
                       commands={currentAgent?.catalog.commands}
                       restoreDraft={workbench.restoreDraft}
                       insertDraft={
@@ -1003,8 +1010,8 @@ export function App({
                       onHeightChange={setComposerHeight}
                       minimized={composerMinimized}
                       onExpand={() => setComposerMinimized(false)}
-                      onSend={(text, attachments) =>
-                        void workbench.send(text, attachments)
+                      onSend={(text, attachments, videoFiles) =>
+                        void workbench.send(text, attachments, videoFiles)
                       }
                       onInterrupt={() => void workbench.interrupt()}
                       // Switching agent opens an empty conversation rather than

@@ -1,9 +1,7 @@
 import type { Attachment } from "@genehub/proto";
 
 /**
- * Pasting a screenshot into the composer is the core way images enter a
- * conversation here — there is no separate file picker (yet). Clipboard
- * items expose pasted images as `kind === "file"` with an image MIME type;
+ * Clipboard items expose pasted images as `kind === "file"` with an image MIME type;
  * everything else (plain text, HTML) is left for the browser's default paste
  * to handle untouched.
  */

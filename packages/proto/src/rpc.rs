@@ -326,6 +326,10 @@ pub enum Request {
         /// Models by hand, for an endpoint that cannot list its own.
         #[serde(default)]
         models: Option<Vec<String>>,
+        /// Explicit input support by model id. Entries override discovery.
+        #[serde(default)]
+        #[ts(optional)]
+        model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
     },
 
     /// Removes a provider the user added, key and all.

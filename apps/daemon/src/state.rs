@@ -79,6 +79,7 @@ struct Discovery {
     /// The key, address and dialect this answer belongs to.
     question: String,
     models: Vec<String>,
+    model_inputs: std::collections::BTreeMap<String, Vec<String>>,
     problem: Option<String>,
     at: std::time::Instant,
 }
@@ -237,6 +238,11 @@ impl AppState {
                 } else {
                     config.models.clone()
                 };
+                let mut model_inputs = discovered
+                    .get(&id)
+                    .map(|found| found.model_inputs.clone())
+                    .unwrap_or_default();
+                model_inputs.extend(config.model_inputs.clone());
                 let problem = if credential_problem.is_some() {
                     credential_problem
                 } else if config.models.is_empty() {
@@ -251,6 +257,7 @@ impl AppState {
                         label: Some(resolved.label),
                         dialect: Some(resolved.dialect.as_str().to_string()),
                         models,
+                        model_inputs,
                         problem,
                         ..config
                     },
@@ -286,6 +293,12 @@ impl AppState {
                         } else {
                             provider.models.clone()
                         },
+                        model_inputs: Some({
+                            let mut inputs =
+                                found.map(|f| f.model_inputs.clone()).unwrap_or_default();
+                            inputs.extend(provider.model_inputs.clone());
+                            inputs
+                        }),
                         problem: if provider.models.is_empty() {
                             found.and_then(|f| f.problem.clone())
                         } else {
@@ -410,15 +423,20 @@ impl AppState {
             |(id, config, question)| async move {
                 let answer = crate::provider::list_models(&id, &config).await;
                 let discovery = match answer {
-                    Ok(models) => Discovery {
+                    Ok(listed) => Discovery {
                         question,
-                        models,
+                        models: listed.iter().map(|model| model.id.clone()).collect(),
+                        model_inputs: listed
+                            .into_iter()
+                            .map(|model| (model.id, model.input_modalities))
+                            .collect(),
                         problem: None,
                         at: std::time::Instant::now(),
                     },
                     Err(error) => Discovery {
                         question,
                         models: Vec::new(),
+                        model_inputs: Default::default(),
                         problem: Some(format!("{error:#}")),
                         at: std::time::Instant::now(),
                     },
@@ -448,6 +466,7 @@ impl AppState {
         label: Option<String>,
         dialect: Option<String>,
         models: Option<Vec<String>>,
+        model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
     ) -> Result<Settings> {
         {
             let mut config = self.config.write().await;
@@ -471,6 +490,27 @@ impl AppState {
             }
             if let Some(models) = models {
                 entry.models = models.into_iter().filter(|m| !m.is_empty()).collect();
+            }
+            if let Some(model_inputs) = model_inputs {
+                for (model, inputs) in model_inputs {
+                    if model.trim().is_empty()
+                        || inputs
+                            .iter()
+                            .any(|input| input != "image" && input != "video")
+                    {
+                        anyhow::bail!("模型输入能力只接受 image 和 video");
+                    }
+                    entry.model_inputs.insert(model, inputs);
+                }
+            }
+            if crate::provider::resolve(provider_id, &entry).dialect
+                == crate::provider::Dialect::Anthropic
+                && entry
+                    .model_inputs
+                    .values()
+                    .any(|inputs| inputs.iter().any(|input| input == "video"))
+            {
+                anyhow::bail!("Anthropic Messages API 不支持原生视频输入");
             }
             if entry.api_key.as_deref().is_some_and(|key| !key.is_empty()) {
                 if let Some(url) = crate::provider::resolve(provider_id, &entry).base_url {
@@ -591,6 +631,7 @@ mod machine_state_tests {
                 None,
                 None,
                 Some(vec!["model".into()]),
+                None,
             )
             .await;
         assert!(result.is_err());
