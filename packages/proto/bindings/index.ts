@@ -962,7 +962,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.

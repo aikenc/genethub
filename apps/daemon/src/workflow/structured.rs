@@ -11,6 +11,15 @@ pub(super) fn session_id(run: &str, node: &str) -> String {
         &hex_digest(format!("{run}\0{node}").as_bytes())[..32]
     )
 }
+pub(super) fn session_id_for_attempt(run: &str, node: &str, attempt: u32) -> String {
+    if attempt == 0 {
+        return session_id(run, node);
+    }
+    format!(
+        "s_{}",
+        &hex_digest(format!("{run}\0{node}\0{attempt}").as_bytes())[..32]
+    )
+}
 fn program(run: &RunRecord) -> Result<engine::Program> {
     engine::compile(
         run.definition
@@ -242,6 +251,8 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                         scope: engine::ancestry(&p, run.engine.as_ref().unwrap(), op.frame)?,
                         definition_id: Some(op.activity.clone()),
                         activity: Default::default(),
+                        prior_activity: Vec::new(),
+                        attempt: 0,
                         outcome: None,
                         reason: None,
                         assigned_at_ms: 0,

@@ -193,6 +193,15 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
     },
+    /// Explicitly re-attempt one fenced, unfinished operation in the same
+    /// structured Run. It never replays a completed predecessor.
+    #[serde(rename = "workflow.recover", rename_all = "camelCase")]
+    WorkflowRecover {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
     /// Changes the finite budget shared by an original request and every
     /// retry. `expectedRevision` is the budget revision exposed by
     /// `workflow.get`, independent of a Run's graph revision.

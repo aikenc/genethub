@@ -5294,7 +5294,15 @@ async fn pump_events(
             _ = checkpoint.tick() => {
                 let _owner = live.execution.lock().await;
                 live.persist_open_turn_if_due().await;
-                if let Err(error) = store.save_meta(&*live.meta.lock().await) { tracing::error!(%error, "persisting execution checkpoint"); }
+                // Some adapters learn their native thread id only after the
+                // first event. Persist it during active work, not only when a
+                // Human pause happens or the next Session start occurs.
+                let handle = live.agent().await.and_then(|agent| agent.persistence());
+                let mut meta = live.meta.lock().await;
+                if let Some(handle) = handle {
+                    meta.persist = Some(handle);
+                }
+                if let Err(error) = store.save_meta(&meta) { tracing::error!(%error, "persisting execution checkpoint"); }
                 continue;
             }
         };

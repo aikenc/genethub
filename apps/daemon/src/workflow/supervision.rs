@@ -12,6 +12,8 @@ const DIAGNOSTIC_CALLS: u64 = 8;
 pub(super) struct Supervision {
     pub last_checked_at_ms: i64,
     pub human_wait_ms: i64,
+    #[serde(default)]
+    pub recovery_wait_ms: i64,
     pub waiting: bool,
     #[serde(default)]
     pub waiting_requests: Vec<genehub_proto::WorkflowHumanWait>,
@@ -235,7 +237,9 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
         .map(|request| format!("等待用户处理：节点 {}，会话 {}，原交互 {}，问题标题（来源数据）：{}。请查看原问题，把需要用户决定的事项带回本 PM 会话；保留原 requestId，不代答、不以项目管理权绕过审批。任务卡可以查看原问题，原会话的交互权限仍然适用。",
             request.node_id, request.session_id, request.request_id, request.title))
         .unwrap_or_default();
-    let recovery = if matches!(run.status.as_str(), "blocked" | "failed") {
+    let recovery = if run.status == "recoverable" {
+        "旧 Worker Session 已封禁并关闭；无写租约节点可由 PM 在核对潜在副作用与预算后用 workflow recover --run <id> --revision <current> 显式重试。无写租约不等于无外部副作用；本操作创建新 Worker 尝试，不保证副作用恰好一次，也不重开整张图。"
+    } else if matches!(run.status.as_str(), "blocked" | "failed") {
         "异常处置：本项目 PM 可直接管理流程与专家、取消或恢复任务，框架会逐次核对异常事实；不因原任务属于另一条 PM 会话而要求用户换会话。成功恢复或取消后回到正常权限。"
     } else {
         ""

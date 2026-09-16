@@ -6,7 +6,7 @@ import { defineJourney } from "../../framework/public.ts";
 
 const q = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 type Contract = { id: string; goal: string; criteria: Array<{ id: string; requirement: string; method: string }> };
-type Assignment = { phase: string; accepted?: Contract[]; previousFailure?: { contract: Contract }; contract?: Contract; criterion?: { id: string }; artifact?: { commit: string } };
+type Assignment = { phase: string; accepted?: Contract[]; previousFailure?: { contract: Contract }; contract?: Contract; milestoneId?: string; criterion?: { id: string }; artifact?: { commit: string } };
 
 // Read daemon-issued approvals and real Worker assignments, never synthesize a scheduler.
 function field(value: unknown, key: string): unknown {
@@ -68,7 +68,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
             milestones: scenario === "empty-plan" ? [] : contracts };
           return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow complete --output ${q(JSON.stringify(output))}` } } };
         }
-        const id = input.contract?.id;
+        const id = input.contract?.id ?? input.milestoneId;
         if (!id || !contracts.some(c => c.id === id)) throw new Error("Worker has no bound contract");
         const file = `${id}.txt`;
         if (input.phase === "implementation") {
@@ -77,6 +77,7 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
           return { tool: { name: "bash", arguments: { command: `cd ${q(opened.workspaceRoot)} && printf '%s\\n' ${q(`${id}:${defect ? "needs-fix" : "ok"}:attempt-${count}`)} > ${q(file)} && git add -- ${q(file)} && git commit -m ${q(`deliver ${id} attempt ${count}`)} && test -s ${q(file)} && "$GENEHUB_CLI" workflow complete --evidence "commit=$(git rev-parse HEAD)" --evidence ${q(`checks=read ${file}`)}` } } };
         }
         if (input.phase !== "acceptance-item" || !input.criterion || !input.artifact?.commit) throw new Error("Reviewer lacks criterion or artifact identity");
+        if (input.contract) throw new Error("Per-item Reviewer input redundantly includes the complete milestone contract");
         const check = `const fs=require('fs'),cp=require('child_process');const f=${JSON.stringify(file)},commit=${JSON.stringify(input.artifact.commit)};const content=fs.readFileSync(f,'utf8');const saved=cp.execFileSync('git',['show',commit+':'+f],{encoding:'utf8'});const passed=content===saved&&${input.criterion.id === "exists" ? "content.length>0" : "content.includes(':ok:')"};process.stdout.write(JSON.stringify({passed,finding:passed?'criterion verified':'artifact still needs repair',evidence:commit+':'+f+':${input.criterion.id}'}));`;
         return { tool: { name: "bash", arguments: { command: `cd ${q(opened.workspaceRoot)} && "$GENEHUB_CLI" workflow complete --output "$(node -e ${q(check)})"` } } };
       }

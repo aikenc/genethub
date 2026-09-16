@@ -167,8 +167,8 @@ structure:
                               value:
                                 op: object
                                 fields:
-                                  contract: {op: ref, path: /item}
-                                  result: {op: ref, path: /results/attempt-milestone}
+                                  milestoneId: {op: ref, path: /item/id}
+                                  artifact: {op: ref, path: /results/attempt-milestone/artifact}
                             feedback: {op: literal, value: null}
                             done: {op: literal, value: true}
       - id: publish-only-accepted
@@ -227,7 +227,7 @@ structure:
                 op: object
                 fields:
                   phase: {op: literal, value: acceptance-item}
-                  contract: {op: ref, path: /input/contract}
+                  milestoneId: {op: ref, path: /input/contract/id}
                   criterion: {op: ref, path: /item}
                   artifact: {op: ref, path: /vars/artifact}
             update:

@@ -42,7 +42,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                                 (
                                     matches!(
                                         run.status.as_str(),
-                                        "running" | "stopping" | "cancelling"
+                                        "running" | "stopping" | "cancelling" | "recoverable"
                                     ),
                                     run.created_at_ms,
                                 )
@@ -62,7 +62,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                         match run.status.as_str() {
                             "running" => summary.running += 1,
                             "stopping" | "cancelling" => summary.stopping += 1,
-                            "blocked" | "failed" => summary.blocked += 1,
+                            "blocked" | "failed" | "recoverable" => summary.blocked += 1,
                             _ => {}
                         }
                     }
@@ -145,6 +145,18 @@ pub(super) struct StopRequest {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_error: Option<String>,
+}
+
+/// A single unfinished operation without a write lease can be explicitly
+/// re-attempted after its previous Session is fenced. This does not prove the
+/// Worker had no external side effects; the engine operation stays pending.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Recovery {
+    pub node_id: String,
+    pub previous_session_id: String,
+    #[serde(default)]
+    pub waiting_since_ms: i64,
 }
 
 pub(super) fn outcome_event(outcome: WorkflowNodeOutcome) -> &'static str {
@@ -324,6 +336,107 @@ pub(crate) async fn cancel(
     run_status(&runtime, &load_run(&runtime, run_id)?)
 }
 
+/// Resume the pinned structured graph at one unfinished operation. This is an
+/// explicit PM decision; the host does not infer idempotence from a missing
+/// result or from the absence of a declared write lease.
+pub(crate) async fn recover(
+    state: &Shared,
+    workspace_id: &str,
+    run_id: &str,
+    expected_revision: u64,
+) -> Result<WorkflowRunStatus> {
+    validate_id(run_id, "runId")?;
+    let workspace = state.workspaces.get(workspace_id).await?;
+    let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
+    {
+        let _guard = lock_run(&runtime, run_id)?;
+        let mut run = load_run(&runtime, run_id)?;
+        let _request = request::request_lock(&runtime, request::group_id(&run))?;
+        request::ensure_open(&runtime, &run)?;
+        if run.workspace_id != workspace_id {
+            bail!("Workflow Run 不属于请求的 Workspace");
+        }
+        if run.revision != expected_revision {
+            bail!(
+                "Workflow revision 冲突：当前为 {}，请求为 {}；先重新读取 workflow get",
+                run.revision,
+                expected_revision
+            );
+        }
+        if run.status != "recoverable" {
+            bail!(
+                "Run 当前为 {}，没有可恢复的未交卷操作；--retry-of 会从流程入口新建 Run",
+                run.status
+            );
+        }
+        let recovery = run
+            .recovery
+            .clone()
+            .ok_or_else(|| anyhow!("recoverable Run 缺少恢复记录"))?;
+        if run
+            .stop
+            .as_ref()
+            .is_some_and(|stop| stop.cleanup_error.is_some())
+        {
+            bail!("旧执行尚未清理干净，不可恢复");
+        }
+        let node = run
+            .nodes
+            .get(&recovery.node_id)
+            .ok_or_else(|| anyhow!("恢复节点不存在"))?;
+        if node.status != "interrupted"
+            || node.session_id.as_deref() != Some(&recovery.previous_session_id)
+            || node.attempt != 0
+        {
+            bail!("恢复节点状态不匹配；请先 workflow get/check 核对");
+        }
+        if !run.leases.is_empty()
+            || runtime_node(&run, &recovery.node_id)?
+                .inputs
+                .write_lease
+                .is_some()
+        {
+            bail!("带写租约的操作不可自动重派；交回 PM 核对副作用");
+        }
+        if request::budget_exhausted(&runtime, &run, now_ms())? {
+            bail!("原始请求预算已耗尽；先核对并调整共享预算");
+        }
+        let old = run
+            .nodes
+            .get_mut(&recovery.node_id)
+            .expect("validated node");
+        old.prior_activity.push(std::mem::take(&mut old.activity));
+        old.attempt = 1;
+        old.status = "pending".into();
+        old.session_id = None;
+        old.assigned_at_ms = 0;
+        run.supervision.recovery_wait_ms = run
+            .supervision
+            .recovery_wait_ms
+            .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
+        run.recovery = None;
+        run.stop = None;
+        run.status = "running".into();
+        run.revision = run.revision.saturating_add(1);
+        run.updated_at_ms = now_ms();
+        if let Some(executor) = run.executor_session_id.clone() {
+            let message = flow_message(
+                &run,
+                "node.recovered",
+                Some(&recovery.node_id),
+                &executor,
+                &run.parent_session_id,
+                Some(run.revision),
+                serde_json::json!({"previousSessionId": recovery.previous_session_id, "attempt": 2}),
+            )?;
+            push_flow_message(&mut run, message);
+        }
+        save_run(&runtime, &run)?;
+    }
+    structured::drive(state, &runtime, run_id).await?;
+    run_status(&runtime, &load_run(&runtime, run_id)?)
+}
+
 pub(crate) async fn budget(
     state: &Shared,
     workspace_id: &str,
@@ -449,7 +562,10 @@ pub(crate) async fn maintain(state: &Shared) {
         for run in runs {
             let unfinished = (cancelled.contains(request::group_id(&run))
                 && !matches!(run.status.as_str(), "completed" | "cancelled"))
-                || matches!(run.status.as_str(), "running" | "stopping" | "cancelling")
+                || matches!(
+                    run.status.as_str(),
+                    "running" | "stopping" | "cancelling" | "recoverable"
+                )
                 || run.supervision.notices.iter().any(|notice| !notice.handled)
                 || run.supervision.diagnostics.iter().any(|diagnostic| {
                     matches!(
@@ -655,9 +771,32 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                             )
                         }))
                 {
-                    let reason =
-                        format!("节点 {node_id} 的 Worker 已停止，尚未提交节点结果；交回 PM 处理");
-                    request_stop(&mut run, "blocked", reason);
+                    let reason = format!(
+                        "节点 {node_id} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理"
+                    );
+                    let eligible = run.engine.is_some()
+                        && node.uses == "agent.session"
+                        && node.attempt == 0
+                        && !run.leases.contains_key(node_id)
+                        && runtime_node(&run, node_id)?.inputs.write_lease.is_none()
+                        && run
+                            .nodes
+                            .values()
+                            .filter(|other| {
+                                matches!(other.status.as_str(), "running" | "finishing")
+                            })
+                            .count()
+                            == 1;
+                    if eligible {
+                        run.recovery = Some(Recovery {
+                            node_id: node_id.clone(),
+                            previous_session_id: session_id.clone(),
+                            waiting_since_ms: 0,
+                        });
+                        request_stop(&mut run, "recoverable", reason);
+                    } else {
+                        request_stop(&mut run, "blocked", reason);
+                    }
                     break;
                 }
             }
@@ -724,22 +863,40 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         .clone()
         .ok_or_else(|| anyhow!("stopping Run has no durable stop decision"))?;
     if errors.is_empty() {
-        for node in current.nodes.values_mut() {
+        for (id, node) in &mut current.nodes {
             match node.status.as_str() {
                 "running" | "finishing" => {
-                    node.status = if stop.target == "cancelled" {
+                    node.status = if stop.target == "recoverable"
+                        && current
+                            .recovery
+                            .as_ref()
+                            .is_some_and(|recovery| recovery.node_id == *id)
+                    {
+                        "interrupted"
+                    } else if stop.target == "cancelled" {
                         "cancelled"
                     } else {
                         "blocked"
                     }
                     .into()
                 }
-                "pending" => node.status = "unreached".into(),
+                "pending" if stop.target != "recoverable" => node.status = "unreached".into(),
                 _ => {}
             }
         }
-        structured::retired(&mut current)?;
-        current.status = stop.target;
+        if stop.target != "recoverable" {
+            structured::retired(&mut current)?;
+        }
+        current.status = stop.target.clone();
+        if stop.target == "recoverable" {
+            current
+                .recovery
+                .as_mut()
+                .expect("recoverable operation")
+                .waiting_since_ms = now_ms();
+        } else {
+            current.recovery = None;
+        }
         current.leases.clear();
         for diagnostic in &mut current.supervision.diagnostics {
             if matches!(

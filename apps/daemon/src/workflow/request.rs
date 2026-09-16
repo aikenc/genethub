@@ -93,18 +93,26 @@ pub(super) fn execution_ms(run: &RunRecord, now: i64) -> i64 {
     };
     end.saturating_sub(run.created_at_ms)
         .saturating_sub(run.supervision.human_wait_ms)
+        .saturating_sub(run.supervision.recovery_wait_ms)
         .max(0)
 }
 
 pub(super) fn activities(
     run: &RunRecord,
 ) -> impl Iterator<Item = &crate::session::store::ExecutionActivity> {
-    run.nodes.values().map(|node| &node.activity).chain(
-        run.supervision
-            .diagnostics
-            .iter()
-            .map(|diagnostic| &diagnostic.activity),
-    )
+    run.nodes
+        .values()
+        .flat_map(|node| {
+            node.prior_activity
+                .iter()
+                .chain(std::iter::once(&node.activity))
+        })
+        .chain(
+            run.supervision
+                .diagnostics
+                .iter()
+                .map(|diagnostic| &diagnostic.activity),
+        )
 }
 
 /// Shared admission budget; use the in-memory Run being committed rather than
@@ -245,10 +253,12 @@ pub(super) async fn admit(
     {
         bail!("requestBudgetExceeded: the original request has exhausted its LLM call allowance");
     }
-    if group
-        .iter()
-        .any(|run| matches!(run.status.as_str(), "running" | "stopping" | "cancelling"))
-    {
+    if group.iter().any(|run| {
+        matches!(
+            run.status.as_str(),
+            "running" | "stopping" | "cancelling" | "recoverable"
+        )
+    }) {
         bail!("activeRunConflict: finish or cancel the previous execution before rework");
     }
     if root

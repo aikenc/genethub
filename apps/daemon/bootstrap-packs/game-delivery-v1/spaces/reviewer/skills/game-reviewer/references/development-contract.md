@@ -34,8 +34,9 @@ or publication. A recommendation cannot enlarge the platform's budget allowance.
 
 ## Acceptance item
 
-The input binds one `criterion`, its complete milestone `contract`, and Coder
-`artifact` evidence (including commit). Check that artifact/version before making
+The input binds one `criterion`, its `milestoneId`, and Coder `artifact`
+evidence (including commit). The frozen full contract remains in the Executor
+Run; do not demand it in every per-item Worker prompt. Check the artifact/version before making
 observations. Execute the specified read-only verification, using the project's
 runtime/playability tools when appropriate. Return exactly:
 

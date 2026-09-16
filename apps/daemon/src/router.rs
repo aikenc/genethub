@@ -1040,6 +1040,22 @@ async fn dispatch(
             }
         }
 
+        Request::WorkflowRecover {
+            workspace_id,
+            run_id,
+            expected_revision,
+        } => {
+            if let Err(error) =
+                authorize_project_workflow_mutation(state, caller, &workspace_id).await
+            {
+                return Handled::err(ErrorCode::Forbidden, error);
+            }
+            match crate::workflow::recover(state, &workspace_id, &run_id, expected_revision).await {
+                Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::WorkflowBudget {
             workspace_id,
             run_id,
@@ -3067,6 +3083,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::WorkflowDispatch { .. } => Some("workflow.dispatch"),
         Request::WorkflowComplete { .. } => Some("workflow.complete"),
         Request::WorkflowCancel { .. } => Some("workflow.cancel"),
+        Request::WorkflowRecover { .. } => Some("workflow.recover"),
         Request::WorkflowBudget { .. } => Some("workflow.budget"),
         Request::AgentSpaceBuilder { .. } => Some("agentSpace.builder"),
         Request::AgentSpaceChangePlan { .. } => Some("agentSpace.changePlan"),

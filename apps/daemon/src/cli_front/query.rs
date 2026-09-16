@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 58] = [
+const COMMAND_NAMES: [&str; 59] = [
     "schema",
     "context",
     "capabilities",
@@ -52,6 +52,7 @@ const COMMAND_NAMES: [&str; 58] = [
     "workflow.check",
     "workflow.complete",
     "workflow.cancel",
+    "workflow.recover",
     "workflow.budget",
     "machine.list",
     "machine.show",
@@ -118,6 +119,7 @@ fn mutates(name: &str) -> bool {
             | "workflow.dispatch"
             | "workflow.complete"
             | "workflow.cancel"
+            | "workflow.recover"
             | "workflow.budget"
             | "machine.pair"
             | "machine.forget"
@@ -1254,7 +1256,7 @@ fn command_schema(name: &str) -> Value {
                 "taskId": {"type": "string", "description": "--task; dispatch idempotency key, generated if omitted"},
                 "prompt": {"type": "string", "minLength": 1, "description": "--message or positional text"},
                 "candidateDigest": {"type": "string", "description": "--candidate"},
-                "retryOf": {"type": "string", "description": "--retry-of; shares original request identity and limits"},
+                "retryOf": {"type": "string", "description": "--retry-of; NEW Run from the workflow entry, sharing original request limits; does not resume an unfinished operation"},
                 "resumeCancelled": {"type": "boolean", "default": false, "description": "--resume-cancelled; requires new user input"},
                 "wait": {"type": "boolean", "default": true}, "timeout": {"type": "integer", "minimum": 0}
             }), &["prompt"],
@@ -1274,7 +1276,7 @@ fn command_schema(name: &str) -> Value {
         "workflow.complete" => workflow_schema(
             "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--output <json>] [--outcome completed|changesRequested|failed|blocked] [--reason <text>]",
             json!({
-                "runId": {"type": "string"}, "nodeId": {"type": "string"},
+                "runId": {"type": "string"}, "nodeId": {"type": "string", "description": "Only the Session currently bound to this node may submit its result; a PM cannot complete on a Worker's behalf"},
                 "revision": {"type": "integer", "minimum": 0},
                 "evidence": {"type": "object", "additionalProperties": {"type": "string"}, "description": "--evidence key=value; success uses the graph's evidence requirements"},
                 "output": {"description": "--output JSON business data (256 KiB, depth 32); checked against completion.output when declared, separate from evidence"},
@@ -1285,6 +1287,11 @@ fn command_schema(name: &str) -> Value {
         "workflow.cancel" => workflow_schema(
             "genet workflow cancel [--workspace <id>] --run <id> --revision <n>",
             json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}}),
+            &["runId", "revision"],
+        ),
+        "workflow.recover" => workflow_schema(
+            "genet workflow recover [--workspace <id>] --run <id> --revision <current>",
+            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0, "description": "Run revision from workflow get; only a fenced, unfinished operation without a write lease can be re-attempted in the same Run. No write lease does not prove absence of external side effects; inspect them first."}}),
             &["runId", "revision"],
         ),
         "workflow.budget" => workflow_schema(
@@ -1440,6 +1447,7 @@ fn command_schema(name: &str) -> Value {
             "workflow.activate" => single_output("workflow.activated"),
             "workflow.complete" => single_output("workflow.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),
+            "workflow.recover" => single_output("workflow.recovered"),
             "workflow.budget" => single_output("workflow.budgetUpdated"),
             "workflow.dispatch" => json!({
                 "type": "object",

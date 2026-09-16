@@ -34,7 +34,7 @@ mod supervision;
 pub(crate) use authoring::schema as authoring_schema;
 pub(crate) use check::check;
 pub(crate) use control::{
-    budget, cancel, maintain, start_assigned, summarize_sessions, validate_input_target,
+    budget, cancel, maintain, recover, start_assigned, summarize_sessions, validate_input_target,
 };
 
 const SOURCE_DIR: &str = ".genethub/workflow";
@@ -51,7 +51,7 @@ const MAX_ACTIVATION_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v2";
 const LEGACY_RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
-const RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v4";
+const RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v5";
 const PREVIOUS_RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v2";
 const FLOW_MESSAGE_SCHEMA: &str = "genehub.flow-message.v1";
 const MAX_LEASE_RECORD_BYTES: u64 = 64 * 1024;
@@ -473,6 +473,8 @@ struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stop: Option<control::StopRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<control::Recovery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     execution_root: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     experimental: bool,
@@ -561,6 +563,10 @@ struct NodeRecord {
     definition_id: Option<String>,
     #[serde(default)]
     activity: crate::session::store::ExecutionActivity,
+    #[serde(default)]
+    prior_activity: Vec<crate::session::store::ExecutionActivity>,
+    #[serde(default)]
+    attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     outcome: Option<genehub_proto::WorkflowNodeOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -641,7 +647,7 @@ pub(crate) async fn exception_authority(
             return false;
         }
         group.iter().any(|run| {
-            matches!(run.status.as_str(), "blocked" | "failed")
+            matches!(run.status.as_str(), "blocked" | "failed" | "recoverable")
                 || (run.supervision.episode_activity_ms.is_some()
                     && run.supervision.diagnostic_role.is_none())
                 || run
@@ -1114,6 +1120,7 @@ pub(crate) async fn dispatch(
     let mut run = RunRecord {
         engine: None,
         stop: None,
+        recovery: None,
         request: Some(request),
         supervision: supervision::Supervision {
             diagnostic_role,
@@ -1165,6 +1172,8 @@ pub(crate) async fn dispatch(
                 definition_id: None,
                 scope: Vec::new(),
                 activity: Default::default(),
+                prior_activity: Vec::new(),
+                attempt: 0,
                 outcome: None,
                 reason: None,
                 assigned_at_ms: 0,
@@ -1617,7 +1626,7 @@ async fn activate(
                             Some(format!("{} · {}", run.task_id, role.id)),
                             managed,
                             system_prompt,
-                            run.engine.as_ref().map(|_| structured::session_id(&run.id, &node.id)),
+                            run.engine.as_ref().map(|_| structured::session_id_for_attempt(&run.id, &node.id, run.nodes.get(&node.id).map_or(0, |record| record.attempt))),
                         )
                         .await?;
                     let record = run.nodes.get_mut(&node.id).expect("validated node");
@@ -2010,7 +2019,10 @@ async fn acquire_lease(
             // TTL alone cannot prove that an earlier writer has stopped.
             let owner = load_run(runtime, &existing.run_id)?;
             if existing.expires_at_ms > now_ms()
-                || matches!(owner.status.as_str(), "running" | "stopping" | "cancelling")
+                || matches!(
+                    owner.status.as_str(),
+                    "running" | "stopping" | "cancelling" | "recoverable"
+                )
             {
                 bail!(
                     "目标 ref {} 已由 Workflow Run {} 独占",
@@ -3180,7 +3192,10 @@ fn active_run_records(
             continue;
         };
         let run = load_run(&runtime, run_id)?;
-        if matches!(run.status.as_str(), "running" | "stopping" | "cancelling") {
+        if matches!(
+            run.status.as_str(),
+            "running" | "stopping" | "cancelling" | "recoverable"
+        ) {
             active.push(run);
         }
     }
@@ -3208,7 +3223,10 @@ fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
             push_flow_message(&mut stored, event);
         }
     }
-    if matches!(stored.status.as_str(), "completed" | "blocked" | "failed") {
+    if matches!(
+        stored.status.as_str(),
+        "completed" | "blocked" | "failed" | "recoverable"
+    ) {
         let kind = stored.status.clone();
         supervision::prepare_notice(&mut stored, &kind);
     }
@@ -3322,7 +3340,7 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
 fn decode_run_record(bytes: &[u8]) -> Result<RunRecord> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
     match value.get("schema").and_then(serde_json::Value::as_str) {
-        Some(RUN_RECORD_SCHEMA | PREVIOUS_RUN_RECORD_SCHEMA | "genehub.workflow.run-record.v3") => serde_json::from_value(value.get_mut("run").ok_or_else(|| anyhow!("Workflow Run record has no payload"))?.take()).context("读取 Workflow Run record"),
+        Some(RUN_RECORD_SCHEMA | PREVIOUS_RUN_RECORD_SCHEMA | "genehub.workflow.run-record.v3" | "genehub.workflow.run-record.v4") => serde_json::from_value(value.get_mut("run").ok_or_else(|| anyhow!("Workflow Run record has no payload"))?.take()).context("读取 Workflow Run record"),
         None => serde_json::from_value(value).context("读取 legacy Workflow Run"),
         Some(schema) => bail!("unsupported Workflow Run storage format {schema}; upgrade the daemon before writing this project"),
     }
@@ -3400,7 +3418,11 @@ fn flow_message(
             .ok_or_else(|| anyhow!("Executor flow message has no Executor Session"))?,
         run_id: run.id.clone(),
         node_id: node_id.map(str::to_string),
-        attempt: node_id.map(|_| 1),
+        attempt: node_id.map(|id| {
+            run.nodes
+                .get(id)
+                .map_or(1, |node| node.attempt.saturating_add(1))
+        }),
         sender_session_id: sender_session_id.into(),
         recipient_session_id: recipient_session_id.into(),
         causation_id: None,
@@ -3443,9 +3465,14 @@ fn record_assigned_messages(
             .managed
             .as_ref()
             .ok_or_else(|| anyhow!("Workflow launched an unbound Worker Session"))?;
+        let attempt = run
+            .nodes
+            .get(&managed.node_id)
+            .map_or(1, |node| node.attempt.saturating_add(1));
         if run.flow_messages.iter().any(|message| {
             message.kind == "node.assigned"
                 && message.node_id.as_deref() == Some(managed.node_id.as_str())
+                && message.attempt == Some(attempt)
         }) {
             continue;
         }
@@ -4322,6 +4349,7 @@ mod tests {
         let mut run = RunRecord {
             engine: None,
             stop: None,
+            recovery: None,
             request: None,
             supervision: Default::default(),
             execution_root: None,
@@ -4349,6 +4377,8 @@ mod tests {
                     definition_id: None,
                     scope: Vec::new(),
                     activity: Default::default(),
+                    prior_activity: Vec::new(),
+                    attempt: 0,
                     outcome: None,
                     reason: None,
                     assigned_at_ms: 0,
@@ -4377,6 +4407,7 @@ mod tests {
         let carrier = |status: &str, executor: Option<&str>| RunRecord {
             engine: None,
             stop: None,
+            recovery: None,
             request: None,
             supervision: Default::default(),
             execution_root: None,

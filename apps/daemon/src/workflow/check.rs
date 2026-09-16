@@ -43,6 +43,12 @@ pub(crate) async fn check(
                 detail,
             });
         };
+        if let Some(recovery) = &run.recovery {
+            if run.status == "recoverable" {
+                finding(Some(recovery.node_id.clone()), "recoverableOperation", "warning",
+                    format!("旧 Worker Session {} 已封禁并关闭；核对潜在副作用和预算后，可用 workflow recover --run {} --revision {} 在同一 Run 重试这个无写租约操作；不会重跑已完成节点。", recovery.previous_session_id, run.id, run.revision));
+            }
+        }
         let definitions = if run.engine.is_some() {
             run.nodes
                 .keys()

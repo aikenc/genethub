@@ -69,6 +69,11 @@ enum Command {
         run_id: String,
         revision: u64,
     },
+    Recover {
+        workspace_id: Option<String>,
+        run_id: String,
+        revision: u64,
+    },
     Budget {
         workspace_id: Option<String>,
         run_id: String,
@@ -427,6 +432,28 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.cancelling", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
+        Command::Recover {
+            workspace_id,
+            run_id,
+            revision,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc
+                .call(Request::WorkflowRecover {
+                    workspace_id,
+                    run_id,
+                    expected_revision: revision,
+                })
+                .await
+                .map_err(query::rpc_error)?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.recover with the wrong reply",
+                ));
+            };
+            output::succeed("workflow.recovered", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
         Command::Budget {
             workspace_id,
             run_id,
@@ -775,6 +802,11 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --revision <current>"))?,
         }),
+        "recover" => Ok(Command::Recover {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --run <id>"))?,
+            revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --revision <current>"))?,
+        }),
         "budget" => {
             if values.max_runs.is_none()
                 && values.deadline_seconds.is_none()
@@ -794,7 +826,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             })
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|budget ...",
+            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|recover|budget ...",
         )),
     }
 }
