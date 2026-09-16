@@ -1952,6 +1952,13 @@ bootstrapPackDigest?: string,
 activationHistory: Array<WorkflowActivationStatus>, };
 
 /**
+ * Read-only observation returned by the request.budget Workflow capability.
+ * Remaining calls are based on observed usage, not reservations or a promise
+ * that concurrent activities will fit. A completed query never changes.
+ */
+export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
+
+/**
  * Mutable limits shared by one Human request and all Workflow retry Runs.
  * Its revision is separate from the graph revision so a PM can adjust a
  * running request without racing a Worker node completion.

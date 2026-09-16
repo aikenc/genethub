@@ -52,7 +52,10 @@ addresses alongside the existing node evidence records.
 
 Expressions are JSON data: literals, JSON Pointer references, object construction,
 strict equality/integer comparison/addition, array append/membership and boolean
-logic. `add` rejects i64 overflow; `append` is bounded to 4096 items. No scripts, I/O or implicit
+logic. `entries` maps an object to at most 4096 `{key,value}` pairs in ascending
+key order (empty object → empty array); non-objects fail. A parallel foreach's
+keyed results can therefore feed a serial fold without a shared accumulator or
+LLM aggregation. `add` rejects i64 overflow; `append` is bounded to 4096 items. No scripts, I/O or implicit
 truth conversion. Missing/type-invalid conditions block rather than choosing a
 business fallback. Loop limits, total operation limits, frontier size, call depth
 and per-transition fuel bound progress. A total control-step cap also bounds
@@ -70,6 +73,13 @@ roles, evidence checks, write leases, PM permissions and cancellation remain hos
 capabilities. Legacy v1 DAG Runs continue on their original path. `result.publish`
 currently publishes the local Run result; it is not a network release adapter.
 No automatic retry of uncertain external side effects is provided.
+
+The host's `request.budget` capability returns an immutable current-request budget
+observation as ordinary activity output. The engine knows no budget fields or
+admission policy. Queries, enforcement and CLI checks share host accounting;
+the host persists observations before advancing and reuses committed values after
+restart. A fresh task can observe new usage/limits; remaining capacity is not a
+reservation for concurrent work.
 
 Workers submit JSON business data through the existing `workflow complete
 --output <json>` command. The host validates bounds and an optional

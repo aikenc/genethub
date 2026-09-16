@@ -1022,6 +1022,29 @@ pub struct WorkflowRequestBudgetStatus {
     pub max_llm_rounds: u64,
 }
 
+/// Read-only observation returned by the request.budget Workflow capability.
+/// Remaining calls are based on observed usage, not reservations or a promise
+/// that concurrent activities will fit. A completed query never changes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowRequestBudgetSnapshot {
+    pub request_run_id: String,
+    #[ts(type = "number")]
+    pub observed_at_ms: i64,
+    pub budget: WorkflowRequestBudgetStatus,
+    pub used_runs: u32,
+    #[ts(type = "number")]
+    pub observed_llm_rounds: u64,
+    #[ts(type = "number")]
+    pub execution_ms: u64,
+    pub remaining_runs: u32,
+    #[ts(type = "number")]
+    pub remaining_llm_rounds: u64,
+    #[ts(type = "number")]
+    pub remaining_execution_ms: u64,
+}
+
 /// Durable parent/role binding for a Workflow-managed ordinary Session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

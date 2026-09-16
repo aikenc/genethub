@@ -1291,14 +1291,14 @@ fn command_schema(name: &str) -> Value {
         ),
         "workflow.recover" => workflow_schema(
             "genet workflow recover [--workspace <id>] --run <id> --revision <current>",
-            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0, "description": "Run revision from workflow get; only a fenced, unfinished operation without a write lease can be re-attempted in the same Run. No write lease does not prove absence of external side effects; inspect them first."}}),
+            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0, "description": "Run revision from workflow get; requires exactly one fenced unfinished active operation, no write lease and no previous recovery attempt. Parallel per-item resume is not supported. Inspect external side effects first."}}),
             &["runId", "revision"],
         ),
         "workflow.budget" => workflow_schema(
             "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--deadline-seconds <n>] [--max-llm-rounds <n>]",
             json!({
                 "runId": {"type": "string", "minLength": 1},
-                "revision": {"type": "integer", "minimum": 0, "description": "current requestBudget.revision from workflow get"},
+                "revision": {"type": "integer", "minimum": 0, "description": "current requestBudget.revision from workflow get; PM authorization only. For readonly graph observations use a request.budget task (schema workflow.definition), not this mutation command."},
                 "maxRuns": {"type": "integer", "minimum": 1, "maximum": 64, "description": "--max-runs"},
                 "deadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 604800, "description": "--deadline-seconds"},
                 "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds"}

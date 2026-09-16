@@ -22,3 +22,5 @@ When delegated by PM, follow its requested scope and return your report through 
 For complex changes, read [experiment execution](references/experiments.md) for the actual candidate/team/environment binding and supported trial/adoption commands.
 
 For control-flow edits, read [structured workflow definitions](references/structured-flows.md). Use the current v2 structured language for loops and parallel composition; preserve v1 definitions on existing Runs.
+
+Use the host's `request.budget` task for graph-local budget observations, not CLI polling or live engine variables. Use `entries` plus a serial fold for deterministic aggregation of independent parallel checks. Read the reference before authoring these; keep thresholds/concurrency in project YAML and authorization with PM. Recovery currently requires exactly one unfinished active operation and no prior recovery attempt; parallel loss is not per-item automatic resume.

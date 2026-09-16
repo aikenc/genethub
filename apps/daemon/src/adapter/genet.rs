@@ -407,6 +407,28 @@ impl AgentSession for GenetSession {
     }
 
     async fn close(&self) -> Result<()> {
+        // Tools own separate process groups. Killing only the Agent's group
+        // first can orphan them; its abort protocol drops those tool futures
+        // before agent_end. Keep ownership if that acknowledgement is missing.
+        let mut events = self.events.subscribe();
+        if self.turn.lock().await.id.is_some() {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                self.interrupt().await?;
+                while self.turn.lock().await.id.is_some() {
+                    match events.recv().await {
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(anyhow!(
+                                "agent stopped before confirming tool cancellation"
+                            ));
+                        }
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .context("agent tool cancellation is unconfirmed; cleanup can be retried")??;
+        }
         super::close_child(&self.child).await?;
         self.tasks.stop().await;
         Ok(())

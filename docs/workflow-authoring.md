@@ -64,6 +64,33 @@ For backward compatibility, omitting **both** object keywords preserves the orig
 closed-object shorthand. Supplying only one keyword is rejected. Existing snapshots/digests retain the
 same serialization when both are omitted; old Runs are not rewritten.
 
+## Budget observations and parallel reduction
+
+`request.budget` is a host capability with no `with` or `completion` fields.
+An ordinary task returns a persisted `output` containing `requestRunId`,
+`observedAtMs`, `budget` (revision/maxRuns/deadlineMs/maxLlmRounds), `usedRuns`,
+`observedLlmRounds`, `executionMs` and remainingRuns/remainingLlmRounds/remainingExecutionMs.
+It reads only its own shared request using the same accounting as admission and
+`workflow check`. The observation is neither a reservation nor authority to raise
+limits. It survives restart unchanged; query again to observe a budget amendment
+or subsequent usage. Thresholds and business exits belong to YAML; PM retains
+budget authorization. The pure engine gains no clock, budget opcode or I/O.
+
+`{op: entries, value: <object expression>}` returns `{key,value}` pairs in ascending
+key order, with a 4096-entry cap. Empty objects return `[]`; non-objects fail with
+the existing typed-expression diagnostic (at runtime for dynamic references).
+Use it on a parallel foreach's keyed output, followed by a serial foreach fold.
+Aggregation is pure data processing: no LLM, shared mutable accumulator or new
+parallel break semantics. Bind artifact data using `call.input` to make shared
+immutable inputs explicit. Serial fold item bodies have fresh results; non-fold
+foreach items inherit a copy of the parent context. Completed negative business verdicts
+are data; unaccepted host/Worker failures still stop the Run and await cleanup.
+
+Only a wholly Human-waiting Run pauses the host execution-time budget; questions
+stay visible when siblings are working. Current same-Run recovery requires one
+unfinished active operation, no write lease and no prior recovery attempt. It
+does not guarantee item-level recovery of a parallel group or exactly-once effects.
+
 ## Agent repair and evidence boundaries
 
 WM uses schema → edit → draft check → bounded correction → evaluation. The built-in Skill stops after

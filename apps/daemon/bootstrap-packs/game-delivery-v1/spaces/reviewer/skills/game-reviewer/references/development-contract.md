@@ -21,6 +21,8 @@ experience/playability in the same delivery contract. Select checks appropriate
 to the project (mobile input/layout when mobile, offline only when required).
 No fixed number of human playtesters is a universal default. Make criteria few,
 specific and non-overlapping: each consumes an independent review activity.
+Read the supplied `budget` observation (including its timestamp and revision);
+do not mistake remaining observed rounds for a reservation or predict exact cost.
 
 On replan, read `accepted`, `delivered` and `previousFailure`. Keep still-valid
 accepted contracts byte-for-byte equivalent as JSON values and plan remaining
@@ -50,7 +52,13 @@ means `passed: false`, not guessed success. Inability to execute the review at a
 must use `--outcome blocked|failed --reason <fact>`; never leave the node running.
 
 The graph invokes every frozen criterion and accumulates its result. One negative
-item rejects the milestone. It allows initial implementation plus one repair,
+item rejects the milestone. Independent checks run up to four at a time against
+the same committed artifact, then a mechanical serial fold aggregates their keyed
+results. Use separate scratch outputs and ephemeral ports; do not alter shared
+fixtures or the artifact. Tell WM if the checks cannot safely run concurrently.
+The graph observes budget before acceptance; below the Pack's configurable minimum
+it returns a budget gap without starting checks, repairing or replanning blindly.
+It allows initial implementation plus one repair,
 then stops later milestones and returns the failure to requirement review, within
 at most three planning rounds. Host failures and cancellation are not swallowed
 as replanning. These limits live in YAML and remain subject to the shared budget.

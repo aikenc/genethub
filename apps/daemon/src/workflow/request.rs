@@ -91,9 +91,19 @@ pub(super) fn execution_ms(run: &RunRecord, now: i64) -> i64 {
     } else {
         run.updated_at_ms
     };
+    let pending_wait = if run.status == "running"
+        && run.supervision.waiting
+        && run.supervision.last_checked_at_ms > 0
+    {
+        end.saturating_sub(run.supervision.last_checked_at_ms)
+            .max(0)
+    } else {
+        0
+    };
     end.saturating_sub(run.created_at_ms)
         .saturating_sub(run.supervision.human_wait_ms)
         .saturating_sub(run.supervision.recovery_wait_ms)
+        .saturating_sub(pending_wait)
         .max(0)
 }
 
@@ -115,27 +125,58 @@ pub(super) fn activities(
         )
 }
 
-/// Shared admission budget; use the in-memory Run being committed rather than
-/// its stale disk copy. Both supervision and dispatch consult this one rule.
-pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
-    let others = all_runs(runtime)?
-        .into_iter()
+/// One accounting projection for graph queries, check and admission. Replace
+/// the persisted current Run with its in-memory version, without double counting.
+pub(super) fn observation(
+    runs: &[RunRecord],
+    run: &RunRecord,
+    now: i64,
+) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
+    let group = runs
+        .iter()
         .filter(|other| group_id(other) == group_id(run) && other.id != run.id)
+        .chain(std::iter::once(run))
         .collect::<Vec<_>>();
-    let elapsed = others
+    let root = group
         .iter()
-        .map(|other| execution_ms(other, now))
-        .sum::<i64>()
-        + execution_ms(run, now);
-    let calls = others
+        .find(|other| other.id == group_id(run))
+        .ok_or_else(|| anyhow!("missing request root {}", group_id(run)))?;
+    let budget = budget(root).status();
+    let execution_ms = group.iter().fold(0u64, |sum, other| {
+        sum.saturating_add(execution_ms(other, now) as u64)
+    });
+    let observed_llm_rounds = group
         .iter()
-        .flat_map(activities)
-        .map(|a| a.llm_rounds)
-        .sum::<u64>()
-        + activities(run).map(|a| a.llm_rounds).sum::<u64>();
-    let budget = budget(&load_run(runtime, group_id(run))?);
-    Ok(calls >= budget.max_llm_rounds
-        || (!run.supervision.waiting && elapsed >= budget.deadline_ms.min(i64::MAX as u64) as i64))
+        .flat_map(|other| activities(other))
+        .fold(0u64, |sum, activity| {
+            sum.saturating_add(activity.llm_rounds)
+        });
+    let used_runs = group.len().min(u32::MAX as usize) as u32;
+    Ok(genehub_proto::WorkflowRequestBudgetSnapshot {
+        request_run_id: group_id(run).into(),
+        observed_at_ms: now,
+        remaining_runs: budget.max_runs.saturating_sub(used_runs),
+        remaining_llm_rounds: budget.max_llm_rounds.saturating_sub(observed_llm_rounds),
+        remaining_execution_ms: budget.deadline_ms.saturating_sub(execution_ms),
+        budget,
+        used_runs,
+        observed_llm_rounds,
+        execution_ms,
+    })
+}
+
+pub(super) fn snapshot(
+    runtime: &RuntimeStore,
+    run: &RunRecord,
+    now: i64,
+) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
+    observation(&all_runs(runtime)?, run, now)
+}
+
+pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
+    let snapshot = snapshot(runtime, run, now)?;
+    Ok(snapshot.remaining_llm_rounds == 0
+        || (!run.supervision.waiting && snapshot.remaining_execution_ms == 0))
 }
 
 pub(super) fn request_lock(runtime: &RuntimeStore, root: &str) -> Result<ExclusiveFileLock> {
@@ -229,28 +270,17 @@ pub(super) async fn admit(
         .into_iter()
         .filter(|run| group_id(run) == link.root_run_id)
         .collect::<Vec<_>>();
-    let budget = budget(&root);
-    if group.len() >= budget.max_runs as usize {
+    let snapshot = observation(&group, &root, now_ms())?;
+    if snapshot.remaining_runs == 0 {
         bail!(
             "requestBudgetExceeded: the original request has reached its {} Run limit",
-            budget.max_runs
+            snapshot.budget.max_runs
         );
     }
-    if group
-        .iter()
-        .map(|run| execution_ms(run, now_ms()))
-        .sum::<i64>()
-        >= budget.deadline_ms.min(i64::MAX as u64) as i64
-    {
+    if snapshot.remaining_execution_ms == 0 {
         bail!("requestBudgetExceeded: the original request has exceeded its execution deadline");
     }
-    if group
-        .iter()
-        .flat_map(activities)
-        .map(|activity| activity.llm_rounds)
-        .sum::<u64>()
-        >= budget.max_llm_rounds
-    {
+    if snapshot.remaining_llm_rounds == 0 {
         bail!("requestBudgetExceeded: the original request has exhausted its LLM call allowance");
     }
     if group.iter().any(|run| {

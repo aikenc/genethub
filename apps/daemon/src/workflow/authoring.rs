@@ -23,7 +23,14 @@ pub(crate) fn schema() -> Value {
     schema["x-genehub"] = json!({
         "dialect": "genehub.workflow.definition.v2", "legacyDialect": DEFINITION_SCHEMA,
         "validationCommand": "workflow check --draft", "maxDiagnostics": 64,
-        "capabilities": ["agent.session", "result.publish"],
+        "capabilities": ["agent.session", "result.publish", "request.budget"],
+        "requestBudget": {
+            "inputs": "none; current Run's shared request only",
+            "output": ["requestRunId", "observedAtMs", "budget", "usedRuns", "observedLlmRounds", "executionMs", "remainingRuns", "remainingLlmRounds", "remainingExecutionMs"],
+            "budget": ["revision", "maxRuns", "deadlineMs", "maxLlmRounds"],
+            "semantics": "Immutable observation, not reservation or permission. Query again to observe changes. Only PM control can adjust limits."
+        },
+        "entries": "{op:entries,value:<object expression>} returns at most 4096 {key,value} pairs in ascending key order; use serial forEach initial/update to aggregate parallel results",
         "verifiers": ["value.nonEmpty", "value.equals", "git.commitOnTarget"],
         "workerOutcomes": ["completed", "changesRequested", "failed", "blocked"],
         "referenceSyntax": "RFC 6901 JSON Pointer, not JSONPath or jq",

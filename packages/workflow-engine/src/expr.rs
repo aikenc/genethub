@@ -15,6 +15,23 @@ impl Expr {
                     .map(|(k, v)| Ok((k.clone(), v.evaluate(context)?)))
                     .collect::<Result<_>>()?,
             ),
+            Self::Entries { value } => {
+                let value = value.evaluate(context)?;
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| Error::Condition("entries requires an object".into()))?;
+                if object.len() > 4096 {
+                    return Err(Error::Condition("entries exceeds 4096 items".into()));
+                }
+                // Do not depend on serde_json's optional preserve_order feature.
+                let sorted = object.iter().collect::<std::collections::BTreeMap<_, _>>();
+                Value::Array(
+                    sorted
+                        .into_iter()
+                        .map(|(key, value)| serde_json::json!({"key": key, "value": value}))
+                        .collect(),
+                )
+            }
             Self::Eq { left, right } => {
                 let l = left.evaluate(context)?;
                 let r = right.evaluate(context)?;
@@ -156,11 +173,17 @@ impl Expr {
                     .map_err(|e| e.at("/value"))?;
                 array.expect_type("array").map_err(|e| e.at("/array"))?;
             }
-            Self::Not { value } => {
+            Self::Entries { value } | Self::Not { value } => {
                 value
                     .validate(depth + 1, remaining)
                     .map_err(|e| e.at("/value"))?;
-                value.expect_type("boolean").map_err(|e| e.at("/value"))?;
+                value
+                    .expect_type(if matches!(self, Self::Entries { .. }) {
+                        "object"
+                    } else {
+                        "boolean"
+                    })
+                    .map_err(|e| e.at("/value"))?;
             }
             Self::All { values } | Self::Any { values } => {
                 for (i, value) in values.iter().enumerate() {
@@ -192,7 +215,7 @@ impl Expr {
             },
             Self::Object { .. } => "object",
             Self::Add { .. } => "integer",
-            Self::Append { .. } => "array",
+            Self::Append { .. } | Self::Entries { .. } => "array",
             _ => "boolean",
         })
     }

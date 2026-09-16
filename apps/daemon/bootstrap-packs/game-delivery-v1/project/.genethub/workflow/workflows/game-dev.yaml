@@ -1,8 +1,10 @@
 # Project-owned business policy. The engine knows only data and control blocks.
 schema: genehub.workflow.definition.v2
 id: game-dev
-version: 1
+version: 2
 nodes:
+  - id: budget
+    uses: request.budget
   - id: requirements
     uses: agent.session
     with: {role: reviewer}
@@ -72,6 +74,7 @@ structure:
           type: sequence
           output: {op: ref, path: /results/plan-decision}
           steps:
+            - {id: planning-budget, type: task, activity: budget}
             - id: assess-requirements
               type: task
               activity: requirements
@@ -79,6 +82,7 @@ structure:
                 op: object
                 fields:
                   phase: {op: literal, value: requirements}
+                  budget: {op: ref, path: /results/planning-budget/output}
                   accepted: {op: ref, path: /vars/accepted}
                   delivered: {op: ref, path: /vars/delivered}
                   previousFailure: {op: ref, path: /vars/feedback}
@@ -171,6 +175,17 @@ structure:
                                   artifact: {op: ref, path: /results/attempt-milestone/artifact}
                             feedback: {op: literal, value: null}
                             done: {op: literal, value: true}
+            - id: stop-for-budget-authorization
+              type: if
+              condition:
+                op: all
+                values:
+                  - {op: exists, path: /results/plan-decision/feedback/result/needsAuthorization}
+                  - {op: ref, path: /results/plan-decision/feedback/result/needsAuthorization}
+              then:
+                id: return-budget-gap
+                type: break
+                value: {op: ref, path: /results/plan-decision}
       - id: publish-only-accepted
         type: if
         condition: {op: ref, path: /results/planning/done}
@@ -180,18 +195,20 @@ structure:
       id: milestone-delivery
       type: loop
       maxRounds: 2
-      initial: {op: literal, value: {attempt: 0, approved: false, feedback: null, artifact: null}}
+      initial: {op: literal, value: {attempt: 0, approved: false, needsAuthorization: false, feedback: null, artifact: null}}
       condition:
         op: all
         values:
           - {op: not, value: {op: ref, path: /vars/approved}}
+          - {op: not, value: {op: ref, path: /vars/needsAuthorization}}
           - {op: lt, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 2}}
       update:
         op: object
         fields:
           attempt: {op: add, left: {op: ref, path: /vars/attempt}, right: {op: literal, value: 1}}
           approved: {op: ref, path: /results/check-items/approved}
-          feedback: {op: ref, path: /results/check-items/items}
+          needsAuthorization: {op: ref, path: /results/check-items/needsAuthorization}
+          feedback: {op: ref, path: /results/check-items}
           artifact: {op: ref, path: /results/check-items/artifact}
       body:
         id: implement-and-check
@@ -208,38 +225,89 @@ structure:
                 delivered: {op: ref, path: /input/delivered}
                 feedback: {op: ref, path: /vars/feedback}
           - id: check-items
-            type: forEach
-            items: {op: ref, path: /input/contract/criteria}
-            key: {op: ref, path: /item/id}
-            maxConcurrency: 1
-            failure: failFast
-            initial:
+            type: call
+            procedure: acceptance-batch
+            input:
               op: object
               fields:
-                approved: {op: literal, value: true}
-                items: {op: literal, value: []}
+                contract: {op: ref, path: /input/contract}
                 artifact: {op: ref, path: /results/implementation/evidence}
-            body:
-              id: check-item
-              type: task
-              activity: acceptance
-              input:
-                op: object
-                fields:
-                  phase: {op: literal, value: acceptance-item}
-                  milestoneId: {op: ref, path: /input/contract/id}
-                  criterion: {op: ref, path: /item}
-                  artifact: {op: ref, path: /vars/artifact}
-            update:
+    acceptance-batch:
+      id: bounded-acceptance
+      type: sequence
+      output: {op: ref, path: /results/acceptance-admission}
+      steps:
+        - {id: acceptance-budget, type: task, activity: budget}
+        - id: acceptance-admission
+          type: if
+          # Pack policy, not a reservation or engine limit. WM may tune this
+          # conservative minimum with measured costs and PM's authorization.
+          condition:
+            op: lt
+            left: {op: ref, path: /results/acceptance-budget/output/remainingLlmRounds}
+            right: {op: literal, value: 32}
+          then:
+            id: acceptance-budget-gap
+            type: sequence
+            steps: []
+            output:
               op: object
               fields:
-                approved: {op: all, values: [{op: ref, path: /vars/approved}, {op: ref, path: /results/output/passed}]}
-                artifact: {op: ref, path: /vars/artifact}
-                items:
-                  op: append
-                  array: {op: ref, path: /vars/items}
-                  value:
+                approved: {op: literal, value: false}
+                needsAuthorization: {op: literal, value: true}
+                artifact: {op: ref, path: /input/artifact}
+                items: {op: literal, value: []}
+                budget: {op: ref, path: /results/acceptance-budget/output}
+          else:
+            id: independent-acceptance
+            type: sequence
+            output: {op: ref, path: /results/summarize-checks}
+            steps:
+              - id: parallel-checks
+                type: forEach
+                items: {op: ref, path: /input/contract/criteria}
+                key: {op: ref, path: /item/id}
+                maxConcurrency: 4
+                failure: failFast
+                body:
+                  id: check-item
+                  type: task
+                  activity: acceptance
+                  input:
                     op: object
                     fields:
+                      phase: {op: literal, value: acceptance-item}
+                      milestoneId: {op: ref, path: /input/contract/id}
                       criterion: {op: ref, path: /item}
-                      review: {op: ref, path: /results/output}
+                      artifact: {op: ref, path: /input/artifact}
+              - id: summarize-checks
+                type: forEach
+                items: {op: entries, value: {op: ref, path: /results/parallel-checks}}
+                key: {op: ref, path: /item/key}
+                maxConcurrency: 1
+                initial:
+                  op: object
+                  fields:
+                    approved: {op: literal, value: true}
+                    needsAuthorization: {op: literal, value: false}
+                    items: {op: literal, value: []}
+                    artifact: {op: ref, path: /input/artifact}
+                body:
+                  id: read-check-result
+                  type: sequence
+                  steps: []
+                  output: {op: ref, path: /item/value}
+                update:
+                  op: object
+                  fields:
+                    approved: {op: all, values: [{op: ref, path: /vars/approved}, {op: ref, path: /results/output/passed}]}
+                    needsAuthorization: {op: literal, value: false}
+                    artifact: {op: ref, path: /vars/artifact}
+                    items:
+                      op: append
+                      array: {op: ref, path: /vars/items}
+                      value:
+                        op: object
+                        fields:
+                          criterionId: {op: ref, path: /item/key}
+                          review: {op: ref, path: /results/output}

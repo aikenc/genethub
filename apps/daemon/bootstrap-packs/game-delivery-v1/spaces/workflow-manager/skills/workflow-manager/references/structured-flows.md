@@ -30,7 +30,43 @@ inside expression evaluation.
 return a value). `forEach.initial/update` reuse loop-local `vars`, require serial
 concurrency, and return the final accumulator; update reads the completed item
 value at `/results`. Nested loops own their vars; use `call.input` to bind an
-outer value before entering a nested scope. Item bodies start with fresh results.
+outer value before entering a nested scope. Serial fold item bodies start with
+fresh results; non-fold foreach items inherit a copy of the parent context.
+
+`{op: entries, value: <object expression>}` returns at most 4096 `{key,value}`
+pairs in ascending key order, including an empty array for an empty object.
+It rejects non-objects and oversize objects. For independent checks, use a
+parallel `forEach` with unique keys, then `entries` on its keyed results and a
+serial `forEach.initial/update` to aggregate mechanically. Do not use an LLM to
+merge reports or invent shared mutable vars. Pass outer artifacts via `call.input`
+before entering the parallel foreach to make shared immutable inputs explicit.
+Worker completion order must not determine the business decision. A completed
+`passed:false` result is data; an unaccepted failed/blocked outcome still stops
+the Run. Only parallelize genuinely independent checks against a fixed artifact;
+isolate scratch outputs/ports and serialize checks needing shared mutable state.
+
+Declare `{id: budget, uses: request.budget}` with no `with` or `completion`.
+A task referencing it returns `/results/<step>/output`: `requestRunId`,
+`observedAtMs`, `budget` (`revision`, `maxRuns`, `deadlineMs`, `maxLlmRounds`),
+`usedRuns`, `observedLlmRounds`, `executionMs`, `remainingRuns`,
+`remainingLlmRounds`, `remainingExecutionMs`. Numbers are nonnegative except
+the wall-clock timestamp. The host persists this current-request observation
+before downstream control runs; a completed query is not refreshed on restart.
+Place another query task where a fresh observation is required, including each
+loop iteration. Use ordinary `lt`/`if` and explicit result data for policy; the
+snapshot is not a reservation, exact future cost, permission, or a live variable.
+Concurrent work can consume more after observation. The host retains hard budget
+enforcement; only authorized PM control can amend limits. Do not add budget polling,
+cross-request query IDs, shell inspection of runtime files, or graph self-approval.
+
+For example, `game-dev` queries before planning and before independent acceptance,
+uses a Pack-owned 32-observed-round minimum for acceptance, then returns an explicit
+authorization gap with `done:false` if below it. This conservative policy is tunable
+YAML, not a guarantee that 32 rounds suffice. Aggregation starts no Worker.
+Do not claim parallel automatic recovery: current `workflow recover` requires
+exactly one unfinished active operation, no write lease, and no previous recovery
+attempt. A lost Worker among concurrent operations may block the whole Run;
+inspect retained results and side effects before deciding a new request retry.
 
 `{id: exit, type: break, value: <expression>}` exits the nearest lexical loop or
 serial foreach. It skips remaining children and that iteration's update; return

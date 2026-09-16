@@ -144,18 +144,51 @@ pub enum FailurePolicy {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Expr {
-    Literal { value: Value },
-    Ref { path: String },
-    Exists { path: String },
-    Object { fields: BTreeMap<String, Expr> },
-    Eq { left: Box<Expr>, right: Box<Expr> },
-    Lt { left: Box<Expr>, right: Box<Expr> },
-    Add { left: Box<Expr>, right: Box<Expr> },
-    Append { array: Box<Expr>, value: Box<Expr> },
-    Contains { array: Box<Expr>, value: Box<Expr> },
-    Not { value: Box<Expr> },
-    All { values: Vec<Expr> },
-    Any { values: Vec<Expr> },
+    Literal {
+        value: Value,
+    },
+    Ref {
+        path: String,
+    },
+    Exists {
+        path: String,
+    },
+    Object {
+        fields: BTreeMap<String, Expr>,
+    },
+    /// Object entries in ascending key order; at most 4096 items.
+    Entries {
+        value: Box<Expr>,
+    },
+    Eq {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Lt {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Add {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Append {
+        array: Box<Expr>,
+        value: Box<Expr>,
+    },
+    Contains {
+        array: Box<Expr>,
+        value: Box<Expr>,
+    },
+    Not {
+        value: Box<Expr>,
+    },
+    All {
+        values: Vec<Expr>,
+    },
+    Any {
+        values: Vec<Expr>,
+    },
 }
 impl Default for Expr {
     fn default() -> Self {

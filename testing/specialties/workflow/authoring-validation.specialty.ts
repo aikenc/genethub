@@ -191,6 +191,24 @@ defineSpecialty(
         type: "workflow.inspect",
         payload: { workspaceId: opened.workspaceId },
       });
+      const entriesWrongType = {
+        schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
+        nodes: [{ id: "budget", uses: "request.budget" }],
+        structure: { body: { id: "empty", type: "sequence", steps: [], output: { op: "entries", value: { op: "literal", value: [] } } } },
+      };
+      writeFileSync(workflowFile, JSON.stringify(entriesWrongType));
+      const entriesFailure = await cli(["workflow", "check", "--draft"]);
+      const entriesDiagnostic = diagnosticFrom(parseJson(entriesFailure.stdout) as CliEnvelope);
+      t.assertions.assert(entriesFailure.code !== 0 && entriesDiagnostic.code === "WF_EXPRESSION_TYPE"
+        && entriesDiagnostic.path === "/structure/body/output/value" && entriesDiagnostic.expected === "object"
+        && entriesDiagnostic.actual === "array", `entries type diagnostic lacks location: ${entriesFailure.stdout}`);
+      for (const bad of [{ with: { role: "worker" } }, { completion: { output: { type: "integer" } } }]) {
+        writeFileSync(workflowFile, JSON.stringify({ ...entriesWrongType,
+          nodes: [{ id: "budget", uses: "request.budget", ...bad }],
+          structure: { body: { id: "query", type: "task", activity: "budget" } } }));
+        const invalidCapability = await cli(["workflow", "check", "--draft"]);
+        t.assertions.assert(invalidCapability.code !== 0 && invalidCapability.stdout.includes("request.budget"), "budget capability accepted Worker inputs or completion overrides");
+      }
       const history = await opened.client.call({
         type: "workflow.history",
         payload: { workspaceId: opened.workspaceId, limit: 10 },

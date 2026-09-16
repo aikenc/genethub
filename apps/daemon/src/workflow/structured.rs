@@ -220,6 +220,18 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                 continue;
             }
             let id = node_id(op.frame);
+            // A host observation may have been committed just before a crash.
+            // Settle its stored value, never resample a completed query.
+            if run.nodes.get(&id).is_some_and(|record| {
+                record.status == "completed"
+                    && matches!(record.uses.as_str(), "result.publish" | "request.budget")
+            }) {
+                settled(&mut run, &id)?;
+                finalize(runtime, &mut run).await;
+                run.revision += 1;
+                save_run(runtime, &run)?;
+                continue;
+            }
             if let Some(record) = run.nodes.get(&id) {
                 if record.status == "running" {
                     if let Some(sid) = &record.session_id {
@@ -316,10 +328,13 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                     break;
                 }
             }
-            if run.nodes[&id].uses == "result.publish" {
-                // This capability publishes the verified Run result, not an external network side effect.
-                run.nodes.get_mut(&id).unwrap().outcome =
-                    Some(genehub_proto::WorkflowNodeOutcome::Completed);
+            if matches!(
+                run.nodes[&id].uses.as_str(),
+                "result.publish" | "request.budget"
+            ) {
+                // Persist the observation before allowing dependent control flow.
+                // No external side effect or Worker participates in these capabilities.
+                save_run(runtime, &run)?;
                 settled(&mut run, &id)?;
                 finalize(runtime, &mut run).await;
             }

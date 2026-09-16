@@ -54,7 +54,7 @@ pub(super) async fn observe(
         return Ok(());
     }
     let now = now_ms();
-    let mut waiting = false;
+    let mut waiting_count = 0;
     let mut waiting_requests = Vec::new();
     let mut stalled = Vec::new();
     let mut episode = now;
@@ -72,7 +72,7 @@ pub(super) async fn observe(
                     .as_ref()
                     .is_ok_and(|summary| summary.status == SessionStatus::Waiting)
                 {
-                    waiting = true;
+                    waiting_count += 1;
                     for request in state
                         .sessions
                         .pending_questions(session_id)
@@ -111,6 +111,18 @@ pub(super) async fn observe(
             }
         }
     }
+    // Questions remain visible while siblings work. Only a wholly waiting Run
+    // pauses its execution clock; pending dispatch and cleanup are still work.
+    let waiting = waiting_count > 0
+        && waiting_count == running
+        && !run.nodes.values().any(|node| {
+            node.status == "finishing" || (run.engine.is_some() && node.status == "pending")
+        })
+        && !run
+            .supervision
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.state.as_str(), "reserved" | "launching" | "running"));
     if run.supervision.waiting && run.supervision.last_checked_at_ms > 0 {
         run.supervision.human_wait_ms = run
             .supervision

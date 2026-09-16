@@ -31,7 +31,7 @@ function assignment(value: unknown): Assignment | undefined {
   return undefined;
 }
 
-for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-gate", "empty-plan"] as const) defineJourney({
+for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-gate", "budget-query-gate", "empty-plan"] as const) defineJourney({
   id: `journey.workflow.pack-development.${scenario}`,
   title: `Installed game-dev closes ${scenario} inside one Executor Run`,
   oracle: "The installed Pack drives four dynamic contracts and every criterion; bounded rejection stops later milestones, retains accepted contracts and replans without another PM dispatch; non-go never publishes",
@@ -54,7 +54,8 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
       criteria: [{ id: "exists", requirement: `m${n}.txt is committed`, method: "inspect the supplied commit" },
         { id: "correct", requirement: `m${n}.txt contains :ok:`, method: "read committed and working content" }] }));
     const events: Assignment[] = [], seen = new Set<string>(), attempts = new Map<string, number>();
-    let pmStage = 0;
+    let pmStage = 0, budgetCommand: string | undefined;
+    const budgetReady = path.join(t.env.root, "budget-amended");
     opened.mock.script(...Array.from({ length: 160 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request), input = assignment(request);
       if (body.includes("<genehub_managed_session>") && input) {
@@ -66,7 +67,8 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
           const output = { decision: scenario === "no-go" ? "noGo" : scenario === "budget-gate" ? "needsAuthorization" : "go",
             scope: "Four artifact contracts; original target unchanged", feasibility: "Bounded local edits", risks: "No external effects", budgetAdvice: "Remain within the existing request envelope",
             milestones: scenario === "empty-plan" ? [] : contracts };
-          return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow complete --output ${q(JSON.stringify(output))}` } } };
+          const waitBudget = scenario === "budget-query-gate" ? `for i in $(seq 1 600); do test -f ${q(budgetReady)} && break; sleep 0.05; done; test -f ${q(budgetReady)} && ` : "";
+          return { tool: { name: "bash", arguments: { command: `${waitBudget}"$GENEHUB_CLI" workflow complete --output ${q(JSON.stringify(output))}` } } };
         }
         const id = input.contract?.id ?? input.milestoneId;
         if (!id || !contracts.some(c => c.id === id)) throw new Error("Worker has no bound contract");
@@ -79,8 +81,12 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
         if (input.phase !== "acceptance-item" || !input.criterion || !input.artifact?.commit) throw new Error("Reviewer lacks criterion or artifact identity");
         if (input.contract) throw new Error("Per-item Reviewer input redundantly includes the complete milestone contract");
         const check = `const fs=require('fs'),cp=require('child_process');const f=${JSON.stringify(file)},commit=${JSON.stringify(input.artifact.commit)};const content=fs.readFileSync(f,'utf8');const saved=cp.execFileSync('git',['show',commit+':'+f],{encoding:'utf8'});const passed=content===saved&&${input.criterion.id === "exists" ? "content.length>0" : "content.includes(':ok:')"};process.stdout.write(JSON.stringify({passed,finding:passed?'criterion verified':'artifact still needs repair',evidence:commit+':'+f+':${input.criterion.id}'}));`;
-        return { tool: { name: "bash", arguments: { command: `cd ${q(opened.workspaceRoot)} && "$GENEHUB_CLI" workflow complete --output "$(node -e ${q(check)})"` } } };
+        const ready = path.join(t.env.root, `review-${input.artifact.commit}-${input.criterion.id}`);
+        const sibling = path.join(t.env.root, `review-${input.artifact.commit}-${input.criterion.id === "exists" ? "correct" : "exists"}`);
+        const barrier = `touch ${q(ready)}; for i in $(seq 1 300); do test -f ${q(sibling)} && break; sleep 0.05; done; test -f ${q(sibling)}`;
+        return { tool: { name: "bash", arguments: { command: `cd ${q(opened.workspaceRoot)} && ${barrier} && "$GENEHUB_CLI" workflow complete --output "$(node -e ${q(check)})"` } } };
       }
+      if (budgetCommand) { const command = budgetCommand; budgetCommand = undefined; return { tool: { name: "bash", arguments: { command } } }; }
       const stage = pmStage++;
       if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
       if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
@@ -99,6 +105,18 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const permission = (await snapshot()).pendingPermissions[0]!;
     await opened.client.call({ type: "session.respondPermission", payload: { sessionId: pm, requestId: permission.id, outcome: { outcome: "selected", optionId: "approve-once" } } });
     let run: WorkflowRunStatus | undefined;
+    if (scenario === "budget-query-gate") {
+      await t.tools.waitUntil(async () => {
+        const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
+        if (reply?.type !== "workflowRuns") throw new Error("missing history");
+        run = reply.data[0]; return !!run && events.some(e => e.phase === "requirements");
+      }, 45000);
+      budgetCommand = `"$GENEHUB_CLI" workflow budget --run ${q(run!.id)} --revision 0 --max-llm-rounds 31 && touch ${q(budgetReady)}`;
+      await opened.client.call({ type: "session.send", payload: { sessionId: pm, messageId: "u_budget_amendment",
+        text: "Limit this request to 31 rounds. Preserve the configured admission policy and report any gap.",
+        attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+      } });
+    }
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("missing history");
@@ -110,17 +128,20 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const plans = events.filter(e => e.phase === "requirements"), writes = events.filter(e => e.phase === "implementation").map(e => e.contract!.id);
     const reviews = events.filter(e => e.phase === "acceptance-item");
     const noWork = ["no-go", "budget-gate", "empty-plan"].includes(scenario);
-    const expected = noWork ? [] : scenario === "exhausted" ? ["m1", ...Array.from({ length: 6 }, () => "m2")] : scenario === "replan" ? ["m1", "m2", "m2", "m2", "m3", "m4"] : ["m1", "m2", "m3", "m4"];
+    const expected = noWork ? [] : scenario === "budget-query-gate" ? ["m1"] : scenario === "exhausted" ? ["m1", ...Array.from({ length: 6 }, () => "m2")] : scenario === "replan" ? ["m1", "m2", "m2", "m2", "m3", "m4"] : ["m1", "m2", "m3", "m4"];
     t.assertions.assert(JSON.stringify(writes) === JSON.stringify(expected), `unexpected milestone execution order: ${writes}`);
-    t.assertions.assert(reviews.length === writes.length * 2, "a declared criterion was omitted or replayed");
-    for (let i = 0; i < reviews.length; i += 2) t.assertions.assert(reviews[i]!.criterion!.id === "exists" && reviews[i + 1]!.criterion!.id === "correct", "criterion identities drifted across repairs");
+    t.assertions.assert(reviews.length === (scenario === "budget-query-gate" ? 0 : writes.length * 2), "a declared criterion was omitted or replayed, or started without admission");
+    for (let i = 0; i < reviews.length; i += 2) t.assertions.assert(JSON.stringify(reviews.slice(i, i + 2).map(r => r.criterion!.id).sort()) === '["correct","exists"]', "criterion identities drifted across parallel repairs");
     t.assertions.assert(plans.length === (scenario === "exhausted" ? 3 : scenario === "replan" ? 2 : 1), "planning bound or replan was lost");
     for (const replan of plans.slice(1)) {
       t.assertions.assert(replan.accepted?.length === 1 && replan.accepted[0]!.id === "m1" && replan.previousFailure?.contract.id === "m2", "replan lost accepted work or failure context");
       t.assertions.assert(replan.accepted![0]!.criteria.length === 2, "accepted contract lost its original criteria");
     }
     const outcome = (run!.structure as { outcome?: { value?: { done: boolean; accepted: Contract[]; delivered: unknown[] } } })?.outcome?.value;
-    if (scenario !== "exhausted") t.assertions.assert(outcome?.done === !noWork && outcome.accepted.length === (noWork ? 0 : 4) && outcome.delivered.length === (noWork ? 0 : 4), "execution completion was confused with accepted delivery");
+    const noDelivery = noWork || scenario === "budget-query-gate";
+    if (scenario !== "exhausted") t.assertions.assert(outcome?.done === !noDelivery && outcome.accepted.length === (noDelivery ? 0 : 4) && outcome.delivered.length === (noDelivery ? 0 : 4), "execution completion was confused with accepted delivery");
+    if (scenario === "budget-query-gate") t.assertions.assert(JSON.stringify(outcome).includes('"needsAuthorization":true') && existsSync(path.join(opened.workspaceRoot, "m1.txt"))
+      && !existsSync(path.join(opened.workspaceRoot, "m2.txt")) && !run!.nodes.some(n => n.uses === "result.publish"), "budget gap lost the artifact, started later work or published");
     if (noWork || scenario === "exhausted") t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, "m3.txt")), "later work started after refusal");
     const pmSource = readFileSync(path.join(opened.workspaceRoot, ".pipebuilder/skills/project-manager/SKILL.md"), "utf8");
     t.assertions.assert(pmSource === readFileSync(path.join(t.openRoot, "apps/daemon/bootstrap-packs/game-delivery-v1/project/.pipebuilder/skills/project-manager/SKILL.md"), "utf8"), "installed PM methods differ from the shipped source");

@@ -212,6 +212,19 @@ PM must inspect `structure.outcome.value.done` before claiming delivery.
 Budget amendments retain a terminal Run's execution cutoff; stopped waiting
 does not become execution cost. The budget control message keeps its own time.
 
+Graph-local awareness uses the readonly `request.budget` host capability, not a
+new PM command or live engine variable. Its ordinary output records shared
+limits/revision, observed calls, execution time, remaining bounds and observation
+time. Admission, this query and `workflow check` use the same accounting. Once
+committed the observation survives restart unchanged; a later task re-queries.
+It does not reserve future calls or authorize budget expansion. Questions remain
+visible with concurrent work; only all-active-Workers waiting with no pending
+dispatch, cleanup or diagnostic work excludes the interval from execution time.
+Independent acceptance checks and their concurrency/minimum-budget policy live
+in Pack YAML; `entries` and serial folds aggregate results without an LLM. Current
+same-Run recovery supports exactly one unfinished active operation, no write
+lease and no prior recovery attempt, not per-item recovery of parallel work.
+
 The independent
 `game-review-and-improve` Workflow starts with review and allows two repair and
 re-review rounds. The report checker validates declared coverage and versions;

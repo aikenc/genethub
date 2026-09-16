@@ -1547,9 +1547,14 @@ async fn activate(
                 continue;
             }
             match node.uses.as_str() {
-                "result.publish" => {
-                    run.nodes.get_mut(&node_id).expect("validated node").status =
-                        "completed".into();
+                "result.publish" | "request.budget" => {
+                    let output = if node.uses == "request.budget" {
+                        Some(serde_json::to_value(request::snapshot(runtime, run, now_ms())?)?)
+                    } else { None };
+                    let record = run.nodes.get_mut(&node_id).expect("validated node");
+                    record.output = output;
+                    record.outcome = Some(genehub_proto::WorkflowNodeOutcome::Completed);
+                    record.status = "completed".into();
                     queue.extend(node.on.get("completed").cloned().unwrap_or_default());
                 }
                 "agent.session" => {
@@ -2695,27 +2700,31 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
         if !ids.insert(node.id.clone()) {
             bail!("Workflow 存在重复节点：{}", node.id);
         }
-        if !matches!(node.uses.as_str(), "agent.session" | "result.publish") {
+        if !matches!(
+            node.uses.as_str(),
+            "agent.session" | "result.publish" | "request.budget"
+        ) {
             bail!("未注册的 Workflow capability：{}", node.uses);
         }
         if node.uses == "agent.session" && node.inputs.role.is_none() {
             bail!("agent.session 节点 {} 必须声明 with.role", node.id);
         }
-        if node.uses == "result.publish"
+        if node.uses != "agent.session"
             && (node.inputs.role.is_some()
                 || node.inputs.workspace.is_some()
                 || node.inputs.write_lease.is_some())
         {
-            bail!("result.publish 节点 {} 不能声明 with 输入", node.id);
+            bail!("{} 节点 {} 不能声明 with 输入", node.uses, node.id);
         }
         if let Some(shape) = &node.completion.output {
             shape.validate()?;
         }
-        if node.uses == "result.publish"
+        if node.uses != "agent.session"
             && (!node.completion.all.is_empty() || node.completion.output.is_some())
         {
             bail!(
-                "result.publish 节点 {} 会立即发布，不能声明 completion 证据",
+                "{} 节点 {} 由宿主完成，不能声明 completion 证据",
+                node.uses,
                 node.id
             );
         }
@@ -2768,8 +2777,8 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
             ) {
                 bail!("当前内核尚未注册节点事件：{event}");
             }
-            if node.uses == "result.publish" && event != "completed" {
-                bail!("result.publish cannot emit {event}");
+            if node.uses != "agent.session" && event != "completed" {
+                bail!("{} cannot emit {event}", node.uses);
             }
             for target in targets {
                 if event != "completed"
@@ -2806,11 +2815,11 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
                 !matches!(
                     outcome.as_str(),
                     "completed" | "changesRequested" | "failed" | "blocked"
-                ) || (node.is_some_and(|n| n.uses == "result.publish") && outcome != "completed")
+                ) || (node.is_some_and(|n| n.uses != "agent.session") && outcome != "completed")
             }) {
                 return Err(authoring::definition_error("WF_OUTCOME", &format!("{path}/accept"),
                     "task accepts an outcome its capability cannot emit".into(),
-                    "agent.session emits completed/changesRequested/failed/blocked; result.publish emits only completed."));
+                    "agent.session emits completed/changesRequested/failed/blocked; result.publish and request.budget emit only completed."));
             }
         }
         return Ok(());

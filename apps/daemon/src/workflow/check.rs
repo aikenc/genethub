@@ -170,23 +170,15 @@ pub(crate) async fn check(
             .iter()
             .filter(|other| request::group_id(other) == request::group_id(&run))
             .collect::<Vec<_>>();
-        let calls: u64 = group
-            .iter()
-            .flat_map(|run| request::activities(run))
-            .map(|activity| activity.llm_rounds)
-            .sum();
+        let snapshot = request::observation(&all, &run, now_ms())?;
         let tokens = group
             .iter()
             .flat_map(|run| request::activities(run))
             .try_fold(0u64, |sum, activity| {
                 activity.tokens.map(|tokens| sum.saturating_add(tokens))
             });
-        let budget = group
-            .iter()
-            .find(|other| other.id == request::group_id(&run))
-            .map(|root| request::budget(root))
-            .unwrap_or_default();
-        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；执行期限 {} 毫秒；预算 revision {}（明确 Human 等待单列）", request::group_id(&run), group.len(), budget.max_runs, calls, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), budget.deadline_ms, budget.revision));
+        let budget = &snapshot.budget;
+        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；执行耗时 {}/{} 毫秒；预算 revision {}（仅全 Run Human 等待免计时；观测不代表额度预留）", snapshot.request_run_id, snapshot.used_runs, budget.max_runs, snapshot.observed_llm_rounds, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), snapshot.execution_ms, budget.deadline_ms, budget.revision));
         if let Some(problem) = &run.supervision.finding {
             finding(None, "diagnosis", "warning", problem.clone());
         }
