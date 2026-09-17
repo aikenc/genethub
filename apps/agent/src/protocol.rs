@@ -86,7 +86,12 @@ pub enum StopReason {
 #[serde(tag = "role")]
 pub enum Message {
     #[serde(rename = "user")]
-    User { content: String, timestamp: i64 },
+    User {
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<MediaAttachment>,
+        timestamp: i64,
+    },
     #[serde(rename = "assistant", rename_all = "camelCase")]
     Assistant {
         content: Vec<Content>,
@@ -113,8 +118,16 @@ pub enum Message {
 
 impl Message {
     pub fn user(text: impl Into<String>) -> Self {
+        Self::user_with_attachments(text, Vec::new())
+    }
+
+    pub fn user_with_attachments(
+        text: impl Into<String>,
+        attachments: Vec<MediaAttachment>,
+    ) -> Self {
         Message::User {
             content: text.into(),
+            attachments,
             timestamp: now_ms(),
         }
     }
@@ -135,6 +148,20 @@ impl Message {
             })
             .collect()
     }
+}
+
+/// User-selected native media, kept with conversation history so follow-up
+/// turns send the same image or video to the model. Path is workspace-relative
+/// for uploaded videos; small pasted images can remain inline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaAttachment {
+    pub name: String,
+    pub mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
 }
 
 /// An in-flight assistant message. Streaming events carry snapshots of this.

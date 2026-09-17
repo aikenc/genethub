@@ -8,7 +8,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Mutex;
 
-use crate::protocol::{now_ms, AssistantDraft, Content, Message, StopReason, Usage};
+use crate::protocol::{
+    now_ms, AssistantDraft, Content, MediaAttachment, Message, StopReason, Usage,
+};
 use crate::provider::{self, ProviderEvent, Request};
 use crate::rpc::Emitter;
 use crate::state::State;
@@ -18,11 +20,19 @@ const TRUNCATED_TOOL_CALL_MESSAGE: &str =
     "was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.";
 
 pub async fn run_prompt(state: Arc<Mutex<State>>, text: String) {
+    run_prompt_with_attachments(state, text, Vec::new()).await;
+}
+
+pub async fn run_prompt_with_attachments(
+    state: Arc<Mutex<State>>,
+    text: String,
+    attachments: Vec<MediaAttachment>,
+) {
     let (emitter, prompt_message) = {
         let mut guard = state.lock().await;
         guard.streaming = true;
         guard.abort.reset();
-        let message = Message::user(text);
+        let message = Message::user_with_attachments(text, attachments);
         guard.session.append_message(message.clone());
         (guard.emitter.clone(), message)
     };
@@ -175,6 +185,9 @@ async fn stream_assistant(
             Vec::new()
         },
         thinking_level: snapshot.thinking_level.clone(),
+        cwd: std::env::var_os("GENET_WORKSPACE_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| snapshot.cwd.clone()),
     };
     let model = snapshot.model.clone();
     let handle = tokio::spawn(async move { provider::stream(&model, request, tx).await });
@@ -500,6 +513,7 @@ mod tests {
             context_window: Some(8192),
             max_tokens: None,
             reasoning: None,
+            input_modalities: Vec::new(),
         }
     }
 

@@ -156,11 +156,28 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             }
 
             let message = expand_skill_command(state, message).await;
+            let attachments = match serde_json::from_value::<Vec<protocol::MediaAttachment>>(
+                command
+                    .rest
+                    .get("attachments")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            ) {
+                Ok(attachments) => attachments,
+                Err(error) => {
+                    emitter.send(error_response(
+                        id,
+                        kind,
+                        format!("invalid attachments: {error}"),
+                    ));
+                    return;
+                }
+            };
             emitter.send(response(id, kind, Some(json!({ "agentInvoked": true }))));
 
             let spawned = state.clone();
             let handle = tokio::spawn(async move {
-                agent::run_prompt(spawned, message).await;
+                agent::run_prompt_with_attachments(spawned, message, attachments).await;
             });
             state.lock().await.running = Some(handle);
         }
@@ -580,6 +597,7 @@ mod tests {
             context_window: None,
             max_tokens: None,
             reasoning: None,
+            input_modalities: Vec::new(),
         }
     }
 

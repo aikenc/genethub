@@ -807,6 +807,7 @@ fn models_in(listed: &Value) -> Vec<ModelInfo> {
                 context_window: None,
                 reasoning: !efforts.is_empty(),
                 efforts,
+                input_modalities: None,
             })
         })
         .collect()

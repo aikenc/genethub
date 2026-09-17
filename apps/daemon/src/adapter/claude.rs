@@ -468,6 +468,7 @@ fn models_in(hello: &Value) -> Vec<ModelInfo> {
                 } else {
                     Vec::new()
                 },
+                input_modalities: None,
             })
         })
         .collect()

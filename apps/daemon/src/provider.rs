@@ -39,6 +39,24 @@ const MAX_MODEL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// too, with an address the user gives it.
 const KNOWN: &[(&str, &str, &str, Dialect)] = &[
     (
+        "kimi",
+        "Kimi",
+        "https://api.moonshot.cn/v1",
+        Dialect::OpenAi,
+    ),
+    (
+        "minimax",
+        "MiniMax",
+        "https://api.minimax.io/v1",
+        Dialect::OpenAi,
+    ),
+    (
+        "qwen",
+        "千问",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        Dialect::OpenAi,
+    ),
+    (
         "deepseek",
         "DeepSeek",
         "https://api.deepseek.com/v1",
@@ -178,7 +196,13 @@ pub fn known() -> Vec<(&'static str, &'static str)> {
 /// Ids only. What comes back is enough to choose one and send it, and the
 /// context window and whether it reasons are not in any of these responses —
 /// inventing them per model was how the hardcoded table started.
-pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<String>> {
+#[derive(Debug, Clone)]
+pub struct ListedModel {
+    pub id: String,
+    pub input_modalities: Vec<String>,
+}
+
+pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<ListedModel>> {
     let resolved = resolve(id, config);
     let base = resolved
         .base_url
@@ -235,23 +259,33 @@ pub async fn list_models(id: &str, config: &ProviderConfig) -> Result<Vec<String
 
     let parsed: serde_json::Value =
         serde_json::from_str(&body).with_context(|| format!("解析 {id} 的模型列表"))?;
-    let mut ids: Vec<String> = parsed["data"]
+    let mut models: Vec<ListedModel> = parsed["data"]
         .as_array()
         .map(|entries| {
             entries
                 .iter()
-                .filter_map(|entry| entry["id"].as_str())
-                .filter(|id| usable_for_chat(id))
-                .map(str::to_string)
+                .filter_map(|entry| {
+                    let id = entry["id"].as_str()?;
+                    usable_for_chat(id).then(|| ListedModel {
+                        id: id.to_string(),
+                        input_modalities: [
+                            (entry["supports_image_in"].as_bool() == Some(true), "image"),
+                            (entry["supports_video_in"].as_bool() == Some(true), "video"),
+                        ]
+                        .into_iter()
+                        .filter_map(|(supported, kind)| supported.then_some(kind.to_string()))
+                        .collect(),
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
-    ids.sort();
-    ids.dedup();
-    if ids.is_empty() {
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    if models.is_empty() {
         return Err(anyhow!("{id} 没有返回任何可用于对话的模型"));
     }
-    Ok(ids)
+    Ok(models)
 }
 
 /// Drops the models that cannot hold a conversation.

@@ -882,7 +882,7 @@ function PendingBubble({
 
   return (
     <div className="flex flex-col items-end gap-1.5" data-testid="pending-message">
-      {pending.attachments.length > 0 ? (
+      {pending.attachments.length > 0 || (pending.videoFiles?.length ?? 0) > 0 ? (
         <div className="flex max-w-[80%] flex-wrap justify-end gap-1.5">
           {pending.attachments.map((attachment, index) => {
             const url = attachmentPreviewUrl(attachment);
@@ -893,8 +893,13 @@ function PendingBubble({
                 alt={attachment.name}
                 className="h-28 w-28 rounded-xl border border-line object-cover opacity-70"
               />
-            ) : null;
+            ) : (
+              <span key={index} className="rounded border border-line px-2 py-1 text-xs">{attachment.name}</span>
+            );
           })}
+          {pending.videoFiles?.map((file, index) => (
+            <span key={`video-${index}`} className="rounded border border-line px-2 py-1 text-xs">视频 · {file.name}</span>
+          ))}
         </div>
       ) : null}
       {pending.text ? (
@@ -1008,7 +1013,9 @@ function Item({ item }: { item: TimelineItem }) {
                     alt={attachment.name}
                     className="h-28 w-28 rounded-xl border border-line object-cover"
                   />
-                ) : null;
+                ) : (
+                  <span key={index} className="rounded border border-line px-2 py-1 text-xs">{attachment.mime.startsWith("video/") ? "视频 · " : ""}{attachment.name}</span>
+                );
               })}
             </div>
           ) : null}

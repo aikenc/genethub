@@ -2,9 +2,10 @@
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use std::path::Path;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{thinking_budget, ProviderEvent, Request, SseBuffer};
+use super::{media, thinking_budget, ProviderEvent, Request, SseBuffer};
 use crate::config::ModelConfig;
 use crate::protocol::{Content, Message, StopReason, Usage};
 
@@ -40,7 +41,7 @@ pub async fn stream(
                 model.provider
             )
         })?;
-    let body = build_body(model, &request);
+    let body = build_body(model, &request)?;
 
     let response = genet_http::Client::new()
         .post(format!("{}/v1/messages", base.trim_end_matches('/')))
@@ -159,13 +160,13 @@ pub async fn stream(
     Ok(())
 }
 
-fn build_body(model: &ModelConfig, request: &Request) -> Value {
+fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
     let mut body = json!({
         "model": model.id,
         "max_tokens": model.max_tokens.unwrap_or(8192),
         "stream": true,
         "system": request.system_prompt,
-        "messages": convert_messages(&request.messages),
+        "messages": convert_messages(model, &request.cwd, &request.messages)?,
     });
 
     if !request.tools.is_empty() {
@@ -188,19 +189,55 @@ fn build_body(model: &ModelConfig, request: &Request) -> Value {
         body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
     }
 
-    body
+    Ok(body)
 }
 
 /// Tool results ride on user turns in the Anthropic format.
-pub fn convert_messages(messages: &[Message]) -> Value {
+pub fn convert_messages(
+    model: &ModelConfig,
+    cwd: &Path,
+    messages: &[Message],
+) -> anyhow::Result<Value> {
     let mut out: Vec<Value> = Vec::new();
+    let latest_user = messages
+        .iter()
+        .rposition(|message| matches!(message, Message::User { .. }));
 
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message {
-            Message::User { content, .. } => out.push(json!({
-                "role": "user",
-                "content": [{ "type": "text", "text": content }],
-            })),
+            Message::User {
+                content,
+                attachments,
+                ..
+            } => {
+                let mut blocks = Vec::new();
+                if !content.is_empty() {
+                    blocks.push(json!({ "type": "text", "text": content }));
+                }
+                for attachment in attachments {
+                    let kind = media::kind(attachment)?;
+                    if Some(index) != latest_user
+                        && (kind == "video"
+                            || !model.input_modalities.iter().any(|input| input == kind))
+                    {
+                        blocks.push(json!({
+                            "type": "text",
+                            "text": media::historical_note(attachment, kind),
+                        }));
+                        continue;
+                    }
+                    let (kind, url) = media::data_url(model, cwd, attachment)?;
+                    if kind == "video" {
+                        anyhow::bail!("Anthropic Messages API 不支持原生视频输入");
+                    }
+                    let data = url.split_once(',').expect("data URL has a comma").1;
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": { "type": "base64", "media_type": attachment.mime, "data": data },
+                    }));
+                }
+                out.push(json!({ "role": "user", "content": blocks }));
+            }
             Message::Assistant { content, .. } => {
                 let blocks: Vec<Value> = content
                     .iter()
@@ -253,7 +290,7 @@ pub fn convert_messages(messages: &[Message]) -> Value {
         }
     }
 
-    Value::Array(out)
+    Ok(Value::Array(out))
 }
 
 fn flatten_text(content: &[Content]) -> String {
@@ -307,6 +344,7 @@ mod tests {
             context_window: None,
             max_tokens: Some(1024),
             reasoning: Some(true),
+            input_modalities: Vec::new(),
         }
     }
 
@@ -317,8 +355,9 @@ mod tests {
             messages: vec![Message::user("hi")],
             tools: crate::tools::definitions(),
             thinking_level: "off".into(),
+            cwd: ".".into(),
         };
-        let body = build_body(&model(), &request);
+        let body = build_body(&model(), &request).unwrap();
         assert_eq!(body["tools"][0]["name"], "read");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         assert!(body.get("thinking").is_none());
@@ -331,8 +370,9 @@ mod tests {
             messages: vec![],
             tools: vec![],
             thinking_level: "high".into(),
+            cwd: ".".into(),
         };
-        let body = build_body(&model(), &request);
+        let body = build_body(&model(), &request).unwrap();
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
     }
 
@@ -371,7 +411,7 @@ mod tests {
                 timestamp: 0,
             },
         ];
-        let converted = convert_messages(&messages);
+        let converted = convert_messages(&model(), Path::new("."), &messages).unwrap();
         assert_eq!(converted.as_array().unwrap().len(), 3);
         let results = &converted[2]["content"];
         assert_eq!(results.as_array().unwrap().len(), 2);

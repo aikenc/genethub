@@ -53,7 +53,7 @@ daemon ──spawn──> $GENEHUB_CLI agent-serve --mode rpc [--model M] [--thi
 
 ### 2.3 明确不做（MVP）
 
-TUI、subagents、extensions、MCP、fork / branch / tree / rewind、steering 与 follow-up 队列、auto-retry、prompt templates、导出 HTML、图片输入、直连 `bash` RPC 命令、telemetry 与成本统计、远程模型目录、project trust。
+TUI、subagents、extensions、MCP、fork / branch / tree / rewind、steering 与 follow-up 队列、auto-retry、prompt templates、导出 HTML、直连 `bash` RPC 命令、telemetry 与成本统计、远程模型目录、project trust。
 
 对应的 RPC 命令一律返回结构合法的空值或 `success: false`，**不允许静默不回**——挂起的请求会让 daemon 侧 30s 超时。
 
@@ -115,6 +115,8 @@ genet agent-serve --mode rpc
 | `get_commands` | 斜杠命令（Skills 与 compact） | `{commands: [...]}` |
 | `set_auto_compaction` | 记录开关 | 无 |
 | `compact` | 用 `genet session context` 取得确定性投影，在禁用工具的纯内存子会话中生成带引用摘要，再以 append-only compaction entry 替换活跃模型上下文 | `{agentInvoked: true}` |
+
+`prompt` 可带 `attachments` 数组，元素含 `name`、`mime`，以及 `dataBase64`（小图片）或工作区相对 `path`（会话上传的视频）。User message 持久化附件引用；模型继续支持该媒体时，后续轮次继续传递原生内容。切换到不支持该媒体的模型后，历史附件会变成文字说明，本轮新附件仍会被拒绝。所选模型的 `inputModalities` 声明 `image` / `video` 后才允许发送；OpenAI 兼容接口使用 `image_url` / `video_url` 内容块，Anthropic Messages 接口使用原生图片块。视频先经 `session.artifact.*` 分块上传，再由 Agent 从工作区读取并内联到模型请求；应用单视频上限 64 MiB，服务商可能有更低的请求上限。
 
 未识别的 `type`：回 `success: false` + `error`，不要崩。
 

@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod fake;
+mod media;
 pub mod openai;
 
 use serde_json::Value;
@@ -38,6 +39,7 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<Value>,
     pub thinking_level: String,
+    pub cwd: std::path::PathBuf,
 }
 
 pub async fn stream(

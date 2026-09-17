@@ -23,6 +23,9 @@ import { readRtcEnabled, writeRtcEnabled } from "./rtc";
  * answer (`settings.providers`), and one the user added shows up there too.
  */
 const OFFERED = [
+  { id: "kimi", label: "Kimi" },
+  { id: "minimax", label: "MiniMax" },
+  { id: "qwen", label: "千问" },
   { id: "deepseek", label: "DeepSeek" },
   { id: "openai", label: "OpenAI" },
   { id: "anthropic", label: "Anthropic" },
@@ -84,7 +87,7 @@ export function SettingsPanel({ host, endpoint }: { host: Host; endpoint?: Endpo
       <section>
         <h2 className="mb-2 text-sm font-medium">模型密钥</h2>
         <p className="mb-3 text-xs text-muted">
-          密钥只保存在这台机器上，写入后不会再被读出来。填好之后模型列表由对方给出，不用手填。
+          密钥只保存在这台机器上，写入后不会再被读出来。模型列表由服务商提供；图片和视频输入能力可按模型设置。
         </p>
         <div className="flex flex-col gap-2">
           {rows(settings?.providers).map((provider) => (
@@ -794,6 +797,7 @@ function rows(configured?: ProviderInfo[]): ProviderInfo[] {
       dialect: "openai",
       custom: false,
       models: [],
+      modelInputs: {},
     }),
   );
   return [...known, ...missing].sort((a, b) => {
@@ -810,6 +814,7 @@ interface Edit {
   apiKey?: string;
   baseUrl?: string;
   models?: string[];
+  modelInputs?: Record<string, string[]>;
 }
 
 function ProviderRow({
@@ -878,6 +883,37 @@ function ProviderRow({
         ) : null}
       </div>
       <ModelsFound provider={provider} />
+      {provider.models.length > 0 ? (
+        <details className="text-xs text-muted">
+          <summary className="cursor-pointer">配置模型图片 / 视频输入</summary>
+          <div className="mt-2 max-h-52 space-y-1 overflow-y-auto">
+            {provider.models.map((model) => (
+              <div key={model} className="flex flex-wrap items-center gap-3 rounded border border-line px-2 py-1">
+                <span className="min-w-40 flex-1 break-all text-fg">{model}</span>
+                {(["image", "video"] as const).map((kind) => (
+                  <label key={kind} className="flex items-center gap-1">
+                    <input
+                      type="checkbox"
+                      aria-label={`${model} ${kind === "image" ? "图片" : "视频"}输入`}
+                      checked={(provider.modelInputs?.[model] ?? []).includes(kind)}
+                      disabled={busy || (kind === "video" && provider.dialect === "anthropic")}
+                      onChange={(event) => {
+                        const current = provider.modelInputs?.[model] ?? [];
+                        const next = event.target.checked
+                          ? [...current, kind]
+                          : current.filter((input) => input !== kind);
+                        setBusy(true);
+                        void onSave({ modelInputs: { [model]: next } }).finally(() => setBusy(false));
+                      }}
+                    />
+                    {kind === "image" ? "图片" : "视频"}
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
