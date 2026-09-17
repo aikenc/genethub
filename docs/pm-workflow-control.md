@@ -236,8 +236,10 @@ visible with concurrent work; only all-active-Workers waiting with no pending
 dispatch, cleanup or diagnostic work excludes the interval from execution time.
 Independent acceptance checks and their concurrency/minimum-budget policy live
 in Pack YAML; `entries` and serial folds aggregate results without an LLM. Current
-same-Run recovery supports exactly one unfinished active operation, no write
-lease and no prior recovery attempt, not per-item recovery of parallel work.
+same-Run recovery continues the original Worker Session after a daemon restart,
+keeps any write lease, and does not replay completed nodes. It refuses to
+continue while the previous Worker process is still running and does not
+reconstruct project files.
 
 The independent
 `game-review-and-improve` Workflow starts with review and allows two repair and

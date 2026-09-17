@@ -63,10 +63,10 @@ For example, `game-dev` queries before planning and before independent acceptanc
 uses a Pack-owned 32-observed-round minimum for acceptance, then returns an explicit
 authorization gap with `done:false` if below it. This conservative policy is tunable
 YAML, not a guarantee that 32 rounds suffice. Aggregation starts no Worker.
-Do not claim parallel automatic recovery: current `workflow recover` requires
-exactly one unfinished active operation, no write lease, and no previous recovery
-attempt. A lost Worker among concurrent operations may block the whole Run;
-inspect retained results and side effects before deciding a new request retry.
+Do not claim parallel automatic recovery: `workflow recover` continues original
+Worker Sessions after a daemon restart, keeps write leases, and refuses to
+continue while a previous process is still running. Inspect retained results
+and side effects before deciding a new request retry.
 
 `{id: exit, type: break, value: <expression>}` exits the nearest lexical loop or
 serial foreach. It skips remaining children and that iteration's update; return

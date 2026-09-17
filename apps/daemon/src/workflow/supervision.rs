@@ -250,7 +250,15 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
             request.node_id, request.session_id, request.request_id, request.title))
         .unwrap_or_default();
     let recovery = if run.status == "recoverable" {
-        "旧 Worker Session 已封禁并关闭；无写租约节点可由 PM 在核对潜在副作用与预算后用 workflow recover --run <id> --revision <current> 显式重试。无写租约不等于无外部副作用；本操作创建新 Worker 尝试，不保证副作用恰好一次，也不重开整张图。"
+        if run
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.reuse_session)
+        {
+            "未交卷 Worker Session 仍保留，写租约未释放；核对工作区后可用 workflow recover --run <id> --revision <current> 通知同一 Worker 继续。已通过节点不会重跑。旧进程仍在运行时必须暂停，不能并行写入。"
+        } else {
+            "旧 Worker Session 已封禁并关闭；无写租约节点可由 PM 在核对潜在副作用与预算后用 workflow recover --run <id> --revision <current> 显式重试。无写租约不等于无外部副作用；本操作创建新 Worker 尝试，不保证副作用恰好一次，也不重开整张图。"
+        }
     } else if matches!(run.status.as_str(), "blocked" | "failed") {
         "异常处置：本项目 PM 可直接管理流程与专家、取消或恢复任务，框架会逐次核对异常事实；不因原任务属于另一条 PM 会话而要求用户换会话。成功恢复或取消后回到正常权限。"
     } else {

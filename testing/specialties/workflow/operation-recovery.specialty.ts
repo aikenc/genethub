@@ -5,9 +5,9 @@ import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } 
 
 defineSpecialty({
   id: "specialty.workflow.operation-recovery.restart",
-  title: "A lost no-write-lease Worker re-attempts its pending operation in the pinned Run",
-  oracle: "A real daemon restart fences the unfinished Worker; explicit recovery creates one new attempt without replaying the accepted predecessor or opening a second Run",
-  catches: ["restart replays completed work", "orphan is terminal despite a pending engine operation", "recovery reuses the fenced Worker identity", "stale Run revision silently resumes", "review work bypasses shared accounting"],
+  title: "A lost Worker continues its original Session in the pinned Run",
+  oracle: "A real daemon restart keeps the unfinished Worker Session; explicit recovery continues that Session without replaying the accepted predecessor or opening a second Run",
+  catches: ["restart fences a resumable Worker", "recovery opens a second Worker identity", "accepted predecessor is replayed", "stale Run revision silently resumes"],
   tags: ["core", "workflow", "structured-workflow", "workflow-recovery"],
   llm: { default: "mock" }, expectedDurationMs: 45_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -88,9 +88,9 @@ defineSpecialty({
       return recoverable?.status === "recoverable";
     }, 45_000);
     t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor changed during restart");
-    t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === interruptedId)?.status === "interrupted", "unfinished Worker was not fenced");
+    t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === interruptedId)?.status === "interrupted", "unfinished Worker was not marked for continuation");
     const check = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: recoverable!.id } });
-    t.assertions.assert(check?.type === "workflowCheck" && check.data.findings.some(f => f.code === "recoverableOperation"), "PM did not receive a recovery finding");
+    t.assertions.assert(check?.type === "workflowCheck" && check.data.findings.some(f => f.code === "recoverableOperation" && f.detail.includes("仍保留")), "PM did not receive a same-session recovery finding");
     const stale = await runGenetAsync(opened.daemon.genet, ["workflow", "recover", "--run", recoverable!.id, "--revision", String(recoverable!.revision - 1)], opened.daemon.env, { cwd: opened.workspaceRoot });
     t.assertions.assert(stale.code !== 0, "stale recovery revision was accepted");
     retryReady = true;
@@ -105,7 +105,7 @@ defineSpecialty({
     t.assertions.assert(completed!.id === before!.id, "recovery replaced the pinned Run");
     t.assertions.assert(completed!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor was replayed");
     const recovered = completed!.nodes.find(n => n.id === recoverable!.nodes.find(n => n.sessionId === interruptedId)!.id)!;
-    t.assertions.assert(recovered.sessionId !== interruptedId && recovered.status === "completed", "recovery reused a fenced Worker");
+    t.assertions.assert(recovered.sessionId === interruptedId && recovered.status === "completed", "recovery replaced the original Worker Session");
     const effects = readFileSync(trace, "utf8").trim().split("\n");
     t.assertions.assert(effects.length === 3 && effects[0] !== effects[1] && effects[1] === effects[2], `operation effects differ: ${JSON.stringify(effects)}`);
     await new Promise(resolve => setTimeout(resolve, 19_000));

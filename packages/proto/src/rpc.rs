@@ -193,8 +193,9 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
     },
-    /// Explicitly re-attempt one fenced, unfinished operation in the same
-    /// structured Run. It never replays a completed predecessor.
+    /// Continue unfinished Worker Sessions in the same structured Run after a
+    /// daemon restart. The original Session and write lease are kept; completed
+    /// predecessors are not replayed. A still-running previous process is refused.
     #[serde(rename = "workflow.recover", rename_all = "camelCase")]
     WorkflowRecover {
         workspace_id: String,

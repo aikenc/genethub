@@ -139,6 +139,20 @@ pub fn stop_tree(pid: u32) {
     signal_tree(pid, libc::SIGKILL);
 }
 
+/// Whether this pid still names a live process. `EPERM` still counts as live:
+/// the process exists, this daemon is just not allowed to signal it.
+#[cfg(unix)]
+pub fn exists(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Asks a process and everything it started to finish, and makes it if it will
 /// not.
 ///
@@ -266,6 +280,35 @@ pub fn stop_tree(_pid: u32) {}
 
 #[cfg(not(unix))]
 pub async fn end_tree(_pid: u32) {}
+
+#[cfg(windows)]
+pub fn exists(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn CloseHandle(handle: isize) -> i32;
+        fn GetExitCodeProcess(handle: isize, exit_code: *mut u32) -> i32;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn exists(_pid: u32) -> bool {
+    false
+}
 
 /// Named once so that the lifecycle below reads as what it does — ask, then
 /// insist — on every platform, including the one where neither is a signal.

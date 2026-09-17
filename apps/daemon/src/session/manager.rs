@@ -67,6 +67,15 @@ impl std::fmt::Display for SessionMissing {
 }
 
 impl std::error::Error for SessionMissing {}
+
+/// Result of asking whether a Worker Session can take a post-restart continue turn.
+#[derive(Debug)]
+pub(crate) enum WorkerContinuation {
+    Ready,
+    ProcessAlive { pid: Option<u32> },
+    Unavailable { reason: String },
+}
+
 /// A snapshot is one RPC body (`MAX_RPC_BODY_BYTES` is 2.9 MiB). Leave room for
 /// summary/round metadata and JSON escaping instead of importing a transcript
 /// that can be written successfully but never opened.
@@ -524,6 +533,7 @@ impl SessionManager {
             updated_at_ms: now,
             archived: false,
             persist: None,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
@@ -647,6 +657,7 @@ impl SessionManager {
             updated_at_ms: now,
             archived: false,
             persist: None,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
@@ -856,6 +867,7 @@ impl SessionManager {
             updated_at_ms: now,
             archived: false,
             persist,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
@@ -1063,6 +1075,7 @@ impl SessionManager {
             updated_at_ms: now,
             archived: false,
             persist: None,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
@@ -1276,6 +1289,7 @@ impl SessionManager {
             updated_at_ms,
             archived: false,
             persist: history.persist,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
@@ -1491,6 +1505,43 @@ impl SessionManager {
             Some(live) => live.execution.lock().await.is_some(),
             None => false,
         }
+    }
+
+    /// Whether a persisted Worker Session can receive a continue turn after the
+    /// daemon has lost its in-memory execution. A live OS process must pause
+    /// continuation so two writers cannot share the project.
+    pub(crate) async fn worker_continuation(&self, session_id: &str) -> WorkerContinuation {
+        let live = match self.live(session_id).await {
+            Ok(live) => live,
+            Err(_) => {
+                return WorkerContinuation::Unavailable {
+                    reason: format!("Worker Session {session_id} 不存在"),
+                };
+            }
+        };
+        let meta = live.meta.lock().await.clone();
+        if meta.execution_retired || live.closing.load(Ordering::SeqCst) {
+            return WorkerContinuation::Unavailable {
+                reason: format!("旧 Worker Session {session_id} 已封禁，不能续接同一会话"),
+            };
+        }
+        if self.has_execution(session_id).await {
+            return WorkerContinuation::ProcessAlive {
+                pid: meta.agent_pid,
+            };
+        }
+        if let Some(pid) = meta.agent_pid {
+            if crate::process::exists(pid) {
+                return WorkerContinuation::ProcessAlive { pid: Some(pid) };
+            }
+            return WorkerContinuation::Ready;
+        }
+        if meta.persist.is_none() && meta.inbox.has_delivered {
+            return WorkerContinuation::Unavailable {
+                reason: format!("缺少原生会话句柄，不能续接 Worker {session_id}"),
+            };
+        }
+        WorkerContinuation::Ready
     }
 
     pub async fn begin_artifact(
@@ -2894,6 +2945,11 @@ impl SessionManager {
         if let Some(pid) = session.pid().await {
             let session_id = live.meta.lock().await.id.clone();
             self.processes.watch(&session_id, pid).await;
+            let mut meta = live.meta.lock().await;
+            if meta.agent_pid != Some(pid) {
+                meta.agent_pid = Some(pid);
+                self.store.save_meta(&meta)?;
+            }
         }
         live.stop_pump().await?;
         live.pump_stop.send_replace(false);
@@ -5301,9 +5357,16 @@ async fn pump_events(
                 // first event. Persist it during active work, not only when a
                 // Human pause happens or the next Session start occurs.
                 let handle = live.agent().await.and_then(|agent| agent.persistence());
+                let pid = match live.agent().await {
+                    Some(agent) => agent.pid().await,
+                    None => None,
+                };
                 let mut meta = live.meta.lock().await;
                 if let Some(handle) = handle {
                     meta.persist = Some(handle);
+                }
+                if let Some(pid) = pid {
+                    meta.agent_pid = Some(pid);
                 }
                 if let Err(error) = store.save_meta(&meta) { tracing::error!(%error, "persisting execution checkpoint"); }
                 continue;
@@ -6368,6 +6431,7 @@ mod tests {
             updated_at_ms: 0,
             archived: false,
             persist: None,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,

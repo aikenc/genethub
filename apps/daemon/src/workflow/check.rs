@@ -45,8 +45,13 @@ pub(crate) async fn check(
         };
         if let Some(recovery) = &run.recovery {
             if run.status == "recoverable" {
-                finding(Some(recovery.node_id.clone()), "recoverableOperation", "warning",
-                    format!("旧 Worker Session {} 已封禁并关闭；核对潜在副作用和预算后，可用 workflow recover --run {} --revision {} 在同一 Run 重试这个无写租约操作；不会重跑已完成节点。", recovery.previous_session_id, run.id, run.revision));
+                if recovery.reuse_session {
+                    finding(Some(recovery.node_id.clone()), "recoverableOperation", "warning",
+                        format!("未交卷 Worker Session {} 仍保留；核对 git 状态与潜在副作用后，可用 workflow recover --run {} --revision {} 通知同一 Worker 继续。已通过节点不会重跑，写租约不会释放。", recovery.previous_session_id, run.id, run.revision));
+                } else {
+                    finding(Some(recovery.node_id.clone()), "recoverableOperation", "warning",
+                        format!("旧 Worker Session {} 已封禁并关闭；核对潜在副作用和预算后，可用 workflow recover --run {} --revision {} 在同一 Run 重试这个无写租约操作；不会重跑已完成节点。", recovery.previous_session_id, run.id, run.revision));
+                }
             }
         }
         let definitions = if run.engine.is_some() {

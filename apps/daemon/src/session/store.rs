@@ -242,6 +242,10 @@ pub struct SessionMeta {
     pub archived: bool,
     #[serde(default)]
     pub persist: Option<PersistHandle>,
+    /// Last observed agent process. Used after a daemon restart to refuse
+    /// continuing a Worker whose previous process is still writing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_pid: Option<u32>,
     /// A stopped interaction waiting for a user who may return much later.
     /// Stored in meta so no live socket or Agent process is required.
     #[serde(default)]
@@ -346,6 +350,7 @@ impl SessionMeta {
             updated_at_ms: header.updated_at_ms,
             archived: false,
             persist: None,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
@@ -2059,6 +2064,7 @@ mod project_home_tests {
             updated_at_ms: 1,
             archived: false,
             persist: None,
+            agent_pid: None,
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,

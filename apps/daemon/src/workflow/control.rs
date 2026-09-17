@@ -147,9 +147,10 @@ pub(super) struct StopRequest {
     pub cleanup_error: Option<String>,
 }
 
-/// A single unfinished operation without a write lease can be explicitly
-/// re-attempted after its previous Session is fenced. This does not prove the
-/// Worker had no external side effects; the engine operation stays pending.
+/// A Worker that lost its in-memory execution can continue the same Session
+/// after a daemon restart. The host does not reconstruct project files; the
+/// Agent inspects the workspace and its own history. `reuse_session` keeps the
+/// original Session and write lease instead of fencing them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Recovery {
@@ -157,6 +158,39 @@ pub(super) struct Recovery {
     pub previous_session_id: String,
     #[serde(default)]
     pub waiting_since_ms: i64,
+    #[serde(default)]
+    pub reuse_session: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<RecoveryNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RecoveryNode {
+    pub node_id: String,
+    pub session_id: String,
+}
+
+fn recovery_targets(recovery: &Recovery) -> Vec<(String, String)> {
+    if recovery.nodes.is_empty() {
+        vec![(
+            recovery.node_id.clone(),
+            recovery.previous_session_id.clone(),
+        )]
+    } else {
+        recovery
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.clone(), node.session_id.clone()))
+            .collect()
+    }
+}
+
+fn continue_message(run: &RunRecord, node: &NodeDefinition) -> String {
+    format!(
+        "daemon 已重启。本节点尚未提交结果。请先核对本会话历史、任务工作目录（git status、现有文件）和已完成动作，再从中断处继续同一节点；不要重做已经完成的工作，也不要另开任务。只有项目目录消失或会话无法继续时才明确失败。\n\n{}",
+        super::task_message(run, node)
+    )
 }
 
 pub(super) fn outcome_event(outcome: WorkflowNodeOutcome) -> &'static str {
@@ -348,7 +382,7 @@ pub(crate) async fn recover(
     validate_id(run_id, "runId")?;
     let workspace = state.workspaces.get(workspace_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
-    {
+    let assignments = {
         let _guard = lock_run(&runtime, run_id)?;
         let mut run = load_run(&runtime, run_id)?;
         let _request = request::request_lock(&runtime, request::group_id(&run))?;
@@ -380,60 +414,127 @@ pub(crate) async fn recover(
         {
             bail!("旧执行尚未清理干净，不可恢复");
         }
-        let node = run
-            .nodes
-            .get(&recovery.node_id)
-            .ok_or_else(|| anyhow!("恢复节点不存在"))?;
-        if node.status != "interrupted"
-            || node.session_id.as_deref() != Some(&recovery.previous_session_id)
-            || node.attempt != 0
-        {
-            bail!("恢复节点状态不匹配；请先 workflow get/check 核对");
-        }
-        if !run.leases.is_empty()
-            || runtime_node(&run, &recovery.node_id)?
-                .inputs
-                .write_lease
-                .is_some()
-        {
-            bail!("带写租约的操作不可自动重派；交回 PM 核对副作用");
-        }
         if request::budget_exhausted(&runtime, &run, now_ms())? {
             bail!("原始请求预算已耗尽；先核对并调整共享预算");
         }
-        let old = run
-            .nodes
-            .get_mut(&recovery.node_id)
-            .expect("validated node");
-        old.prior_activity.push(std::mem::take(&mut old.activity));
-        old.attempt = 1;
-        old.status = "pending".into();
-        old.session_id = None;
-        old.assigned_at_ms = 0;
-        run.supervision.recovery_wait_ms = run
-            .supervision
-            .recovery_wait_ms
-            .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
-        run.recovery = None;
-        run.stop = None;
-        run.status = "running".into();
-        run.revision = run.revision.saturating_add(1);
-        run.updated_at_ms = now_ms();
-        if let Some(executor) = run.executor_session_id.clone() {
-            let message = flow_message(
-                &run,
-                "node.recovered",
-                Some(&recovery.node_id),
-                &executor,
-                &run.parent_session_id,
-                Some(run.revision),
-                serde_json::json!({"previousSessionId": recovery.previous_session_id, "attempt": 2}),
-            )?;
-            push_flow_message(&mut run, message);
+        if recovery.reuse_session {
+            let mut assignments = Vec::new();
+            for (node_id, session_id) in recovery_targets(&recovery) {
+                let node = run
+                    .nodes
+                    .get(&node_id)
+                    .ok_or_else(|| anyhow!("恢复节点不存在"))?;
+                if node.status != "interrupted"
+                    || node.session_id.as_deref() != Some(session_id.as_str())
+                {
+                    bail!("恢复节点状态不匹配；请先 workflow get/check 核对");
+                }
+                match state.sessions.worker_continuation(&session_id).await {
+                    crate::session::manager::WorkerContinuation::Ready => {}
+                    crate::session::manager::WorkerContinuation::ProcessAlive { pid } => {
+                        bail!(
+                            "旧 Worker 仍在运行，暂停续接{}",
+                            pid.map(|pid| format!("（pid {pid}）")).unwrap_or_default()
+                        );
+                    }
+                    crate::session::manager::WorkerContinuation::Unavailable { reason } => {
+                        bail!("{reason}");
+                    }
+                }
+                let definition = runtime_node(&run, &node_id)?;
+                let summary = state.sessions.summary(&session_id).await?;
+                let message = continue_message(&run, &definition);
+                let record = run.nodes.get_mut(&node_id).expect("validated node");
+                record.status = "running".into();
+                record.assigned_at_ms = now_ms();
+                assignments.push((summary, message));
+            }
+            run.supervision.recovery_wait_ms = run
+                .supervision
+                .recovery_wait_ms
+                .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
+            run.recovery = None;
+            run.stop = None;
+            run.status = "running".into();
+            run.revision = run.revision.saturating_add(1);
+            run.updated_at_ms = now_ms();
+            if let Some(executor) = run.executor_session_id.clone() {
+                let message = flow_message(
+                    &run,
+                    "node.continued",
+                    Some(&recovery.node_id),
+                    &executor,
+                    &run.parent_session_id,
+                    Some(run.revision),
+                    serde_json::json!({
+                        "previousSessionId": recovery.previous_session_id,
+                        "reusedSession": true
+                    }),
+                )?;
+                push_flow_message(&mut run, message);
+            }
+            save_run(&runtime, &run)?;
+            Some(assignments)
+        } else {
+            let node = run
+                .nodes
+                .get(&recovery.node_id)
+                .ok_or_else(|| anyhow!("恢复节点不存在"))?;
+            if node.status != "interrupted"
+                || node.session_id.as_deref() != Some(&recovery.previous_session_id)
+                || node.attempt != 0
+            {
+                bail!("恢复节点状态不匹配；请先 workflow get/check 核对");
+            }
+            if !run.leases.is_empty()
+                || runtime_node(&run, &recovery.node_id)?
+                    .inputs
+                    .write_lease
+                    .is_some()
+            {
+                bail!("带写租约的操作不可自动重派；交回 PM 核对副作用");
+            }
+            let old = run
+                .nodes
+                .get_mut(&recovery.node_id)
+                .expect("validated node");
+            old.prior_activity.push(std::mem::take(&mut old.activity));
+            old.attempt = 1;
+            old.status = "pending".into();
+            old.session_id = None;
+            old.assigned_at_ms = 0;
+            run.supervision.recovery_wait_ms = run
+                .supervision
+                .recovery_wait_ms
+                .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
+            run.recovery = None;
+            run.stop = None;
+            run.status = "running".into();
+            run.revision = run.revision.saturating_add(1);
+            run.updated_at_ms = now_ms();
+            if let Some(executor) = run.executor_session_id.clone() {
+                let message = flow_message(
+                    &run,
+                    "node.recovered",
+                    Some(&recovery.node_id),
+                    &executor,
+                    &run.parent_session_id,
+                    Some(run.revision),
+                    serde_json::json!({"previousSessionId": recovery.previous_session_id, "attempt": 2}),
+                )?;
+                push_flow_message(&mut run, message);
+            }
+            save_run(&runtime, &run)?;
+            None
         }
-        save_run(&runtime, &run)?;
+    };
+    if let Some(assignments) = assignments {
+        for (session, message) in assignments {
+            start_assigned(state, workspace_id, run_id, &session, message).await?;
+        }
+    } else {
+        structured::drive(state, &runtime, run_id).await?;
     }
-    structured::drive(state, &runtime, run_id).await?;
     run_status(&runtime, &load_run(&runtime, run_id)?)
 }
 
@@ -746,6 +847,10 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         let previous_status = run.status.clone();
         if run.status == "running" {
             supervision::observe(state, runtime, &mut run).await?;
+            let mut waiting = false;
+            let mut lost = Vec::new();
+            let mut alive: Option<Option<u32>> = None;
+            let mut unavailable: Option<String> = None;
             for (node_id, node) in &run.nodes {
                 if node.status != "running"
                     || now_ms() - node.assigned_at_ms.max(run.created_at_ms) < 10_000
@@ -760,6 +865,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                     .as_ref()
                     .is_ok_and(|session| session.status == SessionStatus::Waiting)
                 {
+                    waiting = true;
                     continue;
                 }
                 if summary.is_err()
@@ -771,33 +877,94 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                             )
                         }))
                 {
-                    let reason = format!(
-                        "节点 {node_id} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理"
-                    );
-                    let eligible = run.engine.is_some()
-                        && node.uses == "agent.session"
-                        && node.attempt == 0
-                        && !run.leases.contains_key(node_id)
-                        && runtime_node(&run, node_id)?.inputs.write_lease.is_none()
-                        && run
-                            .nodes
-                            .values()
-                            .filter(|other| {
-                                matches!(other.status.as_str(), "running" | "finishing")
-                            })
-                            .count()
-                            == 1;
-                    if eligible {
-                        run.recovery = Some(Recovery {
-                            node_id: node_id.clone(),
-                            previous_session_id: session_id.clone(),
-                            waiting_since_ms: 0,
-                        });
-                        request_stop(&mut run, "recoverable", reason);
-                    } else {
-                        request_stop(&mut run, "blocked", reason);
+                    if node.uses != "agent.session" {
+                        unavailable = Some(format!(
+                            "节点 {node_id} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理"
+                        ));
+                        break;
                     }
-                    break;
+                    match state.sessions.worker_continuation(session_id).await {
+                        crate::session::manager::WorkerContinuation::Ready => {
+                            lost.push((node_id.clone(), session_id.clone()));
+                        }
+                        crate::session::manager::WorkerContinuation::ProcessAlive { pid } => {
+                            alive = Some(pid);
+                            break;
+                        }
+                        crate::session::manager::WorkerContinuation::Unavailable { reason } => {
+                            unavailable = Some(reason);
+                            break;
+                        }
+                    }
+                }
+            }
+            if let Some(pid) = alive {
+                request_stop(
+                    &mut run,
+                    "blocked",
+                    format!(
+                        "旧 Worker 仍在运行，暂停续接{}",
+                        pid.map(|pid| format!("（pid {pid}）")).unwrap_or_default()
+                    ),
+                );
+            } else if let Some(reason) = unavailable {
+                request_stop(&mut run, "blocked", reason);
+            } else if !waiting && !lost.is_empty() {
+                if run.engine.is_none() {
+                    request_stop(
+                        &mut run,
+                        "blocked",
+                        format!(
+                            "节点 {} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理",
+                            lost.iter()
+                                .map(|(id, _)| id.as_str())
+                                .collect::<Vec<_>>()
+                                .join("、")
+                        ),
+                    );
+                } else {
+                    let (node_id, session_id) = lost[0].clone();
+                    let reason = format!(
+                    "节点 {} 的 Worker 已与 daemon 失联，尚未提交结果；原 Session 与写租约仍保留，交回 PM 核对后续接",
+                    lost.iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join("、")
+                );
+                    for (id, _) in &lost {
+                        run.nodes.get_mut(id).expect("lost node").status = "interrupted".into();
+                    }
+                    run.recovery = Some(Recovery {
+                        node_id,
+                        previous_session_id: session_id,
+                        waiting_since_ms: now_ms(),
+                        reuse_session: true,
+                        nodes: lost
+                            .into_iter()
+                            .map(|(node_id, session_id)| RecoveryNode {
+                                node_id,
+                                session_id,
+                            })
+                            .collect(),
+                    });
+                    run.status = "recoverable".into();
+                    run.stop = Some(StopRequest {
+                        target: "recoverable".into(),
+                        reason,
+                        cleanup_error: None,
+                    });
+                    if let Some(executor) = run.executor_session_id.clone() {
+                        let message = flow_message(
+                            &run,
+                            "run.recoverable",
+                            None,
+                            &executor,
+                            &run.parent_session_id,
+                            Some(run.revision.saturating_add(1)),
+                            serde_json::json!({"reuseSession": true, "status": "recoverable"}),
+                        )?;
+                        push_flow_message(&mut run, message);
+                    }
                 }
             }
         }

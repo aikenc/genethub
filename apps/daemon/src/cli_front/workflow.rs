@@ -802,7 +802,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow cancel 需要 --revision <current>"))?,
         }),
-        "recover" => Ok(Command::Recover {
+        "recover" | "continue" => Ok(Command::Recover {
             workspace_id: values.workspace.take(),
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --revision <current>"))?,
@@ -826,7 +826,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             })
         }
         _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|recover|budget ...",
+            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|recover|continue|budget ...",
         )),
     }
 }

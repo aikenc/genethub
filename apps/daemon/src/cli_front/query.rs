@@ -1291,7 +1291,7 @@ fn command_schema(name: &str) -> Value {
         ),
         "workflow.recover" => workflow_schema(
             "genet workflow recover [--workspace <id>] --run <id> --revision <current>",
-            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0, "description": "Run revision from workflow get; requires exactly one fenced unfinished active operation, no write lease and no previous recovery attempt. Parallel per-item resume is not supported. Inspect external side effects first."}}),
+            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0, "description": "Run revision from workflow get. After a daemon restart this continues the original unfinished Worker Session and keeps any write lease; it does not replay completed nodes. If the previous Worker process is still running, continuation is refused. Inspect git status and side effects first."}}),
             &["runId", "revision"],
         ),
         "workflow.budget" => workflow_schema(

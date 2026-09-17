@@ -87,9 +87,10 @@ foreach items inherit a copy of the parent context. Completed negative business 
 are data; unaccepted host/Worker failures still stop the Run and await cleanup.
 
 Only a wholly Human-waiting Run pauses the host execution-time budget; questions
-stay visible when siblings are working. Current same-Run recovery requires one
-unfinished active operation, no write lease and no prior recovery attempt. It
-does not guarantee item-level recovery of a parallel group or exactly-once effects.
+stay visible when siblings are working. Current same-Run recovery continues the
+original Worker Session after a daemon restart, keeps any write lease, and does
+not replay completed nodes. It refuses continuation while the previous process
+is still running and does not reconstruct project files.
 
 ## Agent repair and evidence boundaries
 
