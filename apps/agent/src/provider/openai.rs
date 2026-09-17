@@ -219,8 +219,11 @@ pub fn convert_messages(
     messages: &[Message],
 ) -> anyhow::Result<Value> {
     let mut out = vec![json!({ "role": "system", "content": system_prompt })];
+    let latest_user = messages
+        .iter()
+        .rposition(|message| matches!(message, Message::User { .. }));
 
-    for message in messages {
+    for (index, message) in messages.iter().enumerate() {
         match message {
             Message::User {
                 content,
@@ -235,6 +238,16 @@ pub fn convert_messages(
                         parts.push(json!({ "type": "text", "text": content }));
                     }
                     for attachment in attachments {
+                        let kind = media::kind(attachment)?;
+                        if Some(index) != latest_user
+                            && !model.input_modalities.iter().any(|input| input == kind)
+                        {
+                            parts.push(json!({
+                                "type": "text",
+                                "text": media::historical_note(attachment, kind),
+                            }));
+                            continue;
+                        }
                         let (kind, url) = media::data_url(model, cwd, attachment)?;
                         parts.push(if kind == "image" {
                             json!({ "type": "image_url", "image_url": { "url": url } })

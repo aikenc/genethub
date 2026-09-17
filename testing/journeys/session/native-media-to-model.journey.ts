@@ -7,7 +7,7 @@ defineJourney(
     id: "journey.session.native-media-to-model",
     title: "The built-in Agent sends configured image and video inputs to the model",
     oracle: "a user turn with a pasted image and session-uploaded video reaches the mock Chat Completions endpoint as native image_url and video_url parts, and remains in follow-up history",
-    catches: ["Genet silently drops attachments", "video is reduced to a path or sampled frames", "model media settings do not reach the Agent", "media disappears on the next turn"],
+    catches: ["Genet silently drops attachments", "video is reduced to a path or sampled frames", "model media settings do not reach the Agent", "media disappears on the next turn", "switching to a text-only model traps the session on old media"],
     tags: ["core", "session", "media", "parity"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
@@ -27,7 +27,7 @@ defineJourney(
           baseUrl: null,
           label: null,
           dialect: null,
-          models: null,
+          models: ["deepseek-v4-flash", "deepseek-text"],
           modelInputs: { "deepseek-v4-flash": ["image", "video"] },
         },
       });
@@ -78,7 +78,7 @@ defineJourney(
       });
       t.assertions.assert(finished?.type === "sessionArtifact", "video upload was not published");
       if (finished?.type !== "sessionArtifact") return;
-      opened.mock.script({ text: "seen both" }, { text: "still seen" });
+      opened.mock.script({ text: "seen both" }, { text: "still seen" }, { text: "switched" }, { text: "recovered" });
       await opened.client.call({
         type: "session.send",
         payload: {
@@ -110,6 +110,23 @@ defineJourney(
         "the video was not retained in follow-up model context",
       );
 
+      const switched = await opened.client.call({
+        type: "session.setModel",
+        payload: { sessionId, modelId: "deepseek/deepseek-text" },
+      });
+      t.assertions.assert(switched?.type === "ack", "switching to a text-only model failed");
+      await t.flows.main.sendPrompt(opened.client, sessionId, "Continue without the video");
+      await t.tools.waitUntil(() => events.filter((item) => item.type === "turnCompleted").length >= 3, 45_000);
+      const third = opened.mock.requests[2] as { messages?: Array<{ role?: string; content?: unknown }> };
+      t.assertions.assert(
+        !JSON.stringify(third.messages).includes(`data:video/mp4;base64,${video.toString("base64")}`),
+        "the text-only model received old video bytes",
+      );
+      t.assertions.assert(
+        JSON.stringify(third.messages).includes("历史附件"),
+        "the text-only model did not receive an explanation for omitted history",
+      );
+
       await opened.client.call({
         type: "settings.setProvider",
         payload: {
@@ -138,7 +155,10 @@ defineJourney(
       const failed = deniedEvents.find((item) => item.type === "turnFailed");
       const error = (failed?.raw as { event?: { error?: { message?: string } } })?.event?.error;
       t.assertions.assert(error?.message?.includes("未配置 video 输入能力") ?? false, "unsupported video was not explained to the user");
-      t.assertions.assert(opened.mock.requests.length === 2, "unsupported video reached the model endpoint");
+      t.assertions.assert(opened.mock.requests.length === 3, "unsupported video reached the model endpoint");
+      await t.flows.main.sendPrompt(opened.client, deniedSessionId, "Continue with text only");
+      await t.tools.waitUntil(() => deniedEvents.some((item) => item.type === "turnCompleted"), 45_000);
+      t.assertions.assert(opened.mock.requests.length === 4, "rejected media blocked the next text turn");
     } finally {
       opened.client.close();
       opened.daemon.stop();

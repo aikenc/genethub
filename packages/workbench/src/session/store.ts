@@ -1394,14 +1394,26 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
 
     try {
-      const uploaded = await Promise.all(videoFiles.map(async (file) => {
+      // Artifact storage requires ASCII file names. Keep the original names in
+      // chat while using fixed names for the files the Agent reads.
+      const stagedVideos = videoFiles.map((file, index) => ({
+        name: `video-${index + 1}.${videoExtension(file.type)}`,
+        mime: file.type,
+        blob: file,
+      }));
+      let uploaded: Attachment[] = [];
+      if (stagedVideos.length > 0) {
         const bundle = await uploadSessionArtifact(require_(get().client), sessionId, {
-          files: [{ name: file.name, mime: file.type, blob: file }],
+          files: stagedVideos,
           metadata: { kind: "chat-video-input" },
           summary: { eventCount: 0, frameCount: 0, recording: null },
         });
-        return { name: file.name, mime: file.type, path: `${bundle.workspacePath}/${file.name}` };
-      }));
+        uploaded = stagedVideos.map((staged, index) => ({
+          name: videoFiles[index]!.name,
+          mime: staged.mime,
+          path: `${bundle.workspacePath}/${staged.name}`,
+        }));
+      }
       const sentAttachments = [...attachments, ...uploaded];
       // Artifact Preview URLs are bound at chat/document render time from the
       // current workspace roots. Agents emit relative/absolute file paths; the
@@ -2514,6 +2526,17 @@ async function asked<T>(set: Setter, run: () => Promise<T>): Promise<T | undefin
 function require_(client: Client | null): Client {
   if (!client) throw new Error("the workbench is not connected yet");
   return client;
+}
+
+function videoExtension(mime: string): string {
+  switch (mime) {
+    case "video/mp4": return "mp4";
+    case "video/webm": return "webm";
+    case "video/quicktime": return "mov";
+    case "video/mpeg": return "mpeg";
+    case "video/x-msvideo": return "avi";
+    default: throw new Error(`视频格式当前不支持：${mime}`);
+  }
 }
 
 /**

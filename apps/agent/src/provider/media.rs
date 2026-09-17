@@ -18,17 +18,7 @@ pub fn data_url(
     attachment: &MediaAttachment,
 ) -> Result<(&'static str, String)> {
     let mime = attachment.mime.to_ascii_lowercase();
-    let kind = match mime.as_str() {
-        "image/jpeg" | "image/png" | "image/webp" | "image/gif" => "image",
-        "video/mp4" | "video/webm" | "video/quicktime" | "video/mpeg" | "video/x-msvideo" => {
-            "video"
-        }
-        _ => bail!(
-            "{} 的媒体类型 {} 尚不支持",
-            attachment.name,
-            attachment.mime
-        ),
-    };
+    let kind = kind(attachment)?;
     if !model.input_modalities.iter().any(|input| input == kind) {
         bail!(
             "模型 {}/{} 未配置 {} 输入能力",
@@ -81,4 +71,26 @@ pub fn data_url(
         }
     };
     Ok((kind, format!("data:{mime};base64,{encoded}")))
+}
+
+pub fn kind(attachment: &MediaAttachment) -> Result<&'static str> {
+    match attachment.mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif" => Ok("image"),
+        "video/mp4" | "video/webm" | "video/quicktime" | "video/mpeg" | "video/x-msvideo" => {
+            Ok("video")
+        }
+        _ => bail!(
+            "{} 的媒体类型 {} 尚不支持",
+            attachment.name,
+            attachment.mime
+        ),
+    }
+}
+
+pub fn historical_note(attachment: &MediaAttachment, kind: &str) -> String {
+    format!(
+        "历史附件「{}」（{}）无法由当前模型读取。",
+        attachment.name,
+        if kind == "image" { "图片" } else { "视频" }
+    )
 }
