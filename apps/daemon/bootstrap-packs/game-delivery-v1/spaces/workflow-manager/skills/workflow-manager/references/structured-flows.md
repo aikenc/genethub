@@ -8,7 +8,7 @@ instances: use the assignment's node identity, not the static activity ID.
 
 Compose tasks with `sequence.steps`, `if.condition/then/else`,
 `choice.branches/default`, `loop.condition/maxRounds/initial/body/update`,
-`parallel.branches/failure`, `forEach.items/key/maxConcurrency/body/failure`, or
+`parallel.branches/completeWhen`, `forEach.items/key/maxConcurrency/body/completeWhen`, or
 `call.procedure/input` with local `structure.procedures`. All block IDs in the
 bundle are unique. Recursive calls and arbitrary cross-block edges are invalid.
 
@@ -104,8 +104,29 @@ For review loops, the review task explicitly accepts `[completed,
 changesRequested]`. The host still verifies approved evidence for completed.
 Use the review outcome to update approval, and carry the review report in vars
 for the next Coder. Do not count a failed review as an incomplete Worker.
-Unaccepted failures block. `collect` gathers branches; `failFast` stops remaining
-execution and waits for host cleanup. It does not provide compensation.
+Unaccepted failures block. A group gathers every branch or item by default. To
+stop launching more items, declare `completeWhen` over the arrived `/results`
+and the `/group` counts (`total`, `arrived`, `succeeded`, `failed`, `running`,
+`remaining`), for example
+`{op: not, value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}}`
+for stop-on-first-failure, or `{op: lt, left: {op: literal, value: 1}, right: {op: ref, path: /group/succeeded}}`
+for a two-of-N quorum. Items already running still finish and still count; the
+kernel does not kill a Worker to satisfy a satisfied quorum, and this provides
+no compensation for side effects already performed. The one exception is a group
+that has already failed: when `completeWhen` holds and a failure has arrived, the
+group can no longer succeed, so the Run stops instead of buying results nobody
+can use. A `parallel` block accepts the same `completeWhen`, but every branch has
+already started there, so it can only cut short that already-failed case. An older
+`failure: collect|failFast` in an existing definition still compiles, translated to
+the equivalent expression; write `completeWhen` in new or edited Workflows.
+
+A node may bind `with.workspace` to an expression over its own task `input`, so
+sibling instances work in different directories. Write leases are keyed by
+(directory, target ref), so separate directories on separate branches are
+genuinely parallel while the same target ref stays serialized. The kernel has no
+Git worktree concept: a pack node must create the directory (for example
+`git worktree add`) and return its project-relative path in `completion.output`
+before a later task points at it.
 
 For batches, freeze a finite item array and prefer an explicit unique key such
 as `{op: ref, path: /item/id}`. Index identity is supported for an immutable

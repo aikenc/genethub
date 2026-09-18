@@ -109,7 +109,12 @@ structure:
                 items: {op: ref, path: /results/assess-requirements/output/milestones}
                 key: {op: ref, path: /item/id}
                 maxConcurrency: 1
-                failure: failFast
+                # Milestones share one mainline and each accepted contract feeds
+                # the next, so this fold stays serial. Stop starting milestones
+                # once one has genuinely failed rather than merely been rejected.
+                completeWhen:
+                  op: not
+                  value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}
                 initial:
                   op: object
                   fields:
@@ -268,7 +273,9 @@ structure:
                 items: {op: ref, path: /input/contract/criteria}
                 key: {op: ref, path: /item/id}
                 maxConcurrency: 4
-                failure: failFast
+                # Independent checks against one frozen artifact: run them all.
+                # A failed check still makes this group unsuccessful, so the Run
+                # blocks, but the sibling verdicts are not thrown away.
                 body:
                   id: check-item
                   type: task

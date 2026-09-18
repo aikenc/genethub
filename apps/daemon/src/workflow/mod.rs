@@ -140,9 +140,60 @@ struct NodeInputs {
     #[serde(default)]
     role: Option<String>,
     #[serde(default)]
-    workspace: Option<String>,
+    workspace: Option<WorkspaceBinding>,
     #[serde(default)]
     write_lease: Option<WriteLeaseDefinition>,
+}
+
+/// Where a node instance works. A string is the project-relative directory an
+/// author wrote by hand. An expression is evaluated against this activity's own
+/// input, so sibling instances can occupy directories an earlier node produced.
+///
+/// The kernel gains no Git, branch or worktree concept from this: it resolves
+/// data to one directory and keeps owning the write lease over (directory,
+/// target ref). A pack that wants parallel branches creates those directories
+/// with its own nodes.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum WorkspaceBinding {
+    Path(String),
+    Expression(workflow_engine::Expr),
+}
+
+impl WorkspaceBinding {
+    fn literal(&self) -> Option<&str> {
+        match self {
+            Self::Path(path) => Some(path.as_str()),
+            Self::Expression(_) => None,
+        }
+    }
+
+    fn resolve(&self, input: &serde_json::Value) -> Result<String> {
+        match self {
+            Self::Path(path) => Ok(path.clone()),
+            Self::Expression(expr) => {
+                let context =
+                    serde_json::json!({"input": input, "vars": null, "results": {}, "item": null});
+                match expr
+                    .evaluate(&context)
+                    .with_context(|| "求值 with.workspace 表达式".to_string())?
+                {
+                    serde_json::Value::String(path) => Ok(path),
+                    other => bail!("with.workspace 表达式必须求值为字符串，实际为 {other}"),
+                }
+            }
+        }
+    }
+}
+
+/// Bind one activity instance to its directory before any execution exists.
+/// A literal binding resolves to itself, so both forms are stored the same way.
+fn resolved_workspace(node: &NodeDefinition, input: &serde_json::Value) -> Result<Option<String>> {
+    node.inputs
+        .workspace
+        .as_ref()
+        .map(|binding| binding.resolve(input))
+        .transpose()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -571,8 +622,19 @@ struct NodeRecord {
     outcome: Option<genehub_proto::WorkflowNodeOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Transition clock. The kernel records when each state change happened and
+    /// nothing else: no durations, ranking, critical path or utilization. A
+    /// reader that wants those derives them from these facts.
+    #[serde(default)]
+    pending_since_ms: i64,
     #[serde(default)]
     assigned_at_ms: i64,
+    #[serde(default)]
+    settled_at_ms: i64,
+    /// Resolved task working directory, relative to the project root, when the
+    /// node's `with.workspace` is an expression over this activity's input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<String>,
     uses: String,
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1176,7 +1238,10 @@ pub(crate) async fn dispatch(
                 attempt: 0,
                 outcome: None,
                 reason: None,
+                pending_since_ms: now_ms(),
                 assigned_at_ms: 0,
+                settled_at_ms: 0,
+                workspace: None,
                 uses: node.uses.clone(),
                 status: "pending".into(),
                 session_id: None,
@@ -1449,6 +1514,7 @@ pub(crate) async fn complete(
     // Persist the result before retiring its execution. Successors start only
     // after process cleanup, so evidence cannot race an old writer's final tools.
     record.status = "finishing".into();
+    record.settled_at_ms = now_ms();
     record.evidence = evidence;
     record.output = output;
     record.outcome = Some(outcome);
@@ -1549,12 +1615,20 @@ async fn activate(
             match node.uses.as_str() {
                 "result.publish" | "request.budget" => {
                     let output = if node.uses == "request.budget" {
-                        Some(serde_json::to_value(request::snapshot(runtime, run, now_ms())?)?)
-                    } else { None };
+                        Some(serde_json::to_value(request::snapshot(
+                            runtime,
+                            run,
+                            now_ms(),
+                        )?)?)
+                    } else {
+                        None
+                    };
                     let record = run.nodes.get_mut(&node_id).expect("validated node");
                     record.output = output;
                     record.outcome = Some(genehub_proto::WorkflowNodeOutcome::Completed);
                     record.status = "completed".into();
+                    record.assigned_at_ms = now_ms();
+                    record.settled_at_ms = record.assigned_at_ms;
                     queue.extend(node.on.get("completed").cloned().unwrap_or_default());
                 }
                 "agent.session" => {
@@ -1568,28 +1642,55 @@ async fn activate(
                         .get(role_id)
                         .cloned()
                         .ok_or_else(|| anyhow!("角色不存在：{role_id}"))?;
+                    // A structured node resolved its directory when the activity
+                    // was created, from that instance's own input. A DAG node has
+                    // no such input and may only name a fixed directory.
+                    let workspace = run
+                        .nodes
+                        .get(&node_id)
+                        .and_then(|record| record.workspace.clone())
+                        .or_else(|| {
+                            node.inputs
+                                .workspace
+                                .as_ref()
+                                .and_then(WorkspaceBinding::literal)
+                                .map(str::to_string)
+                        });
                     let execution = execution_workspace(
                         state,
                         &run.workspace_id,
                         run.executor_workspace_id.as_deref(),
                         role_id,
-                        run.execution_root.as_deref().map(Path::new).unwrap_or(project_root),
-                        node.inputs.workspace.as_deref(),
+                        run.execution_root
+                            .as_deref()
+                            .map(Path::new)
+                            .unwrap_or(project_root),
+                        workspace.as_deref(),
                     )
                     .await?;
                     if let Some(policy) = &node.inputs.write_lease {
-                        let lease =
-                            acquire_lease(state, runtime, &execution.task_cwd, run, &node.id, policy)
-                                .await?;
+                        let lease = acquire_lease(
+                            state,
+                            runtime,
+                            &execution.task_cwd,
+                            run,
+                            &node.id,
+                            policy,
+                        )
+                        .await?;
                         run.leases.insert(node.id.clone(), lease);
                     }
                     let evidence_scope = if role.evidence_only {
                         let mut ids = BTreeSet::from([run.parent_session_id.clone()]);
                         for previous in history(runtime, 100)? {
                             ids.insert(previous.parent_session_id);
-                            if let Some(id) = previous.executor_session_id { ids.insert(id); }
+                            if let Some(id) = previous.executor_session_id {
+                                ids.insert(id);
+                            }
                             for node in previous.nodes {
-                                if let Some(id) = node.session_id { ids.insert(id); }
+                                if let Some(id) = node.session_id {
+                                    ids.insert(id);
+                                }
                             }
                         }
                         let mut boundaries = BTreeMap::new();
@@ -1602,7 +1703,9 @@ async fn activate(
                             root: project_root.canonicalize()?.display().to_string(),
                             sessions: boundaries,
                         })
-                    } else { None };
+                    } else {
+                        None
+                    };
                     let managed = ManagedSessionInfo {
                         parent_session_id: run
                             .executor_session_id
@@ -1628,7 +1731,13 @@ async fn activate(
                             Some(format!("{} · {}", run.task_id, role.id)),
                             managed,
                             system_prompt,
-                            run.engine.as_ref().map(|_| structured::session_id_for_attempt(&run.id, &node.id, run.nodes.get(&node.id).map_or(0, |record| record.attempt))),
+                            run.engine.as_ref().map(|_| {
+                                structured::session_id_for_attempt(
+                                    &run.id,
+                                    &node.id,
+                                    run.nodes.get(&node.id).map_or(0, |record| record.attempt),
+                                )
+                            }),
                         )
                         .await?;
                     let record = run.nodes.get_mut(&node.id).expect("validated node");
@@ -2200,6 +2309,14 @@ fn load_bundle_from(source: &Path, entry: &CatalogEntry) -> Result<Bundle> {
     })
 }
 
+/// Compile a project's Workflow source the same way an activation would,
+/// without touching runtime state. Shipped assets are validated through the
+/// project path instead of a second checker that could disagree with it.
+#[cfg(test)]
+pub(crate) fn validate_source(project_root: &Path) -> Result<()> {
+    compile_candidate(&source_root(project_root)?).map(|_| ())
+}
+
 fn compile_candidate(source: &Path) -> Result<DcgCandidateRecord> {
     let (project, catalog, project_files) = load_project_files(source)?;
     if !catalog
@@ -2712,6 +2829,16 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
                 || node.inputs.write_lease.is_some())
         {
             bail!("{} 节点 {} 不能声明 with 输入", node.uses, node.id);
+        }
+        if let Some(WorkspaceBinding::Expression(expr)) = &node.inputs.workspace {
+            if definition.structure.is_none() {
+                bail!(
+                    "节点 {} 的 with.workspace 表达式需要结构化 Workflow；DAG 节点只能声明固定目录",
+                    node.id
+                );
+            }
+            workflow_engine::validate_expression(expr, Some("string"))
+                .with_context(|| format!("校验节点 {} 的 with.workspace 表达式", node.id))?;
         }
         if let Some(shape) = &node.completion.output {
             shape.validate()?;
@@ -3569,6 +3696,13 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
         ),
         request_run_id: Some(request::group_id(run).into()),
         report_pending: Some(supervision::report_pending(run)),
+        supervision: Some(genehub_proto::WorkflowSupervisionStatus {
+            last_checked_at_ms: run.supervision.last_checked_at_ms,
+            human_wait_ms: run.supervision.human_wait_ms,
+            recovery_wait_ms: run.supervision.recovery_wait_ms,
+            waiting: run.supervision.waiting,
+            silence_threshold_ms: supervision::SILENCE_MS,
+        }),
         request_budget: request::budget(&root).status(),
         reason: run.stop.as_ref().map(|stop| stop.reason.clone()),
         cleanup_error: run
@@ -3605,8 +3739,18 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
             .iter()
             .map(|(id, node)| WorkflowNodeRunStatus {
                 output: node.output.clone(),
+                pending_since_ms: Some(node.pending_since_ms),
                 assigned_at_ms: Some(node.assigned_at_ms),
+                settled_at_ms: Some(node.settled_at_ms),
                 last_activity_at_ms: Some(node.activity.last_at_ms),
+                attempt: Some(node.attempt),
+                llm_rounds: Some(node.activity.llm_rounds),
+                tokens: node.activity.tokens,
+                prior_llm_rounds: Some(
+                    node.prior_activity
+                        .iter()
+                        .fold(0, |sum, activity| sum.saturating_add(activity.llm_rounds)),
+                ),
                 outcome: node.outcome,
                 reason: node.reason.clone(),
                 id: id.clone(),
@@ -4307,7 +4451,7 @@ mod tests {
 
         assert!(validate_definition(&publish(
             NodeInputs {
-                workspace: Some(".".into()),
+                workspace: Some(WorkspaceBinding::Path(".".into())),
                 ..Default::default()
             },
             CompletionDefinition::default(),
@@ -4387,7 +4531,10 @@ mod tests {
                     attempt: 0,
                     outcome: None,
                     reason: None,
+                    pending_since_ms: 1,
                     assigned_at_ms: 0,
+                    settled_at_ms: 0,
+                    workspace: None,
                     uses: "result.publish".into(),
                     status: "completed".into(),
                     session_id: None,

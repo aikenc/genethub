@@ -1530,6 +1530,22 @@ mod tests {
             .all(|file| !file.body.windows(2).any(|window| window == b"{{")));
     }
 
+    #[test]
+    fn every_shipped_workflow_compiles_through_the_project_path() {
+        let pack = load("game-delivery-v1").expect("embedded pack");
+        let temp = tempfile::tempdir().expect("temporary project");
+        let project = temp.path().join("game-project");
+        fs::create_dir(&project).expect("project");
+        for file in render(&pack, &project, "codex", Some("test-model")).expect("render") {
+            write_asset(&project, Path::new(&file.relative), &file.body).expect("write asset");
+        }
+
+        // A Pack ships its workflows to real projects, so an expression, join
+        // policy or role reference that the engine rejects must fail here and
+        // not at a user's first dispatch.
+        crate::workflow::validate_source(&project).expect("shipped workflows compile");
+    }
+
     #[tokio::test]
     async fn every_bootstrap_stage_compensates_to_the_same_empty_project() {
         for stage in [

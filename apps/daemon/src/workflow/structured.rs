@@ -267,7 +267,10 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                         attempt: 0,
                         outcome: None,
                         reason: None,
+                        pending_since_ms: now_ms(),
                         assigned_at_ms: 0,
+                        settled_at_ms: 0,
+                        workspace: resolved_workspace(activity, &op.input)?,
                         uses: activity.uses.clone(),
                         status: "pending".into(),
                         session_id: None,
@@ -288,7 +291,9 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                         .as_deref()
                         .map(Path::new)
                         .unwrap_or(&runtime.project_root),
-                    node.inputs.workspace.as_deref(),
+                    run.nodes
+                        .get(&id)
+                        .and_then(|record| record.workspace.as_deref()),
                 )
                 .await?;
                 let target = if policy.target_ref == "current" {

@@ -57,7 +57,9 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
       { id: "stop-if-rejected", type: "if", condition: { op: "not", value: ref("/results/work/output/ok") },
         then: { id: "exit-batch", type: "break", value: object({ count: ref("/vars/count"), items: ref("/vars/items"), stopped: ref("/item") }) } },
     ], output: next };
-    const fold = { id: "batch", type: "forEach", items: ref("/results/plan/output"), key: ref("/item"), maxConcurrency: 1, failure: "failFast",
+    // Stop starting items once one has failed: the group can no longer succeed.
+    const stopOnFailure = { op: "not", value: { op: "eq", left: ref("/group/failed"), right: literal(0) } };
+    const fold = { id: "batch", type: "forEach", items: ref("/results/plan/output"), key: ref("/item"), maxConcurrency: 1, completeWhen: stopOnFailure,
       initial: literal({ count: 0, items: [], stopped: null }), body, update: ref("/results") };
     const root = scenario === "null"
       ? { id: "root", type: "sequence", steps: [task("null-value", "null", literal({ kind: "null" }))], output: ref("/results/null-value/output") }

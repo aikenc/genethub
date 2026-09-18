@@ -27,3 +27,8 @@ workflows:
     match:
       kind: game
       complexity: review-and-improve
+  - id: parallel-features
+    path: parallel-features.yaml
+    match:
+      kind: game
+      complexity: parallel-features

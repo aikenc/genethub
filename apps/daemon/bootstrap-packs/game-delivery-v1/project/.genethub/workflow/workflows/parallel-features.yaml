@@ -1,0 +1,298 @@
+# Aggressively parallel branch development with asynchronous integration onto a
+# single mainline. Independent features each own a Git worktree and branch, so
+# their implementations genuinely overlap. Integration has no barrier: every
+# verified feature merges as soon as it is ready, and the kernel's write lease on
+# the mainline ref is what serializes those merges. A rejected feature is data
+# and never blocks its siblings.
+schema: genehub.workflow.definition.v2
+id: parallel-features
+version: 1
+nodes:
+  - id: budget
+    uses: request.budget
+  - id: plan-features
+    uses: agent.session
+    with: {role: reviewer}
+    completion:
+      output:
+        type: object
+        properties:
+          decision: {type: string, enum: [go, noGo, needsAuthorization]}
+          rationale: {type: string, minLength: 1}
+          features:
+            type: array
+            maxItems: 8
+            items:
+              type: object
+              properties:
+                id: {type: string, minLength: 1}
+                goal: {type: string, minLength: 1}
+                branch: {type: string, minLength: 1}
+                criteria:
+                  type: array
+                  minItems: 1
+                  maxItems: 16
+                  items: {type: string, minLength: 1}
+  # Creates one worktree per feature from the project root. Serial, because
+  # concurrent worktree creation contends on the repository index. It adds a new
+  # branch instead of writing the mainline ref, so it takes no write lease.
+  - id: prepare-branch
+    uses: agent.session
+    with: {role: coder}
+    completion:
+      all:
+        - {key: worktree, verify: value.nonEmpty}
+      output:
+        type: object
+        properties:
+          workspace: {type: string, minLength: 1}
+          branch: {type: string, minLength: 1}
+  # Runs inside its own worktree, so `targetRef: current` is that feature's own
+  # branch and sibling implementations hold disjoint leases.
+  - id: implement-feature
+    uses: agent.session
+    with:
+      role: coder
+      workspace: {op: ref, path: /input/workspace}
+      writeLease: {targetRef: current, ttlSeconds: 1800}
+    completion:
+      all:
+        - {key: commit, verify: git.commitOnTarget}
+        - {key: checks, verify: value.nonEmpty}
+      output:
+        type: object
+        properties:
+          commit: {type: string, minLength: 1}
+          summary: {type: string, minLength: 1}
+  - id: verify-feature
+    uses: agent.session
+    with:
+      role: reviewer
+      workspace: {op: ref, path: /input/workspace}
+    completion:
+      output:
+        type: object
+        properties:
+          passed: {type: boolean}
+          finding: {type: string, minLength: 1}
+          evidence: {type: string, minLength: 1}
+  # The single integration point. Every verified feature activates it, and the
+  # mainline write lease admits exactly one at a time.
+  - id: integrate-feature
+    uses: agent.session
+    with:
+      role: coder
+      writeLease: {targetRef: current, ttlSeconds: 900}
+    completion:
+      all:
+        - {key: commit, verify: git.commitOnTarget}
+        - {key: checks, verify: value.nonEmpty}
+      output:
+        type: object
+        properties:
+          mainlineCommit: {type: string, minLength: 1}
+          notes: {type: string, minLength: 1}
+  - id: publish
+    uses: result.publish
+structure:
+  limits: {maxOperations: 96, maxConcurrency: 8, maxFrames: 1024}
+  body:
+    id: parallel-delivery
+    type: sequence
+    output: {op: ref, path: /results/deliver-or-stop}
+    steps:
+      - {id: planning-budget, type: task, activity: budget}
+      - id: plan
+        type: task
+        activity: plan-features
+        input:
+          op: object
+          fields:
+            phase: {op: literal, value: parallel-planning}
+            budget: {op: ref, path: /results/planning-budget/output}
+      - id: deliver-or-stop
+        type: if
+        condition:
+          op: all
+          values:
+            - {op: eq, left: {op: ref, path: /results/plan/output/decision}, right: {op: literal, value: go}}
+            - {op: exists, path: /results/plan/output/features/0}
+        else:
+          id: stop-with-plan
+          type: sequence
+          steps: []
+          output:
+            op: object
+            fields:
+              done: {op: literal, value: false}
+              plan: {op: ref, path: /results/plan/output}
+              integrated: {op: literal, value: []}
+              rejected: {op: literal, value: []}
+        then:
+          id: deliver
+          type: sequence
+          output:
+            op: object
+            fields:
+              done: {op: ref, path: /results/summarize-features/done}
+              plan: {op: ref, path: /results/plan/output}
+              integrated: {op: ref, path: /results/summarize-features/integrated}
+              rejected: {op: ref, path: /results/summarize-features/rejected}
+          steps:
+            - id: prepare-branches
+              type: forEach
+              items: {op: ref, path: /results/plan/output/features}
+              key: {op: ref, path: /item/id}
+              maxConcurrency: 1
+              initial: {op: literal, value: {prepared: []}}
+              update:
+                op: object
+                fields:
+                  prepared:
+                    op: append
+                    array: {op: ref, path: /vars/prepared}
+                    value:
+                      op: object
+                      fields:
+                        id: {op: ref, path: /item/id}
+                        goal: {op: ref, path: /item/goal}
+                        criteria: {op: ref, path: /item/criteria}
+                        branch: {op: ref, path: /results/output/branch}
+                        workspace: {op: ref, path: /results/output/workspace}
+              body:
+                id: create-worktree
+                type: task
+                activity: prepare-branch
+                input:
+                  op: object
+                  fields:
+                    phase: {op: literal, value: branch-preparation}
+                    feature: {op: ref, path: /item}
+            - id: implement-features
+              type: forEach
+              items: {op: ref, path: /results/prepare-branches/prepared}
+              key: {op: ref, path: /item/id}
+              maxConcurrency: 4
+              # A rejected feature is ordinary data and keeps its siblings
+              # running. A hard node failure is not: stop starting new branches
+              # once one has failed. Branches already running still finish and
+              # still integrate; the kernel does not kill a Worker to satisfy
+              # this expression.
+              completeWhen:
+                op: not
+                value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}
+              body:
+                id: feature-branch
+                type: sequence
+                output:
+                  op: object
+                  fields:
+                    featureId: {op: ref, path: /item/id}
+                    branch: {op: ref, path: /item/branch}
+                    passed: {op: ref, path: /results/verification/output/passed}
+                    finding: {op: ref, path: /results/verification/output/finding}
+                    integrated: {op: ref, path: /results/integration/integrated}
+                    mainlineCommit: {op: ref, path: /results/integration/mainlineCommit}
+                steps:
+                  - id: implementation
+                    type: task
+                    activity: implement-feature
+                    input:
+                      op: object
+                      fields:
+                        phase: {op: literal, value: branch-implementation}
+                        feature: {op: ref, path: /item}
+                        workspace: {op: ref, path: /item/workspace}
+                        branch: {op: ref, path: /item/branch}
+                  - id: verification
+                    type: task
+                    activity: verify-feature
+                    input:
+                      op: object
+                      fields:
+                        phase: {op: literal, value: branch-verification}
+                        feature: {op: ref, path: /item}
+                        workspace: {op: ref, path: /item/workspace}
+                        branch: {op: ref, path: /item/branch}
+                        commit: {op: ref, path: /results/implementation/output/commit}
+                  - id: integration
+                    type: if
+                    # Only an immutable, independently verified branch reaches
+                    # the mainline. A Worker's own claim of completion does not.
+                    condition: {op: ref, path: /results/verification/output/passed}
+                    else:
+                      id: skip-integration
+                      type: sequence
+                      steps: []
+                      output:
+                        op: object
+                        fields:
+                          integrated: {op: literal, value: false}
+                          mainlineCommit: {op: literal, value: null}
+                    then:
+                      id: integrate
+                      type: sequence
+                      output:
+                        op: object
+                        fields:
+                          integrated: {op: literal, value: true}
+                          mainlineCommit: {op: ref, path: /results/merge-to-mainline/output/mainlineCommit}
+                      steps:
+                        - id: merge-to-mainline
+                          type: task
+                          activity: integrate-feature
+                          input:
+                            op: object
+                            fields:
+                              phase: {op: literal, value: mainline-integration}
+                              feature: {op: ref, path: /item}
+                              branch: {op: ref, path: /item/branch}
+                              featureCommit: {op: ref, path: /results/implementation/output/commit}
+                              review: {op: ref, path: /results/verification/output}
+            # Mechanical aggregation over the keyed branch results. No Worker and
+            # no LLM participates, and Worker completion order cannot decide the
+            # outcome.
+            - id: summarize-features
+              type: forEach
+              items: {op: entries, value: {op: ref, path: /results/implement-features}}
+              key: {op: ref, path: /item/key}
+              maxConcurrency: 1
+              initial: {op: literal, value: {integrated: [], rejected: [], done: false}}
+              update:
+                op: object
+                fields:
+                  integrated: {op: ref, path: /results/integrated}
+                  rejected: {op: ref, path: /results/rejected}
+                  done: {op: exists, path: /results/integrated/0}
+              body:
+                id: classify-branch
+                type: if
+                condition: {op: ref, path: /item/value/integrated}
+                then:
+                  id: keep-integrated
+                  type: sequence
+                  steps: []
+                  output:
+                    op: object
+                    fields:
+                      integrated:
+                        op: append
+                        array: {op: ref, path: /vars/integrated}
+                        value: {op: ref, path: /item/value}
+                      rejected: {op: ref, path: /vars/rejected}
+                else:
+                  id: keep-rejected
+                  type: sequence
+                  steps: []
+                  output:
+                    op: object
+                    fields:
+                      integrated: {op: ref, path: /vars/integrated}
+                      rejected:
+                        op: append
+                        array: {op: ref, path: /vars/rejected}
+                        value: {op: ref, path: /item/value}
+            - id: publish-integrated
+              type: if
+              condition: {op: ref, path: /results/summarize-features/done}
+              then: {id: publish-result, type: task, activity: publish}

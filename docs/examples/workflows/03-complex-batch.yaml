@@ -62,7 +62,7 @@ structure:
         items: {op: ref, path: /results/discover/output}
         key: {op: ref, path: /item/id}
         maxConcurrency: 1
-        failure: failFast
+        completeWhen: {op: not, value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}}
         initial: {op: literal, value: {accepted: [], deliveries: [], failure: null, approved: true}}
         update: {op: ref, path: /results}
         body:

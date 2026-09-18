@@ -39,7 +39,60 @@ impl Program {
         })
     }
 }
-pub fn compile(definition: Definition) -> Result<Program> {
+/// Translate the retired join enum before anything reads the join policy, so a
+/// Run pinned by an older host keeps the behavior it was started with and a
+/// project source that still declares it keeps compiling.
+fn translate_retired_joins(block: &mut Block) {
+    let (complete_when, retired) = match &mut block.kind {
+        BlockKind::Parallel {
+            branches,
+            complete_when,
+            retired_failure,
+        } => {
+            branches.iter_mut().for_each(translate_retired_joins);
+            (complete_when, retired_failure)
+        }
+        BlockKind::ForEach {
+            body,
+            complete_when,
+            retired_failure,
+            ..
+        } => {
+            translate_retired_joins(body);
+            (complete_when, retired_failure)
+        }
+        BlockKind::Sequence { steps, .. } => {
+            steps.iter_mut().for_each(translate_retired_joins);
+            return;
+        }
+        BlockKind::If { then, r#else, .. } => {
+            translate_retired_joins(then);
+            if let Some(r#else) = r#else {
+                translate_retired_joins(r#else);
+            }
+            return;
+        }
+        BlockKind::Choice { branches, default } => {
+            branches
+                .iter_mut()
+                .for_each(|branch| translate_retired_joins(&mut branch.body));
+            translate_retired_joins(default);
+            return;
+        }
+        BlockKind::Loop { body, .. } => return translate_retired_joins(body),
+        BlockKind::Task { .. } | BlockKind::Call { .. } | BlockKind::Break { .. } => return,
+    };
+    // An explicit `completeWhen` is the author's current intent and wins.
+    if let (None, Some(retired)) = (&complete_when, retired.take()) {
+        *complete_when = retired.translate();
+    }
+}
+pub fn compile(mut definition: Definition) -> Result<Program> {
+    translate_retired_joins(&mut definition.body);
+    definition
+        .procedures
+        .values_mut()
+        .for_each(translate_retired_joins);
     if definition.limits.max_concurrency == 0
         || definition.limits.max_concurrency > 64
         || definition.limits.max_frames == 0
@@ -346,9 +399,15 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 check(initial, "/initial", None)?;
                 check(update, "/update", None)?;
             }
+            BlockKind::Parallel { complete_when, .. } => {
+                if let Some(complete_when) = complete_when {
+                    check(complete_when, "/completeWhen", Some("boolean"))?;
+                }
+            }
             BlockKind::ForEach {
                 items,
                 key,
+                complete_when,
                 initial,
                 update,
                 ..
@@ -356,6 +415,9 @@ pub fn compile(definition: Definition) -> Result<Program> {
                 check(items, "/items", Some("array"))?;
                 if let Some(key) = key {
                     check(key, "/key", None)?;
+                }
+                if let Some(complete_when) = complete_when {
+                    check(complete_when, "/completeWhen", Some("boolean"))?;
                 }
                 if let Some(initial) = initial {
                     check(initial, "/initial", None)?;

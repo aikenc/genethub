@@ -95,7 +95,7 @@ structure:
                     items: {op: ref, path: /results/assess/output/milestones}
                     key: {op: ref, path: /item/id}
                     maxConcurrency: 1
-                    failure: failFast
+                    completeWhen: {op: not, value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}}
                     initial:
                       op: object
                       fields:
@@ -212,14 +212,14 @@ structure:
           - id: checks
             type: parallel
             # 两路只读检查同一 commit；系统故障不作为普通拒绝吞掉。
-            failure: failFast
+            completeWhen: {op: not, value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}}
             branches:
               - id: criterion-batch
                 type: forEach
                 items: {op: ref, path: /input/contract/criteria}
                 key: {op: ref, path: /item/id}
                 maxConcurrency: 1
-                failure: failFast
+                completeWhen: {op: not, value: {op: eq, left: {op: ref, path: /group/failed}, right: {op: literal, value: 0}}}
                 initial:
                   op: object
                   fields:

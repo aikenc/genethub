@@ -1924,7 +1924,25 @@ export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: 
  */
 export type WorkflowNodeOutcome = "completed" | "changesRequested" | "failed" | "blocked";
 
-export type WorkflowNodeRunStatus = { output?: unknown, assignedAtMs?: number, lastActivityAtMs?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
+export type WorkflowNodeRunStatus = { output?: unknown, 
+/**
+ * First time this node instance existed, retained across attempts. The
+ * daemon records transition times only; every rate, ranking and critical
+ * path is computed by the reader.
+ */
+pendingSinceMs?: number, assignedAtMs?: number, 
+/**
+ * When this node's result was accepted, before execution retirement.
+ */
+settledAtMs?: number, lastActivityAtMs?: number, 
+/**
+ * Zero-based attempt of this node instance, not of the whole Run.
+ */
+attempt?: number, llmRounds?: number, tokens?: number, 
+/**
+ * LLM rounds already spent by this node's abandoned earlier attempts.
+ */
+priorLlmRounds?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
 
 /**
  * Project-owned Workflow catalog projected by the daemon after validation.
@@ -1987,7 +2005,7 @@ export type WorkflowRunStatus = {
 /**
  * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
  */
-structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, requestBudget: WorkflowRequestBudgetStatus, 
+structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
 /**
  * Why execution is blocked, stopping or cancelled.
  */
@@ -2020,6 +2038,22 @@ activationRevision?: number, bundleDigest: string, taskId: string, status: strin
  * simple graphs remain zero.
  */
 executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunStatus>, createdAtMs: number, updatedAtMs: number, };
+
+/**
+ * Raw non-LLM observation facts for one Run. Health is a reader's judgment:
+ * the daemon publishes the clock it already keeps and its fixed silence
+ * threshold, and deliberately computes no efficiency verdict from them.
+ */
+export type WorkflowSupervisionStatus = { lastCheckedAtMs: number, 
+/**
+ * Elapsed time excluded from execution charging because the whole Run was
+ * waiting for a Human.
+ */
+humanWaitMs: number, 
+/**
+ * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
+ */
+recoveryWaitMs: number, waiting: boolean, silenceThresholdMs: number, };
 
 export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 

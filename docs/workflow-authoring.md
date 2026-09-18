@@ -92,6 +92,39 @@ original Worker Session after a daemon restart, keeps any write lease, and does
 not replay completed nodes. It refuses continuation while the previous process
 is still running and does not reconstruct project files.
 
+## Join policy, task directories and the transition clock
+
+A group's join policy is an expression, not an engine mode. `parallel` and `forEach`
+both accept `completeWhen`, evaluated against the results that have arrived plus
+`/group` counts (`total`, `arrived`, `succeeded`, `failed`, `running`, `remaining`).
+When it holds, a `forEach` starts no further item and settles once its in-flight
+items return; the engine never kills a Worker to satisfy it. When it holds and a
+failure has already arrived, the group can no longer succeed, so the execution
+stops instead of paying for results nobody can use — that case is what the removed
+`failFast` policy used to cover, and omitting `completeWhen` keeps the previous
+collect-everything behavior. Any-of, quorum and stop-on-first-failure are therefore
+project-authored expressions. A definition pinned by an older host may still carry
+the retired `failure: collect|failFast` enum; compilation translates it once into
+the equivalent expression and never writes it back, so a Run already in flight and
+an unmigrated project source both keep working without a second supported spelling
+in the model.
+
+`with.workspace` may be an expression over the node's own task input instead of a
+fixed string, so sibling instances of one activity work in different directories.
+The kernel gains no Git worktree, branch or checkout concept from this: write
+leases stay keyed by (directory, target ref), which is what makes separate
+directories on separate branches genuinely concurrent while one target ref stays
+serialized. A pack that wants parallel branches creates those directories with an
+ordinary node and returns the project-relative path in its `completion.output`.
+
+Every node instance records when its state changed: `pendingSinceMs` (the instance
+first existed, retained across attempts), `assignedAtMs` (the current attempt
+started), `settledAtMs` (its result was accepted) and `lastActivityAtMs`, beside
+`attempt`, `llmRounds`, `tokens` and `priorLlmRounds`. The Run additionally exposes
+its `supervision` snapshot. These are transitions the host already performs. The
+daemon computes no duration, ranking, critical path or utilization from them: a
+reader that wants those derives them, so that what counts as healthy stays policy.
+
 ## Agent repair and evidence boundaries
 
 WM uses schema → edit → draft check → bounded correction → evaluation. The built-in Skill stops after

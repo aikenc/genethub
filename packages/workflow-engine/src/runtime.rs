@@ -505,6 +505,41 @@ fn collected(state: &mut EngineState, id: u64) -> Option<(String, Outcome, bool)
     state.frames.remove(&id);
     Some((name, result, breaking))
 }
+/// Counting facts a join policy can read. The engine states what has arrived;
+/// it does not decide what "enough" means.
+fn group_facts(
+    total: usize,
+    remaining: usize,
+    children: &BTreeMap<String, u64>,
+    results: &BTreeMap<String, Outcome>,
+) -> Value {
+    let succeeded = results.values().filter(|outcome| outcome.success).count();
+    json!({
+        "total": total,
+        "arrived": results.len(),
+        "succeeded": succeeded,
+        "failed": results.len() - succeeded,
+        "running": children.len(),
+        "remaining": remaining,
+    })
+}
+
+/// Does the group's own join policy hold over what has arrived so far?
+fn enough(
+    context: &Value,
+    complete_when: &Expr,
+    total: usize,
+    remaining: usize,
+    children: &BTreeMap<String, u64>,
+    results: &BTreeMap<String, Outcome>,
+) -> Result<(bool, Value)> {
+    let mut context = context.clone();
+    context["results"] = results_value(results);
+    context["item"] = Value::Null;
+    context["group"] = group_facts(total, remaining, children, results);
+    let held = complete_when.condition(&context)?;
+    Ok((held, context["group"].clone()))
+}
 fn results_value(results: &BTreeMap<String, Outcome>) -> Value {
     Value::Object(
         results
@@ -745,20 +780,43 @@ fn step(
             };
         }
         (
-            BlockKind::Parallel { failure, .. },
+            BlockKind::Parallel {
+                branches,
+                complete_when,
+                ..
+            },
             Cursor::Parallel {
                 mut children,
                 mut results,
             },
         ) => {
             let changed = gather(state, &mut children, &mut results)?;
-            if *failure == FailurePolicy::FailFast && results.values().any(|r| !r.success) {
-                stop(
-                    state,
-                    Status::Stopping,
-                    Outcome::failed("branchFailed", format!("{} failed", block.id)),
-                );
-            } else if children.is_empty() {
+            if let Some(complete_when) = complete_when {
+                let (held, group) = enough(
+                    &state.frames[&id].context,
+                    complete_when,
+                    branches.len(),
+                    0,
+                    &children,
+                    &results,
+                )?;
+                if held && results.values().any(|outcome| !outcome.success) {
+                    history.push(HistoryEntry {
+                        frame: id,
+                        parent: frame.parent,
+                        node: block.id.clone(),
+                        event: "sealed".into(),
+                        detail: group,
+                    });
+                    stop(
+                        state,
+                        Status::Stopping,
+                        Outcome::failed("branchFailed", format!("{} failed", block.id)),
+                    );
+                    return Ok(true);
+                }
+            }
+            if children.is_empty() {
                 finish_group(state, id, &results, history)?;
             } else {
                 state.frames.get_mut(&id).unwrap().cursor = Cursor::Parallel { children, results };
@@ -819,13 +877,14 @@ fn step(
                 next: 0,
                 children: BTreeMap::new(),
                 results: BTreeMap::new(),
+                sealed: false,
             };
         }
         (
             BlockKind::ForEach {
                 body,
                 max_concurrency,
-                failure,
+                complete_when,
                 update,
                 ..
             },
@@ -835,6 +894,7 @@ fn step(
                 mut next,
                 mut children,
                 mut results,
+                mut sealed,
             },
         ) => {
             // A serial child is already settled (including host cleanup) before
@@ -863,15 +923,43 @@ fn step(
                 }
             }
             let mut changed = gather(state, &mut children, &mut results)?;
-            if *failure == FailurePolicy::FailFast && results.values().any(|r| !r.success) {
-                stop(
-                    state,
-                    Status::Stopping,
-                    Outcome::failed("itemFailed", format!("{} failed", block.id)),
-                );
-                return Ok(true);
+            if let (false, Some(complete_when)) = (sealed, complete_when) {
+                let (held, group) = enough(
+                    &state.frames[&id].context,
+                    complete_when,
+                    items.len(),
+                    items.len() - next,
+                    &children,
+                    &results,
+                )?;
+                if held {
+                    sealed = true;
+                    changed = true;
+                    history.push(HistoryEntry {
+                        frame: id,
+                        parent: frame.parent,
+                        node: block.id.clone(),
+                        event: "sealed".into(),
+                        detail: group,
+                    });
+                    // An arrived failure already decides this group, so the
+                    // items still running cannot change it. Let them go instead
+                    // of buying a result nobody can use.
+                    if results.values().any(|outcome| !outcome.success) {
+                        stop(
+                            state,
+                            Status::Stopping,
+                            Outcome::failed("itemFailed", format!("{} failed", block.id)),
+                        );
+                        return Ok(true);
+                    }
+                }
             }
-            let to_start = (items.len() - next).min(max_concurrency.saturating_sub(children.len()));
+            let to_start = if sealed {
+                0
+            } else {
+                (items.len() - next).min(max_concurrency.saturating_sub(children.len()))
+            };
             if state.frames.len().saturating_add(to_start) > program.definition.limits.max_frames {
                 // No partial creation: capacity failure must not orphan active frames.
                 stop(
@@ -881,7 +969,7 @@ fn step(
                 );
                 return Ok(true);
             }
-            while next < items.len() && children.len() < *max_concurrency {
+            while !sealed && next < items.len() && children.len() < *max_concurrency {
                 let mut ctx = state.frames[&id].context.clone();
                 ctx["item"] = items[next].clone();
                 if update.is_some() {
@@ -894,7 +982,7 @@ fn step(
                 next += 1;
                 changed = true;
             }
-            if children.is_empty() && next == items.len() {
+            if children.is_empty() && (sealed || next == items.len()) {
                 if update.is_some() && results.values().all(|r| r.success) {
                     complete(
                         state,
@@ -912,6 +1000,7 @@ fn step(
                     next,
                     children,
                     results,
+                    sealed,
                 };
                 return Ok(changed);
             }

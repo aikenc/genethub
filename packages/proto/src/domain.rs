@@ -1252,6 +1252,9 @@ pub struct WorkflowRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub report_pending: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub supervision: Option<WorkflowSupervisionStatus>,
     #[serde(default)]
     pub request_budget: WorkflowRequestBudgetStatus,
 
@@ -1363,12 +1366,36 @@ pub struct WorkflowNodeRunStatus {
     )]
     #[ts(optional, type = "unknown")]
     pub output: Option<serde_json::Value>,
+    /// First time this node instance existed, retained across attempts. The
+    /// daemon records transition times only; every rate, ranking and critical
+    /// path is computed by the reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub pending_since_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub assigned_at_ms: Option<i64>,
+    /// When this node's result was accepted, before execution retirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub settled_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub last_activity_at_ms: Option<i64>,
+    /// Zero-based attempt of this node instance, not of the whole Run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub llm_rounds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub tokens: Option<u64>,
+    /// LLM rounds already spent by this node's abandoned earlier attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub prior_llm_rounds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub outcome: Option<WorkflowNodeOutcome>,
@@ -1383,6 +1410,27 @@ pub struct WorkflowNodeRunStatus {
     pub session_id: Option<String>,
     #[serde(default)]
     pub evidence: std::collections::BTreeMap<String, String>,
+}
+
+/// Raw non-LLM observation facts for one Run. Health is a reader's judgment:
+/// the daemon publishes the clock it already keeps and its fixed silence
+/// threshold, and deliberately computes no efficiency verdict from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowSupervisionStatus {
+    #[ts(type = "number")]
+    pub last_checked_at_ms: i64,
+    /// Elapsed time excluded from execution charging because the whole Run was
+    /// waiting for a Human.
+    #[ts(type = "number")]
+    pub human_wait_ms: i64,
+    /// Elapsed time the Run spent recoverable, awaiting a PM continue decision.
+    #[ts(type = "number")]
+    pub recovery_wait_ms: i64,
+    pub waiting: bool,
+    #[ts(type = "number")]
+    pub silence_threshold_ms: i64,
 }
 
 /// Finishing a review is distinct from approving its subject.

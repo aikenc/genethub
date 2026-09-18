@@ -499,10 +499,15 @@ pub(crate) async fn recover(
                 .get_mut(&recovery.node_id)
                 .expect("validated node");
             old.prior_activity.push(std::mem::take(&mut old.activity));
-            old.attempt = 1;
+            // The attempt counter is the node's real retry depth. Its first
+            // pending time is never rewritten, so a reader can still see how
+            // long the node has existed rather than only the current attempt.
+            old.attempt = old.attempt.saturating_add(1);
+            let attempt = old.attempt;
             old.status = "pending".into();
             old.session_id = None;
             old.assigned_at_ms = 0;
+            old.settled_at_ms = 0;
             run.supervision.recovery_wait_ms = run
                 .supervision
                 .recovery_wait_ms
@@ -520,7 +525,7 @@ pub(crate) async fn recover(
                     &executor,
                     &run.parent_session_id,
                     Some(run.revision),
-                    serde_json::json!({"previousSessionId": recovery.previous_session_id, "attempt": 2}),
+                    serde_json::json!({"previousSessionId": recovery.previous_session_id, "attempt": attempt}),
                 )?;
                 push_flow_message(&mut run, message);
             }

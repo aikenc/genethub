@@ -7,7 +7,7 @@ const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 // Initial vertical slice: real PM -> daemon -> structured engine -> Worker -> disk.
 // Expressions are project-authored inputs, not imports of engine implementation.
-for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "budget", "collect", "fail-fast", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
+for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
   id: `specialty.workflow.structured.${scenario}`,
   title: `Structured workflow ${scenario} preserves real activity outcomes`,
   oracle: "A project-authored while loop executes zero or bounded rounds in one Run; real Worker artifacts agree with its public terminal state and no PM redispatch is needed",
@@ -63,12 +63,23 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     } else if (scenario === "parallel-loop") {
       body = {id:"team",type:"parallel",branches:[{...loop,body:{...task("front-iteration"),input:literal("LOOP_FRONT")}}, {...task("back-once"),input:literal("ONCE_BACK")}]};
       expectedWorkers = 3;
-    } else if (["parallel","collect","fail-fast"].includes(scenario)) {
-      body = {id:"team",type:"parallel",failure:scenario === "fail-fast" ? "failFast" : "collect",branches:[{...task("front"),accept:scenario === "parallel" ? ["completed","changesRequested"] : ["completed"]},task("back")]};
+    } else if (["parallel","collect","fail-fast","legacy-failure"].includes(scenario)) {
+      // `legacy-failure` is a source an older host pinned: the retired join enum
+      // must still compile and still behave like the expression that replaced it.
+      body = {id:"team",type:"parallel",
+        ...(scenario === "fail-fast" ? {completeWhen:{op:"not",value:{op:"eq",left:{op:"ref",path:"/group/failed"},right:literal(0)}}} : {}),
+        ...(scenario === "legacy-failure" ? {failure:"failFast"} : {}),
+        branches:[{...task("front"),accept:scenario === "parallel" ? ["completed","changesRequested"] : ["completed"]},task("back")]};
       blocked = scenario !== "parallel";
     } else if (scenario === "foreach" || scenario === "foreach-empty") {
       body = {id:"batch",type:"forEach",items:literal(scenario === "foreach" ? ["a","b","c","d","e"] : []),maxConcurrency:2,body:task("item")};
       expectedWorkers = scenario === "foreach" ? 5 : 0;
+    } else if (scenario === "quorum") {
+      // One success is enough here, so the remaining items must never start and
+      // the group must still settle successfully.
+      body = {id:"batch",type:"forEach",items:literal(["a","b","c"]),maxConcurrency:1,
+        completeWhen:{op:"lt",left:literal(0),right:{op:"ref",path:"/group/succeeded"}},body:task("item")};
+      expectedWorkers = 1;
     } else if (scenario === "call") {
       body = {id:"invoke",type:"call",procedure:"build"};
       structure.procedures = {build:task("build-body")}; expectedWorkers = 1;
@@ -152,11 +163,11 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
     },90_000);
     t.assertions.assert(run?.status === (scenario === "cancel" ? "cancelled" : blocked ? "blocked" : "completed"),`unexpected terminal state: ${JSON.stringify(run)}`);
     const workerNodes = run!.nodes.filter(node=>node.uses === "agent.session");
-    t.assertions.assert((scenario === "fail-fast" ? workerNodes.length >= 1 && workerNodes.length <= 2 : workerNodes.length === expectedWorkers),"wrong business iteration count");
+    t.assertions.assert((["fail-fast","legacy-failure"].includes(scenario) ? workerNodes.length >= 1 && workerNodes.length <= 2 : workerNodes.length === expectedWorkers),"wrong business iteration count");
     t.assertions.assert(new Set(workerNodes.map(n=>n.sessionId)).size === workerNodes.length,"iterations reused a Worker Session");
     if (expectedWorkers > 0) {
       const entries = readFileSync(artifact,"utf8").trim().split("\n");
-      t.assertions.assert((scenario === "fail-fast" ? entries.length >= 1 && entries.length <= 2 : entries.length === expectedWorkers) && new Set(entries).size === entries.length,"actual disk operations duplicated or missing");
+      t.assertions.assert((["fail-fast","legacy-failure"].includes(scenario) ? entries.length >= 1 && entries.length <= 2 : entries.length === expectedWorkers) && new Set(entries).size === entries.length,"actual disk operations duplicated or missing");
     }
     if (scenario === "parallel" || scenario === "parallel-loop" || scenario === "foreach") {
       let live = 0, peak = 0;

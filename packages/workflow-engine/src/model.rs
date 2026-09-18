@@ -84,8 +84,16 @@ pub enum BlockKind {
     },
     Parallel {
         branches: Vec<Block>,
-        #[serde(default)]
-        failure: FailurePolicy,
+        /// Every branch has already started, so this can only cut short a group
+        /// whose verdict is already negative. See `ForEach::complete_when`.
+        #[serde(
+            default,
+            rename = "completeWhen",
+            skip_serializing_if = "Option::is_none"
+        )]
+        complete_when: Option<Expr>,
+        #[serde(default, rename = "failure", skip_serializing)]
+        retired_failure: Option<RetiredJoin>,
     },
     ForEach {
         items: Expr,
@@ -95,8 +103,20 @@ pub enum BlockKind {
         #[serde(rename = "maxConcurrency")]
         max_concurrency: usize,
         body: Box<Block>,
-        #[serde(default)]
-        failure: FailurePolicy,
+        /// Join policy as data instead of a fixed enum. Evaluated against the
+        /// results that have already arrived; when it holds, no further item is
+        /// started and the group settles once its in-flight items return. If
+        /// those arrived results already contain a failure the group can no
+        /// longer succeed, so the execution stops instead of paying for work
+        /// that cannot change the verdict. Absent means every item runs.
+        #[serde(
+            default,
+            rename = "completeWhen",
+            skip_serializing_if = "Option::is_none"
+        )]
+        complete_when: Option<Expr>,
+        #[serde(default, rename = "failure", skip_serializing)]
+        retired_failure: Option<RetiredJoin>,
         /// Optional serial fold. Uses the same local vars/update convention as loop.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initial: Option<Expr>,
@@ -130,15 +150,36 @@ pub struct Branch {
     pub condition: Expr,
     pub body: Block,
 }
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// The join policy this engine used before `completeWhen`. Definitions pinned
+/// inside a Run by an older host still carry it, and so do project sources that
+/// have not been migrated, so it is accepted as input, translated once while
+/// compiling and never written back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub enum FailurePolicy {
-    #[default]
+pub enum RetiredJoin {
     Collect,
     FailFast,
 }
-
+impl RetiredJoin {
+    /// `failFast` stopped a group as soon as a failure arrived, which is exactly
+    /// what this expression says about the arrived results.
+    pub(crate) fn translate(self) -> Option<Expr> {
+        match self {
+            Self::Collect => None,
+            Self::FailFast => Some(Expr::Not {
+                value: Box::new(Expr::Eq {
+                    left: Box::new(Expr::Ref {
+                        path: "/group/failed".into(),
+                    }),
+                    right: Box::new(Expr::Literal {
+                        value: Value::from(0),
+                    }),
+                }),
+            }),
+        }
+    }
+}
 /// References use JSON Pointer into {input, vars, results, item}. No I/O or code.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -265,6 +306,9 @@ pub enum Cursor {
         next: usize,
         children: BTreeMap<String, u64>,
         results: BTreeMap<String, Outcome>,
+        /// `completeWhen` already held: start no further item.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sealed: bool,
     },
     Done,
 }

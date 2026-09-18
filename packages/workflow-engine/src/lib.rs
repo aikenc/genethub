@@ -86,3 +86,15 @@ impl Error {
 pub fn pointer_token(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
+
+/// Validate one host-declared expression with the same bounds the compiler
+/// applies to graph expressions. A host that accepts an expression where it
+/// used to accept a literal reuses this check instead of writing its own.
+pub fn validate_expression(expr: &Expr, expected: Option<&str>) -> Result<()> {
+    let mut budget = 256;
+    expr.validate(0, &mut budget)?;
+    if let Some(kind) = expected {
+        expr.expect_type(kind)?;
+    }
+    Ok(())
+}

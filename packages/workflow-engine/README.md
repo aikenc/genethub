@@ -33,9 +33,25 @@ addresses alongside the existing node evidence records.
 - `loop` evaluates its condition before each iteration, including the first.
   `maxRounds: 0` is allowed. False exits; true at the limit blocks. Each iteration
   has a fresh results scope; `update` explicitly carries data into `vars`.
-- `parallel` starts independent branches; `collect` waits for all outcomes.
-  `failFast` stops the execution and requires host cleanup before terminal state.
+- `parallel` starts independent branches and waits for every outcome. A failed
+  branch makes the group's own outcome unsuccessful, which its parent propagates.
 - `forEach` freezes its finite input array and applies a concurrency bound.
+- Both groups take an optional `completeWhen`: the join policy as data instead of
+  a fixed enum. It is evaluated against the results that have already arrived,
+  plus `/group` counts (`total`, `arrived`, `succeeded`, `failed`, `running`,
+  `remaining`). When it holds, a `forEach` starts no further item and settles
+  once its in-flight items return; items already running are never abandoned,
+  because their host resources are retired only through the ordinary settle path.
+  When it holds and a failure has already arrived, the group can no longer
+  succeed, so the execution stops rather than buying a result that cannot change
+  the verdict. Absent means every item runs and every branch is awaited. Any-of,
+  quorum and stop-on-first-failure are therefore expressions, not engine-owned
+  modes. On a `parallel` block every branch has already started, so its
+  `completeWhen` can only cut short a group whose verdict is already negative.
+  A definition pinned before `completeWhen` may still carry the retired
+  `failure: collect|failFast` enum; compilation translates it once into the
+  equivalent expression and never writes it back, so in-flight Runs keep the
+  behavior they started with.
   Optional `key` expressions supply unique string/integer identities; otherwise
   item addresses use indices in that immutable array. Optional `initial` and
   `update` must be supplied together with `maxConcurrency: 1`: `vars` is the

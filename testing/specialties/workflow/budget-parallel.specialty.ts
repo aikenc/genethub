@@ -45,7 +45,10 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
     const pure = scenario.startsWith("entries-");
     const input = scenario === "entries-empty" ? {} : scenario === "entries-type" ? []
       : Object.fromEntries(Array.from({ length: scenario === "entries-limit" ? 4097 : 4096 }, (_, n) => [`k${n.toString().padStart(4, "0")}`, n]));
-    const parallel = { id: "checks", type: "forEach", items: lit(["z", "a"]), key: ref("/item"), maxConcurrency: 2, failure: "failFast",
+    // Stop-on-first-failure as an expression: an arrived failure already decides
+    // the group, so the Run stops instead of waiting out its live siblings.
+    const parallel = { id: "checks", type: "forEach", items: lit(["z", "a"]), key: ref("/item"), maxConcurrency: 2,
+      completeWhen: { op: "not", value: { op: "eq", left: ref("/group/failed"), right: lit(0) } },
       body: task("check", "work", obj({ key: ref("/item") })) };
     const fold = { id: "reduce", type: "forEach", items: { op: "entries", value: ref("/results/checks") }, key: ref("/item/key"), maxConcurrency: 1,
       initial: lit({ approved: true, keys: [] }), body: seq("read-result", [], ref("/item/value")),
@@ -178,7 +181,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       t.assertions.assert(run!.nodes.some(n => n.outcome === "failed") && !run!.nodes.some(n => n.uses === "result.publish"), "host failure was turned into a business result");
       for (const node of run!.nodes.filter(n => n.sessionId)) {
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: node.sessionId! } });
-        t.assertions.assert(reply?.type === "snapshot" && !["running", "waiting"].includes(reply.data.summary.status), "failFast left an executing sibling");
+        t.assertions.assert(reply?.type === "snapshot" && !["running", "waiting"].includes(reply.data.summary.status), "the decided group left an executing sibling");
       }
     } else if (scenario === "entries-type" || scenario === "entries-limit") {
       t.assertions.assert(JSON.stringify(run!.structure).includes(scenario === "entries-type" ? "entries requires an object" : "entries exceeds 4096 items"), "runtime type/size error lacks actionable cause");
