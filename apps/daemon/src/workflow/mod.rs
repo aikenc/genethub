@@ -31,6 +31,7 @@ mod output;
 mod request;
 mod structured;
 mod supervision;
+pub(crate) use authoring::procedures_schema as authoring_procedures_schema;
 pub(crate) use authoring::schema as authoring_schema;
 pub(crate) use check::check;
 pub(crate) use control::{
@@ -43,6 +44,7 @@ const CATALOG_FILE: &str = "workflows/catalog.yaml";
 const MAX_SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_WORKFLOWS: usize = 64;
 const MAX_NODES: usize = 64;
+const MAX_INCLUDES: usize = 8;
 const MAX_CANDIDATE_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CANDIDATE_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CANDIDATE_RECORD_BYTES: u64 = 64 * 1024 * 1024;
@@ -61,6 +63,7 @@ const MAX_LEASE_SECONDS: u64 = 24 * 60 * 60;
 const PROJECT_SCHEMA: &str = "genehub.workflow.project.v1";
 const CATALOG_SCHEMA: &str = "genehub.workflow.catalog.v1";
 const DEFINITION_SCHEMA: &str = "genehub.workflow.definition.v1";
+const PROCEDURES_SCHEMA: &str = "genehub.workflow.procedures.v1";
 const ROLE_SCHEMA: &str = "genehub.workflow.role.v1";
 const CANDIDATE_SCHEMA: &str = "genehub.workflow.candidate.v1";
 const ACTIVATION_SCHEMA: &str = "genehub.workflow.activation.v1";
@@ -116,9 +119,29 @@ struct WorkflowDefinition {
     version: u32,
     #[serde(default)]
     entry: String,
+    /// Shared procedure libraries this Workflow pulls in, by library id. They
+    /// are resolved while loading the bundle, so the pinned program is exactly
+    /// what the same content written in one file would produce: the engine, the
+    /// Run state and recovery gain no notion of a sub-workflow.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    include: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structure: Option<workflow_engine::Definition>,
     nodes: Vec<NodeDefinition>,
+}
+
+/// A procedure library: `call` targets plus the activities they need, with no
+/// entry, no catalog match and no `include` of its own. One level of resolution
+/// keeps cycles impossible instead of bounding them at runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcedureLibrary {
+    schema: String,
+    id: String,
+    version: u32,
+    #[serde(default)]
+    nodes: Vec<NodeDefinition>,
+    procedures: BTreeMap<String, workflow_engine::Block>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2249,7 +2272,7 @@ fn load_bundle_from(source: &Path, entry: &CatalogEntry) -> Result<Bundle> {
     let workflow_relative = format!("workflows/{}", entry.path);
     let workflow_path = existing_relative_within(source, &workflow_relative, "Workflow 定义")?;
     let workflow_bytes = read_source(&workflow_path)?;
-    let definition: WorkflowDefinition = authoring::parse(&workflow_bytes, &workflow_relative)?;
+    let mut definition: WorkflowDefinition = authoring::parse(&workflow_bytes, &workflow_relative)?;
     if !matches!(
         definition.schema.as_str(),
         DEFINITION_SCHEMA | "genehub.workflow.definition.v2"
@@ -2263,6 +2286,7 @@ fn load_bundle_from(source: &Path, entry: &CatalogEntry) -> Result<Bundle> {
             definition.id
         );
     }
+    resolve_includes(source, &mut definition, &mut digest_files)?;
     validate_definition(&definition)?;
     digest_files.push((workflow_relative, workflow_bytes));
 
@@ -2797,6 +2821,77 @@ fn lock_activation(runtime: &RuntimeStore) -> Result<ExclusiveFileLock> {
         .directory(Path::new(""), true)?
         .join("activation.lock");
     lock_exclusive_file(&path, "DCG Activation 正由另一个请求修改")
+}
+
+/// Merge every included library into one flat definition before validation, so
+/// duplicate block IDs, unknown procedures and missing activities keep being
+/// reported against the single pinned program instead of a second dialect.
+fn resolve_includes(
+    source: &Path,
+    definition: &mut WorkflowDefinition,
+    digest_files: &mut Vec<(String, Vec<u8>)>,
+) -> Result<()> {
+    if definition.include.is_empty() {
+        return Ok(());
+    }
+    if definition.include.len() > MAX_INCLUDES {
+        bail!("Workflow include 数量不能超过 {MAX_INCLUDES}");
+    }
+    if definition.structure.is_none() {
+        bail!("include 需要结构化 Workflow：DAG 定义没有子过程");
+    }
+    let mut included = BTreeSet::new();
+    let mut nodes = Vec::new();
+    let mut procedures = BTreeMap::<String, workflow_engine::Block>::new();
+    for library_id in &definition.include {
+        validate_id(library_id, "include")?;
+        if !included.insert(library_id.clone()) {
+            bail!("Workflow 重复 include 子过程库：{library_id}");
+        }
+        let relative = format!("procedures/{library_id}.yaml");
+        let bytes = read_source(&existing_relative_within(source, &relative, "子过程库")?)?;
+        let library: ProcedureLibrary = authoring::parse(&bytes, &relative)?;
+        if library.schema != PROCEDURES_SCHEMA {
+            bail!("不支持的子过程库 schema：{}", library.schema);
+        }
+        if library.id != *library_id {
+            bail!("子过程库 {relative} 的 id {} 与 include 不一致", library.id);
+        }
+        if library.version == 0 {
+            bail!("子过程库 {library_id} 的 version 必须大于 0");
+        }
+        if library.procedures.is_empty() {
+            bail!("子过程库 {library_id} 必须声明至少一个子过程");
+        }
+        for node in library.nodes {
+            if definition
+                .nodes
+                .iter()
+                .chain(&nodes)
+                .any(|existing: &NodeDefinition| existing.id == node.id)
+            {
+                bail!("子过程库 {library_id} 的节点 {} 与已有节点重名", node.id);
+            }
+            nodes.push(node);
+        }
+        for (name, block) in library.procedures {
+            let taken = definition
+                .structure
+                .as_ref()
+                .is_some_and(|structure| structure.procedures.contains_key(&name))
+                || procedures.contains_key(&name);
+            if taken {
+                bail!("子过程库 {library_id} 的子过程 {name} 与已有子过程重名");
+            }
+            procedures.insert(name, block);
+        }
+        digest_files.push((relative, bytes));
+    }
+    definition.nodes.extend(nodes);
+    if let Some(structure) = definition.structure.as_mut() {
+        structure.procedures.extend(procedures);
+    }
+    Ok(())
 }
 
 fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
@@ -4342,6 +4437,7 @@ mod tests {
     fn graph_validation_uses_capabilities_and_edges_not_business_node_names() {
         let definition = WorkflowDefinition {
             structure: None,
+            include: Vec::new(),
             schema: DEFINITION_SCHEMA.into(),
             id: "anything".into(),
             version: 1,
@@ -4373,6 +4469,7 @@ mod tests {
     fn graph_validation_rejects_hidden_or_unsafe_execution_capabilities() {
         let definition = WorkflowDefinition {
             structure: None,
+            include: Vec::new(),
             schema: DEFINITION_SCHEMA.into(),
             id: "unsafe".into(),
             version: 1,
@@ -4395,6 +4492,7 @@ mod tests {
     fn graph_validation_accepts_project_owned_fanout_without_named_business_stages() {
         let definition = WorkflowDefinition {
             structure: None,
+            include: Vec::new(),
             schema: DEFINITION_SCHEMA.into(),
             id: "fanout".into(),
             version: 1,
@@ -4436,6 +4534,7 @@ mod tests {
     fn publish_capability_cannot_silently_ignore_inputs_or_evidence() {
         let publish = |inputs: NodeInputs, completion: CompletionDefinition| WorkflowDefinition {
             structure: None,
+            include: Vec::new(),
             schema: DEFINITION_SCHEMA.into(),
             id: "publish-only".into(),
             version: 1,
@@ -4484,6 +4583,7 @@ mod tests {
     fn an_auto_only_graph_reaches_a_terminal_run() {
         let definition = WorkflowDefinition {
             structure: None,
+            include: Vec::new(),
             schema: DEFINITION_SCHEMA.into(),
             id: "publish-only".into(),
             version: 1,
@@ -4581,6 +4681,7 @@ mod tests {
             executor_turns: 0,
             definition: WorkflowDefinition {
                 structure: None,
+                include: Vec::new(),
                 schema: DEFINITION_SCHEMA.into(),
                 id: "direct".into(),
                 version: 1,

@@ -1,11 +1,15 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkflowDiagnostic, WorkflowDraftReport } from "@genehub/proto";
 import { defineSpecialty, parseJson, runGenetAsync } from "../../framework/public.ts";
 
 type CliEnvelope = {
   type?: string;
-  data?: { definition?: Record<string, unknown>; draft?: WorkflowDraftReport };
+  data?: {
+    definition?: Record<string, unknown>;
+    procedures?: Record<string, unknown>;
+    draft?: WorkflowDraftReport;
+  };
   error?: {
     code?: string;
     details?: { draft?: WorkflowDraftReport };
@@ -80,6 +84,7 @@ defineSpecialty(
       "unknown YAML fields are silently ignored",
       "string booleans are coerced",
       "draft checking changes Active or launches a Run",
+      "an edited shared procedure library keeps the old pinned Candidate",
       "an evidence-only role silently accepts an adapter without restricted evidence tools",
     ],
     tags: ["core", "workflow", "workflow-authoring"],
@@ -115,6 +120,19 @@ defineSpecialty(
           extension?.validationCommand === "workflow check --draft" &&
           extension?.referenceSyntax === "RFC 6901 JSON Pointer, not JSONPath or jq",
         `definition schema is not the documented authoring contract: ${schemaResult.stdout}`,
+      );
+      // A shared procedure library is part of the same authoring contract, so
+      // its syntax comes from the same command as the Workflow it serves.
+      const proceduresSchema = schemaEnvelope.data?.procedures;
+      const proceduresProperties = proceduresSchema?.properties as
+        | Record<string, unknown>
+        | undefined;
+      t.assertions.assert(
+        proceduresSchema?.["$id"] === "urn:genehub:workflow:procedures:authoring:v1" &&
+          !!proceduresProperties?.procedures &&
+          (extension?.include as Record<string, unknown> | undefined)?.file ===
+            "procedures/<id>.yaml beside workflows/, schema genehub.workflow.procedures.v1",
+        `procedure library schema is not published with the definition: ${schemaResult.stdout}`,
       );
 
       const before = await opened.client.call({
@@ -153,6 +171,55 @@ defineSpecialty(
           afterValid.data.activeDigest === before.data.activeDigest &&
           afterValid.data.activationRevision === before.data.activationRevision,
         `valid draft metadata or non-mutation contract failed: ${JSON.stringify({ draft, before, afterValid })}`,
+      );
+
+      // A library shared by several Workflows is source of the same Candidate:
+      // editing it must produce a new pinned identity, not reuse the old one.
+      mkdirSync(path.join(opened.workspaceRoot, ".genethub/workflow/procedures"), {
+        recursive: true,
+      });
+      const libraryFile = path.join(
+        opened.workspaceRoot,
+        ".genethub/workflow/procedures/shared.yaml",
+      );
+      const libraryBody = (activity: string) => ({
+        schema: "genehub.workflow.procedures.v1",
+        id: "shared",
+        version: 1,
+        nodes: [{ id: activity, uses: "agent.session", with: { role: "worker" } }],
+        procedures: { review: { id: "review-body", type: "task", activity } },
+      });
+      writeFileSync(libraryFile, JSON.stringify(libraryBody("library-review")));
+      writeFileSync(
+        workflowFile,
+        JSON.stringify({
+          schema: "genehub.workflow.definition.v2",
+          id: "direct-change",
+          version: 2,
+          include: ["shared"],
+          nodes: [{ id: "deliver", uses: "agent.session", with: { role: "worker" } }],
+          structure: {
+            body: {
+              id: "delivery",
+              type: "sequence",
+              steps: [
+                { id: "deliver-step", type: "task", activity: "deliver" },
+                { id: "review-step", type: "call", procedure: "review" },
+              ],
+            },
+          },
+        }),
+      );
+      const withLibrary = parseJson((await cli(["workflow", "check", "--draft"])).stdout) as CliEnvelope;
+      writeFileSync(libraryFile, JSON.stringify(libraryBody("library-second-opinion")));
+      const libraryEdited = parseJson((await cli(["workflow", "check", "--draft"])).stdout) as CliEnvelope;
+      t.assertions.assert(
+        withLibrary.data?.draft?.valid === true &&
+          libraryEdited.data?.draft?.valid === true &&
+          JSON.stringify(withLibrary.data.draft.workflows[0]?.roles) === JSON.stringify(["worker"]) &&
+          !!libraryEdited.data.draft.candidateDigest &&
+          libraryEdited.data.draft.candidateDigest !== withLibrary.data.draft.candidateDigest,
+        `an included library is not pinned source of the Candidate: ${JSON.stringify({ withLibrary, libraryEdited })}`,
       );
 
       writeFileSync(workflowFile, sourceWithUnexpectedField);

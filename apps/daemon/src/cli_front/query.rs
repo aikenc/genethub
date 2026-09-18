@@ -1027,7 +1027,10 @@ fn capabilities_data() -> Value {
 
 fn schema_data(command: Option<&str>) -> Value {
     match command {
-        Some("workflow.definition") => json!({"definition": crate::workflow::authoring_schema()}),
+        Some("workflow.definition") => json!({
+            "definition": crate::workflow::authoring_schema(),
+            "procedures": crate::workflow::authoring_procedures_schema(),
+        }),
         Some(command) => json!({"command": command_schema(command)}),
         None => json!({
             "commands": COMMAND_NAMES.iter().map(|name| command_schema(name)).collect::<Vec<_>>()

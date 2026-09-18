@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 import type { WorkflowRunStatus } from "@genehub/proto";
@@ -7,12 +7,12 @@ const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 // Initial vertical slice: real PM -> daemon -> structured engine -> Worker -> disk.
 // Expressions are project-authored inputs, not imports of engine implementation.
-for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
+for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-false", "if-omitted", "condition-error", "choice-first", "choice-default", "nested", "parallel", "foreach", "foreach-empty", "call", "include", "budget", "collect", "fail-fast", "legacy-failure", "quorum", "restart", "cancel", "nested-loop", "item-keys", "duplicate-keys", "deadline", "activity-deadline", "stale-result", "deadline-restart", "parallel-loop", "nested-loop-restart"] as const) defineSpecialty({
   id: `specialty.workflow.structured.${scenario}`,
   title: `Structured workflow ${scenario} preserves real activity outcomes`,
   oracle: "A project-authored while loop executes zero or bounded rounds in one Run; real Worker artifacts agree with its public terminal state and no PM redispatch is needed",
-  catches: ["while executes once when initially false", "loop limit rejects final successful round", "node identity reuses a previous Worker", "negative evidence bypasses workflow conditions", "structured source is silently executed as a DAG"],
-  tags: ["core", "workflow", "structured-workflow", ...(["parallel-loop","nested-loop-restart","nested-loop","parallel","foreach"].includes(scenario) ? ["structured-composition"] : [])],
+  catches: ["while executes once when initially false", "loop limit rejects final successful round", "node identity reuses a previous Worker", "negative evidence bypasses workflow conditions", "structured source is silently executed as a DAG", "an included procedure library runs a different program than the same content inline"],
+  tags: ["core", "workflow", "structured-workflow", ...(["parallel-loop","nested-loop-restart","nested-loop","parallel","foreach","include"].includes(scenario) ? ["structured-composition"] : [])],
   llm: { default: "mock" }, expectedDurationMs: 35_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
@@ -80,18 +80,31 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
       body = {id:"batch",type:"forEach",items:literal(["a","b","c"]),maxConcurrency:1,
         completeWhen:{op:"lt",left:literal(0),right:{op:"ref",path:"/group/succeeded"}},body:task("item")};
       expectedWorkers = 1;
-    } else if (scenario === "call") {
+    } else if (scenario === "call" || scenario === "include") {
       body = {id:"invoke",type:"call",procedure:"build"};
-      structure.procedures = {build:task("build-body")}; expectedWorkers = 1;
+      if (scenario === "call") structure.procedures = {build:task("build-body")};
+      expectedWorkers = 1;
     } else if (scenario === "budget") {
       body = {id:"batch",type:"forEach",items:literal([1,2,3]),maxConcurrency:1,body:task("item")};
       structure.limits = {maxOperations:1,maxConcurrency:2,maxFrames:64}; expectedWorkers = 1; blocked = true;
     }
     if (scenario === "activity-deadline") { body = {...task("slow"),timeoutMs:1000}; expectedWorkers = 1; blocked = true; }
     if (["deadline","deadline-restart"].includes(scenario)) { structure.timeoutMs = scenario === "deadline-restart" ? 10000 : 5000; expectedWorkers = 1; blocked = true; }
+    const worker = {id:"work",uses:"agent.session",with:{role:"worker"},completion:{all:[{key:"done",verify:"value.nonEmpty"},{key:"checks",verify:"value.nonEmpty"}]}};
+    if (scenario === "include") {
+      // The callable procedure and the activity it needs live in a separate
+      // file that several Workflows can share.
+      mkdirSync(path.join(source,"procedures"),{recursive:true});
+      writeFileSync(path.join(source,"procedures/shared.yaml"),JSON.stringify({
+        schema:"genehub.workflow.procedures.v1",id:"shared",version:1,
+        nodes:[{...worker,id:"library-work"}],
+        procedures:{build:{id:"build-body",type:"task",activity:"library-work",accept:["completed","changesRequested"]}},
+      }));
+    }
     writeFileSync(definitionPath,JSON.stringify({
       schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,
-      nodes:[{id:"work",uses:"agent.session",with:{role:"worker"},completion:{all:[{key:"done",verify:"value.nonEmpty"},{key:"checks",verify:"value.nonEmpty"}]}},{id:"publish",uses:"result.publish"}],
+      ...(scenario === "include" ? {include:["shared"]} : {}),
+      nodes:[worker,{id:"publish",uses:"result.publish"}],
       structure:{...structure,body:{id:"delivery",type:"sequence",steps:[body,{id:"delivery-result",type:"task",activity:"publish"}]}},
     }));
     let pmCalls = 0;

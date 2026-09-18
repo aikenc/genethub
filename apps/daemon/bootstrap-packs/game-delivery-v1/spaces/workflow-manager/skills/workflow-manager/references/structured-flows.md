@@ -12,6 +12,16 @@ Compose tasks with `sequence.steps`, `if.condition/then/else`,
 `call.procedure/input` with local `structure.procedures`. All block IDs in the
 bundle are unique. Recursive calls and arbitrary cross-block edges are invalid.
 
+Procedures several Workflows share live in `procedures/<id>.yaml` beside
+`workflows/`, with schema `genehub.workflow.procedures.v1`, holding `procedures`
+plus the nodes they use. A Workflow names them in `include: [<id>]`; a library
+has no entry, no catalog match and no `include` of its own. The merge happens
+while loading, so the result is identical to writing the same content inline and
+every collision of a procedure name, node ID or block ID is refused. Library
+bytes are Candidate source: editing one produces a new Candidate digest for each
+Workflow that includes it. Use it for a procedure genuinely reused across
+Workflows, not to split one Workflow into files.
+
 A loop checks its condition before entering. It may execute zero times;
 `maxRounds` is nonnegative. False after the last permitted round is success.
 The loop body gets fresh `results` each round; only explicitly updated `vars`

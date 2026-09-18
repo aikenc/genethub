@@ -30,15 +30,38 @@ pub(crate) fn schema() -> Value {
             "budget": ["revision", "maxRuns", "deadlineMs", "maxLlmRounds"],
             "semantics": "Immutable observation, not reservation or permission. Query again to observe changes. Only PM control can adjust limits."
         },
+        "include": {
+            "file": "procedures/<id>.yaml beside workflows/, schema genehub.workflow.procedures.v1",
+            "resolution": "Merged into this definition while loading, before any validation; the pinned program is identical to the same content written inline.",
+            "rules": ["library declares procedures plus the nodes they use, no entry and no include of its own", "procedure names, node IDs and block IDs must not collide with the including Workflow or another library", "call a merged procedure with {type:call, procedure:<name>}"],
+            "limits": {"includes": MAX_INCLUDES},
+        },
         "entries": "{op:entries,value:<object expression>} returns at most 4096 {key,value} pairs in ascending key order; use serial forEach initial/update to aggregate parallel results",
         "verifiers": ["value.nonEmpty", "value.equals", "git.commitOnTarget"],
         "workerOutcomes": ["completed", "changesRequested", "failed", "blocked"],
         "referenceSyntax": "RFC 6901 JSON Pointer, not JSONPath or jq",
         "typeChecking": "known expression kinds at compile time; references and output values at runtime; no coercion",
         "outputObjects": "Prefer explicit required + additionalProperties:false. Omit both only for legacy all-required/closed shorthand.",
-        "limits": {"sourceBytes": MAX_SOURCE_BYTES, "workflows": MAX_WORKFLOWS, "nodes": MAX_NODES},
+        "limits": {"sourceBytes": MAX_SOURCE_BYTES, "workflows": MAX_WORKFLOWS, "nodes": MAX_NODES, "includes": MAX_INCLUDES},
         "scope": "Syntax schema is generated from the parser types. Compiler checks control flow, bounds and references; valid does not prove carrier readiness, actual check execution or business quality."
     });
+    schema
+}
+
+/// Same generator as the definition schema: a library is a fragment of the one
+/// dialect, not a second one.
+pub(crate) fn procedures_schema() -> Value {
+    let mut schema = serde_json::to_value(
+        schemars::generate::SchemaSettings::draft2020_12()
+            .for_deserialize()
+            .into_generator()
+            .into_root_schema_for::<ProcedureLibrary>(),
+    )
+    .expect("schema serializes");
+    schema["$id"] = json!("urn:genehub:workflow:procedures:authoring:v1");
+    schema["properties"]["schema"] = json!({"const": PROCEDURES_SCHEMA});
+    schema["properties"]["version"]["minimum"] = json!(1);
+    schema["properties"]["nodes"]["maxItems"] = json!(MAX_NODES);
     schema
 }
 

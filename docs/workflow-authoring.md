@@ -125,6 +125,26 @@ its `supervision` snapshot. These are transitions the host already performs. The
 daemon computes no duration, ranking, critical path or utilization from them: a
 reader that wants those derives them, so that what counts as healthy stays policy.
 
+## Shared procedure libraries
+
+A workflow may reuse `call` targets written in another file. `include: [<id>]`
+names libraries at `procedures/<id>.yaml`, beside `workflows/`, each carrying
+`procedures` plus the nodes they use and nothing else: no entry, no catalog
+match and no `include` of its own, so one resolution step makes cycles
+impossible instead of bounding them at runtime.
+
+The include is resolved while the bundle loads, before any validation. The
+pinned program is exactly what the same content written inline would produce,
+so the engine, the Run record and recovery gain no notion of a sub-workflow,
+and duplicate block IDs, unknown procedures or missing activities keep their
+existing diagnostics. Procedure names, node IDs and block IDs must not collide
+with the including workflow or another library; the loader refuses a collision
+rather than choosing a winner. Library bytes are Candidate source, so editing a
+library produces a new Candidate digest for every workflow that includes it —
+one library serves several workflows without letting one of them drift onto
+stale content. `schema workflow.definition` publishes the library schema beside
+the definition schema.
+
 ## Agent repair and evidence boundaries
 
 WM uses schema → edit → draft check → bounded correction → evaluation. The built-in Skill stops after

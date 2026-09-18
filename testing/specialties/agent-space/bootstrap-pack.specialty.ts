@@ -452,9 +452,13 @@ defineSpecialty(
       for (const relative of legacy.absentFiles) rmSync(path.join(approved.root, relative), { force: true });
       rmSync(path.join(approved.root, "spaces", "workflow-reviewer"), { recursive: true, force: true });
       for (const [relative, content] of Object.entries(legacy.files)) writeFileSync(path.join(approved.root, relative), content);
-      const coderPrompt = path.join(approved.root, ".genethub/workflow/prompts/coder.md");
-      writeFileSync(coderPrompt, "\nUser customization: retain accessible keyboard controls.\n", { flag: "a" });
-      const customized = readFileSync(coderPrompt, "utf8");
+      // Workflow source this Pack version does not change relative to the
+      // installed one: the upgrade must leave the user's edit alone. A file the
+      // upgrade does need to rewrite is a conflict instead, which the PM Skill
+      // step below proves.
+      const coderRole = path.join(approved.root, ".genethub/workflow/roles/coder.yaml");
+      writeFileSync(coderRole, "\n# User customization: retain accessible keyboard controls.\n", { flag: "a" });
+      const customized = readFileSync(coderRole, "utf8");
       for (const member of [projectAfterBypass!, ...spaces.filter((space) => space.name !== "workflow-reviewer")]) {
         const built = await opened.client.call({ type: "agentSpace.builder", payload: { workspaceId: approveProject.id, targetWorkspaceId: member.id, spaceName: member.name, operation: { kind: "build", dryRun: false, requireNoPostCommands: true } } });
         t.assertions.assert(built?.type === "agentSpaceBuilder" && built.data.status === "ok", "legacy source fixture did not build");
@@ -550,7 +554,7 @@ defineSpecialty(
       t.assertions.assert(!upgradeEvents.some(event => event.type === "turnFailed"), "authorized upgrade turn failed");
       const upgraded = cli(["space", "bootstrap", "plan", "--workspace", approveProject.id, "--pack", "game-delivery-v1"]);
       t.assertions.assert(upgraded.status === 0 && upgraded.data.current === true, `upgraded project was not idempotent: ${upgraded.text}`);
-      t.assertions.assert(readFileSync(coderPrompt, "utf8") === customized, "upgrade changed a user-owned workflow prompt");
+      t.assertions.assert(readFileSync(coderRole, "utf8") === customized, "upgrade changed user-owned workflow source it did not need to rewrite");
       const afterUpgrade = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: approveProject.id } });
       t.assertions.assert(afterUpgrade?.type === "workflowProject" && afterUpgrade.data.workflows.some((workflow) => workflow.id === "workflow-review") && afterUpgrade.data.activationRevision === legacyActivation.data.activationRevision + 1, "upgrade omitted reviewer routing or lost activation history");
       t.note(`project=${approveProject.id} executor=${executor.id} commit=${projectCommit.slice(0, 12)}`);
