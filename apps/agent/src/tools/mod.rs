@@ -6,6 +6,7 @@ mod bash;
 mod diff;
 pub(crate) mod evidence;
 mod fs_tools;
+mod media;
 mod search;
 
 use std::path::{Path, PathBuf};
@@ -120,6 +121,7 @@ pub fn definitions() -> Vec<Value> {
                 "required": ["path"]
             }
         }),
+        media::definition(),
         json!({
             "name": "write",
             "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
@@ -247,17 +249,24 @@ pub fn definitions() -> Vec<Value> {
         }),
     ];
     if evidence::enabled() {
-        definitions.retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls")));
+        definitions
+            .retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls" | "read_media")));
         definitions.push(evidence::definition());
     }
     definitions
+}
+
+/// The details key under which read_media registers an attachment for the
+/// agent loop to inject (kept behind a function so the module stays private).
+pub(crate) fn media_attachment_detail_key() -> &'static str {
+    media::ATTACHMENT_DETAIL
 }
 
 pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
     if evidence::enabled() {
         match name {
             "genet" => return evidence::run(args, cwd).await,
-            "read" | "ls" => {
+            "read" | "ls" | "read_media" => {
                 if let Err(error) = evidence::check_path(args, cwd) {
                     return ToolResult::error(error);
                 }
@@ -267,6 +276,7 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
     }
     match name {
         "read" => fs_tools::read(args, cwd),
+        "read_media" => media::read(args, cwd),
         "write" => fs_tools::write(args, cwd),
         "edit" => fs_tools::edit(args, cwd),
         "ls" => fs_tools::ls(args, cwd),
@@ -425,9 +435,10 @@ mod tests {
             .iter()
             .map(|d| d["name"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(names.len(), 8);
+        assert_eq!(names.len(), 9);
         for name in [
             "read",
+            "read_media",
             "write",
             "edit",
             "ls",

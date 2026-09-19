@@ -7,8 +7,12 @@ use crate::skills::{self, Skill};
 
 const CONTEXT_FILES: [&str; 2] = ["AGENTS.md", "GENEHUB.md"];
 
-const TOOL_SNIPPETS: [(&str, &str); 8] = [
+const TOOL_SNIPPETS: [(&str, &str); 9] = [
     ("read", "read a file, optionally a line range"),
+    (
+        "read_media",
+        "read an image or video file in the workspace so you can see its content",
+    ),
     ("write", "create or overwrite a file"),
     ("edit", "apply targeted replacements to a file"),
     ("ls", "list a directory"),
