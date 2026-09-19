@@ -90,6 +90,13 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         } else await handled(["u_consult"]);
         t.assertions.assert((await snapshot()).pendingPermissions?.length === 0, "the explicitly answered card did not resolve");
       } else if (scenario === "restart") {
+        // Durability of the accepted original is the fact under test, so the
+        // model must actually accept the medium the user attached.
+        const configured = await client.call({ type: "settings.setProvider", payload: {
+          providerId: "deepseek", apiKey: "sk-test", baseUrl: opened.mock.origin, label: null, dialect: null,
+          models: ["deepseek-v4-flash"], modelInputs: { "deepseek-v4-flash": ["image"] },
+        } });
+        t.assertions.assert(configured?.type === "settings", "model image input was not configured before the attachment");
         const image = { name: "pixel.png", mime: "image/png", dataBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhN8AAAAASUVORK5CYII=" };
         const ack = await client.call({ type: "session.send", payload: { sessionId, messageId: "u_recover", text: "保留这张图和这条消息。", attachments: [image], artifactPreviewBaseUrl: null, continuesRound: null } });
         t.assertions.assert(ack?.type === "ack", "message was not accepted before restart");
