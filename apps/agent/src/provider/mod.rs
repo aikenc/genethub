@@ -3,7 +3,10 @@
 
 pub mod anthropic;
 pub mod fake;
-mod media;
+// Shared with `tools::media`, which registers agent-requested attachments and
+// must enforce the same confinement and size rules before the loop injects
+// them into the conversation.
+pub(crate) mod media;
 pub mod openai;
 
 use serde_json::Value;
