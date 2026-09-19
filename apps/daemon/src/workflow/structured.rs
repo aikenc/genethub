@@ -235,12 +235,24 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             if let Some(record) = run.nodes.get(&id) {
                 if record.status == "running" {
                     if let Some(sid) = &record.session_id {
-                        let inspection = state.sessions.inspect(sid, None).await?;
-                        if inspection.round_count == 0 && !state.sessions.has_execution(sid).await {
-                            sessions.push((
-                                inspection.summary,
-                                task_message(&run, &runtime_node(&run, &id)?),
-                            ));
+                        match state.sessions.inspect(sid, None).await {
+                            Ok(inspection) => {
+                                if inspection.round_count == 0
+                                    && !state.sessions.has_execution(sid).await
+                                {
+                                    sessions.push((
+                                        inspection.summary,
+                                        task_message(&run, &runtime_node(&run, &id)?),
+                                    ));
+                                }
+                            }
+                            // A Worker whose Session record is gone can never
+                            // receive its turn. Reconciliation decides that one
+                            // node; failing here would stall every later pass
+                            // and freeze the whole Run.
+                            Err(error)
+                                if error.is::<crate::session::manager::SessionMissing>() => {}
+                            Err(error) => return Err(error),
                         }
                     }
                     continue;

@@ -65,6 +65,11 @@ pub(super) struct RequestLink {
     pub cancelled: bool,
     #[serde(default)]
     pub cancelled_at_ms: i64,
+    /// Whether the executor cancelled its own execution instead of the user
+    /// withdrawing the request. Legacy records carry no actor and are read as
+    /// a user cancellation, which is the stricter of the two.
+    #[serde(default)]
+    pub cancelled_by_agent: bool,
     #[serde(default)]
     pub resume_message_id: Option<String>,
 }
@@ -313,7 +318,21 @@ pub(super) async fn admit(
             }
             None => false,
         };
-        if !resume_cancelled
+        // Nothing was withdrawn when the executor cancelled its own stuck
+        // execution, so the request budget is the limiter and the explicit
+        // flag is what keeps the resumption deliberate. A user cancellation
+        // still needs the user back.
+        let by_agent = root
+            .request
+            .as_ref()
+            .is_some_and(|request| request.cancelled_by_agent);
+        if by_agent {
+            if !resume_cancelled {
+                bail!(
+                    "taskCancelled: resuming an execution the executor cancelled needs explicit --resume-cancelled"
+                );
+            }
+        } else if !resume_cancelled
             || !user_input
             || !after_cancellation
             || message_id.as_deref() == Some(&link.original_message_id)
@@ -328,10 +347,11 @@ pub(super) async fn admit(
             original_message_id: link.original_message_id.clone(),
             ..Default::default()
         });
-        if request.resume_message_id == message_id {
+        if !by_agent && request.resume_message_id == message_id {
             bail!("this recovery message was already consumed");
         }
         request.cancelled = false;
+        request.cancelled_by_agent = false;
         request.resume_message_id = message_id;
         root.request = Some(request);
         root.revision += 1;

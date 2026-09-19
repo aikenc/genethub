@@ -5,7 +5,7 @@ import path from "node:path";
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-for (const structured of [false,true]) for (const scenario of ["negative", "orphan", "cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
+for (const structured of [false,true]) for (const scenario of ["negative", "orphan", "cancel", "self-cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
   if (structured && !["independent","silence-wr","silence-human","cancel"].includes(scenario)) continue;
   const silence = scenario.startsWith("silence");
   const wr = scenario.startsWith("silence-wr");
@@ -13,7 +13,7 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
     id: `specialty.workflow-control.${scenario}${structured ? ".structured" : ""}`,
     title: `Project workflow recovery across ${scenario}`,
     oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics",
-    catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM cannot raise an exhausted request budget", "a stale budget update overwrites a PM decision", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery"],
+    catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM cannot raise an exhausted request budget", "a stale budget update overwrites a PM decision", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery", "the executor's own cleanup demands a user message the user never owed"],
     tags: ["core", ...(structured ? ["structured-workflow"] : []), ...(wr ? ["pm-exception-recovery"] : []), "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -238,6 +238,27 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
           await t.tools.waitUntil(async () => (await history()).length === 2, 30_000);
           independent = (await history()).find(other => other.id !== original)!;
           t.assertions.assert(independent.requestRunId !== original, "new independent user request was silently attached to existing work");
+        }
+        if (scenario === "self-cancel") {
+          // The executor cancels its own stuck execution and continues the same
+          // request. The user withdrew nothing, so there is no user message
+          // after the cancellation and the shared budget stays the limiter.
+          run = await get(original);
+          const resume = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task self-recovery --retry-of ${quote(original)} --resume-cancelled --message "自清理后继续原请求" --no-wait`;
+          nextCommand = `"$GENEHUB_CLI" workflow cancel --run ${quote(original)} --revision ${run.revision}`
+            + ` && for i in $(seq 1 60); do ${resume} && exit 0; sleep 0.5; done; exit 1`;
+          await send("u_self_cancel", "这个节点卡住了，自己收拾干净再继续同一件事。", original);
+          await t.tools.waitUntil(async () => (await history()).length === 2, 40_000);
+          const resumed = (await history()).find(other => other.id !== original)!;
+          t.assertions.assert((await get(original)).status === "cancelled" && resumed.requestRunId === original && resumed.status === "running",
+            "executor self-recovery did not continue inside the cancelled original request");
+          t.assertions.assert(JSON.stringify(resumed.requestBudget) === JSON.stringify(run.requestBudget),
+            "self-recovery opened a fresh request budget");
+          await t.tools.waitUntil(async () => !(await snapshot()).summary.inputSummary?.pendingMessageIds.includes("u_self_cancel"), 30_000);
+          await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: resumed.id, expectedRevision: (await get(resumed.id)).revision } });
+          await t.tools.waitUntil(async () => (await get(resumed.id)).status === "cancelled", 35_000);
+          t.note(`scenario=${scenario}; worker calls=${workerCalls}; PM calls=${pmCalls}`);
+          return;
         }
         if (scenario === "late-resume") {
           nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task stale-recovery --retry-of ${quote(original)} --resume-cancelled --message "继续旧请求" --no-wait`;

@@ -308,6 +308,7 @@ pub(crate) async fn cancel(
     workspace_id: &str,
     run_id: &str,
     expected_revision: u64,
+    by_agent: bool,
 ) -> Result<WorkflowRunStatus> {
     validate_id(run_id, "runId")?;
     let workspace = state.workspaces.get(workspace_id).await?;
@@ -346,6 +347,7 @@ pub(crate) async fn cancel(
     });
     link.cancelled = true;
     link.cancelled_at_ms = now_ms();
+    link.cancelled_by_agent = by_agent;
     root.request = Some(link);
     root.revision += 1;
     save_run(&runtime, &root)?; // The request fence survives a partial cascade.
@@ -361,7 +363,11 @@ pub(crate) async fn cancel(
         request_stop(
             &mut current,
             "cancelled",
-            "用户终止该请求及全部关联执行".into(),
+            if by_agent {
+                "执行方终止该请求及全部关联执行".into()
+            } else {
+                "用户终止该请求及全部关联执行".into()
+            },
         );
         current.revision += 1;
         current.updated_at_ms = now_ms();
@@ -886,90 +892,93 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                         unavailable = Some(format!(
                             "节点 {node_id} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理"
                         ));
-                        break;
+                        continue;
                     }
+                    // Every node is asked, and a sibling that cannot continue
+                    // no longer decides for the ones that can: continuation is
+                    // a per-node fact, while `blocked` retires the whole
+                    // program and is not reversible.
                     match state.sessions.worker_continuation(session_id).await {
                         crate::session::manager::WorkerContinuation::Ready => {
                             lost.push((node_id.clone(), session_id.clone()));
                         }
                         crate::session::manager::WorkerContinuation::ProcessAlive { pid } => {
-                            alive = Some(pid);
-                            break;
+                            alive = alive.or(Some(pid));
                         }
                         crate::session::manager::WorkerContinuation::Unavailable { reason } => {
-                            unavailable = Some(reason);
-                            break;
+                            unavailable = unavailable.or(Some(reason));
                         }
                     }
                 }
             }
-            if let Some(pid) = alive {
+            let continuable = !waiting && !lost.is_empty();
+            if continuable && run.engine.is_none() {
                 request_stop(
                     &mut run,
                     "blocked",
                     format!(
-                        "旧 Worker 仍在运行，暂停续接{}",
-                        pid.map(|pid| format!("（pid {pid}）")).unwrap_or_default()
+                        "节点 {} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理",
+                        lost.iter()
+                            .map(|(id, _)| id.as_str())
+                            .collect::<Vec<_>>()
+                            .join("、")
                     ),
                 );
-            } else if let Some(reason) = unavailable {
-                request_stop(&mut run, "blocked", reason);
-            } else if !waiting && !lost.is_empty() {
-                if run.engine.is_none() {
+            } else if !continuable {
+                if let Some(pid) = alive {
                     request_stop(
                         &mut run,
                         "blocked",
                         format!(
-                            "节点 {} 的 Worker 已停止，尚未提交节点结果；交回 PM 核对后处理",
-                            lost.iter()
-                                .map(|(id, _)| id.as_str())
-                                .collect::<Vec<_>>()
-                                .join("、")
+                            "旧 Worker 仍在运行，暂停续接{}",
+                            pid.map(|pid| format!("（pid {pid}）")).unwrap_or_default()
                         ),
                     );
-                } else {
-                    let (node_id, session_id) = lost[0].clone();
-                    let reason = format!(
+                } else if let Some(reason) = unavailable {
+                    request_stop(&mut run, "blocked", reason);
+                }
+            } else {
+                let (node_id, session_id) = lost[0].clone();
+                let reason = format!(
                     "节点 {} 的 Worker 已与 daemon 失联，尚未提交结果；原 Session 与写租约仍保留，交回 PM 核对后续接",
                     lost.iter()
                         .map(|(id, _)| id.as_str())
                         .collect::<Vec<_>>()
                         .join("、")
                 );
-                    for (id, _) in &lost {
-                        run.nodes.get_mut(id).expect("lost node").status = "interrupted".into();
-                    }
-                    run.recovery = Some(Recovery {
-                        node_id,
-                        previous_session_id: session_id,
-                        waiting_since_ms: now_ms(),
-                        reuse_session: true,
-                        nodes: lost
-                            .into_iter()
-                            .map(|(node_id, session_id)| RecoveryNode {
-                                node_id,
-                                session_id,
-                            })
-                            .collect(),
-                    });
-                    run.status = "recoverable".into();
-                    run.stop = Some(StopRequest {
-                        target: "recoverable".into(),
-                        reason,
-                        cleanup_error: None,
-                    });
-                    if let Some(executor) = run.executor_session_id.clone() {
-                        let message = flow_message(
-                            &run,
-                            "run.recoverable",
-                            None,
-                            &executor,
-                            &run.parent_session_id,
-                            Some(run.revision.saturating_add(1)),
-                            serde_json::json!({"reuseSession": true, "status": "recoverable"}),
-                        )?;
-                        push_flow_message(&mut run, message);
-                    }
+                for (id, _) in &lost {
+                    run.nodes.get_mut(id).expect("lost node").status = "interrupted".into();
+                }
+                run.recovery = Some(Recovery {
+                    node_id,
+                    previous_session_id: session_id,
+                    waiting_since_ms: now_ms(),
+                    reuse_session: true,
+                    nodes: lost
+                        .into_iter()
+                        .map(|(node_id, session_id)| RecoveryNode {
+                            node_id,
+                            session_id,
+                        })
+                        .collect(),
+                });
+                run.status = "recoverable".into();
+                run.stop = Some(StopRequest {
+                    target: "recoverable".into(),
+                    reason,
+                    cleanup_error: None,
+                });
+                if let Some(executor) = run.executor_session_id.clone() {
+                    let message = flow_message(
+                        &run,
+                        "run.recoverable",
+                        None,
+                        &executor,
+                        &run.parent_session_id,
+                        Some(run.revision.saturating_add(1)),
+                        serde_json::json!({"reuseSession": true, "status": "recoverable"}),
+                    )?;
+                    push_flow_message(&mut run, message);
                 }
             }
         }
@@ -1001,15 +1010,13 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
     for session_id in session_ids {
         let result: Result<()> = async {
             if let Err(error) = state.sessions.fence_execution(&session_id).await {
-                // Reservation precedes Session creation, which can fail. Both
-                // states may legitimately have no Session to fence or reap.
+                // Reservation precedes Session creation, which can fail, and a
+                // durable record can be lost while the daemon is down. Neither
+                // state has a Session to fence or reap, and no retry can bring
+                // one back: refusing here would leave the Run stopping forever.
                 // Existing Sessions and every other lookup error still fail
                 // closed through the normal cleanup path.
-                let uncreated_diagnostic = run.supervision.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.session_id == session_id
-                        && matches!(diagnostic.state.as_str(), "reserved" | "failed")
-                });
-                if uncreated_diagnostic && error.is::<crate::session::manager::SessionMissing>() {
+                if error.is::<crate::session::manager::SessionMissing>() {
                     return Ok(());
                 }
                 return Err(error);

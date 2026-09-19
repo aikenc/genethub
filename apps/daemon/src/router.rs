@@ -1034,7 +1034,15 @@ async fn dispatch(
                     return Handled::err(ErrorCode::Forbidden, error);
                 }
             }
-            match crate::workflow::cancel(state, &workspace_id, &run_id, expected_revision).await {
+            match crate::workflow::cancel(
+                state,
+                &workspace_id,
+                &run_id,
+                expected_revision,
+                caller.session_controller_id().is_some(),
+            )
+            .await
+            {
                 Ok(run) => Handled::ok(Reply::WorkflowRun(run)),
                 Err(error) => failed(error),
             }

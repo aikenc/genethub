@@ -729,7 +729,13 @@ pub(super) async fn resolve_workspace(
 }
 
 fn parse(args: &[String]) -> Result<Command, CliFailure> {
-    let verb = args.first().map(String::as_str).unwrap_or_default();
+    // The verb is read as an Option before the rest is sliced off: this parser
+    // runs inside the daemon on behalf of a Session, so a bare `genet workflow`
+    // that indexed past the end would take every session on the machine down
+    // with it.
+    let Some(verb) = args.first().map(String::as_str) else {
+        return Err(CliFailure::invalid_args(USAGE));
+    };
     let mut values = Values::parse(&args[1..])?;
     if values.draft && (verb != "check" || values.run.is_some()) {
         return Err(CliFailure::invalid_args(
@@ -825,11 +831,12 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 max_llm_rounds: values.max_llm_rounds,
             })
         }
-        _ => Err(CliFailure::invalid_args(
-            "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|recover|continue|budget ...",
-        )),
+        _ => Err(CliFailure::invalid_args(USAGE)),
     }
 }
+
+const USAGE: &str =
+    "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|recover|continue|budget ...";
 
 #[derive(Default)]
 struct Values {
@@ -990,6 +997,12 @@ impl Values {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_workflow_command_with_no_verb_is_answered_instead_of_trapping() {
+        let failure = parse(&[]).expect_err("a bare workflow command has no verb");
+        assert!(failure.message.contains("usage: genet workflow"));
+    }
 
     #[test]
     fn direct_dispatch_does_not_invent_review_or_approval_flags() {
