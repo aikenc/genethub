@@ -100,8 +100,9 @@ pub async fn run_prompt_with_attachments(
             break;
         }
 
-        let (results, requested_input) = if assistant.stop_reason == StopReason::Length {
-            (fail_truncated_calls(&emitter, &calls), false)
+        let (results, requested_input, attachments) = if assistant.stop_reason == StopReason::Length
+        {
+            (fail_truncated_calls(&emitter, &calls), false, Vec::new())
         } else {
             execute_calls(&state, &emitter, &snapshot, &calls).await
         };
@@ -115,11 +116,37 @@ pub async fn run_prompt_with_attachments(
             produced.push(value);
         }
 
-        {
+        let injected = {
             let mut guard = state.lock().await;
             for message in results {
                 guard.session.append_message(message);
             }
+            // Media registered by read_media enters the conversation as a
+            // marked user-message attachment — the only shape providers map
+            // to image_url/video_url — so history replay and compaction treat
+            // it exactly like a chat upload.
+            let fresh = fresh_attachments(&guard.session, attachments);
+            if fresh.is_empty() {
+                None
+            } else {
+                let names = fresh
+                    .iter()
+                    .map(|attachment| attachment.name.clone())
+                    .collect::<Vec<_>>()
+                    .join("、");
+                let message = Message::user_with_attachments(
+                    format!("你通过 read_media 附加了 {names}。媒体内容随本条消息提供，请结合当前任务继续分析。"),
+                    fresh,
+                );
+                guard.session.append_message(message.clone());
+                Some(message)
+            }
+        };
+        if let Some(message) = injected {
+            let value = to_value(&message);
+            emitter.send(json!({ "type": "message_start", "message": value }));
+            emitter.send(json!({ "type": "message_end", "message": value }));
+            produced.push(value);
         }
 
         emitter.send(json!({
@@ -371,7 +398,7 @@ async fn execute_calls(
     emitter: &Emitter,
     snapshot: &Snapshot,
     calls: &[(String, String, Value)],
-) -> (Vec<Message>, bool) {
+) -> (Vec<Message>, bool, Vec<MediaAttachment>) {
     for (id, name, arguments) in calls {
         emitter.send(json!({
             "type": "tool_execution_start",
@@ -391,6 +418,7 @@ async fn execute_calls(
         let emitter = emitter.clone();
         let cwd = snapshot.cwd.clone();
         let abort = abort.clone();
+        let model = snapshot.model.clone();
         async move {
             let result = if name == "request_user_input" && !interaction_is_valid {
                 tools::ToolResult::error(
@@ -421,6 +449,7 @@ async fn execute_calls(
                     }
                 }
             };
+            let result = enforce_media_modality(result, &model);
             emitter.send(json!({
                 "type": "tool_execution_end",
                 "toolCallId": id,
@@ -440,7 +469,76 @@ async fn execute_calls(
     });
 
     let results = futures_util::future::join_all(futures).await;
-    (results, requested_input)
+    let attachments = results.iter().filter_map(registered_attachment).collect();
+    (results, requested_input, attachments)
+}
+
+/// The attachment a successful read_media call registered, if any.
+fn registered_attachment(message: &Message) -> Option<MediaAttachment> {
+    let Message::ToolResult {
+        details,
+        is_error: false,
+        ..
+    } = message
+    else {
+        return None;
+    };
+    let value = details
+        .as_ref()?
+        .get(crate::tools::media_attachment_detail_key())?
+        .clone();
+    serde_json::from_value(value).ok()
+}
+
+/// Tools cannot see the current model, so read_media validates everything
+/// except the one fact that decides whether the file can actually reach it:
+/// the declared input modalities. An unsupported model gets an honest tool
+/// error here — before the event is emitted — instead of a silently dropped
+/// attachment.
+fn enforce_media_modality(
+    result: tools::ToolResult,
+    model: &crate::config::ModelConfig,
+) -> tools::ToolResult {
+    if result.is_error {
+        return result;
+    }
+    let Some(value) = result
+        .details
+        .as_ref()
+        .and_then(|details| details.get(crate::tools::media_attachment_detail_key()))
+    else {
+        return result;
+    };
+    let Ok(attachment) = serde_json::from_value::<MediaAttachment>(value.clone()) else {
+        return result;
+    };
+    let kind = crate::provider::media::kind(&attachment).unwrap_or("media");
+    if model.input_modalities.iter().any(|input| input == kind) {
+        return result;
+    }
+    tools::ToolResult::error(format!(
+        "read_media: 模型 {}/{} 未配置 {kind} 输入能力，无法读取 {}",
+        model.provider, model.id, attachment.name
+    ))
+}
+
+/// Skips files already attached to the conversation so a re-read does not
+/// resend the same media on every following request.
+fn fresh_attachments(
+    session: &crate::session::Session,
+    attachments: Vec<MediaAttachment>,
+) -> Vec<MediaAttachment> {
+    attachments
+        .into_iter()
+        .filter(|attachment| {
+            !session.messages.iter().any(|message| match message {
+                Message::User { attachments, .. } => attachments
+                    .iter()
+                    .any(|existing| existing.path.is_some() && existing.path == attachment.path),
+                _ => false,
+            })
+        })
+        .collect()
 }
 
 async fn finish_without_model(
@@ -694,7 +792,7 @@ mod tests {
             }
             _ = &mut running => panic!("the command unexpectedly finished before cancellation"),
         }
-        let (results, stopped_for_human_input) =
+        let (results, stopped_for_human_input, _) =
             tokio::time::timeout(std::time::Duration::from_secs(2), &mut running)
                 .await
                 .expect("the tool await is cancellation-aware");
@@ -705,5 +803,123 @@ mod tests {
             Message::ToolResult { is_error: true, content, .. }
                 if matches!(content.first(), Some(Content::Text { text }) if text == "Operation aborted")
         ));
+    }
+
+    #[tokio::test]
+    async fn read_media_registers_an_attachment_for_a_capable_model() {
+        let dir = std::env::temp_dir().join(format!("genet-loop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("clip.webm"), b"webm-bytes").unwrap();
+
+        let mut model = fake_model();
+        model.input_modalities = vec!["video".into()];
+        let (emitter, rx) = capture();
+        let state = state_with(Some(model.clone()), emitter.clone(), dir.clone());
+        let snapshot = Snapshot {
+            model,
+            messages: Vec::new(),
+            system_prompt: String::new(),
+            tools_enabled: true,
+            thinking_level: "medium".into(),
+            cwd: dir,
+        };
+        let calls = vec![(
+            "call_1".to_string(),
+            "read_media".to_string(),
+            json!({"path": "clip.webm"}),
+        )];
+
+        let (results, stopped, attachments) =
+            execute_calls(&state, &emitter, &snapshot, &calls).await;
+
+        assert!(!stopped);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].path.as_deref(), Some("clip.webm"));
+        assert_eq!(attachments[0].mime, "video/webm");
+        assert!(matches!(
+            &results[0],
+            Message::ToolResult { is_error: false, content, .. }
+                if matches!(content.first(), Some(Content::Text { text }) if text.contains("已附加"))
+        ));
+        let frames = drain(rx).await;
+        let end = frames
+            .iter()
+            .find(|f| f["type"] == "tool_execution_end")
+            .unwrap();
+        assert_eq!(end["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn read_media_fails_honestly_when_the_model_lacks_the_modality() {
+        let dir = std::env::temp_dir().join(format!("genet-loop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("clip.webm"), b"webm-bytes").unwrap();
+
+        let (emitter, rx) = capture();
+        let model = fake_model();
+        let state = state_with(Some(model.clone()), emitter.clone(), dir.clone());
+        let snapshot = Snapshot {
+            model,
+            messages: Vec::new(),
+            system_prompt: String::new(),
+            tools_enabled: true,
+            thinking_level: "medium".into(),
+            cwd: dir,
+        };
+        let calls = vec![(
+            "call_1".to_string(),
+            "read_media".to_string(),
+            json!({"path": "clip.webm"}),
+        )];
+
+        let (results, _, attachments) = execute_calls(&state, &emitter, &snapshot, &calls).await;
+
+        assert!(attachments.is_empty());
+        assert!(matches!(
+            &results[0],
+            Message::ToolResult { is_error: true, content, .. }
+                if matches!(content.first(), Some(Content::Text { text }) if text.contains("未配置 video 输入能力"))
+        ));
+        // The emitted event agrees with the recorded result: no false success.
+        let frames = drain(rx).await;
+        let end = frames
+            .iter()
+            .find(|f| f["type"] == "tool_execution_end")
+            .unwrap();
+        assert_eq!(end["isError"], true);
+    }
+
+    #[test]
+    fn already_attached_files_are_not_resent() {
+        let dir = std::env::temp_dir();
+        let mut session = Session::in_memory(dir);
+        session.append_message(Message::user_with_attachments(
+            "hi",
+            vec![MediaAttachment {
+                name: "clip.webm".into(),
+                mime: "video/webm".into(),
+                path: Some("clip.webm".into()),
+                data_base64: None,
+            }],
+        ));
+        let again = vec![
+            MediaAttachment {
+                name: "clip.webm".into(),
+                mime: "video/webm".into(),
+                path: Some("clip.webm".into()),
+                data_base64: None,
+            },
+            MediaAttachment {
+                name: "frame.png".into(),
+                mime: "image/png".into(),
+                path: Some("frame.png".into()),
+                data_base64: None,
+            },
+        ];
+
+        let fresh = fresh_attachments(&session, again);
+
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].name, "frame.png");
     }
 }

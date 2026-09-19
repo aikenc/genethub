@@ -9,8 +9,8 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::config::ModelConfig;
 use crate::protocol::MediaAttachment;
 
-const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-const MAX_VIDEO_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_VIDEO_BYTES: usize = 64 * 1024 * 1024;
 
 pub fn data_url(
     model: &ModelConfig,
