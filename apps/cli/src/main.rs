@@ -210,8 +210,9 @@ pub fn usage() -> i32 {
                                     list recent Runs for Workflow analysis
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
-                              [--outcome changesRequested|failed|blocked --reason <text>]
-                                    finish a negative review through its explicit or default exit
+                              [--outcome <name> --reason <text>]
+                                    finish a negative review through its explicit or default exit;
+                                    built-in changesRequested|failed|blocked or a Workflow-declared name
   genet space inspect              which responsibilities this AgentSpace carries
   genet space children             the direct Workers this Executor may dispatch to
   genet space component set --component <pm|executor|worker|reviewer> [--role <r>]

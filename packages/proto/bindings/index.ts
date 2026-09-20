@@ -1920,9 +1920,14 @@ export type WorkflowFinding = { runId: string, nodeId: string | null, code: stri
 export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
 
 /**
- * Finishing a review is distinct from approving its subject.
+ * A node's settled outcome, as a bare string on the wire and on disk.
+ *
+ * The kernel's only stake in the name is the success bit — declared by the
+ * workflow that owns it, with the four built-in names keeping their
+ * historical semantics. Anything else the name means is project vocabulary
+ * carried opaquely.
  */
-export type WorkflowNodeOutcome = "completed" | "changesRequested" | "failed" | "blocked";
+export type WorkflowNodeOutcome = string;
 
 export type WorkflowNodeRunStatus = { output?: unknown, 
 /**

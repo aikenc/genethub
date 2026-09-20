@@ -121,7 +121,12 @@ pub(super) fn settled(run: &mut RunRecord, id: &str) -> Result<()> {
         return Ok(());
     };
     let record = &run.nodes[id];
-    let code = control::outcome_event(record.outcome.unwrap_or_default());
+    let name = record.outcome.clone().unwrap_or_default();
+    let code = name.name().to_string();
+    // The declared success bit, not a kernel guess from the name. The engine
+    // still re-derives routing from the task's accept list; this is the bit
+    // persisted with the settled observation.
+    let success = super::outcome_success(&run.definition, &code).unwrap_or(false);
     let transition = engine::advance(
         &program,
         snapshot,
@@ -133,8 +138,8 @@ pub(super) fn settled(run: &mut RunRecord, id: &str) -> Result<()> {
                 update_seq: op.update_seq + 1,
                 update: engine::ActivityUpdate::Settled {
                     outcome: engine::Outcome {
-                        code: code.into(),
-                        success: code == "completed",
+                        code: code.clone(),
+                        success,
                         value: {
                             let mut value = serde_json::json!({"outcome":code,"evidence":record.evidence,"reason":record.reason});
                             if let Some(output) = &record.output {

@@ -38,11 +38,14 @@ pub(crate) fn schema() -> Value {
         },
         "entries": "{op:entries,value:<object expression>} returns at most 4096 {key,value} pairs in ascending key order; use serial forEach initial/update to aggregate parallel results",
         "verifiers": ["value.nonEmpty", "value.equals", "git.commitOnTarget"],
-        "workerOutcomes": ["completed", "changesRequested", "failed", "blocked"],
+        "workerOutcomes": {
+            "builtin": ["completed", "changesRequested", "failed", "blocked"],
+            "custom": "declare in this Workflow's outcomes map (name -> {success: bool}); on edges and structured accept lists may use any declared name, and only agent.session may emit non-completed outcomes; the kernel consumes just the success bit",
+        },
         "referenceSyntax": "RFC 6901 JSON Pointer, not JSONPath or jq",
         "typeChecking": "known expression kinds at compile time; references and output values at runtime; no coercion",
         "outputObjects": "Prefer explicit required + additionalProperties:false. Omit both only for legacy all-required/closed shorthand.",
-        "limits": {"sourceBytes": MAX_SOURCE_BYTES, "workflows": MAX_WORKFLOWS, "nodes": MAX_NODES, "includes": MAX_INCLUDES},
+        "limits": {"sourceBytes": MAX_SOURCE_BYTES, "workflows": MAX_WORKFLOWS, "nodes": MAX_NODES, "includes": MAX_INCLUDES, "outcomes": MAX_OUTCOMES},
         "scope": "Syntax schema is generated from the parser types. Compiler checks control flow, bounds and references; valid does not prove carrier readiness, actual check execution or business quality."
     });
     schema

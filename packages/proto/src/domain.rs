@@ -1447,16 +1447,31 @@ pub struct WorkflowDiagnosticStatus {
     pub error: Option<String>,
 }
 
-/// Finishing a review is distinct from approving its subject.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+/// A node's settled outcome, as a bare string on the wire and on disk.
+///
+/// The kernel's only stake in the name is the success bit — declared by the
+/// workflow that owns it, with the four built-in names keeping their
+/// historical semantics. Anything else the name means is project vocabulary
+/// carried opaquely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(transparent)]
 #[ts(export, export_to = "index.ts")]
-pub enum WorkflowNodeOutcome {
-    #[default]
-    Completed,
-    ChangesRequested,
-    Failed,
-    Blocked,
+pub struct WorkflowNodeOutcome(pub String);
+
+impl WorkflowNodeOutcome {
+    pub fn completed() -> Self {
+        Self("completed".into())
+    }
+
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for WorkflowNodeOutcome {
+    fn default() -> Self {
+        Self::completed()
+    }
 }
 
 /// A session written by a newer build than this one.

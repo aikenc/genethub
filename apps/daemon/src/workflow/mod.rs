@@ -45,6 +45,7 @@ const MAX_SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_WORKFLOWS: usize = 64;
 const MAX_NODES: usize = 64;
 const MAX_INCLUDES: usize = 8;
+const MAX_OUTCOMES: usize = 32;
 const MAX_CANDIDATE_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CANDIDATE_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_CANDIDATE_RECORD_BYTES: u64 = 64 * 1024 * 1024;
@@ -119,6 +120,11 @@ struct WorkflowDefinition {
     version: u32,
     #[serde(default)]
     entry: String,
+    /// Outcomes this Workflow's `agent.session` nodes may settle with, beyond
+    /// the kernel's four built-in names. The kernel consumes only the declared
+    /// success bit; the name, its routing and its meaning stay project data.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    outcomes: BTreeMap<String, OutcomeDeclaration>,
     /// Shared procedure libraries this Workflow pulls in, by library id. They
     /// are resolved while loading the bundle, so the pinned program is exactly
     /// what the same content written in one file would produce: the engine, the
@@ -128,6 +134,13 @@ struct WorkflowDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structure: Option<workflow_engine::Definition>,
     nodes: Vec<NodeDefinition>,
+}
+
+/// The one fact the kernel needs about a declared outcome.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OutcomeDeclaration {
+    success: bool,
 }
 
 /// A procedure library: `call` targets plus the activities they need, with no
@@ -1524,21 +1537,32 @@ pub(crate) async fn complete(
     if record.status != "running" || record.session_id.as_deref() != Some(caller_session_id) {
         bail!("当前 Session 不是节点 {node_id} 的执行者");
     }
-    let event = control::outcome_event(outcome);
+    // The kernel judges an outcome by exactly one bit. Where the bit comes
+    // from is not negotiable: built-in names or this Workflow's own `outcomes`
+    // declaration. An undeclared name is a typo until the Workflow says
+    // otherwise, so it is refused instead of guessed.
+    validate_id(outcome.name(), "outcome 名")?;
+    let success = outcome_success(&run.definition, outcome.name()).ok_or_else(|| {
+        anyhow!(
+            "Workflow {} 未声明 outcome {}；内置 completed|changesRequested|failed|blocked，\
+             其余需在该 Workflow 的 outcomes 中声明",
+            run.workflow_id,
+            outcome.name()
+        )
+    })?;
+    let event = outcome.name().to_string();
     if let Some(value) = &output {
         output::bounded(value)?;
         if let Some(shape) = &node.completion.output {
             shape.verify(value, "")?;
         }
-    } else if node.completion.output.is_some()
-        && outcome == genehub_proto::WorkflowNodeOutcome::Completed
-    {
+    } else if node.completion.output.is_some() && success {
         bail!(
             "节点 {} 需要按 completion.output 提交结构化 output",
             node.id
         );
     }
-    if outcome == genehub_proto::WorkflowNodeOutcome::Completed {
+    if success {
         verify_evidence(&workspace.root, &run, &node, &evidence).await?;
     } else {
         control::validate_negative_result(reason.as_deref(), &evidence)?;
@@ -1552,16 +1576,13 @@ pub(crate) async fn complete(
     record.output = output;
     record.outcome = Some(outcome);
     record.reason = reason.clone();
-    let targets = node.on.get(event).cloned().unwrap_or_default();
-    if run.engine.is_none()
-        && outcome != genehub_proto::WorkflowNodeOutcome::Completed
-        && targets.is_empty()
-    {
+    let targets = node.on.get(&event).cloned().unwrap_or_default();
+    if run.engine.is_none() && !success && targets.is_empty() {
         run.nodes.get_mut(node_id).expect("node").status = "completed".into();
         control::request_stop(
             &mut run,
             "blocked",
-            format!("{node_id}: {}", reason.as_deref().unwrap_or(event)),
+            format!("{node_id}: {}", reason.as_deref().unwrap_or(event.as_str())),
         );
     }
     run.revision = run.revision.saturating_add(1);
@@ -1658,7 +1679,7 @@ async fn activate(
                     };
                     let record = run.nodes.get_mut(&node_id).expect("validated node");
                     record.output = output;
-                    record.outcome = Some(genehub_proto::WorkflowNodeOutcome::Completed);
+                    record.outcome = Some(genehub_proto::WorkflowNodeOutcome::completed());
                     record.status = "completed".into();
                     record.assigned_at_ms = now_ms();
                     record.settled_at_ms = record.assigned_at_ms;
@@ -1904,6 +1925,21 @@ fn managed_prompt(
         "\n本节点成功完成还需 `--output <JSON>`，数据形状为 {}。object 的 properties 必须全部提供且不得添加其他字段；这不是完整 JSON Schema。\n",
         serde_json::to_string(shape).expect("output shape serializes"),
     )).unwrap_or_default();
+    // Project vocabulary: outcome names this Workflow declared beyond the
+    // kernel's built-ins, so a Worker can settle with them instead of forcing
+    // its judgment into `blocked`.
+    let declared = run
+        .definition
+        .outcomes
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("|");
+    let declared_outcomes = if declared.is_empty() {
+        String::new()
+    } else {
+        format!("（本 Workflow 另声明 {declared}）")
+    };
     format!(
         "{}\n\n<genehub_managed_session>\n\
 你正在普通 Session 中执行项目 Workflow `{}` 的节点 `{}`，角色标签为 `{}`。本会话由根会话委托，\
@@ -1915,7 +1951,7 @@ fn managed_prompt(
 `verify` 名称只描述 daemon 如何校验，不是 value 的前缀：例如提交证据使用 `--evidence commit=<40位提交哈希>`，\
 普通检查使用 `--evidence checks=<实际检查摘要>`。\
 只上报真实证据；缺少证据时继续执行或明确失败。提交结果后结束本节点，框架会收尾该会话及进程后再派发后续节点。\n\
-无法满足节点验收或无法继续时，使用 `workflow complete --outcome changesRequested|failed|blocked --reason <具体原因>`，\
+无法满足节点验收或无法继续时，使用 `workflow complete --outcome changesRequested|failed|blocked{}` --reason <具体原因>`，\
 可以附带已有证据；不要伪造通过证据，也不要只在聊天中报告后留下 running 节点。\n\
 </genehub_managed_session>",
         role.prompt_text,
@@ -1925,6 +1961,7 @@ fn managed_prompt(
         if evidence.is_empty() { "无额外证据" } else { &evidence },
         output_contract,
         task_cwd,
+        declared_outcomes,
     )
 }
 
@@ -2929,6 +2966,21 @@ fn resolve_includes(
     Ok(())
 }
 
+/// The kernel's whole stake in an outcome name: its success bit. The built-in
+/// names keep their historical semantics; any other name must be declared by
+/// the Workflow itself, or the kernel has nothing to judge it by and returns
+/// `None`.
+fn outcome_success(definition: &WorkflowDefinition, name: &str) -> Option<bool> {
+    match name {
+        "completed" => Some(true),
+        "changesRequested" | "failed" | "blocked" => Some(false),
+        _ => definition
+            .outcomes
+            .get(name)
+            .map(|declared| declared.success),
+    }
+}
+
 fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
     validate_id(&definition.id, "workflow id")?;
     if definition.version == 0 {
@@ -2936,6 +2988,18 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
     }
     if definition.nodes.is_empty() || definition.nodes.len() > MAX_NODES {
         bail!("Workflow 节点数必须在 1..={MAX_NODES} 之间");
+    }
+    if definition.outcomes.len() > MAX_OUTCOMES {
+        bail!("Workflow outcome 声明数必须在 0..={MAX_OUTCOMES} 之间");
+    }
+    for name in definition.outcomes.keys() {
+        validate_id(name, "outcome 名")?;
+        if matches!(
+            name.as_str(),
+            "completed" | "changesRequested" | "failed" | "blocked"
+        ) {
+            bail!("outcome {name} 不能重定义内置名；内置语义由内核固定");
+        }
     }
     let mut ids = BTreeSet::new();
     let mut incoming = BTreeMap::<String, usize>::new();
@@ -3025,17 +3089,18 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
             }
         }
         for (event, targets) in &node.on {
-            if !matches!(
-                event.as_str(),
-                "completed" | "changesRequested" | "failed" | "blocked"
-            ) {
-                bail!("当前内核尚未注册节点事件：{event}");
+            if outcome_success(definition, event).is_none() {
+                bail!(
+                    "Workflow {} 未声明节点事件 {event}；内置 completed|changesRequested|failed|blocked，\
+                     其余需在该 Workflow 的 outcomes 中声明",
+                    definition.id
+                );
             }
             if node.uses != "agent.session" && event != "completed" {
                 bail!("{} cannot emit {event}", node.uses);
             }
             for target in targets {
-                if event != "completed"
+                if outcome_success(definition, event) != Some(true)
                     && definition
                         .nodes
                         .iter()
@@ -3065,15 +3130,26 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
                     "Use a node ID declared in this Workflow's nodes list.",
                 ));
             }
-            if accept.iter().any(|outcome| {
-                !matches!(
-                    outcome.as_str(),
-                    "completed" | "changesRequested" | "failed" | "blocked"
-                ) || (node.is_some_and(|n| n.uses != "agent.session") && outcome != "completed")
+            if let Some(outcome) = accept
+                .iter()
+                .find(|outcome| outcome_success(definition, outcome).is_none())
+            {
+                return Err(authoring::definition_error(
+                    "WF_OUTCOME",
+                    &format!("{path}/accept"),
+                    format!("task accepts the undeclared outcome {outcome}"),
+                    "Built-in completed/changesRequested/failed/blocked or a name this Workflow declares in outcomes.",
+                ));
+            }
+            if let Some(outcome) = accept.iter().find(|outcome| {
+                node.is_some_and(|n| n.uses != "agent.session") && outcome.as_str() != "completed"
             }) {
-                return Err(authoring::definition_error("WF_OUTCOME", &format!("{path}/accept"),
-                    "task accepts an outcome its capability cannot emit".into(),
-                    "agent.session emits completed/changesRequested/failed/blocked; result.publish and request.budget emit only completed."));
+                return Err(authoring::definition_error(
+                    "WF_OUTCOME",
+                    &format!("{path}/accept"),
+                    format!("task accepts {outcome}, which its capability cannot emit"),
+                    "agent.session emits any declared outcome; result.publish and request.budget emit only completed.",
+                ));
             }
         }
         return Ok(());
@@ -3881,7 +3957,7 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
                         .iter()
                         .fold(0, |sum, activity| sum.saturating_add(activity.llm_rounds)),
                 ),
-                outcome: node.outcome,
+                outcome: node.outcome.clone(),
                 reason: node.reason.clone(),
                 id: id.clone(),
                 uses: node.uses.clone(),
@@ -4542,6 +4618,7 @@ mod tests {
             id: "anything".into(),
             version: 1,
             entry: "first".into(),
+            outcomes: BTreeMap::new(),
             nodes: vec![
                 NodeDefinition {
                     id: "first".into(),
@@ -4574,6 +4651,7 @@ mod tests {
             id: "unsafe".into(),
             version: 1,
             entry: "run-review-because-the-name-says-so".into(),
+            outcomes: BTreeMap::new(),
             nodes: vec![NodeDefinition {
                 id: "run-review-because-the-name-says-so".into(),
                 uses: "shell.exec".into(),
@@ -4597,6 +4675,7 @@ mod tests {
             id: "fanout".into(),
             version: 1,
             entry: "delegate".into(),
+            outcomes: BTreeMap::new(),
             nodes: vec![
                 NodeDefinition {
                     id: "delegate".into(),
@@ -4630,6 +4709,176 @@ mod tests {
         validate_definition(&definition).unwrap();
     }
 
+    fn dag_definition(
+        outcomes: BTreeMap<String, OutcomeDeclaration>,
+        on: BTreeMap<String, Vec<String>>,
+    ) -> WorkflowDefinition {
+        WorkflowDefinition {
+            structure: None,
+            include: Vec::new(),
+            schema: DEFINITION_SCHEMA.into(),
+            id: "custom-outcomes".into(),
+            version: 1,
+            entry: "review".into(),
+            outcomes,
+            nodes: vec![
+                NodeDefinition {
+                    id: "review".into(),
+                    uses: "agent.session".into(),
+                    inputs: NodeInputs {
+                        role: Some("reviewer".into()),
+                        ..Default::default()
+                    },
+                    completion: CompletionDefinition::default(),
+                    on,
+                },
+                NodeDefinition {
+                    id: "escalate".into(),
+                    uses: "agent.session".into(),
+                    inputs: NodeInputs {
+                        role: Some("architect".into()),
+                        ..Default::default()
+                    },
+                    completion: CompletionDefinition::default(),
+                    on: BTreeMap::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn declared_outcomes_add_project_vocabulary_with_one_kernel_bit() {
+        let outcomes = BTreeMap::from([
+            (
+                "needsDesignReview".to_string(),
+                OutcomeDeclaration { success: false },
+            ),
+            (
+                "acceptedWithNotes".to_string(),
+                OutcomeDeclaration { success: true },
+            ),
+        ]);
+        let definition = dag_definition(
+            outcomes.clone(),
+            BTreeMap::from([
+                ("completed".into(), vec![]),
+                ("needsDesignReview".into(), vec!["escalate".into()]),
+            ]),
+        );
+        validate_definition(&definition).unwrap();
+        // The kernel's whole stake: the success bit, nothing about the name.
+        assert_eq!(outcome_success(&definition, "completed"), Some(true));
+        assert_eq!(
+            outcome_success(&definition, "changesRequested"),
+            Some(false)
+        );
+        assert_eq!(
+            outcome_success(&definition, "needsDesignReview"),
+            Some(false)
+        );
+        assert_eq!(
+            outcome_success(&definition, "acceptedWithNotes"),
+            Some(true)
+        );
+        assert_eq!(outcome_success(&definition, "flaky"), None);
+    }
+
+    #[test]
+    fn undeclared_outcome_names_are_refused_not_guessed() {
+        let error = validate_definition(&dag_definition(
+            BTreeMap::new(),
+            BTreeMap::from([("needsDesignReview".into(), vec!["escalate".into()])]),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("未声明节点事件 needsDesignReview"),
+            "{error}"
+        );
+        assert!(error.contains("outcomes"), "{error}");
+
+        let redeclared =
+            BTreeMap::from([("failed".to_string(), OutcomeDeclaration { success: true })]);
+        let error = validate_definition(&dag_definition(
+            redeclared,
+            BTreeMap::from([("completed".into(), vec![])]),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("不能重定义内置名"), "{error}");
+    }
+
+    #[test]
+    fn only_agent_sessions_may_emit_a_non_completed_outcome() {
+        let mut definition = dag_definition(
+            BTreeMap::from([(
+                "needsDesignReview".to_string(),
+                OutcomeDeclaration { success: false },
+            )]),
+            BTreeMap::from([("completed".into(), vec![])]),
+        );
+        definition.nodes[1].uses = "result.publish".into();
+        definition.nodes[1].inputs = NodeInputs::default();
+        definition.nodes[1].on =
+            BTreeMap::from([("needsDesignReview".into(), vec!["review".into()])]);
+        let error = validate_definition(&definition).unwrap_err().to_string();
+        assert!(error.contains("cannot emit needsDesignReview"), "{error}");
+    }
+
+    #[test]
+    fn structured_accept_lists_may_use_declared_outcomes() {
+        let mut definition = dag_definition(
+            BTreeMap::from([(
+                "needsDesignReview".to_string(),
+                OutcomeDeclaration { success: false },
+            )]),
+            BTreeMap::new(),
+        );
+        definition.schema = "genehub.workflow.definition.v2".into();
+        definition.entry = String::new();
+        definition.structure = Some(workflow_engine::Definition {
+            timeout_ms: None,
+            body: workflow_engine::Block {
+                id: "review-step".into(),
+                kind: workflow_engine::BlockKind::Task {
+                    activity: "review".into(),
+                    timeout_ms: None,
+                    input: workflow_engine::Expr::Ref { path: "".into() },
+                    accept: vec!["completed".into(), "needsDesignReview".into()],
+                },
+            },
+            procedures: BTreeMap::new(),
+            input: serde_json::json!({}),
+            limits: Default::default(),
+        });
+        validate_definition(&definition).unwrap();
+
+        definition.outcomes.remove("needsDesignReview").unwrap();
+        let error = validate_definition(&definition).unwrap_err().to_string();
+        assert!(
+            error.contains("undeclared outcome needsDesignReview"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn outcome_wire_format_stays_a_bare_string_for_existing_records() {
+        let legacy: Option<genehub_proto::WorkflowNodeOutcome> =
+            serde_json::from_str("\"changesRequested\"").unwrap();
+        assert_eq!(
+            legacy.clone().expect("deserializes").name(),
+            "changesRequested"
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            "\"changesRequested\""
+        );
+        assert_eq!(
+            genehub_proto::WorkflowNodeOutcome::default().name(),
+            "completed"
+        );
+    }
+
     #[test]
     fn publish_capability_cannot_silently_ignore_inputs_or_evidence() {
         let publish = |inputs: NodeInputs, completion: CompletionDefinition| WorkflowDefinition {
@@ -4639,6 +4888,7 @@ mod tests {
             id: "publish-only".into(),
             version: 1,
             entry: "publish".into(),
+            outcomes: BTreeMap::new(),
             nodes: vec![NodeDefinition {
                 id: "publish".into(),
                 uses: "result.publish".into(),
@@ -4688,6 +4938,7 @@ mod tests {
             id: "publish-only".into(),
             version: 1,
             entry: "publish".into(),
+            outcomes: BTreeMap::new(),
             nodes: vec![NodeDefinition {
                 id: "publish".into(),
                 uses: "result.publish".into(),
@@ -4786,6 +5037,7 @@ mod tests {
                 id: "direct".into(),
                 version: 1,
                 entry: "work".into(),
+                outcomes: BTreeMap::new(),
                 nodes: Vec::new(),
             },
             roles: BTreeMap::new(),

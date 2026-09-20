@@ -1270,13 +1270,13 @@ fn command_schema(name: &str) -> Value {
             json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}, "draft": {"type":"boolean", "description":"Read-only source validation; invalid draft exits nonzero with error.details.draft.diagnostics. Definition schema: schema workflow.definition"}}), &[],
         ),
         "workflow.complete" => workflow_schema(
-            "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--output <json>] [--outcome completed|changesRequested|failed|blocked] [--reason <text>]",
+            "genet workflow complete [--workspace <id>] [--run <id>] [--node <id>] [--revision <n>] [--evidence <key=value>]... [--output <json>] [--outcome <name>] [--reason <text>]",
             json!({
                 "runId": {"type": "string"}, "nodeId": {"type": "string", "description": "Only the Session currently bound to this node may submit its result; a PM cannot complete on a Worker's behalf"},
                 "revision": {"type": "integer", "minimum": 0},
                 "evidence": {"type": "object", "additionalProperties": {"type": "string"}, "description": "--evidence key=value; success uses the graph's evidence requirements"},
                 "output": {"description": "--output JSON business data (256 KiB, depth 32); checked against completion.output when declared, separate from evidence"},
-                "outcome": {"enum": ["completed", "changesRequested", "failed", "blocked"], "default": "completed"},
+                "outcome": {"type": "string", "default": "completed", "description": "an outcome the Workflow declares: built-in completed|changesRequested|failed|blocked, or a name from its outcomes map; a success:false outcome requires --reason"},
                 "reason": {"type": "string", "minLength": 1, "description": "required for a negative outcome"}
             }), &[],
         ),

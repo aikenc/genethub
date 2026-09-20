@@ -68,6 +68,13 @@ pub(crate) async fn check(
             }
             let fallback = ["changesRequested", "failed", "blocked"]
                 .into_iter()
+                .chain(
+                    run.definition
+                        .outcomes
+                        .iter()
+                        .filter(|(_, declared)| !declared.success)
+                        .map(|(name, _)| name.as_str()),
+                )
                 .filter(|event| !node.on.contains_key(*event))
                 .collect::<Vec<_>>();
             if run.engine.is_none() && !fallback.is_empty() {

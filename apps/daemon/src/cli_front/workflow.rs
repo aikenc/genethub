@@ -384,7 +384,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                         expected_revision,
                         evidence: evidence.clone(),
                         output: output.clone(),
-                        outcome,
+                        outcome: outcome.clone(),
                         reason: reason.clone(),
                     })
                     .await
@@ -885,13 +885,11 @@ impl Values {
                 "--retry-of" => values.retry_of = Some(next(&mut index)?),
                 "--resume-cancelled" => values.resume_cancelled = true,
                 "--outcome" => {
-                    values.outcome = Some(
-                        serde_json::from_value(json!(next(&mut index)?)).map_err(|_| {
-                            CliFailure::invalid_args(
-                                "--outcome 使用 completed|changesRequested|failed|blocked",
-                            )
-                        })?,
-                    );
+                    let value = next(&mut index)?;
+                    if value.len() > 96 {
+                        return Err(CliFailure::invalid_args("--outcome 名称不能超过 96 字符"));
+                    }
+                    values.outcome = Some(genehub_proto::WorkflowNodeOutcome(value));
                 }
                 "--reason" => values.reason = Some(next(&mut index)?),
                 "--agent" => values.agent = Some(next(&mut index)?),

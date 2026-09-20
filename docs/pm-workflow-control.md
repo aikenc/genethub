@@ -52,6 +52,11 @@ changesRequested → repair → review-after-repair → publish-repaired. A seco
 rejection uses the blocked exit. Unselected branches become unreached, and
 separate publish nodes avoid introducing joins. Projects may edit these paths;
 the daemon does not recognize repair node names or prescribe another PM Run.
+A Workflow may also declare its own outcomes beyond the four built-in names
+(`outcomes: <name>: {success: <bool>}`); the kernel judges only the declared
+success bit, while `on` edges and structured `accept` lists route by any
+declared name, so a reviewer no longer has to compress a project-specific
+judgment into `blocked`.
 
 Accepted node results enter finishing. The executor reconciler fences and
 closes that node, verifies known process cleanup, then activates its declared

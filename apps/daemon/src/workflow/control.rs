@@ -2,7 +2,7 @@
 //! an LLM. A stop remains nonterminal until session and lease cleanup succeeds.
 
 use super::*;
-use genehub_proto::{SessionStatus, WorkflowNodeOutcome};
+use genehub_proto::SessionStatus;
 
 pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSummary]) {
     let executing_runs = state.sessions.executing_workflow_runs().await;
@@ -191,15 +191,6 @@ fn continue_message(run: &RunRecord, node: &NodeDefinition) -> String {
         "daemon 已重启。本节点尚未提交结果。请先核对本会话历史、任务工作目录（git status、现有文件）和已完成动作，再从中断处继续同一节点；不要重做已经完成的工作，也不要另开任务。只有项目目录消失或会话无法继续时才明确失败。\n\n{}",
         super::task_message(run, node)
     )
-}
-
-pub(super) fn outcome_event(outcome: WorkflowNodeOutcome) -> &'static str {
-    match outcome {
-        WorkflowNodeOutcome::Completed => "completed",
-        WorkflowNodeOutcome::ChangesRequested => "changesRequested",
-        WorkflowNodeOutcome::Failed => "failed",
-        WorkflowNodeOutcome::Blocked => "blocked",
-    }
 }
 
 pub(super) fn validate_negative_result(
@@ -763,7 +754,7 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
             if let Some(activity) = activity {
                 run.nodes.get_mut(node_id).expect("node").activity = activity;
             }
-            let outcome = run.nodes[node_id].outcome.unwrap_or_default();
+            let outcome = run.nodes[node_id].outcome.clone().unwrap_or_default();
             run.nodes.get_mut(node_id).expect("node").status = "completed".into();
             if run.engine.is_some() {
                 structured::settled(&mut run, node_id)?;
@@ -776,7 +767,7 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
             let definition = runtime_node(&run, node_id)?;
             let targets = definition
                 .on
-                .get(outcome_event(outcome))
+                .get(outcome.name())
                 .cloned()
                 .unwrap_or_default();
             let leases_before = run.leases.clone();
