@@ -249,24 +249,11 @@ pub struct AgentSpaceInfo {
     /// Worker should suggest to the user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guidance: Vec<String>,
-    /// The Bootstrap Pack that last established this Space, when any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub bootstrap_pack: Option<AgentSpacePackIdentity>,
     /// Builder/tree facts checked by the daemon. Business health remains a DCG
     /// concern; this field reports only structural reasons the UI can display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub health: Option<AgentSpaceHealth>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct AgentSpacePackIdentity {
-    pub id: String,
-    pub version: u32,
-    pub digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -407,67 +394,6 @@ pub struct AgentSpaceBuilderReport {
     pub details: Option<serde_json::Value>,
 }
 
-/// Result of planning or applying one versioned project Bootstrap Pack.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapPackReport {
-    #[serde(default)]
-    pub conflict_runs: Vec<String>,
-    #[serde(default)]
-    pub recovery_actions: Vec<String>,
-    pub schema: String,
-    pub status: String,
-    pub pack_id: String,
-    pub pack_version: u32,
-    pub pack_digest: String,
-    pub project_workspace_id: String,
-    /// Project-relative Skill the initiating Agent reads immediately after
-    /// apply. This keeps bootstrap discovery generic while the Pack owns the
-    /// actual PM method.
-    pub entry_skill: String,
-    /// Relative project paths owned by this pack, in stable order.
-    pub files: Vec<String>,
-    /// The four configured AgentSpaces after apply; empty for a pure plan.
-    pub spaces: Vec<WorkspaceInfo>,
-    /// Whether applying the same pack again would be a no-op.
-    pub current: bool,
-    /// Digest of the complete immutable mutation plan. Apply must echo it.
-    pub plan_digest: String,
-    /// AgentSpace CAS value observed while the plan was made.
-    #[ts(type = "number")]
-    pub expected_revision: u64,
-    /// Git/root facts included in `planDigest` and shown before approval.
-    pub git: BootstrapGitPlan,
-    /// Present only when a SessionController asked for a mutating plan. This
-    /// challenge has no authority; a Human response may turn it into one
-    /// daemon-private, single-use grant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub approval: Option<BootstrapApprovalChallenge>,
-    /// Exact bootstrap commit produced by a successful apply.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub bootstrap_commit: Option<String>,
-    /// True only after the initiating Session owns a project-scoped control
-    /// binding. A `pm` component alone never grants this authority.
-    #[serde(default)]
-    pub project_control_bound: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapGitPlan {
-    /// `create` for a new repository, `reuse` for a direct clean repository.
-    pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub head: Option<String>,
-    pub status_digest: String,
-    pub commit_identity: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -493,23 +419,6 @@ pub struct AgentSpaceChangePlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub approval: Option<BootstrapApprovalChallenge>,
-}
-
-/// One immutable Bootstrap Pack embedded in this product build. The list is
-/// discovery only; choosing a pack remains a PM/Skill decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapPackInfo {
-    pub id: String,
-    pub version: u32,
-    pub description: String,
-    pub digest: String,
-    /// Project-relative method entry point installed by this Pack.
-    pub entry_skill: String,
-    /// Stable, product-neutral intent categories advertised by the Pack.
-    #[serde(default)]
-    pub intent_matches: Vec<String>,
 }
 
 /// How a child session obtained the context that precedes its first new turn.
@@ -1159,17 +1068,115 @@ pub struct WorkflowDraftReport {
     pub truncated: bool,
     pub diagnostics: Vec<WorkflowDiagnostic>,
     pub candidate_digest: Option<String>,
-    pub default_workflow: Option<String>,
-    pub execution: Option<WorkflowDraftExecution>,
+    /// Package this draft compiled, absent when compilation never got that far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub package_id: Option<String>,
+    /// Project-relative executor product directory derived from the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_path: Option<String>,
     pub workflows: Vec<WorkflowDraftEntry>,
 }
 
+/// One discovered Workflow package and the mechanical facts about it.
+///
+/// Everything here is computed by the daemon from the project side or from the
+/// package's own Git checkout. Nothing is taken from the package's prose: an
+/// untrusted clone must not be able to assert a platform fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
-pub struct WorkflowDraftExecution {
-    pub executor_path: String,
+pub struct WorkflowPackageStatus {
+    /// Path below `.genethub/workflows/`, which is the package's identity.
+    pub id: String,
+    /// Frontmatter summary, or the first prose line. Untrusted display text.
+    pub description: String,
+    /// The package's own experiment marker.
+    pub dev: bool,
+    /// Git remote of the package's checkout, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_url: Option<String>,
+    /// Commit of the package's checkout; the package's version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_commit: Option<String>,
+    /// True when the package checkout has uncommitted changes, which includes
+    /// unresolved merge markers left by an upgrade.
+    pub source_dirty: bool,
+    /// Content identity of the package source right now.
+    pub source_digest: String,
+    /// Flow ids from `flows/*.yaml`.
+    pub flows: Vec<String>,
+    /// Compilation result of the current source; `null` when it compiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compile_error: Option<String>,
+    /// Product Space directories this package owns once built.
+    pub spaces: Vec<WorkflowPackageSpaceStatus>,
+    /// True when every declared Space is registered with matching digests.
+    pub built: bool,
+    /// True when a built Space no longer matches its registered lock digest.
+    pub drifted: bool,
+    /// Flow ids also declared by another package in this project.
+    pub conflicting_flows: Vec<String>,
+}
+
+/// One product Space of a package and whether it is live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowPackageSpaceStatus {
+    pub name: String,
+    /// Project-relative product directory.
+    pub path: String,
+    pub components: Vec<String>,
+    /// True when the directory exists and the Builder verifies it.
+    pub materialized: bool,
+    /// True when the AgentSpace is registered with an authorized topology.
+    pub registered: bool,
+}
+
+/// Result of `workflow list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowPackageList {
+    /// Absolute `.genethub/workflows/` path packages are discovered under.
     pub root: String,
+    pub packages: Vec<WorkflowPackageStatus>,
+    /// `spaces/<name>--<space>` directories with no package left to own them.
+    pub orphan_spaces: Vec<String>,
+}
+
+/// Plan or result of `workflow build`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowBuildReport {
+    pub schema: String,
+    /// `planned`, `applied`, or `current` when the product already matches.
+    pub status: String,
+    pub package_id: String,
+    pub source_digest: String,
+    /// Product directories this build writes.
+    pub spaces: Vec<String>,
+    /// Component topology being authorized, one entry per Space.
+    pub components: Vec<String>,
+    pub plan_digest: String,
+    #[ts(type = "number")]
+    pub expected_revision: u64,
+    /// Runs that must finish before a rebuild may replace shared carriers.
+    pub conflict_runs: Vec<String>,
+    /// Present when a human challenge is required and was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approval: Option<BootstrapApprovalChallenge>,
+    /// Active Candidate digest after the build activated the package source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1200,18 +1207,21 @@ pub struct WorkflowDiagnostic {
     pub column: Option<u32>,
 }
 
-/// Project-owned Workflow catalog projected by the daemon after validation.
+/// Project-owned Workflow package projected by the daemon after validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowProjectStatus {
-    /// The catalog/default below belong to this exact version, not necessarily Active.
+    /// The flow list below belongs to this exact version, not necessarily Active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_digest: Option<String>,
-    pub schema: String,
+    /// Path below `.genethub/workflows/` identifying the package.
+    pub package_id: String,
+    /// The package's own "still an experiment" marker. It gates nothing; it
+    /// tells PM to weigh the health facts more carefully.
+    pub dev: bool,
     pub root: String,
-    pub default_workflow: String,
     pub workflows: Vec<WorkflowCatalogEntryStatus>,
     /// Digest of the project source as it exists now, whether or not it has
     /// been promoted for execution.
@@ -1230,13 +1240,8 @@ pub struct WorkflowProjectStatus {
     pub active_digest: Option<String>,
     #[ts(type = "number")]
     pub activation_revision: u64,
-    /// True when project source has changed since the active Candidate.
+    /// True when package source has changed since the active Candidate.
     pub source_changed: bool,
-    /// Provenance of the deterministic genesis pack, when the active
-    /// Candidate was created by one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub bootstrap_pack_digest: Option<String>,
     /// Ordered immutable activation history. Reusing an already-active digest
     /// is a no-op and therefore does not append an entry.
     pub activation_history: Vec<WorkflowActivationStatus>,
@@ -1263,10 +1268,6 @@ pub struct WorkflowCatalogEntryStatus {
     pub id: String,
     pub path: String,
     pub digest: String,
-    #[serde(default)]
-    pub match_kind: Option<String>,
-    #[serde(default)]
-    pub match_complexity: Option<String>,
 }
 
 /// Durable status of one project Workflow run. Node meaning comes entirely

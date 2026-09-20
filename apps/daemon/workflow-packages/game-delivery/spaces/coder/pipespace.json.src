@@ -1,0 +1,22 @@
+{
+  "schema": "pipespace.v1",
+  "name": "coder",
+  "description": "Reusable game implementation Worker.",
+  "agents": [
+    "codex",
+    "cursor",
+    "codebuddy",
+    "claude-code"
+  ],
+  "skills": [
+    "game-coder"
+  ],
+  "tags": [
+    "worker",
+    "coder"
+  ],
+  "skillProviders": [],
+  "children": {
+    "scanDepth": 0
+  }
+}

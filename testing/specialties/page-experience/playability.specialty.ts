@@ -15,7 +15,7 @@ defineSpecialty({
   surfaces: ["browser", "bootstrap-pack"], productInterfaces: ["game-reviewer/scripts/check-playability.mjs", "gameTestSnapshot"],
 }, async t => {
   symlinkSync(path.join(t.openRoot, "testing/node_modules"), path.join(t.env.workspace, "node_modules"), "dir");
-  const script = path.join(t.openRoot, "apps/daemon/bootstrap-packs/game-delivery-v1/spaces/reviewer/skills/game-reviewer/scripts/check-playability.mjs");
+  const script = path.join(t.openRoot, "apps/daemon/workflow-packages/game-delivery/spaces/reviewer/skills/game-reviewer/scripts/check-playability.mjs");
   for (const variant of ["healthy", "ready", "unobservable"] as const) {
     const entry = path.join(t.env.workspace, variant + ".html");
     const html = `<!doctype html><html><body><button id="start">开始战斗</button><script>

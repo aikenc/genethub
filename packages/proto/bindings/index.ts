@@ -102,10 +102,6 @@ components: Array<AgentComponentInfo>,
  */
 guidance: Array<string>, 
 /**
- * The Bootstrap Pack that last established this Space, when any.
- */
-bootstrapPack?: AgentSpacePackIdentity, 
-/**
  * Builder/tree facts checked by the daemon. Business health remains a DCG
  * concern; this field reports only structural reasons the UI can display.
  */
@@ -119,8 +115,6 @@ health?: AgentSpaceHealth, };
  * operation must re-check instead of diffing arbitrary fields.
  */
 export type AgentSpaceOperation = { "kind": "setComponent", componentId: string, enabled: boolean, role: string | null, } | { "kind": "removeComponent", componentId: string, } | { "kind": "setParent", parentWorkspaceId: string | null, } | { "kind": "setLifecycle", lifecycle: string, };
-
-export type AgentSpacePackIdentity = { id: string, version: number, digest: string, };
 
 export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
 
@@ -223,76 +217,6 @@ id: string, bytes: number,
 at: string, };
 
 export type BootstrapApprovalChallenge = { challengeId: string, title: string, detail: string, expiresAtMs: number, };
-
-export type BootstrapGitPlan = { 
-/**
- * `create` for a new repository, `reuse` for a direct clean repository.
- */
-mode: string, head?: string, statusDigest: string, commitIdentity: string, };
-
-/**
- * One immutable Bootstrap Pack embedded in this product build. The list is
- * discovery only; choosing a pack remains a PM/Skill decision.
- */
-export type BootstrapPackInfo = { id: string, version: number, description: string, digest: string, 
-/**
- * Project-relative method entry point installed by this Pack.
- */
-entrySkill: string, 
-/**
- * Stable, product-neutral intent categories advertised by the Pack.
- */
-intentMatches: Array<string>, };
-
-/**
- * Result of planning or applying one versioned project Bootstrap Pack.
- */
-export type BootstrapPackReport = { conflictRuns: Array<string>, recoveryActions: Array<string>, schema: string, status: string, packId: string, packVersion: number, packDigest: string, projectWorkspaceId: string, 
-/**
- * Project-relative Skill the initiating Agent reads immediately after
- * apply. This keeps bootstrap discovery generic while the Pack owns the
- * actual PM method.
- */
-entrySkill: string, 
-/**
- * Relative project paths owned by this pack, in stable order.
- */
-files: Array<string>, 
-/**
- * The four configured AgentSpaces after apply; empty for a pure plan.
- */
-spaces: Array<WorkspaceInfo>, 
-/**
- * Whether applying the same pack again would be a no-op.
- */
-current: boolean, 
-/**
- * Digest of the complete immutable mutation plan. Apply must echo it.
- */
-planDigest: string, 
-/**
- * AgentSpace CAS value observed while the plan was made.
- */
-expectedRevision: number, 
-/**
- * Git/root facts included in `planDigest` and shown before approval.
- */
-git: BootstrapGitPlan, 
-/**
- * Present only when a SessionController asked for a mutating plan. This
- * challenge has no authority; a Human response may turn it into one
- * daemon-private, single-use grant.
- */
-approval?: BootstrapApprovalChallenge, 
-/**
- * Exact bootstrap commit produced by a successful apply.
- */
-bootstrapCommit?: string, 
-/**
- * True only after the initiating Session owns a project-scoped control
- * binding. A `pm` component alone never grants this authority.
- */
-projectControlBound: boolean, };
 
 /**
  * What an agent can do, declared up front.
@@ -939,7 +863,7 @@ export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { 
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "bootstrapPack", "data": BootstrapPackReport } | { "type": "bootstrapPacks", "data": Array<BootstrapPackInfo> } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -959,7 +883,45 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, candidateDigest?: string, } } | { "type": "workflow.initialize", "payload": { workspaceId: string, agentId: string, modelId: string | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, workflowId: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, 
+cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, 
+/**
+ * Required once a project holds more than one package.
+ */
+packageId?: string, candidateDigest?: string, } } | { "type": "workflow.list", "payload": { workspaceId: string, } } | { "type": "workflow.build", "payload": { workspaceId: string, packageId: string, apply: boolean, 
+/**
+ * Required for apply and copied verbatim from the preceding plan.
+ */
+planDigest: string | null, 
+/**
+ * Stable id chosen by the Agent for idempotent apply replay.
+ */
+actionId: string | null, 
+/**
+ * CAS value copied from the preceding plan.
+ */
+expectedRevision: number | null, } } | { "type": "workflow.activate", "payload": { workspaceId: string, 
+/**
+ * Required once a project holds more than one package.
+ */
+packageId?: string, candidateDigest: string | null, expectedRevision: number, } } | { "type": "workflow.dispatch", "payload": { retryOf?: string, resumeCancelled?: boolean, candidateDigest?: string, workspaceId: string, 
+/**
+ * Required once a project holds more than one package.
+ */
+packageId?: string, 
+/**
+ * Flow id inside the package. Optional when the package has one flow.
+ */
+workflowId?: string, 
+/**
+ * Project-relative task directory for this Run. Defaults to the
+ * project root; a trial pins its own material directory here.
+ */
+executionRoot?: string, taskId: string, prompt: string, } } | { "type": "workflow.check", "payload": { workspaceId: string, runId: string | null, 
+/**
+ * Which package `--draft` validates. Required once a project holds
+ * more than one.
+ */
+packageId?: string, 
 /**
  * Validate current source without creating a Candidate, Run or Worker.
  */
@@ -989,19 +951,7 @@ targetWorkspaceId: string | null, spaceName: string, operation: AgentSpaceBuilde
 /**
  * Preview an exact build under the existing PM management binding.
  */
-plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "project.bootstrap", "payload": { workspaceId: string, packId: string, apply: boolean, agentId: string | null, modelId: string | null, 
-/**
- * Required for apply and copied verbatim from the preceding plan.
- */
-planDigest: string | null, 
-/**
- * Stable id chosen by the Agent for idempotent apply replay.
- */
-actionId: string | null, 
-/**
- * CAS value copied from the preceding plan.
- */
-expectedRevision: number | null, } } | { "type": "project.bootstrap.list" } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
+plan?: boolean, planDigest?: string, actionId?: string, expectedRevision?: number, } } | { "type": "project.approval.request", "payload": { challengeId: string, } } | { "type": "agentSpace.children", "payload": { workspaceId: string, } } | { "type": "session.list", "payload": { workspaceId: string | null, includeArchived: boolean, } } | { "type": "session.get", "payload": { sessionId: string, recentRounds?: number, beforeItemId?: string, } } | { "type": "session.drafts", "payload": { sessionId: string, } } | { "type": "session.drafts.replace", "payload": { sessionId: string, drafts: Array<SessionDraft>, } } | { "type": "session.components", "payload": { sessionId: string, } } | { "type": "session.flow", "payload": { sessionId: string, } } | { "type": "session.inspect", "payload": { sessionId: string, throughRoundId: string | null, } } | { "type": "session.narrative", "payload": { sessionId: string, throughRoundId: string | null, 
 /**
  * Exact item lookup. Mutually exclusive with `cursor` on the CLI.
  */
@@ -1904,7 +1854,36 @@ outputRateEstimated: boolean, costUsd?: number, };
 
 export type WorkflowActivationStatus = { revision: number, digest: string, previousDigest?: string, activatedAtMs: number, };
 
-export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: string, matchKind: string | null, matchComplexity: string | null, };
+/**
+ * Plan or result of `workflow build`.
+ */
+export type WorkflowBuildReport = { schema: string, 
+/**
+ * `planned`, `applied`, or `current` when the product already matches.
+ */
+status: string, packageId: string, sourceDigest: string, 
+/**
+ * Product directories this build writes.
+ */
+spaces: Array<string>, 
+/**
+ * Component topology being authorized, one entry per Space.
+ */
+components: Array<string>, planDigest: string, expectedRevision: number, 
+/**
+ * Runs that must finish before a rebuild may replace shared carriers.
+ */
+conflictRuns: Array<string>, 
+/**
+ * Present when a human challenge is required and was issued.
+ */
+approval?: BootstrapApprovalChallenge, 
+/**
+ * Active Candidate digest after the build activated the package source.
+ */
+activeDigest?: string, };
+
+export type WorkflowCatalogEntryStatus = { id: string, path: string, digest: string, };
 
 export type WorkflowCheckReport = { checkedAtMs: number, findings: Array<WorkflowFinding>, runs: Array<WorkflowRunStatus>, draft?: WorkflowDraftReport, };
 
@@ -1925,12 +1904,18 @@ export type WorkflowDiagnosticStatus = { sessionId: string, status: string, crea
 
 export type WorkflowDraftEntry = { id: string, path: string, roles: Array<string>, };
 
-export type WorkflowDraftExecution = { executorPath: string, root: string, };
-
 /**
  * Source validation is separate from carrier readiness and improvement/quality judgments.
  */
-export type WorkflowDraftReport = { schema: string, root: string, valid: boolean, truncated: boolean, diagnostics: Array<WorkflowDiagnostic>, candidateDigest: string | null, defaultWorkflow: string | null, execution: WorkflowDraftExecution | null, workflows: Array<WorkflowDraftEntry>, };
+export type WorkflowDraftReport = { schema: string, root: string, valid: boolean, truncated: boolean, diagnostics: Array<WorkflowDiagnostic>, candidateDigest: string | null, 
+/**
+ * Package this draft compiled, absent when compilation never got that far.
+ */
+packageId?: string, 
+/**
+ * Project-relative executor product directory derived from the package.
+ */
+executorPath?: string, workflows: Array<WorkflowDraftEntry>, };
 
 export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
 
@@ -1967,13 +1952,114 @@ attempt?: number, llmRounds?: number, tokens?: number,
 priorLlmRounds?: number, outcome?: WorkflowNodeOutcome, reason?: string, id: string, uses: string, status: string, sessionId?: string, evidence: { [key in string]?: string }, };
 
 /**
- * Project-owned Workflow catalog projected by the daemon after validation.
+ * Result of `workflow list`.
+ */
+export type WorkflowPackageList = { 
+/**
+ * Absolute `.genethub/workflows/` path packages are discovered under.
+ */
+root: string, packages: Array<WorkflowPackageStatus>, 
+/**
+ * `spaces/<name>--<space>` directories with no package left to own them.
+ */
+orphanSpaces: Array<string>, };
+
+/**
+ * One product Space of a package and whether it is live.
+ */
+export type WorkflowPackageSpaceStatus = { name: string, 
+/**
+ * Project-relative product directory.
+ */
+path: string, components: Array<string>, 
+/**
+ * True when the directory exists and the Builder verifies it.
+ */
+materialized: boolean, 
+/**
+ * True when the AgentSpace is registered with an authorized topology.
+ */
+registered: boolean, };
+
+/**
+ * One discovered Workflow package and the mechanical facts about it.
+ *
+ * Everything here is computed by the daemon from the project side or from the
+ * package's own Git checkout. Nothing is taken from the package's prose: an
+ * untrusted clone must not be able to assert a platform fact.
+ */
+export type WorkflowPackageStatus = { 
+/**
+ * Path below `.genethub/workflows/`, which is the package's identity.
+ */
+id: string, 
+/**
+ * Frontmatter summary, or the first prose line. Untrusted display text.
+ */
+description: string, 
+/**
+ * The package's own experiment marker.
+ */
+dev: boolean, 
+/**
+ * Git remote of the package's checkout, when it has one.
+ */
+sourceUrl?: string, 
+/**
+ * Commit of the package's checkout; the package's version.
+ */
+sourceCommit?: string, 
+/**
+ * True when the package checkout has uncommitted changes, which includes
+ * unresolved merge markers left by an upgrade.
+ */
+sourceDirty: boolean, 
+/**
+ * Content identity of the package source right now.
+ */
+sourceDigest: string, 
+/**
+ * Flow ids from `flows/*.yaml`.
+ */
+flows: Array<string>, 
+/**
+ * Compilation result of the current source; `null` when it compiles.
+ */
+compileError?: string, 
+/**
+ * Product Space directories this package owns once built.
+ */
+spaces: Array<WorkflowPackageSpaceStatus>, 
+/**
+ * True when every declared Space is registered with matching digests.
+ */
+built: boolean, 
+/**
+ * True when a built Space no longer matches its registered lock digest.
+ */
+drifted: boolean, 
+/**
+ * Flow ids also declared by another package in this project.
+ */
+conflictingFlows: Array<string>, };
+
+/**
+ * Project-owned Workflow package projected by the daemon after validation.
  */
 export type WorkflowProjectStatus = { 
 /**
- * The catalog/default below belong to this exact version, not necessarily Active.
+ * The flow list below belongs to this exact version, not necessarily Active.
  */
-selectedDigest?: string, schema: string, root: string, defaultWorkflow: string, workflows: Array<WorkflowCatalogEntryStatus>, 
+selectedDigest?: string, 
+/**
+ * Path below `.genethub/workflows/` identifying the package.
+ */
+packageId: string, 
+/**
+ * The package's own "still an experiment" marker. It gates nothing; it
+ * tells PM to weigh the health facts more carefully.
+ */
+dev: boolean, root: string, workflows: Array<WorkflowCatalogEntryStatus>, 
 /**
  * Digest of the project source as it exists now, whether or not it has
  * been promoted for execution.
@@ -1990,14 +2076,9 @@ candidateError?: string,
  */
 activeDigest?: string, activationRevision: number, 
 /**
- * True when project source has changed since the active Candidate.
+ * True when package source has changed since the active Candidate.
  */
 sourceChanged: boolean, 
-/**
- * Provenance of the deterministic genesis pack, when the active
- * Candidate was created by one.
- */
-bootstrapPackDigest?: string, 
 /**
  * Ordered immutable activation history. Reusing an already-active digest
  * is a no-op and therefore does not append an entry.

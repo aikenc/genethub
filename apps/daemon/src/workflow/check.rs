@@ -6,6 +6,7 @@ pub(crate) async fn check(
     state: &Shared,
     workspace_id: &str,
     run_id: Option<&str>,
+    package_id: Option<&str>,
     draft: bool,
 ) -> Result<WorkflowCheckReport> {
     let workspace = state.workspaces.get(workspace_id).await?;
@@ -17,7 +18,11 @@ pub(crate) async fn check(
             checked_at_ms: now_ms(),
             findings: Vec::new(),
             runs: Vec::new(),
-            draft: Some(authoring::check_draft(&workspace.root, &state.registry)),
+            draft: Some(authoring::check_draft(
+                &workspace.root,
+                package_id,
+                &state.registry,
+            )),
         });
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;

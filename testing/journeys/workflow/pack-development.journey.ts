@@ -40,11 +40,18 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
   llm: { default: "mock" }, expectedDurationMs: 45_000, timeoutMs: 240_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
-  productInterfaces: ["session.send", "session.respondPermission", "genet space bootstrap", "genet workflow", "workflow.history"],
+  productInterfaces: ["session.send", "session.respondPermission", "genet workflow build", "genet workflow", "workflow.history"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
     rmSync(path.join(opened.workspaceRoot, ".keep"));
+    // `workflow build` materializes carriers; it never initializes a
+    // repository, so the project's own Git baseline is the fixture's job —
+    // the same way a user already has a repo before cloning a package.
+    t.data.git.init(opened.workspaceRoot);
+    // The Agent's `git clone` step, performed by the fixture: a package is an
+    // ordinary directory until `workflow build` authorizes its components.
+    t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot: opened.workspaceRoot });
     for (const [key, value] of [["user.name", "Pack Journey"], ["user.email", "pack@example.com"], ["commit.gpgsign", "false"]]) {
       const result = spawnSync("git", ["config", "--global", key!, value!], { env: opened.daemon.env, encoding: "utf8" });
       t.assertions.assert(result.status === 0, "isolated Git setup failed");
@@ -88,9 +95,9 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
       }
       if (budgetCommand) { const command = budgetCommand; budgetCommand = undefined; return { tool: { name: "bash", arguments: { command } } }; }
       const stage = pmStage++;
-      if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
+      if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
       if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
-      if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${field(request, "planDigest")} --expected-revision ${field(request, "expectedRevision")} --action-id install-pack` } } };
+      if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id install-pack && cd ${q(opened.workspaceRoot)} && git add -A && git commit -m 'commit the built workflow team'` } } };
       if (stage === 3) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow dispatch --workflow game-dev --task four-contracts --message "Deliver all four contracts inside this Workflow; preserve accepted work on replan" --no-wait' } } };
       return { text: "Inspect the result; do not dispatch another milestone Run." };
     } })));
@@ -143,8 +150,11 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     if (scenario === "budget-query-gate") t.assertions.assert(JSON.stringify(outcome).includes('"needsAuthorization":true') && existsSync(path.join(opened.workspaceRoot, "m1.txt"))
       && !existsSync(path.join(opened.workspaceRoot, "m2.txt")) && !run!.nodes.some(n => n.uses === "result.publish"), "budget gap lost the artifact, started later work or published");
     if (noWork || scenario === "exhausted") t.assertions.assert(!existsSync(path.join(opened.workspaceRoot, "m3.txt")), "later work started after refusal");
-    const pmSource = readFileSync(path.join(opened.workspaceRoot, ".pipebuilder/skills/project-manager/SKILL.md"), "utf8");
-    t.assertions.assert(pmSource === readFileSync(path.join(t.openRoot, "apps/daemon/bootstrap-packs/game-delivery-v1/project/.pipebuilder/skills/project-manager/SKILL.md"), "utf8"), "installed PM methods differ from the shipped source");
+    // PM methods are a product built-in now, not something a package installs:
+    // the root AgentSpace is single and its capability surface must not drift
+    // with how many packages a project happens to have cloned.
+    const pmSource = readFileSync(path.join(t.env.data, "builtin-skills/project-manager/SKILL.md"), "utf8");
+    t.assertions.assert(pmSource === readFileSync(path.join(t.openRoot, "apps/daemon/builtin-skills/project-manager/SKILL.md"), "utf8"), "materialized PM methods differ from the shipped source");
     t.note(`one Executor Run; ${plans.length} plans, ${writes.length} real committed edits, ${reviews.length} commit-bound criterion checks; this proves scripted mechanics, not autonomous PM judgment`);
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

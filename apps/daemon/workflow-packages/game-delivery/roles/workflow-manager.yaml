@@ -1,0 +1,5 @@
+schema: genehub.workflow.role.v1
+id: workflow-manager
+agentId: genet
+userInteraction: readOnly
+prompt: prompts/workflow-manager.md

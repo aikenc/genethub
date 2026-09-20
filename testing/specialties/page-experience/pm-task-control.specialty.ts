@@ -19,7 +19,7 @@ defineSpecialty({
       const result = spawnSync(command, args, { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" });
       if (result.status !== 0) throw new Error(result.stderr || result.stdout);
     };
-    exec(opened.daemon.genet, ["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
+    t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
     exec("git", ["add", "."]);
     exec("git", ["commit", "-m", "browser workflow fixture"]);
     await t.flows.main.configureMockProvider(opened.client, opened.mock);

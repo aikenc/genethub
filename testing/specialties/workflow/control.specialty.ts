@@ -1,5 +1,5 @@
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
@@ -18,22 +18,25 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
-    productInterfaces: ["genet workflow", "session.send", "session.get", "session.list", "workflow.cancel", "workflow.budget", "workflow.check", ".genethub/workflow"],
+    productInterfaces: ["genet workflow", "session.send", "session.get", "session.list", "workflow.cancel", "workflow.budget", "workflow.check", ".genethub/workflows"],
   }, async t => {
     t.data.git.init(t.env.workspace);
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
-    const cli = (args: string[]) => {
-      const result = spawnSync(opened.daemon.genet, args, { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" });
-      if (result.status !== 0) throw new Error(`${args.join(" ")}: ${result.stderr || result.stdout}`);
-      return result.stdout;
-    };
     try {
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
-      cli(["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
-      const source = path.join(opened.workspaceRoot, ".genethub/workflow");
-      const workflowFile = path.join(source, "workflows/direct-change.yaml");
-      const schema = readFileSync(workflowFile, "utf8").split("\n")[0];
+      const source = t.flows.main.seedWorkflowPackage({
+        projectRoot: opened.workspaceRoot,
+        // The diagnostic carrier is declared by a Space source, never by a
+        // manifest field: policy is the platform's, the carrier is the
+        // package's. Declaring it is enough to bind the role.
+        spaces: wr
+          ? [{ name: "wr", components: [{ componentId: "worker", role: "wr" }, { componentId: "diagnostic" }] }]
+          : [],
+      });
+      const workflowFile = path.join(source, "flows/direct-change.yaml");
+      const definitionSchema = "genehub.workflow.definition.v1";
       writeFileSync(path.join(source, "prompts/direct-worker.md"), "WORKFLOW_CONTROL_WORKER: only execute your assigned node.\n");
+      writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
       const node = (id: string, role = "worker") => ({
         id, uses: "agent.session", with: { role, workspace: "." },
         completion: { all: [{ key: "review", verify: "value.equals", expected: "approved" }] }, on: { completed: ["publish"] },
@@ -44,22 +47,17 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
         nodes:[activity,{id:"publish",uses:"result.publish"}],
         structure:{body:{id:"delivery",type:"sequence",steps:[{id:"check",type:"task",activity:"review"},{id:"deliver",type:"task",activity:"publish"}]}},
       } : {
-        schema: schema?.split(": ")[1], id: "direct-change", version: 1, entry: "review",
+        schema: definitionSchema, id: "direct-change", version: 1, entry: "review",
         nodes: [node("review"), { id: "publish", uses: "result.publish" }],
       }));
       if (wr) {
-        const roleFile = path.join(source, "roles/worker.yaml");
-        const roleSchema = readFileSync(roleFile, "utf8").split("\n")[0]?.split(": ")[1];
-        writeFileSync(path.join(source, "roles/wr.yaml"), JSON.stringify({ schema: roleSchema, id: "wr", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/wr.md" }));
+        writeFileSync(path.join(source, "roles/wr.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "wr", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/wr.md" }));
         writeFileSync(path.join(source, "prompts/wr.md"), "WORKFLOW_CONTROL_WR: report bounded evidence only.\n");
-        writeFileSync(path.join(source, "workflows/diagnose.yaml"), JSON.stringify({ schema: schema?.split(": ")[1], id: "diagnose", version: 1, entry: "diagnose", nodes: [node("diagnose", "wr"), { id: "publish", uses: "result.publish" }] }));
-        const catalogFile = path.join(source, "workflows/catalog.yaml");
-        const catalog = readFileSync(catalogFile, "utf8");
-        writeFileSync(catalogFile, catalog + "  - id: diagnose\n    path: diagnose.yaml\n");
-        const projectFile = path.join(source, "project.yaml");
-        writeFileSync(projectFile, readFileSync(projectFile, "utf8") + "diagnosticRole: wr\n");
+        // A flow referencing the role is what loads it into the Candidate;
+        // a file in roles/ that nothing references stays out by design.
+        writeFileSync(path.join(source, "flows/diagnose.yaml"), JSON.stringify({ schema: definitionSchema, id: "diagnose", version: 1, entry: "diagnose", nodes: [node("diagnose", "wr"), { id: "publish", uses: "result.publish" }] }));
       }
-      let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task control-1 --message "检查启动循环" --no-wait';
+      let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task control-1 --message "检查启动循环" --no-wait';
       let nextInputId = "u_initial";
       let workerCalls = 0, diagnosticCalls = 0, pmCalls = 0;
       let staleResponseAt = 0;

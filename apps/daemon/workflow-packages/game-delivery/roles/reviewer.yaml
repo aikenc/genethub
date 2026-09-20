@@ -1,0 +1,5 @@
+schema: genehub.workflow.role.v1
+id: reviewer
+agentId: genet
+userInteraction: readOnly
+prompt: prompts/reviewer.md

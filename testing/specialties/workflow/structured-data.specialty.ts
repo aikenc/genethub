@@ -43,8 +43,7 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
   };
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    await cli(["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
-    const source = path.join(opened.workspaceRoot, ".genethub/workflow");
+        const source = t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "DATA_WORKER: process only your structured assignment; report actual outputs.\n");
     const outputShape = { type: "object", properties: { ok: { type: "boolean" }, value: { type: "integer" }, details: { type: "string", enum: ["checked"] } },
       ...(scenario === "optional-object" ? { required: ["ok", "value"], additionalProperties: false } : {}) };
@@ -66,7 +65,7 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
       : { id: "root", type: "sequence", steps: [task("plan", "plan", literal({ kind: "plan" })), fold,
         task("after-batch", "work", object({ kind: literal("tail"), previous: ref("/results/batch") }))], output: ref("/results/batch") };
     if (scenario === "overflow") next.fields.count = { op: "add", left: literal(9223372036854775000), right: literal(10000) };
-    writeFileSync(path.join(source, "workflows/direct-change.yaml"), JSON.stringify({
+    writeFileSync(path.join(source, "flows/direct-change.yaml"), JSON.stringify({
       schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
       nodes: [
         { id: "plan", uses: "agent.session", with: { role: "worker" }, completion: { output: { type: "array", minItems: 1, maxItems: 8, items: { type: "integer" } } } },
@@ -83,7 +82,7 @@ for (const scenario of ["fold", "break", "nested-break", "restart", "cancel", "s
       if (!text.includes("DATA_WORKER")) {
         if (dispatched) return { text: "Observed the Run facts." };
         dispatched = true;
-        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task data-batch --no-wait --message "Process a finite record batch; stop on rejection and retain accepted records."' } } };
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task data-batch --no-wait --message "Process a finite record batch; stop on rejection and retain accepted records."' } } };
       }
       const operation = text.match(/当前节点：(operation-\d+)/)?.[1];
       const input = assignment(request);

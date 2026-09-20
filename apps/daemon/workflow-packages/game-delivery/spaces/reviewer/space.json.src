@@ -1,0 +1,9 @@
+{
+  "lifecycle": "pooled",
+  "components": [
+    { "componentId": "worker", "role": "reviewer" },
+    { "componentId": "reviewer" }
+  ],
+  "folders": [{ "name": "project", "path": "../.." }],
+  "guidance": ["这是 Reviewer WorkerSpace；检查由项目 DCG 派发的实现与证据"]
+}

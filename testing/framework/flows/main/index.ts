@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 
@@ -341,6 +341,135 @@ export async function openWorkspace(input: {
     await started.mock.stop();
     throw error;
   }
+}
+
+/// Relative location of the Workflow package this product build ships.
+export const BUILTIN_PACKAGE_ID = "game-delivery";
+const BUILTIN_PACKAGE_SOURCE = "apps/daemon/workflow-packages/game-delivery";
+
+/**
+ * Clones the shipped Workflow package into a project exactly the way a user
+ * would, so tests exercise the same discover/build path a community clone
+ * takes. Copying rather than `git clone` keeps the test hermetic; the daemon
+ * never reads the package's `.git` for anything but provenance display.
+ */
+export function clonePackage(input: {
+  openRoot: string;
+  projectRoot: string;
+  packageId?: string;
+  sourceRoot?: string;
+}): string {
+  const target = path.join(
+    input.projectRoot,
+    ".genethub/workflows",
+    input.packageId ?? BUILTIN_PACKAGE_ID,
+  );
+  const source = input.sourceRoot ?? path.join(input.openRoot, BUILTIN_PACKAGE_SOURCE);
+  if (!existsSync(source)) throw new Error(`no Workflow package at ${source}`);
+  mkdirSync(path.dirname(target), { recursive: true });
+  cpSync(source, target, { recursive: true });
+  return target;
+}
+
+/**
+ * Writes a minimal Workflow package a test can then add flows and roles to.
+ *
+ * It replaces the old `workflow init` scaffold: a project is Workflow-enabled
+ * because a package directory exists, so a fixture creates one the same way a
+ * user's `git clone` would rather than calling a command that no longer exists.
+ * Returns the package directory.
+ */
+export function seedWorkflowPackage(input: {
+  projectRoot: string;
+  packageId?: string;
+  description?: string;
+  /** Space sources this package declares, materialized by `workflow build`. */
+  spaces?: Array<{ name: string; components: Array<{ componentId: string; role?: string }>; lifecycle?: string }>;
+}): string {
+  const root = path.join(input.projectRoot, ".genethub/workflows", input.packageId ?? "local");
+  for (const sub of ["flows", "roles", "prompts"]) {
+    mkdirSync(path.join(root, sub), { recursive: true });
+  }
+  writeFileSync(
+    path.join(root, "workflow.md"),
+    `---\ndescription: ${input.description ?? "test package"}\n---\n\n测试用包。\n`,
+  );
+  for (const space of input.spaces ?? []) {
+    const dir = path.join(root, "spaces", space.name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, "space.json.src"),
+      `${JSON.stringify({ lifecycle: space.lifecycle ?? "pooled", components: space.components }, null, 2)}\n`,
+    );
+    writeFileSync(
+      path.join(dir, "pipespace.json.src"),
+      `${JSON.stringify({ schema: "pipespace.v1", name: space.name, agents: ["codex"], skills: [], skillProviders: [], tags: [] }, null, 2)}\n`,
+    );
+  }
+  return root;
+}
+
+/**
+ * Seeds a package with one runnable flow and its worker role, the shape most
+ * Workflow specs previously got from `workflow init`.
+ */
+export function seedDirectChangePackage(input: {
+  projectRoot: string;
+  packageId?: string;
+  agentId?: string;
+  modelId?: string;
+  spaces?: Parameters<typeof seedWorkflowPackage>[0]["spaces"];
+}): string {
+  const root = seedWorkflowPackage({
+    projectRoot: input.projectRoot,
+    packageId: input.packageId,
+    description: "direct change fixture",
+    spaces: input.spaces,
+  });
+  writeFileSync(
+    path.join(root, "flows/direct-change.yaml"),
+    `${JSON.stringify({
+      schema: "genehub.workflow.definition.v1",
+      id: "direct-change",
+      version: 1,
+      entry: "implement",
+      nodes: [
+        {
+          id: "implement",
+          uses: "agent.session",
+          with: {
+            role: "worker",
+            workspace: ".",
+            writeLease: { targetRef: "current", ttlSeconds: 3600 },
+          },
+          completion: {
+            all: [
+              { key: "commit", verify: "git.commitOnTarget" },
+              { key: "checks", verify: "value.nonEmpty" },
+            ],
+          },
+          on: { completed: ["publish"] },
+        },
+        { id: "publish", uses: "result.publish" },
+      ],
+    }, null, 2)}\n`,
+  );
+  writeFileSync(
+    path.join(root, "roles/worker.yaml"),
+    `${JSON.stringify({
+      schema: "genehub.workflow.role.v1",
+      id: "worker",
+      agentId: input.agentId ?? "genet",
+      ...(input.modelId === null ? {} : { modelId: input.modelId ?? "deepseek/deepseek-v4-flash" }),
+      userInteraction: "readOnly",
+      prompt: "prompts/direct-worker.md",
+    }, null, 2)}\n`,
+  );
+  writeFileSync(
+    path.join(root, "prompts/direct-worker.md"),
+    "你是当前项目直达流程中的实现 Worker。只处理根会话交付的精确目标，不扩大范围，不替用户改变流程。\n先核对仓库与目标 ref，再完成实现和项目要求的检查。只有真实提交已经位于租约目标 ref、检查已经实际执行后，才可按系统合同上报证据；不得编造 commit、测试或检查结果。\n",
+  );
+  return root;
 }
 
 export async function configureMockProvider(

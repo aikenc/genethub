@@ -1454,13 +1454,13 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::AgentSpaceChangePlan { workspace_id, .. }
         | Request::AgentSpaceConfigure { workspace_id, .. }
         | Request::AgentSpaceBuilder { workspace_id, .. }
-        | Request::ProjectBootstrap { workspace_id, .. }
+        | Request::WorkflowList { workspace_id }
+        | Request::WorkflowBuild { workspace_id, .. }
         | Request::WorkflowHistory { workspace_id, .. }
         | Request::AgentSpaceChildren { workspace_id }
         | Request::WorkspaceAddRoot { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
         | Request::WorkspaceRemove { workspace_id } => Some(workspace_id),
-        Request::BootstrapPackList => None,
         _ => None,
     }
 }

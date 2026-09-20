@@ -1,4 +1,4 @@
-import {mkdirSync,readFileSync,writeFileSync} from "node:fs";
+import {existsSync,mkdirSync,readFileSync,writeFileSync} from "node:fs";
 import {spawnSync} from "node:child_process";
 import path from "node:path";
 import {defineSpecialty,runGenetAsync} from "../../framework/public.ts";
@@ -20,8 +20,6 @@ for(const scenario of ["shared","independent","derived"] as const)defineSpecialt
  const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
  const git=(cwd:string,...args:string[])=>{const r=spawnSync("git",args,{cwd,encoding:"utf8"});t.assertions.assert(r.status===0,r.stderr);return r.stdout.trim();};
  try{
-  const init=await runGenetAsync(opened.daemon.genet,["workflow","init","--agent","genet","--model","deepseek/deepseek-v4-flash"],opened.daemon.env,{cwd:opened.workspaceRoot});
-  t.assertions.assert(init.code===0,init.stderr);
   // Worktrees live under the ignored `.genethub/`, so branch writers never make
   // the mainline directory dirty and never block its own lease.
   const derived=["front","back"].map(name=>({id:name,workspace:`.genethub/temp/${name}`}));
@@ -33,7 +31,7 @@ for(const scenario of ["shared","independent","derived"] as const)defineSpecialt
     writeFileSync(path.join(root,"seed.txt"),"initial");
     git(root,"add",".");git(root,"commit","-m","lease fixture");
   }
-  const source=path.join(opened.workspaceRoot,".genethub/workflow");
+  const source=t.flows.main.seedDirectChangePackage({projectRoot:opened.workspaceRoot});
   writeFileSync(path.join(source,"prompts/direct-worker.md"),"STRUCTURED_LEASE_WORKER: write only in the assigned task directory and report its commit.");
   const writer=(id:string,workspace:unknown)=>({id,uses:"agent.session",with:{role:"worker",workspace,writeLease:{targetRef:"current",ttlSeconds:900}},completion:{all:[{key:"commit",verify:"git.commitOnTarget"}]}});
   const definition=scenario==="derived"?{
@@ -50,10 +48,20 @@ for(const scenario of ["shared","independent","derived"] as const)defineSpecialt
     nodes:["front","back"].map(id=>writer(id,scenario==="independent"?id:".")),
     structure:{body:{id:"team",type:"parallel",branches:["front","back"].map(id=>({id:`${id}-step`,type:"task",activity:id,input:{op:"literal",value:id==="front"?"FRONT_ACTIVITY":"BACK_ACTIVITY"}}))}},
   };
-  writeFileSync(path.join(source,"workflows/direct-change.yaml"),JSON.stringify({schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,...definition}));
-  // Source edits are intentional fixture inputs; workers start from clean repos.
-  git(opened.workspaceRoot,"add",".");git(opened.workspaceRoot,"commit","-m","structured lease definition");
+  writeFileSync(path.join(source,"flows/direct-change.yaml"),JSON.stringify({schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,...definition}));
+  // Source edits are intentional fixture inputs; workers start from clean
+  // repos, and a write lease requires that. The `independent` scenario
+  // deliberately leaves the project root outside Git.
+  if(existsSync(path.join(opened.workspaceRoot,".git"))){
+    const activated=await runGenetAsync(opened.daemon.genet,["workflow","activate","--revision","0"],opened.daemon.env,{cwd:opened.workspaceRoot});
+    t.assertions.assert(activated.code===0,activated.stderr||activated.stdout);
+    git(opened.workspaceRoot,"add",".");git(opened.workspaceRoot,"commit","-m","structured lease definition");
+  }
   const mainline=git(opened.workspaceRoot,"rev-parse","HEAD");
+  t.assertions.assert(
+    git(opened.workspaceRoot,"status","--porcelain")==="",
+    `fixture left the mainline dirty: ${git(opened.workspaceRoot,"status","--porcelain")}`,
+  );
   const trace=path.join(opened.workspaceRoot,".git","concurrency.txt");
   const seen=new Set<string>();let dispatched=false;
   await t.flows.main.configureMockProvider(opened.client,opened.mock);
@@ -73,7 +81,7 @@ for(const scenario of ["shared","independent","derived"] as const)defineSpecialt
       }
       return {text:"已提交代码及证据。"};
     }
-    if(!dispatched){dispatched=true;return {tool:{name:"bash",arguments:{command:'"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task lease-team --message "两个实现各自提交" --no-wait'}}};}
+    if(!dispatched){dispatched=true;return {tool:{name:"bash",arguments:{command:'"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task lease-team --message "两个实现各自提交" --no-wait'}}};}
     return {text:"小队已完成。"};
   }})));
   const pm=await t.flows.main.createBuiltinSession(opened.client,opened.workspaceId);

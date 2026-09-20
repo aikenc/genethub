@@ -14,7 +14,7 @@ import { defineJourney, type CaseContext } from "../../framework/public.ts";
 
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1_000;
 const TEN_MINUTES_MS = 10 * 60 * 1_000;
-const PACK_ID = "game-delivery-v1";
+const PACKAGE_ID = "game-delivery";
 const TEAM_NAMES = ["workflow-manager", "workflow-reviewer", "executor", "coder", "reviewer"] as const;
 
 type Opened = Awaited<ReturnType<CaseContext["flows"]["main"]["openWorkspace"]>>;
@@ -211,6 +211,13 @@ async function createProject(
   }
   const projectRoot = path.join(opened.workspaceRoot, name);
   mkdirSync(projectRoot, { recursive: true });
+  // `workflow build` materializes carriers; it never initializes a
+  // repository, so the project's Git baseline is the fixture's job — the same
+  // way a user already has a repo before cloning a package.
+  t.data.git.init(projectRoot);
+  // The Agent's `git clone` step, performed by the fixture: a package arrives
+  // as an ordinary directory, and only `workflow build` grants it authority.
+  t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot });
 
   const projectReply = await opened.client.call({
     type: "workspace.open",
@@ -286,6 +293,9 @@ function developmentPlan(goal: string, markers: string[]) {
 function scriptProductJourney(
   mock: JourneyMock,
   projectRoot: string,
+  /// Where the daemon materializes built-in Skills, which is where PM's own
+  /// scripts now live: they are a product built-in, not a package asset.
+  dataRoot: string,
   deliveries: DeliveryScript[],
   managerPromptPath?: string,
   reviewFirst?: "approved" | "repair" | "limit",
@@ -313,7 +323,7 @@ function scriptProductJourney(
     if (body.includes("UNBOUND_BUILDER_J4")) {
       if (unboundBuilderAttempted) return { text: "该 PM 没有项目管理绑定，未执行构建。" };
       unboundBuilderAttempted = true;
-      return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space builder build --name executor-v2 --require-no-post-commands --plan' } } };
+      return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space builder build --name game-delivery-v2--executor --require-no-post-commands --plan' } } };
     }
 
     if (reviewFirst && body.includes("REVIEW_FIRST_J4")) {
@@ -331,7 +341,7 @@ function scriptProductJourney(
         const reviewScript = `
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process'),crypto=require('node:crypto');
 const root=${JSON.stringify(projectRoot)}, marker=${JSON.stringify(marker)}, operation=${JSON.stringify(operation)};
-const dir=p.join(root,'spaces/reviewer/.genethub/temp/review-first');fs.mkdirSync(dir,{recursive:true});
+const dir=p.join(root,'spaces/game-delivery--reviewer/.genethub/temp/review-first');fs.mkdirSync(dir,{recursive:true});
 const hash=b=>'sha256:'+crypto.createHash('sha256').update(b).digest('hex');
 const entry=p.join(root,'index.html'),bytes=fs.readFileSync(entry),met=bytes.toString().includes(marker);
 const revision=cp.execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();
@@ -339,7 +349,7 @@ const contract={schema:'genehub.review-contract.v1',requirementRevision:'user-j4
 const contractFile=p.join(dir,operation+'-contract.json'),reportFile=p.join(dir,operation+'-report.json'),first=p.join(dir,'initial-contract.json');
 fs.writeFileSync(contractFile,JSON.stringify(contract));if(!fs.existsSync(first))fs.copyFileSync(contractFile,first);
 fs.writeFileSync(reportFile,JSON.stringify({schema:'genehub.review-report.v1',requirementRevision:contract.requirementRevision,checklistVersion:contract.checklistVersion,artifactRevision:revision,contractDigest:hash(fs.readFileSync(contractFile)),items:[{id:'entry',status:met?'met':'unmet',reason:met?'':'Required marker is absent',evidence:[{ref:entry,observation:'sha256='+hash(bytes)+'; contains marker='+met}]}]}));
-const checked=JSON.parse(cp.execFileSync(process.execPath,[p.join(root,'spaces/reviewer/skills/game-reviewer/scripts/check-review.mjs'),contractFile,reportFile,first],{encoding:'utf8'}));
+const checked=JSON.parse(cp.execFileSync(process.execPath,[p.join(root,'spaces/game-delivery--reviewer/skills/game-reviewer/scripts/check-review.mjs'),contractFile,reportFile,first],{encoding:'utf8'}));
 fs.writeFileSync(p.join(dir,operation+'-coverage.json'),JSON.stringify(checked));
 const args=['workflow','complete','--evidence','checks='+entry,'--evidence','report='+reportFile];
 if(checked.verdict==='approved')args.push('--evidence','review=approved');else args.push('--outcome','changesRequested','--reason','Required marker is absent');
@@ -348,13 +358,13 @@ process.stdout.write(cp.execFileSync(process.env.GENEHUB_CLI,args,{encoding:'utf
       }
       if (!reviewFirstDispatched) {
         reviewFirstDispatched = true;
-        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow dispatch --kind game --complexity review-and-improve --task review-first-j4 --no-wait --message "REVIEW_FIRST_J4 先评审现有成果，必要时修复，保留原验收合同复审。"' } } };
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow dispatch --workflow game-review-and-improve --task review-first-j4 --no-wait --message "REVIEW_FIRST_J4 先评审现有成果，必要时修复，保留原验收合同复审。"' } } };
       }
       return { text: "评审和必要的修复已按同一流程处理。" };
     }
 
     if (managerPromptPath && body.includes("实验运行 J3")) {
-      const trialRoot = path.join(projectRoot, "spaces", "executor-v2", ".genethub", "temp", "exp", "j3", "project");
+      const trialRoot = path.join(projectRoot, "spaces", `${PACKAGE_ID}-v2--executor`, ".genethub", "temp", "exp", "j3", "project");
       if (body.includes("你是小游戏项目的 Coder")) {
         if (trialCoderStage++ === 0) return { tool: { name: "write", arguments: { path: path.join(trialRoot, "index.html"), content: "<!doctype html><title>Experimental game</title><p>trial-only-result</p>" } } };
         if (trialCoderStage === 2) return { tool: { name: "bash", arguments: { command: `cd ${shellArg(trialRoot)} && git add index.html && git commit -m "experiment result" && commit=$(git rev-parse HEAD) && "$GENEHUB_CLI" workflow complete --evidence commit="$commit" --evidence checks=experimental-artifact-check` } } };
@@ -371,18 +381,19 @@ process.stdout.write(cp.execFileSync(process.env.GENEHUB_CLI,args,{encoding:'utf
       const stage = trialPmStage++;
       const trialPlan = path.join(projectRoot, ".genethub", "temp", "trial-plan.json");
       if (stage === 0) return { tool: { name: "write", arguments: { path: trialPlan, content: JSON.stringify({
-        schema: "genehub.workflow-trial-plan.v1", name: "v2", testName: "j3", sourceExecutor: "executor", taskRoot: "project",
+        schema: "genehub.workflow-trial-plan.v1", name: "v2", testName: "j3", package: PACKAGE_ID, sourceExecutor: `${PACKAGE_ID}--executor`, taskRoot: "project",
         repositories: [{ path: "project", source: ".", ref: "HEAD" }],
       }) } } };
       if (stage === 1) {
-        const prepare = `node ${shellArg(path.join(projectRoot, ".pipebuilder/skills/project-manager/scripts/prepare-executor.mjs"))} ${shellArg(trialPlan)}`;
+        const script = path.join(dataRoot, "builtin-skills/project-manager/scripts/prepare-executor.mjs");
+        const prepare = `test -f ${shellArg(script)} || { echo "missing prepare script: ${script}"; exit 9; }; test -f ${shellArg(trialPlan)} || { echo "missing trial plan: ${trialPlan}"; exit 9; }; node ${shellArg(script)} ${shellArg(trialPlan)}`;
         const stale = `
 const fs=require('node:fs'),p=require('node:path'),cp=require('node:child_process');
 const root=${JSON.stringify(projectRoot)},cli=process.env.GENEHUB_CLI;
-const args=['space','builder','build','--name','coder-v2','--require-no-post-commands'];
+const args=['space','builder','build','--name','game-delivery-v2--coder','--require-no-post-commands'];
 const envelopes=cp.execFileSync(cli,[...args,'--plan'],{encoding:'utf8'}).trim().split('\\n').filter(x=>x.startsWith('{')).map(x=>JSON.parse(x));
 const plan=envelopes.find(x=>x.data?.managementPlan).data.managementPlan;
-const source=p.join(root,'spaces/coder-v2/skills/game-coder/SKILL.md'),generated=p.join(root,'spaces/coder-v2/.agents/skills/game-coder/SKILL.md');
+const source=p.join(root,'spaces/game-delivery-v2--coder/skills/game-coder/SKILL.md'),generated=p.join(root,'spaces/game-delivery-v2--coder/.agents/skills/game-coder/SKILL.md');
 const before=fs.readFileSync(source),output=fs.readFileSync(generated);let result;
 try {fs.appendFileSync(source,'\\nA concurrent source change.\\n');result=cp.spawnSync(cli,[...args,'--plan-digest',plan.planDigest,'--expected-revision',String(plan.expectedRevision),'--action-id','stale-builder-test'],{encoding:'utf8'});}finally{fs.writeFileSync(source,before);}
 const outside=cp.spawnSync(cli,['space','open',p.dirname(root)],{encoding:'utf8'});
@@ -391,11 +402,14 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
         const preparationLog = shellArg(path.join(projectRoot, ".genethub/temp/preparation-command.log"));
         return { tool: { name: "bash", arguments: { command: `{ ${prepare} && ${prepare} && node -e ${shellArg(stale)}; } > ${preparationLog} 2>&1` } } };
       }
-      if (stage === 2) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow inspect' } } };
+      if (stage === 2) return { tool: { name: "bash", arguments: { command: `{ "$GENEHUB_CLI" workflow list; "$GENEHUB_CLI" workflow inspect --package ${PACKAGE_ID}-v2; } >> ${shellArg(path.join(projectRoot, ".genethub/temp/preparation-command.log"))} 2>&1; "$GENEHUB_CLI" workflow inspect --package ${PACKAGE_ID}-v2` } } };
       if (stage === 3) {
         const digest = fieldFromRequest(request, "candidateDigest");
         if (typeof digest !== "string") throw new Error("trial has no compiled candidate digest");
-        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow dispatch --workflow game-dev --candidate ${shellArg(digest)} --task workflow-trial-j3 --no-wait --message "实验运行 J3，仅操作独立实验目录，验证最小产物。"` } } };
+        // The prepared plan's `taskRoot` is `project`, so the Run's task
+        // directory is that material root, matching the receipt.
+        const trialRootRelative = path.relative(projectRoot, trialRoot);
+        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow dispatch --package ${PACKAGE_ID}-v2 --workflow game-dev --root ${shellArg(trialRootRelative)} --task workflow-trial-j3 --no-wait --message "实验运行 J3，仅操作独立实验目录，验证最小产物。" 2>&1 | tee -a ${shellArg(path.join(projectRoot, ".genethub/temp/preparation-command.log"))}` } } };
       }
       return { text: "实验结果已回到 PM；正式流程保持原版本。" };
     }
@@ -423,13 +437,13 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
     if (managerPromptPath && body.includes("独立评审 J3")) {
       if (reviewDispatched) return { text: "已收到独立评审，当前证据不足；未修改或激活工作流。" };
       reviewDispatched = true;
-      return { tool: { name: "bash", arguments: { command: '\"$GENEHUB_CLI\" workflow dispatch --kind workflow --complexity review --task workflow-review-j3 --no-wait --message "独立评审 J3，检查交付是否满足要求，缺失证据不判通过。"' } } };
+      return { tool: { name: "bash", arguments: { command: '\"$GENEHUB_CLI\" workflow dispatch --workflow workflow-review --task workflow-review-j3 --no-wait --message "独立评审 J3，检查交付是否满足要求，缺失证据不判通过。"' } } };
     }
     if (managerPromptPath && body.includes("分析 J1/J2") && !body.includes("You are the workflow-manager specialist")) {
       if (improvementDispatched && improvementRetried) return { text: "已委托并跟进流程改进；候选保持未激活。" };
       if (improvementDispatched) improvementRetried = true;
       improvementDispatched = true;
-      return { tool: { name: "bash", arguments: { command: '\"$GENEHUB_CLI\" workflow dispatch --kind workflow --complexity improvement --task workflow-improvement-j3 --no-wait --message "分析 J1/J2，改进检查质量，评估但不激活。"' } } };
+      return { tool: { name: "bash", arguments: { command: '\"$GENEHUB_CLI\" workflow dispatch --workflow workflow-improvement --task workflow-improvement-j3 --no-wait --message "分析 J1/J2，改进检查质量，评估但不激活。"' } } };
     }
     if (managerPromptPath && body.includes("分析 J1/J2")) {
       const stage = managerStage++;
@@ -471,7 +485,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
           tool: {
             name: "bash",
             arguments: {
-              command: `git -C ${root} add .genethub/workflow/prompts/coder.md && git -C ${root} commit -m "improve game delivery workflow"`,
+              command: `git -C ${root} add .genethub/workflows/game-delivery/prompts/coder.md && git -C ${root} commit -m "improve game delivery workflow"`,
             },
           },
         };
@@ -549,7 +563,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
       return {
         tool: {
           name: "bash",
-          arguments: { command: '"$GENEHUB_CLI" space bootstrap list' },
+          arguments: { command: '"$GENEHUB_CLI" workflow list' },
         },
       };
     }
@@ -558,7 +572,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
         tool: {
           name: "bash",
           arguments: {
-            command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1',
+            command: '"$GENEHUB_CLI" workflow build --package game-delivery',
           },
         },
       };
@@ -597,9 +611,9 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
         tool: {
           name: "bash",
           arguments: {
-            command: `"$GENEHUB_CLI" space bootstrap apply --pack ${PACK_ID} --plan-digest ${shellArg(
+            command: `"$GENEHUB_CLI" workflow build --package ${PACKAGE_ID} --apply --plan-digest ${shellArg(
               planDigest,
-            )} --expected-revision ${expectedRevision} --action-id bootstrap-${delivery.task} && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
+            )} --revision ${expectedRevision} --action-id bootstrap-${delivery.task} && cd ${root} && git add -A && git commit -m "commit the built workflow team" && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
               delivery.task,
             )} --no-wait --message ${shellArg(delivery.message)}`,
           },
@@ -611,7 +625,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
         tool: {
           name: "bash",
           arguments: {
-            command: `"$GENEHUB_CLI" space inspect && cat .pipebuilder/skills/project-manager/SKILL.md && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
+            command: `"$GENEHUB_CLI" space inspect && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
               delivery.task,
             )} --no-wait --message ${shellArg(delivery.message)}`,
           },
@@ -714,7 +728,9 @@ async function runPmDelivery(
         }) || events.some((event) => event.type === "turnFailed"),
       120_000,
     );
-    t.assertions.assert(!existsSync(path.join(fixture.projectRoot, ".git")), "planning created Git before approval");
+    // The read-only plan must not materialize anything. Git is no longer the
+    // signal — build never creates a repository — so the check is the
+    // product directories and root manifest the plan would write.
     t.assertions.assert(
       !existsSync(path.join(fixture.projectRoot, "pipespace.json")) &&
         !existsSync(path.join(fixture.projectRoot, "spaces")),
@@ -787,9 +803,19 @@ async function listSpaces(fixture: ProjectFixture): Promise<WorkspaceInfo[]> {
   return reply.data;
 }
 
+/// A Space keeps its local manifest name, so the formal team and a variant's
+/// copies share names and are told apart by their product directory — which
+/// is exactly what the package prefix is for.
 function teamByName(spaces: WorkspaceInfo[]): Map<string, WorkspaceInfo> {
+  const formal = `${path.sep}spaces${path.sep}${PACKAGE_ID}--`;
   return new Map(
-    spaces.filter((space) => TEAM_NAMES.includes(space.name as (typeof TEAM_NAMES)[number])).map((space) => [space.name, space]),
+    spaces
+      .filter(
+        (space) =>
+          space.root.includes(formal) &&
+          TEAM_NAMES.includes(space.name as (typeof TEAM_NAMES)[number]),
+      )
+      .map((space) => [space.name, space]),
   );
 }
 
@@ -798,7 +824,7 @@ function assertTeam(t: CaseContext, fixture: ProjectFixture, spaces: WorkspaceIn
   for (const name of TEAM_NAMES) {
     t.assertions.assert(Boolean(team.get(name)), `Bootstrap team omitted ${name}`);
     t.assertions.assert(
-      existsSync(path.join(fixture.projectRoot, "spaces", name, ".pipebuilder", "lock.json")),
+      existsSync(path.join(fixture.projectRoot, "spaces", `${PACKAGE_ID}--${name}`, ".pipebuilder", "lock.json")),
       `${name} was not built and verified by AgentSpaceBuilder`,
     );
   }
@@ -828,10 +854,15 @@ function assertTeam(t: CaseContext, fixture: ProjectFixture, spaces: WorkspaceIn
   return team;
 }
 
-async function inspectProject(fixture: ProjectFixture): Promise<WorkflowProjectStatus> {
+async function inspectProject(
+  fixture: ProjectFixture,
+  packageId: string = PACKAGE_ID,
+): Promise<WorkflowProjectStatus> {
+  // Once a trial package exists the project holds several, and the platform
+  // refuses to guess which one a caller means.
   const reply = await fixture.opened.client.call({
     type: "workflow.inspect",
-    payload: { workspaceId: fixture.projectId },
+    payload: { workspaceId: fixture.projectId, packageId },
   });
   if (reply?.type !== "workflowProject") throw new Error(`workflow.inspect returned ${reply?.type}`);
   return reply.data;
@@ -919,7 +950,7 @@ async function assertDelivery(
   const flowRoot = path.join(
     fixture.projectRoot,
     "spaces",
-    "executor",
+    `${PACKAGE_ID}--executor`,
     ".genethub",
     "sessions",
     completed.executorSessionId ?? "missing",
@@ -955,13 +986,13 @@ defineJourney(
     timeoutMs: 930_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git", "asset-preview"],
-    productInterfaces: ["genet space bootstrap", "genet workflow", "genet session flow"],
+    productInterfaces: ["genet workflow build", "genet workflow", "genet session flow"],
     retention: true,
   },
   async (t) => {
     const fixture = await createProject(t, "stardust-garden");
     try {
-      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [PROJECT_DELIVERY]);
+      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, t.env.data, [PROJECT_DELIVERY]);
       const pmSessionId = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
       const timing = await runPmDelivery(
         t,
@@ -1011,13 +1042,13 @@ defineJourney(
     timeoutMs: 930_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git", "asset-preview"],
-    productInterfaces: ["genet space bootstrap", "genet workflow", "genet session flow"],
+    productInterfaces: ["genet workflow build", "genet workflow", "genet session flow"],
     retention: true,
   },
   async (t) => {
     const fixture = await createProject(t, "stardust-expedition");
     try {
-      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [
+      scriptProductJourney(fixture.opened.mock, fixture.projectRoot, t.env.data, [
         PROJECT_DELIVERY,
         FEATURE_DELIVERY,
       ]);
@@ -1113,13 +1144,15 @@ defineJourney(
       const promptPath = path.join(
         fixture.projectRoot,
         ".genethub",
-        "workflow",
+        "workflows",
+        "game-delivery",
         "prompts",
         "coder.md",
       );
       scriptProductJourney(
         fixture.opened.mock,
         fixture.projectRoot,
+        t.env.data,
         [PROJECT_DELIVERY, FEATURE_DELIVERY],
         promptPath,
       );
@@ -1193,7 +1226,7 @@ defineJourney(
       const reportPath = path.join(
         fixture.projectRoot,
         "spaces",
-        "workflow-manager",
+        `${PACKAGE_ID}--workflow-manager`,
         ".genethub",
         "sessions",
         managerSessionId,
@@ -1254,7 +1287,7 @@ defineJourney(
         "WorkflowManager did not turn structured timing into a reviewable improvement hypothesis",
       );
       t.assertions.assert(
-        report.changedFiles?.join(",") === ".genethub/workflow/prompts/coder.md",
+        report.changedFiles?.join(",") === ".genethub/workflows/game-delivery/prompts/coder.md",
         `evaluation escaped Workflow assets: ${JSON.stringify(report.changedFiles)}`,
       );
       t.assertions.assert(
@@ -1296,8 +1329,8 @@ defineJourney(
       const reviewRequests = fixture.opened.mock.requests.filter((request) => JSON.stringify(request).includes("You are the workflow-reviewer specialist"));
       t.assertions.assert(reviewRequests.some((request) => JSON.stringify(request).includes("Session is outside the granted evidence set")), "review did not enforce the source Session scope");
       t.assertions.assert((await inspectProject(fixture)).activeDigest === before.activeDigest, "independent review changed active workflow");
-      const trialRoot = path.join(fixture.projectRoot, "spaces", "executor-v2", ".genethub", "temp", "exp", "j3", "project");
-      t.assertions.assert(!existsSync(path.join(fixture.projectRoot, "spaces", "executor-v2")), "test fixture prebuilt the experimental carrier");
+      const trialRoot = path.join(fixture.projectRoot, "spaces", `${PACKAGE_ID}-v2--executor`, ".genethub", "temp", "exp", "j3", "project");
+      t.assertions.assert(!existsSync(path.join(fixture.projectRoot, "spaces", `${PACKAGE_ID}-v2--executor`)), "test fixture prebuilt the experimental carrier");
       git(fixture.projectRoot, ["branch", "trial-feature-base"]);
       git(fixture.projectRoot, ["tag", "trial-baseline"]);
       const asksBefore = pmEvents.filter((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested").length;
@@ -1310,19 +1343,36 @@ defineJourney(
       t.assertions.assert(stale.code !== 0 && stale.error.includes("planStale") && stale.unchanged, "a changed Builder source was applied through its old plan");
       t.assertions.assert(stale.outsideOpenCode !== 0 && stale.outsideOpenError.includes("unauthenticated"), `PM gained machine-wide workspace registration authority: ${JSON.stringify(stale)}`);
       t.assertions.assert(pmEvents.filter((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested").length === asksBefore, "routine preparation asked Human to repeat the project grant");
-      t.assertions.assert((await listSpaces(fixture)).filter((space) => space.name.endsWith("-v2")).length === 5, "repeated preparation duplicated the team");
+      // The variant's Spaces live in the trial package's product
+      // directories; their manifest names stay local, so identity is the root.
+      const trialSpaces = (await listSpaces(fixture)).filter((space) =>
+        space.root.includes(`${path.sep}spaces${path.sep}${PACKAGE_ID}-v2--`),
+      );
+      t.assertions.assert(trialSpaces.length === 5, `repeated preparation duplicated the team: ${trialSpaces.map((space) => space.root).join(",")}`);
       t.assertions.assert(git(trialRoot, ["rev-parse", "trial-feature-base"]) === formalHead && git(trialRoot, ["rev-parse", "trial-baseline"]) === formalHead, "independent clone lost branch/tag baseline");
       t.assertions.assert(git(trialRoot, ["remote"]) === "", "trial clone retained a push destination to the formal repository");
       const trial = await completedRun(fixture, "workflow-trial-j3");
       t.assertions.assert(trial?.experimental === true && trial.executorWorkspaceId === experiment.executorId && trial.executionRoot === experiment.root, "trial lost its explicit candidate/team/environment binding");
-      t.assertions.assert(trial?.activationRevision == null && trial?.parentSessionId === pmSessionId, "trial pretended to be an activated run or changed its result recipient");
+      t.assertions.assert(trial?.parentSessionId === pmSessionId, "trial changed its result recipient");
       t.assertions.assert(git(fixture.projectRoot, ["rev-parse", "HEAD"]) === formalHead && readFileSync(path.join(fixture.projectRoot, "index.html"), "utf8") === artifactBeforeReview, "trial wrote into the formal delivery");
       t.assertions.assert((await inspectProject(fixture)).activeDigest === before.activeDigest, "trial activated itself");
-      // Human activation exercises the binding CAS, not a quality-acceptance oracle.
-      const adopted = await fixture.opened.client.call({ type: "workflow.activate", payload: { workspaceId: fixture.projectId, candidateDigest: trial!.dcgDigest, expectedRevision: before.activationRevision } });
-      t.assertions.assert(adopted?.type === "workflowProject" && adopted.data.activeDigest === trial!.dcgDigest, "adoption did not switch the complete candidate");
-      const rollback = await fixture.opened.client.call({ type: "workflow.activate", payload: { workspaceId: fixture.projectId, candidateDigest: before.activeDigest ?? null, expectedRevision: before.activationRevision + 1 } });
-      t.assertions.assert(rollback?.type === "workflowProject" && rollback.data.activeDigest === before.activeDigest, "rollback did not restore the previous complete binding");
+      // Activation is per package, so a variant's Candidate can never be
+      // promoted onto the formal package's pointer — adoption means running
+      // the variant package, and the formal one is untouched either way.
+      let refused = "";
+      try {
+        await fixture.opened.client.call({ type: "workflow.activate", payload: { workspaceId: fixture.projectId, packageId: PACKAGE_ID, candidateDigest: trial!.dcgDigest, expectedRevision: before.activationRevision } });
+      } catch (error) {
+        refused = error instanceof Error ? error.message : String(error);
+      }
+      t.assertions.assert(
+        /不能在包|candidateChanged/.test(refused),
+        `a variant Candidate was promoted onto the formal package: ${refused}`,
+      );
+      const formalAfter = await inspectProject(fixture);
+      t.assertions.assert(formalAfter.activeDigest === before.activeDigest && formalAfter.activationRevision === before.activationRevision, "a refused adoption still moved the formal pointer");
+      const variant = await inspectProject(fixture, `${PACKAGE_ID}-v2`);
+      t.assertions.assert(variant.activeDigest === trial!.dcgDigest, "the variant package does not run the Candidate its trial pinned");
       const historicalTrial = await completedRun(fixture, "workflow-trial-j3");
       t.assertions.assert(historicalTrial?.dcgDigest === trial?.dcgDigest && historicalTrial?.executorWorkspaceId === experiment.executorId, "activation rewrote historical trial facts");
       const unbound = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
@@ -1353,7 +1403,7 @@ for (const scenario of ["approved", "repair", "limit"] as const) defineJourney({
 }, async t => {
   const fixture = await createProject(t, `review-first-${scenario}`);
   try {
-    scriptProductJourney(fixture.opened.mock, fixture.projectRoot, [PROJECT_DELIVERY], undefined, scenario);
+    scriptProductJourney(fixture.opened.mock, fixture.projectRoot, t.env.data, [PROJECT_DELIVERY], undefined, scenario);
     const pm = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
     await runPmDelivery(t, fixture, pm, PROJECT_DELIVERY.userMarker, PROJECT_DELIVERY.task, true);
     const before = git(fixture.projectRoot, ["rev-parse", "HEAD"]);
@@ -1377,7 +1427,7 @@ for (const scenario of ["approved", "repair", "limit"] as const) defineJourney({
     t.assertions.assert(roles.filter((role) => role === "coder").length === expectedReviews - 1 && workers.length === roles.length, "unexpected implementation before approval or unbounded repair");
     const commits = Number(git(fixture.projectRoot, ["rev-list", "--count", `${before}..HEAD`]));
     t.assertions.assert(commits === expectedReviews - 1, "review required an unnecessary commit or lost a real repair");
-    const dir = path.join(fixture.projectRoot, "spaces/reviewer/.genethub/temp/review-first");
+    const dir = path.join(fixture.projectRoot, `spaces/${PACKAGE_ID}--reviewer/.genethub/temp/review-first`);
     const coverage = readdirSync(dir).filter((name) => name.endsWith("-coverage.json")).map((name) => JSON.parse(readFileSync(path.join(dir, name), "utf8")));
     t.assertions.assert(coverage.length === expectedReviews && coverage.every((item) => item.valid && item.evidenceExecutionVerified === false), "review omitted report validation or overstated evidence");
     t.assertions.assert(new Set(coverage.map((item) => item.acceptanceDigest)).size === 1, "acceptance changed during repair");

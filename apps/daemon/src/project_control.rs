@@ -560,6 +560,24 @@ impl Broker {
         )
     }
 
+    /// Moves an existing project binding to a new controller Session, keeping
+    /// the package identity it was established with.
+    ///
+    /// A fresh main Session in a PM project inherits control; it does not
+    /// establish it. Re-deriving the identity here would mean guessing which
+    /// package took the project over, so the recorded one is carried forward.
+    pub fn rebind(&self, workspace_id: &str, controller_session_id: &str) -> Result<()> {
+        let Ok(existing) = self.load_binding(workspace_id) else {
+            return Ok(());
+        };
+        self.bind(
+            workspace_id,
+            controller_session_id,
+            &existing.pack_id,
+            &existing.pack_digest,
+        )
+    }
+
     /// A project takeover authorizes ordinary project conversations to delegate work.
     /// Configuration management remains tied to the controller Session.
     pub fn has_binding(&self, workspace_id: &str) -> bool {

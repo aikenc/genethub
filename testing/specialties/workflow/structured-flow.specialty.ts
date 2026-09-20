@@ -27,9 +27,8 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
       return result.stdout;
     };
     await t.flows.main.configureMockProvider(opened.client,opened.mock);
-    await cli(["workflow","init","--agent","genet","--model","deepseek/deepseek-v4-flash"]);
-    const source = path.join(opened.workspaceRoot,".genethub/workflow");
-    const definitionPath = path.join(source,"workflows/direct-change.yaml");
+    const source = t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
+    const definitionPath = path.join(source,"flows/direct-change.yaml");
     const workerPrompt = path.join(source,"prompts/direct-worker.md");
     writeFileSync(workerPrompt,"STRUCTURED_WORKER: execute the assigned activity, preserve the current operation identity, report actual file evidence.\n");
     const literal = (value: unknown) => ({op:"literal",value});
@@ -133,7 +132,7 @@ for (const scenario of ["zero", "repair", "limit", "zero-limit", "if-true", "if-
       pmCalls += 1;
       if (!dispatched) {
         dispatched = true;
-        return {tool:{name:"bash",arguments:{command:'"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task structured-task --message "按流程执行并核对真实产物" --no-wait'}}};
+        return {tool:{name:"bash",arguments:{command:'"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task structured-task --message "按流程执行并核对真实产物" --no-wait'}}};
       }
       return {text:"已查看工作流结果。"};
     };

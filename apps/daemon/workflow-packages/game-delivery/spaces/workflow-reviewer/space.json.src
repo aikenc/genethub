@@ -1,0 +1,9 @@
+{
+  "lifecycle": "persistent",
+  "components": [
+    { "componentId": "worker", "role": "workflow-reviewer" },
+    { "componentId": "diagnostic" }
+  ],
+  "folders": [{ "name": "project", "path": "../.." }],
+  "guidance": ["评估流程卡顿、协作异常或流程改进的证据；业务可行性与交付质量由游戏 Reviewer 评估。"]
+}

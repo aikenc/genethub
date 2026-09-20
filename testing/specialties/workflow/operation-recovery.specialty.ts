@@ -25,10 +25,9 @@ defineSpecialty({
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     const help = await cli(["schema", "workflow.recover"]);
     t.assertions.assert(help.includes("unfinished") && help.includes("revision"), "agent-facing recovery schema omitted its safety boundary");
-    await cli(["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
-    const source = path.join(opened.workspaceRoot, ".genethub/workflow");
+        const source = t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "RECOVERY_WORKER: execute this operation and submit its own result.\n");
-    writeFileSync(path.join(source, "workflows/direct-change.yaml"), JSON.stringify({
+    writeFileSync(path.join(source, "flows/direct-change.yaml"), JSON.stringify({
       schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
       nodes: [{ id: "work", uses: "agent.session", with: { role: "worker" }, completion: { all: [{ key: "done", verify: "value.nonEmpty" }] } }],
       structure: { body: { id: "delivery", type: "sequence", steps: [
@@ -58,7 +57,7 @@ defineSpecialty({
       }
       if (!launched) {
         launched = true;
-        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task recovery-case --no-wait --message "完成两步只读核对"' } } };
+        return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task recovery-case --no-wait --message "完成两步只读核对"' } } };
       }
       return { text: "I will inspect the Run facts before acting." };
     } })));

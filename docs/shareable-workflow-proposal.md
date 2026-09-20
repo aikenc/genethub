@@ -1,6 +1,11 @@
 # 可分享 Workflow 包设计提案
 
-> 状态：提案（未实现）。本文按[产品工程引导](./engineering-guidance.md)的方案门清单产出，实现前需过门。<br>
+> 状态：已实现。设计与决策记录保留在本文；当前实现见 [package.rs](../apps/daemon/src/workflow/package.rs)、
+> [build.rs](../apps/daemon/src/workflow/build.rs) 与随产品发布的内置包
+> [game-delivery](../apps/daemon/workflow-packages/game-delivery/workflow.md)。<br>
+> 落地时相对本文的两处修正：`$project` 解析为 `.genethub/`（因此项目公共 Skill 写作 `$project/skills`，
+> 与 `$workflow/skills` 同形）；包的 executor 载体判定为「声明 executor 且不同时是 worker 的 Space」——
+> WorkflowManager 既是 Worker 又挂 executor 以拥有自己的子团队，按组件存在与否判定会把它误判成第二个载体。<br>
 > 上游事实：[architecture.md](./architecture.md) B1–B5、[workflow-executor-model.md](./workflow-executor-model.md)、[workflow-authoring.md](./workflow-authoring.md)。<br>
 > 取代对象：`genehub.bootstrap-pack.v1` 的编译期内嵌 Pack 形态（[bootstrap_pack.rs](../apps/daemon/src/bootstrap_pack.rs)）。
 
@@ -441,7 +446,7 @@ flow id 与 Space 名冲突、git 是否干净、是否空目录。包侧只提�
 | `apps/daemon/src/workflow/supervision.rs` | `Supervision.diagnostic_role` 的来源从 `project.yaml` 改为「声明 `diagnostic` 组件的 Space 及其 worker role」；`:381` 的 `evidence_only` 硬性检查保留；`:208-213` 的「未配置」分支语义不变 |
 | `apps/daemon/src/agent_space_builder/manifest.rs` | Provider 路径新增 `$workflow`/`$collection`/`$project` 逻辑引用解析（边界检查 `:550` 不变） |
 | 新增 `apps/daemon/src/workflow/package.rs`（暂名） | 包发现、`workflow.md` frontmatter 解析、build（两个 `.src` → 产物 Space、Provider 路径解析、调 `agent_space_builder::run`）、撞名检测、授权挑战 |
-| `apps/daemon/bootstrap-packs/game-delivery-v1/` | 改写为新结构的内置默认包（源形态，不再内嵌），`pack.json` 消失 |
+| `apps/daemon/bootstrap-packs/game-delivery-v1/` | 已改写为 `apps/daemon/workflow-packages/game-delivery/`（源形态，不再内嵌），`pack.json` 消失；PM 的 `project-manager` Skill 按 D8 迁为产品内置 |
 | `docs/workflow-executor-model.md` / `docs/workflow-authoring.md` | 同步「定义在包、载体在产物 Space」的归属描述 |
 
 **限额**（替代原 `MAX_PACK_FILES`/`MAX_PACK_BYTES`）：单包文件数、单包字节数、扫描深度、单项目包数

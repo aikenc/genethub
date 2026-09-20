@@ -1,8 +1,6 @@
 //! Read-only authoring facade over the production loader/compiler, not a second validator.
 use super::*;
-use genehub_proto::{
-    WorkflowDiagnostic, WorkflowDraftEntry, WorkflowDraftExecution, WorkflowDraftReport,
-};
+use genehub_proto::{WorkflowDiagnostic, WorkflowDraftEntry, WorkflowDraftReport};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -31,7 +29,7 @@ pub(crate) fn schema() -> Value {
             "semantics": "Immutable observation, not reservation or permission. Query again to observe changes. Only PM control can adjust limits."
         },
         "include": {
-            "file": "procedures/<id>.yaml beside workflows/, schema genehub.workflow.procedures.v1",
+            "file": "procedures/<id>.yaml beside the package's flows/, schema genehub.workflow.procedures.v1",
             "resolution": "Merged into this definition while loading, before any validation; the pinned program is identical to the same content written inline.",
             "rules": ["library declares procedures plus the nodes they use, no entry and no include of its own", "procedure names, node IDs and block IDs must not collide with the including Workflow or another library", "call a merged procedure with {type:call, procedure:<name>}"],
             "limits": {"includes": MAX_INCLUDES},
@@ -150,51 +148,55 @@ fn diagnostic(file: &str, error: &anyhow::Error) -> WorkflowDiagnostic {
     }
 }
 
-/// One causal diagnostic per failing catalog entry (deduplicated), bounded at 64.
+/// One causal diagnostic per failing flow (deduplicated), bounded at 64.
 /// Positive metadata is derived ONLY from the final consistent compiled snapshot.
 pub(super) fn check_draft(
     root: &Path,
+    package_id: Option<&str>,
     registry: &crate::adapter::registry::Registry,
 ) -> WorkflowDraftReport {
     let mut report = WorkflowDraftReport {
         schema: "genehub.workflow.draft-check.v1".into(),
-        root: root.join(SOURCE_DIR).display().to_string(),
+        root: package::packages_root(root).display().to_string(),
         valid: false,
         truncated: false,
         diagnostics: Vec::new(),
         candidate_digest: None,
-        default_workflow: None,
-        execution: None,
+        package_id: None,
+        executor_path: None,
         workflows: Vec::new(),
     };
-    let source = match source_root(root) {
-        Ok(source) => source,
+    let package_id = match super::resolve_package_id(root, package_id) {
+        Ok(id) => id,
         Err(error) => {
-            push(&mut report, diagnostic(PROJECT_FILE, &error));
+            push(&mut report, diagnostic(package::MANIFEST_FILE, &error));
             return report;
         }
     };
-    report.root = source.display().to_string();
-    let (_, catalog, _) = match load_project_files(&source) {
-        Ok(files) => files,
+    let package = match package::load(root, &package_id) {
+        Ok(package) => package,
         Err(error) => {
-            push(&mut report, diagnostic(PROJECT_FILE, &error));
+            push(&mut report, diagnostic(package::MANIFEST_FILE, &error));
             return report;
         }
     };
-    for entry in &catalog.workflows {
-        if let Err(error) = load_bundle_from(&source, entry) {
+    report.root = package.root.display().to_string();
+    report.package_id = Some(package_id);
+    // Per-flow diagnostics first: one broken flow should name itself rather
+    // than surfacing as a single opaque package-level compile failure.
+    for flow_id in &package.flow_ids {
+        if let Err(error) = load_bundle_from(&package.root, flow_id) {
             push(
                 &mut report,
-                diagnostic(&format!("workflows/{}", entry.path), &error),
+                diagnostic(&format!("flows/{flow_id}.yaml"), &error),
             );
         }
     }
     if !report.diagnostics.is_empty() {
         return report;
     }
-    match compile_candidate(&source) {
-        Err(error) => push(&mut report, diagnostic(PROJECT_FILE, &error)),
+    match compile_candidate(&package) {
+        Err(error) => push(&mut report, diagnostic(package::MANIFEST_FILE, &error)),
         Ok(candidate) => {
             for role in candidate
                 .workflows
@@ -219,23 +221,14 @@ pub(super) fn check_draft(
             }
             report.valid = true;
             report.candidate_digest = Some(candidate.digest);
-            report.default_workflow = Some(candidate.project.default_workflow);
-            report.execution = candidate.project.execution.map(|e| WorkflowDraftExecution {
-                executor_path: e.executor_path,
-                root: e.root,
-            });
+            report.executor_path = candidate.package.executor_path;
             report.workflows = candidate
-                .catalog
                 .workflows
                 .iter()
-                .map(|entry| WorkflowDraftEntry {
-                    id: entry.id.clone(),
-                    path: entry.path.clone(),
-                    roles: candidate.workflows[&entry.id]
-                        .roles
-                        .keys()
-                        .cloned()
-                        .collect(),
+                .map(|(id, bundle)| WorkflowDraftEntry {
+                    id: id.clone(),
+                    path: format!("flows/{id}.yaml"),
+                    roles: bundle.roles.keys().cloned().collect(),
                 })
                 .collect();
         }

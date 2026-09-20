@@ -26,9 +26,12 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
   expectedDurationMs: 180_000, timeoutMs: 600_000, retention: true,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "real-llm" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
-  productInterfaces: ["session.send", "session.respondPermission", "genet space bootstrap", "genet space builder", "genet workflow", "workflow.history"],
+  productInterfaces: ["session.send", "session.respondPermission", "genet workflow build", "genet space builder", "genet workflow", "workflow.history"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  // The Agent's `git clone` step, performed by the fixture: a package is an
+  // ordinary directory until `workflow build` authorizes its components.
+  t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot: opened.workspaceRoot });
   const cli = async (args: string[]) => {
     const result = await runGenetAsync(opened.daemon.genet, args, opened.daemon.env, { cwd: opened.workspaceRoot });
     t.assertions.assert(result.code === 0, result.stderr || result.stdout); return result.stdout;
@@ -52,9 +55,9 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
     // mistaken PM judgment in real session history, not an injected tool fact.
     opened.mock.script(...Array.from({ length: 12 }, () => ({ respond: (request: unknown) => {
       const current = stage++;
-      if (current === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
+      if (current === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
       if (current === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管测试项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
-      if (current === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${field(request, "planDigest")} --expected-revision ${field(request, "expectedRevision")} --action-id install-real-pm-trial` } } };
+      if (current === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id install-real-pm-trial` } } };
       return { text: "项目已接管。我先前把远程攻击理解成远程联机，把工作流伪代码当成 PM 的逐项派发任务，并把灰烬包生成完成等同于正式发布完成。这些判断还没有核对。" };
     } })));
     let pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
@@ -100,11 +103,12 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
       await turn("这次只说明证据范围：即使 WM 给出 structure passed，也不能直接证明改进有效。先保留未验证结论，不再启动实验、评审或开发，不激活。");
       t.assertions.assert((await history()).length === 1, "evidence explanation triggered another delegation");
     } else {
-      await turn("纠正你上一条：本项目的‘灰烬包’只是内部体验材料，绝不等于正式发布。请保留这个反证、修正和适用范围，更新 PM 自身源 Skill：新增 references/project-lessons.md 并在 SKILL.md 引用它，保护其他规则；通过已有 Builder 构建并验证生效。不要改 Workflow、Worker 或公共平台规则，不委派游戏开发。后续相关任务应先检索这条项目经验。");
-      const source = path.join(opened.workspaceRoot, ".pipebuilder/skills/project-manager");
-      const lesson = path.join(source, "references/project-lessons.md");
-      t.assertions.assert(existsSync(lesson) && readFileSync(path.join(source, "SKILL.md"), "utf8").includes("project-lessons.md"), "PM did not persist a referenced source method");
-      t.assertions.assert(readFileSync(path.join(opened.workspaceRoot, ".agents/skills/project-manager/SKILL.md"), "utf8") === readFileSync(path.join(source, "SKILL.md"), "utf8"), "PM's built Skill is not the corrected source");
+      await turn("纠正你上一条：本项目的‘灰烬包’只是内部体验材料，绝不等于正式发布。请保留这个反证、修正和适用范围，写进本项目自己的共享 Skill 层 .genethub/skills/project-lessons/SKILL.md，并通过已有 Builder 构建验证它对本项目生效；PM 的通用方法是产品内置，不要改它，也不要改 Workflow、Worker 或公共平台规则，不委派游戏开发。后续相关任务应先检索这条项目经验。");
+      // PM's general method is a product built-in; a project-specific lesson
+      // belongs in the project's own Skill layer, which is exactly what
+      // `.genethub/skills/` is for.
+      const source = path.join(opened.workspaceRoot, ".genethub/skills/project-lessons");
+      t.assertions.assert(existsSync(path.join(source, "SKILL.md")) && readFileSync(path.join(source, "SKILL.md"), "utf8").length > 0, "PM did not persist a project-scoped lesson");
       const snap = JSON.stringify((await snapshot(pm)).items);
       t.assertions.assert(snap.includes("builder") && snap.includes("build") && snap.includes("verify"), "PM did not exercise source-to-generated method validation");
       pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);

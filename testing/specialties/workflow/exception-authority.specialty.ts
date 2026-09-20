@@ -29,11 +29,14 @@ defineSpecialty({
   llm: { default: "mock" }, expectedDurationMs: 60_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client"],
-  productInterfaces: ["session.send", "session.respondPermission", "genet space bootstrap", "genet workflow", ".genethub/workflow"],
+  productInterfaces: ["session.send", "session.respondPermission", "genet workflow build", "genet workflow", ".genethub/workflows"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   try {
     rmSync(path.join(opened.workspaceRoot, ".keep"));
+    // The Agent's `git clone` step, performed by the fixture: a package is an
+    // ordinary directory until `workflow build` authorizes its components.
+    t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot: opened.workspaceRoot });
     for (const [key, value] of [["user.name", "Journey User"], ["user.email", "journey@example.com"], ["commit.gpgsign", "false"]]) {
       const result = spawnSync("git", ["config", "--global", key!, value!], { env: opened.daemon.env, encoding: "utf8" });
       t.assertions.assert(result.status === 0, "isolated Git configuration failed");
@@ -61,9 +64,9 @@ defineSpecialty({
       }
       if (phase === "bootstrap") {
         const stage = bootstrapStage++;
-        if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
+        if (stage === 0) return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
         if (stage === 1) return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "不接管" }] }] } } };
-        if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${field(request, "planDigest")} --expected-revision ${field(request, "expectedRevision")} --action-id initial-takeover` } } };
+        if (stage === 2) return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id initial-takeover` } } };
       } else if (command && body.includes(phase)) {
         const value = command; command = undefined; commandTaken = true;
         return { emptyToolIdDeltas: true, tool: { name: "bash", arguments: { command: value } } };
@@ -85,8 +88,8 @@ defineSpecialty({
     await t.tools.waitUntil(async () => bootstrapStage >= 4 && (await snapshot(owner)).summary.status === "idle", 50_000);
     const installed = await opened.client.call({ type: "workspace.list" });
     t.assertions.assert(installed?.type === "workspaces" && installed.data.find(space => space.id === opened.workspaceId)?.agentSpace?.components.some(component => component.componentId === "pm" && component.enabled), `bootstrap did not install PM: ${JSON.stringify(installed)}`);
-    const source = path.join(opened.workspaceRoot, ".genethub/workflow");
-    const workflowFile = path.join(source, "workflows/game-dev.yaml");
+    const source = path.join(opened.workspaceRoot, ".genethub/workflows/game-delivery");
+    const workflowFile = path.join(source, "flows/game-dev.yaml");
     const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
     const roleSchema = readFileSync(roleFile, "utf8").split("\n")[0]?.split(": ")[1];
@@ -139,8 +142,8 @@ defineSpecialty({
     // No Human challenge or binding transfer should be needed in an actual exception.
     const spaces = await opened.client.call({ type: "workspace.list" });
     if (spaces?.type !== "workspaces") throw new Error("missing project experts");
-    const coder = spaces.data.find(space => space.name === "coder")!;
-    const built = await runCommand(other, "u_exception_builder", '"$GENEHUB_CLI" space builder build --name coder --require-no-post-commands');
+    const coder = spaces.data.find(space => space.name === "game-delivery--coder" || space.name === "coder")!;
+    const built = await runCommand(other, "u_exception_builder", '"$GENEHUB_CLI" space builder build --name game-delivery--coder --require-no-post-commands');
     t.assertions.assert(field(built, "status") === "ok", `exception PM could not repair expert projections: ${built}`);
     const moving = await runCommand(other, "u_foreign_parent_denied", `"$GENEHUB_CLI" space parent set --workspace ${coder.id} --parent ${unrelated.data.id} --revision ${coder.agentSpace!.revision} --plan`);
     t.assertions.assert(moving.includes("forbidden"), "exception moved a project expert into a foreign project");
@@ -162,7 +165,7 @@ defineSpecialty({
     // business request must remain usable in this original conversation.
     const beforeAssessment = spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout;
     for (const kind of ["assessment", "review"]) {
-      const delegated = await runCommand(other, `u_business_${kind}`, `"$GENEHUB_CLI" workflow dispatch --kind game --complexity ${kind} --task business-${kind} --message "Assess melee and ranged cultivation gameplay; report only" --no-wait`);
+      const delegated = await runCommand(other, `u_business_${kind}`, `"$GENEHUB_CLI" workflow dispatch --workflow game-${kind} --task business-${kind} --message "Assess melee and ranged cultivation gameplay; report only" --no-wait`);
       t.assertions.assert(!delegated.includes("forbidden"), `old PM could not delegate business ${kind}: ${delegated}`);
       await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === `business-${kind}` && run.status === "completed"), 40_000)
         .catch(async error => { throw new Error(`${error}; ${delegated}; runs=${JSON.stringify(await history())}; requests=${JSON.stringify(opened.mock.requests).slice(-8000)}`); });
@@ -178,7 +181,7 @@ defineSpecialty({
     t.assertions.assert(afterPlan.includes("forbidden"), "exception left unrelated expert management enabled");
     const closedControl = await runCommand(other, "u_settled_worker_denied", `"$GENEHUB_CLI" session interrupt ${worker}`);
     t.assertions.assert(closedControl.includes("forbidden"), "exception retained control of another PM's managed Session");
-    const normalBuilder = await runCommand(other, "u_settled_builder_denied", '"$GENEHUB_CLI" space builder build --name coder --require-no-post-commands');
+    const normalBuilder = await runCommand(other, "u_settled_builder_denied", '"$GENEHUB_CLI" space builder build --name game-delivery--coder --require-no-post-commands');
     t.assertions.assert(normalBuilder.includes("forbidden"), "normal PM gained direct Builder write permission");
     const ownerAgain = await runCommand(owner, "u_owner_unchanged", dispatch("owner-unchanged"));
     t.assertions.assert(!ownerAgain.includes("ProjectControlBinding"), "recovery transferred normal project control");

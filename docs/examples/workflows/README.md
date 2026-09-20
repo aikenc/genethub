@@ -115,14 +115,13 @@ planning（最多 3 次规划）
 这些是 Workflow 定义文件，不是独立的 Executor 安装包。导入需要：
 
 1. 有项目、Executor、`coder` / `reviewer` 角色绑定及其 Prompt/Skill。
-   可以在隔离项目使用现有 `game-delivery-v1` Pack 准备这些载体；非游戏项目由 WM 映射合适的角色方法。
+   可以在隔离项目 clone 并 build 内置的 `game-delivery` 包来准备这些载体；非游戏项目由 WM 映射合适的角色方法。
 2. WM 根据真实需求修改 `structure.input` 的示例目标或合同，并保留原始需求与验收。
    `structure.input` 是定义中的初始数据，派发消息不会自动重写它。
-3. 将文件纳入项目的 `.genethub/workflow/workflows/`，在 `catalog.yaml` 增加条目，例如：
+3. 把文件放进目标包的 `flows/` 目录，文件名必须与文件内 `id` 一致——流程清单由目录决定，没有登记表：
 
-   ```yaml
-   - id: example-complex-batch
-     path: 03-complex-batch.yaml
+   ```text
+   .genethub/workflows/<package>/flows/example-complex-batch.yaml   # 内含 id: example-complex-batch
    ```
 
 4. 用现有 `workflow inspect` 检查候选；由有权限的 PM 按现有候选试验/激活规则派发。

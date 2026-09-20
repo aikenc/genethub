@@ -16,11 +16,9 @@ for (const width of [390,1280]) defineSpecialty({
   const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
   let browser:Awaited<ReturnType<typeof openWorkbenchPage>>|undefined;
   try {
-    const init=await runGenetAsync(opened.daemon.genet,["workflow","init","--agent","genet","--model","deepseek/deepseek-v4-flash"],opened.daemon.env,{cwd:opened.workspaceRoot});
-    t.assertions.assert(init.code===0,init.stderr);
-    const root=path.join(opened.workspaceRoot,".genethub/workflow");
+    const root=t.flows.main.seedDirectChangePackage({projectRoot:opened.workspaceRoot});
     writeFileSync(path.join(root,"prompts/direct-worker.md"),"STRUCTURE_UI_WORKER: report the assigned operation.");
-    writeFileSync(path.join(root,"workflows/direct-change.yaml"),JSON.stringify({
+    writeFileSync(path.join(root,"flows/direct-change.yaml"),JSON.stringify({
       schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,
       nodes:[{id:"worker",uses:"agent.session",with:{role:"worker"},completion:{all:[{key:"done",verify:"value.nonEmpty"}]}}],
       structure:{body:{id:"review-cycle",type:"loop",maxRounds:2,initial:{op:"literal",value:{done:false}},condition:{op:"not",value:{op:"ref",path:"/vars/done"}},body:{id:"review",type:"task",activity:"worker",accept:["completed","changesRequested"]},update:{op:"object",fields:{done:{op:"eq",left:{op:"ref",path:"/results/evidence/done"},right:{op:"literal",value:"yes"}}}}}},
@@ -38,7 +36,7 @@ for (const width of [390,1280]) defineSpecialty({
         }
         return {text:"已提交本轮证据。"};
       }
-      if(!dispatched){dispatched=true;return {tool:{name:"bash",arguments:{command:'"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task ui-loop --message "检查两轮流程展示" --no-wait'}}};}
+      if(!dispatched){dispatched=true;return {tool:{name:"bash",arguments:{command:'"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task ui-loop --message "检查两轮流程展示" --no-wait'}}};}
       return {text:"两轮检查完成。"};
     }})));
     const pm=await t.flows.main.createBuiltinSession(opened.client,opened.workspaceId);

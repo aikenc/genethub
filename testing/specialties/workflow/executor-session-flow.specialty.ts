@@ -72,7 +72,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
     timeoutMs: 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
-    productInterfaces: ["genet space bootstrap", "genet workflow", "genet session flow"],
+    productInterfaces: ["genet workflow build", "genet workflow", "genet session flow"],
   },
   async (t) => {
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
@@ -82,6 +82,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       const handoff = outcome === "cancel-handoff" || outcome === "restart-handoff" || outcome === "corrupt-frontier";
       const projectRoot = path.join(opened.workspaceRoot, "asteroid-garden");
       mkdirSync(projectRoot, { recursive: true });
+      t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot });
       t.data.git.init(projectRoot);
       writeFileSync(path.join(projectRoot, "README.md"), "# Asteroid Garden\n");
       git(projectRoot, ["add", "README.md"]);
@@ -98,7 +99,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       const legacyDevelopment = readFileSync(path.join(t.openRoot, "testing/fixtures/workflow/pack-v7-development.yaml"), "utf8");
       // Keep the old repair/finishing frontier oracle independent of changes to
       // the current Pack's business method. Use real source/commit/activation.
-      const installLegacy = `node -e ${shellArg(`require('fs').writeFileSync('.genethub/workflow/workflows/game-dev.yaml',${JSON.stringify(legacyDevelopment)})`)} && git add .genethub/workflow/workflows/game-dev.yaml && git commit -m 'select preserved v7 repair method' && "$GENEHUB_CLI" workflow activate --revision 1`;
+      const installLegacy = `node -e ${shellArg(`require('fs').writeFileSync('.genethub/workflows/game-delivery/flows/game-dev.yaml',${JSON.stringify(legacyDevelopment)})`)} && git add -A && git commit -m 'select preserved v7 repair method' && "$GENEHUB_CLI" workflow activate --revision 1`;
       const gameHtml = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Asteroid Garden</title><style>body{margin:0;background:#08152b;color:#fff;font:16px sans-serif;text-align:center}canvas{background:#10264c;border:2px solid #79e8ff;margin:20px}</style></head><body><h1>Asteroid Garden</h1><p>方向键移动，收集星种</p><canvas id="game" width="640" height="360"></canvas><script>const c=document.querySelector('#game'),x=c.getContext('2d');let px=320,score=0;addEventListener('keydown',e=>{px+=e.key==='ArrowLeft'?-20:e.key==='ArrowRight'?20:0;score++;draw()});function draw(){x.fillStyle='#10264c';x.fillRect(0,0,c.width,c.height);x.fillStyle='#79e8ff';x.fillRect(px,300,28,28);x.fillStyle='#fff';x.fillText('星种 '+score,20,30)}draw()</script></body></html>`;
       let pmStage = 0;
       const coderOperations = new Set<string>();
@@ -171,13 +172,13 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space inspect' } } };
         }
         if (stage === 1) {
-          return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap list' } } };
+          return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow list' } } };
         }
         if (stage === 2) {
           return {
             tool: {
               name: "bash",
-              arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' },
+              arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' },
             },
           };
         }
@@ -213,7 +214,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             tool: {
               name: "bash",
               arguments: {
-                command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${shellArg(planDigest)} --expected-revision ${expectedRevision} --action-id bootstrap-asteroid-garden && cat .pipebuilder/skills/project-manager/SKILL.md && ${installLegacy} && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task asteroid-garden --no-wait --message "制作一个可玩的太空花园小游戏，方向键移动、收集星种并显示得分。"`,
+                command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${shellArg(planDigest)} --revision ${expectedRevision} --action-id bootstrap-asteroid-garden && ${installLegacy} && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task asteroid-garden --no-wait --message "制作一个可玩的太空花园小游戏，方向键移动、收集星种并显示得分。"`,
               },
             },
           };
@@ -301,7 +302,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         const stopped = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
         t.assertions.assert(stopped.code === 0, `daemon stop failed: ${stopped.stderr}`);
         if (outcome === "corrupt-frontier") {
-          const snapshotPath = path.join(projectRoot,"spaces","executor",".genethub","sessions",accepted!.executorSessionId!,"components","executor","snapshots",`run-${accepted!.id}.json`);
+          const snapshotPath = path.join(projectRoot,"spaces","game-delivery--executor",".genethub","sessions",accepted!.executorSessionId!,"components","executor","snapshots",`run-${accepted!.id}.json`);
           const saved = JSON.parse(readFileSync(snapshotPath,"utf8"));
           t.assertions.assert(!!saved.run.engine,"fault fixture lacks a structured snapshot");
           saved.run.engine.frames[saved.run.engine.root].cursor = {phase:"selected",child:999999};
@@ -371,9 +372,13 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       const spacesReply = await opened.client.call({ type: "workspace.list" });
       t.assertions.assert(spacesReply?.type === "workspaces", "workspace.list failed");
       const spaces = spacesReply?.type === "workspaces" ? spacesReply.data : [];
-      const coderSpace = spaces.find((space) => space.name === "coder");
-      const reviewerSpace = spaces.find((space) => space.name === "reviewer");
-      const executorSpace = spaces.find((space) => space.name === "executor");
+      // Product Space names carry their package prefix, which is what keeps
+      // two packages' same-named Spaces apart in one project.
+      const packageSpace = (name: string) =>
+        spaces.find((space) => space.name === `game-delivery--${name}` || space.name === name);
+      const coderSpace = packageSpace("coder");
+      const reviewerSpace = packageSpace("reviewer");
+      const executorSpace = packageSpace("executor");
       t.assertions.assert(coder?.workspaceId === coderSpace?.id, "Coder did not run in Coder AgentSpace");
       t.assertions.assert(
         reviewer?.workspaceId === reviewerSpace?.id,
@@ -439,7 +444,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       t.assertions.assert(!!run!.structure,"preserved repair method is not structured");
       t.assertions.assert(workers.every(worker => worker.status === "closed"), "terminal nodes left live execution owners");
 
-      const executorRoot = path.join(projectRoot, "spaces", "executor");
+      const executorRoot = executorSpace?.root ?? path.join(projectRoot, "spaces", "game-delivery--executor");
       const flowRoot = path.join(
         executorRoot,
         ".genethub",

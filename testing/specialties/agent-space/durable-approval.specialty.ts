@@ -45,6 +45,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
     let client = opened.client;
     const projectRoot = path.join(opened.workspaceRoot, "empty-project");
     mkdirSync(projectRoot);
+    t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot });
     const cli = (args: string[]) => {
       const result = runGenet(opened.daemon.genet, args, opened.daemon.env);
       if (result.code !== 0) throw new Error(`CLI ${args.join(" ")}: ${result.stderr || result.stdout}`);
@@ -56,7 +57,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
     let restarted = false;
     let resumed = 0;
     let replayedApply = false;
-    let committedHead = "";
+    let committedTeam = "";
     let stage = "starting";
     let lastSnapshot: unknown;
     let mockFailure = "";
@@ -68,16 +69,16 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
         resumed += 1;
         if (!body.includes("DURABLE_APPROVAL_GOAL")) throw new Error("resumed Agent lost original conversation");
         if (!restarted && window === "approved") { paused = true; return { hang: true }; }
-        if (existsSync(path.join(projectRoot, ".git"))) {
+        if (existsSync(path.join(projectRoot, "spaces"))) {
           if (!restarted && window === "applied") { paused = true; return { hang: true }; }
           if (restarted && window === "applied" && !replayedApply) {
             replayedApply = true;
           } else return { text: "接管结果已核验，任务完成。" };
         }
         if (!plan) throw new Error("missing real plan");
-        return bash(`"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${quote(plan.digest)} --expected-revision ${plan.revision} --action-id ${quote(plan.challenge)}`);
+        return bash(`"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${quote(plan.digest)} --revision ${plan.revision} --action-id ${quote(plan.challenge)}`);
       }
-      if (phase++ === 0) return bash('"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1');
+      if (phase++ === 0) return bash('"$GENEHUB_CLI" workflow build --package game-delivery');
       if (!plan) {
         const challenge = field(request, "challengeId"), digest = field(request, "planDigest"), revision = field(request, "expectedRevision");
         if (typeof challenge !== "string" || typeof digest !== "string" || typeof revision !== "number") { mockFailure = JSON.stringify((request as { messages?: unknown }).messages).slice(-5000); throw new Error("plan omitted approval facts"); }
@@ -108,7 +109,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
         requestId = snapshot.data.pendingPermissions?.[0]?.id ?? "";
         return Boolean(requestId);
       }, 90_000);
-      t.assertions.assert(!existsSync(path.join(projectRoot, ".git")), "plan mutated project before approval");
+      t.assertions.assert(!existsSync(path.join(projectRoot, "spaces")), "plan mutated project before approval");
       t.assertions.assert(agentHostProcesses().filter((p) => p.environ.includes(t.env.data)).length === 0, "Human card retained an Agent process");
       const pausedSnapshot = await client.call({ type: "session.get", payload: { sessionId } });
       t.assertions.assert(pausedSnapshot?.type === "snapshot" && !pausedSnapshot.data.items.some(item => item.type === "turnSummary" && item.stats.outcome === "failed"), "intentional Human pause was shown as Agent failure");
@@ -127,7 +128,12 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
         const stopped = await client.call({ type: "session.interrupt", payload: { sessionId } });
         t.assertions.assert(stopped?.type === "ack", "stop failed");
       }
-      if (window === "applied") committedHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).stdout.trim();
+      // Build writes no commit, so a replayed apply is proved idempotent by
+      // the registered team it leaves behind rather than by a commit id.
+      if (window === "applied") {
+        const built = await client.call({ type: "workspace.list" });
+        committedTeam = built?.type === "workspaces" ? built.data.map((space) => space.id).sort().join(",") : "";
+      }
       stage = "restarting daemon";
       const pid = Number(cli(["daemon", "status"]).pid);
       client.close();
@@ -150,14 +156,14 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
       await t.tools.waitUntil(async () => {
         const snapshot = await client.call({ type: "session.get", payload: { sessionId } });
         lastSnapshot = snapshot;
-        return snapshot?.type === "snapshot" && snapshot.data.summary.status === "idle" && (denied ? !existsSync(path.join(projectRoot, ".git")) : existsSync(path.join(projectRoot, ".git")));
+        return snapshot?.type === "snapshot" && snapshot.data.summary.status === "idle" && (denied ? !existsSync(path.join(projectRoot, "spaces")) : existsSync(path.join(projectRoot, "spaces")));
       }, 90_000);
       t.assertions.assert(denied ? resumed === 0 : resumed > 0, "no approved adapter continuation occurred");
       const spaces = await client.call({ type: "workspace.list" });
       t.assertions.assert(spaces?.type === "workspaces" && spaces.data.length === (denied ? 2 : 7), "bootstrap did not create exactly five children");
       if (window === "applied") {
-        const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8" }).stdout.trim();
-        t.assertions.assert(replayedApply && head === committedHead && Boolean(head), "replayed apply changed the commit");
+        const team = spaces?.type === "workspaces" ? spaces.data.map((space) => space.id).sort().join(",") : "";
+        t.assertions.assert(replayedApply && team === committedTeam && Boolean(team), "replayed apply changed the built team");
       }
       const originalRound = field(roundsBefore, "roundId");
       t.assertions.assert(typeof originalRound === "string", "missing original user round");

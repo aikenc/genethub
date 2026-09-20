@@ -87,38 +87,61 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// Reads and validates the project-owned source under
-    /// `.genethub/workflow/`. The target must be a non-worker project entry;
-    /// its optional PM marker is irrelevant. This is a pure projection and
-    /// starts no Agent.
+    /// Reads and validates one Workflow package's source under
+    /// `.genethub/workflows/<id>/`. The target must be a non-worker project
+    /// entry; its optional PM marker is irrelevant. This is a pure projection
+    /// and starts no Agent.
     #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
     WorkflowInspect {
         workspace_id: String,
+        /// Required once a project holds more than one package.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         candidate_digest: Option<String>,
     },
-    /// Applies the deterministic genesis pack and activates its first
-    /// Candidate. Only a local user or an ordinary main Session in this
-    /// project may request the mutation.
-    #[serde(rename = "workflow.initialize", rename_all = "camelCase")]
-    WorkflowInitialize {
+    /// Read-only facts about every Workflow package cloned into this project:
+    /// provenance, compile state, product drift and authorization. It never
+    /// executes package content.
+    #[serde(rename = "workflow.list", rename_all = "camelCase")]
+    WorkflowList { workspace_id: String },
+    /// Materializes one package's Space sources into product Spaces and
+    /// authorizes their component topology. `apply` without an approved plan
+    /// is refused; this is the only path by which a cloned package gains
+    /// scheduling rights.
+    #[serde(rename = "workflow.build", rename_all = "camelCase")]
+    WorkflowBuild {
         workspace_id: String,
-        agent_id: String,
+        package_id: String,
+        apply: bool,
+        /// Required for apply and copied verbatim from the preceding plan.
         #[serde(default)]
-        model_id: Option<String>,
+        plan_digest: Option<String>,
+        /// Stable id chosen by the Agent for idempotent apply replay.
+        #[serde(default)]
+        action_id: Option<String>,
+        /// CAS value copied from the preceding plan.
+        #[serde(default)]
+        #[ts(type = "number | null")]
+        expected_revision: Option<u64>,
     },
     /// Promotes the current source Candidate or rolls back to a persisted one.
     /// `expectedRevision` is the activation CAS and is never optional.
     #[serde(rename = "workflow.activate", rename_all = "camelCase")]
     WorkflowActivate {
         workspace_id: String,
+        /// Required once a project holds more than one package.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         #[serde(default)]
         candidate_digest: Option<String>,
         #[ts(type = "number")]
         expected_revision: u64,
     },
-    /// Starts one project-defined Workflow. The durable parent Session comes
+    /// Starts one package-defined flow. The durable parent Session comes
     /// from the authenticated session-bound CLI identity, never this payload.
     #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
     WorkflowDispatch {
@@ -132,7 +155,19 @@ pub enum Request {
         #[ts(optional)]
         candidate_digest: Option<String>,
         workspace_id: String,
-        workflow_id: String,
+        /// Required once a project holds more than one package.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
+        /// Flow id inside the package. Optional when the package has one flow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        workflow_id: Option<String>,
+        /// Project-relative task directory for this Run. Defaults to the
+        /// project root; a trial pins its own material directory here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        execution_root: Option<String>,
         task_id: String,
         prompt: String,
     },
@@ -140,6 +175,11 @@ pub enum Request {
     WorkflowCheck {
         workspace_id: String,
         run_id: Option<String>,
+        /// Which package `--draft` validates. Required once a project holds
+        /// more than one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         /// Validate current source without creating a Candidate, Run or Worker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -280,30 +320,6 @@ pub enum Request {
         #[ts(optional, type = "number")]
         expected_revision: Option<u64>,
     },
-    /// Plans or applies a versioned project-owned team/DCG asset bundle.
-    #[serde(rename = "project.bootstrap", rename_all = "camelCase")]
-    ProjectBootstrap {
-        workspace_id: String,
-        pack_id: String,
-        apply: bool,
-        #[serde(default)]
-        agent_id: Option<String>,
-        #[serde(default)]
-        model_id: Option<String>,
-        /// Required for apply and copied verbatim from the preceding plan.
-        #[serde(default)]
-        plan_digest: Option<String>,
-        /// Stable id chosen by the Agent for idempotent apply replay.
-        #[serde(default)]
-        action_id: Option<String>,
-        /// CAS value copied from the preceding plan.
-        #[serde(default)]
-        #[ts(type = "number | null")]
-        expected_revision: Option<u64>,
-    },
-    /// Lists the versioned Bootstrap Packs available in this daemon build.
-    #[serde(rename = "project.bootstrap.list")]
-    BootstrapPackList,
     /// Presents one daemon-authored project mutation plan to the Human and
     /// waits for their answer. A SessionController may request this card but
     /// cannot answer it; approval authority remains Human-only and the
@@ -987,13 +1003,13 @@ pub enum Reply {
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
     WorkflowProject(WorkflowProjectStatus),
+    WorkflowPackages(WorkflowPackageList),
+    WorkflowBuild(WorkflowBuildReport),
     WorkflowRun(WorkflowRunStatus),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),
     AgentSpaceChangePlan(AgentSpaceChangePlan),
-    BootstrapPack(BootstrapPackReport),
-    BootstrapPacks(Vec<BootstrapPackInfo>),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),

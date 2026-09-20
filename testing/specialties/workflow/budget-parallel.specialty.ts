@@ -38,8 +38,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
   };
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    await cli(["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
-    const source = path.join(opened.workspaceRoot, ".genethub/workflow");
+        const source = t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "BUDGET_PARALLEL_WORKER: execute only the bound assignment and submit actual results.\n");
     const budgetCase = scenario === "observation" || scenario === "retry";
     const pure = scenario.startsWith("entries-");
@@ -58,7 +57,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       : budgetCase ? seq("root", [task("before", "budget"), task("work-step", "work", lit({ key: "budget" })), task("after", "budget")],
         obj({ before: ref("/results/before/output"), after: ref("/results/after/output") }))
       : seq("root", [parallel, fold, { id: "deliver-if-approved", type: "if", condition: ref("/results/reduce/approved"), then: task("publish", "publish") }], ref("/results/reduce"));
-    writeFileSync(path.join(source, "workflows/direct-change.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
+    writeFileSync(path.join(source, "flows/direct-change.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
       nodes: [{ id: "budget", uses: "request.budget" }, { id: "publish", uses: "result.publish" },
         { id: "work", uses: "agent.session", with: { role: "worker" }, completion: { output: { type: "object", properties: { passed: { type: "boolean" } } } } }],
       structure: { input, body: root } }));
@@ -69,7 +68,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
     const effect = (key: string) => path.join(opened.workspaceRoot, `started-${key}`);
     // A bounded real-tool barrier makes serial execution fail, not merely take longer.
     const waitFile = (file: string) => `for i in $(seq 1 400); do test -f ${q(file)} && break; sleep 0.05; done; test -f ${q(file)}`;
-    let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 1 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-1 --no-wait --message "Process the bounded record batch within the existing request budget"';
+    let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-1 --no-wait --message "Process the bounded record batch within the existing request budget"';
     const seen = new Set<string>();
     let continuationAllowed = false;
     opened.mock.script(...Array.from({ length: 90 }, () => ({ respond: (request: unknown) => {

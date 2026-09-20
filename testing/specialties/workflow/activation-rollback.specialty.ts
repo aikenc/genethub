@@ -33,7 +33,7 @@ defineSpecialty(
     timeoutMs: 120_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
-    productInterfaces: ["@genehub/workbench/client", "genet workflow", ".genethub/workflow"],
+    productInterfaces: ["@genehub/workbench/client", "genet workflow", ".genethub/workflows"],
   },
   async (t) => {
     t.data.git.init(t.env.workspace);
@@ -45,17 +45,22 @@ defineSpecialty(
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
-      const initialized = spawnSync(
+      t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
+      // Genesis is the package's first activation; every later one is an
+      // ordinary CAS activation of the same pointer. Activating also
+      // publishes `.genethub/.gitignore`, so commit after it: a write lease
+      // refuses a tree left dirty by the daemon's own session storage.
+      const genesisActivation = spawnSync(
         opened.daemon.genet,
-        ["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"],
+        ["workflow", "activate", "--revision", "0"],
         { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" },
       );
       t.assertions.assert(
-        initialized.status === 0,
-        `workflow init failed: ${initialized.stderr || initialized.stdout}`,
+        genesisActivation.status === 0,
+        `genesis activation failed: ${genesisActivation.stderr || genesisActivation.stdout}`,
       );
       git(opened.workspaceRoot, ["add", ".genethub"]);
-      git(opened.workspaceRoot, ["commit", "-m", "initialize workflow"]);
+      git(opened.workspaceRoot, ["commit", "-m", "clone and activate workflow package"]);
 
       const genesisReply = await opened.client.call({
         type: "workflow.inspect",
@@ -73,10 +78,10 @@ defineSpecialty(
         `unexpected genesis activation: ${JSON.stringify(genesis)}`,
       );
 
-      const rolePath = path.join(opened.workspaceRoot, ".genethub/workflow/roles/worker.yaml");
+      const rolePath = path.join(opened.workspaceRoot, ".genethub/workflows/local/roles/worker.yaml");
       const validRole = readFileSync(rolePath, "utf8");
-      t.assertions.assert(validRole.includes("agentId: genet"), "fixture role does not use genet");
-      writeFileSync(rolePath, validRole.replace("agentId: genet", "agentId: unavailable-agent"));
+      t.assertions.assert(validRole.includes('"agentId": "genet"'), "fixture role does not use genet");
+      writeFileSync(rolePath, validRole.replace('"agentId": "genet"', '"agentId": "unavailable-agent"'));
       git(opened.workspaceRoot, ["add", rolePath]);
       git(opened.workspaceRoot, ["commit", "-m", "configure unavailable worker"]);
 
@@ -154,7 +159,7 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                'if "$GENEHUB_CLI" workflow dispatch --kind business --complexity simple --task must-fail --message "不得创建 Worker" --wait --timeout 10; then echo "unexpected success"; exit 9; fi',
+                'if "$GENEHUB_CLI" workflow dispatch --task must-fail --message "不得创建 Worker" --wait --timeout 10; then echo "unexpected success"; exit 9; fi',
             },
           },
         },
@@ -237,7 +242,7 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                '"$GENEHUB_CLI" workflow dispatch --kind business --complexity simple --task succeeds-after-rollback --message "在 recovered.txt 写入 recovered 并提交。" --wait --timeout 60',
+                '"$GENEHUB_CLI" workflow dispatch --task succeeds-after-rollback --message "在 recovered.txt 写入 recovered 并提交。" --wait --timeout 60',
             },
           },
         },

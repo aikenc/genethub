@@ -8,7 +8,6 @@ pub mod agent_space;
 pub mod agent_space_builder;
 pub mod authz;
 pub(crate) mod blocking;
-pub mod bootstrap_pack;
 pub mod channel_auth;
 pub mod cli_front;
 pub mod client_debug;

@@ -24,15 +24,20 @@ pub const COMPONENT_PM: &str = "pm";
 pub const COMPONENT_EXECUTOR: &str = "executor";
 pub const COMPONENT_WORKER: &str = "worker";
 pub const COMPONENT_REVIEWER: &str = "reviewer";
+/// Carrier for the platform's bounded automatic diagnosis. The package chooses
+/// which Worker Space hosts it; every policy — trigger, quota, prompt, and the
+/// read-only evidence boundary — stays in `workflow::supervision`.
+pub const COMPONENT_DIAGNOSTIC: &str = "diagnostic";
 
 /// Every component the first batch defines a contract for. Unknown ids are
 /// refused rather than stored, so a typo cannot become a durable relationship
 /// that nothing will ever schedule.
-pub const COMPONENT_IDS: [&str; 4] = [
+pub const COMPONENT_IDS: [&str; 5] = [
     COMPONENT_PM,
     COMPONENT_EXECUTOR,
     COMPONENT_WORKER,
     COMPONENT_REVIEWER,
+    COMPONENT_DIAGNOSTIC,
 ];
 
 /// Bumped only when an older daemon would *misread* a stored component, in
@@ -124,11 +129,23 @@ pub fn apply(
             {
                 bail!("the reviewer component extends worker; mount an enabled worker first");
             }
+            if component_id == COMPONENT_DIAGNOSTIC
+                && *enabled
+                && !has_enabled_component(&next, COMPONENT_WORKER)
+            {
+                bail!("the diagnostic component extends worker; mount an enabled worker first");
+            }
             if component_id == COMPONENT_WORKER
                 && !*enabled
                 && has_enabled_component(&next, COMPONENT_REVIEWER)
             {
                 bail!("disable the reviewer component before disabling worker");
+            }
+            if component_id == COMPONENT_WORKER
+                && !*enabled
+                && has_enabled_component(&next, COMPONENT_DIAGNOSTIC)
+            {
+                bail!("disable the diagnostic component before disabling worker");
             }
             let replacement = AgentComponentEntry {
                 component_id: component_id.to_string(),
@@ -157,6 +174,11 @@ pub fn apply(
             if component_id == COMPONENT_WORKER && has_enabled_component(&next, COMPONENT_REVIEWER)
             {
                 bail!("remove the reviewer component before removing worker");
+            }
+            if component_id == COMPONENT_WORKER
+                && has_enabled_component(&next, COMPONENT_DIAGNOSTIC)
+            {
+                bail!("remove the diagnostic component before removing worker");
             }
             next.components
                 .retain(|component| component.component_id != component_id);
@@ -331,13 +353,6 @@ pub fn describe(entry: &AgentSpaceEntry) -> AgentSpaceInfo {
             })
             .collect(),
         guidance: entry.guidance.clone(),
-        bootstrap_pack: entry.bootstrap_pack.as_ref().map(|pack| {
-            genehub_proto::AgentSpacePackIdentity {
-                id: pack.id.clone(),
-                version: pack.version,
-                digest: pack.digest.clone(),
-            }
-        }),
         health: None,
     }
 }
@@ -373,7 +388,6 @@ mod tests {
             builder_lock_digest: "sha256:lock".into(),
             components: Vec::new(),
             guidance: Vec::new(),
-            bootstrap_pack: None,
         }
     }
 

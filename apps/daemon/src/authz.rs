@@ -355,7 +355,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
         | Request::AgentSpaceChildren { .. }
-        | Request::BootstrapPackList
+        | Request::WorkflowList { .. }
         | Request::SessionComponents { .. }
         | Request::SessionFlow { .. }
         | Request::DirectoryList { .. }
@@ -382,9 +382,8 @@ pub fn required(request: &Request) -> Capability {
 
         Request::SessionCreate { .. }
         | Request::AgentSpaceBuilder { .. }
-        | Request::ProjectBootstrap { .. }
         | Request::ProjectApprovalRequest { .. }
-        | Request::WorkflowInitialize { .. }
+        | Request::WorkflowBuild { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }
         | Request::WorkflowComplete { .. }

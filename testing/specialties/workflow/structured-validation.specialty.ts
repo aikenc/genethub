@@ -40,15 +40,17 @@ for(const fixture of invalid)defineSpecialty({
  t.data.git.init(t.env.workspace);
  const opened=await t.flows.main.openWorkspace({openRoot:t.openRoot,lease:t.env});
  try{
-  const init=await runGenetAsync(opened.daemon.genet,["workflow","init","--agent","genet"],opened.daemon.env,{cwd:opened.workspaceRoot});
-  t.assertions.assert(init.code===0,init.stderr);
+  const source=t.flows.main.seedDirectChangePackage({projectRoot:opened.workspaceRoot});
+  // A broken draft is reported as `candidateError` only while a previously
+  // activated Candidate remains runnable, which is the behaviour under test.
+  const activated=await runGenetAsync(opened.daemon.genet,["workflow","activate","--revision","0"],opened.daemon.env,{cwd:opened.workspaceRoot});
+  t.assertions.assert(activated.code===0,activated.stderr||activated.stdout);
   const before=await opened.client.call({type:"workflow.inspect",payload:{workspaceId:opened.workspaceId}});
-  const source=path.join(opened.workspaceRoot,".genethub/workflow");
   if(fixture.library){
    mkdirSync(path.join(source,"procedures"),{recursive:true});
    writeFileSync(path.join(source,"procedures/shared.yaml"),JSON.stringify(fixture.library));
   }
-  writeFileSync(path.join(source,"workflows/direct-change.yaml"),JSON.stringify({schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,nodes:[{id:"work",uses:"agent.session",with:{role:"worker"}}],structure:fixture.structure,...fixture.definition}));
+  writeFileSync(path.join(source,"flows/direct-change.yaml"),JSON.stringify({schema:"genehub.workflow.definition.v2",id:"direct-change",version:2,nodes:[{id:"work",uses:"agent.session",with:{role:"worker"}}],structure:fixture.structure,...fixture.definition}));
   const after=await opened.client.call({type:"workflow.inspect",payload:{workspaceId:opened.workspaceId}});
   t.assertions.assert(before?.type==="workflowProject" && after?.type==="workflowProject" && after.data.activationRevision===before.data.activationRevision && !!after.data.candidateError?.includes(fixture.reason),`invalid source did not produce expected error: ${JSON.stringify(after)}`);
   const history=await opened.client.call({type:"workflow.history",payload:{workspaceId:opened.workspaceId,limit:10}});

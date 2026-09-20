@@ -4,23 +4,26 @@ Workflow 是被创建、验证和采用的执行方案。Executor 是使这个�
 
 | 概念 | 含义 | 当前实现 |
 | --- | --- | --- |
-| Workflow | 步骤、角色协作、条件、验收与异常处理的定义 | 项目根 `.genethub/workflow/` 下的流程、角色、提示词与 catalog |
+| Workflow 包 | 一个含 `workflow.md` 的普通目录，靠 `git clone` 获得；身份即它相对 `.genethub/workflows/` 的路径 | `<project>/.genethub/workflows/<id>/` 下的 `flows/`、`roles/`、`prompts/`、`skills/` 与 `spaces/` 源 |
+| Workflow（流程） | 步骤、角色协作、条件、验收与异常处理的定义 | 包内 `flows/<id>.yaml`；文件名即 id，没有登记表 |
 | Executor | Workflow 的运行载体，调度自己直接拥有的 Worker | 挂载 executor Component 的 AgentSpace |
-| Candidate | 一份可固定身份的候选配置 | 包含项目配置、catalog、Workflow 及相关源文件；当前也包含执行绑定 |
+| Candidate | 一份可固定身份的候选配置 | 包含从包目录推导的事实（包 id、executor 载体、诊断载体）、各条流程及相关源文件 |
 | Run | 使用固定候选、载体与输入执行一次任务 | daemon 创建，Executor 会话保存权威运行快照 |
 | 测试项目 | 验证 Workflow 的材料 | 普通任务目录；按案例需要包含零个、一个或多个 Git 仓库 |
 
-产品中选择某个 Executor 可以表示选择一套可运行的 Workflow 方案。实现中仍应保留定义、载体和运行身份：当前一个 catalog 可以包含多个 Workflow，同一个 Executor 可以承载多个 Workflow。定义源也没有全部迁入 Executor 目录。
+产品中选择某个 Executor 可以表示选择一套可运行的 Workflow 方案。实现中仍应保留定义、载体和运行身份：一个包可以包含多条流程，同一个 Executor 承载该包的全部流程。一个项目可以同时安装多个包，各自绑定自己的 Executor，因此派发时包与流程都要能被点名。
+
+源与产物严格分离：包目录是纯源（手写、可 git 管理），`workflow build` 把其中的 Space 源物化到 `<project>/spaces/<扁平包id>--<space>/`，产物全部可重建。升级就是在包目录里 `git pull` 再 build——平台不实现三方合并，daemon 也不联网。
 
 | 数据 | 位置与责任 |
 | --- | --- |
-| 可编辑 Workflow 源 | 项目 `.genethub/workflow/`；WM 按项目已有版本管理维护 |
-| 执行绑定 | `project.yaml.execution.executorPath` 选择 Executor，`execution.root` 选择任务目录 |
-| Candidate、激活指针及 Run 索引 | daemon 管理的持久记录 |
+| 可编辑 Workflow 源 | 包目录 `.genethub/workflows/<id>/`；它自带 git 检出，WM 在其中维护版本 |
+| 执行绑定 | 由包推导：声明顶层 `executor` 组件的 Space 对应产物目录即该包的 Executor；任务目录默认项目根，由 Run 输入覆盖 |
+| Candidate、激活指针及 Run 索引 | daemon 管理的持久记录；激活指针按包分文件，一个包的重建不会改写另一个包的指向 |
 | Executor 所属 Run 快照 | Executor 会话的 executor 组件实例 `snapshots`；由 daemon 更新 |
 | Space 的 Skill 与配置 | 各 AgentSpace 的 Builder 源及其验证身份；不能假设一个 Candidate digest 已覆盖全部 Skill 内容 |
 
-相关实现见 [Workflow 宿主](../apps/daemon/src/workflow/mod.rs)的 `compile_candidate`、`resolve_execution_binding`、`executor_snapshot_relative` 与 `save_run`，以及 [默认项目绑定](../apps/daemon/bootstrap-packs/game-delivery-v1/project/.genethub/workflow/project.yaml)。
+相关实现见 [Workflow 宿主](../apps/daemon/src/workflow/mod.rs)的 `compile_candidate`、`resolve_execution_binding`、`executor_snapshot_relative` 与 `save_run`，[包发现与物化](../apps/daemon/src/workflow/package.rs)、[构建与授权](../apps/daemon/src/workflow/build.rs)，以及随产品发布的[内置包](../apps/daemon/workflow-packages/game-delivery/workflow.md)。
 
 项目、Executor 和目录有三种不同关系。
 

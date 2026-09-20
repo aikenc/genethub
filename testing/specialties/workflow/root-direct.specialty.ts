@@ -69,13 +69,16 @@ defineSpecialty(
       );
 
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
+      // A package arrives by clone; the root Session activates it rather than
+      // running an initializer the product no longer has.
+      t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
       opened.mock.script(
         {
           tool: {
             name: "bash",
             arguments: {
               command:
-                '"$GENEHUB_CLI" workflow init --agent genet --model deepseek/deepseek-v4-flash && git add .genethub && git commit -m "initialize project workflow"',
+                '"$GENEHUB_CLI" workflow activate --revision 0 && git add .genethub && git commit -m "activate the cloned workflow package"',
             },
           },
         },
@@ -84,7 +87,7 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                '"$GENEHUB_CLI" workflow dispatch --kind business --complexity simple --task simple-fix --message "在 result.txt 写入 workflow-direct 并提交。" --wait --timeout 60',
+                '"$GENEHUB_CLI" workflow dispatch --task simple-fix --message "在 result.txt 写入 workflow-direct 并提交。" --wait --timeout 60',
             },
           },
         },
@@ -93,7 +96,7 @@ defineSpecialty(
             name: "bash",
             arguments: {
               command:
-                'output=$("$GENEHUB_CLI" workflow init --agent genet --model deepseek/deepseek-v4-flash 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly initialized the DCG"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能初始化或激活项目 DCG" && output=$("$GENEHUB_CLI" workflow activate --revision 1 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly activated the DCG"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能初始化或激活项目 DCG" && output=$("$GENEHUB_CLI" workflow dispatch --workflow direct-change --task nested-forbidden --message "受管 Worker 不得再次派发" --no-wait 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly dispatched a nested Workflow"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能派发新的 Workflow"',
+                'output=$("$GENEHUB_CLI" workflow activate --revision 1 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly activated the DCG"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能初始化或激活项目 DCG" && output=$("$GENEHUB_CLI" workflow dispatch --workflow direct-change --task nested-forbidden --message "受管 Worker 不得再次派发" --no-wait 2>&1); status=$?; if [ "$status" -eq 0 ]; then echo "managed Worker unexpectedly dispatched a nested Workflow"; exit 9; fi; printf "%s" "$output" | grep -q "受管子会话不能派发新的 Workflow"',
             },
           },
         },
@@ -136,7 +139,7 @@ defineSpecialty(
         );
       } catch (error) {
         throw new Error(
-          `${error instanceof Error ? error.message : String(error)} while waiting for workflow init; events=${JSON.stringify(
+          `${error instanceof Error ? error.message : String(error)} while waiting for the package activation; events=${JSON.stringify(
             rootEvents.slice(-8).map((event) => event.raw),
           ).slice(-4000)}`,
         );
@@ -254,8 +257,8 @@ defineSpecialty(
 
       t.assertions.fileEquals(opened.workspaceRoot, "result.txt", "workflow-direct\n");
       t.assertions.assert(
-        existsSync(path.join(opened.workspaceRoot, ".genethub/workflow/project.yaml")),
-        "project Workflow source was not created",
+        existsSync(path.join(opened.workspaceRoot, ".genethub/workflows/local/workflow.md")),
+        "the cloned Workflow package source is missing",
       );
       t.assertions.assert(
         !existsSync(path.join(opened.workspaceRoot, ".genehub")),

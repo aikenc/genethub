@@ -1,0 +1,9 @@
+{
+  "lifecycle": "persistent",
+  "components": [
+    { "componentId": "worker", "role": "workflow-manager" },
+    { "componentId": "executor" }
+  ],
+  "folders": [{ "name": "project", "path": "../.." }],
+  "guidance": ["分析最近两次 Workflow 的耗时、返工和 Review，形成改进 Candidate"]
+}

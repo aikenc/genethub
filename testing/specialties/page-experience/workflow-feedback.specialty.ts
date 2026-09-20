@@ -43,10 +43,9 @@ for (const width of [390, 1280]) defineSpecialty({
     await cli(["space", "parent", "set", "--workspace", workerSpace.id, "--parent", executor.id]);
     await cli(["space", "component", "set", "--workspace", workerSpace.id, "--component", "worker", "--role", "worker"]);
     await cli(["space", "component", "set", "--workspace", workerSpace.id, "--component", "executor"]);
-    await cli(["workflow", "init", "--workspace", project.id, "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"], project.root);
-    const root = path.join(project.root, ".genethub/workflow");
+    const root = t.flows.main.seedDirectChangePackage({ projectRoot: project.root });
     writeFileSync(path.join(root, "prompts/direct-worker.md"), "LEGACY_FEEDBACK_WORKER: submit evidence for your assigned node.");
-    writeFileSync(path.join(root, "workflows/direct-change.yaml"), JSON.stringify({
+    writeFileSync(path.join(root, "flows/direct-change.yaml"), JSON.stringify({
       schema: "genehub.workflow.definition.v1", id: "direct-change", version: 1, entry: "specialist",
       nodes: [
         { id: "specialist", uses: "agent.session", with: { role: "worker" }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] }, on: { completed: ["publish"] } },
