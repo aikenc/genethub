@@ -73,17 +73,20 @@ async fn run_inner(args: &Value, cwd: &Path) -> Result<ToolResult, String> {
     let mut argv: Vec<String> =
         serde_json::from_value(args.get("args").cloned().unwrap_or(Value::Null))
             .map_err(|_| "genet requires a string args array".to_string())?;
+    // Headroom for the largest payload the CLI itself accepts (`--output`,
+    // 256 KiB). A tighter budget here would refuse submissions the contract
+    // asks a reviewer to make.
     if argv.len() > 40
         || argv
             .iter()
-            .any(|arg| arg.len() > 64 * 1024 || arg.contains('\0'))
+            .any(|arg| arg.len() > 256 * 1024 || arg.contains('\0'))
     {
         return Err("evidence command exceeds its argument budget".into());
     }
     let mut boundary = None;
-    let (start, flags): (usize, &[&str]) = match argv.first().map(String::as_str) {
-        Some("capabilities") if argv.len() == 1 => (1, &[]),
-        Some("schema") if argv.len() == 2 && !argv[1].starts_with('-') => (2, &[]),
+    let start: usize = match argv.first().map(String::as_str) {
+        Some("capabilities") if argv.len() == 1 => 1,
+        Some("schema") if argv.len() == 2 && !argv[1].starts_with('-') => 2,
         Some("session") if argv.len() >= 3 => {
             let round = scope
                 .sessions
@@ -96,29 +99,34 @@ async fn run_inner(args: &Value, cwd: &Path) -> Result<ToolResult, String> {
                             .clone()
                             .ok_or("Session has no bounded evidence; report unavailable")?,
                     );
-                    (3, &["--budget-tokens", "--limit", "--cursor", "--item"])
+                    3
                 }
-                "flow" => (3, &[]),
+                "flow" => 3,
                 _ => {
                     return Err("session command is not available to evidence-only analysis".into())
                 }
             }
         }
         Some("workflow") if argv.len() >= 2 => match argv[1].as_str() {
-            "get" | "check" => (2, &["--run"]),
-            "history" => (2, &["--limit"]),
-            "complete" => (2, &["--revision", "--evidence", "--outcome", "--reason"]),
+            "get" | "check" | "history" | "complete" => 2,
             _ => return Err("workflow mutation is not available to evidence-only analysis".into()),
         },
         _ => return Err("command is not available to evidence-only analysis".into()),
     };
-    let rest = &argv[start..];
-    if !rest.len().is_multiple_of(2)
-        || rest
-            .chunks(2)
-            .any(|pair| !flags.contains(&pair[0].as_str()) || pair[1].starts_with('-'))
+    // Only the target and the granted boundary are this tool's to enforce.
+    // Which options a reachable command takes is the CLI's own contract: it
+    // rejects unknown options, malformed JSON and oversized payloads itself,
+    // and the daemon independently authorises every mutation against the
+    // calling managed Session. Re-declaring the option set here drifted from
+    // that contract and silently refused legitimate submissions, so the
+    // allowlist covers commands, not argument shapes.
+    if let Some(flag) = argv[start..]
+        .iter()
+        .find(|arg| matches!(arg.as_str(), "--workspace" | "--through-round"))
     {
-        return Err("unsupported evidence command arguments or target override".into());
+        return Err(format!(
+            "evidence commands cannot redirect their target or boundary: {flag}"
+        ));
     }
     if let Some(round) = boundary {
         argv.extend(["--through-round".into(), round]);
@@ -151,4 +159,93 @@ async fn run_inner(args: &Value, cwd: &Path) -> Result<ToolResult, String> {
         ToolResult::error(truncated.content.clone())
     };
     Ok(result.with_truncation(&truncated))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialises the tests that share the process-wide scope variable.
+    static SCOPE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_scope<T>(scope: &str, body: impl FnOnce() -> T) -> T {
+        let guard = SCOPE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GENEHUB_EVIDENCE_SCOPE", scope);
+        let result = body();
+        std::env::remove_var("GENEHUB_EVIDENCE_SCOPE");
+        drop(guard);
+        result
+    }
+
+    fn refusal(argv: &[&str]) -> Option<String> {
+        with_scope(r#"{"root":"/tmp","sessions":{"s_1":"r_9"}}"#, || {
+            let args = json!({"args": argv});
+            // Only the pre-spawn validation is under test; reaching the CLI
+            // means the arguments were accepted.
+            std::env::remove_var("GENEHUB_CLI");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            match runtime.block_on(run_inner(&args, Path::new("/tmp"))) {
+                Err(error) if error == "GENEHUB_CLI is unavailable" => None,
+                Err(error) => Some(error),
+                Ok(_) => None,
+            }
+        })
+    }
+
+    #[test]
+    fn a_structured_completion_report_is_accepted() {
+        // The role contract requires `--output <JSON>`; an allowlist that
+        // omitted it forced reviewers to downgrade to a negative outcome.
+        assert_eq!(
+            refusal(&[
+                "workflow",
+                "complete",
+                "--revision",
+                "7",
+                "--evidence",
+                "checks=four actions reviewed",
+                "--output",
+                r#"{"verdict":"pass","observed":"spin: T-pose at 1.03s"}"#,
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn options_the_cli_owns_are_not_second_guessed() {
+        // `--node`/`--run` disambiguate the caller's own node, and `--draft`
+        // is a flag with no value: the old pair-shaped allowlist refused both.
+        assert_eq!(
+            refusal(&["workflow", "complete", "--node", "review", "--run", "wr_1"]),
+            None
+        );
+        assert_eq!(refusal(&["workflow", "check", "--draft"]), None);
+    }
+
+    #[test]
+    fn unreachable_commands_are_still_refused() {
+        assert!(refusal(&["workflow", "dispatch", "--run", "wr_1"]).is_some());
+        assert!(refusal(&["session", "send", "s_1", "hello"]).is_some());
+        assert!(refusal(&["bash", "-c", "echo"]).is_some());
+    }
+
+    #[test]
+    fn the_granted_session_boundary_still_holds() {
+        assert_eq!(
+            refusal(&["session", "inspect", "s_other"]).as_deref(),
+            Some("Session is outside the granted evidence set")
+        );
+        let redirect = refusal(&["workflow", "get", "--workspace", "w_other"]);
+        assert!(
+            redirect.is_some_and(|error| error.contains("cannot redirect")),
+            "a target override must stay refused"
+        );
+        let boundary = refusal(&["session", "narrative", "s_1", "--through-round", "r_1"]);
+        assert!(
+            boundary.is_some_and(|error| error.contains("cannot redirect")),
+            "the granted boundary must not be overridable"
+        );
+    }
 }

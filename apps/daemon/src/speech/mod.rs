@@ -572,6 +572,19 @@ fn validate_runtime_capabilities(capabilities: &SpeechRuntimeCapabilities) -> Re
     Ok(())
 }
 
+/// A language code's shape, which is all the daemon can judge on its own. Which
+/// codes actually work is the registered runtime's declaration — it is accepted
+/// and published from `capabilities.languages`, so refusing a hint against a
+/// built-in list would reject a language the platform itself just advertised.
+fn valid_language_code(language: &str) -> bool {
+    !language.is_empty()
+        && language.len() <= 16
+        && language == language.to_ascii_lowercase()
+        && language
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
 pub fn validate_settings(
     pinned_terms: Vec<String>,
     language_hints: Vec<String>,
@@ -597,8 +610,8 @@ pub fn validate_settings(
     let mut languages = Vec::new();
     for language in language_hints {
         let language = language.trim().to_ascii_lowercase();
-        if !SUPPORTED_LANGUAGES.contains(&language.as_str()) {
-            anyhow::bail!("不支持的语音语言提示 `{language}`");
+        if !valid_language_code(&language) {
+            anyhow::bail!("无效的语音语言提示 `{language}`");
         }
         if !languages.contains(&language) {
             languages.push(language);
@@ -1199,7 +1212,7 @@ async fn validate_start(start: &SpeechStart, services: &PeerServices) -> Result<
         || start
             .language_hints
             .iter()
-            .any(|language| !SUPPORTED_LANGUAGES.contains(&language.as_str()))
+            .any(|language| !valid_language_code(language))
     {
         anyhow::bail!("unsupported speech language hint");
     }
@@ -1648,6 +1661,28 @@ mod tests {
         encode_speech_audio, encode_speech_frame, encode_speech_json, SpeechEncoding,
     };
 
+    #[test]
+    fn a_language_the_runtime_declares_is_accepted_as_a_hint() {
+        // A registered runtime declares its own `capabilities.languages`; the
+        // daemon publishes them. Validating hints against a built-in list
+        // refused codes the platform had just advertised.
+        let (_terms, languages) =
+            validate_settings(Vec::new(), vec!["he".into(), "sw".into(), "yue".into()])
+                .expect("runtime-declared languages are hintable");
+        assert_eq!(languages, vec!["he", "sw", "yue"]);
+    }
+
+    #[test]
+    fn a_malformed_language_code_is_still_refused() {
+        // `EN` normalises to `en` before validation, as it always has.
+        for bad in ["", "en_US", "zh cn", &"x".repeat(17)] {
+            assert!(
+                validate_settings(Vec::new(), vec![bad.into()]).is_err(),
+                "{bad:?} is not a well-formed language code"
+            );
+        }
+    }
+
     fn decode_one(wire: Vec<u8>) -> SpeechFrame {
         SpeechFrameDecoder::default().push(&wire).unwrap().remove(0)
     }
@@ -1668,7 +1703,10 @@ mod tests {
     #[test]
     fn settings_are_qwen3_local_and_bounded() {
         assert!(validate_settings(vec!["GeneHub".into()], vec!["zh".into(), "en".into()]).is_ok());
-        assert!(validate_settings(vec![], vec!["invented".into()]).is_err());
+        // A well-formed code the daemon does not recognise belongs to the
+        // runtime's declaration, not to a built-in list; malformed ones are
+        // still refused (see a_malformed_language_code_is_still_refused).
+        assert!(validate_settings(vec![], vec!["not a code".into()]).is_err());
         let defaults = settings(&SpeechConfig::default());
         assert_eq!(defaults.runtime.id, "unconfigured");
         assert_eq!(defaults.runtime.implementation, "unconfigured");

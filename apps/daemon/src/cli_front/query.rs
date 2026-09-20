@@ -80,22 +80,15 @@ const COMMAND_NAMES: [&str; 59] = [
 
 /// The capability vocabulary a machine grants a device, named here so `genet
 /// schema` can offer it as an enum rather than leaving an agent to discover the
-/// spelling by being refused.
-const GRANTS: [&str; 10] = [
-    "handshake",
-    "read",
-    "session",
-    "files",
-    "git",
-    "pty",
-    // Named even though it is rarely granted: an agent that needs it can only
-    // discover the spelling here, and one that guesses gets refused with no
-    // hint that the grant it wanted exists.
-    "pty:unconfined",
-    "devices",
-    "settings",
-    "update",
-];
+/// spelling by being refused. Derived from the same set `Capability::parse`
+/// accepts: a hand-written copy drifted, and published a shorter enum than the
+/// daemon would have honoured, which is the refusal this list exists to avoid.
+fn grants() -> Vec<&'static str> {
+    crate::authz::Capability::ALL
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect()
+}
 
 /// Commands that change something on the target machine. Read by agents that
 /// need to know what is safe to retry, so it is a property of the command
@@ -1371,7 +1364,7 @@ fn command_schema(name: &str) -> Value {
             object_input(
                 json!({"grants": {
                     "type": ["array", "null"],
-                    "items": {"type": "string", "enum": GRANTS},
+                    "items": {"type": "string", "enum": grants()},
                     "description": "absent means an unrestricted device",
                 }}),
                 &[],
