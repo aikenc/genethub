@@ -302,7 +302,17 @@ struct DcgActivationRecord {
     revision: u64,
     active_digest: String,
     history: Vec<DcgActivationEvent>,
+    /// Activations dropped from the front of `history` once it reached
+    /// `MAX_ACTIVATION_HISTORY`. Retained so `revision` stays reconcilable
+    /// with the window: `revision == trimmed_activations + history.len()`.
+    /// Records written before rotation existed simply have none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    trimmed_activations: u64,
     updated_at_ms: i64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2596,12 +2606,6 @@ fn activate_project_inner(
     if genesis && current.is_some() {
         bail!("项目已经激活不同的 DCG；genesis 不会覆盖现有活动版本");
     }
-    if current
-        .as_ref()
-        .is_some_and(|activation| activation.history.len() >= MAX_ACTIVATION_HISTORY)
-    {
-        bail!("DCG Activation history 已达到 {MAX_ACTIVATION_HISTORY} 条上限");
-    }
     let candidate = if persist {
         persist_candidate(runtime, candidate)?
     } else {
@@ -2619,6 +2623,9 @@ fn activate_project_inner(
     let previous_digest = current
         .as_ref()
         .map(|activation| activation.active_digest.clone());
+    let mut trimmed_activations = current
+        .as_ref()
+        .map_or(0, |activation| activation.trimmed_activations);
     let mut history = current.map_or_else(Vec::new, |activation| activation.history);
     history.push(DcgActivationEvent {
         revision,
@@ -2626,11 +2633,20 @@ fn activate_project_inner(
         previous_digest,
         activated_at_ms: now,
     });
+    // The window rotates rather than filling up: a long-lived project used to
+    // reach the cap and then be unable to activate anything ever again. The
+    // audit chain is bounded, not the project's ability to move forward.
+    if history.len() > MAX_ACTIVATION_HISTORY {
+        let overflow = history.len() - MAX_ACTIVATION_HISTORY;
+        history.drain(..overflow);
+        trimmed_activations = trimmed_activations.saturating_add(overflow as u64);
+    }
     let activation = DcgActivationRecord {
         schema: ACTIVATION_SCHEMA.into(),
         revision,
         active_digest: candidate.digest,
         history,
+        trimmed_activations,
         updated_at_ms: now,
     };
     let body = encode_private_record("DCG Activation", &activation, MAX_ACTIVATION_RECORD_BYTES)?;
@@ -2711,17 +2727,36 @@ fn load_activation(runtime: &RuntimeStore) -> Result<Option<DcgActivationRecord>
     if activation.history.len() > MAX_ACTIVATION_HISTORY {
         bail!("DCG Activation history 超过 {MAX_ACTIVATION_HISTORY} 条上限");
     }
-    if activation.revision == 0 || activation.revision != activation.history.len() as u64 {
+    // The window may have rotated, so the revision reconciles against what was
+    // dropped plus what is retained rather than against the length alone.
+    let first_revision = activation
+        .trimmed_activations
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("DCG Activation 裁剪计数无效"))?;
+    if activation.revision == 0
+        || activation.revision
+            != activation
+                .trimmed_activations
+                .saturating_add(activation.history.len() as u64)
+    {
         bail!("DCG Activation revision 与 history 长度不一致");
+    }
+    if activation.trimmed_activations > 0 && activation.history.len() != MAX_ACTIVATION_HISTORY {
+        bail!("DCG Activation 裁剪后 history 必须保持满窗口");
     }
     let mut previous_digest: Option<&str> = None;
     let mut previous_time = 0;
     for (index, event) in activation.history.iter().enumerate() {
-        if event.revision != index as u64 + 1 {
+        if event.revision != first_revision + index as u64 {
             bail!("DCG Activation history revision 不连续");
         }
         candidate_hex(&event.active_digest)?;
-        if event.previous_digest.as_deref() != previous_digest {
+        // The oldest retained event's predecessor was trimmed away, so only
+        // links inside the window are checked for continuity.
+        if index > 0 && event.previous_digest.as_deref() != previous_digest {
+            bail!("DCG Activation history 前序摘要不连续");
+        }
+        if index == 0 && activation.trimmed_activations == 0 && event.previous_digest.is_some() {
             bail!("DCG Activation history 前序摘要不连续");
         }
         if event.activated_at_ms <= 0 || event.activated_at_ms < previous_time {
@@ -4071,6 +4106,7 @@ mod tests {
             revision: history.len() as u64,
             active_digest: digest,
             updated_at_ms: history.len() as i64,
+            trimmed_activations: 0,
             history,
         };
         let path = activation_path(&runtime, true).unwrap();
@@ -4079,6 +4115,70 @@ mod tests {
 
         let error = load_activation(&runtime).unwrap_err().to_string();
         assert!(error.contains("history 超过"));
+    }
+
+    #[test]
+    fn a_full_activation_history_rotates_instead_of_locking_the_project() {
+        // Reaching the cap used to refuse every further activation, so a
+        // long-lived project could never adopt a new DCG again.
+        let root = tempfile::tempdir().unwrap();
+        let runtime = test_runtime(root.path());
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let history = (0..MAX_ACTIVATION_HISTORY)
+            .map(|index| DcgActivationEvent {
+                revision: index as u64 + 1,
+                active_digest: digest.clone(),
+                previous_digest: (index > 0).then(|| digest.clone()),
+                activated_at_ms: index as i64 + 1,
+            })
+            .collect::<Vec<_>>();
+        let full = DcgActivationRecord {
+            schema: ACTIVATION_SCHEMA.into(),
+            revision: history.len() as u64,
+            active_digest: digest.clone(),
+            updated_at_ms: history.len() as i64,
+            trimmed_activations: 0,
+            history,
+        };
+        let path = activation_path(&runtime, true).unwrap();
+        crate::config::save_private(&path, &serde_json::to_vec_pretty(&full).unwrap()).unwrap();
+        // A record at exactly the cap is still well-formed and readable.
+        let loaded = load_activation(&runtime).unwrap().expect("activation");
+        assert_eq!(loaded.history.len(), MAX_ACTIVATION_HISTORY);
+
+        // Rotating one more activation in keeps the window bounded, advances
+        // the revision past the window length, and stays loadable.
+        let next_digest = format!("sha256:{}", "b".repeat(64));
+        let mut history = loaded.history;
+        let revision = loaded.revision + 1;
+        history.push(DcgActivationEvent {
+            revision,
+            active_digest: next_digest.clone(),
+            previous_digest: Some(digest),
+            activated_at_ms: revision as i64 + 1,
+        });
+        let overflow = history.len() - MAX_ACTIVATION_HISTORY;
+        history.drain(..overflow);
+        let rotated = DcgActivationRecord {
+            schema: ACTIVATION_SCHEMA.into(),
+            revision,
+            active_digest: next_digest,
+            updated_at_ms: revision as i64 + 1,
+            trimmed_activations: overflow as u64,
+            history,
+        };
+        crate::config::save_private(&path, &serde_json::to_vec_pretty(&rotated).unwrap()).unwrap();
+
+        let loaded = load_activation(&runtime)
+            .expect("a rotated history stays valid")
+            .expect("activation");
+        assert_eq!(loaded.revision, MAX_ACTIVATION_HISTORY as u64 + 1);
+        assert_eq!(loaded.history.len(), MAX_ACTIVATION_HISTORY);
+        assert_eq!(loaded.trimmed_activations, 1);
+        assert_eq!(
+            loaded.history[0].revision, 2,
+            "the oldest event was dropped"
+        );
     }
 
     #[test]
