@@ -38,6 +38,8 @@ Workflow 现在是产品的内部资产：唯一一个 Pack 用 `include!(concat
 | 产物 Space 被改动即失效 | `workspace.rs:697-704`：`verify_pipe_space` 与 `builder_lock_digest` 不一致直接拒绝 dispatch |
 | 一个项目当前只能有一个可选 executor | `workspace.rs:681-684` `exactly one reusable {component_id} child` |
 | 激活指针是项目级单文件 | `workflow/mod.rs:2637` `activation_path` → `<runtime>/activation.json` |
+| 自动诊断的触发条件、配额、提示词、只读与证据边界全部由平台硬编码 | `workflow/supervision.rs:5-8`、`:192-213`、`:380-395`；项目配置只提供载体与 agent/model |
+| 组件 id 是封闭清单，未知 id 直接拒绝 | `agent_space.rs:31-37` `COMPONENT_IDS`（`pm`/`executor`/`worker`/`reviewer`） |
 | `.genethub/.gitignore` 目前只白名单 `workflow/` | `workflow/mod.rs:3021` 要求 `*`、`!.gitignore`、`!workflow/`、`!workflow/**` |
 
 两个由此得到的结论：
@@ -189,21 +191,48 @@ digest 漂移、`workflow check --draft` 状态、每个被引用 role 是否有
 ```markdown
 ---
 description: Unity 构建管线；从改动到可提交审核的 Android 构建
-dev: true                          # 可选，实验中
-diagnosticRole: workflow-reviewer  # 可选，见下
+dev: true          # 可选，实验中
 ---
 
 做什么、何时用、需要哪些前置工具、怎么算验收——这一段是给人和 PM 读的散文，不是 schema。
 ```
 
-三个字段各自有理由：`description` 是 `workflow list` 与 PM 路由的机读摘要（`SKILL.md` 同款）；
-`dev` 是本轮明确要的实验标记；`diagnosticRole` 有真实消费者（`workflow/supervision.rs:192` 与 `:380`
-在 Run 失败时取该角色做诊断）。
+两个字段各自有理由：`description` 是 `workflow list` 与 PM 路由的机读摘要（`SKILL.md` 同款）；
+`dev` 是本轮明确要的实验标记。
 
-`diagnosticRole` 也可以反过来由 `roles/<id>.yaml` 自己声明 `diagnostic: true`，那样清单就只剩两个字段。
-本版**不采用**，因为角色现在是「被 flow 引用才加载」（`workflow/mod.rs:2165-2175`），改成扫描
-`roles/` 会让一个没被任何 flow 引用的散落文件影响 Candidate——[workflow-authoring.md](./workflow-authoring.md)
-明确把「uncataloged scratch files 不能篡改角色清单」当作既有保证，不值得为省一个字段换掉它。
+### D10 `diagnosticRole` 不是包清单字段：策略归平台，载体由 Space 自己声明
+
+项目级 `diagnosticRole`（`ProjectDefinition.diagnostic_role`）容易被误认为「包自带的诊断策略」。
+读完 [supervision.rs](../apps/daemon/src/workflow/supervision.rs) 后，事实是**策略整块属于平台**：
+
+| 诊断的组成 | 归属 | 位置 |
+| --- | --- | --- |
+| 何时触发（180 秒无 LLM／工具活动，且不是在等人） | 平台硬编码 | `supervision.rs:5` `SILENCE_MS`、`:97`、`:116-125` |
+| 触发几次、跑多久、几轮 LLM | 平台硬编码 | `:6-8` `MAX_DIAGNOSTICS=2` / `DIAGNOSTIC_DEADLINE_MS` / `DIAGNOSTIC_CALLS=8`，配额按 request group 计（`:180-195`） |
+| 诊断会话的提示词 | 平台硬编码 | `:392` 整段 prompt 由 Rust 拼出，**角色的 `prompt` 文件不参与** |
+| 只读与证据边界 | 平台强制 | `:381` 拒绝非 `evidence_only` 角色；`:395` `SessionUserInteraction::ReadOnly` + `evidence_scope` |
+| 失败与超时后如何回报 PM | 平台硬编码 | `:411`、`:455-465` |
+| **跑在哪个 Worker Space、用哪个 agent/model** | **包** | `:382-394` 用 `role.id` 经 `worker_space_for_role` 选载体，用 `role.agent_id`/`model_id`/`mode_id` 起会话 |
+
+所以这个字段实际只表达一件事：**这个包里哪个 Worker Space 充当诊断载体。** 它不该是清单键，
+理由和 `executor` 一样——载体的身份应该由载体自己声明。做法也一样：在
+`spaces/<name>/space.json.src` 的 `components[]` 里加平台组件 `diagnostic`（`reviewer` 那样「extends
+worker」的附加组件），全包 0 个或 1 个，多于 1 个报错。于是清单少一个字段，而授权路径不变——
+组件拓扑本来就要过人类挑战，诊断载体的权限也就一并被授权覆盖。
+
+有一件真实的包侧能力不能丢：诊断会话跑在那个 Space 里，**该 Space 的 Skill 会进入诊断上下文**，
+所以「这个流程的诊断该看什么、怎么写报告」仍然是包作者能表达的（现有包就是靠
+`spaces/workflow-reviewer/skills/workflow-reviewer/SKILL.md` 表达的）。这也是**不采用**「平台直接在
+executor Space 里跑诊断、彻底不需要声明」的原因：那样会把 executor 面向派发的 Skill 塞进诊断上下文，
+同时丢掉按包定制诊断视角的能力。
+
+没有任何 Space 声明 `diagnostic` 时，诊断能力不可用——走的仍是今天已有的分支：`:208-213` 记录
+「未配置或额度已用完」并通知 PM 按机械事实处理，不是报错。
+
+另一条被否掉的路是让 `roles/<id>.yaml` 自己声明 `diagnostic: true`：角色现在是「被 flow 引用才加载」
+（`workflow/mod.rs:2165-2175`），改成扫描 `roles/` 会让一个没被任何 flow 引用的散落文件影响 Candidate，
+而 [workflow-authoring.md](./workflow-authoring.md) 明确把「uncataloged scratch files 不能篡改角色清单」
+当作既有保证，不值得为省一个字段换掉它。Space 声明没有这个问题：`spaces/` 本来就要被完整扫描并物化。
 
 于是**包里不再有任何 `*.yaml` 形式的清单**，`<project>/.genethub/project.yaml` 也整体消失
 （它原本只剩 `schema` + `execution.root`，全部可缺省）。项目是否启用 Workflow 的标记从
@@ -226,7 +255,7 @@ diagnosticRole: workflow-reviewer  # 可选，见下
 │       │   │   ├── review-common/SKILL.md
 │       │   │   └── evidence-contract/SKILL.md
 │       │   ├── game-build/                  # id = studio/game-build
-│       │   │   ├── workflow.md              # 唯一清单：frontmatter 三个字段 + 散文正文
+│       │   │   ├── workflow.md              # 唯一清单：frontmatter 两个字段 + 散文正文
 │       │   │   ├── flows/{game-dev,game-review}.yaml   # 现有 definition.v1，未改
 │       │   │   ├── roles/{coder,reviewer}.yaml         # 现有 role.v1，未改
 │       │   │   ├── prompts/{coder,reviewer}.md
@@ -273,13 +302,12 @@ diagnosticRole: workflow-reviewer  # 可选，见下
 ---
 description: Unity 构建管线；从改动到可提交审核的 Android 构建
 dev: true
-diagnosticRole: workflow-reviewer
 ---
 
 做什么、何时用、需要哪些前置工具、怎么算验收。
 ```
 
-三个字段都可选之外无它（`description` 缺省取正文首段）。其余一切由目录推导：
+两个字段都可选（`description` 缺省取正文首段）。其余一切由目录推导：
 
 | 事实 | 来源 |
 | --- | --- |
@@ -288,6 +316,7 @@ diagnosticRole: workflow-reviewer
 | flow 清单 | `flows/*.yaml`，id 取文件内 `id`，build 校验与文件名一致 |
 | role 清单 | flow 引用的 `roles/<id>.yaml`（保持「引用才加载」） |
 | executor | `spaces/*/space.json.src` 中声明 executor 组件的那个；>1 报错 |
+| 诊断载体 | 同上，声明 `diagnostic` 组件的那个；0 个表示不启用自动诊断（见 D10） |
 | 产物路径 | `spaces/<flat-id>--<space>/`，由 build 推导 |
 | task cwd | 缺省 `.`，由 Run 输入覆盖 |
 
@@ -314,7 +343,7 @@ diagnosticRole: workflow-reviewer
 
 **`<project>/.genethub/project.yaml`：删除。** `ProjectDefinition`（`workflow/mod.rs:70-78`）的四个字段
 分别归零——`schema` 随文件消失，`default_workflow` 见 D4，`execution` 全部可缺省，`diagnostic_role`
-挪进包的 `workflow.md` frontmatter。项目是否启用 Workflow 的标记改为「存在 `.genethub/workflows/`」，
+改由 Space 声明 `diagnostic` 组件推导（见 D10）。项目是否启用 Workflow 的标记改为「存在 `.genethub/workflows/`」，
 `find_source_root` 的向上查找相应改为找该目录。
 
 **`.genethub/.gitignore`** 的白名单（`workflow/mod.rs:3021`）随之改为 `skills/**` 与 `workflows/**`，
@@ -353,6 +382,8 @@ J1 的 Agent 动作序列固定为：`workflow inspect`（事实）→ 匹配度
 | `apps/daemon/src/cli_front/workflow.rs` | `select_workflow`（`:565`）去掉 `kind`/`complexity` 打分与 `default_workflow` 回退，只留显式 id 与「单条隐含」；对应 CLI flag 下线 |
 | `packages/proto`（`src/domain.rs:1230`、`bindings/index.ts:1890`） | `WorkflowCatalogEntryStatus` 移除 `matchKind`/`matchComplexity`，`WorkflowProjectStatus` 移除 `defaultWorkflow`；按 G03 走兼容窗口 |
 | `apps/daemon/src/workspace.rs` | `exactly one reusable executor`（`:681-684`）改为按解析路径精确选择，匹配不到/多个才报歧义 |
+| `apps/daemon/src/agent_space.rs` | `COMPONENT_IDS`（`:31-37`）加入 `diagnostic`，规则与 `reviewer` 同形（extends worker，禁止在 worker 停用时保留） |
+| `apps/daemon/src/workflow/supervision.rs` | `Supervision.diagnostic_role` 的来源从 `project.yaml` 改为「声明 `diagnostic` 组件的 Space 及其 worker role」；`:381` 的 `evidence_only` 硬性检查保留；`:208-213` 的「未配置」分支语义不变 |
 | `apps/daemon/src/agent_space_builder/manifest.rs` | Provider 路径新增 `$workflow`/`$collection`/`$project` 逻辑引用解析（边界检查 `:550` 不变） |
 | 新增 `apps/daemon/src/workflow/package.rs`（暂名） | 包发现、清单解析、build（物化 `.src` → 产物 Space、`skills-override/` → `.pipebuilder/skills/`、调 `agent_space_builder::run`）、撞名检测、三方合并升级 |
 | `apps/daemon/bootstrap-packs/game-delivery-v1/` | 迁移为新结构的内置默认包，`pack.json` 从 532 行降到清单级别 |
@@ -385,8 +416,8 @@ J1 的 Agent 动作序列固定为：`workflow inspect`（事实）→ 匹配度
 | `second_shape` | 包加载器的第二个形状是内置默认包（迁移后的 `game-delivery-v1`）与社区 clone 包走同一条 discover/parse/build 路径；第 4 步同时接入，抽象在那一步被证伪 |
 | `untrusted_input` | ① 来源标记：`workflow list`/`inspect` 对每个包报告来源（git remote + commit）与「未授权」状态，包内 `workflow.md` frontmatter 之后的正文与 Skill 正文都作为不可信文本进入上下文，Agent 不得把它当指令执行；② 形状约束：frontmatter 是封闭的三字段结构，flow/role 仍是 `deny_unknown_fields`；正文是自由文本，因此它**只能影响 Agent 的判断，不能影响任何机械行为**——这正是删掉 `requires`/`expects` 的安全收益：不可信来源不再有伪造平台事实的字段；`inspect` 不执行包内任何脚本，Provider 的 `command`/`build` 保持 `PB006` 拒绝；③ 限额：见 §8 的四项限额，超限 fail closed；组件拓扑变化必须过人类挑战 |
 | `observability` | 每个包的：来源 commit、源 digest、产物 `builder_lock_digest`、漂移与否、`check --draft` 结果、role→Worker 覆盖、build 耗时与拒绝原因计数。支撑「dev 包健康度」与升级合并失败率 |
-| `not_doing` | 不做打包格式/registry/审核评分；不做导出上传命令；不做包依赖包；不放宽 `validate_space_root`；不放开 git Skill Provider 与可执行 Provider builder；不允许包往 PM 投影 Skill；不引入 id 转义规则（撞名报错）；**不做无执行点的声明字段**——不收 `category`、`requires.tools`、`requires.git`、`cliMinVersion`、`expects`，也不做工具探测与环境预检 |
-| `oracle` | 现有 journey [pm-game-delivery](../testing/journeys/workflow/pm-game-delivery.journey.ts) 必须在内置包迁移后继续通过（防回归 oracle）；新增 case：递归发现与 id 推导（标记文件为 `workflow.md`）、包集/单包两形态、撞名报错、flow id 与文件名不一致报错、包内出现 0 个或 >1 个 executor Space 时的行为、多 flow 未点名时的歧义错误、`.src` 物化后产物 digest 与授权、四层 Skill shadowing 的最终落盘内容、未授权包不得获得 executor 组件、三方合并冲突阻止激活。真实组件：daemon 的 workflow 编译器与 AgentSpaceBuilder；mock 边界：git remote 用本地裸仓库，不打真实网络 |
+| `not_doing` | 不做打包格式/registry/审核评分；不做导出上传命令；不做包依赖包；不放宽 `validate_space_root`；不放开 git Skill Provider 与可执行 Provider builder；不允许包往 PM 投影 Skill；不引入 id 转义规则（撞名报错）；**不做无执行点的声明字段**——不收 `category`、`requires.tools`、`requires.git`、`cliMinVersion`、`expects`，也不做工具探测与环境预检；不把自动诊断的触发条件、配额、提示词与只读边界开放给包配置（D10） |
+| `oracle` | 现有 journey [pm-game-delivery](../testing/journeys/workflow/pm-game-delivery.journey.ts) 必须在内置包迁移后继续通过（防回归 oracle）；新增 case：递归发现与 id 推导（标记文件为 `workflow.md`）、包集/单包两形态、撞名报错、flow id 与文件名不一致报错、包内出现 0 个或 >1 个 executor Space 时的行为、0 个或 >1 个 `diagnostic` Space 时的行为（0 个必须走既有「未配置」通知而不是报错）、多 flow 未点名时的歧义错误、`.src` 物化后产物 digest 与授权、四层 Skill shadowing 的最终落盘内容、未授权包不得获得 executor 组件、三方合并冲突阻止激活。真实组件：daemon 的 workflow 编译器与 AgentSpaceBuilder；mock 边界：git remote 用本地裸仓库，不打真实网络 |
 
 `G01–G11` 逐项：`G01` 适用（§2 事实先于设计）；`G02` 适用（见 `second_shape`）；`G03` **适用且需要
 兼容窗口**——本次只删不加字段（`WorkflowProjectStatus.defaultWorkflow`、`WorkflowCatalogEntryStatus`
