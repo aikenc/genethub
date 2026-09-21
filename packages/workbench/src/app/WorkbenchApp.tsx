@@ -1040,7 +1040,11 @@ export function App({
                             ? workbench.forwardDraft
                             : null
                         }
-                        onClearForwardDraft={() => workbench.setForwardDraft(null)}
+                        drafts={workbench.sessionDrafts}
+                        onClearForwardDraft={() => void workbench.setForwardDraft(null)}
+                        onSaveDraft={workbench.saveComposerDraft}
+                        onReplaceDrafts={workbench.replaceSessionDrafts}
+                        onUpdateDraft={workbench.updateSessionDraft}
                         speech={
                           workbench.client &&
                           workbench.activeWorkspaceId &&
@@ -1064,9 +1068,9 @@ export function App({
                         onHeightChange={setComposerHeight}
                         minimized={composerMinimized}
                         onExpand={() => setComposerMinimized(false)}
-                        onSend={(text, attachments, videoFiles) =>
-                          void workbench.send(text, attachments, videoFiles)
-                        }
+                        onSend={async (text, attachments, videoFiles) => {
+                          if (!await workbench.send(text, attachments, videoFiles)) throw new Error("消息尚未发送");
+                        }}
                         onInterrupt={() => void workbench.interrupt()}
                         // Switching agent opens an empty conversation rather than
                         // handing this one over: no adapter can pick up another's

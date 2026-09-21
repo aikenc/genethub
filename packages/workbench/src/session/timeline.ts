@@ -292,6 +292,8 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         runtimeValues: { ...state.runtimeValues, [event.axisId]: event.valueId },
       };
+    case "draftsChanged":
+      return state;
 
     // Not part of the timeline itself; the session list and its tab title
     // are what change, handled by the store where it has access to them.

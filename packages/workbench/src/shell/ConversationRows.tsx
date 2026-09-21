@@ -5,7 +5,7 @@ import type {
 } from "@genehub/proto";
 import { useContext, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { readLocalDraft, markContentRead } from "../session/localConversation";
+import { markContentRead } from "../session/localConversation";
 import { sessionAttention } from "../session/attention";
 import { Hand, Loader2 } from "lucide-react";
 import { useWorkbench } from "../session/store";
@@ -327,9 +327,6 @@ function SessionRow({
   const facts = sessionAttention(session, summaries);
   // Written by a newer build into this project's folder. Listed, so the
   // conversation does not appear to have vanished, but not openable here.
-  const draftText = readLocalDraft(
-    `${useWorkbench.getState().client?.identity?.machineId ?? ""}:${session.id}`,
-  ).text;
   const messageDate = new Date(
     session.messagePreview?.atMs ?? session.updatedAtMs,
   );
@@ -373,7 +370,7 @@ function SessionRow({
           {(facts.label || stale) && <span className="block"><SessionStatusIcon session={session} sessions={summaries} showLabel stale={stale} /></span>}
           <span className="flex min-w-0 items-center gap-1">
           <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
-          <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{draftText ? " · 草稿" : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+          <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
           </span></span>
         </EntityText>
       </button>

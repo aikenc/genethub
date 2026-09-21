@@ -518,6 +518,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             effort_id: None,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
@@ -642,6 +643,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             effort_id: None,
             runtime_values,
             id: stable_id.unwrap_or_else(|| format!("s_{}", uuid::Uuid::new_v4().simple())),
@@ -852,6 +854,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
@@ -1057,6 +1060,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             runtime_values: Default::default(),
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -1274,6 +1278,7 @@ impl SessionManager {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
@@ -3095,6 +3100,45 @@ impl SessionManager {
         })
         .await;
         Ok(())
+    }
+
+    pub async fn drafts(&self, session_id: &str) -> Result<Vec<genehub_proto::SessionDraft>> {
+        let live = self.live(session_id).await?;
+        let drafts = live.meta.lock().await.drafts.clone();
+        Ok(drafts)
+    }
+
+    /// Replaces the small ordered set in one write so selection, edits and
+    /// deletes cannot leave half-applied composer state on disk.
+    pub async fn replace_drafts(
+        &self,
+        session_id: &str,
+        drafts: Vec<genehub_proto::SessionDraft>,
+    ) -> Result<Vec<genehub_proto::SessionDraft>> {
+        if drafts.len() > 5 {
+            anyhow::bail!("a session supports at most 5 drafts");
+        }
+        let mut ids = std::collections::HashSet::new();
+        for draft in &drafts {
+            if draft.id.trim().is_empty() || !ids.insert(draft.id.as_str()) {
+                anyhow::bail!("draft ids must be non-empty and unique");
+            }
+            if draft.text.trim().is_empty() && draft.attachments.is_empty() {
+                anyhow::bail!("a draft needs text or an attachment");
+            }
+        }
+        let live = self.live(session_id).await?;
+        {
+            let mut meta = live.meta.lock().await;
+            meta.drafts = drafts.clone();
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        live.publish(SessionEvent::DraftsChanged {
+            count: drafts.len() as u32,
+        })
+        .await;
+        Ok(drafts)
     }
 
     /// Same shape as `set_model`, and for the same two reasons.
@@ -6157,6 +6201,9 @@ async fn apply(live: &Live, event: &SessionEvent) {
             meta.runtime_values
                 .insert(axis_id.clone(), value_id.clone());
         }
+        // The mutation writes metadata before publishing. Subscribers use this
+        // event as invalidation; replay must not try to reconstruct payloads.
+        SessionEvent::DraftsChanged { .. } => {}
         SessionEvent::SessionStatusChanged { status } => {
             *live.status.lock().await = *status;
         }
@@ -6416,6 +6463,7 @@ mod tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             effort_id: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
@@ -6466,6 +6514,37 @@ mod tests {
             Arc::new(Registry::new(&std::collections::BTreeMap::new())),
             16,
         )
+    }
+
+    #[tokio::test]
+    async fn drafts_are_bounded_and_survive_a_manager_restart() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let draft = genehub_proto::SessionDraft {
+            id: "draft-1".into(),
+            text: "继续整理交互".into(),
+            attachments: vec![],
+            forward: None,
+        };
+
+        sessions
+            .replace_drafts("s1", vec![draft.clone()])
+            .await
+            .unwrap();
+        assert_eq!(sessions.summary("s1").await.unwrap().draft_count, Some(1));
+
+        let restarted = manager(workspace.path());
+        assert_eq!(restarted.drafts("s1").await.unwrap(), vec![draft.clone()]);
+        let too_many = (0..6)
+            .map(|index| genehub_proto::SessionDraft {
+                id: format!("draft-{index}"),
+                text: index.to_string(),
+                attachments: vec![],
+                forward: None,
+            })
+            .collect();
+        assert!(restarted.replace_drafts("s1", too_many).await.is_err());
     }
 
     #[tokio::test]
@@ -7742,6 +7821,7 @@ mod tests {
                 activity: Default::default(),
                 message_preview: None,
                 latest_reply: None,
+                drafts: vec![],
                 agent_id: "amnesiac".into(),
                 persist: Some(stale),
                 ..meta()
@@ -7791,6 +7871,7 @@ mod tests {
                 activity: Default::default(),
                 message_preview: None,
                 latest_reply: None,
+                drafts: vec![],
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -7848,6 +7929,7 @@ mod tests {
                 activity: Default::default(),
                 message_preview: None,
                 latest_reply: None,
+                drafts: vec![],
                 agent_id: "recorder".into(),
                 ..meta()
             })
@@ -7926,6 +8008,7 @@ mod tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             title: Some("Fix the login redirect".into()),
             ..meta()
         });
@@ -8012,6 +8095,7 @@ mod tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             title: Some("生成三张风景画，简笔风".into()),
             ..meta()
         });

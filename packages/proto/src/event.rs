@@ -327,6 +327,8 @@ pub enum SessionEvent {
     EffortChanged { effort_id: String },
     #[serde(rename_all = "camelCase")]
     RuntimeAxisChanged { axis_id: String, value_id: String },
+    #[serde(rename_all = "camelCase")]
+    DraftsChanged { count: u32 },
     /// The session picked up a name — today only the first message's first
     /// line, set once when a session had none (`SessionManager::send`).
     /// Clients that show a session list must repaint it on this event rather

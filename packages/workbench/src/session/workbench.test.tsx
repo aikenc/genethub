@@ -2507,6 +2507,38 @@ describe("the controls offered to the user", () => {
     expect(box).toHaveFocus();
   });
 
+  it("saves the current composer beside Send and clears it only after persistence", async () => {
+    const onSaveDraft = vi.fn(async () => true);
+    render(<Composer {...composerProps({ onSaveDraft })} />);
+    const box = screen.getByLabelText("任务描述");
+
+    await userEvent.type(box, "稍后继续修改");
+    await userEvent.click(screen.getByRole("button", { name: "存为草稿" }));
+
+    expect(onSaveDraft).toHaveBeenCalledWith("稍后继续修改", [], []);
+    expect(box).toHaveValue("");
+  });
+
+  it("selects multiple saved drafts, sends them in display order, then removes them", async () => {
+    const onSend = vi.fn(async () => {});
+    const onReplaceDrafts = vi.fn(async () => true);
+    render(<Composer {...composerProps({
+      onSend,
+      onReplaceDrafts,
+      drafts: [
+        { id: "d1", text: "第一条", attachments: [] },
+        { id: "d2", text: "第二条", attachments: [] },
+      ],
+    })} />);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择草稿 第一条" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择草稿 第二条" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onSend).toHaveBeenCalledWith("第一条\n\n第二条", []);
+    expect(onReplaceDrafts).toHaveBeenCalledWith([]);
+  });
+
   it("keeps the rich settings viewable when Agent switching is locked", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
     await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));

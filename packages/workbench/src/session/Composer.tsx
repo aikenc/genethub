@@ -1,5 +1,5 @@
-import type { AgentInfo, Attachment, CommandInfo, SessionStatus } from "@genehub/proto";
-import { Loader2, Mic, Paperclip, Square, X } from "lucide-react";
+import type { AgentInfo, Attachment, CommandInfo, SessionDraft, SessionStatus } from "@genehub/proto";
+import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -133,9 +133,13 @@ export function Composer({
   restoreDraft,
   insertDraft,
   forwardDraft,
+  drafts,
   speech,
   lastActivityAtMs,
   onSend,
+  onSaveDraft,
+  onReplaceDrafts,
+  onUpdateDraft,
   onInterrupt,
   onPickAgent,
   onPickModel,
@@ -177,6 +181,7 @@ export function Composer({
   insertDraft?: ComposerDraftInsert | null;
   /** A forward capsule parked here, sent ahead of the user's own text. */
   forwardDraft?: ForwardDraft | null;
+  drafts?: SessionDraft[];
   /** Available only when the connected daemon advertises Speech Protocol v2. */
   speech?: SpeechInputTarget;
   /**
@@ -188,7 +193,10 @@ export function Composer({
    * have is someone who had no way to tell.
    */
   lastActivityAtMs?: number | null;
-  onSend(text: string, attachments: Attachment[], videoFiles?: File[]): void;
+  onSend(text: string, attachments: Attachment[], videoFiles?: File[]): void | Promise<void>;
+  onSaveDraft?(text: string, attachments: Attachment[], videoFiles?: File[]): Promise<boolean>;
+  onReplaceDrafts?(drafts: SessionDraft[]): Promise<boolean>;
+  onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
   onPickAgent(id: string): void;
   onPickModel(id: string): void;
@@ -225,6 +233,10 @@ export function Composer({
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
+  const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(() => new Set());
+  const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
+  const draftPicker = useRef<HTMLInputElement>(null);
+  const activeDraftFile = useRef<string | null>(null);
   const imageAllowed = Boolean(attachmentsSupported && (inputModalities?.includes("image") ?? true));
   const videoAllowed = Boolean(attachmentsSupported && inputModalities?.includes("video"));
   const fileActionLabel = !attachmentsSupported
@@ -336,22 +348,24 @@ export function Composer({
     setHighlighted(0);
   };
 
-  const send = () => {
+  const send = async () => {
     // The button is gone outside `idle`, but the textarea's Enter is not: it
     // used to reach the daemon mid-turn and come back as "a turn is already
     // running in this session", which describes our own key handler rather than
     // anything the reader did wrong.
     if (phase === "sending" || (!durableInput && phase !== "idle") || disabled || speechInput.busy) return;
     const text = draft.trim();
-    if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft) return;
+    const selectedDrafts = (drafts ?? []).filter((item) => selectedDraftIds.has(item.id));
+    if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDrafts.length === 0) return;
     // The parked capsule travels ahead of the user's own words, inside the
     // same message, so the receiver sees history first and the ask second.
-    const payload = forwardDraft
+    const currentPayload = forwardDraft
       ? text
         ? `${forwardDraft.capsule}\n\n${text}`
         : forwardDraft.capsule
       : text;
-    const outgoing = [...(forwardDraft?.attachments ?? []), ...attachments];
+    const payload = [...selectedDrafts.map((item) => item.text), currentPayload].filter(Boolean).join("\n\n");
+    const outgoing = [...selectedDrafts.flatMap((item) => item.attachments), ...(forwardDraft?.attachments ?? []), ...attachments];
     speechInput.dismissReview();
     setSpeechTextRange(null);
     setActiveSpeechSpan(null);
@@ -361,9 +375,30 @@ export function Composer({
     setMissingAttachments(0);
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
     setDismissed(false);
-    if (videoFiles.length > 0) onSend(payload, outgoing, videoFiles);
-    else onSend(payload, outgoing);
+    try {
+      if (videoFiles.length > 0) await onSend(payload, outgoing, videoFiles);
+      else await onSend(payload, outgoing);
+    } catch {
+      // The owning store has already restored/reporting the live input. Saved
+      // draft cards stay intact until admission is confirmed.
+      return;
+    }
+    if (selectedDrafts.length > 0) {
+      await onReplaceDrafts?.((drafts ?? []).filter((item) => !selectedDraftIds.has(item.id)));
+      setSelectedDraftIds(new Set());
+    }
     if (forwardDraft) onClearForwardDraft?.();
+  };
+
+  const saveDraft = async () => {
+    if (!onSaveDraft) return;
+    const saved = await onSaveDraft(draft.trim(), attachments, videoFiles);
+    if (!saved) return;
+    setDraft("");
+    setAttachments([]);
+    setVideoFiles([]);
+    setMissingAttachments(0);
+    if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
   };
 
   // A message that failed comes back whole, text and attachments together, so
@@ -410,6 +445,23 @@ export function Composer({
       const added = await Promise.all(images.map(fileToAttachment));
       setAttachments((current) => [...current, ...added]);
       setVideoFiles((current) => [...current, ...videos]);
+      setPasteNotice(null);
+    } catch (error) {
+      setPasteNotice(error instanceof Error ? error.message : "读取文件失败");
+    }
+  };
+
+  const addDraftFiles = async (draftId: string, files: File[]) => {
+    const item = (drafts ?? []).find((candidate) => candidate.id === draftId);
+    if (!item || !onUpdateDraft) return;
+    try {
+      const images = files.filter((file) => file.type.startsWith("image/"));
+      const videos = files.filter((file) => file.type.startsWith("video/"));
+      if (images.length + videos.length !== files.length) throw new Error("只支持图片和视频文件");
+      if (images.length > 0 && !imageAllowed) throw new Error("当前模型不支持图片输入");
+      if (videos.length > 0 && !videoAllowed) throw new Error("当前模型不支持视频输入");
+      const added = await Promise.all(images.map(fileToAttachment));
+      await onUpdateDraft({ ...item, attachments: [...item.attachments, ...added] }, videos);
       setPasteNotice(null);
     } catch (error) {
       setPasteNotice(error instanceof Error ? error.message : "读取文件失败");
@@ -535,6 +587,76 @@ export function Composer({
           focused ? "border-muted/50" : "border-line-strong"
         }`}
       >
+        {(drafts?.length ?? 0) > 0 ? (
+          <div className="space-y-1 px-4 pt-3" data-testid="session-drafts">
+            {drafts!.map((item) => {
+              const expanded = expandedDraftId === item.id;
+              const firstLine = item.text.split(/\r?\n/, 1)[0]?.trim() || item.attachments[0]?.name || "附件";
+              return (
+                <div key={item.id} className="rounded-xl border border-line bg-raised/40">
+                  <div className="flex min-h-9 items-center gap-2 px-2.5">
+                    <input
+                      type="checkbox"
+                      aria-label={`选择草稿 ${firstLine}`}
+                      checked={selectedDraftIds.has(item.id)}
+                      onChange={() => setSelectedDraftIds((current) => {
+                        const next = new Set(current);
+                        if (next.has(item.id)) next.delete(item.id); else next.add(item.id);
+                        return next;
+                      })}
+                      className="h-4 w-4 shrink-0 accent-[rgb(var(--accent))]"
+                    />
+                    <button
+                      type="button"
+                      aria-expanded={expanded}
+                      className="min-w-0 flex-1 truncate py-2 text-left text-xs text-muted hover:text-fg"
+                      onClick={() => setExpandedDraftId(expanded ? null : item.id)}
+                    >
+                      {item.forward ? <span aria-hidden className="mr-1.5">↪</span> : null}
+                      {firstLine}
+                      {item.attachments.length > 0 ? <span className="ml-1.5 text-faint">· {item.attachments.length} 个附件</span> : null}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`移除草稿 ${firstLine}`}
+                      className="shrink-0 px-1.5 py-1 text-xs text-muted hover:text-fg"
+                      onClick={() => void onReplaceDrafts?.(drafts!.filter((candidate) => candidate.id !== item.id))}
+                    >移除</button>
+                  </div>
+                  {expanded ? (
+                    <div className="border-t border-line px-2.5 pb-2 pt-2">
+                      <textarea
+                        aria-label={`编辑草稿 ${firstLine}`}
+                        defaultValue={item.text}
+                        rows={3}
+                        className="w-full resize-none bg-transparent text-sm text-fg outline-none"
+                        onBlur={(event) => {
+                          const text = event.currentTarget.value.trim();
+                          if (text && text !== item.text) void onUpdateDraft?.({ ...item, text });
+                        }}
+                      />
+                      <div className="flex items-center gap-2">
+                        {item.attachments.map((attachment, index) => (
+                          <span key={`${attachment.name}-${index}`} className="inline-flex max-w-32 items-center gap-1 rounded-md bg-surface px-2 py-1 text-[10px] text-muted">
+                            <span className="truncate">{attachment.name}</span>
+                            <button type="button" aria-label={`移除 ${attachment.name}`} onClick={() => void onUpdateDraft?.({ ...item, attachments: item.attachments.filter((_, i) => i !== index) })}>×</button>
+                          </span>
+                        ))}
+                        <button
+                          type="button"
+                          aria-label="给草稿添加图片或视频"
+                          className="ml-auto flex h-7 w-7 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-fg"
+                          onClick={() => { activeDraftFile.current = item.id; draftPicker.current?.click(); }}
+                        ><Paperclip className="h-4 w-4" aria-hidden /></button>
+                        <button type="button" aria-label="完成编辑草稿" className="flex h-7 w-7 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-fg" onClick={() => setExpandedDraftId(null)}><Check className="h-4 w-4" aria-hidden /></button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
         {forwardDraft ? (
           <div className="px-4 pt-3" data-testid="forward-draft">
             <div className="flex items-center gap-2 rounded-xl border border-line bg-raised/50 px-3 py-2">
@@ -807,6 +929,20 @@ export function Composer({
                 if (files.length > 0) void addFiles(files);
               }}
             />
+            <input
+              ref={draftPicker}
+              type="file"
+              accept={videoAllowed ? (imageAllowed ? "image/*,video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo" : "video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo") : "image/*"}
+              multiple
+              tabIndex={-1}
+              className="hidden"
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                const draftId = activeDraftFile.current;
+                event.currentTarget.value = "";
+                if (draftId && files.length > 0) void addDraftFiles(draftId, files);
+              }}
+            />
             {speech ? (
               speechInput.phase === "recording" ? (
                 <button
@@ -873,6 +1009,22 @@ export function Composer({
             >
               <Paperclip className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
             </button>
+            <button
+              type="button"
+              aria-label="存为草稿"
+              title="存为草稿"
+              disabled={
+                disabled ||
+                speechInput.busy ||
+                (drafts?.length ?? 0) >= 5 ||
+                (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft)
+              }
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => void saveDraft()}
+              className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
+            >
+              <BookmarkPlus className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
+            </button>
             {phase === "sending" ? (
               // Still a button, and still focusable: `disabled` would throw the
               // focus of whoever just clicked it back to the document. It is
@@ -891,7 +1043,7 @@ export function Composer({
               </button>
             ) : phase === "running" ? (
               <div className="flex shrink-0 items-center gap-1.5">
-                {durableInput && (draft.trim() || attachments.length || forwardDraft) ? <button
+                {durableInput && (draft.trim() || attachments.length || forwardDraft || selectedDraftIds.size > 0) ? <button
                   type="button" aria-label="发送补充消息" title="发送提问或新要求，由当前 Agent 接续处理"
                   disabled={disabled || speechInput.busy} onMouseDown={event => event.preventDefault()}
                   onClick={() => send()} className="min-h-9 rounded-full px-3 text-xs text-accent disabled:opacity-30">发送补充</button> : null}
@@ -921,7 +1073,7 @@ export function Composer({
                 disabled={
                   disabled ||
                   speechInput.busy ||
-                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft)
+                  (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDraftIds.size === 0)
                 }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
               >

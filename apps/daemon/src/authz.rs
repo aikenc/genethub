@@ -404,6 +404,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionClose { .. }
         | Request::SessionArchive { .. }
         | Request::SessionRename { .. }
+        | Request::SessionDrafts { .. }
+        | Request::SessionDraftsReplace { .. }
         | Request::SessionDelete { .. }
         | Request::SessionSetModel { .. }
         | Request::SessionSetMode { .. }

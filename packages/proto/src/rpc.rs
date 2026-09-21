@@ -334,6 +334,13 @@ pub enum Request {
         #[ts(optional)]
         before_item_id: Option<String>,
     },
+    #[serde(rename = "session.drafts", rename_all = "camelCase")]
+    SessionDrafts { session_id: String },
+    #[serde(rename = "session.drafts.replace", rename_all = "camelCase")]
+    SessionDraftsReplace {
+        session_id: String,
+        drafts: Vec<crate::SessionDraft>,
+    },
     /// Which responsibilities are live in this Session, and where each may
     /// write. Read-only: composition is changed on the Space, not here.
     #[serde(rename = "session.components", rename_all = "camelCase")]
@@ -963,6 +970,7 @@ pub enum Reply {
     Session(SessionSummary),
     ForkTransfer(ForkTransfer),
     Sessions(Vec<SessionSummary>),
+    SessionDrafts(Vec<crate::SessionDraft>),
     SessionComponents(Vec<ComponentInstanceInfo>),
     SessionFlow(ExecutorFlowStatus),
     SessionImports(SessionImportListing),

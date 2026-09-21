@@ -808,6 +808,35 @@ pub struct SessionContext {
     pub digest: String,
 }
 
+/// One explicitly saved, still-unsent message in a session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionDraft {
+    pub id: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::timeline::Attachment>,
+    /// Forward provenance is presentation metadata only; `text` remains the
+    /// complete editable payload that will be sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub forward: Option<SessionDraftForward>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionDraftForward {
+    pub source_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_title: Option<String>,
+    pub item_count: u32,
+    #[ts(type = "number")]
+    pub estimated_tokens: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -832,6 +861,11 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub message_preview: Option<SessionMessagePreview>,
+    /// Number of explicitly saved unsent messages. The full payload is read
+    /// only for the open composer so session lists never carry attachment data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub draft_count: Option<u32>,
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,

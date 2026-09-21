@@ -202,6 +202,8 @@ pub struct SessionMeta {
     pub message_preview: Option<genehub_proto::SessionMessagePreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_reply: Option<genehub_proto::SessionReplyCursor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drafts: Vec<genehub_proto::SessionDraft>,
     pub id: String,
     /// Which workspace this conversation belongs to.
     ///
@@ -335,6 +337,7 @@ impl SessionMeta {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             id,
             workspace_id,
             format: header.format,
@@ -401,6 +404,7 @@ impl SessionMeta {
             }),
             work_summary: None,
             message_preview: self.message_preview.clone(),
+            draft_count: (!self.drafts.is_empty()).then_some(self.drafts.len() as u32),
             last_activity_at_ms,
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
@@ -2049,6 +2053,7 @@ mod project_home_tests {
             activity: Default::default(),
             message_preview: None,
             latest_reply: None,
+            drafts: vec![],
             id: id.into(),
             workspace_id: workspace_id.into(),
             format: SESSION_FORMAT,

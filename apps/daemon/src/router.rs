@@ -281,6 +281,8 @@ async fn authorize_session_request(
         | Request::SessionClose { session_id }
         | Request::SessionArchive { session_id, .. }
         | Request::SessionRename { session_id, .. }
+        | Request::SessionDrafts { session_id }
+        | Request::SessionDraftsReplace { session_id, .. }
         | Request::SessionDelete { session_id }
         | Request::SessionSetModel { session_id, .. }
         | Request::SessionSetMode { session_id, .. }
@@ -1205,6 +1207,18 @@ async fn dispatch(
             }
             Err(error) => failed(error),
         },
+
+        Request::SessionDrafts { session_id } => match state.sessions.drafts(&session_id).await {
+            Ok(drafts) => Handled::ok(Reply::SessionDrafts(drafts)),
+            Err(error) => failed(error),
+        },
+
+        Request::SessionDraftsReplace { session_id, drafts } => {
+            match state.sessions.replace_drafts(&session_id, drafts).await {
+                Ok(drafts) => Handled::ok(Reply::SessionDrafts(drafts)),
+                Err(error) => failed(error),
+            }
+        }
 
         Request::SessionComponents { session_id } => {
             match session_components(state, &session_id).await {
@@ -3107,6 +3121,7 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::ProjectBootstrap { .. } => Some("project.bootstrap"),
         Request::ProjectApprovalRequest { .. } => Some("project.approval.request"),
         Request::SessionSend { .. } => Some("session.send"),
+        Request::SessionDraftsReplace { .. } => Some("session.drafts.replace"),
         Request::SessionArtifactBegin { .. } => Some("session.artifact.begin"),
         Request::SessionArtifactChunk { .. } => Some("session.artifact.chunk"),
         Request::SessionArtifactFinish { .. } => Some("session.artifact.finish"),
