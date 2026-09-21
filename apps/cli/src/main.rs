@@ -198,8 +198,9 @@ pub fn usage() -> i32 {
   genet workflow build --package <id> [--apply --plan-digest <digest> --action-id <id> --revision <n>]
                                     materialize one package's Spaces; applying needs approval
   genet workflow inspect           validate and list project workflows
-  genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
-                                    route through the project workflow catalog
+  genet workflow dispatch [--package <id>] [--workflow <id>] [--root <dir>] \"<task>\"
+                                    run one flow from one package; both are
+                                    inferred only when the project has exactly one
   genet workflow get --run <id>    read one durable workflow run
   genet workflow check [--run <id> | --draft]
   genet schema workflow.definition

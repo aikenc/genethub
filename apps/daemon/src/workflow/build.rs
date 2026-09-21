@@ -312,21 +312,12 @@ pub(crate) async fn apply(
 
     // The carrier's parent is the project; every other Space hangs off the
     // carrier. A Worker that also mounts `executor` owns a subteam but is
-    // still a child here, which is why the carrier is identified the same way
-    // `Package::executor_space` does it rather than by the component alone.
+    // still a child here, so the carrier is identified by the same predicate
+    // `Package::executor_space` used to refuse an ambiguous source.
     let executor_name = plan
         .spaces
         .iter()
-        .find(|space| {
-            space
-                .components
-                .iter()
-                .any(|(id, _)| id == crate::agent_space::COMPONENT_EXECUTOR)
-                && !space
-                    .components
-                    .iter()
-                    .any(|(id, _)| id == crate::agent_space::COMPONENT_WORKER)
-        })
+        .find(|space| package::is_executor_carrier(&space.components))
         .map(|space| space.name.clone());
     let executor_workspace_id = executor_name
         .as_ref()

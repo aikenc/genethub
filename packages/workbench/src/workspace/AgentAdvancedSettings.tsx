@@ -97,12 +97,6 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
                   label="Builder"
                   value={workspace.agentSpace.builderLockDigest || "未验证"}
                 />
-                {workspace.agentSpace.bootstrapPack ? (
-                  <Detail
-                    label="Pack"
-                    value={`${workspace.agentSpace.bootstrapPack.id} v${workspace.agentSpace.bootstrapPack.version}`}
-                  />
-                ) : null}
                 {section !== "relations" && <div className="mt-2 space-y-1" aria-label="Component 列表">
                   {workspace.agentSpace.components.map((component) => (
                     <div

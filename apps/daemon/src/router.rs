@@ -395,6 +395,32 @@ fn agent_space_requires_project_control(space: &crate::config::AgentSpaceEntry) 
     crate::agent_space::has_enabled_component(space, crate::agent_space::COMPONENT_PM)
 }
 
+/// Extends the acting Session's project management authority to a Session
+/// that just replaced it as the project's interaction endpoint.
+///
+/// `SessionCreate` already did this for a fresh main Session; a forked one is
+/// the same event from the project's perspective — a new conversation taking
+/// over where an old one left off — and must not be refused it. The prior
+/// asymmetry meant a fork could write session history but never manage the
+/// PM AgentSpace it forked out of, and the only way back was for a Run to
+/// break first (`exception_authority`). A no-op when the workspace is not
+/// PM-managed or was never bound: rebind only carries an existing grant
+/// forward, it never creates one.
+async fn rebind_project_control_if_pm(
+    state: &Shared,
+    summary: &genehub_proto::SessionSummary,
+) -> anyhow::Result<()> {
+    let Ok(space) = state.workspaces.agent_space(&summary.workspace_id).await else {
+        return Ok(());
+    };
+    if !agent_space_requires_project_control(&space) {
+        return Ok(());
+    }
+    state
+        .project_control
+        .rebind(&summary.workspace_id, &summary.id)
+}
+
 /// The one action name that can turn a cloned Workflow package into a team
 /// with scheduling rights. Naming it once keeps the reservation, the replay
 /// receipt and the human card describing the same thing.
@@ -1417,21 +1443,10 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => {
-                    if let Ok(space) = state.workspaces.agent_space(&workspace_id).await {
-                        if crate::agent_space::has_enabled_component(
-                            &space,
-                            crate::agent_space::COMPONENT_PM,
-                        ) {
-                            if let Err(error) =
-                                state.project_control.rebind(&workspace_id, &summary.id)
-                            {
-                                return failed(error);
-                            }
-                        }
-                    }
-                    Handled::ok(Reply::Session(summary))
-                }
+                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                },
                 Err(error) => failed(error),
             }
         }
@@ -1753,7 +1768,10 @@ async fn dispatch(
                     )
                     .await
                 {
-                    Ok(summary) => Handled::ok(Reply::Session(summary)),
+                    Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                        Ok(()) => Handled::ok(Reply::Session(summary)),
+                        Err(error) => failed(error),
+                    },
                     Err(error) => failed(error),
                 };
             }
@@ -1762,7 +1780,10 @@ async fn dispatch(
                 .fork(&session_id, &turn_id, target, &providers)
                 .await
             {
-                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                },
                 Err(error) => failed(error),
             }
         }
@@ -1796,7 +1817,10 @@ async fn dispatch(
                 )
                 .await
             {
-                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                },
                 Err(error) => failed(error),
             }
         }
@@ -3270,6 +3294,150 @@ mod tests {
         )
         .expect("mounting PM should be valid");
         assert!(agent_space_requires_project_control(&pm));
+    }
+
+    /// Minimal Builder-verifiable PM root, mirroring what
+    /// `workflow::build::apply` writes for a fresh project before it
+    /// registers the PM component. This test is about the rebind mechanism,
+    /// not about how a project becomes PM-managed (`workflow/build.rs`
+    /// already covers that end to end via a real package).
+    fn seed_pm_project_manifest(project_root: &std::path::Path) {
+        std::fs::write(
+            project_root.join("pipespace.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "pipespace.v1",
+                "name": "project",
+                "agents": ["codex", "cursor", "codebuddy", "claude-code"],
+                "skills": [],
+                "tags": ["project", "pm"],
+                "skillProviders": [],
+                "children": { "scanDepth": 0 },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("project.code-workspace"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "folders": [{ "name": "project", "path": "." }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The mechanism `SessionFork` and `SessionForkImport` now share with
+    /// `SessionCreate`: a Session that just became the project's interaction
+    /// endpoint inherits management authority from whichever Session held it,
+    /// the same way a fresh main Session already did. Before this, a forked
+    /// Session could write history but never manage the PM AgentSpace it
+    /// forked out of, and the only way back was for a Run to break first.
+    #[tokio::test]
+    async fn a_forked_session_inherits_project_control_the_same_way_a_fresh_one_does() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        seed_pm_project_manifest(&project);
+        let paths = crate::config::Paths::new(home.path().join("data"));
+        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
+        let workspace = state.workspaces.open(&project, None).await.unwrap();
+        crate::agent_space_builder::run(
+            &project,
+            &project,
+            crate::agent_space_builder::Command::Build { dry_run: false },
+            true,
+        )
+        .expect("the seeded PM root must be buildable");
+        state
+            .workspaces
+            .apply_bootstrap_space_plan(
+                &workspace.id,
+                0,
+                &[crate::workspace::BootstrapSpaceRegistration {
+                    workspace_id: workspace.id.clone(),
+                    parent_workspace_id: None,
+                    lifecycle: "persistent".into(),
+                    components: vec![(crate::agent_space::COMPONENT_PM.into(), None)],
+                    guidance: Vec::new(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let original = state
+            .sessions
+            .create(
+                &workspace.id,
+                project.clone(),
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .project_control
+            .bind(&workspace.id, &original.id, "test-pack", "sha256:test")
+            .unwrap();
+        assert!(state.project_control.is_bound(&workspace.id, &original.id));
+
+        // A second Session standing in for a fork target: rebind must move
+        // authority to it exactly as SessionCreate would for a fresh one.
+        let forked = state
+            .sessions
+            .create(
+                &workspace.id,
+                project.clone(),
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        rebind_project_control_if_pm(&state, &forked).await.unwrap();
+
+        assert!(
+            state.project_control.is_bound(&workspace.id, &forked.id),
+            "the forked Session must inherit project control"
+        );
+        assert!(
+            !state.project_control.is_bound(&workspace.id, &original.id),
+            "control moves to the new endpoint; it does not fork into two holders"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebinding_a_non_pm_workspace_is_a_no_op() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let paths = crate::config::Paths::new(home.path().join("data"));
+        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
+        let workspace = state.workspaces.open(&project, None).await.unwrap();
+
+        let session = state
+            .sessions
+            .create(
+                &workspace.id,
+                project,
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        rebind_project_control_if_pm(&state, &session).await.unwrap();
+
+        assert!(
+            !state.project_control.has_binding(&workspace.id),
+            "an ordinary Workspace never gains a project control binding"
+        );
     }
 
     #[test]

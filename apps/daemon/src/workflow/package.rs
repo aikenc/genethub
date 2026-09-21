@@ -134,16 +134,10 @@ impl Package {
     /// definition-only package that reuses somebody else's carrier; more than
     /// one is ambiguous and refused rather than silently resolved.
     pub(crate) fn executor_space(&self) -> Result<Option<&SpaceSource>> {
-        let mut matches = self.spaces.iter().filter(|space| {
-            space
-                .components
-                .iter()
-                .any(|(id, _)| id == crate::agent_space::COMPONENT_EXECUTOR)
-                && !space
-                    .components
-                    .iter()
-                    .any(|(id, _)| id == crate::agent_space::COMPONENT_WORKER)
-        });
+        let mut matches = self
+            .spaces
+            .iter()
+            .filter(|space| is_executor_carrier(&space.components));
         let first = matches.next();
         if let Some(extra) = matches.next() {
             bail!(
@@ -208,6 +202,22 @@ impl Package {
             .executor_space()?
             .map(|space| format!("{SPACES_DIR}/{}", self.space_directory(&space.name))))
     }
+}
+
+/// Whether a declared component set makes its Space the package's top-level
+/// executor carrier.
+///
+/// Both the source-side check (`Package::executor_space`) and the build-side
+/// parent selection ask this question, and they must answer it identically: a Space
+/// that carries `executor` while also being a Worker owns a subteam and is
+/// still a child of the carrier, never a second carrier.
+pub(crate) fn is_executor_carrier(components: &[(String, Option<String>)]) -> bool {
+    components
+        .iter()
+        .any(|(id, _)| id == crate::agent_space::COMPONENT_EXECUTOR)
+        && !components
+            .iter()
+            .any(|(id, _)| id == crate::agent_space::COMPONENT_WORKER)
 }
 
 /// `studio/game-build` → `studio-game-build`. Collisions are detected by the
