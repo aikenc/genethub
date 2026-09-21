@@ -1,5 +1,5 @@
 //! Durable admission and serialized delivery inside the existing Session.
-use super::super::store::InboxEntry;
+use super::super::store::{InboxEntry, SessionInbox};
 use super::*;
 use crate::state::Shared;
 
@@ -24,6 +24,19 @@ fn lane_of(entry: &InboxEntry) -> Lane {
     match entry.source.as_str() {
         "workflow" => Lane::Activity,
         _ => Lane::Human,
+    }
+}
+
+/// A new Human message after a failed turn is a decision to move on, not an
+/// implicit retry of every Human input from the rejected provider request.
+fn retire_failed_human_inputs(inbox: &mut SessionInbox) {
+    if !inbox.paused {
+        return;
+    }
+    for entry in &mut inbox.entries {
+        if entry.state == "sent" && lane_of(entry) == Lane::Human {
+            entry.state = "handled".into();
+        }
     }
 }
 
@@ -132,8 +145,12 @@ impl SessionManager {
                     return Ok(());
                 }
             } else {
-                if meta.inbox.entries.len() >= MAX_RECEIPTS
-                    || meta
+                let mut next = meta.clone();
+                if source == "user" {
+                    retire_failed_human_inputs(&mut next.inbox);
+                }
+                if next.inbox.entries.len() >= MAX_RECEIPTS
+                    || next
                         .inbox
                         .entries
                         .iter()
@@ -143,7 +160,6 @@ impl SessionManager {
                 {
                     bail!("the session input ledger or pending queue is full; resolve pending inputs before sending more");
                 }
-                let mut next = meta.clone();
                 next.inbox.entries.push(InboxEntry {
                     message_id: message_id.clone(),
                     received_at_ms: now_ms(),
@@ -635,5 +651,26 @@ mod tests {
         assert_eq!(lane_of(&entry("m", "user")), Lane::Human);
         assert_eq!(lane_of(&entry("m", "something-new")), Lane::Human);
         assert_eq!(lane_of(&entry("m", "workflow")), Lane::Activity);
+    }
+
+    #[test]
+    fn new_human_input_retires_only_failed_human_deliveries() {
+        let mut failed_human = entry("m_failed", "user");
+        failed_human.state = "sent".into();
+        let mut failed_workflow = entry("m_workflow", "workflow");
+        failed_workflow.state = "sent".into();
+        let queued_human = entry("m_queued", "user");
+        let mut inbox = SessionInbox {
+            entries: vec![failed_human, failed_workflow, queued_human],
+            paused: true,
+            has_delivered: true,
+            error: Some("failed".into()),
+        };
+
+        retire_failed_human_inputs(&mut inbox);
+
+        assert_eq!(inbox.entries[0].state, "handled");
+        assert_eq!(inbox.entries[1].state, "sent");
+        assert_eq!(inbox.entries[2].state, "queued");
     }
 }

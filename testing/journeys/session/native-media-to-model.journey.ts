@@ -7,7 +7,7 @@ defineJourney(
     id: "journey.session.native-media-to-model",
     title: "The built-in Agent sends configured image and video inputs to the model",
     oracle: "a user turn with a pasted image and session-uploaded video reaches the mock Chat Completions endpoint as native image_url and video_url parts, and remains in follow-up history",
-    catches: ["Genet silently drops attachments", "video is reduced to a path or sampled frames", "model media settings do not reach the Agent", "media disappears on the next turn", "switching to a text-only model traps the session on old media"],
+    catches: ["Genet silently drops attachments", "video is reduced to a path or sampled frames", "model media settings do not reach the Agent", "media disappears on the next turn", "switching to a text-only model traps the session on old media", "a provider-rejected video poisons later messages"],
     tags: ["core", "session", "media", "parity"],
     llm: { default: "mock" },
     expectedDurationMs: 35_000,
@@ -159,6 +159,58 @@ defineJourney(
       await t.flows.main.sendPrompt(opened.client, deniedSessionId, "Continue with text only");
       await t.tools.waitUntil(() => deniedEvents.some((item) => item.type === "turnCompleted"), 45_000);
       t.assertions.assert(opened.mock.requests.length === 4, "rejected media blocked the next text turn");
+
+      await opened.client.call({
+        type: "settings.setProvider",
+        payload: {
+          providerId: "deepseek",
+          apiKey: null,
+          baseUrl: null,
+          label: null,
+          dialect: null,
+          models: null,
+          modelInputs: { "deepseek-v4-flash": ["image", "video"] },
+        },
+      });
+      const rejectedVideo = Buffer.from("rejected-video-bytes");
+      const replacementVideo = Buffer.from("replacement-video-bytes");
+      opened.mock.script({ status: 413 }, { text: "replacement accepted" });
+      const recoveredSessionId = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
+      const recoveredEvents = await t.flows.main.attachEventLog(opened.client, recoveredSessionId);
+      await opened.client.call({
+        type: "session.send",
+        payload: {
+          sessionId: recoveredSessionId,
+          messageId: "u_rejected_video",
+          text: "Describe the rejected video",
+          attachments: [{ name: "large.mp4", mime: "video/mp4", dataBase64: rejectedVideo.toString("base64") }],
+          artifactPreviewBaseUrl: null,
+          continuesRound: null,
+        },
+      });
+      await t.tools.waitUntil(() => recoveredEvents.some((item) => item.type === "turnFailed"), 45_000);
+      await opened.client.call({
+        type: "session.send",
+        payload: {
+          sessionId: recoveredSessionId,
+          messageId: "u_replacement_video",
+          text: "Describe only this replacement video",
+          attachments: [{ name: "small.mp4", mime: "video/mp4", dataBase64: replacementVideo.toString("base64") }],
+          artifactPreviewBaseUrl: null,
+          continuesRound: null,
+        },
+      });
+      await t.tools.waitUntil(() => recoveredEvents.filter((item) => item.type === "turnCompleted").length === 1, 45_000);
+      const recoveredRequest = opened.mock.requests[5] as { messages?: unknown[] };
+      const recoveredBody = JSON.stringify(recoveredRequest.messages);
+      t.assertions.assert(
+        !recoveredBody.includes(rejectedVideo.toString("base64")) && !recoveredBody.includes("u_rejected_video"),
+        "the provider-rejected video remained in the next model request",
+      );
+      t.assertions.assert(
+        recoveredBody.includes(replacementVideo.toString("base64")) && recoveredBody.includes("u_replacement_video"),
+        "the replacement video did not reach the recovered request",
+      );
     } finally {
       opened.client.close();
       opened.daemon.stop();

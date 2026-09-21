@@ -28,13 +28,14 @@ pub async fn run_prompt_with_attachments(
     text: String,
     attachments: Vec<MediaAttachment>,
 ) {
-    let (emitter, prompt_message) = {
+    let (emitter, prompt_message, retained_context_len) = {
         let mut guard = state.lock().await;
         guard.streaming = true;
         guard.abort.reset();
+        let retained_context_len = guard.session.messages.len();
         let message = Message::user_with_attachments(text, attachments);
         guard.session.append_message(message.clone());
-        (guard.emitter.clone(), message)
+        (guard.emitter.clone(), message, retained_context_len)
     };
 
     let mut produced: Vec<Value> = Vec::new();
@@ -76,6 +77,13 @@ pub async fn run_prompt_with_attachments(
             let mut guard = state.lock().await;
             guard.session.append_message(assistant.message.clone());
             guard.stats.add(&assistant.usage);
+            // A provider rejection before any tool call has no side effects to
+            // preserve. Keep its emitted transcript and append-only audit, but
+            // do not make the rejected prompt (especially large native media)
+            // part of every later provider request.
+            if assistant.stop_reason == StopReason::Error && produced.len() == 2 {
+                guard.session.rollback_failed_turn(retained_context_len);
+            }
         }
 
         if matches!(
