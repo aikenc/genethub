@@ -299,10 +299,15 @@ pub(super) async fn deliver_notice(
             .find(|notice| notice.id == id)
             .ok_or_else(|| anyhow!("Workflow notice disappeared"))?
             .clone();
+        // Addressed to whoever owns this Run's notices now, not to whoever
+        // dispatched it: the dispatching conversation may have been forked
+        // away from or archived, and the inbox retires a notice it cannot
+        // match rather than holding it.
+        let recipient = super::notice_recipient(state, &run).await?;
         if cancelled {
             state
                 .sessions
-                .discard_workflow_inputs(&run.parent_session_id, &run.id)
+                .discard_workflow_inputs(&recipient, &run.id)
                 .await?;
             for notice in &mut run.supervision.notices {
                 notice.handled = true;
@@ -313,7 +318,7 @@ pub(super) async fn deliver_notice(
         state
             .sessions
             .accept_input(
-                &run.parent_session_id,
+                &recipient,
                 notice.id.clone(),
                 notice.text.clone(),
                 Vec::new(),
@@ -323,7 +328,7 @@ pub(super) async fn deliver_notice(
             .await?;
         let handled = state
             .sessions
-            .input_handled(&run.parent_session_id, &notice.id)
+            .input_handled(&recipient, &notice.id)
             .await?
             == Some(true);
         if let Some(current_notice) = run

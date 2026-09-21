@@ -745,9 +745,41 @@ pub(crate) async fn workflow_notice_current(
     let runtime = RuntimeStore::new(&state.paths.root, &session.workspace_id, &workspace.root)?;
     let run = load_run(&runtime, run_id)?;
     let root = load_run(&runtime, request::group_id(&run))?;
-    Ok(run.parent_session_id == session_id
+    Ok(notice_recipient(state, &run).await? == session_id
         && !supervision::cancellation_requested(&run)
         && !supervision::cancellation_requested(&root))
+}
+
+/// The Session a Run's notices belong to right now.
+///
+/// `parent_session_id` records who dispatched the Run and never changes, which
+/// made it the wrong thing to address deliveries to: once that conversation
+/// was forked away from or archived, the predicate above stopped matching and
+/// `discard_workflow_inputs` retired the notice outright, so a completion
+/// reached nobody. The dispatcher is still the answer whenever it is a live,
+/// unarchived Session — this only redirects the case where it is not.
+///
+/// Returning the dispatcher when no successor exists is deliberate: an
+/// undeliverable notice should stay queued against a known Session, not be
+/// silently dropped.
+async fn notice_recipient(state: &Shared, run: &RunRecord) -> Result<String> {
+    let dispatcher_live = state
+        .sessions
+        .summary(&run.parent_session_id)
+        .await
+        .is_ok_and(|summary| !summary.archived);
+    if dispatcher_live {
+        return Ok(run.parent_session_id.clone());
+    }
+    let successor = state
+        .sessions
+        .list(Some(&run.workspace_id), false)
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id != run.parent_session_id && candidate.managed.is_none());
+    Ok(successor
+        .map(|summary| summary.id)
+        .unwrap_or_else(|| run.parent_session_id.clone()))
 }
 
 /// Temporary project recovery authority, derived from unresolved Run facts.
@@ -1182,12 +1214,12 @@ pub(crate) async fn apply_build(
     // requires a project controller: without one, the very next dispatch or
     // build is refused for lack of a binding. Recovery authority is temporary
     // and must not silently become a new permanent takeover.
-    let preserve_controller = !state
-        .project_control
-        .is_bound(workspace_id, controller_session_id)
-        && exception_authority(state, workspace_id, controller_session_id)
+    let preserve_controller =
+        !crate::router::session_may_manage_project(state, workspace_id, controller_session_id)
             .await
-            .unwrap_or(false);
+            && exception_authority(state, workspace_id, controller_session_id)
+                .await
+                .unwrap_or(false);
     if !preserve_controller {
         state.project_control.bind(
             workspace_id,

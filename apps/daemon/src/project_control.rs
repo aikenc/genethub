@@ -136,11 +136,14 @@ impl Broker {
         &self,
         spec: ChallengeSpec,
         project_workspace_id: &str,
+        may_manage: bool,
         recovery_authorized: bool,
     ) -> Result<Option<BootstrapApprovalChallenge>> {
-        let controller = spec.controller_session_id.clone();
         let challenge = self.issue(spec).await?;
-        if !self.is_bound(project_workspace_id, &controller) && !recovery_authorized {
+        // Whether the caller may manage this project is a question about
+        // Sessions and Workspaces, which this broker cannot see; the router
+        // answers it (`session_may_manage_project`) and passes the verdict in.
+        if !may_manage && !recovery_authorized {
             return Ok(Some(challenge));
         }
         let mut guard = self.state.lock().await;
@@ -418,6 +421,7 @@ impl Broker {
         git_head: Option<&str>,
         status_digest: &str,
         action_id: &str,
+        may_manage: bool,
         recovery_authorized: bool,
     ) -> Result<String> {
         validate_action_id(action_id)?;
@@ -427,13 +431,14 @@ impl Broker {
             .challenges
             .values_mut()
             .find(|challenge| {
+                // A management-bound plan is still re-verified here: holding
+                // it at issue time does not prove the caller still may act.
+                // The authority question itself is answered by the caller
+                // (`session_may_manage_project`) because this broker cannot
+                // see Sessions or Workspaces.
                 (challenge.approved
-                    || challenge
-                        .management_binding
-                        .as_ref()
-                        .is_some_and(|project| {
-                            self.is_bound(project, controller_session_id) || recovery_authorized
-                        }))
+                    || (challenge.management_binding.is_some()
+                        && (may_manage || recovery_authorized)))
                     && !challenge.rejected
                     && !challenge.consumed
                     && challenge.spec.controller_session_id == controller_session_id
@@ -930,6 +935,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap-before-human",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -977,6 +983,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_1",
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -993,6 +1000,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
                 false,
             )
             .await
@@ -1011,6 +1019,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
                 false,
             )
             .await
@@ -1051,6 +1060,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_after_remove",
+                false,
                 false,
             )
             .await
@@ -1116,6 +1126,7 @@ mod tests {
                 "sha256:clean",
                 "rejected_action",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -1148,6 +1159,7 @@ mod tests {
                 None,
                 "sha256:changed",
                 "stale_action",
+                false,
                 false,
             )
             .await
@@ -1221,6 +1233,7 @@ mod tests {
                 "sha256:clean",
                 "expired_action",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -1259,6 +1272,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_1",
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1280,6 +1294,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_2",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -1297,6 +1312,7 @@ mod tests {
                     None,
                     "sha256:clean",
                     "bootstrap_1",
+                    false,
                     false,
                 )
                 .await

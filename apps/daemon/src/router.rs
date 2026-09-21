@@ -172,7 +172,7 @@ pub async fn handle(
             ) => {
                 match agent_space_management_project(state, caller, workspace_id, operation).await {
                     Ok(project) => {
-                        state.project_control.is_bound(&project, session_id)
+                        session_may_manage_project(state, &project, session_id).await
                             || crate::workflow::exception_authority(state, &project, session_id)
                                 .await
                                 .unwrap_or(false)
@@ -224,8 +224,11 @@ async fn authorize_pm_space_open(
     authorize_project_workflow_mutation(state, caller, project_id)
         .await
         .map_err(anyhow::Error::msg)?;
-    if !state.project_control.is_bound(project_id, session_id) {
-        anyhow::bail!("projectControlRequired: only the bound PM registers prepared Spaces");
+    if !session_may_manage_project(state, project_id, session_id).await {
+        anyhow::bail!(
+            "projectControlRequired: registering a prepared Space needs a taken-over project \
+             and a main Session that belongs to it"
+        );
     }
     let project = state.workspaces.project_entry(project_id).await?;
     let requested = crate::guest_paths::inbound_absolute(root)
@@ -376,13 +379,13 @@ async fn authorize_project_workflow_mutation(
                 .await
                 .map_err(|error| format!("无法确认项目管理授权：{error:#}"))?;
             if agent_space_requires_project_control(&space)
-                && !state.project_control.is_bound(workspace_id, session_id)
+                && !session_may_manage_project(state, workspace_id, session_id).await
                 && !crate::workflow::exception_authority(state, workspace_id, session_id)
                     .await
                     .unwrap_or(false)
             {
                 return Err(
-                    "当前 Session 没有这个项目的 ProjectControlBinding；请先完成 PM 接管".into(),
+                    "这个项目尚未接管；请先完成 PM 接管后再修改 Workflow 配置".into(),
                 );
             }
             Ok(())
@@ -419,6 +422,77 @@ async fn rebind_project_control_if_pm(
     state
         .project_control
         .rebind(&summary.workspace_id, &summary.id)
+}
+
+/// Whether `session_id` may act as this project's manager.
+///
+/// This is the J3 predicate: it asks whether the *project* has been taken
+/// over and whether this Session is entitled to speak for it — never whether
+/// the Session's id equals a stored string. Keying management on one id made
+/// a fork, and any second conversation, permanently powerless while
+/// `SessionCreate` silently moved the id anyway, so the stored id was never a
+/// boundary in the first place.
+///
+/// Two things it deliberately still refuses:
+///
+/// - a **managed** Session. A Worker the project itself dispatched must not
+///   be able to reconfigure the project that owns it, and the old
+///   `is_bound` check was the only thing standing in its way at the
+///   `AgentSpaceConfigure` gate.
+/// - a Session belonging to a **different** project. Management authority is
+///   per-project, and a conversation in project A says nothing about B.
+/// Moves a project's management binding off a Session that was just archived.
+///
+/// Dropping it instead would be worse than leaving it: `has_binding` would
+/// report the project as never taken over, and every management gate would
+/// close for the Sessions still working in it. So the binding is handed to
+/// another live, unarchived main Session when one exists, and only left in
+/// place when none does — a stale pointer is recoverable, a project that
+/// forgot it was ever taken over is not.
+async fn move_binding_off_archived_session(
+    state: &Shared,
+    workspace_id: &str,
+    archived_session_id: &str,
+) -> anyhow::Result<()> {
+    if !state
+        .project_control
+        .is_bound(workspace_id, archived_session_id)
+    {
+        return Ok(());
+    }
+    let successor = state
+        .sessions
+        .list(Some(workspace_id), false)
+        .await?
+        .into_iter()
+        .find(|candidate| candidate.id != archived_session_id && candidate.managed.is_none());
+    match successor {
+        Some(successor) => state.project_control.rebind(workspace_id, &successor.id),
+        None => Ok(()),
+    }
+}
+
+pub(crate) async fn session_may_manage_project(
+    state: &Shared,
+    project_id: &str,
+    session_id: &str,
+) -> bool {
+    if !state.project_control.has_binding(project_id) {
+        return false;
+    }
+    let Ok(summary) = state.sessions.summary(session_id).await else {
+        return false;
+    };
+    if summary.managed.is_some() {
+        return false;
+    }
+    // The Session's own project, resolved the same way every caller does, so
+    // a Space nested under the project still resolves to the project itself.
+    state
+        .workspaces
+        .project_root(&summary.workspace_id)
+        .await
+        .is_ok_and(|owner| owner == project_id)
 }
 
 /// The one action name that can turn a cloned Workflow package into a team
@@ -493,7 +567,7 @@ async fn authorize_agent_space_change(
                 .await
                 .map_err(|error| format!("无法确认项目边界：{error:#}"))?;
             if summary.workspace_id == workspace_id
-                || state.project_control.is_bound(&project_id, session_id)
+                || session_may_manage_project(state, &project_id, session_id).await
                 || crate::workflow::exception_authority(state, &project_id, session_id)
                     .await
                     .unwrap_or(false)
@@ -540,7 +614,7 @@ async fn agent_space_management_project(
             if current.revision == 0
                 && current.parent_workspace_id.is_none()
                 && current.components.is_empty()
-                && state.project_control.is_bound(&destination, session)
+                && session_may_manage_project(state, &destination, session).await
             {
                 let child = state
                     .workspaces
@@ -951,6 +1025,7 @@ async fn dispatch(
                             .issue_management(
                                 spec,
                                 &workspace_id,
+                                session_may_manage_project(state, &workspace_id, session_id).await,
                                 crate::workflow::exception_authority(
                                     state,
                                     &workspace_id,
@@ -1015,6 +1090,7 @@ async fn dispatch(
                     None,
                     "",
                     action_id,
+                    session_may_manage_project(state, &workspace_id, session_id).await,
                     crate::workflow::exception_authority(state, &workspace_id, session_id)
                         .await
                         .unwrap_or(false),
@@ -1882,7 +1958,23 @@ async fn dispatch(
             session_id,
             archived,
         } => match state.sessions.archive(&session_id, archived).await {
-            Ok(summary) => Handled::ok(Reply::Session(summary)),
+            Ok(summary) => {
+                // Archiving retires a conversation, so a binding still naming
+                // it would record the takeover against a Session nobody
+                // reads. The binding is moved rather than dropped: deleting
+                // it would make `has_binding` report the project as never
+                // taken over and close every gate for the Sessions that are
+                // still live.
+                if archived {
+                    if let Err(error) =
+                        move_binding_off_archived_session(state, &summary.workspace_id, &session_id)
+                            .await
+                    {
+                        return failed(error);
+                    }
+                }
+                Handled::ok(Reply::Session(summary))
+            }
             Err(error) => failed(error),
         },
 
@@ -2442,7 +2534,9 @@ async fn dispatch(
                             detail: format!(
                                 "只对 Workspace {workspace_id} 执行一次 revision {expected_revision} CAS：\n{detail}\nplan: {plan_digest}"
                             ),
-                        }, &project_id, crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false))
+                        }, &project_id,
+                        session_may_manage_project(state, &project_id, session_id).await,
+                        crate::workflow::exception_authority(state, &project_id, session_id).await.unwrap_or(false))
                         .await { Ok(challenge) => challenge, Err(error) => return failed(error) }
             } else {
                 None
@@ -2543,6 +2637,7 @@ async fn dispatch(
                         None,
                         &current.builder_lock_digest,
                         action_id,
+                        session_may_manage_project(state, &project_id, session_id).await,
                         crate::workflow::exception_authority(state, &project_id, session_id)
                             .await
                             .unwrap_or(false),
@@ -2675,7 +2770,8 @@ async fn dispatch(
             if let Some(session_id) = caller.session_controller_id() {
                 if !(read_only
                     || recovery
-                    || managed_build && state.project_control.is_bound(&workspace_id, session_id))
+                    || managed_build
+                        && session_may_manage_project(state, &workspace_id, session_id).await)
                 {
                     return Handled::err(
                         ErrorCode::Forbidden,
@@ -3407,6 +3503,131 @@ mod tests {
         assert!(
             !state.project_control.is_bound(&workspace.id, &original.id),
             "control moves to the new endpoint; it does not fork into two holders"
+        );
+    }
+
+    /// J3 in one case: management is a question about the project, so a
+    /// second main Session in a taken-over project may manage it, while a
+    /// managed Worker the project itself dispatched still may not.
+    #[tokio::test]
+    async fn management_follows_the_project_not_one_session_id() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        seed_pm_project_manifest(&project);
+        let paths = crate::config::Paths::new(home.path().join("data"));
+        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
+        let workspace = state.workspaces.open(&project, None).await.unwrap();
+        crate::agent_space_builder::run(
+            &project,
+            &project,
+            crate::agent_space_builder::Command::Build { dry_run: false },
+            true,
+        )
+        .expect("the seeded PM root must be buildable");
+        state
+            .workspaces
+            .apply_bootstrap_space_plan(
+                &workspace.id,
+                0,
+                &[crate::workspace::BootstrapSpaceRegistration {
+                    workspace_id: workspace.id.clone(),
+                    parent_workspace_id: None,
+                    lifecycle: "persistent".into(),
+                    components: vec![(crate::agent_space::COMPONENT_PM.into(), None)],
+                    guidance: Vec::new(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let open = |id: &str| {
+            let state = state.clone();
+            let project = project.clone();
+            let id = id.to_string();
+            async move {
+                state
+                    .sessions
+                    .create(&id, project, "genet", None, None, Default::default(), None)
+                    .await
+                    .unwrap()
+            }
+        };
+        let holder = open(&workspace.id).await;
+        let other = open(&workspace.id).await;
+
+        // Nothing may manage a project nobody has taken over yet.
+        assert!(!session_may_manage_project(&state, &workspace.id, &holder.id).await);
+
+        state
+            .project_control
+            .bind(&workspace.id, &holder.id, "test-pack", "sha256:test")
+            .unwrap();
+        assert!(session_may_manage_project(&state, &workspace.id, &holder.id).await);
+        assert!(
+            session_may_manage_project(&state, &workspace.id, &other.id).await,
+            "a second main Session in the same taken-over project may manage it"
+        );
+        assert!(
+            !session_may_manage_project(&state, &workspace.id, "s_not_a_session").await,
+            "an unknown Session never manages a project"
+        );
+    }
+
+    /// Archiving the holder must not strand the takeover on a conversation
+    /// nobody reads, and must not erase it either.
+    #[tokio::test]
+    async fn archiving_the_holder_moves_the_binding_instead_of_erasing_it() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let paths = crate::config::Paths::new(home.path().join("data"));
+        let (state, _pty) = crate::state::AppState::build(paths).await.unwrap();
+        let workspace = state.workspaces.open(&project, None).await.unwrap();
+
+        let holder = state
+            .sessions
+            .create(
+                &workspace.id,
+                project.clone(),
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let successor = state
+            .sessions
+            .create(
+                &workspace.id,
+                project,
+                "genet",
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .project_control
+            .bind(&workspace.id, &holder.id, "test-pack", "sha256:test")
+            .unwrap();
+
+        state.sessions.archive(&holder.id, true).await.unwrap();
+        move_binding_off_archived_session(&state, &workspace.id, &holder.id)
+            .await
+            .unwrap();
+
+        assert!(
+            state.project_control.has_binding(&workspace.id),
+            "the project must still read as taken over"
+        );
+        assert!(
+            state.project_control.is_bound(&workspace.id, &successor.id),
+            "the binding moves to a live main Session"
         );
     }
 

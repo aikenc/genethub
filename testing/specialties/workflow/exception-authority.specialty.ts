@@ -23,8 +23,8 @@ function field(value: unknown, key: string): unknown {
 defineSpecialty({
   id: "specialty.workflow.pm-exception-authority",
   title: "An unbound project PM recovers a blocked task and returns to normal permissions",
-  oracle: "An approved project keeps normal binding checks; an actual blocked Run lets another PM manage and retry the same request, successful recovery removes the exception, and streamed tool argument fragments execute intact",
-  catches: ["every PM always gains project control", "the original Run owner and current PM cannot recover each other's work", "temporary recovery permanently transfers the binding", "empty streaming ids discard tool arguments"],
+  oracle: "Management follows the taken-over project rather than one Session id, correctness checks still apply to every manager, an actual blocked Run lets another PM retry the same request, recovery authority never escapes the project, and streamed tool argument fragments execute intact",
+  catches: ["a Session outside the project gains its management", "authority checks standing in for correctness checks", "the original Run owner and current PM cannot recover each other's work", "temporary recovery permanently transfers the binding", "empty streaming ids discard tool arguments"],
   tags: ["core", "workflow", "authorization", "pm-exception-recovery", "pm-recovery-authority", "pm-business-assessment"],
   llm: { default: "mock" }, expectedDurationMs: 60_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -121,8 +121,13 @@ defineSpecialty({
     owner = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     t.assertions.assert(other !== owner, "test did not create a second PM Session");
     const dispatch = (task: string) => `"$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${task} --message recover --no-wait`;
-    const denied = await runCommand(other, "u_normal_denied", '"$GENEHUB_CLI" workflow activate --revision 0');
-    t.assertions.assert(denied.includes("forbidden") && (await history()).length === 0, `normal unbound PM gained management: ${denied}`);
+    // Management belongs to the taken-over project, not to whichever Session
+    // happens to hold its binding, so the earlier PM conversation is still a
+    // manager here. What it does not get is a free pass on correctness: the
+    // stale `--revision 0` is refused by the activation CAS, not by identity.
+    const stale = await runCommand(other, "u_normal_stale", '"$GENEHUB_CLI" workflow activate --revision 0');
+    t.assertions.assert(!stale.includes("forbidden"), `a main Session in a taken-over project was refused management: ${stale}`);
+    t.assertions.assert((await history()).length === 0, `a stale activation started work: ${stale}`);
     const status = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });
     if (status?.type !== "workflowProject") throw new Error("candidate did not compile");
     const initial = await runCommand(owner, "u_owner_start", `"$GENEHUB_CLI" workflow activate --revision ${status.data.activationRevision} && ${dispatch("original")}`);
@@ -177,8 +182,12 @@ defineSpecialty({
       t.assertions.assert(JSON.stringify(reportRun).includes("partial"), "negative business conclusion was lost or treated as acceptance");
     }
     t.assertions.assert(spawnSync("git", ["status", "--porcelain=v1"], { cwd: opened.workspaceRoot, env: opened.daemon.env, encoding: "utf8" }).stdout === beforeAssessment, "assessment changed project files");
-    const afterPlan = await runCommand(other, "u_settled_management_denied", `${configure} --plan`);
-    t.assertions.assert(afterPlan.includes("forbidden"), "exception left unrelated expert management enabled");
+    // Once the exception settles, the escalation it granted is gone: what
+    // remains is ordinary project management, which every main Session in a
+    // taken-over project has. Management is therefore still available here,
+    // while the powers that only an exception confers are not.
+    const afterPlan = await runCommand(other, "u_settled_management", `${configure} --plan`);
+    t.assertions.assert(!afterPlan.includes("forbidden"), `settled project management was refused: ${afterPlan}`);
     const closedControl = await runCommand(other, "u_settled_worker_denied", `"$GENEHUB_CLI" session interrupt ${worker}`);
     t.assertions.assert(closedControl.includes("forbidden"), "exception retained control of another PM's managed Session");
     const normalBuilder = await runCommand(other, "u_settled_builder_denied", '"$GENEHUB_CLI" space builder build --name game-delivery--coder --require-no-post-commands');
@@ -186,7 +195,7 @@ defineSpecialty({
     const ownerAgain = await runCommand(owner, "u_owner_unchanged", dispatch("owner-unchanged"));
     t.assertions.assert(!ownerAgain.includes("ProjectControlBinding"), "recovery transferred normal project control");
     await t.tools.waitUntil(async () => (await history()).length === 5, 20_000);
-    t.note("management denial -> exception recovery -> business assessment and review in original PM -> management still denied; binding unchanged");
+    t.note("project-level management -> exception recovery -> business assessment and review in original PM -> escalation withdrawn while ordinary management remains; binding unchanged");
   } finally {
     opened.client.close(); opened.daemon.stop(); await opened.mock.stop();
   }

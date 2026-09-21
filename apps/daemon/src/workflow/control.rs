@@ -343,9 +343,12 @@ pub(crate) async fn cancel(
     root.revision += 1;
     save_run(&runtime, &root)?; // The request fence survives a partial cascade.
     for previous in group {
+        // Retire the notices where they were actually delivered, which is not
+        // necessarily the Session that dispatched the Run.
+        let recipient = super::notice_recipient(state, &previous).await?;
         state
             .sessions
-            .discard_workflow_inputs(&previous.parent_session_id, &previous.id)
+            .discard_workflow_inputs(&recipient, &previous.id)
             .await?;
         let mut current = load_run(&runtime, &previous.id)?;
         if matches!(current.status.as_str(), "completed" | "cancelled") {
