@@ -815,7 +815,10 @@ pub struct SessionContext {
 pub struct SessionDraft {
     pub id: String,
     pub text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    // Required on the TypeScript wire shape. Omitting an empty vector makes
+    // older/newer web clients observe `undefined` where the protocol promises
+    // an array and can crash while rendering a text-only draft.
+    #[serde(default)]
     pub attachments: Vec<crate::timeline::Attachment>,
     /// Forward provenance is presentation metadata only; `text` remains the
     /// complete editable payload that will be sent.
@@ -2363,6 +2366,19 @@ pub struct InviteAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_only_session_draft_serializes_an_empty_attachment_list() {
+        let wire = serde_json::to_value(SessionDraft {
+            id: "d1".into(),
+            text: "continue later".into(),
+            attachments: vec![],
+            forward: None,
+        })
+        .unwrap();
+
+        assert_eq!(wire["attachments"], serde_json::json!([]));
+    }
 
     #[test]
     fn collapsed_file_tree_fields_are_absent_instead_of_null() {

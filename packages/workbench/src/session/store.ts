@@ -514,6 +514,12 @@ function patchTimeline(
   });
 }
 
+function normalizeSessionDrafts(drafts: SessionDraft[]): SessionDraft[] {
+  // Peers built before attachments became wire-required omitted the field for
+  // text-only drafts. Keep that persisted data usable during rolling upgrades.
+  return drafts.map((draft) => ({ ...draft, attachments: draft.attachments ?? [] }));
+}
+
 function refreshSessionDrafts(client: Client, sessionId: string, get: () => WorkbenchState, set: Setter): void {
   // A handful of store-level tests use the subscription-only slice of Client.
   // Real peers always expose call; this guard keeps that deliberately narrow
@@ -522,7 +528,7 @@ function refreshSessionDrafts(client: Client, sessionId: string, get: () => Work
   void client.call({ type: "session.drafts", payload: { sessionId } })
     .then((reply) => {
       if (reply?.type === "sessionDrafts" && get().client === client && get().activeSessionId === sessionId) {
-        set({ sessionDrafts: reply.data });
+        set({ sessionDrafts: normalizeSessionDrafts(reply.data) });
       }
     })
     .catch((error) => reportError(set, error));
@@ -1727,7 +1733,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       const currentReply = await client.call({ type: "session.drafts", payload: { sessionId } });
       if (currentReply?.type !== "sessionDrafts") throw new Error("读取会话草稿失败");
       if (currentReply.data.length >= 5) throw new Error("每个会话最多保存 5 条草稿");
-      const next: SessionDraft[] = [...currentReply.data, {
+      const next: SessionDraft[] = [...normalizeSessionDrafts(currentReply.data), {
         id: `draft-${crypto.randomUUID()}`,
         text: draft.capsule,
         attachments: draft.attachments ?? [],
@@ -1740,10 +1746,11 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       }];
       const reply = await client.call({ type: "session.drafts.replace", payload: { sessionId, drafts: next } });
       if (reply?.type !== "sessionDrafts") throw new Error("保存转发草稿失败");
+      const savedDrafts = normalizeSessionDrafts(reply.data);
       set((state) => ({
         forwardDraft: null,
-        ...(state.activeSessionId === sessionId ? { sessionDrafts: reply.data } : {}),
-        sessions: state.sessions.map((entry) => entry.id === sessionId ? { ...entry, draftCount: reply.data.length } : entry),
+        ...(state.activeSessionId === sessionId ? { sessionDrafts: savedDrafts } : {}),
+        sessions: state.sessions.map((entry) => entry.id === sessionId ? { ...entry, draftCount: savedDrafts.length } : entry),
       }));
       forwardMemory.delete(key);
     } catch (error) {
@@ -1790,9 +1797,10 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     try {
       const reply = await require_(get().client).call({ type: "session.drafts.replace", payload: { sessionId, drafts } });
       if (reply?.type !== "sessionDrafts") throw new Error("保存会话草稿失败");
+      const savedDrafts = normalizeSessionDrafts(reply.data);
       set((state) => ({
-        sessionDrafts: reply.data,
-        sessions: state.sessions.map((entry) => entry.id === sessionId ? { ...entry, draftCount: reply.data.length } : entry),
+        sessionDrafts: savedDrafts,
+        sessions: state.sessions.map((entry) => entry.id === sessionId ? { ...entry, draftCount: savedDrafts.length } : entry),
       }));
       return true;
     } catch (error) {

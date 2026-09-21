@@ -365,7 +365,7 @@ export function Composer({
         : forwardDraft.capsule
       : text;
     const payload = [...selectedDrafts.map((item) => item.text), currentPayload].filter(Boolean).join("\n\n");
-    const outgoing = [...selectedDrafts.flatMap((item) => item.attachments), ...(forwardDraft?.attachments ?? []), ...attachments];
+    const outgoing = [...selectedDrafts.flatMap((item) => item.attachments ?? []), ...(forwardDraft?.attachments ?? []), ...attachments];
     speechInput.dismissReview();
     setSpeechTextRange(null);
     setActiveSpeechSpan(null);
@@ -591,7 +591,8 @@ export function Composer({
           <div className="space-y-1 px-4 pt-3" data-testid="session-drafts">
             {drafts!.map((item) => {
               const expanded = expandedDraftId === item.id;
-              const firstLine = item.text.split(/\r?\n/, 1)[0]?.trim() || item.attachments[0]?.name || "附件";
+              const itemAttachments = item.attachments ?? [];
+              const firstLine = item.text.split(/\r?\n/, 1)[0]?.trim() || itemAttachments[0]?.name || "附件";
               return (
                 <div key={item.id} className="rounded-xl border border-line bg-raised/40">
                   <div className="flex min-h-9 items-center gap-2 px-2.5">
@@ -614,7 +615,7 @@ export function Composer({
                     >
                       {item.forward ? <span aria-hidden className="mr-1.5">↪</span> : null}
                       {firstLine}
-                      {item.attachments.length > 0 ? <span className="ml-1.5 text-faint">· {item.attachments.length} 个附件</span> : null}
+                      {itemAttachments.length > 0 ? <span className="ml-1.5 text-faint">· {itemAttachments.length} 个附件</span> : null}
                     </button>
                     <button
                       type="button"
@@ -636,10 +637,10 @@ export function Composer({
                         }}
                       />
                       <div className="flex items-center gap-2">
-                        {item.attachments.map((attachment, index) => (
+                        {itemAttachments.map((attachment, index) => (
                           <span key={`${attachment.name}-${index}`} className="inline-flex max-w-32 items-center gap-1 rounded-md bg-surface px-2 py-1 text-[10px] text-muted">
                             <span className="truncate">{attachment.name}</span>
-                            <button type="button" aria-label={`移除 ${attachment.name}`} onClick={() => void onUpdateDraft?.({ ...item, attachments: item.attachments.filter((_, i) => i !== index) })}>×</button>
+                            <button type="button" aria-label={`移除 ${attachment.name}`} onClick={() => void onUpdateDraft?.({ ...item, attachments: itemAttachments.filter((_, i) => i !== index) })}>×</button>
                           </span>
                         ))}
                         <button

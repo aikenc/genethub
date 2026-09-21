@@ -2539,6 +2539,19 @@ describe("the controls offered to the user", () => {
     expect(onReplaceDrafts).toHaveBeenCalledWith([]);
   });
 
+  it("keeps text-only drafts from older peers usable when attachments are absent", async () => {
+    const onSend = vi.fn(async () => {});
+    const legacyDraft = { id: "legacy", text: "旧草稿仍可继续" } as unknown as
+      NonNullable<ComponentProps<typeof Composer>["drafts"]>[number];
+    render(<Composer {...composerProps({ onSend, drafts: [legacyDraft] })} />);
+
+    expect(screen.getByRole("button", { name: "旧草稿仍可继续" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: "选择草稿 旧草稿仍可继续" }));
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onSend).toHaveBeenCalledWith("旧草稿仍可继续", []);
+  });
+
   it("keeps the rich settings viewable when Agent switching is locked", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
     await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
