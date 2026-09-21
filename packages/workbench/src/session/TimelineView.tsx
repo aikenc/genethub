@@ -1,4 +1,5 @@
 import type {
+  AgentCapability,
   BlobOverview,
   RoundBatch,
   RoundBatchSummary,
@@ -182,7 +183,16 @@ export interface ForwardController {
 
 export type ForwardTarget =
   | { kind: "session"; sessionId: string }
-  | { kind: "new"; workspaceId: string; agentId: string };
+  | {
+      kind: "new";
+      workspaceId: string;
+      capability: AgentCapability;
+      agentId: string;
+      modelId: string | null;
+      modeId: string | null;
+      effortId: string | null;
+      runtimeValues: Record<string, string>;
+    };
 
 
 export function TimelineView({
@@ -294,6 +304,7 @@ export function TimelineView({
   const sessions = useWorkbench((workbench) => workbench.sessions);
   const agents = useWorkbench((workbench) => workbench.agents);
   const workspaces = useWorkbench((workbench) => workbench.workspaces);
+  const settings = useWorkbench((workbench) => workbench.settings);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
   const hasExecutor = !activeSession?.managed && workspaces.find((space) => space.id === activeSession?.workspaceId)
     ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
@@ -835,7 +846,12 @@ export function TimelineView({
           sourceMachine={forkController?.sourceMachine ?? CURRENT_MACHINE}
           sourceWorkspaceId={activeSession.workspaceId}
           sourceAgentId={activeSession.agentId}
-          sourceCatalog={{ agents, workspaces }}
+          sourceModelId={activeSession.modelId ?? null}
+          sourceCatalog={{
+            agents,
+            workspaces,
+            agentPreferences: settings?.agentPreferences,
+          }}
           hasNativeCheckpoint={forkRequest.hasNativeCheckpoint}
           listMachines={forkController?.listMachines}
           loadCatalog={forkController?.loadCatalog}
@@ -845,6 +861,9 @@ export function TimelineView({
             return forkSession(forkRequest.turnId, {
               agentId: selection.agentId,
               workspaceId: selection.workspaceId,
+              ...(selection.modelId ? { modelId: selection.modelId } : {}),
+              ...(selection.modeId ? { modeId: selection.modeId } : {}),
+              ...(selection.effortId ? { effortId: selection.effortId } : {}),
             });
           }}
         />
@@ -2163,8 +2182,8 @@ function TurnFooter({
   const forkTitle = canFork
     ? live
       ? "从当前进行中的内容重建分支"
-      : "从这个 turn 创建分支并选择 Agent"
-    : "当前没有可用的目标 Agent";
+      : "从这个 turn 创建分支并选择能力"
+    : "当前没有可用的目标能力路由";
 
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">

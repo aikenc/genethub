@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use genehub_proto::{ProviderInfo, ServerFrame, Settings, SpeechCapabilities, SpeechRuntimeStatus};
+use genehub_proto::{
+    AgentSelectionPreferences, PreferredAgentModel, ProviderInfo, ServerFrame, Settings,
+    SpeechCapabilities, SpeechRuntimeStatus,
+};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use crate::adapter::registry::Registry;
@@ -273,9 +276,13 @@ impl AppState {
     }
 
     pub async fn settings(&self) -> Settings {
-        let (stored, speech) = {
+        let (stored, speech, agent_preferences) = {
             let config = self.config.read().await;
-            (config.agents.providers.clone(), config.speech.clone())
+            (
+                config.agents.providers.clone(),
+                config.speech.clone(),
+                config.agent_preferences.clone(),
+            )
         };
         let discovered = self.discover(&stored).await;
         Settings {
@@ -315,7 +322,25 @@ impl AppState {
                 .collect(),
             lan_enabled: config_lan(&self.config).await,
             speech: Some(crate::speech::settings(&speech)),
+            agent_preferences,
         }
+    }
+
+    /// Replaces the capability router as one machine-level value. Keeping this
+    /// beside provider and speech settings means every workspace and client on
+    /// the machine sees the same order and last runtime choices.
+    pub async fn set_agent_preferences(
+        &self,
+        preferences: AgentSelectionPreferences,
+    ) -> Result<Settings> {
+        validate_agent_preferences(&preferences)?;
+        {
+            let mut config = self.config.write().await;
+            config.agent_preferences = Some(preferences);
+            config.save(&self.paths.config_file())?;
+        }
+        crate::config::restrict_to_owner(&self.paths.config_file())?;
+        Ok(self.settings().await)
     }
 
     pub async fn speech_capabilities(&self) -> SpeechCapabilities {
@@ -584,10 +609,95 @@ impl AppState {
     }
 }
 
+fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result<()> {
+    for (capability, routes) in [
+        ("planning", &preferences.capabilities.planning),
+        ("coding", &preferences.capabilities.coding),
+        ("multimodal", &preferences.capabilities.multimodal),
+    ] {
+        if routes.len() > 5 {
+            anyhow::bail!("{capability} 能力最多配置 5 个 Agent 与模型");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for route in routes {
+            validate_route(route)?;
+            if !seen.insert((&route.agent_id, &route.model_id)) {
+                anyhow::bail!("{capability} 能力中不能重复配置同一个 Agent 与模型");
+            }
+        }
+    }
+    if preferences.runtimes.len() > 64 {
+        anyhow::bail!("最多记住 64 个 Agent 的运行设置");
+    }
+    for (agent_id, runtime) in &preferences.runtimes {
+        validate_id("Agent", agent_id, 128)?;
+        if let Some(effort_id) = &runtime.effort_id {
+            validate_id("思考强度", effort_id, 128)?;
+        }
+        if let Some(mode_id) = &runtime.mode_id {
+            validate_id("权限", mode_id, 128)?;
+        }
+        if runtime.runtime_values.len() > 16 {
+            anyhow::bail!("一个 Agent 最多记住 16 个运行参数");
+        }
+        for (axis_id, value_id) in &runtime.runtime_values {
+            validate_id("运行参数", axis_id, 128)?;
+            validate_id("运行参数值", value_id, 128)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_route(route: &PreferredAgentModel) -> Result<()> {
+    validate_id("Agent", &route.agent_id, 128)?;
+    if let Some(model_id) = &route.model_id {
+        validate_id("模型", model_id, 512)?;
+    }
+    Ok(())
+}
+
+fn validate_id(label: &str, value: &str, max_chars: usize) -> Result<()> {
+    if value.trim().is_empty() || value.chars().count() > max_chars {
+        anyhow::bail!("{label} 标识不能为空且不能超过 {max_chars} 个字符");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod machine_state_tests {
     use super::*;
     use crate::config::{Enrollment, Rendezvous};
+
+    #[test]
+    fn capability_settings_enforce_ordered_list_bounds_and_unique_routes() {
+        let route = |agent: &str, model: &str| PreferredAgentModel {
+            agent_id: agent.into(),
+            model_id: Some(model.into()),
+        };
+        let mut preferences = AgentSelectionPreferences::default();
+        preferences.capabilities.coding = (0..5)
+            .map(|index| route(&format!("agent-{index}"), "model"))
+            .collect();
+        validate_agent_preferences(&preferences).expect("five ordered routes are valid");
+
+        preferences
+            .capabilities
+            .coding
+            .push(route("agent-5", "model"));
+        let too_many = validate_agent_preferences(&preferences)
+            .expect_err("a sixth route must be rejected")
+            .to_string();
+        assert!(too_many.contains("最多配置 5"), "{too_many}");
+
+        preferences.capabilities.coding = vec![
+            route("codex", "model"),
+            route("codex", "model"),
+        ];
+        let duplicate = validate_agent_preferences(&preferences)
+            .expect_err("the same exact route cannot occupy two ranks")
+            .to_string();
+        assert!(duplicate.contains("不能重复"), "{duplicate}");
+    }
 
     #[tokio::test]
     async fn independent_machine_state_updates_merge_instead_of_overwriting() {

@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  AgentGrid,
+  CapabilityGrid,
   MachineGrid,
   useMachineCatalog,
   WorkspaceList,
   type MachineCatalog,
   type MachineOption,
 } from "./MachineCatalogPicker";
+import {
+  capabilityForRoute,
+  normalizeAgentPreferences,
+} from "./capability-preferences";
+import type { AgentCapability } from "@genehub/proto";
 
 export type ForkMachineOption = MachineOption;
 export type ForkCatalog = MachineCatalog;
@@ -17,13 +21,18 @@ export type ForkCatalog = MachineCatalog;
 export interface ForkSelection {
   machine: ForkMachineOption;
   workspaceId: string;
+  capability: AgentCapability;
   agentId: string;
+  modelId: string | null;
+  modeId: string | null;
+  effortId: string | null;
 }
 
 export function ForkDialog({
   sourceMachine,
   sourceWorkspaceId,
   sourceAgentId,
+  sourceModelId,
   sourceCatalog,
   hasNativeCheckpoint,
   listMachines,
@@ -34,6 +43,7 @@ export function ForkDialog({
   sourceMachine: ForkMachineOption;
   sourceWorkspaceId: string;
   sourceAgentId: string;
+  sourceModelId: string | null;
   sourceCatalog: ForkCatalog;
   hasNativeCheckpoint: boolean;
   listMachines?(): Promise<ForkMachineOption[]>;
@@ -41,14 +51,25 @@ export function ForkDialog({
   onClose(): void;
   onConfirm(selection: ForkSelection): Promise<boolean>;
 }) {
+  const sourcePreferences = normalizeAgentPreferences(
+    sourceCatalog.agentPreferences,
+    sourceCatalog.agents,
+  );
+  const sourceCapability = capabilityForRoute(
+    sourcePreferences,
+    sourceAgentId,
+    sourceModelId,
+  );
   const {
     machines,
     selectedMachine,
     catalog,
     workspaceId: selectedWorkspaceId,
     setWorkspaceId: setSelectedWorkspaceId,
-    agentId: selectedAgentId,
-    setAgentId: setSelectedAgentId,
+    capability: selectedCapability,
+    setCapability: setSelectedCapability,
+    preferences,
+    route: selectedRoute,
     loadingMachines,
     loadingCatalog,
     problem,
@@ -58,7 +79,7 @@ export function ForkDialog({
     sourceMachine,
     sourceCatalog,
     sourceWorkspaceId,
-    sourceAgentId,
+    sourceCapability,
     listMachines,
     loadCatalog,
   });
@@ -85,22 +106,20 @@ export function ForkDialog({
     };
   }, [busy, onClose]);
 
-  const selectedAgent = catalog.agents.find((agent) => agent.id === selectedAgentId);
   const selectedWorkspace = catalog.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
   );
   const unchanged =
     selectedMachine.id === sourceMachine.id &&
     selectedWorkspaceId === sourceWorkspaceId &&
-    selectedAgentId === sourceAgentId;
+    selectedRoute?.agent.id === sourceAgentId;
   const native = Boolean(
-    unchanged && hasNativeCheckpoint && selectedAgent?.capabilities.fork,
+    unchanged && hasNativeCheckpoint && selectedRoute?.agent.capabilities.fork,
   );
   const valid = Boolean(
     selectedMachine.online !== false &&
       selectedWorkspace &&
-      selectedAgent &&
-      canStartAgent(selectedAgent),
+      selectedRoute,
   );
 
   if (typeof document === "undefined") return null;
@@ -155,13 +174,14 @@ export function ForkDialog({
             onSelect={setSelectedWorkspaceId}
           />
 
-          <AgentGrid
+          <CapabilityGrid
             agents={catalog.agents}
-            selectedAgentId={selectedAgentId}
+            preferences={preferences}
+            selectedCapability={selectedCapability}
             disabled={busy || loadingCatalog}
-            onSelect={setSelectedAgentId}
-            currentAgentId={
-              selectedMachine.id === sourceMachine.id ? sourceAgentId : undefined
+            onSelect={setSelectedCapability}
+            currentCapability={
+              selectedMachine.id === sourceMachine.id ? sourceCapability : undefined
             }
           />
 
@@ -195,12 +215,17 @@ export function ForkDialog({
             disabled={busy || loadingCatalog || !valid}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => {
+              if (!selectedRoute) return;
               setBusy(true);
               setProblem(null);
               void onConfirm({
                 machine: selectedMachine,
                 workspaceId: selectedWorkspaceId,
-                agentId: selectedAgentId,
+                capability: selectedCapability,
+                agentId: selectedRoute.agent.id,
+                modelId: selectedRoute.modelId,
+                modeId: selectedRoute.modeId,
+                effortId: selectedRoute.effortId,
               })
                 .then((created) => {
                   if (created) onClose();

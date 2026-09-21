@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  AgentSelectionPreferences,
   Reply,
   Request,
   SessionSummary,
@@ -28,6 +29,16 @@ import { useWorkbench } from "../session/store";
 
 const REMOTE =
   "wss://relay.example.com/fabric/v2?ticket=client%3Aabc&route=abc";
+
+const preferencesFor = (agentId: string): AgentSelectionPreferences => ({
+  selectedCapability: "planning",
+  capabilities: {
+    planning: [{ agentId }],
+    coding: [{ agentId }],
+    multimodal: [{ agentId }],
+  },
+  runtimes: {},
+});
 
 const paired = (machineId: string, name: string, endpoint = REMOTE) =>
   rememberMachine({
@@ -524,6 +535,15 @@ describe("switching from the sidebar", () => {
               return { type: "agents", data: [agent(remote ? "claude" : "codex", !remote)] };
             case "workspace.list":
               return { type: "workspaces", data: [remote ? remoteWorkspace : sourceWorkspace] };
+            case "settings.get":
+              return {
+                type: "settings",
+                data: {
+                  providers: [],
+                  lanEnabled: false,
+                  agentPreferences: preferencesFor(remote ? "claude" : "codex"),
+                },
+              };
             case "session.list":
               return { type: "sessions", data: [summary] };
             case "session.forkExport":
@@ -709,6 +729,15 @@ describe("switching from the sidebar", () => {
             return { type: "agents", data: [cursor] };
           case "workspace.list":
             return { type: "workspaces", data: [workspace] };
+          case "settings.get":
+            return {
+              type: "settings",
+              data: {
+                providers: [],
+                lanEnabled: false,
+                agentPreferences: preferencesFor("cursor"),
+              },
+            };
           case "session.list":
             return { type: "sessions", data: [sourceSession] };
           case "session.fork":

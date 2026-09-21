@@ -32,6 +32,9 @@ pub struct Config {
     /// not something that happens because they installed the app.
     pub lan_enabled: bool,
     pub agents: AgentsConfig,
+    /// Capability routing and runtime choices belong to this machine, not to
+    /// any workspace opened on it.
+    pub agent_preferences: Option<genehub_proto::AgentSelectionPreferences>,
     /// Qwen3-ASR input is independent of Agent/LLM providers. GeneHub stores
     /// only prompt and local correction preferences; model installation and
     /// runtime configuration belong to the community adapter.
@@ -80,6 +83,7 @@ impl Default for Config {
             port: 0,
             lan_enabled: false,
             agents: AgentsConfig::default(),
+            agent_preferences: None,
             speech: SpeechConfig::default(),
             workspace_roots: Vec::new(),
             workspaces: Vec::new(),

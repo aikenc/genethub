@@ -43,7 +43,12 @@ import type {
 } from "../session/TimelineView";
 import type { ForkMachineOption } from "../session/ForkDialog";
 import type { MachineCatalog } from "../session/MachineCatalogPicker";
-import { defaultAgent, useWorkbench } from "../session/store";
+import { useWorkbench } from "../session/store";
+import {
+  capabilityForRoute,
+  normalizeAgentPreferences,
+  resolveCapabilityRoute,
+} from "../session/capability-preferences";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
@@ -60,6 +65,7 @@ import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject"
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import type { SpeechInputProblem } from "../speech/useSpeechInput";
+import { canStartAgent } from "../presentation/catalog/resolve";
 
 /**
  * Both defaults live out here, and they have to.
@@ -246,6 +252,13 @@ export function App({
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const currentModelId = workbench.timeline.modelId ?? draft?.modelId ?? session?.modelId ?? currentAgent?.catalog.defaultModel;
   const currentModel = currentAgent?.catalog.models.find((model) => model.id === currentModelId);
+  const agentPreferences = normalizeAgentPreferences(
+    workbench.settings?.agentPreferences,
+    workbench.agents,
+  );
+  const selectedCapability =
+    draft?.capability ??
+    capabilityForRoute(agentPreferences, agentId, currentModelId ?? null);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
   const managedReadOnly = session?.managed?.userInteraction === "readOnly";
   const sessionReadOnly = importedReadOnly || managedReadOnly;
@@ -588,17 +601,30 @@ export function App({
       async loadCatalog(machine) {
         if (machine.id === sourceMachine.id) {
           const state = useWorkbench.getState();
-          return { agents: state.agents, workspaces: state.workspaces };
+          return {
+            agents: state.agents,
+            workspaces: state.workspaces,
+            agentPreferences: state.settings?.agentPreferences,
+          };
         }
         return onMachine(machine, async (client) => {
-          const [agents, workspaces] = await Promise.all([
+          const [agents, workspaces, settings] = await Promise.all([
             client.call({ type: "agent.list" }),
             client.call({ type: "workspace.list" }),
+            client.call({ type: "settings.get" }),
           ]);
-          if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-            throw new Error("目标机器没有返回可用的执行引擎和项目列表。");
+          if (
+            agents?.type !== "agents" ||
+            workspaces?.type !== "workspaces" ||
+            settings?.type !== "settings"
+          ) {
+            throw new Error("目标机器没有返回能力配置、执行引擎和项目列表。");
           }
-          return { agents: agents.data, workspaces: workspaces.data };
+          return {
+            agents: agents.data,
+            workspaces: workspaces.data,
+            agentPreferences: settings.data.agentPreferences,
+          };
         });
       },
       async loadSessions(machine) {
@@ -625,8 +651,9 @@ export function App({
               payload: {
                 workspaceId: target.workspaceId,
                 agentId: target.agentId,
-                modelId: null,
-                modeId: null,
+                modelId: target.modelId,
+                modeId: target.modeId,
+                runtimeValues: target.runtimeValues,
                 title: null,
                 cwd: null,
               },
@@ -635,6 +662,15 @@ export function App({
               throw new Error("目标机器没有创建会话。");
             }
             sessionId = created.data.id;
+            if (target.effortId) {
+              const updated = await client.call({
+                type: "session.setEffort",
+                payload: { sessionId, effortId: target.effortId },
+              });
+              if (updated?.type !== "ack") {
+                throw new Error("目标机器没有应用该能力的思考强度。");
+              }
+            }
           }
           await client.call({
             type: "session.send",
@@ -699,6 +735,9 @@ export function App({
           return state.forkSession(turnId, {
             agentId: selection.agentId,
             workspaceId: selection.workspaceId,
+            ...(selection.modelId ? { modelId: selection.modelId } : {}),
+            ...(selection.modeId ? { modeId: selection.modeId } : {}),
+            ...(selection.effortId ? { effortId: selection.effortId } : {}),
           });
         }
 
@@ -712,6 +751,9 @@ export function App({
         const created = await broker.createFork(selection.machine, exported.data, {
           agentId: selection.agentId,
           workspaceId: selection.workspaceId,
+          ...(selection.modelId ? { modelId: selection.modelId } : {}),
+          ...(selection.modeId ? { modeId: selection.modeId } : {}),
+          ...(selection.effortId ? { effortId: selection.effortId } : {}),
         });
         // Stay where the user is. Being yanked onto another machine the moment
         // a Fork lands is what made cross-machine Fork feel broken; the jump
@@ -1004,6 +1046,8 @@ export function App({
                             : undefined
                         }
                         agents={workbench.agents}
+                        preferences={agentPreferences}
+                        capability={selectedCapability}
                         agentId={agentId}
                         modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
                         modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
@@ -1072,13 +1116,12 @@ export function App({
                           if (!await workbench.send(text, attachments, videoFiles)) throw new Error("消息尚未发送");
                         }}
                         onInterrupt={() => void workbench.interrupt()}
-                        // Switching agent opens an empty conversation rather than
-                        // handing this one over: no adapter can pick up another's
-                        // history (`ComposerControls` on why the chip locks once
-                        // anything has been said). Nothing is written until that
-                        // conversation is used.
-                        onPickAgent={(id) => workbench.newSession(null, id)}
-                        onPickModel={(id) => void workbench.setModel(id)}
+                        onPickCapability={(capability) =>
+                          void workbench.setCapability(capability)
+                        }
+                        onSavePreferences={(preferences) =>
+                          workbench.setAgentPreferences(preferences)
+                        }
                         onPickMode={(id) => void workbench.setMode(id)}
                         onPickEffort={(id) => void workbench.setEffort(id)}
                         onPickRuntimeAxis={(axisId, valueId) =>
@@ -1264,13 +1307,16 @@ function FirstRun({
     workspaces,
     activeWorkspaceId,
     agents,
+    settings,
     newSession,
     connection,
     client,
   } = useWorkbench();
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
-  const agent = defaultAgent(agents);
+  const preferences = normalizeAgentPreferences(settings?.agentPreferences, agents);
+  const route = resolveCapabilityRoute(preferences, preferences.selectedCapability, agents);
+  const hasUsableAgent = agents.some(canStartAgent);
 
   // An empty catalog while the socket is still coming up (or already dead) is
   // not "no workspace" — saying that sends people hunting for a folder when the
@@ -1314,7 +1360,7 @@ function FirstRun({
     );
   }
 
-  if (!agent) {
+  if (!hasUsableAgent) {
     return (
       <Splash>
         <p className="text-sm">还差一个模型密钥。</p>
@@ -1338,13 +1384,17 @@ function FirstRun({
         <WorkspaceIcon workspace={workspace} />
         <span>{workspace.name} 已就绪。</span>
       </p>
-      <p className="mb-3 text-xs text-muted">开一个会话，直接说你想做什么。</p>
+      <p className="mb-3 text-xs text-muted">
+        {route
+          ? "开一个会话，直接说你想做什么。"
+          : "当前能力还没有可用首选项；进入会话后可从聊天框编辑这台机器的能力配置。"}
+      </p>
       <button
         type="button"
         className="min-h-11 rounded-xl bg-accent px-4 text-sm text-white md:min-h-0 md:rounded-md md:px-3 md:py-1.5 md:text-xs"
-        onClick={() => newSession(workspace.id, agent.id)}
+        onClick={() => newSession(workspace.id, null, { capability: preferences.selectedCapability })}
       >
-        新建会话
+        {route ? "新建会话" : "配置能力并新建会话"}
       </button>
     </Splash>
   );

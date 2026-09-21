@@ -1,14 +1,21 @@
-import type { AgentInfo, WorkspaceInfo } from "@genehub/proto";
+import type {
+  AgentCapability,
+  AgentInfo,
+  AgentSelectionPreferences,
+  WorkspaceInfo,
+} from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
 import { AgentMark } from "../presentation/AgentMark";
-import {
-  canStartAgent,
-  resolveAgentAvailability,
-  resolveAgentPresentation,
-} from "../presentation/catalog/resolve";
+import { resolveAgentPresentation } from "../presentation/catalog/resolve";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { buildAgentSpaceTree, flattenAgentSpaceTree } from "../workspace/agent-space-tree";
+import {
+  CAPABILITIES,
+  normalizeAgentPreferences,
+  resolveCapabilityRoute,
+  type ResolvedCapabilityRoute,
+} from "./capability-preferences";
 
 export interface MachineOption {
   /** Daemon identity. Unlike routeId, this is stable across connection paths. */
@@ -23,6 +30,8 @@ export interface MachineOption {
 export interface MachineCatalog {
   agents: AgentInfo[];
   workspaces: WorkspaceInfo[];
+  /** Machine-global routing belongs to the target machine, never the workspace. */
+  agentPreferences?: AgentSelectionPreferences | null;
 }
 
 /** Stand-in for the machine on screen when the host cannot name others. */
@@ -35,23 +44,23 @@ export const CURRENT_MACHINE: MachineOption = {
 };
 
 /**
- * The machine + workspace + Agent picking state shared by Fork and Forward:
+ * The machine + workspace + capability picking state shared by Fork and Forward:
  * the machine grid drives a catalog load, and switching machines re-seeds the
- * workspace/Agent choices from what the target actually has. Presentational
+ * workspace/capability choices from what the target actually has. Presentational
  * pieces below stay dumb so each dialog composes only the fieldsets it needs.
  */
 export function useMachineCatalog({
   sourceMachine,
   sourceCatalog,
   sourceWorkspaceId,
-  sourceAgentId,
+  sourceCapability,
   listMachines,
   loadCatalog,
 }: {
   sourceMachine: MachineOption;
   sourceCatalog: MachineCatalog;
   sourceWorkspaceId: string;
-  sourceAgentId?: string;
+  sourceCapability?: AgentCapability;
   listMachines?(): Promise<MachineOption[]>;
   loadCatalog?(machine: MachineOption): Promise<MachineCatalog>;
 }) {
@@ -59,7 +68,13 @@ export function useMachineCatalog({
   const [selectedMachineId, setSelectedMachineId] = useState(sourceMachine.id);
   const [catalog, setCatalog] = useState<MachineCatalog>(sourceCatalog);
   const [workspaceId, setWorkspaceId] = useState(sourceWorkspaceId);
-  const [agentId, setAgentId] = useState(sourceAgentId ?? "");
+  const sourcePreferences = normalizeAgentPreferences(
+    sourceCatalog.agentPreferences,
+    sourceCatalog.agents,
+  );
+  const [capability, setCapability] = useState<AgentCapability>(
+    sourceCapability ?? sourcePreferences.selectedCapability,
+  );
   const [loadingMachines, setLoadingMachines] = useState(Boolean(listMachines));
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -97,13 +112,13 @@ export function useMachineCatalog({
     if (machine.id === sourceMachine.id) {
       setCatalog(sourceCatalog);
       setWorkspaceId(sourceWorkspaceId);
-      setAgentId(sourceAgentId ?? "");
+      setCapability(sourceCapability ?? sourcePreferences.selectedCapability);
       setLoadingCatalog(false);
       return;
     }
     if (!loadCatalog) return;
     setLoadingCatalog(true);
-    setCatalog({ agents: [], workspaces: [] });
+    setCatalog({ agents: [], workspaces: [], agentPreferences: null });
     void loadCatalog(machine)
       .then((loaded) => {
         if (catalogRequest.current !== request) return;
@@ -113,10 +128,9 @@ export function useMachineCatalog({
             ? sourceWorkspaceId
             : (loaded.workspaces[0]?.id ?? ""),
         );
-        setAgentId(
-          loaded.agents.some((agent) => agent.id === sourceAgentId && canStartAgent(agent))
-            ? (sourceAgentId as string)
-            : (loaded.agents.find(canStartAgent)?.id ?? ""),
+        setCapability(
+          normalizeAgentPreferences(loaded.agentPreferences, loaded.agents)
+            .selectedCapability,
         );
       })
       .catch((error: unknown) => {
@@ -129,6 +143,8 @@ export function useMachineCatalog({
 
   const selectedMachine =
     machines.find((machine) => machine.id === selectedMachineId) ?? sourceMachine;
+  const preferences = normalizeAgentPreferences(catalog.agentPreferences, catalog.agents);
+  const route = resolveCapabilityRoute(preferences, capability, catalog.agents);
 
   return {
     machines,
@@ -136,8 +152,10 @@ export function useMachineCatalog({
     catalog,
     workspaceId,
     setWorkspaceId,
-    agentId,
-    setAgentId,
+    capability,
+    setCapability,
+    preferences,
+    route,
     loadingMachines,
     loadingCatalog,
     problem,
@@ -260,51 +278,59 @@ export function WorkspaceList({
   );
 }
 
-export function AgentGrid({
+export function CapabilityGrid({
   agents,
-  selectedAgentId,
+  preferences,
+  selectedCapability,
   disabled,
   onSelect,
-  currentAgentId,
+  currentCapability,
 }: {
   agents: AgentInfo[];
-  selectedAgentId: string;
+  preferences: AgentSelectionPreferences;
+  selectedCapability: AgentCapability;
   disabled?: boolean;
-  onSelect(agentId: string): void;
-  /** Shown as "当前执行引擎" when it is also the selection's machine default. */
-  currentAgentId?: string;
+  onSelect(capability: AgentCapability): void;
+  /** Shown when the source session resolves through this capability. */
+  currentCapability?: AgentCapability;
 }) {
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标执行引擎</legend>
-      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {agents.map((agent) => {
-          const presentation = resolveAgentPresentation(agent);
-          const availability = resolveAgentAvailability(agent);
+      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标能力</legend>
+      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {CAPABILITIES.map((candidate) => {
+          const route = resolveCapabilityRoute(preferences, candidate.id, agents);
+          const presentation = route ? resolveAgentPresentation(route.agent) : null;
+          const modelLabel = route ? resolveModelLabel(route) : null;
           return (
             <label
-              key={agent.id}
+              key={candidate.id}
               className="flex min-h-16 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
             >
               <input
                 type="radio"
-                name="machine-catalog-agent"
-                value={agent.id}
-                aria-label={`${presentation.label}${availability ? ` ${availability.fullLabel}` : ""}`}
-                checked={agent.id === selectedAgentId}
-                disabled={!canStartAgent(agent)}
-                onChange={() => onSelect(agent.id)}
+                name="machine-catalog-capability"
+                value={candidate.id}
+                aria-label={`${candidate.label}${route ? ` ${presentation?.label ?? route.agent.label}` : " 当前不可用"}`}
+                checked={candidate.id === selectedCapability}
+                disabled={!route}
+                onChange={() => onSelect(candidate.id)}
                 className="sr-only"
               />
-              {presentation.kind === "text" ? null : (
-                <AgentMark agent={agent} className="h-6 w-6" fallbackToText={false} />
-              )}
+              {route && presentation?.kind !== "text" ? (
+                <AgentMark agent={route.agent} className="h-6 w-6" fallbackToText={false} />
+              ) : null}
+              {!route ? (
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-raised text-xs text-faint" aria-hidden>
+                  —
+                </span>
+              ) : null}
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-fg">{presentation.label}</span>
-                <span className={`block text-[10px] ${availability ? "text-danger" : "text-faint"}`}>
-                  {agent.id === currentAgentId
-                    ? "当前执行引擎"
-                    : availability?.fullLabel ?? "已就绪"}
+                <span className="block truncate text-fg">{candidate.label}</span>
+                <span className={`block truncate text-[10px] ${route ? "text-faint" : "text-danger"}`}>
+                  {route
+                    ? `${presentation?.label ?? route.agent.label}${modelLabel ? ` · ${modelLabel}` : ""}${candidate.id === currentCapability ? " · 当前" : ""}`
+                    : "未配置或当前不可用"}
                 </span>
               </span>
             </label>
@@ -312,6 +338,14 @@ export function AgentGrid({
         })}
       </div>
     </fieldset>
+  );
+}
+
+function resolveModelLabel(route: ResolvedCapabilityRoute): string | null {
+  if (!route.modelId) return null;
+  return (
+    route.agent.catalog.models.find((model) => model.id === route.modelId)?.label ??
+    route.modelId
   );
 }
 

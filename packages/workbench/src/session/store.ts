@@ -1,9 +1,12 @@
 import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
+  AgentCapability,
   AgentSpaceBuilderOperation,
   AgentSpaceBuilderReport,
   AgentSpaceOperation,
   AgentInfo,
+  AgentRuntimePreference,
+  AgentSelectionPreferences,
   Attachment,
   BackgroundProcess,
   DeviceInfo,
@@ -47,10 +50,13 @@ import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  recallRuntimeChoice,
-  rememberRuntimeChoice,
-  type AgentRuntimeMemory,
-} from "./runtime-memory";
+  capabilityForRoute,
+  normalizeAgentPreferences,
+  resolveAgentRuntime,
+  resolveCapabilityRoute,
+  withRuntimePreference,
+  withSelectedCapability,
+} from "./capability-preferences";
 import {
   applySequenced,
   emptyTimeline,
@@ -117,6 +123,7 @@ export interface Draft {
   /** Local identity, never a daemon Session ID. */
   localId?: string;
   workspaceId: string;
+  capability: AgentCapability;
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
@@ -399,7 +406,11 @@ interface WorkbenchState {
   newSession(
     workspaceId?: string | null,
     agentId?: string | null,
-    options?: { addressScope?: AddressScope; localId?: string },
+    options?: {
+      addressScope?: AddressScope;
+      localId?: string;
+      capability?: AgentCapability;
+    },
   ): void;
   selectSession(sessionId: string): Promise<void>;
   archiveSession(sessionId: string, archived: boolean): Promise<void>;
@@ -460,6 +471,8 @@ interface WorkbenchState {
   importSessionCandidate(workspaceId: string, candidateId: string): Promise<boolean>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
+  setCapability(capability: AgentCapability): Promise<void>;
+  setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
   setRuntimeAxis(axisId: string, valueId: string): Promise<void>;
@@ -993,30 +1006,52 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const state = get();
     const target = workspaceId ?? currentWorkspace(state);
     if (!target) return;
-    // What this project was last worked on with, before what is on screen: a
-    // conversation open in another project is not evidence about this one, and
-    // switching projects is exactly when the Agent usually changes too. Only a
-    // project's own history outranks the conversation in front of the user;
-    // an inherited last-used choice does not.
     const localId = options?.localId ?? crypto.randomUUID();
     const cachedDraft = state.client?.identity ? draftIdentities(state.client.identity.machineId).find(item => item.localId === localId) : undefined;
-    const own = recallRuntimeChoice(target, state.agents);
-    const chosenAgentId =
-      agentId ?? cachedDraft?.agentId ??
-      (own.scoped ? own.agentId : null) ??
-      state.draft?.agentId ??
-      state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
-      own.agentId ??
-      null;
-    // Scoped to the Agent actually being opened: Claude's `sonnet` would be an
-    // id Codex has never heard of, and `session.create` would refuse it.
-    const remembered =
-      chosenAgentId === own.agentId
-        ? own
-        : recallRuntimeChoice(target, state.agents, chosenAgentId);
-    if (agentId) rememberRuntimeChoice(target, agentId);
-    const draftRuntime = cachedDraft?.runtimeValues ? {modelId:cachedDraft.modelId ?? null, modeId:cachedDraft.modeId ?? null, effortId:cachedDraft.effortId ?? null, runtimeValues:cachedDraft.runtimeValues} : remembered;
-    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
+    const normalizedPreferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
+    );
+    const capability =
+      options?.capability ??
+      cachedDraft?.capability ??
+      (agentId
+        ? capabilityForRoute(normalizedPreferences, agentId, cachedDraft?.modelId ?? null)
+        : normalizedPreferences.selectedCapability);
+    const preferences = withSelectedCapability(normalizedPreferences, capability);
+    // The first-run proposal becomes an actual machine-global configuration
+    // when it is first used. Until then `None` remains distinguishable from a
+    // deliberately saved empty list, which Workflow must block on.
+    if (
+      state.settings &&
+      (!state.settings.agentPreferences ||
+        state.settings.agentPreferences.selectedCapability !== capability)
+    ) {
+      void state.setAgentPreferences(preferences);
+    }
+    const resolvedCapability = resolveCapabilityRoute(preferences, capability, state.agents);
+    const chosenAgentId = agentId ?? cachedDraft?.agentId ?? resolvedCapability?.agent.id ?? null;
+    const chosenAgent = state.agents.find((candidate) => candidate.id === chosenAgentId);
+    const resolvedRuntime =
+      chosenAgent && chosenAgent.id === resolvedCapability?.agent.id
+        ? resolvedCapability
+        : chosenAgent
+          ? resolveAgentRuntime(preferences, chosenAgent, cachedDraft?.modelId)
+          : null;
+    const draftRuntime = cachedDraft
+      ? {
+          modelId: cachedDraft.modelId ?? resolvedRuntime?.modelId ?? null,
+          modeId: cachedDraft.modeId ?? resolvedRuntime?.modeId ?? null,
+          effortId: cachedDraft.effortId ?? resolvedRuntime?.effortId ?? null,
+          runtimeValues: cachedDraft.runtimeValues ?? resolvedRuntime?.runtimeValues ?? {},
+        }
+      : {
+          modelId: resolvedRuntime?.modelId ?? null,
+          modeId: resolvedRuntime?.modeId ?? null,
+          effortId: resolvedRuntime?.effortId ?? null,
+          runtimeValues: resolvedRuntime?.runtimeValues ?? {},
+        };
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, capability, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -1034,6 +1069,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       draft: {
         localId,
         workspaceId: target,
+        capability,
         agentId: chosenAgentId,
         modelId: draftRuntime.modelId,
         modeId: draftRuntime.modeId,
@@ -1943,7 +1979,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   // applied at `session.create`. Dropping it — which is what happened before —
   // meant picking a model in a new chat did nothing at all.
   async setModel(modelId) {
-    remember(get(), { modelId });
     const sessionId = get().activeSessionId;
     if (!sessionId) return void onDraft(get, set, { modelId });
     await switched(get, set, sessionId, "modelId", modelId, () =>
@@ -1951,33 +1986,120 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
   },
 
+  async setCapability(capability) {
+    let state = get();
+    // A daemon Session already owns a concrete Agent. Before it has visible
+    // history the picker is still offered, but changing capability must open a
+    // fresh local draft rather than pretending the existing Session changed
+    // identity underneath it.
+    if (!state.draft && state.activeSessionId) {
+      get().newSession(state.activeWorkspaceId, null, { capability });
+      state = get();
+    }
+    const preferences = withSelectedCapability(
+      normalizeAgentPreferences(state.settings?.agentPreferences, state.agents),
+      capability,
+    );
+    const route = resolveCapabilityRoute(preferences, capability, state.agents);
+    if (state.draft) {
+      onDraft(get, set, {
+        capability,
+        agentId: route?.agent.id ?? null,
+        modelId: route?.modelId ?? null,
+        modeId: route?.modeId ?? null,
+        effortId: route?.effortId ?? null,
+        runtimeValues: route?.runtimeValues ?? {},
+      });
+    }
+    await get().setAgentPreferences(preferences);
+  },
+
+  async setAgentPreferences(preferences) {
+    const before = get().settings;
+    if (before) {
+      set({ settings: { ...before, agentPreferences: preferences } });
+      syncDraftRoute(get, set, preferences);
+    }
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "settings.setAgentPreferences",
+        payload: { preferences },
+      }),
+    );
+    // A newer preference write owns the screen even if this request finishes
+    // later. Object identity is intentional: the optimistic value above is
+    // retained verbatim until another write replaces it.
+    const stillCurrent = !before || get().settings?.agentPreferences === preferences;
+    if (reply?.type === "settings" && stillCurrent) {
+      set({ settings: reply.data });
+      syncDraftRoute(
+        get,
+        set,
+        normalizeAgentPreferences(reply.data.agentPreferences ?? preferences, get().agents),
+      );
+    } else if (before && stillCurrent) {
+      set({ settings: before });
+      const restored = normalizeAgentPreferences(before.agentPreferences, get().agents);
+      const draft = get().draft;
+      const capability =
+        draft?.capability === preferences.selectedCapability &&
+        preferences.selectedCapability !== restored.selectedCapability
+          ? restored.selectedCapability
+          : draft?.capability;
+      syncDraftRoute(get, set, restored, capability);
+    }
+  },
+
   async setMode(modeId) {
-    remember(get(), { modeId });
     const sessionId = get().activeSessionId;
-    if (!sessionId) return void onDraft(get, set, { modeId });
-    await switched(get, set, sessionId, "modeId", modeId, () =>
+    if (!sessionId) {
+      onDraft(get, set, { modeId });
+      await rememberMachineRuntime(get, { modeId });
+      return;
+    }
+    const applied = await switched(get, set, sessionId, "modeId", modeId, () =>
       require_(get().client).call({ type: "session.setMode", payload: { sessionId, modeId } }),
     );
+    if (
+      applied &&
+      get().activeSessionId === sessionId &&
+      get().timeline.modeId === modeId
+    ) {
+      await rememberMachineRuntime(get, { modeId });
+    }
   },
 
   async setEffort(effortId) {
-    remember(get(), { effortId });
     const sessionId = get().activeSessionId;
-    if (!sessionId) return void onDraft(get, set, { effortId });
-    await switched(get, set, sessionId, "effortId", effortId, () =>
+    if (!sessionId) {
+      onDraft(get, set, { effortId });
+      await rememberMachineRuntime(get, { effortId });
+      return;
+    }
+    const applied = await switched(get, set, sessionId, "effortId", effortId, () =>
       require_(get().client).call({ type: "session.setEffort", payload: { sessionId, effortId } }),
     );
+    if (
+      applied &&
+      get().activeSessionId === sessionId &&
+      get().timeline.effortId === effortId
+    ) {
+      await rememberMachineRuntime(get, { effortId });
+    }
   },
 
   async setRuntimeAxis(axisId, valueId) {
-    remember(get(), { runtimeValues: { [axisId]: valueId } });
     const sessionId = get().activeSessionId;
     if (!sessionId) {
       const draft = get().draft;
       if (!draft) return;
-      return void onDraft(get, set, {
+      onDraft(get, set, {
         runtimeValues: { ...draft.runtimeValues, [axisId]: valueId },
       });
+      await rememberMachineRuntime(get, {
+        runtimeValues: { [axisId]: valueId },
+      });
+      return;
     }
     const before = get().timeline.runtimeValues[axisId];
     set((state) => ({
@@ -1990,6 +2112,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       await require_(get().client).call({
         type: "session.setRuntimeAxis",
         payload: { sessionId, axisId, valueId },
+      });
+      await rememberMachineRuntime(get, {
+        runtimeValues: { [axisId]: valueId },
       });
     } catch (error) {
       const state = get();
@@ -2386,6 +2511,10 @@ async function refreshCatalog(
     (reply) => ({ reply } as const),
     (error: unknown) => ({ error } as const),
   );
+  const settings = client.call({ type: "settings.get" }).then(
+    (reply) => ({ reply } as const),
+    (error: unknown) => ({ error } as const),
+  );
   const workspaces = await client.call({ type: "workspace.list" });
   if (useWorkbench.getState().client !== client) return;
   if (workspaces?.type !== "workspaces") {
@@ -2407,9 +2536,12 @@ async function refreshCatalog(
   }
   const listedAgentsResult = await agents;
   if ("error" in listedAgentsResult) throw listedAgentsResult.error;
+  const settingsResult = await settings;
+  if ("error" in settingsResult) throw settingsResult.error;
   const listedAgents = listedAgentsResult.reply;
   if (useWorkbench.getState().client !== client) return;
   if (listedAgents?.type === "agents") set({ agents: listedAgents.data });
+  if (settingsResult.reply?.type === "settings") set({ settings: settingsResult.reply.data });
   // A project with no saved conversation needs an Agent before it can land on
   // its draft. A named session already opened above without waiting for this.
   if (mayLand()) await land(get);
@@ -2469,12 +2601,12 @@ async function land(get: () => WorkbenchState): Promise<void> {
     return;
   }
 
-  const agent = defaultAgent(state.agents);
-  if (!agent) return;
+  const preferences = normalizeAgentPreferences(state.settings?.agentPreferences, state.agents);
+  if (!resolveCapabilityRoute(preferences, preferences.selectedCapability, state.agents)) return;
   // An empty conversation, not a stored one. Landing somewhere used to write a
   // session on every first visit to a project, whether or not anything was ever
   // said in it.
-  get().newSession(workspaceId, agent.id, { addressScope: "machine" });
+  get().newSession(workspaceId, null, { addressScope: "machine" });
   finishLanding(get, intent);
 }
 
@@ -2617,10 +2749,7 @@ async function start(
   const draft = state.draft;
   if (!draft) return null;
 
-  const agentId =
-    draft.agentId ??
-    defaultAgent(state.agents)?.id ??
-    null;
+  const agentId = draft.agentId;
   if (!agentId) return null;
 
   const reply = await asked(set, () =>
@@ -2639,16 +2768,6 @@ async function start(
   );
   if (reply?.type !== "session" || get().client !== state.client) return null;
 
-  // The choice that actually started a conversation, not merely one that was
-  // looked at: this is what the next new chat in this project opens with.
-  rememberRuntimeChoice(draft.workspaceId, agentId, {
-    ...(draft.modelId ? { modelId: draft.modelId } : {}),
-    ...(draft.modeId ? { modeId: draft.modeId } : {}),
-    ...(draft.effortId ? { effortId: draft.effortId } : {}),
-    ...(Object.keys(draft.runtimeValues).length > 0
-      ? { runtimeValues: draft.runtimeValues }
-      : {}),
-  });
   set((current) => ({
     sessions: [reply.data, ...current.sessions],
     // A forward capsule parked on the unstarted conversation belongs to the
@@ -2701,6 +2820,25 @@ function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>)
   set({ draft: next });
 }
 
+/** Keeps an unstarted conversation on the route its capability now resolves to. */
+function syncDraftRoute(
+  get: () => WorkbenchState,
+  set: Setter,
+  preferences: AgentSelectionPreferences,
+  capability = get().draft?.capability,
+): void {
+  if (!capability || !get().draft) return;
+  const route = resolveCapabilityRoute(preferences, capability, get().agents);
+  onDraft(get, set, {
+    capability,
+    agentId: route?.agent.id ?? null,
+    modelId: route?.modelId ?? null,
+    modeId: route?.modeId ?? null,
+    effortId: route?.effortId ?? null,
+    runtimeValues: route?.runtimeValues ?? {},
+  });
+}
+
 /**
  * Moves one runtime axis on screen now, and tells the machine after.
  *
@@ -2723,32 +2861,42 @@ async function switched(
   axis: "modelId" | "modeId" | "effortId",
   value: string,
   run: () => Promise<unknown>,
-): Promise<void> {
+): Promise<boolean> {
   const before = get().timeline[axis];
   set((state) => ({ timeline: { ...state.timeline, [axis]: value } }));
   try {
     await run();
+    return true;
   } catch (error) {
     const state = get();
     if (state.activeSessionId === sessionId && state.timeline[axis] === value) {
       set({ timeline: { ...state.timeline, [axis]: before } });
     }
     reportError(set, error);
+    return false;
   }
 }
 
-/**
- * Carries a runtime choice into the next conversation in this project.
- *
- * Written on the way out rather than read back here: the daemon owns what the
- * live session is doing, and this only answers "what should the next new chat
- * in this project start as".
- */
-function remember(state: WorkbenchState, axes: AgentRuntimeMemory): void {
+/** Persists compact runtime choices once for the whole machine. */
+function rememberMachineRuntime(
+  get: () => WorkbenchState,
+  change: Partial<AgentRuntimePreference>,
+): Promise<void> {
+  const state = get();
+  // Do not manufacture and write a partial machine configuration while the
+  // initial settings request is still in flight. The picker is unavailable in
+  // that state in the real UI, and preserving the daemon-owned value is safer
+  // than replacing it with defaults derived from an incomplete catalog.
+  if (!state.settings) return Promise.resolve();
   const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
-  const workspaceId = session?.workspaceId ?? state.draft?.workspaceId ?? state.activeWorkspaceId;
   const agentId = session?.agentId ?? state.draft?.agentId ?? null;
-  rememberRuntimeChoice(workspaceId ?? null, agentId, axes);
+  if (!agentId) return Promise.resolve();
+  const preferences = withRuntimePreference(
+    normalizeAgentPreferences(state.settings?.agentPreferences, state.agents),
+    agentId,
+    change,
+  );
+  return state.setAgentPreferences(preferences);
 }
 
 /**

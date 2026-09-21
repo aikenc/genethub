@@ -1,6 +1,6 @@
-schema: genehub.workflow.role.v1
+schema: genehub.workflow.role.v2
 id: workflow-reviewer
-agentId: genet
+capability: planning
 evidenceOnly: true
 userInteraction: readOnly
 prompt: prompts/workflow-reviewer.md

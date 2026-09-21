@@ -442,6 +442,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet
         | Request::SettingsSetProvider { .. }
+        | Request::SettingsSetAgentPreferences { .. }
         | Request::SettingsForgetProvider { .. }
         | Request::SpeechSettingsSetQwen3 { .. }
         | Request::SpeechRuntimeProbe

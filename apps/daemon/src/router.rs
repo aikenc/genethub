@@ -2121,6 +2121,13 @@ async fn dispatch(
 
         Request::SettingsGet => Handled::ok(Reply::Settings(state.settings().await)),
 
+        Request::SettingsSetAgentPreferences { preferences } => {
+            match state.set_agent_preferences(preferences).await {
+                Ok(settings) => Handled::ok(Reply::Settings(settings)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SpeechCapabilities => {
             Handled::ok(Reply::SpeechCapabilities(state.speech_capabilities().await))
         }
@@ -3296,6 +3303,9 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionDelete { .. } => Some("session.delete"),
         Request::SessionRespondPermission { .. } => Some("session.respondPermission"),
         Request::SettingsSetProvider { .. } => Some("settings.setProvider"),
+        Request::SettingsSetAgentPreferences { .. } => {
+            Some("settings.setAgentPreferences")
+        }
         Request::SettingsForgetProvider { .. } => Some("settings.forgetProvider"),
         Request::HubPair { .. } => Some("hub.pair"),
         Request::HubTrial { .. } => Some("hub.trial"),

@@ -2,9 +2,8 @@ import type { RoundSummary, RoundTrunkSummary, SessionSummary } from "@genehub/p
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  AgentGrid,
+  CapabilityGrid,
   CURRENT_MACHINE,
   MachineGrid,
   useMachineCatalog,
@@ -71,6 +70,7 @@ export function ForwardDialog({
   const client = useWorkbench((state) => state.client);
   const agents = useWorkbench((state) => state.agents);
   const workspaces = useWorkbench((state) => state.workspaces);
+  const settings = useWorkbench((state) => state.settings);
   const sessions = useWorkbench((state) => state.sessions);
   const activeWorkspaceId = useWorkbench((state) => state.activeWorkspaceId);
   const fetchTrunkDetails = useWorkbench((state) => state.fetchTrunkDetails);
@@ -87,8 +87,10 @@ export function ForwardDialog({
     catalog,
     workspaceId,
     setWorkspaceId,
-    agentId,
-    setAgentId,
+    capability,
+    setCapability,
+    preferences,
+    route,
     loadingMachines,
     loadingCatalog,
     problem: machineProblem,
@@ -96,9 +98,12 @@ export function ForwardDialog({
     pickMachine,
   } = useMachineCatalog({
     sourceMachine,
-    sourceCatalog: { agents, workspaces },
+    sourceCatalog: {
+      agents,
+      workspaces,
+      agentPreferences: settings?.agentPreferences,
+    },
     sourceWorkspaceId: activeWorkspaceId ?? workspaces[0]?.id ?? "",
-    sourceAgentId: agents.find(canStartAgent)?.id,
     listMachines: controller?.listMachines,
     loadCatalog: controller?.loadCatalog,
   });
@@ -237,15 +242,13 @@ export function ForwardDialog({
     return () => document.removeEventListener("keydown", dismiss);
   }, [busy, onClose]);
 
-  const selectedAgent = catalog.agents.find((agent) => agent.id === agentId);
   const valid =
     built !== null &&
     !built.overBudget &&
     (destination === "new"
       ? Boolean(
           catalog.workspaces.some((workspace) => workspace.id === workspaceId) &&
-            selectedAgent &&
-            canStartAgent(selectedAgent),
+            route,
         )
       : targetSessionId !== null);
 
@@ -254,7 +257,7 @@ export function ForwardDialog({
     if (onSourceMachine) {
       // Same machine: park the capsule on a composer, reviewed before sending.
       if (destination === "new") {
-        newSession(workspaceId, agentId);
+        newSession(workspaceId, null, { capability });
         setForwardDraft({
           sessionId: null,
           capsule: built.text,
@@ -288,7 +291,18 @@ export function ForwardDialog({
     const machine = selectedMachine;
     const target =
       destination === "new"
-        ? ({ kind: "new", workspaceId, agentId } as const)
+        ? route
+          ? ({
+              kind: "new",
+              workspaceId,
+              capability,
+              agentId: route.agent.id,
+              modelId: route.modelId,
+              modeId: route.modeId,
+              effortId: route.effortId,
+              runtimeValues: route.runtimeValues,
+            } as const)
+          : null
         : targetSessionId
           ? ({ kind: "session", sessionId: targetSessionId } as const)
           : null;
@@ -396,11 +410,12 @@ export function ForwardDialog({
                 onSelect={setWorkspaceId}
               />
 
-              <AgentGrid
+              <CapabilityGrid
                 agents={catalog.agents}
-                selectedAgentId={agentId}
+                preferences={preferences}
+                selectedCapability={capability}
                 disabled={busy || loadingCatalog}
-                onSelect={setAgentId}
+                onSelect={setCapability}
               />
             </>
           ) : (

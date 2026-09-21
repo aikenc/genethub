@@ -1,7 +1,5 @@
 import type { AgentInfo, ModeInfo, ModelInfo } from "@genehub/proto";
 
-import { defaultAgent } from "./store";
-
 export interface RuntimeSelection {
   current: AgentInfo | undefined;
   agents: AgentInfo[];
@@ -34,10 +32,13 @@ export function resolveRuntimeSelection({
   effortId: string | null;
   runtimeValues?: Record<string, string> | null;
 }): RuntimeSelection {
-  const ready = agents.filter((agent) => agent.probe.state === "ready");
   const selected = agents.find((agent) => agent.id === agentId);
   const removed = agentId && !selected ? removedAgent(agentId) : undefined;
-  const current = selected ?? removed ?? defaultAgent(agents) ?? ready[0];
+  // Capability routing has already resolved the exact Agent before this
+  // presentation helper runs. When no route exists, keep the selection empty
+  // so the editor can explain the missing capability instead of silently
+  // showing an unrelated default Agent.
+  const current = selected ?? removed;
   const catalogModel = current?.catalog.models.find((candidate) => candidate.id === modelId);
   const fallbackModel =
     current?.catalog.models.find((candidate) => candidate.id === current.catalog.defaultModel) ??

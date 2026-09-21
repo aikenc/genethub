@@ -1,26 +1,26 @@
-import type { AgentInfo } from "@genehub/proto";
+import type {
+  AgentCapability,
+  AgentInfo,
+  AgentSelectionPreferences,
+} from "@genehub/proto";
+import { Brain, Code2, ScanSearch } from "lucide-react";
 import { useCallback, useId, useRef, useState } from "react";
 
-import { AgentMark } from "../presentation/AgentMark";
 import { EffortMeter } from "../presentation/EffortMeter";
 import {
-  resolveAgentAvailability,
-  resolveAgentPresentation,
   resolveAgentProfile,
   resolveEffortBadge,
   resolveModeBadge,
-  resolveModelPresentation,
 } from "../presentation/catalog/resolve";
+import { capabilityLabel } from "./capability-preferences";
 import { resolveRuntimeSelection } from "./runtime-selection";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
-/** One quiet, non-wrapping summary in the composer footer.
- *
- * The full catalog remains available in `RuntimeSettingsPanel`; focusing the
- * textarea no longer unfolds four native selects into the conversation.
- */
+/** One capability-first summary in the composer footer. */
 export function ComposerControls({
   agents,
+  preferences,
+  capability,
   agentId,
   modelId,
   modeId,
@@ -29,14 +29,16 @@ export function ComposerControls({
   disabled,
   agentLocked,
   onOpenChange,
-  onPickAgent,
-  onPickModel,
+  onPickCapability,
+  onSavePreferences,
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
   onRefreshAgents,
 }: {
   agents: AgentInfo[];
+  preferences: AgentSelectionPreferences;
+  capability: AgentCapability;
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
@@ -45,8 +47,8 @@ export function ComposerControls({
   disabled?: boolean;
   agentLocked?: boolean;
   onOpenChange?(open: boolean): void;
-  onPickAgent(id: string): void;
-  onPickModel(id: string): void;
+  onPickCapability(capability: AgentCapability): void;
+  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
   onPickRuntimeAxis?(axisId: string, valueId: string): void;
@@ -64,59 +66,39 @@ export function ComposerControls({
     effortId,
     runtimeValues,
   });
-  const agentPresentation = selection.current
-    ? resolveAgentPresentation(selection.current)
-    : null;
   const agentProfile = selection.current
     ? resolveAgentProfile(selection.current.id)
     : null;
   const permissionAxis = Boolean(
     selection.current?.capabilities.permissions && agentProfile?.modeKind === "permission",
   );
-  const model = selection.model
-    ? resolveModelPresentation({
-        agentId: selection.current?.id ?? null,
-        modelId: selection.model.id,
-        modelLabel: selection.model.label,
-      })
-    : null;
-  const agentAvailability = selection.current
-    ? resolveAgentAvailability(selection.current)
-    : null;
   const effort =
     selection.current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0
-    ? resolveEffortBadge(selection.effortId)
-    : null;
-  const mode = selection.current?.capabilities.setMode && selection.mode
-    ? resolveModeBadge({
-        agentId: selection.current.id,
-        permissions: permissionAxis,
-        modeId: selection.mode?.id,
-        modeLabel: selection.mode?.label,
-      })
-    : null;
-  const runtimeBadges = (selection.current?.catalog.runtimeAxes ?? []).flatMap((axis) => {
-    const value = axis.values.find((candidate) => candidate.id === selection.runtimeValues[axis.id]);
-    return value ? [{ axis, value }] : [];
-  });
+      ? resolveEffortBadge(selection.effortId)
+      : null;
+  const mode =
+    selection.current?.capabilities.setMode && selection.mode
+      ? resolveModeBadge({
+          agentId: selection.current.id,
+          permissions: permissionAxis,
+          modeId: selection.mode.id,
+          modeLabel: selection.mode.label,
+        })
+      : null;
   const summary = [
-    selection.current
-      ? `执行引擎：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
-      : "执行引擎：未选择",
-    model ? `模型：${model.fullLabel}` : null,
+    `能力：${capabilityLabel(capability)}`,
     effort ? `思考强度：${effort.fullLabel}` : null,
-    ...runtimeBadges.map(({ axis, value }) => `${axis.label}：${value.label}`),
-    mode
-      ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`
-      : null,
+    mode ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}` : null,
   ]
     .filter(Boolean)
     .join("；");
-  const setPanelOpen = useCallback((next: boolean) => {
-    setOpen(next);
-    onOpenChange?.(next);
-    if (next) onRefreshAgents?.();
-  }, [onOpenChange, onRefreshAgents]);
+  const setPanelOpen = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      onOpenChange?.(next);
+    },
+    [onOpenChange],
+  );
   const closePanel = useCallback(() => setPanelOpen(false), [setPanelOpen]);
 
   return (
@@ -132,32 +114,9 @@ export function ComposerControls({
         onClick={() => setPanelOpen(true)}
         className="flex h-9 !min-h-0 !min-w-0 flex-1 items-center rounded-md px-1.5 text-left text-[14px] leading-9 text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:text-[12px] md:leading-6"
       >
-        <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden opacity-75 md:gap-1.5">
-          {selection.current ? (
-            <AgentMark
-              agent={selection.current}
-              className="h-5 w-5 md:h-4 md:w-4"
-              textClassName="max-w-24 text-[14px] md:text-[12px]"
-              glyphClassName="text-[18px] md:text-[14px]"
-            />
-          ) : null}
-          {agentAvailability ? (
-            <span
-              className="shrink-0 whitespace-nowrap text-danger"
-              title={agentAvailability.fullLabel}
-            >
-              {agentAvailability.shortLabel}
-            </span>
-          ) : null}
-          {model ? (
-            <span className="min-w-0 truncate text-muted" title={model.fullLabel}>
-              {model.shortLabel}
-            </span>
-          ) : selection.current && agentPresentation && agentPresentation.kind !== "text" ? (
-            <span className="min-w-0 truncate text-muted" title={agentPresentation.label}>
-              {agentPresentation.label}
-            </span>
-          ) : null}
+        <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden opacity-80">
+          <CapabilityIcon capability={capability} />
+          <span className="truncate text-fg">{capabilityLabel(capability)}</span>
           {effort ? (
             <span
               className="flex shrink-0 items-center gap-0.5 whitespace-nowrap text-muted"
@@ -167,21 +126,13 @@ export function ComposerControls({
               <span aria-hidden>{effort.shortLabel}</span>
             </span>
           ) : null}
-          {runtimeBadges.map(({ axis, value }) => (
-            <span
-              key={axis.id}
-              className="shrink-0 whitespace-nowrap text-muted"
-              title={`${axis.label}：${value.label}`}
-            >
-              {value.label}
-            </span>
-          ))}
           {mode ? (
             <span
               className="shrink-0 whitespace-nowrap text-muted"
               title={`${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`}
+              aria-hidden
             >
-              <span aria-hidden>{mode.emoji}</span>
+              {mode.emoji}
             </span>
           ) : null}
           <span className="ml-auto shrink-0 text-[12px] text-faint md:text-[8px]" aria-hidden>
@@ -194,12 +145,15 @@ export function ComposerControls({
         <RuntimeSettingsPanel
           id={panelId}
           selection={selection}
+          agents={agents}
+          preferences={preferences}
+          capability={capability}
           disabled={disabled}
           agentLocked={agentLocked}
           returnFocusRef={trigger}
           onClose={closePanel}
-          onPickAgent={onPickAgent}
-          onPickModel={onPickModel}
+          onPickCapability={onPickCapability}
+          onSavePreferences={onSavePreferences}
           onPickMode={onPickMode}
           onPickEffort={onPickEffort}
           onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
@@ -208,4 +162,11 @@ export function ComposerControls({
       ) : null}
     </>
   );
+}
+
+function CapabilityIcon({ capability }: { capability: AgentCapability }) {
+  const className = "h-4 w-4 shrink-0 text-accent";
+  if (capability === "planning") return <Brain className={className} aria-hidden />;
+  if (capability === "coding") return <Code2 className={className} aria-hidden />;
+  return <ScanSearch className={className} aria-hidden />;
 }

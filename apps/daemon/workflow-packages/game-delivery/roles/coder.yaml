@@ -1,5 +1,5 @@
-schema: genehub.workflow.role.v1
+schema: genehub.workflow.role.v2
 id: coder
-agentId: genet
+capability: coding
 userInteraction: readOnly
 prompt: prompts/coder.md

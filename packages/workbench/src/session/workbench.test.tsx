@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  AgentSelectionPreferences,
   RoundLayer,
   RoundTrunk,
   TimelineItem,
@@ -22,7 +23,6 @@ import {
   resolveComposerPhase,
   resizeComposerTextarea,
 } from "./Composer";
-import { ComposerControls } from "./ComposerControls";
 import { NewSessionPanel } from "./NewSessionPanel";
 import { PermissionCard } from "./Permission";
 import { TimelineView } from "./TimelineView";
@@ -62,6 +62,16 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
   },
   ...overrides,
 });
+
+const COMPOSER_PREFERENCES: AgentSelectionPreferences = {
+  capabilities: {
+    planning: [{ agentId: "genet", modelId: "deepseek/v4" }],
+    coding: [{ agentId: "genet", modelId: "deepseek/v4" }],
+    multimodal: [{ agentId: "genet", modelId: "deepseek/v4" }],
+  },
+  selectedCapability: "planning",
+  runtimes: {},
+};
 
 /** Real actions, so a test that stubs one hands it back. */
 const { retryPending, editPending } = useWorkbench.getState();
@@ -1968,13 +1978,15 @@ function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {})
   return {
     phase: "idle" as const,
     agents: [agent()],
+    preferences: COMPOSER_PREFERENCES,
+    capability: "planning" as const,
     agentId: "genet",
     modelId: null,
     modeId: null,
     onSend: () => {},
     onInterrupt: () => {},
-    onPickAgent: () => {},
-    onPickModel: () => {},
+    onPickCapability: () => {},
+    onSavePreferences: () => {},
     onPickMode: () => {},
     ...overrides,
   };
@@ -2027,54 +2039,6 @@ describe("the controls offered to the user", () => {
     await waitFor(() => expect(onOpenSettings).toHaveBeenCalledOnce());
     expect(onSend).not.toHaveBeenCalled();
     expect(screen.getByText("Qwen3 runtime 尚未就绪")).toBeInTheDocument();
-  });
-
-  it("does not offer a model section for an agent that cannot switch models", async () => {
-    const fixed = agent({
-      id: "fixed",
-      capabilities: { ...agent().capabilities, setModel: false, setMode: false },
-    });
-
-    render(
-      <ComposerControls
-        agents={[fixed]}
-        agentId="fixed"
-        modelId={null}
-        modeId={null}
-        effortId={null}
-        onPickAgent={() => {}}
-        onPickModel={() => {}}
-        onPickMode={() => {}}
-        onPickEffort={() => {}}
-      />,
-    );
-
-    await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
-    const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByRole("tablist", { name: "执行引擎" })).toBeInTheDocument();
-    expect(within(dialog).queryByText("模型")).not.toBeInTheDocument();
-    expect(within(dialog).queryByText("模式")).not.toBeInTheDocument();
-  });
-
-  it("keeps every Agent visible and labels one that is not installed", async () => {
-    render(
-      <ComposerControls
-        agents={[agent(), agent({ id: "opencode", label: "OpenCode", probe: { state: "notInstalled" } })]}
-        agentId="genet"
-        modelId={null}
-        modeId={null}
-        effortId={null}
-        onPickAgent={() => {}}
-        onPickModel={() => {}}
-        onPickMode={() => {}}
-        onPickEffort={() => {}}
-      />,
-    );
-
-    await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
-    const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeEnabled();
-    expect(within(dialog).getByRole("tab", { name: "OpenCode 未安装" })).toBeDisabled();
   });
 
   it("sends on enter and keeps shift+enter for a new line", async () => {
@@ -2413,7 +2377,7 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 
     const box = screen.getByLabelText("任务描述");
-    const summary = screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ });
+    const summary = screen.getByRole("button", { name: /能力：规划/ });
     const card = box.closest("[data-composer-card]");
     const inputSlot = box.closest('[data-composer-slot="input"]');
     const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
@@ -2436,7 +2400,7 @@ describe("the controls offered to the user", () => {
     expect(card).toHaveClass("border-line-strong");
     expect(summary).toHaveClass("!min-h-0", "!min-w-0", "focus-visible:outline-muted/60");
     expect(summary).not.toHaveClass("focus-visible:outline-accent");
-    expect(summary.firstElementChild).toHaveClass("opacity-75");
+    expect(summary.firstElementChild).toHaveClass("opacity-80");
     expect(fileButton).toHaveClass("!min-h-0", "!min-w-0", "focus-visible:outline-muted/60");
     expect(sendButton).toHaveClass("!min-h-0", "!min-w-0", "focus-visible:outline-muted/60");
     geometry();
@@ -2650,9 +2614,9 @@ describe("the controls offered to the user", () => {
 
   it("keeps the rich settings viewable when Agent switching is locked", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
-    await userEvent.click(screen.getByRole("button", { name: /执行引擎：GeneHub Agent/ }));
-    const dialog = screen.getByRole("dialog", { name: "Agent 与运行设置" });
-    expect(within(dialog).getByRole("tab", { name: "GeneHub Agent" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /能力：规划/ }));
+    const dialog = screen.getByRole("dialog", { name: "能力与运行设置" });
+    expect(within(dialog).getByRole("radio", { name: /规划/ })).toBeDisabled();
     expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
   });
 
@@ -2901,7 +2865,7 @@ describe("a whole turn as the timeline sees it", () => {
     expect(state.status).toBe("idle");
   });
 
-  it("opens Agent selection for a completed turn without a native checkpoint", async () => {
+  it("opens capability selection for a completed turn without a native checkpoint", async () => {
     useWorkbench.setState({
       sessions: [
         {
@@ -2931,6 +2895,19 @@ describe("a whole turn as the timeline sees it", () => {
         }),
         agent({ id: "claude", label: "Claude Code" }),
       ],
+      settings: {
+        providers: [],
+        lanEnabled: false,
+        agentPreferences: {
+          selectedCapability: "planning",
+          capabilities: {
+            planning: [{ agentId: "codex", modelId: "deepseek/v4" }],
+            coding: [{ agentId: "claude", modelId: "deepseek/v4" }],
+            multimodal: [],
+          },
+          runtimes: {},
+        },
+      },
     });
     let state = apply(emptyTimeline(), {
       type: "item",
@@ -2970,7 +2947,7 @@ describe("a whole turn as the timeline sees it", () => {
     await userEvent.click(screen.getByRole("button", { name: "Fork" }));
 
     expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "规划 Codex" })).toBeChecked();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
     expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();
@@ -3005,6 +2982,19 @@ describe("a whole turn as the timeline sees it", () => {
           capabilities: { ...agent().capabilities, fork: false },
         }),
       ],
+      settings: {
+        providers: [],
+        lanEnabled: false,
+        agentPreferences: {
+          selectedCapability: "coding",
+          capabilities: {
+            planning: [],
+            coding: [{ agentId: "cursor", modelId: "deepseek/v4" }],
+            multimodal: [],
+          },
+          runtimes: {},
+        },
+      },
     });
     let state = apply(emptyTimeline(), {
       type: "turnStarted",

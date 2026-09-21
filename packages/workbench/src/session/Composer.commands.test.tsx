@@ -1,4 +1,4 @@
-import type { CommandInfo } from "@genehub/proto";
+import type { AgentSelectionPreferences, CommandInfo } from "@genehub/proto";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -21,20 +21,32 @@ const COMMANDS: CommandInfo[] = [
   { name: "context", description: undefined, argumentHint: undefined },
 ];
 
+const PREFERENCES: AgentSelectionPreferences = {
+  capabilities: {
+    planning: [{ agentId: "claude" }],
+    coding: [{ agentId: "claude" }],
+    multimodal: [],
+  },
+  selectedCapability: "planning",
+  runtimes: {},
+};
+
 function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
   const onSend = vi.fn();
   render(
     <Composer
       phase="idle"
       agents={[]}
+      preferences={PREFERENCES}
+      capability="planning"
       agentId="claude"
       modelId={null}
       modeId={null}
       commands={COMMANDS}
       onSend={onSend}
       onInterrupt={vi.fn()}
-      onPickAgent={vi.fn()}
-      onPickModel={vi.fn()}
+      onPickCapability={vi.fn()}
+      onSavePreferences={vi.fn()}
       onPickMode={vi.fn()}
       {...overrides}
     />,
@@ -123,9 +135,9 @@ describe("the slash command menu", () => {
     await userEvent.type(input, "/");
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /执行引擎：claude/ }));
+    await userEvent.click(screen.getByRole("button", { name: /能力：规划/ }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "关闭运行设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "关闭能力设置" }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
 
     await userEvent.click(input);

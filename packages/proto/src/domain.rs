@@ -2027,6 +2027,71 @@ pub enum UpdateDownload {
     Failed { version: String, message: String },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentCapability {
+    #[default]
+    Planning,
+    Coding,
+    Multimodal,
+}
+
+/// One exact route in a capability's ordered fallback list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct PreferredAgentModel {
+    pub agent_id: String,
+    /// Catalog-less ACP Agents may intentionally own their model default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+}
+
+/// Built-in capability routes. Order is significant and every list is bounded
+/// to five entries by the daemon's settings mutation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct CapabilityAgentPreferences {
+    #[serde(default)]
+    pub planning: Vec<PreferredAgentModel>,
+    #[serde(default)]
+    pub coding: Vec<PreferredAgentModel>,
+    #[serde(default)]
+    pub multimodal: Vec<PreferredAgentModel>,
+}
+
+/// Last runtime choices for one Agent. Values are checked against the live
+/// catalog by the client before they are used; stale ids remain harmless.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRuntimePreference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
+}
+
+/// Machine-global capability routing and compact runtime defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSelectionPreferences {
+    #[serde(default)]
+    pub capabilities: CapabilityAgentPreferences,
+    #[serde(default)]
+    pub selected_capability: AgentCapability,
+    #[serde(default)]
+    pub runtimes: std::collections::BTreeMap<String, AgentRuntimePreference>,
+}
+
 /// The machine-level settings a client may see and change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -2040,6 +2105,12 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub speech: Option<crate::speech::SpeechSettings>,
+    /// Absent means this machine has never saved a preference. Clients may
+    /// derive a useful first-run proposal; `Some` with empty lists is an
+    /// intentional user configuration and must stay empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_preferences: Option<AgentSelectionPreferences>,
 }
 
 /// A provider's configuration, minus the secret.

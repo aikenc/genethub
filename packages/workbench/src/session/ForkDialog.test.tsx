@@ -1,4 +1,9 @@
-import type { AgentInfo, WorkspaceInfo } from "@genehub/proto";
+import type {
+  AgentCapability,
+  AgentInfo,
+  AgentSelectionPreferences,
+  WorkspaceInfo,
+} from "@genehub/proto";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -40,6 +45,24 @@ function workspace(id: string, name: string, workspaceFile?: string): WorkspaceI
   };
 }
 
+function preferences(
+  selectedCapability: AgentCapability,
+  planning: string,
+  coding = planning,
+  multimodal = planning,
+): AgentSelectionPreferences {
+  const route = (agentId: string) => [{ agentId, modelId: "model" }];
+  return {
+    selectedCapability,
+    capabilities: {
+      planning: route(planning),
+      coding: route(coding),
+      multimodal: route(multimodal),
+    },
+    runtimes: {},
+  };
+}
+
 const sourceMachine: ForkMachineOption = {
   id: "machine-source",
   routeId: "local",
@@ -49,7 +72,7 @@ const sourceMachine: ForkMachineOption = {
 };
 
 describe("ForkDialog", () => {
-  it("defaults to an unchanged native target and reconstructs after switching Agent", async () => {
+  it("keeps the same-Agent native contract across a route model change and reconstructs after switching capability", async () => {
     const onConfirm = vi.fn(async () => true);
     const onClose = vi.fn();
     render(
@@ -57,6 +80,7 @@ describe("ForkDialog", () => {
         sourceMachine={sourceMachine}
         sourceWorkspaceId="w1"
         sourceAgentId="codex"
+        sourceModelId="legacy-model"
         sourceCatalog={{
           agents: [
             agent("codex", "Codex", true),
@@ -64,6 +88,7 @@ describe("ForkDialog", () => {
             agent("cursor", "Cursor", false, false),
           ],
           workspaces: [workspace("w1", "GeneHub")],
+          agentPreferences: preferences("planning", "codex", "claude", "cursor"),
         }}
         hasNativeCheckpoint
         onClose={onClose}
@@ -71,11 +96,11 @@ describe("ForkDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "规划 Codex" })).toBeChecked();
     expect(screen.getByText("原生分支")).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Cursor 未安装" })).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "多模态理解 当前不可用" })).toBeDisabled();
 
-    await userEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
+    await userEvent.click(screen.getByRole("radio", { name: "编码 Claude Code" }));
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByText(/上下文窗口的 35%/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
@@ -83,7 +108,11 @@ describe("ForkDialog", () => {
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
       machine: sourceMachine,
       workspaceId: "w1",
+      capability: "coding",
       agentId: "claude",
+      modelId: "model",
+      modeId: null,
+      effortId: null,
     }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
@@ -95,9 +124,11 @@ describe("ForkDialog", () => {
         sourceMachine={sourceMachine}
         sourceWorkspaceId="w1"
         sourceAgentId="cursor"
+        sourceModelId="model"
         sourceCatalog={{
           agents: [agent("cursor", "Cursor", false), agent("codex", "Codex", true)],
           workspaces: [workspace("w1", "GeneHub"), workspace("w2", "Suite", "/work/suite.code-workspace")],
+          agentPreferences: preferences("planning", "cursor", "codex"),
         }}
         hasNativeCheckpoint={false}
         onClose={vi.fn()}
@@ -105,7 +136,7 @@ describe("ForkDialog", () => {
       />,
     );
 
-    expect(screen.getByRole("radio", { name: "Cursor" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "规划 Cursor" })).toBeChecked();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
     expect(screen.getByRole("option", { name: /GeneHub/ })).toHaveAttribute("aria-selected", "true");
@@ -116,7 +147,11 @@ describe("ForkDialog", () => {
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
       machine: sourceMachine,
       workspaceId: "w1",
+      capability: "planning",
       agentId: "cursor",
+      modelId: "model",
+      modeId: null,
+      effortId: null,
     }));
   });
 
@@ -130,9 +165,11 @@ describe("ForkDialog", () => {
         sourceMachine={sourceMachine}
         sourceWorkspaceId="w1"
         sourceAgentId="cursor"
+        sourceModelId="model"
         sourceCatalog={{
           agents: [agent("cursor", "Cursor", false)],
           workspaces: [workspace("w1", "GeneHub"), workspace("w2", "Destination")],
+          agentPreferences: preferences("planning", "cursor"),
         }}
         hasNativeCheckpoint={false}
         listMachines={() => pending}
@@ -148,7 +185,7 @@ describe("ForkDialog", () => {
     expect(screen.getByRole("listbox", { name: "目标项目" })).toBeInTheDocument();
   });
 
-  it("loads only the selected machine's existing workspaces and Agents", async () => {
+  it("loads the selected machine's workspaces and machine-global capability routes", async () => {
     const remote: ForkMachineOption = {
       id: "machine-remote",
       routeId: "hub-row-7",
@@ -167,15 +204,18 @@ describe("ForkDialog", () => {
     const loadCatalog = vi.fn(async () => ({
       agents: [agent("claude", "Claude Code", false)],
       workspaces: [workspace("remote-w", "模型仓库")],
+      agentPreferences: preferences("coding", "claude"),
     }));
     render(
       <ForkDialog
         sourceMachine={sourceMachine}
         sourceWorkspaceId="w1"
         sourceAgentId="codex"
+        sourceModelId="model"
         sourceCatalog={{
           agents: [agent("codex", "Codex", true)],
           workspaces: [workspace("w1", "GeneHub")],
+          agentPreferences: preferences("planning", "codex"),
         }}
         hasNativeCheckpoint
         listMachines={async () => [sourceMachine, remote, offline]}
@@ -190,13 +230,17 @@ describe("ForkDialog", () => {
     await userEvent.click(screen.getByRole("radio", { name: "GPU 工作站" }));
 
     expect(await screen.findByRole("option", { name: /模型仓库/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Claude Code" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "编码 Claude Code" })).toBeChecked();
     expect(loadCatalog).toHaveBeenCalledWith(remote);
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({
       machine: remote,
       workspaceId: "remote-w",
+      capability: "coding",
       agentId: "claude",
+      modelId: "model",
+      modeId: null,
+      effortId: null,
     }));
   });
 });

@@ -145,13 +145,16 @@ Diagnosis resolves its Worker within the Run's pinned Executor and execution
 root, including isolated trial material. The Worker's own directory remains its
 Session cwd; the project evidence root and bounded Session references do not
 change. Do not mount the whole formal project merely to work around a diagnostic
-startup error. `workflow check --draft` reports `WF_ROLE_CAPABILITY` at the role's
-`agentId` if `evidenceOnly` requires a boundary the adapter cannot enforce.
-Restricted Session creation and restart enforce the same adapter declaration;
-currently the built-in Agent supports it. Select a compatible Agent/model in a
-new Candidate, not a weaker prompt or disabled evidence boundary. Existing Runs
-retain their pinned role; updating source does not rewrite or retry a failed
-diagnosis. These boundaries are covered by
+startup error. A `genehub.workflow.role.v2` role declares only
+`capability: planning|coding|multimodal`; it cannot pin `agentId`, `modelId`,
+permission mode or runtime values. Each dispatch resolves the first currently
+usable exact route from this machine's ordered capability preferences, and an
+`evidenceOnly` role skips routes whose adapter cannot enforce the boundary. If
+no route remains, the Run blocks with the rejected routes and asks a Human to
+repair machine-level setup. Restricted Session creation and restart enforce the
+same adapter declaration. Legacy role.v1 Candidates remain readable but new
+source should use role.v2. Existing Runs retain their pinned role intent;
+updating source does not rewrite or retry a failed diagnosis. These boundaries are covered by
 `specialty.workflow.trial-materials.silence-wr` and
 `specialty.workflow.authoring-validation.contract`.
 

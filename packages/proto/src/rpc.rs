@@ -612,6 +612,13 @@ pub enum Request {
         model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
     },
 
+    /// Replaces the machine-global capability routes and remembered runtime
+    /// choices. These preferences are deliberately independent of workspaces.
+    #[serde(rename = "settings.setAgentPreferences", rename_all = "camelCase")]
+    SettingsSetAgentPreferences {
+        preferences: AgentSelectionPreferences,
+    },
+
     /// Removes a provider the user added, key and all.
     #[serde(rename = "settings.forgetProvider", rename_all = "camelCase")]
     SettingsForgetProvider { provider_id: String },

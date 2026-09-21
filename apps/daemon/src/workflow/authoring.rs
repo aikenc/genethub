@@ -22,6 +22,14 @@ pub(crate) fn schema() -> Value {
         "dialect": "genehub.workflow.definition.v2", "legacyDialect": DEFINITION_SCHEMA,
         "validationCommand": "workflow check --draft", "maxDiagnostics": 64,
         "capabilities": ["agent.session", "result.publish", "request.budget"],
+        "role": {
+            "schema": ROLE_SCHEMA,
+            "binding": "capability only",
+            "capabilities": ["planning", "coding", "multimodal"],
+            "resolution": "At each dispatch, use the first currently available Agent + model in this machine's ordered capability preferences; block for human action when none are usable.",
+            "forbiddenExactFields": ["agentId", "modelId", "modeId", "runtimeValues"],
+            "legacyReadOnlySchema": LEGACY_ROLE_SCHEMA,
+        },
         "requestBudget": {
             "inputs": "none; current Run's shared request only",
             "output": ["requestRunId", "observedAtMs", "budget", "usedRuns", "observedLlmRounds", "executionMs", "remainingRuns", "remainingLlmRounds", "remainingExecutionMs"],
@@ -208,14 +216,19 @@ pub(super) fn check_draft(
                 .values()
                 .flat_map(|bundle| bundle.roles.values())
             {
-                if role.evidence_only {
-                    if let Err(error) = registry.require_evidence_scope(&role.agent_id) {
+                // Legacy role.v1 pins an exact adapter, so draft checking can
+                // still prove its evidence boundary. role.v2 resolves a live
+                // capability route only when dispatched and filters every
+                // fallback by this same requirement then.
+                if role.evidence_only && role.schema == LEGACY_ROLE_SCHEMA {
+                    let agent_id = role.agent_id.as_deref().unwrap_or_default();
+                    if let Err(error) = registry.require_evidence_scope(agent_id) {
                         push(&mut report, WorkflowDiagnostic {
                             phase: "capability".into(), code: "WF_ROLE_CAPABILITY".into(), severity: "error".into(),
                             file: format!("roles/{}.yaml", role.id), path: "/agentId".into(),
                             message: format!("{error:#}"),
                             hint: "Choose an Agent supporting evidenceOnly and a compatible model, then rerun `workflow check --draft`. Read-only interaction or a prompt alone cannot enforce the evidence boundary.".into(),
-                            expected: Some("adapter with bounded read-only evidence scope".into()), actual: Some(role.agent_id.chars().take(256).collect()),
+                            expected: Some("adapter with bounded read-only evidence scope".into()), actual: Some(agent_id.chars().take(256).collect()),
                             line: None, column: None,
                         });
                     }

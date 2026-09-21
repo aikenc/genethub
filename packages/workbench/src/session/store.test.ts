@@ -49,9 +49,9 @@ function stubClient() {
 }
 
 beforeEach(() => {
-  // The per-project Agent and model memory lives here, and jsdom keeps one
-  // store for the whole file: without this, one test's choice is the next
-  // test's starting point.
+  // Draft text and identities still live in browser storage, and jsdom keeps
+  // one store for the whole file. Agent preferences themselves now live in
+  // machine settings and are reset with the Zustand state below.
   localStorage.clear();
   useWorkbench.setState({
     client: null,
@@ -67,6 +67,7 @@ beforeEach(() => {
     notice: null,
     restoreDraft: null,
     composerDraftInserts: [],
+    settings: null,
     // Fresh, not carried over: a test that leaves a message pending must not
     // hand it to the next one.
     timeline: emptyTimeline(),
@@ -401,6 +402,7 @@ describe("a message that has been sent and not yet confirmed", () => {
       activeSessionId: null,
       draft: {
         workspaceId: "w1",
+        capability: "planning",
         agentId: "genet",
         modelId: null,
         modeId: null,
@@ -500,6 +502,7 @@ describe("a message that has been sent and not yet confirmed", () => {
       activeSessionId: null,
       draft: {
         workspaceId: "w1",
+        capability: "planning",
         agentId: "genet",
         modelId: null,
         modeId: null,
@@ -971,6 +974,7 @@ describe("an action the user asked for that fails", () => {
       sessions: [],
       draft: {
         workspaceId: "w1",
+        capability: "planning",
         agentId: "codex",
         modelId: null,
         modeId: null,
@@ -1159,18 +1163,50 @@ describe("opening a new conversation", () => {
     });
   });
 
-  it("stays with the agent the user is already talking to", () => {
+  it("starts from the machine's selected capability instead of pinning the current Agent", () => {
     const { client } = creatingClient();
+    const claude = {
+      id: "claude",
+      label: "Claude Code",
+      builtin: false,
+      probe: { state: "ready" },
+      capabilities: {
+        interrupt: true,
+        setModel: true,
+        setEffort: true,
+        setMode: true,
+        permissions: false,
+        resume: true,
+        fork: false,
+        attachments: true,
+      },
+      catalog: { models: [], modes: [], commands: [] },
+    } as AgentInfo;
     useWorkbench.setState({
       client,
+      agents: [claude],
       sessions: [{ ...SESSION, agentId: "claude" }],
       activeSessionId: "s1",
       activeWorkspaceId: "w1",
+      settings: {
+        providers: [],
+        lanEnabled: false,
+        agentPreferences: {
+          selectedCapability: "coding",
+          capabilities: {
+            planning: [],
+            coding: [{ agentId: "claude" }],
+            multimodal: [],
+          },
+          runtimes: {},
+        },
+      },
     });
 
     useWorkbench.getState().newSession();
 
     expect(useWorkbench.getState().draft?.agentId).toBe("claude");
+    expect(useWorkbench.getState().draft?.capability).toBe("coding");
   });
 
   it("leaves no second 新会话 tab behind once it is a real conversation", async () => {
@@ -1274,20 +1310,22 @@ describe("switching a runtime axis mid-conversation", () => {
   });
 });
 
-/**
- * "每个工作区都要记录上一次的模型选择。新工作区就按上一次的选择走。"
- *
- * The choice is remembered in this browser, keyed by project, and the models
- * are kept under the Agent they belong to — Claude's `sonnet` is not an id
- * Codex would accept.
- */
-describe("what a new conversation opens with", () => {
+describe("machine-global capability routing", () => {
   const claude = {
     id: "claude",
     label: "Claude Code",
     builtin: false,
     probe: { state: "ready" },
-    capabilities: { setModel: true, setEffort: true, setMode: true },
+    capabilities: {
+      interrupt: true,
+      setModel: true,
+      setEffort: true,
+      setMode: true,
+      permissions: false,
+      resume: true,
+      fork: false,
+      attachments: true,
+    },
     catalog: {
       models: [
         { id: "sonnet", label: "Sonnet", reasoning: true, efforts: ["low", "high"] },
@@ -1307,71 +1345,181 @@ describe("what a new conversation opens with", () => {
     },
   } as AgentInfo;
 
+  const preferences = {
+    capabilities: {
+      planning: [{ agentId: "claude", modelId: "opus" }],
+      coding: [{ agentId: "codex", modelId: "gpt-5.6-sol" }],
+      multimodal: [],
+    },
+    selectedCapability: "planning" as const,
+    runtimes: { claude: { effortId: "high", runtimeValues: {} } },
+  };
+
   beforeEach(() => {
-    useWorkbench.setState({ agents: [claude, codex], sessions: [], workspaces: [] });
+    useWorkbench.setState({
+      agents: [claude, codex],
+      sessions: [],
+      workspaces: [],
+      settings: { providers: [], lanEnabled: false, agentPreferences: preferences },
+    });
   });
 
-  it("reopens a project with the Agent and model it was last used with", async () => {
-    useWorkbench.getState().newSession("w1", "claude");
-    await useWorkbench.getState().setModel("opus");
-
-    useWorkbench.getState().newSession("w2", "codex");
-    useWorkbench.getState().newSession("w1", null);
-
+  it("uses the same selected capability route in every workspace", () => {
+    useWorkbench.getState().newSession("w1");
     expect(useWorkbench.getState().draft).toMatchObject({
       workspaceId: "w1",
+      capability: "planning",
+      agentId: "claude",
+      modelId: "opus",
+    });
+
+    useWorkbench.getState().newSession("w2");
+    expect(useWorkbench.getState().draft).toMatchObject({
+      workspaceId: "w2",
+      capability: "planning",
       agentId: "claude",
       modelId: "opus",
     });
   });
 
-  it("keeps each Agent's model to itself when the Agent changes back and forth", async () => {
-    useWorkbench.getState().newSession("w1", "claude");
-    await useWorkbench.getState().setModel("opus");
-    useWorkbench.getState().newSession("w1", "codex");
-    expect(useWorkbench.getState().draft?.modelId).toBeNull();
+  it("switches capability, exact Agent and model as one machine preference", async () => {
+    const calls: Array<{ type: string; payload?: unknown }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request);
+        return request.type === "settings.setAgentPreferences"
+          ? { type: "settings", data: { providers: [], lanEnabled: false, agentPreferences: (request.payload as { preferences: typeof preferences }).preferences } }
+          : undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+    useWorkbench.getState().newSession("w1");
 
-    await useWorkbench.getState().setModel("gpt-5.6-sol");
-    useWorkbench.getState().newSession("w1", "claude");
-    expect(useWorkbench.getState().draft?.modelId).toBe("opus");
-  });
-
-  it("starts an unvisited project from the last choice made anywhere", async () => {
-    useWorkbench.getState().newSession("w1", "claude");
-    await useWorkbench.getState().setEffort("high");
-    await useWorkbench.getState().setModel("sonnet");
-
-    useWorkbench.getState().newSession("w-fresh", null);
+    await useWorkbench.getState().setCapability("coding");
 
     expect(useWorkbench.getState().draft).toMatchObject({
-      workspaceId: "w-fresh",
-      agentId: "claude",
-      modelId: "sonnet",
-      effortId: "high",
+      capability: "coding",
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
+    });
+    expect(calls.at(-1)?.type).toBe("settings.setAgentPreferences");
+    expect(localStorage.getItem("genehub.runtime.by-workspace")).toBeNull();
+  });
+
+  it("re-resolves an open draft before sending when the saved ranking changes", async () => {
+    const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: Record<string, unknown> }) => {
+        sent.push(request);
+        if (request.type === "settings.setAgentPreferences") {
+          return {
+            type: "settings",
+            data: {
+              providers: [],
+              lanEnabled: false,
+              agentPreferences: request.payload?.preferences,
+            },
+          };
+        }
+        if (request.type === "session.create") {
+          return {
+            type: "session",
+            data: {
+              ...SESSION,
+              id: "s-ranked",
+              agentId: String(request.payload?.agentId),
+            },
+          };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], summary: { ...SESSION, id: "s-ranked", agentId: "codex" } },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client });
+    useWorkbench.getState().newSession("w1");
+
+    const reordered = {
+      ...preferences,
+      capabilities: {
+        ...preferences.capabilities,
+        planning: [
+          { agentId: "codex", modelId: "gpt-5.6-sol" },
+          { agentId: "claude", modelId: "opus" },
+        ],
+      },
+    };
+    await useWorkbench.getState().setAgentPreferences(reordered);
+
+    expect(useWorkbench.getState().draft).toMatchObject({
+      capability: "planning",
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
+    });
+
+    await useWorkbench.getState().send("follow the new first choice");
+    expect(sent.find((request) => request.type === "session.create")?.payload).toMatchObject({
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
     });
   });
 
-  it("drops a remembered model the catalog no longer offers", async () => {
-    useWorkbench.getState().newSession("w1", "claude");
-    await useWorkbench.getState().setModel("opus");
-
+  it("opens a fresh draft when capability changes from an existing empty session", async () => {
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) =>
+        request.type === "settings.setAgentPreferences"
+          ? {
+              type: "settings",
+              data: {
+                providers: [],
+                lanEnabled: false,
+                agentPreferences: (request.payload as { preferences: typeof preferences })
+                  .preferences,
+              },
+            }
+          : undefined,
+    } as unknown as Client;
     useWorkbench.setState({
-      agents: [{ ...claude, catalog: { ...claude.catalog, models: [claude.catalog.models[0]!] } }],
-    });
-    useWorkbench.getState().newSession("w1", null);
-
-    expect(useWorkbench.getState().draft).toMatchObject({ agentId: "claude", modelId: null });
-  });
-
-  it("still follows the conversation on screen into a project it knows nothing about", () => {
-    useWorkbench.setState({
-      sessions: [{ ...SESSION, workspaceId: "w9", agentId: "codex" }],
+      client,
+      sessions: [{ ...SESSION, agentId: "claude" }],
       activeSessionId: "s1",
+      activeWorkspaceId: "w1",
+      draft: null,
     });
 
-    useWorkbench.getState().newSession("w9", null);
+    await useWorkbench.getState().setCapability("coding");
 
-    expect(useWorkbench.getState().draft?.agentId).toBe("codex");
+    expect(useWorkbench.getState().activeSessionId).toBeNull();
+    expect(useWorkbench.getState().draft).toMatchObject({
+      workspaceId: "w1",
+      capability: "coding",
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
+    });
+  });
+
+  it("honors an intentionally empty saved list instead of deriving defaults", () => {
+    useWorkbench.setState({
+      settings: {
+        providers: [],
+        lanEnabled: false,
+        agentPreferences: {
+          ...preferences,
+          capabilities: { ...preferences.capabilities, planning: [] },
+        },
+      },
+    });
+
+    useWorkbench.getState().newSession("w1");
+    expect(useWorkbench.getState().draft).toMatchObject({
+      capability: "planning",
+      agentId: null,
+      modelId: null,
+    });
   });
 });
 

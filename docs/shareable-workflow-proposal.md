@@ -300,7 +300,7 @@ clone、fetch 或任何 remote 概念；为了「给个链接就能装」而把�
 │       │   ├── game-build/                  # id = studio/game-build
 │       │   │   ├── workflow.md              # 唯一清单：frontmatter 两个字段 + 散文正文
 │       │   │   ├── flows/{game-dev,game-review}.yaml   # 现有 definition.v1，未改
-│       │   │   ├── roles/{coder,reviewer}.yaml         # 现有 role.v1，未改
+│       │   │   ├── roles/{coder,reviewer}.yaml         # role.v2：只声明 capability 方向
 │       │   │   ├── prompts/{coder,reviewer}.md
 │       │   │   ├── skills/                  # 第 2 层：本包专有
 │       │   │   │   └── unity-coder/

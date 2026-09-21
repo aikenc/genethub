@@ -1,4 +1,12 @@
-import type { AgentInfo, Attachment, CommandInfo, SessionDraft, SessionStatus } from "@genehub/proto";
+import type {
+  AgentCapability,
+  AgentInfo,
+  AgentSelectionPreferences,
+  Attachment,
+  CommandInfo,
+  SessionDraft,
+  SessionStatus,
+} from "@genehub/proto";
 import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Play, Square, X } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -132,6 +140,8 @@ export function Composer({
   disabled,
   disabledReason,
   agents,
+  preferences,
+  capability,
   agentId,
   modelId,
   modeId,
@@ -152,8 +162,8 @@ export function Composer({
   onReplaceDrafts,
   onUpdateDraft,
   onInterrupt,
-  onPickAgent,
-  onPickModel,
+  onPickCapability,
+  onSavePreferences,
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
@@ -174,6 +184,8 @@ export function Composer({
   /** Why this transcript cannot accept a new turn, when the state is durable. */
   disabledReason?: string;
   agents: AgentInfo[];
+  preferences: AgentSelectionPreferences;
+  capability: AgentCapability;
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
@@ -209,8 +221,8 @@ export function Composer({
   onReplaceDrafts?(drafts: SessionDraft[]): Promise<boolean>;
   onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
-  onPickAgent(id: string): void;
-  onPickModel(id: string): void;
+  onPickCapability(capability: AgentCapability): void;
+  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
   onPickRuntimeAxis?(axisId: string, valueId: string): void;
@@ -975,6 +987,8 @@ export function Composer({
           >
             <ComposerControls
               agents={agents}
+              preferences={preferences}
+              capability={capability}
               agentId={agentId}
               modelId={modelId}
               modeId={modeId}
@@ -983,8 +997,8 @@ export function Composer({
               disabled={disabled || phase !== "idle"}
               agentLocked={agentLocked}
               onOpenChange={setSettingsOpen}
-              onPickAgent={onPickAgent}
-              onPickModel={onPickModel}
+              onPickCapability={onPickCapability}
+              onSavePreferences={onSavePreferences}
               onPickMode={onPickMode}
               onPickEffort={onPickEffort ?? (() => {})}
               onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
