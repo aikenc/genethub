@@ -124,8 +124,8 @@ for (const scenario of ["plain", "multiple-repos", "own-worktree", "parent-repo"
     }
     writeFileSync(path.join(source, "flows/trial-data.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "trial-data", version: 2,
       nodes: repositories.map((repository, index) => ({ id: `work-${index}`, uses: "agent.session", with: { role: "worker", workspace: repository,
-        ...(dataOnly ? {} : { writeLease: { targetRef: "current", ttlSeconds: 900 } }) },
-        completion: { all: [{ key: dataOnly ? "done" : "commit", verify: dataOnly ? "value.nonEmpty" : "git.commitOnTarget" }] } })),
+        ...(dataOnly ? {} : { writeLease: { ttlSeconds: 900 } }) },
+        completion: { all: [{ key: dataOnly ? "done" : "commit", verify: "value.nonEmpty" }] } })),
       structure: { body: { id: "material-tasks", type: "sequence", steps: repositories.map((repository, index) => ({ id: `step-${index}`, type: "task", activity: `work-${index}`, input: { op: "literal", value: repository } })) } },
     }));
     // Activate each package on its own pointer: a trial is isolated because

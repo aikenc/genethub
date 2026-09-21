@@ -424,23 +424,6 @@ async fn rebind_project_control_if_pm(
         .rebind(&summary.workspace_id, &summary.id)
 }
 
-/// Whether `session_id` may act as this project's manager.
-///
-/// This is the J3 predicate: it asks whether the *project* has been taken
-/// over and whether this Session is entitled to speak for it — never whether
-/// the Session's id equals a stored string. Keying management on one id made
-/// a fork, and any second conversation, permanently powerless while
-/// `SessionCreate` silently moved the id anyway, so the stored id was never a
-/// boundary in the first place.
-///
-/// Two things it deliberately still refuses:
-///
-/// - a **managed** Session. A Worker the project itself dispatched must not
-///   be able to reconfigure the project that owns it, and the old
-///   `is_bound` check was the only thing standing in its way at the
-///   `AgentSpaceConfigure` gate.
-/// - a Session belonging to a **different** project. Management authority is
-///   per-project, and a conversation in project A says nothing about B.
 /// Moves a project's management binding off a Session that was just archived.
 ///
 /// Dropping it instead would be worse than leaving it: `has_binding` would
@@ -472,6 +455,23 @@ async fn move_binding_off_archived_session(
     }
 }
 
+/// Whether `session_id` may act as this project's manager.
+///
+/// This is the J3 predicate: it asks whether the *project* has been taken
+/// over and whether this Session is entitled to speak for it — never whether
+/// the Session's id equals a stored string. Keying management on one id made
+/// a fork, and any second conversation, permanently powerless while
+/// `SessionCreate` silently moved the id anyway, so the stored id was never a
+/// boundary in the first place.
+///
+/// Two things it deliberately still refuses:
+///
+/// - a **managed** Session. A Worker the project itself dispatched must not
+///   be able to reconfigure the project that owns it, and the old
+///   `is_bound` check was the only thing standing in its way at the
+///   `AgentSpaceConfigure` gate.
+/// - a Session belonging to a **different** project. Management authority is
+///   per-project, and a conversation in project A says nothing about B.
 pub(crate) async fn session_may_manage_project(
     state: &Shared,
     project_id: &str,
@@ -734,30 +734,38 @@ async fn guard_agent_space_mutation(
         return Ok(());
     }
 
+    // Only a Session that is mid-turn can be writing. A `Waiting` Session is
+    // blocked on a person's answer and holds nothing — and it is precisely
+    // the state someone is in when they realize the team needs changing, so
+    // treating it as a conflict refused the change exactly when it was
+    // wanted.
     let sessions = state.sessions.list(Some(workspace_id), true).await?;
     let active_sessions = sessions
         .into_iter()
-        .filter(|session| {
-            matches!(
-                session.status,
-                genehub_proto::SessionStatus::Running | genehub_proto::SessionStatus::Waiting
-            )
-        })
+        .filter(|session| matches!(session.status, genehub_proto::SessionStatus::Running))
         .map(|session| session.id)
         .collect::<Vec<_>>();
     if !active_sessions.is_empty() {
         anyhow::bail!(
-            "activeSessionConflict: stop these running or waiting Sessions before changing AgentSpace {workspace_id}: {}",
+            "activeSessionConflict: stop these running Sessions before changing AgentSpace {workspace_id}: {}",
             active_sessions.join(", ")
         );
     }
 
+    // Scoped to the Runs that actually pinned this Space. A Run belonging to
+    // another package cannot be reinterpreted by a change to a carrier it
+    // never used, and blocking on it made a busy project's team permanently
+    // unmodifiable — the more a project is used, the less it could be
+    // maintained.
     let project = state.workspaces.project_root(workspace_id).await?;
+    let executor_parent = current.parent_workspace_id.clone();
     let active_runs = match state.workspaces.get(&project).await {
-        Ok(project_entry) => crate::workflow::project_active_run_ids(
+        Ok(project_entry) => crate::workflow::carrier_active_run_ids(
             &state.paths.root,
             &project,
             &project_entry.root,
+            workspace_id,
+            executor_parent.as_deref(),
         )?,
         Err(error) => anyhow::bail!(
             "activeRunUnknown: 无法确认 AgentSpace 是否仍被 Workflow 使用；先恢复项目 {project}：{error:#}"

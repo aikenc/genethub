@@ -313,15 +313,17 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
                         .and_then(|record| record.workspace.as_deref()),
                 )
                 .await?;
-                let target = if policy.target_ref == "current" {
-                    crate::git::current_ref(&execution.task_cwd).await?
-                } else {
-                    policy.target_ref.clone()
-                };
-                let repository = execution.task_cwd.display().to_string();
+                // Same question as before, asked about a directory instead of
+                // a Git ref: is a sibling instance already writing here.
+                let resource = super::existing_relative_within(
+                    &execution.task_cwd,
+                    &policy.resource,
+                    "写租约目录",
+                )?
+                .display()
+                .to_string();
                 let blocked = run.leases.values().any(|lease| {
-                    lease.repository == repository
-                        && lease.target_ref == target
+                    lease.resource == resource
                         && run
                             .nodes
                             .get(&lease.node_id)

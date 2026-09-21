@@ -175,6 +175,10 @@ state.project_control.has_binding(&project_id)            // 项目被接管了�
 而不是等 Worker 跑到一半才炸。PM/WM 学习新标准自行迁移。与 dev-1 包重构立下的
 "不做任何兼容层"先例一致。
 
+**D-C 的范围限定（2026-09-21 实施时补，纠正下文 S5 的一处分类错误）**：本条说的是
+**Workflow 语法与证据模型**的硬切——`writeLease.targetRef`、`git.commitOnTarget`、
+`LeaseRecord` 的 Git 形态。它**不**授权放弃 trial 隔离。详见 S5 修订说明。
+
 ### D-D：① 与 P3 的身份/订阅部分**合并交付**，中间不留窗口
 
 这是核查 D-A 时翻出的新事实，改变了交付结构。
@@ -289,11 +293,33 @@ build，已经是在批准"这份源码获得调度 Worker 和取得写租约的
 | `mod.rs:2441` `resolve_ref` | 记录 `base_commit` 基线 | → 包脚本返回 opaque revision |
 | `mod.rs:2366` `resolve_ref` | `git.commitOnTarget` 读当前提交 | → 包脚本 + 声明式判定 |
 | `mod.rs:2378` `is_ancestor` | 祖先关系验证 | → 包脚本产出布尔证据 |
-| `mod.rs:2393` `repository_directories` | 实验隔离的仓库边界 | → 通用 Workspace 路径包含判定 |
+| `mod.rs:2393` `repository_directories` | 实验隔离的仓库边界 | ~~→ 通用 Workspace 路径包含判定~~ **留在平台**，见下 |
 | `structured.rs:317` `current_ref` | 结构化流程读 ref | → 包脚本 `observe` |
 
 对应移除：`with.writeLease.targetRef`、`LeaseRecord` 的 `repository`/`target_ref`/`base_commit`、
 `git.commitOnTarget` verifier。
+
+**表中第 6 行是分类错误，实施时纠正（2026-09-21）**：实验隔离不属于「Git 能力」，它是**隔离边界**。
+两个理由，任一独立成立：
+
+1. **J1 支持它留下，而不是禁止**。J1 说「平台只定义**它必须亲自执行**的结构」。未经批准的 Candidate
+   不得触及正式仓库，正是平台必须亲自执行的安全性质——J1 是它留在 kernel 的**理由**，不是驱逐它的依据。
+2. **交给包脚本在逻辑上不成立**。该保证约束的对象就是 trial 包本身，而包脚本**由被约束方提供**：
+   不调用该脚本的包自动不受约束。用 X 提供的代码去约束 X，等于没有约束。
+
+「通用 Workspace 路径包含判定」也替代不了：`.git` 文件里的 `gitdir:` 指针与
+`objects/info/alternates` 共享对象，**都是目录本身留在界内、而解析到的仓库在界外**——路径判定按定义
+看不见这两者。经实跑确认：删除该检查后 `specialty.workflow.trial-materials.formal-metadata`
+不再拒绝，Run 进入 `running` 并在等待一个永不到来的拒绝中超时。
+
+**落地形态**：检查改写为 `git::reaches_git_state_outside(root, bounds)`，放在 `git.rs`——
+Git 知识留在 Git 模块，kernel 只问「这个目录能否够到界外的 Git 状态」而不需要知道什么是 gitdir。
+仅对 `run.experimental` 提问：普通 Run 的 worktree 仓库合法地位于项目目录之外，那是正常开发布局。
+非 Git 目录返回 `Ok(())`——本检查约束仓库，不要求存在仓库。它**不是** provenance probe：
+无法判定即拒绝，绝不降级为「未知」。
+
+因此 layer lint 写成**两个具名例外**（provenance = 可失败的展示事实；trial 隔离 = 平台必须亲自执行的
+containment），而不是一个。加第三个例外必须先说服这条测试。
 
 **原提案没料到的新矛盾**：dev-1 这次重构把 kernel 的 Git 调用点**从 6 增加到 9**——
 `mod.rs:1086-1088` 的 `package_provenance` 新增 `resolve_ref`/`remote_url`/`status`，用于报告包来源。
@@ -344,8 +370,26 @@ build，已经是在批准"这份源码获得调度 Worker 和取得写租约的
 5. 沙箱强度由包声明、经挑战卡逐条批准；平台只强制不可协商的那部分（D-B）；
 6. 脚本执行能力绑定已批准 digest，漂移有结构化错误；
 7. kernel 与 Workflow schema 不再出现 Git 专有类型；平台核心的**正确性**不依赖 `git`，
-   provenance 失败降级为未知；
+   provenance 失败降级为未知；**唯一例外是 trial 隔离**（见 S5 修订），它是 containment
+   而非 Git 能力，由具名 lint 例外守住；
 8. Human 输入与异步 Activity 事件不再混为一轮命令；
 9. 团队变更不再被无关包的 Run 或等待回答的会话阻塞；
 10. Git 项目、纯目录项目分别通过独立端到端验收；
 11. `journey.workflow.pm-builds-game-with-team`（包模型回归 oracle）全程持续通过。
+
+### 实施记录（2026-09-21）
+
+S1 `34f2850`、S2 `6757a61`、S3 `772b820`、S4 `24010dc` 已封印提交。S5 与 S6 合并为一次提交收尾，
+第 4、6、10 条在收尾中补齐：
+
+- **第 4 条**：`workflow-packages/game-delivery/scripts/publish-directory.mjs` 是目录型参考实现，
+  全程不用任何仓库工具；单测直接跑**已发布的那份**（而非夹具副本），夹具刻意不 `git init`。
+- **第 6 条**：批准记录改为**按包存**（`approved_packages: pack_id → digest`）。此前 binding 只有
+  一对 `pack_id`/`pack_digest`，意味着 build 第二个包会**静默撤销**第一个包的可执行能力；
+  未批准的包现在返回 `None` 并**失败关闭**，而不是拿邻居的 digest 顶替。
+- **第 10 条**：新增 `specialty.workflow.directory-project.no-repository`，在**完全无仓库**的项目里
+  跑通激活 → 派发 → 目录写租约 → 证据判定，并断言 provenance 为未知而非报错、平台不偷偷建仓库。
+
+**第 5 条未达成，不打勾**：`pack.script` 目前复用 Session confinement 策略（`mod.rs` 中有注释说明），
+包级能力声明与挑战卡逐条批准尚未实现，D-B 的「不声明即没有」还无法表达。这是已知缺口，
+不是已完成项——它需要独立设计，不应混进本轮。

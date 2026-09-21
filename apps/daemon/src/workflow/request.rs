@@ -288,11 +288,13 @@ pub(super) async fn admit(
     if snapshot.remaining_llm_rounds == 0 {
         bail!("requestBudgetExceeded: the original request has exhausted its LLM call allowance");
     }
+    // `recoverable` is deliberately absent: it means a Run is stuck, and
+    // reworking it is the standard response to being stuck. Requiring an
+    // explicit cancel first added a step that could only ever be answered
+    // one way. The states kept here are the ones where execution is still
+    // genuinely in motion and a second Run would race it.
     if group.iter().any(|run| {
-        matches!(
-            run.status.as_str(),
-            "running" | "stopping" | "cancelling" | "recoverable"
-        )
+        matches!(run.status.as_str(), "running" | "stopping" | "cancelling")
     }) {
         bail!("activeRunConflict: finish or cancel the previous execution before rework");
     }

@@ -315,6 +315,59 @@ process.stdin.on("end", () => {
         assert_eq!(result.revision.as_deref(), Some("opaque/task-dir"));
     }
 
+    /// The shipped reference implementation, run as a package would run it.
+    ///
+    /// It publishes a directory and uses no repository tooling at all,
+    /// which is the property under test: the capability contract by which a
+    /// package teaches the platform a new action must work for a project
+    /// that is a plain folder, not only for one that is a checkout. The
+    /// fixture therefore never initializes a repository.
+    #[tokio::test]
+    async fn the_reference_implementation_needs_no_repository_tooling() {
+        let root = tempfile::tempdir().unwrap();
+        // The real shipped package, not a fixture copy: a reference
+        // implementation that drifted from what ships would prove nothing.
+        let package = Path::new(env!("CARGO_MANIFEST_DIR")).join("workflow-packages/game-delivery");
+        let task = root.path().join("task-dir");
+        std::fs::create_dir_all(task.join("build")).unwrap();
+        std::fs::create_dir_all(task.join("build/nested")).unwrap();
+        std::fs::write(task.join("build/index.html"), "<!doctype html>").unwrap();
+        std::fs::write(task.join("build/nested/app.js"), "console.log(1)").unwrap();
+
+        let script = resolve_script(&package, "scripts/publish-directory.mjs").unwrap();
+        let definition = ScriptDefinition {
+            script: "scripts/publish-directory.mjs".into(),
+            input: serde_json::json!({
+                "source": "build",
+                "destination": "public",
+                "expectedFiles": 2,
+            }),
+            timeout_seconds: Some(60),
+        };
+        let result = run(&script, &task, None, &definition).await.unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.evidence.get("published").map(String::as_str), Some("2"));
+        assert_eq!(
+            result.evidence.get("matchedExpectation").map(String::as_str),
+            Some("true")
+        );
+        assert!(task.join("public/nested/app.js").is_file());
+        // An opaque receipt: the platform stores it and never parses it.
+        assert!(result.revision.is_some_and(|revision| revision.starts_with("dir:")));
+        assert!(
+            !task.join(".git").exists(),
+            "the fixture must stay a plain directory for this test to mean anything"
+        );
+
+        // Produce and judge stay apart: the script reported a count, and it
+        // is the platform's registered predicate that rules on it.
+        let verdict = crate::workflow::verifier("value.equals").expect("registered");
+
+        assert!((verdict.check)("2", Some("2")).is_ok());
+        assert!((verdict.check)("2", Some("3")).is_err());
+    }
+
     /// A script that never finishes must not hold the node forever, and its
     /// whole process group goes with it.
     #[tokio::test]

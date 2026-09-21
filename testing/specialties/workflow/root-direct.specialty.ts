@@ -47,10 +47,11 @@ defineSpecialty(
     const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
     try {
       const repository = realpathSync(opened.workspaceRoot);
-      const targetRef = `refs/heads/${initialBranch}`;
-      const leaseKey = createHash("sha256")
-        .update(`${repository}\0${targetRef}`)
-        .digest("hex");
+      // Forged in the shape the daemon actually reads today — a directory
+      // lease keyed by the resolved resource path. Writing the retired
+      // ref-keyed shape would make the assertion below pass because the file
+      // is unparseable rather than because untrusted state is distrusted.
+      const leaseKey = createHash("sha256").update(repository).digest("hex");
       const forgedLegacyLease = path.join(
         opened.workspaceRoot,
         `.genethub/runtime/workflows/ref-leases/${leaseKey}.json`,
@@ -61,9 +62,7 @@ defineSpecialty(
         JSON.stringify({
           runId: "wr_forged",
           nodeId: "implement",
-          repository,
-          targetRef,
-          baseCommit: git(opened.workspaceRoot, ["rev-parse", "HEAD"]),
+          resource: repository,
           expiresAtMs: Date.now() + 3_600_000,
         }),
       );

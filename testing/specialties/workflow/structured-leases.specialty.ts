@@ -33,7 +33,7 @@ for(const scenario of ["shared","independent","derived"] as const)defineSpecialt
   }
   const source=t.flows.main.seedDirectChangePackage({projectRoot:opened.workspaceRoot});
   writeFileSync(path.join(source,"prompts/direct-worker.md"),"STRUCTURED_LEASE_WORKER: write only in the assigned task directory and report its commit.");
-  const writer=(id:string,workspace:unknown)=>({id,uses:"agent.session",with:{role:"worker",workspace,writeLease:{targetRef:"current",ttlSeconds:900}},completion:{all:[{key:"commit",verify:"git.commitOnTarget"}]}});
+  const writer=(id:string,workspace:unknown)=>({id,uses:"agent.session",with:{role:"worker",workspace,writeLease:{ttlSeconds:900}},completion:{all:[{key:"commit",verify:"value.nonEmpty"}]}});
   const definition=scenario==="derived"?{
     nodes:[
       {id:"prepare",uses:"agent.session",with:{role:"worker"},completion:{output:{type:"array",minItems:2,maxItems:2,items:{type:"object",properties:{id:{type:"string",minLength:1},workspace:{type:"string",minLength:1}}}}}},

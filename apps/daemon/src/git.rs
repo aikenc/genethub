@@ -16,21 +16,44 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
-/// Resolve an explicitly selected worktree without inheriting a parent repo.
-/// A worktree's private Git directory and common repository can differ.
-pub(crate) async fn repository_directories(root: &Path) -> Result<(PathBuf, PathBuf)> {
+/// Whether a directory can reach Git state outside `bounds`.
+///
+/// A trial runs a Candidate nobody has approved yet, so it must not be able
+/// to touch the formal repository. Directory containment cannot answer this:
+/// a `.git` file holding `gitdir: /formal/.git` and an
+/// `objects/info/alternates` entry both leave the directory itself perfectly
+/// inside its bounds while the *repository* they resolve to is the formal
+/// one. Only something that understands Git can see the difference, so the
+/// question is answered here and the Workflow kernel asks it without
+/// learning what a gitdir is.
+///
+/// Not a provenance probe: a failure to decide is a refusal, never an
+/// "unknown". A directory that is not a Git repository at all is fine and
+/// returns `Ok(())` — the check constrains repositories, it does not
+/// require one.
+pub(crate) async fn reaches_git_state_outside(root: &Path, bounds: &Path) -> Result<()> {
     let marker = root.join(".git");
-    let metadata = crate::config::sensitive_metadata(&marker)
-        .context("gitRepositoryRequired: select an actual Git worktree root")?;
-    crate::config::reject_link_or_reparse(&marker, &metadata)?;
-    if !metadata.is_dir() && !metadata.is_file() {
-        anyhow::bail!("gitRepositoryRequired: .git must be a directory or worktree file");
+    if let Ok(metadata) = crate::config::sensitive_metadata(&marker) {
+        crate::config::reject_link_or_reparse(&marker, &metadata)?;
+        if !metadata.is_dir() && !metadata.is_file() {
+            anyhow::bail!("experimentIsolation: .git must be a directory or a worktree file");
+        }
     }
+    // Deliberately asked of every directory, marker or not. Git searches
+    // upwards, so a directory with no `.git` of its own is the *parent
+    // traversal* case: it silently belongs to whatever repository encloses
+    // it, which for a trial is the formal project. Returning early on a
+    // missing marker would wave through the plainest escape of the three.
+    let Ok(private) = git(root, &["rev-parse", "--git-dir"]).await else {
+        // Git resolves nothing here, so there is no repository to escape
+        // through — including none above. This is the pure-directory
+        // project, and it is allowed.
+        return Ok(());
+    };
+    let bounds = bounds
+        .canonicalize()
+        .with_context(|| format!("reading the isolation boundary: {}", bounds.display()))?;
     let canonical = root.canonicalize()?;
-    let top = git(root, &["rev-parse", "--show-toplevel"]).await?;
-    if crate::guest_paths::guest_path(Path::new(top.trim())).canonicalize()? != canonical {
-        anyhow::bail!("wrongProjectRoot: task directory is not the selected Git worktree root");
-    }
     let resolve = |value: &str| -> Result<PathBuf> {
         let path = crate::guest_paths::guest_path(Path::new(value.trim()));
         Ok(if path.is_absolute() {
@@ -40,9 +63,34 @@ pub(crate) async fn repository_directories(root: &Path) -> Result<(PathBuf, Path
         }
         .canonicalize()?)
     };
-    let private = resolve(&git(root, &["rev-parse", "--git-dir"]).await?)?;
+    // `--git-dir` is where this worktree keeps its own metadata and
+    // `--git-common-dir` is the repository it belongs to. A worktree file
+    // makes them differ, which is legitimate; both still have to live inside
+    // the boundary.
+    let private = resolve(&private)?;
     let common = resolve(&git(root, &["rev-parse", "--git-common-dir"]).await?)?;
-    Ok((private, common))
+    for (label, directory) in [("metadata", &private), ("repository", &common)] {
+        if !directory.starts_with(&bounds) {
+            anyhow::bail!(
+                "experimentIsolation: this task directory's Git {label} is {}, outside its own boundary {}",
+                directory.display(),
+                bounds.display()
+            );
+        }
+    }
+    // A `--shared` clone keeps its metadata local while reading objects from
+    // whatever it points at, so the two checks above can both pass while the
+    // formal object store is still in use.
+    let alternates = common.join("objects/info/alternates");
+    if crate::config::sensitive_metadata(&alternates).is_ok()
+        && !std::fs::read_to_string(&alternates)?.trim().is_empty()
+    {
+        anyhow::bail!(
+            "experimentIsolation: this task directory borrows Git objects through {}; copy them instead of sharing",
+            alternates.display()
+        );
+    }
+    Ok(())
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<String> {
@@ -131,49 +179,6 @@ pub(crate) async fn remote_url(root: &Path) -> Result<Option<String>> {
     };
     let url = url.trim();
     Ok((!url.is_empty()).then(|| url.to_string()))
-}
-
-pub(crate) async fn current_ref(root: &Path) -> Result<String> {
-    let reference = git(root, &["symbolic-ref", "-q", "HEAD"]).await?;
-    let reference = reference.trim();
-    if reference.is_empty() {
-        anyhow::bail!("当前仓库处于 detached HEAD，不能取得独占目标 ref 租约");
-    }
-    Ok(reference.to_string())
-}
-
-pub(crate) async fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let mut child = Command::new("git")
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("running git merge-base")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("capturing git merge-base stderr")?;
-    let (stderr, status) = tokio::time::timeout(GIT_TIMEOUT, async move {
-        tokio::try_join!(
-            read_bounded(stderr, MAX_STDERR_BYTES, "git merge-base error output"),
-            async { child.wait().await.context("waiting for git merge-base") },
-        )
-    })
-    .await
-    .map_err(|_| anyhow!("git merge-base timed out"))??;
-    if status.success() {
-        return Ok(true);
-    }
-    if status.code() == Some(1) {
-        return Ok(false);
-    }
-    Err(anyhow!(
-        "git merge-base failed: {}",
-        String::from_utf8_lossy(&stderr).trim()
-    ))
 }
 
 /// Parses `--porcelain=v1 -z`.
@@ -382,6 +387,88 @@ mod tests {
         let diff = diff(dir.path(), None).await.unwrap();
         assert!(diff.contains("-one"));
         assert!(diff.contains("+two"));
+    }
+
+    /// The three escapes the boundary exists for. Each one leaves the task
+    /// directory itself inside its bounds, which is exactly why a path check
+    /// cannot replace this.
+    #[tokio::test]
+    async fn a_trial_cannot_reach_the_formal_repository_through_git_indirection() {
+        let formal = repo().await;
+        std::fs::write(formal.path().join("a.txt"), "one\n").unwrap();
+        commit(formal.path(), "first", &[]).await.unwrap();
+
+        let trial = tempfile::tempdir().unwrap();
+
+        // A plain directory with no repository anywhere above it. This is
+        // the pure-directory project and it is allowed.
+        let plain = trial.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        reaches_git_state_outside(&plain, trial.path())
+            .await
+            .expect("a directory with no repository above it is not an escape");
+
+        // The plainest escape and the one a path check is least able to
+        // see: no `.git` at all, because Git searches upwards and this
+        // directory silently belongs to the repository enclosing it.
+        let nested = formal.path().join("nested/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let refused = reaches_git_state_outside(&nested, &nested)
+            .await
+            .expect_err("a directory inside an enclosing repository must be refused");
+        assert!(
+            format!("{refused:#}").contains("experimentIsolation"),
+            "unhelpful refusal: {refused:#}"
+        );
+
+        // Its own repository, wholly inside the boundary.
+        let contained = trial.path().join("contained");
+        std::fs::create_dir(&contained).unwrap();
+        for args in [vec!["init", "-q"]] {
+            git(&contained, &args).await.unwrap();
+        }
+        reaches_git_state_outside(&contained, trial.path())
+            .await
+            .expect("a self-contained repository stays inside its boundary");
+
+        // A `.git` file pointing at the formal repository's metadata.
+        let pointer = trial.path().join("pointer");
+        std::fs::create_dir(&pointer).unwrap();
+        std::fs::write(
+            pointer.join(".git"),
+            format!("gitdir: {}\n", formal.path().join(".git").display()),
+        )
+        .unwrap();
+        let refused = reaches_git_state_outside(&pointer, trial.path())
+            .await
+            .expect_err("a gitdir pointer out of the boundary must be refused");
+        assert!(
+            format!("{refused:#}").contains("experimentIsolation"),
+            "unhelpful refusal: {refused:#}"
+        );
+
+        // A `--shared` clone keeps local metadata but reads the formal
+        // object store, so the directory checks alone would pass it.
+        let shared = trial.path().join("shared");
+        git(
+            formal.path(),
+            &[
+                "clone",
+                "--shared",
+                "-q",
+                &formal.path().display().to_string(),
+                &shared.display().to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let refused = reaches_git_state_outside(&shared, trial.path())
+            .await
+            .expect_err("borrowed Git objects must be refused");
+        assert!(
+            format!("{refused:#}").contains("experimentIsolation"),
+            "unhelpful refusal: {refused:#}"
+        );
     }
 
     #[tokio::test]

@@ -47,17 +47,17 @@ nodes:
         properties:
           workspace: {type: string, minLength: 1}
           branch: {type: string, minLength: 1}
-  # Runs inside its own worktree, so `targetRef: current` is that feature's own
-  # branch and sibling implementations hold disjoint leases.
+  # Each feature runs in its own directory, so the default `.` lease is that
+  # directory and sibling implementations hold disjoint leases.
   - id: implement-feature
     uses: agent.session
     with:
       role: coder
       workspace: {op: ref, path: /input/workspace}
-      writeLease: {targetRef: current, ttlSeconds: 1800}
+      writeLease: {ttlSeconds: 1800}
     completion:
       all:
-        - {key: commit, verify: git.commitOnTarget}
+        - {key: commit, verify: value.nonEmpty}
         - {key: checks, verify: value.nonEmpty}
       output:
         type: object
@@ -82,10 +82,10 @@ nodes:
     uses: agent.session
     with:
       role: coder
-      writeLease: {targetRef: current, ttlSeconds: 900}
+      writeLease: {ttlSeconds: 900}
     completion:
       all:
-        - {key: commit, verify: git.commitOnTarget}
+        - {key: commit, verify: value.nonEmpty}
         - {key: checks, verify: value.nonEmpty}
       output:
         type: object

@@ -75,7 +75,7 @@ const ACTIVATION_SCHEMA: &str = "genehub.workflow.activation.v1";
 /// deliberately not offered; a Workflow that needs to *produce* a fact runs a
 /// node and submits the result as evidence, which a predicate here then
 /// judges.
-struct Verifier {
+pub(super) struct Verifier {
     id: &'static str,
     /// Whether the declaration must carry a non-empty `expected`.
     expects_value: bool,
@@ -119,7 +119,7 @@ const VERIFIERS: &[Verifier] = &[
     },
 ];
 
-fn verifier(id: &str) -> Option<&'static Verifier> {
+pub(super) fn verifier(id: &str) -> Option<&'static Verifier> {
     VERIFIERS.iter().find(|entry| entry.id == id)
 }
 
@@ -272,9 +272,21 @@ fn resolved_workspace(node: &NodeDefinition, input: &serde_json::Value) -> Resul
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WriteLeaseDefinition {
-    target_ref: String,
+    /// Project-relative directory this node claims exclusive write access to.
+    /// `.` is the Run's own task directory.
+    ///
+    /// This used to be a Git ref, which made the kernel responsible for
+    /// understanding branches. Exclusion is the part the platform can
+    /// actually guarantee for any project — a repository, a plain folder, an
+    /// asset depot — so that is the only part it still claims.
+    #[serde(default = "default_lease_resource")]
+    resource: String,
     #[serde(default = "default_lease_seconds")]
     ttl_seconds: u64,
+}
+
+fn default_lease_resource() -> String {
+    ".".into()
 }
 
 fn default_lease_seconds() -> u64 {
@@ -784,9 +796,8 @@ struct NodeRecord {
 struct LeaseRecord {
     run_id: String,
     node_id: String,
-    repository: String,
-    target_ref: String,
-    base_commit: String,
+    /// Absolute path of the directory held exclusively.
+    resource: String,
     expires_at_ms: i64,
 }
 
@@ -1187,14 +1198,28 @@ pub(crate) async fn list_packages(
 /// A package's version is its checkout's commit, and its origin is that
 /// checkout's remote. Nothing is stored: a receipt would be a second copy of
 /// a fact Git already owns, and the copy is the one that goes stale.
+///
+/// This is the only place the kernel still shells out to `git`, and it is
+/// deliberately allowed to fail: every value is optional and every error
+/// becomes "unknown". Trust comes from `source_digest`, which the platform
+/// computes itself, so a project with no repository — or a machine with no
+/// `git` — loses a provenance column and nothing else. Anything that must
+/// hold for correctness belongs outside this function.
 async fn package_provenance(root: &Path) -> (Option<String>, Option<String>, bool) {
-    let commit = crate::git::resolve_ref(root, "HEAD").await.ok();
-    let url = crate::git::remote_url(root).await.ok().flatten();
-    let dirty = crate::git::status(root)
-        .await
-        .map(|status| !status.clean)
-        .unwrap_or(false);
+    let commit = provenance_probe(crate::git::resolve_ref(root, "HEAD").await);
+    let url = provenance_probe(crate::git::remote_url(root).await).flatten();
+    let dirty =
+        provenance_probe(crate::git::status(root).await).is_some_and(|status| !status.clean);
     (url, commit, dirty)
+}
+
+/// Marks a Git read whose failure is an acceptable "unknown".
+///
+/// Naming it makes the boundary checkable: a test asserts that every
+/// `crate::git::` call in the Workflow kernel passes through here, so a
+/// future correctness check cannot quietly start depending on Git.
+fn provenance_probe<T>(result: Result<T>) -> Option<T> {
+    result.ok()
 }
 
 /// Plans the materialization of one package, without writing anything.
@@ -1941,7 +1966,7 @@ pub(crate) async fn complete(
         );
     }
     if success {
-        verify_evidence(&workspace.root, &run, &node, &evidence).await?;
+        verify_evidence(&node, &evidence)?;
     } else {
         control::validate_negative_result(reason.as_deref(), &evidence)?;
     }
@@ -2054,11 +2079,21 @@ async fn run_pack_script(
     let package_id = candidate.package.id.clone();
     let package = package::load(project_root, &package_id)?;
     let current = package::source_digest(&package)?;
-    let approved = state
+    // Fail closed. The approval is looked up for *this* package, because a
+    // project may hold several and the binding records only the one that
+    // built last: comparing against another package's digest would be
+    // comparing unrelated quantities. No recorded approval therefore means
+    // no execution, never "allowed by default" — this grant runs code.
+    let Some(approved) = state
         .project_control
-        .bound_pack_digest(&run.workspace_id)
-        .unwrap_or_default();
-    if !approved.is_empty() && approved != current {
+        .bound_pack_digest(&run.workspace_id, &package_id)
+    else {
+        bail!(
+            "capabilityRevoked: Workflow 包 {package_id} 没有已记录的批准；\
+             先运行 `workflow build --package {package_id}` 取得授权再执行脚本节点"
+        );
+    };
+    if approved != current {
         bail!(
             "capabilityRevoked: Workflow 包 {package_id} 的源码已变更（批准时 {approved}，当前 {current}）；\
              请重新运行 `workflow build --package {package_id}` 取得授权后再执行脚本节点"
@@ -2554,12 +2589,12 @@ fn settle_if_terminal(run: &mut RunRecord) {
     }
 }
 
-async fn verify_evidence(
-    project_root: &Path,
-    run: &RunRecord,
-    node: &NodeDefinition,
-    evidence: &BTreeMap<String, String>,
-) -> Result<()> {
+/// Judges submitted evidence against the node's declaration.
+///
+/// Every verifier is a pure predicate over the value, so this needs neither
+/// the project on disk nor the Run's history: that is precisely what makes a
+/// verdict recomputable from a Run record alone.
+fn verify_evidence(node: &NodeDefinition, evidence: &BTreeMap<String, String>) -> Result<()> {
     let expected: BTreeSet<&str> = node
         .completion
         .all
@@ -2587,55 +2622,7 @@ async fn verify_evidence(
                 .with_context(|| format!("证据 {}", requirement.key))?;
             continue;
         }
-        match requirement.verify.as_str() {
-            "git.commitOnTarget" => {
-                let lease = run
-                    .leases
-                    .get(&node.id)
-                    .ok_or_else(|| anyhow!("节点 {} 没有目标 ref 租约", node.id))?;
-                let repository = Path::new(&lease.repository);
-                if !repository.starts_with(project_root) && repository != project_root {
-                    bail!("租约仓库不属于当前项目");
-                }
-                let current = crate::git::resolve_ref(repository, &lease.target_ref).await?;
-                if current != value {
-                    bail!(
-                        "commit 证据不是租约目标 {} 的当前提交：目标为 {}，收到 {}",
-                        lease.target_ref,
-                        current,
-                        value
-                    );
-                }
-                if current == lease.base_commit {
-                    bail!("目标 ref 没有产生新提交");
-                }
-                if !crate::git::is_ancestor(repository, &lease.base_commit, &current).await? {
-                    bail!("目标 ref 的新提交不是租约基线的后继");
-                }
-            }
-            other => bail!("未注册的 evidence verifier：{other}"),
-        }
-    }
-    Ok(())
-}
-
-async fn validate_execution_repository(
-    execution_root: &Path,
-    repository: &Path,
-    experimental: bool,
-) -> Result<()> {
-    let (private, common) = crate::git::repository_directories(repository).await?;
-    if experimental {
-        let root = execution_root.canonicalize()?;
-        if !private.starts_with(&root) || !common.starts_with(&root) {
-            bail!("experimentIsolation: Git node metadata must belong to the test directory, not the formal repository or an external shared worktree");
-        }
-        // A --shared clone can still depend on the formal object store even
-        // though its .git directory is local. Keep trial repositories complete.
-        let alternates = common.join("objects/info/alternates");
-        if alternates.exists() && !fs::read_to_string(&alternates)?.trim().is_empty() {
-            bail!("experimentIsolation: copy Git objects without shared alternates before running this Candidate");
-        }
+        bail!("未注册的 evidence verifier：{}", requirement.verify);
     }
     Ok(())
 }
@@ -2651,29 +2638,32 @@ async fn acquire_lease(
     if policy.ttl_seconds == 0 || policy.ttl_seconds > MAX_LEASE_SECONDS {
         bail!("writeLease.ttlSeconds 必须在 1..={MAX_LEASE_SECONDS} 之间");
     }
-    validate_execution_repository(
-        run.execution_root
-            .as_deref()
-            .map(Path::new)
-            .unwrap_or(&runtime.project_root),
-        repository,
-        run.experimental,
-    )
-    .await?;
-    let status = crate::git::status(repository).await?;
-    if !status.clean {
-        bail!("目标 Workspace 工作区不干净，不能取得直接写入租约");
+    // A trial executes a Candidate no one has approved, so before it is given
+    // a write lease it must be shown to be unable to reach the formal
+    // project's Git state. Asked only of trials: an ordinary Run legitimately
+    // works in a worktree whose repository lives outside the project
+    // directory, and that is the normal development layout, not an escape.
+    //
+    // This stays in the platform on purpose. It is not a Git feature the
+    // kernel wants; it is a containment boundary, and containment is exactly
+    // what J1 says the platform must enforce itself. It could not be
+    // delegated to a package script even in principle — the script would be
+    // supplied by the very package the boundary constrains.
+    if run.experimental {
+        crate::git::reaches_git_state_outside(
+            repository,
+            run.execution_root
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or(&runtime.project_root),
+        )
+        .await?;
     }
-    let target_ref = if policy.target_ref == "current" {
-        crate::git::current_ref(repository).await?
-    } else {
-        policy.target_ref.clone()
-    };
-    if !target_ref.starts_with("refs/heads/") {
-        bail!("直接写入租约只接受本地分支 ref：{target_ref}");
-    }
-    let base_commit = crate::git::resolve_ref(repository, &target_ref).await?;
-    let key = hex_digest(format!("{}\0{target_ref}", repository.display()).as_bytes());
+    // The claimed directory is resolved against the node's own working
+    // directory and must stay inside it, so a lease cannot reach a sibling
+    // task's files.
+    let resource = existing_relative_within(repository, &policy.resource, "写租约目录")?;
+    let key = hex_digest(resource.display().to_string().as_bytes());
     let directory = runtime.directory(Path::new("ref-leases"), true)?;
     let guard_path = directory.join(format!("{key}.guard"));
     let _guard = lock_exclusive_file(&guard_path, "目标 ref 租约正在被另一个请求修改")?;
@@ -2684,9 +2674,11 @@ async fn acquire_lease(
             // The ref reservation belongs to the Run across read-only review.
             // Each writing node receives its own fresh baseline in run.leases.
             // Check every earlier holder, including sibling branches.
-            for previous in run.leases.values().filter(|lease| {
-                lease.repository == existing.repository && lease.target_ref == existing.target_ref
-            }) {
+            for previous in run
+                .leases
+                .values()
+                .filter(|lease| lease.resource == existing.resource)
+            {
                 let node = run
                     .nodes
                     .get(&previous.node_id)
@@ -2713,8 +2705,8 @@ async fn acquire_lease(
                 )
             {
                 bail!(
-                    "目标 ref {} 已由 Workflow Run {} 独占",
-                    existing.target_ref,
+                    "目录 {} 已由 Workflow Run {} 独占",
+                    existing.resource,
                     existing.run_id
                 );
             }
@@ -2723,9 +2715,7 @@ async fn acquire_lease(
     let record = LeaseRecord {
         run_id: run.id.clone(),
         node_id: node_id.to_string(),
-        repository: repository.display().to_string(),
-        target_ref,
-        base_commit,
+        resource: resource.display().to_string(),
         expires_at_ms: now_ms().saturating_add(
             i64::try_from(policy.ttl_seconds.saturating_mul(1000)).unwrap_or(i64::MAX),
         ),
@@ -2749,7 +2739,7 @@ async fn release_leases(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
 }
 
 async fn release_lease(runtime: &RuntimeStore, lease: &LeaseRecord) -> Result<()> {
-    let key = hex_digest(format!("{}\0{}", lease.repository, lease.target_ref).as_bytes());
+    let key = hex_digest(lease.resource.as_bytes());
     let directory = runtime.directory(Path::new("ref-leases"), false)?;
     let path = directory.join(format!("{key}.json"));
     if load_lease_if_present(&path)?.is_none() {
@@ -3499,7 +3489,7 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
                 );
             }
             let registered = verifier(&requirement.verify);
-            if registered.is_none() && requirement.verify != "git.commitOnTarget" {
+            if registered.is_none() {
                 bail!(
                     "未注册的 evidence verifier：{}；已注册：{}",
                     requirement.verify,
@@ -3542,12 +3532,6 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
                     );
                 }
                 None => {}
-            }
-            if requirement.verify == "git.commitOnTarget" && node.inputs.write_lease.is_none() {
-                bail!(
-                    "节点 {} 使用 git.commitOnTarget，但没有声明 with.writeLease",
-                    node.id
-                );
             }
         }
         for (event, targets) in &node.on {
@@ -3902,29 +3886,42 @@ fn run_path(runtime: &RuntimeStore, run_id: &str, create_parent: bool) -> Result
         .join(format!("{run_id}.json")))
 }
 
-/// Whether a Run in this project still depends on `carrier_workspace_id` as
-/// its execution carrier.
+/// Stable ids of the non-terminal Runs that pinned `carrier_workspace_id`,
+/// either as their Executor or as the Executor owning it.
 ///
-/// Asked before an AgentSpace is moved in the ownership tree. A Run pinned
-/// its carrier when it started, so reparenting that Space mid-flight would
-/// leave the Run pointing at a Space that now belongs to a different project
-/// and scope — the change is refused instead of silently reinterpreted.
+/// Asked before an AgentSpace is changed. A Run pins its carrier when it
+/// starts, so altering that Space mid-flight would reinterpret the Run
+/// through a different team; altering an unrelated one cannot. The project
+/// as a whole is the wrong scope for that question, and using it meant any
+/// Run anywhere froze the entire project's team — the busier the project,
+/// the less maintainable it became.
 ///
-/// Runs have no index, so this scans the project's Run directory. The scan is
-/// capped: a directory past the cap cannot be proven safe, and reporting a
-/// dependency is the conservative answer.
-#[cfg(test)]
-fn carrier_has_active_run(
+/// Worker Spaces are resolved as children of the Executor, so a Run depends
+/// on its Executor and on that Executor's children. `executor_parent` is
+/// the candidate Space's parent, which the caller reads from the registry
+/// because this module deliberately knows nothing about the Space tree.
+///
+/// Runs have no index, so this scans the project's Run directory. The scan
+/// is capped: a directory past the cap cannot be proven safe, and reporting
+/// a dependency is the conservative answer.
+pub(crate) fn carrier_active_run_ids(
     data_root: &Path,
     project_workspace_id: &str,
     project_root: &Path,
     carrier_workspace_id: &str,
-) -> Result<bool> {
-    Ok(
-        active_run_records(data_root, project_workspace_id, project_root)?
-            .into_iter()
-            .any(|run| run.executor_workspace_id.as_deref() == Some(carrier_workspace_id)),
-    )
+    executor_parent: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut ids = active_run_records(data_root, project_workspace_id, project_root)?
+        .into_iter()
+        .filter(|run| {
+            let pinned = run.executor_workspace_id.as_deref();
+            pinned == Some(carrier_workspace_id) || (pinned.is_some() && pinned == executor_parent)
+        })
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// Stable ids of every non-terminal Run in one project.
@@ -4479,6 +4476,58 @@ mod tests {
         write(&package.join("prompts/direct-worker.md"), "实现 Worker。\n");
         ensure_source_visible(&root.join(".genethub")).unwrap();
         package
+    }
+
+    /// The de-Git boundary, asserted on the source rather than trusted to a
+    /// review: the kernel may not reach for Git to decide anything it could
+    /// have decided for a project that has no repository.
+    ///
+    /// Two exceptions, named here so that adding a third has to be argued
+    /// for rather than slipped in:
+    ///
+    /// - `package_provenance` — a display fact, allowed to fail, never read
+    ///   by a check. Losing it costs a column in `workflow list`.
+    /// - `reaches_git_state_outside` — a containment boundary for trials.
+    ///   It is Git-shaped because the escapes it closes (a `gitdir:` pointer,
+    ///   shared object alternates) are Git-shaped; a path check cannot see
+    ///   them. J1 keeps this in the platform rather than exiling it: the
+    ///   platform must enforce containment itself, and delegating it to a
+    ///   package script is not even coherent, because the script would come
+    ///   from the package being contained.
+    #[test]
+    fn the_workflow_kernel_names_no_git_concept_it_depends_on() {
+        let sources = [
+            ("workflow/mod.rs", include_str!("mod.rs")),
+            ("workflow/structured.rs", include_str!("structured.rs")),
+            ("workflow/control.rs", include_str!("control.rs")),
+            ("workflow/supervision.rs", include_str!("supervision.rs")),
+            ("workflow/check.rs", include_str!("check.rs")),
+            ("workflow/build.rs", include_str!("build.rs")),
+            ("workflow/package.rs", include_str!("package.rs")),
+        ];
+        for (name, source) in sources {
+            // Stop at each file's own test module: fixtures and this scanner
+            // are not the kernel's execution paths.
+            let production = source
+                .split_once("\n#[cfg(test)]\n")
+                .map(|(before, _)| before)
+                .unwrap_or(source);
+            for (index, line) in production.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or("");
+                if !code.contains("crate::git::") {
+                    continue;
+                }
+                let allowed = name == "workflow/mod.rs"
+                    && (code.contains("provenance_probe")
+                        || code.contains("reaches_git_state_outside"));
+                assert!(
+                    allowed,
+                    "{name}:{} reaches for Git outside the two named exceptions \
+                     (package provenance, trial containment): {code}",
+                    index + 1,
+                );
+            }
+        }
     }
 
     /// Every registered verifier must be a pure predicate: the same value and
@@ -5191,12 +5240,10 @@ mod tests {
         let lease = LeaseRecord {
             run_id: "wr_forged".into(),
             node_id: "implement".into(),
-            repository: project.path().display().to_string(),
-            target_ref: "refs/heads/main".into(),
-            base_commit: "deadbeef".into(),
+            resource: project.path().display().to_string(),
             expires_at_ms: i64::MAX,
         };
-        let key = hex_digest(format!("{}\0{}", lease.repository, lease.target_ref).as_bytes());
+        let key = hex_digest(lease.resource.as_bytes());
         let untrusted_lease = untrusted.join(format!("ref-leases/{key}.json"));
         fs::create_dir_all(untrusted_lease.parent().unwrap()).unwrap();
         fs::write(&untrusted_lease, serde_json::to_vec(&lease).unwrap()).unwrap();
@@ -5239,16 +5286,14 @@ mod tests {
         let old = LeaseRecord {
             run_id: "wr_old".into(),
             node_id: "implement".into(),
-            repository: project.path().display().to_string(),
-            target_ref: "refs/heads/main".into(),
-            base_commit: "old".into(),
+            resource: project.path().display().to_string(),
             expires_at_ms: 1,
         };
         let mut successor = old.clone();
         successor.run_id = "wr_new".into();
-        successor.base_commit = "new".into();
+        successor.node_id = "repair".into();
         successor.expires_at_ms = i64::MAX;
-        let key = hex_digest(format!("{}\0{}", old.repository, old.target_ref).as_bytes());
+        let key = hex_digest(old.resource.as_bytes());
         let lease_path = directory.join(format!("{key}.json"));
         let guard_path = directory.join(format!("{key}.guard"));
         crate::config::save_private(&lease_path, &serde_json::to_vec(&old).unwrap()).unwrap();
@@ -5265,7 +5310,7 @@ mod tests {
 
         let current = load_lease_if_present(&lease_path).unwrap().unwrap();
         assert_eq!(current.run_id, successor.run_id);
-        assert_eq!(current.base_commit, successor.base_commit);
+        assert_eq!(current.node_id, successor.node_id);
     }
 
     #[test]
@@ -5776,24 +5821,36 @@ mod tests {
             updated_at_ms: 1,
             snapshot_relative: None,
         };
-        let busy = |space: &str| {
-            carrier_has_active_run(data.path(), "w_project", project.path(), space).unwrap()
+        let busy = |space: &str, parent: Option<&str>| {
+            !carrier_active_run_ids(data.path(), "w_project", project.path(), space, parent)
+                .unwrap()
+                .is_empty()
         };
 
         assert!(
-            !busy("w_executor"),
+            !busy("w_executor", None),
             "a project that has never dispatched pins nothing"
         );
         save_run(&runtime, &carrier("completed", Some("w_executor"))).unwrap();
         assert!(
-            !busy("w_executor"),
+            !busy("w_executor", None),
             "a settled Run must not keep its carrier pinned forever"
         );
         save_run(&runtime, &carrier("running", Some("w_executor"))).unwrap();
-        assert!(busy("w_executor"));
+        assert!(busy("w_executor", None));
         assert!(
-            !busy("w_other"),
+            !busy("w_other", None),
             "one busy carrier must not freeze the whole tree"
+        );
+        // A Worker Space is resolved as a child of the Executor, so a Run on
+        // the Executor also pins its children — but only its own.
+        assert!(
+            busy("w_worker", Some("w_executor")),
+            "a Worker under the busy Executor is part of that Run's team"
+        );
+        assert!(
+            !busy("w_worker", Some("w_other")),
+            "a Worker under an idle Executor is not pinned by another team's Run"
         );
     }
 

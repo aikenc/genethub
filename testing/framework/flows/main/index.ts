@@ -440,11 +440,11 @@ export function seedDirectChangePackage(input: {
           with: {
             role: "worker",
             workspace: ".",
-            writeLease: { targetRef: "current", ttlSeconds: 3600 },
+            writeLease: { ttlSeconds: 3600 },
           },
           completion: {
             all: [
-              { key: "commit", verify: "git.commitOnTarget" },
+              { key: "commit", verify: "value.nonEmpty" },
               { key: "checks", verify: "value.nonEmpty" },
             ],
           },
