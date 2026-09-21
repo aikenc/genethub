@@ -191,6 +191,7 @@ export function TimelineView({
   state,
   forkController,
   forwardController,
+  onForwardToNewSession,
   bottomInset = 0,
   onScrollBack,
   onReturnToBottom,
@@ -200,6 +201,8 @@ export function TimelineView({
   state: TimelineState;
   forkController?: ForkController;
   forwardController?: ForwardController;
+  /** Opens the shell detail that owns a newly parked forward draft. */
+  onForwardToNewSession?(): void;
   /** Overlay clearance added to scroll content without shrinking its viewport. */
   bottomInset?: number;
   /** Fired once a sustained drag back through history says the reader has left
@@ -814,6 +817,7 @@ export function TimelineView({
           messages={forwardInput.messages}
           rounds={forwardInput.rounds}
           controller={forwardController}
+          onNewSession={onForwardToNewSession}
           onClose={() => {
             setForwardOpen(false);
             setForwardInput(null);

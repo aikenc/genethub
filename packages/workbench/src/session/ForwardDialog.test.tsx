@@ -127,6 +127,7 @@ async function waitForBuilt() {
 describe("ForwardDialog", () => {
   it("parks the capsule on the draft composer for a same-machine new session", async () => {
     const onConfirmed = vi.fn();
+    const onNewSession = vi.fn();
     render(
       <ForwardDialog
         source={SOURCE}
@@ -134,6 +135,7 @@ describe("ForwardDialog", () => {
         rounds={[]}
         onClose={vi.fn()}
         onConfirmed={onConfirmed}
+        onNewSession={onNewSession}
       />,
     );
 
@@ -144,6 +146,7 @@ describe("ForwardDialog", () => {
     expect(draft?.sessionId).toBeNull();
     expect(draft?.capsule).toContain("你好");
     expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
+    expect(onNewSession).toHaveBeenCalledOnce();
     expect(onConfirmed).toHaveBeenCalled();
   });
 

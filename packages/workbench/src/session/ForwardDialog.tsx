@@ -53,6 +53,7 @@ export function ForwardDialog({
   controller,
   onClose,
   onConfirmed,
+  onNewSession,
 }: {
   source: ForwardSource;
   /** Selected messages in timeline order, already round-attributed. */
@@ -64,6 +65,8 @@ export function ForwardDialog({
   onClose(): void;
   /** After the capsule is parked or delivered; defaults to `onClose`. */
   onConfirmed?(): void;
+  /** Reveal the local draft after parking a forward in a new session. */
+  onNewSession?(): void;
 }) {
   const client = useWorkbench((state) => state.client);
   const agents = useWorkbench((state) => state.agents);
@@ -263,6 +266,7 @@ export function ForwardDialog({
             ? { attachments: built.imageAttachments }
             : {}),
         });
+        onNewSession?.();
       } else if (targetSessionId) {
         setForwardDraft({
           sessionId: targetSessionId,

@@ -932,6 +932,12 @@ export function App({
                             state={workbench.timeline}
                             {...(forkController ? { forkController } : {})}
                             {...(forwardController ? { forwardController } : {})}
+                            onForwardToNewSession={() => {
+                              const workspaceId = useWorkbench.getState().draft?.workspaceId;
+                              if (!workspaceId) return;
+                              rootNextPage();
+                              openOverview(workspaceId);
+                            }}
                             bottomInset={
                               workbench.timeline.pendingPermission || workbench.timeline.permissionProgress ? 0 : composerHeight
                             }
