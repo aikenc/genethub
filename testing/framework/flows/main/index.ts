@@ -509,6 +509,65 @@ export async function createBuiltinSession(
   return session.data.id;
 }
 
+/**
+ * Substrings marking a coding-tuned model, most specific first. Matched
+ * against whatever this machine has configured rather than naming a vendor's
+ * exact model id, which changes without notice.
+ */
+const PREFERRED_REAL_MODELS = ["for-coding", "coding", "coder", "code"] as const;
+
+/**
+ * Moves a Session onto a real model this machine actually holds credentials
+ * for, and reports which one.
+ *
+ * Setup normally runs against the mock, which registers itself under the
+ * `deepseek` provider id. A real-LLM case that seeds host providers is
+ * therefore still pointing at a provider id whose credentials may be absent
+ * — the model id is asked of the live catalog rather than hardcoded, so the
+ * case follows whatever this machine is configured with instead of pinning a
+ * vendor. Blocks rather than fails when nothing is configured: an absent
+ * credential is an environment fact, not a product defect.
+ */
+export async function selectRealModel(
+  client: ProductSession["client"],
+  sessionId: string,
+  prefer: readonly string[] = PREFERRED_REAL_MODELS,
+): Promise<string> {
+  const agent = await requireAgentReady(client, "genet");
+  // The mock's provider id is excluded by name: its catalog entries look
+  // exactly like real ones, and picking one would silently re-run the case
+  // against the mock while reporting it as real.
+  const candidates = agent.catalog.models
+    .map((model) => model.id)
+    .filter((id) => !id.startsWith("deepseek/"));
+  if (candidates.length === 0) {
+    throw new BlockedError(
+      `no real model is configured on this machine; genet offers ${
+        agent.catalog.models.map((model) => model.id).join(", ") || "nothing"
+      }`,
+    );
+  }
+  // Prefer a coding-tuned model where one is configured. A PM case drives
+  // tools and a Workflow rather than holding a conversation, and a general
+  // chat model reads the same prompt as an invitation to answer in prose.
+  const modelId =
+    prefer.map((wanted) => candidates.find((id) => id.includes(wanted))).find(Boolean) ??
+    candidates[0]!;
+  await client.call({ type: "session.setModel", payload: { sessionId, modelId } });
+  // Confirmed from the Session's own snapshot rather than from the call
+  // returning: the point of this helper is that the turn afterwards really
+  // runs on the real model.
+  const snapshot = await client.call({ type: "session.get", payload: { sessionId } });
+  if (snapshot?.type !== "snapshot" || snapshot.data.summary.modelId !== modelId) {
+    throw new Error(
+      `the Session did not move onto ${modelId}: ${JSON.stringify(
+        snapshot?.type === "snapshot" ? snapshot.data.summary.modelId : snapshot?.type,
+      )}`,
+    );
+  }
+  return modelId;
+}
+
 export async function requireAgentReady(
   client: ProductSession["client"],
   agentId: string,

@@ -23,7 +23,7 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
   oracle: "After mechanical takeover setup, the configured real model corrects delegation or updates its own project method; read-only follow-up does not start implementation, activate a candidate or repeat a Run",
   catches: ["scripted PM answers are sold as autonomous behavior", "workflow pseudocode becomes PM milestone dispatches", "self-improvement edits only generated assets", "an explanatory follow-up repeats execution"],
   tags: ["workflow", "pm-reflection-real"], llm: { default: "real" },
-  expectedDurationMs: 180_000, timeoutMs: 600_000, retention: true,
+  expectedDurationMs: 420_000, timeoutMs: 1_500_000, retention: true,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "real-llm" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
   productInterfaces: ["session.send", "session.respondPermission", "genet workflow build", "genet space builder", "genet workflow", "workflow.history"],
@@ -69,6 +69,12 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
     opened.client.close(); await cli(["daemon", "stop"]);
     t.flows.main.seedHostBetaProviders(t.env); // No credentials enter prompts or reports.
     await cli(["daemon", "start"]); opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+    // Setup ran on the mock, which registers itself under the `deepseek`
+    // provider id. Move the PM onto the real model now that credentials are
+    // present; the package's roles declare no model of their own, so the
+    // Workers it dispatches inherit this one.
+    const realModel = await t.flows.main.selectRealModel(opened.client, pm);
+    t.note(`real PM model: ${realModel}`);
     const mockCalls = opened.mock.requests.length;
     const before = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });
     if (before?.type !== "workflowProject") throw new Error("installed catalog unavailable");
@@ -77,7 +83,7 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
     const turn = async (prompt: string) => {
       const events = await t.flows.main.attachEventLog(opened.client, pm);
       await t.flows.main.sendPrompt(opened.client, pm, prompt);
-      await t.tools.waitUntil(async () => events.some(e => e.type === "turnFailed") || (events.some(e => e.type === "turnCompleted") && (await snapshot(pm)).summary.status === "idle"), 240_000);
+      await t.tools.waitUntil(async () => events.some(e => e.type === "turnFailed") || (events.some(e => e.type === "turnCompleted") && (await snapshot(pm)).summary.status === "idle"), 420_000);
       const failed = events.find(e => e.type === "turnFailed");
       if (failed) {
         const detail = JSON.stringify(failed.raw);
@@ -89,7 +95,7 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
     };
     if (scenario === "correction") {
       await turn("纠正你上一条：远程攻击是 ranged combat，不是联机。我的原目标是评估近战与远程战斗的实现范围。先请业务团队只做可行性评估，保留未知项，绝不开发或改工作流。你也要核对并修正自己的理解和委派。");
-      await t.tools.waitUntil(async () => (await history()).some(r => r.status === "completed" || r.status === "blocked"), 180_000);
+      await t.tools.waitUntil(async () => (await history()).some(r => r.status === "completed" || r.status === "blocked"), 300_000);
       const runs = await history();
       t.assertions.assert(runs.length === 1 && runs[0]!.workflowId === "game-assessment" && runs[0]!.status === "completed", "real PM failed to correct business delegation");
       t.assertions.assert(runs[0]!.nodes.every(n => n.uses !== "agent.session" || n.evidence.report), "assessment lacks its returned business report");
@@ -99,7 +105,7 @@ for (const scenario of ["correction", "workflow-intent", "self-method"] as const
       await turn("纠正：下面是完整 Workflow 需求，不是 PM 的逐里程碑任务清单：需求评审→遍历动态里程碑→开发自测→逐项交付评审→本项最多两次尝试，仍未过则 break→保留已验收成果重规划，全部在一个 Executor Run 闭环。先交 WM 对照当前配置，吻合可给出有依据的无需修改结论。不激活，不制作游戏，不让 PM 拆成多个开发 Run。");
       const runs = await history();
       t.assertions.assert(runs.length === 1 && runs[0]!.workflowId === "workflow-improvement", "real PM executed the pseudocode instead of delegating its whole requirement to WM");
-      await t.tools.waitUntil(async () => ["completed", "blocked"].includes((await history())[0]!.status), 180_000);
+      await t.tools.waitUntil(async () => ["completed", "blocked"].includes((await history())[0]!.status), 300_000);
       await turn("这次只说明证据范围：即使 WM 给出 structure passed，也不能直接证明改进有效。先保留未验证结论，不再启动实验、评审或开发，不激活。");
       t.assertions.assert((await history()).length === 1, "evidence explanation triggered another delegation");
     } else {
