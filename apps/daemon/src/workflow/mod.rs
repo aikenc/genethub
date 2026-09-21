@@ -213,7 +213,8 @@ struct NodeInputs {
     #[serde(default)]
     write_lease: Option<WriteLeaseDefinition>,
     /// Present on `uses: pack.script` nodes. Flattened so a node declares
-    /// `with: {script, input, timeoutSeconds}` rather than nesting.
+    /// `with: {script, args, interpreter, env, cwd, input, timeoutSeconds}`
+    /// rather than nesting.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     script: Option<script::ScriptDefinition>,
 }
@@ -2106,19 +2107,14 @@ async fn run_pack_script(
         .as_deref()
         .map(|relative| project_root.join(relative))
         .unwrap_or_else(|| project_root.to_path_buf());
-    let workspace = state.workspaces.get(&run.workspace_id).await?;
-    // Reuses the Session confinement policy rather than inventing a second
-    // one: a package script is no more trusted than the Agent that would
-    // otherwise have run the same command.
-    let confinement = crate::isolation::required_for(
-        &crate::authz::Principal::SessionController {
-            session_id: run.parent_session_id.clone(),
-        },
-        &workspace,
-    )
-    .map_err(|refusal| anyhow!("pack.script 无法取得隔离：{refusal}"))?;
-
-    let result = script::run(&script_path, &task_cwd, confinement.as_ref(), definition).await?;
+    // Deliberately unconfined. The Agent in the next node can already run any
+    // command on this machine, so sandboxing the declared, digest-anchored
+    // path while leaving the undeclared one open would protect nothing and
+    // break every script that needs a credential, a system tool or the
+    // network. Isolating the machine is a deployment decision — run GeneHub
+    // in a VM if this account should not be fully reachable — and the
+    // platform has no business making it for the user.
+    let result = script::run(&script_path, &task_cwd, definition).await?;
     let evidence = result
         .evidence
         .iter()
