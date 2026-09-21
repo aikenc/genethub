@@ -30,6 +30,7 @@ mod control;
 mod output;
 mod package;
 mod request;
+mod script;
 mod structured;
 mod supervision;
 pub(crate) use authoring::procedures_schema as authoring_procedures_schema;
@@ -64,6 +65,63 @@ const PROCEDURES_SCHEMA: &str = "genehub.workflow.procedures.v1";
 const ROLE_SCHEMA: &str = "genehub.workflow.role.v1";
 const CANDIDATE_SCHEMA: &str = "genehub.workflow.candidate.v1";
 const ACTIVATION_SCHEMA: &str = "genehub.workflow.activation.v1";
+
+/// One evidence verifier the platform knows how to evaluate.
+///
+/// Every entry is a **pure predicate over the submitted value**: same value,
+/// same declaration, same verdict, forever. That is what keeps an audit chain
+/// recomputable — anyone holding a Run record can re-run the judgment without
+/// re-running whatever produced the fact. Executable verifiers are
+/// deliberately not offered; a Workflow that needs to *produce* a fact runs a
+/// node and submits the result as evidence, which a predicate here then
+/// judges.
+struct Verifier {
+    id: &'static str,
+    /// Whether the declaration must carry a non-empty `expected`.
+    expects_value: bool,
+    check: fn(value: &str, expected: Option<&str>) -> Result<()>,
+}
+
+/// The registry. Adding a declarative predicate is a table entry rather than
+/// a new match arm threaded through validation and evaluation.
+const VERIFIERS: &[Verifier] = &[
+    Verifier {
+        id: "value.nonEmpty",
+        expects_value: false,
+        check: |value, _| {
+            if value.is_empty() {
+                bail!("证据不能为空");
+            }
+            Ok(())
+        },
+    },
+    Verifier {
+        id: "value.equals",
+        expects_value: true,
+        check: |value, expected| {
+            let expected = expected.expect("value.equals declares an expected value");
+            if value != expected {
+                bail!("证据必须等于 {expected:?}，收到 {value:?}");
+            }
+            Ok(())
+        },
+    },
+    Verifier {
+        id: "value.oneOf",
+        expects_value: true,
+        check: |value, expected| {
+            let expected = expected.expect("value.oneOf declares an expected value");
+            if !expected.split('|').any(|candidate| candidate.trim() == value) {
+                bail!("证据必须是 {expected:?} 之一，收到 {value:?}");
+            }
+            Ok(())
+        },
+    },
+];
+
+fn verifier(id: &str) -> Option<&'static Verifier> {
+    VERIFIERS.iter().find(|entry| entry.id == id)
+}
 
 /// The compiled identity of one package's source.
 ///
@@ -154,6 +212,10 @@ struct NodeInputs {
     workspace: Option<WorkspaceBinding>,
     #[serde(default)]
     write_lease: Option<WriteLeaseDefinition>,
+    /// Present on `uses: pack.script` nodes. Flattened so a node declares
+    /// `with: {script, input, timeoutSeconds}` rather than nesting.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    script: Option<script::ScriptDefinition>,
 }
 
 /// Where a node instance works. A string is the project-relative directory an
@@ -1960,6 +2022,123 @@ fn runtime_node(run: &RunRecord, id: &str) -> Result<NodeDefinition> {
     Ok(node)
 }
 
+/// What one `pack.script` node settled to.
+struct ScriptOutcome {
+    output: serde_json::Value,
+    outcome: genehub_proto::WorkflowNodeOutcome,
+    status: String,
+}
+
+/// Runs a package's script for one node and turns its report into a node
+/// settlement.
+///
+/// Two boundaries are enforced here rather than trusted to the script:
+///
+/// - **J2, at execution time.** The script must live in the package the Run
+///   pinned, and that package's source must still hash to what was approved.
+///   `git pull` is how a package upgrades, and it changes the source without
+///   passing any challenge, so a Run that started under one approval must not
+///   silently execute code from another.
+/// - **Produce and judge stay apart.** The script's `evidence` is judged by
+///   the ordinary verifier registry, exactly as an Agent's would be. A script
+///   cannot approve its own work by returning `ok: true`.
+async fn run_pack_script(
+    state: &Shared,
+    project_root: &Path,
+    run: &RunRecord,
+    node: &NodeDefinition,
+    definition: &script::ScriptDefinition,
+) -> Result<ScriptOutcome> {
+    let runtime = RuntimeStore::new(&state.paths.root, &run.workspace_id, project_root)?;
+    let candidate = load_candidate(&runtime, &run.dcg_digest)?;
+    let package_id = candidate.package.id.clone();
+    let package = package::load(project_root, &package_id)?;
+    let current = package::source_digest(&package)?;
+    let approved = state
+        .project_control
+        .bound_pack_digest(&run.workspace_id)
+        .unwrap_or_default();
+    if !approved.is_empty() && approved != current {
+        bail!(
+            "capabilityRevoked: Workflow 包 {package_id} 的源码已变更（批准时 {approved}，当前 {current}）；\
+             请重新运行 `workflow build --package {package_id}` 取得授权后再执行脚本节点"
+        );
+    }
+
+    let script_path = script::resolve_script(&package.root, &definition.script)?;
+    let task_cwd = run
+        .execution_root
+        .as_deref()
+        .map(|relative| project_root.join(relative))
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let workspace = state.workspaces.get(&run.workspace_id).await?;
+    // Reuses the Session confinement policy rather than inventing a second
+    // one: a package script is no more trusted than the Agent that would
+    // otherwise have run the same command.
+    let confinement = crate::isolation::required_for(
+        &crate::authz::Principal::SessionController {
+            session_id: run.parent_session_id.clone(),
+        },
+        &workspace,
+    )
+    .map_err(|refusal| anyhow!("pack.script 无法取得隔离：{refusal}"))?;
+
+    let result = script::run(&script_path, &task_cwd, confinement.as_ref(), definition).await?;
+    let evidence = result
+        .evidence
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    // The script's own facts are judged by the same registry an Agent's
+    // evidence goes through.
+    let declared = node
+        .completion
+        .all
+        .iter()
+        .map(|requirement| requirement.key.clone())
+        .collect::<BTreeSet<_>>();
+    let submitted = evidence.keys().cloned().collect::<BTreeSet<_>>();
+    if declared != submitted {
+        bail!(
+            "pack.script 节点 {} 声明的证据是 {:?}，脚本提交了 {:?}",
+            node.id,
+            declared,
+            submitted
+        );
+    }
+    for requirement in &node.completion.all {
+        let value = evidence
+            .get(&requirement.key)
+            .expect("key sets were compared")
+            .trim();
+        let verifier = verifier(&requirement.verify).ok_or_else(|| {
+            anyhow!(
+                "pack.script 节点 {} 使用了未注册的 verifier {}",
+                node.id,
+                requirement.verify
+            )
+        })?;
+        (verifier.check)(value, requirement.expected.as_deref())
+            .with_context(|| format!("证据 {}", requirement.key))?;
+    }
+
+    let outcome = if result.ok {
+        genehub_proto::WorkflowNodeOutcome::completed()
+    } else {
+        genehub_proto::WorkflowNodeOutcome("failed".into())
+    };
+    Ok(ScriptOutcome {
+        output: serde_json::json!({
+            "ok": result.ok,
+            "evidence": evidence,
+            "revision": result.revision,
+            "message": result.message,
+        }),
+        status: if result.ok { "completed" } else { "failed" }.into(),
+        outcome,
+    })
+}
+
 async fn activate(
     state: &Shared,
     project_root: &Path,
@@ -1983,6 +2162,30 @@ async fn activate(
                 continue;
             }
             match node.uses.as_str() {
+                "pack.script" => {
+                    let definition = node
+                        .inputs
+                        .script
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("pack.script 节点 {} 缺少 with.script", node.id))?;
+                    let outcome = run_pack_script(
+                        state,
+                        project_root,
+                        run,
+                        &node,
+                        definition,
+                    )
+                    .await?;
+                    let record = run.nodes.get_mut(&node_id).expect("validated node");
+                    record.output = Some(outcome.output);
+                    record.outcome = Some(outcome.outcome.clone());
+                    record.status = outcome.status;
+                    record.assigned_at_ms = now_ms();
+                    record.settled_at_ms = record.assigned_at_ms;
+                    if let Some(next) = node.on.get(outcome.outcome.0.as_str()) {
+                        queue.extend(next.clone());
+                    }
+                }
                 "result.publish" | "request.budget" => {
                     let output = if node.uses == "request.budget" {
                         Some(serde_json::to_value(request::snapshot(
@@ -2377,26 +2580,14 @@ async fn verify_evidence(
             .get(&requirement.key)
             .expect("key sets were compared")
             .trim();
+        // Registered predicates first: they are pure, so the key they failed
+        // on is the only context their message needs.
+        if let Some(verifier) = verifier(&requirement.verify) {
+            (verifier.check)(value, requirement.expected.as_deref())
+                .with_context(|| format!("证据 {}", requirement.key))?;
+            continue;
+        }
         match requirement.verify.as_str() {
-            "value.nonEmpty" => {
-                if value.is_empty() {
-                    bail!("证据 {} 不能为空", requirement.key);
-                }
-            }
-            "value.equals" => {
-                let expected = requirement
-                    .expected
-                    .as_deref()
-                    .expect("value.equals was validated with an expected value");
-                if value != expected {
-                    bail!(
-                        "证据 {} 必须等于 {:?}，收到 {:?}",
-                        requirement.key,
-                        expected,
-                        value
-                    );
-                }
-            }
             "git.commitOnTarget" => {
                 let lease = run
                     .leases
@@ -3245,12 +3436,18 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
         }
         if !matches!(
             node.uses.as_str(),
-            "agent.session" | "result.publish" | "request.budget"
+            "agent.session" | "result.publish" | "request.budget" | "pack.script"
         ) {
             bail!("未注册的 Workflow capability：{}", node.uses);
         }
         if node.uses == "agent.session" && node.inputs.role.is_none() {
             bail!("agent.session 节点 {} 必须声明 with.role", node.id);
+        }
+        if node.uses == "pack.script" && node.inputs.script.is_none() {
+            bail!("pack.script 节点 {} 必须声明 with.script", node.id);
+        }
+        if node.uses != "pack.script" && node.inputs.script.is_some() {
+            bail!("{} 节点 {} 不能声明 with.script", node.uses, node.id);
         }
         if node.uses != "agent.session"
             && (node.inputs.role.is_some()
@@ -3272,12 +3469,22 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
         if let Some(shape) = &node.completion.output {
             shape.validate()?;
         }
-        if node.uses != "agent.session"
+        // `pack.script` is the one non-Agent capability that produces facts,
+        // so it may declare the evidence its output must satisfy. The purely
+        // internal capabilities still cannot: nothing submits evidence for
+        // them.
+        if !matches!(node.uses.as_str(), "agent.session" | "pack.script")
             && (!node.completion.all.is_empty() || node.completion.output.is_some())
         {
             bail!(
                 "{} 节点 {} 由宿主完成，不能声明 completion 证据",
                 node.uses,
+                node.id
+            );
+        }
+        if node.uses == "pack.script" && node.completion.output.is_some() {
+            bail!(
+                "pack.script 节点 {} 的产出是脚本 evidence，不声明 completion.output",
                 node.id
             );
         }
@@ -3291,30 +3498,50 @@ fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
                     requirement.key
                 );
             }
-            if !matches!(
-                requirement.verify.as_str(),
-                "value.nonEmpty" | "value.equals" | "git.commitOnTarget"
-            ) {
-                bail!("未注册的 evidence verifier：{}", requirement.verify);
+            let registered = verifier(&requirement.verify);
+            if registered.is_none() && requirement.verify != "git.commitOnTarget" {
+                bail!(
+                    "未注册的 evidence verifier：{}；已注册：{}",
+                    requirement.verify,
+                    VERIFIERS
+                        .iter()
+                        .map(|entry| entry.id)
+                        .collect::<Vec<_>>()
+                        .join("、")
+                );
             }
-            match (requirement.verify.as_str(), requirement.expected.as_deref()) {
-                ("value.equals", Some(expected))
-                    if !expected.is_empty() && expected.trim() == expected => {}
-                ("value.equals", _) => {
+            // Whether a declaration carries `expected` is the verifier's own
+            // property, not a rule about one hardcoded name.
+            let expects_value = registered.is_some_and(|entry| entry.expects_value);
+            match requirement.expected.as_deref() {
+                Some(expected)
+                    if expects_value && (expected.is_empty() || expected.trim() != expected) =>
+                {
                     bail!(
-                        "节点 {} 的 value.equals 证据 {} 必须声明非空 expected",
+                        "节点 {} 的 {} 证据 {} 的 expected 必须非空且无首尾空白",
                         node.id,
+                        requirement.verify,
                         requirement.key
                     );
                 }
-                (_, Some(_)) => {
+                Some(_) if expects_value => {}
+                Some(_) => {
                     bail!(
-                        "节点 {} 的证据 {} 只有 value.equals 可以声明 expected",
+                        "节点 {} 的证据 {} 使用的 {} 不接受 expected",
                         node.id,
+                        requirement.key,
+                        requirement.verify
+                    );
+                }
+                None if expects_value => {
+                    bail!(
+                        "节点 {} 的 {} 证据 {} 必须声明非空 expected",
+                        node.id,
+                        requirement.verify,
                         requirement.key
                     );
                 }
-                (_, None) => {}
+                None => {}
             }
             if requirement.verify == "git.commitOnTarget" && node.inputs.write_lease.is_none() {
                 bail!(
@@ -4252,6 +4479,60 @@ mod tests {
         write(&package.join("prompts/direct-worker.md"), "实现 Worker。\n");
         ensure_source_visible(&root.join(".genethub")).unwrap();
         package
+    }
+
+    /// Every registered verifier must be a pure predicate: the same value and
+    /// declaration always produce the same verdict. That is what lets anyone
+    /// holding a Run record re-run the judgment without re-running whatever
+    /// produced the fact, which is why executable verifiers stay refused.
+    #[test]
+    fn registered_verifiers_are_pure_predicates_over_the_submitted_value() {
+        let check = |id: &str, value: &str, expected: Option<&str>| {
+            (verifier(id).expect("registered").check)(value, expected)
+        };
+
+        assert!(check("value.nonEmpty", "x", None).is_ok());
+        assert!(check("value.nonEmpty", "", None).is_err());
+        assert!(check("value.equals", "approved", Some("approved")).is_ok());
+        assert!(check("value.equals", "rejected", Some("approved")).is_err());
+        // A project-shaped predicate the platform did not have to grow a new
+        // match arm for.
+        assert!(check("value.oneOf", "amber", Some("green|amber|red")).is_ok());
+        assert!(check("value.oneOf", "purple", Some("green|amber|red")).is_err());
+
+        for entry in VERIFIERS {
+            let expected = entry.expects_value.then_some("a");
+            let first = (entry.check)("a", expected).is_ok();
+            let second = (entry.check)("a", expected).is_ok();
+            assert_eq!(first, second, "{} is not deterministic", entry.id);
+        }
+    }
+
+    /// Whether a declaration carries `expected` is the verifier's property,
+    /// so adding one does not mean editing a rule that names another by hand.
+    #[test]
+    fn a_declaration_is_checked_against_its_own_verifier() {
+        let root = tempfile::tempdir().unwrap();
+        let package = seed_package(root.path());
+        let flow = |verify: &str, expected: Option<&str>| {
+            let requirement = match expected {
+                Some(expected) => format!("{{ key: review, verify: {verify}, expected: {expected} }}"),
+                None => format!("{{ key: review, verify: {verify} }}"),
+            };
+            write(
+                &package.join("flows/direct-change.yaml"),
+                &format!("schema: genehub.workflow.definition.v1\nid: direct-change\nversion: 1\nentry: implement\nnodes:\n  - id: implement\n    uses: agent.session\n    with:\n      role: worker\n      workspace: .\n    completion:\n      all:\n        - {requirement}\n    on:\n      completed: [publish]\n  - id: publish\n    uses: result.publish\n"),
+            );
+            compile_package(root.path(), TEST_PACKAGE).map(|_| ())
+        };
+
+        flow("value.oneOf", Some("approved|partial")).expect("a registered verifier with its value");
+        let missing = flow("value.oneOf", None).unwrap_err().to_string();
+        assert!(missing.contains("expected"), "{missing}");
+        let unwanted = flow("value.nonEmpty", Some("approved")).unwrap_err().to_string();
+        assert!(unwanted.contains("不接受 expected"), "{unwanted}");
+        let unknown = flow("value.matchesRegex", None).unwrap_err().to_string();
+        assert!(unknown.contains("未注册"), "{unknown}");
     }
 
     /// A role may carry keys only its own Workflow reads. The platform stops

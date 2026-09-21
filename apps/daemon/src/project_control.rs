@@ -589,6 +589,19 @@ impl Broker {
         self.load_binding(workspace_id).is_ok()
     }
 
+    /// The package source digest this project's takeover was approved
+    /// against, if any.
+    ///
+    /// Executable package content is anchored to it: a package upgrades by
+    /// `git pull`, which changes its source without passing any challenge,
+    /// so "the user approved this package once" must not become "the author
+    /// may change what runs afterwards".
+    pub fn bound_pack_digest(&self, workspace_id: &str) -> Option<String> {
+        self.load_binding(workspace_id)
+            .ok()
+            .map(|binding| binding.pack_digest)
+    }
+
     pub fn is_bound(&self, workspace_id: &str, controller_session_id: &str) -> bool {
         self.load_binding(workspace_id)
             .is_ok_and(|binding| binding.controller_session_id == controller_session_id)

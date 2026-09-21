@@ -35,7 +35,16 @@ pub(crate) fn schema() -> Value {
             "limits": {"includes": MAX_INCLUDES},
         },
         "entries": "{op:entries,value:<object expression>} returns at most 4096 {key,value} pairs in ascending key order; use serial forEach initial/update to aggregate parallel results",
-        "verifiers": ["value.nonEmpty", "value.equals", "git.commitOnTarget"],
+        // Derived from the registry so the contract cannot drift from what
+        // the daemon will actually accept.
+        "verifiers": super::VERIFIERS.iter().map(|entry| serde_json::json!({
+            "id": entry.id,
+            "expected": if entry.expects_value { "required" } else { "not accepted" },
+        })).chain(std::iter::once(serde_json::json!({
+            "id": "git.commitOnTarget",
+            "expected": "not accepted",
+            "note": "requires with.writeLease; moving to a Workflow package capability",
+        }))).collect::<Vec<_>>(),
         "workerOutcomes": {
             "builtin": ["completed", "changesRequested", "failed", "blocked"],
             "custom": "declare in this Workflow's outcomes map (name -> {success: bool}); on edges and structured accept lists may use any declared name, and only agent.session may emit non-completed outcomes; the kernel consumes just the success bit",
