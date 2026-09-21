@@ -132,46 +132,128 @@ J3 正是 fork 问题的根因，也是下面 Category B 全部条目的共同�
 | E6 | `planner.rs:498-510` | 生成目标必须字节一致，无优先级/合并策略 | 两个 skill 无法共同贡献同一配置文件；手改生成文件会**阻塞全部后续 build** 而非报告为漂移 |
 | E7 | `runtime.rs:288-297` | 引擎 root frame id 固定为字面量 `1` | 结构上排除了恢复进子块、拆分 Run、嫁接修复子树——长流程最自然的恢复动作 |
 
-## 3. 本提案的范围与顺序
+## 3. 已确认的决策（2026-09-21）
 
-35 项不可能一次做完，也不该。按**根因收敛**而非逐条修：
+进入排期前，三项由用户拍板、一项由核查结果推翻了初稿，记录如下。**后续实现以本节为准**，
+与本节冲突的早期表述作废。
 
-### P0 — fork 失权（B1）：把授权从会话身份迁到项目授权
+### D-A：授权判据换成"项目是否已被接管"，不是"你是不是那一个会话"
 
-这是触发点，也是唯一有用户明确诉求的一项，优先做。
+```rust
+// 今天（7 处都是这个形状）
+state.project_control.is_bound(&project_id, session_id)   // 你 == 那一个会话？
+// 改后
+state.project_control.has_binding(&project_id)            // 项目被接管了吗？
+```
+
+`has_binding` **不是新造的**，它已存在且已在 `router.rs:1121`（dispatch 的门）使用。
+现状因此是：**派发任务用项目级判据，改配置用会话级判据**——同一个项目两套标准，
+这个不一致本身就是证据。
+
+这不降低实际安全性：`SessionCreate` 今天**无条件** rebind（`router.rs:1419`），
+任何在 PM 项目里新建的会话都会静默夺走管理权，所以"单一持有者"现在**已经是假象**——
+它不是安全边界，只是个会被随机改写的指针。
+
+### D-B：沙箱强度由 Workflow 声明，平台只定义不可协商的机制
+
+初稿写的"平台强制严格"**违背了本提案自己的 J1**，已作废。正确的分层：
+
+- **平台必须亲自执行、不开放**：argv 传参不经 shell、超时与输出上限、进程树取消、
+  路径必须在已授权 Workspace 内。
+- **由包声明、由人类批准**：网络、额外路径、环境变量等。包在其源中声明，
+  `workflow build` 的挑战卡**逐条列出**，用户批准的就是这一份。**不声明即没有**——
+  那是默认值，不是天花板。
+- **内置 `game-delivery` 声明最小集**（本地读写、无网络）作为示范，不作为平台上限。
+
+与信任锚天然一致：能力随 `source_digest` 一同被批准，`git pull` 改了声明 → digest 变 →
+能力失效，需重新批准。
+
+### D-C：Git 迁出硬切，不留兼容层
+
+无外部 flow 在用 `writeLease.targetRef` / `git.commitOnTarget`（用户确认），
+内置 `game-delivery` 同批改写。旧写法在 `check`/`activate` 阶段**明确失败**，
+而不是等 Worker 跑到一半才炸。PM/WM 学习新标准自行迁移。与 dev-1 包重构立下的
+"不做任何兼容层"先例一致。
+
+### D-D：① 与 P3 的身份/订阅部分**合并交付**，中间不留窗口
+
+这是核查 D-A 时翻出的新事实，改变了交付结构。
+
+回包投递用的是**另一个**判据（`mod.rs:737`）：
+
+```rust
+run.parent_session_id == session_id && !cancellation_requested(...)
+```
+
+`parent_session_id` 是**派发那一刻**的会话（`router.rs:1133` 取
+`caller.session_controller_id()`），写进 Run 记录后**再也不变**。而判据不成立时，
+通知不是排队等待——`inbox.rs:388` 调用 `discard_workflow_inputs` **直接丢弃**：
+
+```
+会话 A 派发 Run → parent_session_id = A
+从 A fork 出 B，在 B 里继续工作
+Run 完成 → 通知要投给 A
+若不再使用 A → 这条完成通知被丢弃，没有任何人收到
+```
+
+**这个洞今天就存在**，D-A 不制造它，但会让人**更频繁撞上**——因为 D-A 之后 fork 出的会话
+真能派发任务，多会话协作成为常态。因此授权改造与 Operation 身份/订阅迁移必须同批上线，
+不能先上前者再慢慢做后者。原提案 §4.4「Activity 可以把投递订阅切到新 Session」正是补丁。
+
+## 4. 范围与顺序
+
+35 项不可能一次做完，也不该。按**根因收敛**而非逐条修。
+
+### S1 — 地基：透明搬运（零风险，先合）
+
+去掉 role/project 定义的 `deny_unknown_fields`，让平台不消费的字段原样搬运。
+这是路线图第 2-4 项的共同前提，也是 S4 的前提。
+
+### S2 — 授权 + 身份/订阅（D-A + D-D，合并交付）
 
 1. **拆分三职责**（原提案 §2.3 的主张，现给出落点）：
-   - **授权**：用户对该 Project 是否有权 → 新的项目级授权记录，不含 session id；
+   - **授权**：用户对该 Project 是否有权 → 项目级判据，不含 session id；
    - **归属**：某 operation 的事件投给谁 → 保留 session id，这是 J3 允许的用途；
    - **一致性**：目标是否仍在预期 revision → 已有 CAS，不变。
-2. **`is_bound` 的 7 处调用改为查授权**，而不是比 id。`has_binding`（项目级，
-   `router.rs:1121` 已在用）是现成的正确形状——**注意这两个函数已经并存，语义不一致本身就是证据**。
-3. **fork 继承授权**：`SessionCreate` 已经 `rebind`，fork 走同一条路径。
-   **一致即正确**——旧代码没有在 fork 分支里调用过 `project_control`（当时的
-   `router.rs:1746`、`1764`），这处不一致没有任何设计理由存在。
-4. **归档不得搁死授权**：`SessionArchive` 与 `SessionDelete` 同样释放或转移。
-5. 保留 `exception_authority` 作为**故障恢复**通道，但它不再是 fork 的唯一出路。
+2. **`is_bound` 的 7 处调用改为项目级授权判据**（`router.rs:175`、`:227`、`:377`、
+   `:468`、`:515`、`:2640`、`agent_space_builder/management.rs:115`、`workflow/mod.rs:1176`）。
+3. **归档不得搁死授权**：`SessionArchive` 与 `SessionDelete` 同样释放或转移。
+4. **Operation 身份**：统一 `activityId`/`operationId`/`attempt`/`causationId`；
+   填上今天基本为空的 `causation_id`（全仓 3 处写入，2 处硬编码 `None`）。
+5. **订阅可迁移**：Run 的投递目标不再是写死的 `parent_session_id`，
+   fork 后可把订阅迁到新会话；**判据不成立时不得静默丢弃**。
+6. 保留 `exception_authority` 作为**故障恢复**通道，但它不再是 fork 的唯一出路。
 
-验收：从中间 fork、归档原会话、在 fork 里继续 build/dispatch/管理，全程无需项目先出故障。
+验收：从中间 fork、归档原会话、在 fork 里继续 build/dispatch/管理，全程无需项目先出故障；
+且旧会话派发的 Run 完成后，通知能被当前订阅者收到而不是被丢弃。
 
-**落地状态（2026-09-21）：第 3 项已合入**——`router.rs` 新增 `rebind_project_control_if_pm`，
-`SessionFork`、其定向变体和 `SessionForkImport` 三个入口现在都调用它，与 `SessionCreate` 走同一条
-路径。单测 `a_forked_session_inherits_project_control_the_same_way_a_fresh_one_does` 与
-`rebinding_a_non_pm_workspace_is_a_no_op` 覆盖了机制本身；`testctl` 重跑
-`specialty.agent.fork-load` 及既有 workflow 包специalties 未见回归。
+**已落地部分（2026-09-21，commit `2d7b47c`）**：`router.rs` 新增
+`rebind_project_control_if_pm`，`SessionFork`、其定向变体和 `SessionForkImport` 三个入口
+与 `SessionCreate` 走同一条路径；单测
+`a_forked_session_inherits_project_control_the_same_way_a_fresh_one_does` 与
+`rebinding_a_non_pm_workspace_is_a_no_op` 覆盖机制本身。这只保证了**已有绑定能正确转移**，
+没有改变"绑定是什么"——`is_bound` 仍是会话身份相等，J3 在那 7 处尚未生效，由本阶段补完。
 
-**第 1/2/4 项尚未落地**：把 `is_bound` 的 7 处调用改造成真正的项目级授权查询，以及让
-`SessionArchive` 释放/转移绑定，是对授权模型本身的改动，范围明显大于"让 fork 和 create 一致"，
-需要单独设计和验收，不应和这次最小修复混在一起仓促做。当前的修复只保证了**已有绑定能正确转移**，
-没有改变"绑定是什么"这件事——`is_bound` 仍然是会话身份相等，J3 尚未在这 7 处真正生效。
+### S3 — Activity Router 余下部分（原提案 §4/§5）
 
-### P1 — capability 与 verifier 注册表（D1 + D2）：Git 迁出的前提
+三条 lane（`human`/`activity`/`recovery`）、逐事件 ACK、§4.3 接纳规则、§4.5 确定性 snapshot。
+
+`inbox.rs:444` 今天仍把 Human 消息与 Workflow notice **拼成一段文本**交给同一次 turn，
+把"哪条是当前要求、哪条是旧 Run 通知、哪些副作用已发生"全部留给模型判断——
+**这是用提示词兜正确性的边界**。本阶段消除它：一次模型调用只有一个 primary input，
+其余事件只以数量与 ID 元数据呈现，Agent 要用就显式读权威 snapshot。
+
+本阶段会改变每次 turn 里 Agent 看到的输入形状，现有 prompt 与 journey 同批调整。
+
+### S4 — capability 与 verifier 注册表（D1 + D2）：Git 迁出的前提
 
 用户决策"Git 从平台剔除、放到 workflow 管理层"要求先有 D1。顺序不可颠倒。
 
-- **D1 `uses` 注册表**：新增唯一一个 `uses: pack.script`，宿主契约为：路径在已批准包内、
-  argv 传参（不经 shell）、cwd 限定已授权 Workspace、超时与输出上限、进程树取消、
-  stdout 必须有界结构化 JSON、`idempotencyKey` 透传。平台不理解语义。
+- **D1 `uses` 注册表**：新增唯一一个 `uses: pack.script`。平台**必须亲自执行**的那部分契约
+  （不开放）：路径在已批准包内、argv 传参不经 shell、cwd 限定已授权 Workspace、
+  超时与输出上限、进程树取消、stdout 必须有界结构化 JSON、`idempotencyKey` 透传。
+  平台不理解语义。**其余能力（网络、额外路径、环境变量）由包声明、经挑战卡逐条批准**——
+  见 D-B，不声明即没有。
 - **D2 verifier 注册表**：**仅纯判定式声明谓词**。2026-09-20 已否决可执行 verifier
   （理由：破坏审计链可复算性），本提案不推翻。
 - **执行与判定分离**：`pack.script` **产生**事实并进入 Run 记录，纯判定谓词**检查**事实。
@@ -190,7 +272,7 @@ build，已经是在批准"这份源码获得调度 Worker 和取得写租约的
 **是在同一个门上多说一句话，不是开新门**。WM 因此天然被信任——不因为它叫 WM，而因为它的产出要进
 项目必须过同一道批准。PM 小团队的灵活性（自批自包、无需外部审核）与可核对边界同时保住。
 
-### P2 — Git 迁出平台（原提案 §8，按当前代码重算）
+### S5 — Git 迁出平台（原提案 §8，按当前代码重算；硬切见 D-C）
 
 `workflow-engine` **已经完全干净**（0 处 Git 引用），耦合全在 daemon 的 workflow 层。
 
@@ -221,20 +303,7 @@ build，已经是在批准"这份源码获得调度 Worker 和取得写租约的
 因此 layer lint 按"**core 的正确性不得依赖 git**"写，而不是"core 不得出现 git 字样"——后者会把
 一个无害展示功能判红。
 
-### P3 — Activity Event Router（原提案 §4/§5，完整保留）
-
-与 P0 是**同一个根因的两半**：P0 修"授权不该绑会话"，P3 修"归属不该靠猜"。证据经复核全部成立：
-
-- `FlowMessageStatus`（`domain.rs:1320`）已有 `run_id`/`node_id`/`attempt`/`causation_id`/`expected_revision`——结构化路由地基真的在；
-- `causation_id` 实际基本未填：全仓 3 处写入，2 处硬编码 `None`，仅 1 处透传（`mod.rs:4159`）；
-- `inbox.rs:444` 仍把 Human 消息与 Workflow notice 拼成一段文本交给同一次 turn，把"哪条是当前
-  要求、哪条是旧 Run 通知"留给模型判断——**这是用提示词兜正确性的边界**。
-
-保留原提案 §4.3 接纳规则、§4.4 三条 lane（`human`/`activity`/`recovery`）、逐事件 ACK、
-§4.5 确定性 snapshot、§5 fork 语义。交点：`pack.script` 的 `idempotencyKey` 由 Operation 身份派生
-（`run.id:node.id:attempt`）。
-
-### P4 — 排他性收窄（E1、E2、E3）
+### S6 — 排他性收窄（E1、E2、E3）
 
 - **E1 把项目级冲突集收窄到载体级**：精确检查曾经存在（`carrier_has_active_run`，现为死代码），
   恢复它并把 `lock_project_execution` 按包分片；
@@ -245,11 +314,15 @@ build，已经是在批准"这份源码获得调度 Worker 和取得写租约的
 
 - **A1 role↔Worker 1:1**：路线图第 6 项，明确"最后做，需实例身份与租约模型设计，先设计后实现"。
 - **D5/D6/D7 封闭词表**、**C2/C3 树形变更**、**E6/E7 引擎与 planner**：均需独立设计，
-  且不阻塞 P0-P3。列入清单是为了让它们**可见**，不是承诺本轮交付。
-- **地基（前置）**：去掉 role/project 定义的 `deny_unknown_fields`，让平台不消费的字段透明搬运。
-  零风险，是 D1-D4 的共同前提，应在 P1 之前先合。
+  且不阻塞 S1-S6。列入清单是为了让它们**可见**，不是承诺本轮交付。
 
-## 4. 不变量
+### 交付纪律
+
+每个阶段独立走 `workflowctl` 任务记录 + `genethub-modify-review` 封印提交 +
+`testctl dev-feedback` 定向验证，分步提交而非一个巨型提交。
+`journey.workflow.pm-builds-game-with-team` 作为包模型回归 oracle，全程必须持续通过。
+
+## 5. 不变量
 
 1. **J1**：平台只定义它必须亲自执行的结构。
 2. **J2**：可执行能力锚定已批准的 `source_digest`；漂移即失效。
@@ -259,17 +332,20 @@ build，已经是在批准"这份源码获得调度 Worker 和取得写租约的
    **不得靠重跑可能非幂等的脚本"试试看"**。
 5. 不放开可执行 Skill Provider——`PB006` 维持拒绝。`pack.script` 是 Workflow 节点能力，
    与 Skill Provider 是两条路径，不得互相借道。
-6. 不引入包可自声明的 trusted 标志位。
+6. 不引入包可自声明的 trusted 标志位。能力可以声明，**信任不可以**——
+   声明的能力要成立，必须经人类挑战批准并锚定 digest（D-B + J2）。
 
-## 5. 完成定义
+## 6. 完成定义
 
 1. 从中间 fork、归档原会话、在 fork 中继续管理项目，全程不需要项目先出故障；
 2. `is_bound` 不再作为授权判据存在于任何路径；
-3. `uses` 与 verifier 有注册机制，且 fake/directory 参考实现证明契约不依赖任何仓库工具；
-4. 脚本执行能力绑定已批准 digest，漂移有结构化错误；
-5. kernel 与 Workflow schema 不再出现 Git 专有类型；平台核心的**正确性**不依赖 `git`，
+3. 旧会话派发的 Run 完成后，通知投给当前订阅者而不是被静默丢弃（D-D）；
+4. `uses` 与 verifier 有注册机制，且 fake/directory 参考实现证明契约不依赖任何仓库工具；
+5. 沙箱强度由包声明、经挑战卡逐条批准；平台只强制不可协商的那部分（D-B）；
+6. 脚本执行能力绑定已批准 digest，漂移有结构化错误；
+7. kernel 与 Workflow schema 不再出现 Git 专有类型；平台核心的**正确性**不依赖 `git`，
    provenance 失败降级为未知；
-6. Human 输入与异步 Activity 事件不再混为一轮命令；
-7. 团队变更不再被无关包的 Run 或等待回答的会话阻塞；
-8. Git 项目、纯目录项目分别通过独立端到端验收；
-9. `journey.workflow.pm-builds-game-with-team`（包模型回归 oracle）全程持续通过。
+8. Human 输入与异步 Activity 事件不再混为一轮命令；
+9. 团队变更不再被无关包的 Run 或等待回答的会话阻塞；
+10. Git 项目、纯目录项目分别通过独立端到端验收；
+11. `journey.workflow.pm-builds-game-with-team`（包模型回归 oracle）全程持续通过。

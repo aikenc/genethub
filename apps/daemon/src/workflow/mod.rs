@@ -237,8 +237,19 @@ struct EvidenceRequirement {
     expected: Option<String>,
 }
 
+/// A role as the platform consumes it.
+///
+/// Deliberately not `deny_unknown_fields`: a role file may carry fields only
+/// its own Workflow reads, and the platform has no business refusing a
+/// definition because it does not recognise a key it was never going to act
+/// on. Refusing would make every project-level extension wait for a daemon
+/// release, which is the rigidity this file is being walked back from.
+///
+/// Unknown keys stay auditable without being parsed here: `digest_candidate`
+/// hashes the raw source bytes, so the Candidate's content identity already
+/// covers whatever the platform chose not to interpret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct RoleSnapshot {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     evidence_only: bool,
@@ -4209,6 +4220,38 @@ mod tests {
         write(&package.join("prompts/direct-worker.md"), "实现 Worker。\n");
         ensure_source_visible(&root.join(".genethub")).unwrap();
         package
+    }
+
+    /// A role may carry keys only its own Workflow reads. The platform stops
+    /// refusing them (S1 of the de-rigidify plan), but they stay inside the
+    /// Candidate's content identity because the digest covers raw bytes — so
+    /// transparent carry does not become an audit hole.
+    #[test]
+    fn a_role_may_declare_fields_only_its_workflow_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let package = seed_package(root.path());
+        let baseline = compile_package(root.path(), TEST_PACKAGE).unwrap().digest;
+
+        write(
+            &package.join("roles/worker.yaml"),
+            "schema: genehub.workflow.role.v1\nid: worker\nagentId: opencode\nmodelId: qwen3.8-flash\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\nreviewRubric: strict\n",
+        );
+        let candidate = compile_package(root.path(), TEST_PACKAGE)
+            .expect("an unrecognised role key must not fail compilation");
+        assert_ne!(
+            candidate.digest, baseline,
+            "the extra key must still change the Candidate's content identity"
+        );
+
+        // What the platform does consume is still required and still checked.
+        write(
+            &package.join("roles/worker.yaml"),
+            "schema: genehub.workflow.role.v1\nid: worker\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\n",
+        );
+        let error = compile_package(root.path(), TEST_PACKAGE)
+            .expect_err("a missing agentId is still refused")
+            .to_string();
+        assert!(error.contains("agentId"), "{error}");
     }
 
     #[test]
