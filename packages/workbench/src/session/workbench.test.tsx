@@ -5,7 +5,7 @@ import type {
   TimelineItem,
   WorkspaceInfo,
 } from "@genehub/proto";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -2507,8 +2507,9 @@ describe("the controls offered to the user", () => {
     expect(box).toHaveFocus();
   });
 
-  it("saves the current composer beside Send and clears it only after persistence", async () => {
-    const onSaveDraft = vi.fn(async () => true);
+  it("moves the current composer into a visible saving state without duplicate submits", async () => {
+    let confirm!: (saved: boolean) => void;
+    const onSaveDraft = vi.fn(() => new Promise<boolean>((resolve) => { confirm = resolve; }));
     render(<Composer {...composerProps({ onSaveDraft })} />);
     const box = screen.getByLabelText("任务描述");
 
@@ -2517,6 +2518,29 @@ describe("the controls offered to the user", () => {
 
     expect(onSaveDraft).toHaveBeenCalledWith("稍后继续修改", [], []);
     expect(box).toHaveValue("");
+    const saving = screen.getByRole("button", { name: "正在保存草稿" });
+    expect(saving).toHaveAttribute("aria-busy", "true");
+    expect(saving).toBeDisabled();
+    saving.click();
+    expect(onSaveDraft).toHaveBeenCalledTimes(1);
+
+    await act(async () => confirm(true));
+    expect(await screen.findByRole("button", { name: "草稿已保存" })).toBeInTheDocument();
+  });
+
+  it("restores a failed save ahead of text typed while persistence was pending", async () => {
+    let confirm!: (saved: boolean) => void;
+    const onSaveDraft = vi.fn(() => new Promise<boolean>((resolve) => { confirm = resolve; }));
+    render(<Composer {...composerProps({ onSaveDraft })} />);
+    const box = screen.getByLabelText("任务描述");
+
+    await userEvent.type(box, "原草稿");
+    await userEvent.click(screen.getByRole("button", { name: "存为草稿" }));
+    await userEvent.type(box, "等待时新写的内容");
+    await act(async () => confirm(false));
+
+    await waitFor(() => expect(box).toHaveValue("原草稿\n等待时新写的内容"));
+    expect(screen.getByText("草稿保存失败，内容已恢复")).toBeInTheDocument();
   });
 
   it("selects multiple saved drafts, sends them in display order, then removes them", async () => {

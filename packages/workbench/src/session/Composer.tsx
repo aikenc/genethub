@@ -233,6 +233,9 @@ export function Composer({
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
+  const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved">("idle");
+  const draftSavePending = useRef(false);
+  const draftSavedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedDraftIds, setSelectedDraftIds] = useState<Set<string>>(() => new Set());
   const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
   const draftPicker = useRef<HTMLInputElement>(null);
@@ -251,6 +254,9 @@ export function Composer({
   useEffect(() => {
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments });
   }, [persistenceKey, draft, attachments, missingAttachments]);
+  useEffect(() => () => {
+    if (draftSavedTimer.current !== null) clearTimeout(draftSavedTimer.current);
+  }, []);
   const [pasteNotice, setPasteNotice] = useState<string | null>(saved.missingAttachments ? `${saved.missingAttachments} 个附件未能恢复，请重新选择后发送。` : ("recoveryNotice" in saved ? saved.recoveryNotice ?? null : null));
   const [highlighted, setHighlighted] = useState(0);
   const [dismissed, setDismissed] = useState(false);
@@ -391,14 +397,35 @@ export function Composer({
   };
 
   const saveDraft = async () => {
-    if (!onSaveDraft) return;
-    const saved = await onSaveDraft(draft.trim(), attachments, videoFiles);
-    if (!saved) return;
+    if (!onSaveDraft || draftSavePending.current) return;
+    const text = draft.trim();
+    const savedAttachments = attachments;
+    const savedVideoFiles = videoFiles;
+    draftSavePending.current = true;
+    setDraftSaveState("saving");
     setDraft("");
     setAttachments([]);
     setVideoFiles([]);
     setMissingAttachments(0);
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
+    try {
+      const saved = await onSaveDraft(text, savedAttachments, savedVideoFiles);
+      if (!saved) throw new Error("draft persistence was not confirmed");
+      setDraftSaveState("saved");
+      if (draftSavedTimer.current !== null) clearTimeout(draftSavedTimer.current);
+      draftSavedTimer.current = setTimeout(() => {
+        draftSavedTimer.current = null;
+        setDraftSaveState("idle");
+      }, 1_200);
+    } catch {
+      setDraft((current) => appendDraftLine(text, current));
+      setAttachments((current) => [...savedAttachments, ...current]);
+      setVideoFiles((current) => [...savedVideoFiles, ...current]);
+      setPasteNotice("草稿保存失败，内容已恢复");
+      setDraftSaveState("idle");
+    } finally {
+      draftSavePending.current = false;
+    }
   };
 
   // A message that failed comes back whole, text and attachments together, so
@@ -1012,11 +1039,13 @@ export function Composer({
             </button>
             <button
               type="button"
-              aria-label="存为草稿"
-              title="存为草稿"
+              aria-label={draftSaveState === "saving" ? "正在保存草稿" : draftSaveState === "saved" ? "草稿已保存" : "存为草稿"}
+              title={draftSaveState === "saving" ? "正在保存草稿" : draftSaveState === "saved" ? "草稿已保存" : "存为草稿"}
+              aria-busy={draftSaveState === "saving" ? "true" : undefined}
               disabled={
                 disabled ||
                 speechInput.busy ||
+                draftSaveState === "saving" ||
                 (drafts?.length ?? 0) >= 5 ||
                 (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft)
               }
@@ -1024,7 +1053,13 @@ export function Composer({
               onClick={() => void saveDraft()}
               className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
             >
-              <BookmarkPlus className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
+              {draftSaveState === "saving" ? (
+                <Loader2 className="h-6 w-6 animate-spin md:h-4 md:w-4" aria-hidden />
+              ) : draftSaveState === "saved" ? (
+                <Check className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
+              ) : (
+                <BookmarkPlus className="h-6 w-6 md:h-4 md:w-4" aria-hidden />
+              )}
             </button>
             {phase === "sending" ? (
               // Still a button, and still focusable: `disabled` would throw the
