@@ -1859,7 +1859,7 @@ export type WorkflowActivationStatus = { revision: number, digest: string, previ
  */
 export type WorkflowBuildReport = { schema: string, 
 /**
- * `planned`, `applied`, or `current` when the product already matches.
+ * `planned` for a read-only plan, `applied` once the build wrote it.
  */
 status: string, packageId: string, sourceDigest: string, 
 /**

@@ -184,11 +184,12 @@ Older observation files are left untouched and are not recovery inputs. Use
 only a locator. CLI waiting follows the Run through cleanup until a terminal state
 or its explicit timeout, rather than inferring completion from a Worker turn.
 
-The legacy direct-workflow initializer and team Bootstrap Packs share the same
-no-overwrite asset writer. The legacy source lives in
-`apps/daemon/workflow-templates/direct-change/`; its file order, bytes and digest
-remain compatible. It still initializes a direct workflow without taking over the
-project or creating a PM team. Team topology and Pack upgrades remain explicit.
+A project becomes Workflow-enabled by cloning a package under
+`.genethub/workflows/`, not by an initializer that writes assets into it.
+`workflow list` reports what a project has cloned and `workflow build`
+materializes one package's Spaces through the same no-overwrite writer. Neither
+takes over the project: materializing Spaces and upgrading a package stay
+explicit, approved actions.
 
 ## Business delegation and configuration control
 

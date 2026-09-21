@@ -194,7 +194,9 @@ pub fn usage() -> i32 {
   genet speech runtime register --command <absolute-path> [--arg <value>...]
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
-  genet workflow init              initialize .genethub/workflow in this project
+  genet workflow list              the Workflow packages cloned into this project
+  genet workflow build --package <id> [--apply --plan-digest <digest> --action-id <id> --revision <n>]
+                                    materialize one package's Spaces; applying needs approval
   genet workflow inspect           validate and list project workflows
   genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
                                     route through the project workflow catalog
@@ -225,10 +227,6 @@ pub fn usage() -> i32 {
   genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
   genet space builder init|check|explain|build|verify|clean --name <agent-space>
                                     run the daemon-owned AgentSpaceBuilder inside this project
-  genet space bootstrap list       discover versioned project team/workflow packs
-  genet space bootstrap plan --pack <id> [--agent <id>] [--model <id>]
-  genet space bootstrap apply --pack <id> --plan-digest <digest> --action-id <id> --expected-revision <n> [--agent <id>] [--model <id>]
-                                    install a versioned project team and workflow pack
   genet space approval request --challenge <id>
                                     ask the Human to approve one daemon-authored plan; never approves it
   genet session components <id>     which responsibilities are live in this session

@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 59] = [
+const COMMAND_NAMES: [&str; 60] = [
     "schema",
     "context",
     "capabilities",
@@ -43,7 +43,8 @@ const COMMAND_NAMES: [&str; 59] = [
     "session.respond",
     "session.interrupt",
     "session.close",
-    "workflow.init",
+    "workflow.list",
+    "workflow.build",
     "workflow.inspect",
     "workflow.activate",
     "workflow.dispatch",
@@ -107,7 +108,7 @@ fn mutates(name: &str) -> bool {
             | "session.respond"
             | "session.interrupt"
             | "session.close"
-            | "workflow.init"
+            | "workflow.build"
             | "workflow.activate"
             | "workflow.dispatch"
             | "workflow.complete"
@@ -1236,9 +1237,20 @@ fn command_schema(name: &str) -> Value {
                 &["sessionId", "prompt"],
             ),
         ),
-        "workflow.init" => workflow_schema(
-            "genet workflow init [--workspace <id>] [--agent <id>] [--model <id>]",
-            json!({"agentId": {"type": "string"}, "modelId": {"type": "string"}}), &[],
+        "workflow.list" => workflow_schema(
+            "genet workflow list [--workspace <id>]",
+            json!({}), &[],
+        ),
+        "workflow.build" => workflow_schema(
+            "genet workflow build [--workspace <id>] --package <id> [--apply --plan-digest <digest> --action-id <id> --revision <n>]",
+            json!({
+                "packageId": {"type": "string", "minLength": 1, "description": "--package; path below .genethub/workflows/"},
+                "apply": {"type": "boolean", "default": false,
+                    "description": "--apply; materializing the package's Spaces needs an approved plan, so it also requires planDigest, actionId and expectedRevision"},
+                "planDigest": {"type": "string", "description": "--plan-digest; from the preceding plan"},
+                "actionId": {"type": "string", "description": "--action-id"},
+                "expectedRevision": {"type": "integer", "minimum": 0, "description": "--revision"}
+            }), &["packageId"],
         ),
         "workflow.inspect" => workflow_schema("genet workflow inspect [--workspace <id>] [--candidate <digest>]", json!({"candidateDigest":{"type":"string","description":"Inspect this immutable candidate catalog; does not activate it"}}), &[]),
         "workflow.activate" => workflow_schema(
@@ -1439,7 +1451,20 @@ fn command_schema(name: &str) -> Value {
         "streaming": streams(name),
         "inputSchema": with_selectors(name, input),
         "outputSchema": match name {
-            "workflow.init" => single_output("workflow.initialized"),
+            // One command, two terminal shapes: a plan a Human can read and
+            // the applied result, so a reader can tell them apart without
+            // inspecting whether `--apply` was passed.
+            "workflow.build" => json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["schema", "type", "data"],
+                "properties": {
+                    "schema": {"const": CLI_SCHEMA},
+                    "type": {"enum": ["workflow.build.plan", "workflow.built"]},
+                    "data": {"type": "object"},
+                }
+            }),
             "workflow.activate" => single_output("workflow.activated"),
             "workflow.complete" => single_output("workflow.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),

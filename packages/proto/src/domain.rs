@@ -1156,7 +1156,7 @@ pub struct WorkflowPackageList {
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowBuildReport {
     pub schema: String,
-    /// `planned`, `applied`, or `current` when the product already matches.
+    /// `planned` for a read-only plan, `applied` once the build wrote it.
     pub status: String,
     pub package_id: String,
     pub source_digest: String,
