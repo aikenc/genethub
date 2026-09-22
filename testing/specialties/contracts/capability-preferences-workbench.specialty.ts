@@ -24,6 +24,7 @@ defineSpecialty({
     "All UI and store boundaries affected by capability-first routing pass without pending tests",
   catches: [
     "an execution surface exposes a concrete Agent picker",
+    "one Agent cannot occupy multiple ordered routes with different models",
     "machine-global capability or runtime preferences are lost",
     "Fork or Forward bypasses the target machine's capability order",
   ],

@@ -193,10 +193,21 @@ describe("the capability-first composer control", () => {
     expect(screen.getByRole("button", { name: "保存到这台机器" })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "添加首选项" }));
+    expect(screen.getByLabelText("第 2 项 Agent")).toHaveValue("genet");
+    expect(screen.getByLabelText("第 2 项模型")).toHaveValue("vision");
+    expect(
+      within(screen.getByLabelText("第 2 项模型")).getByRole("option", {
+        name: /DeepSeek V4（已配置）/,
+      }),
+    ).toBeDisabled();
+    await userEvent.selectOptions(screen.getByLabelText("第 2 项模型"), "omni");
     await userEvent.click(screen.getByRole("button", { name: "上移第 2 项" }));
     await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
     await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
-    expect(callbacks.onSavePreferences.mock.calls[0]?.[0].capabilities.planning).toHaveLength(2);
+    expect(callbacks.onSavePreferences.mock.calls[0]?.[0].capabilities.planning).toEqual([
+      { agentId: "genet", modelId: "omni" },
+      { agentId: "genet", modelId: "deepseek/v4" },
+    ]);
   });
 
   it("marks image and video support on every model choice", async () => {

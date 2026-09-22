@@ -140,6 +140,12 @@ export function RuntimeSettings({
   const routes = routesForCapability(draft, capability);
   const update = (next: PreferredAgentModel[]) =>
     setDraft((current) => withCapabilityRoutes(current, capability, next));
+  const availableToAdd =
+    routes.length < 5
+      ? agents
+          .map((agent) => firstAvailableRoute(agent, routes))
+          .find((route): route is PreferredAgentModel => Boolean(route))
+      : undefined;
   const move = (from: number, to: number) => {
     if (to < 0 || to >= routes.length || from === to) return;
     const next = [...routes];
@@ -149,17 +155,8 @@ export function RuntimeSettings({
     update(next);
   };
   const add = () => {
-    if (routes.length >= 5) return;
-    const agent =
-      agents.find(
-        (candidate) =>
-          !routes.some(
-            (route) => route.agentId === candidate.id && route.modelId === modelFor(candidate),
-          ),
-      ) ?? agents[0];
-    if (!agent) return;
-    const modelId = modelFor(agent);
-    update([...routes, { agentId: agent.id, ...(modelId ? { modelId } : {}) }]);
+    if (!availableToAdd) return;
+    update([...routes, availableToAdd]);
   };
 
   return (
@@ -225,21 +222,23 @@ export function RuntimeSettings({
                       (candidate) => candidate.id === event.currentTarget.value,
                     );
                     if (!nextAgent) return;
+                    const replacement = firstAvailableRoute(nextAgent, routes, index);
+                    if (!replacement) return;
                     const next = [...routes];
-                    const modelId = modelFor(nextAgent);
-                    next[index] = {
-                      agentId: nextAgent.id,
-                      ...(modelId ? { modelId } : {}),
-                    };
+                    next[index] = replacement;
                     update(next);
                   }}
                 >
                   {!agent ? <option value={route.agentId}>{route.agentId}（已移除）</option> : null}
-                  {agents.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {resolveAgentPresentation(candidate).label}
-                    </option>
-                  ))}
+                  {agents.map((candidate) => {
+                    const selectable = Boolean(firstAvailableRoute(candidate, routes, index));
+                    return (
+                      <option key={candidate.id} value={candidate.id} disabled={!selectable}>
+                        {resolveAgentPresentation(candidate).label}
+                        {selectable ? "" : "（模型均已添加）"}
+                      </option>
+                    );
+                  })}
                 </select>
               </label>
               <label className="min-w-0">
@@ -267,14 +266,22 @@ export function RuntimeSettings({
                     </option>
                   ) : null}
                   {models.map((model) => {
+                    const alreadyConfigured = routes.some(
+                      (candidate, candidateIndex) =>
+                        candidateIndex !== index &&
+                        sameRoute(candidate, { agentId: route.agentId, modelId: model.id }),
+                    );
                     const label = resolveModelPresentation({
                         agentId: agent?.id ?? null,
                         modelId: model.id,
                         modelLabel: model.label,
                       }).fullLabel;
                     return (
-                      <option key={model.id} value={model.id}>
-                        {mediaOptionLabel(label, mediaInputSupport(agent, model.id))}
+                      <option key={model.id} value={model.id} disabled={alreadyConfigured}>
+                        {mediaOptionLabel(
+                          `${label}${alreadyConfigured ? "（已配置）" : ""}`,
+                          mediaInputSupport(agent, model.id),
+                        )}
                       </option>
                     );
                   })}
@@ -332,7 +339,7 @@ export function RuntimeSettings({
       <div className="flex items-center justify-between gap-3">
         <button
           type="button"
-          disabled={disabled || routes.length >= 5 || agents.length === 0}
+          disabled={disabled || !availableToAdd}
           onClick={add}
           className="flex h-9 items-center gap-1 rounded-lg border border-line px-3 text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-40"
         >
@@ -354,11 +361,30 @@ export function RuntimeSettings({
   );
 }
 
-function modelFor(agent: AgentInfo): string | undefined {
-  return (
-    agent.catalog.models.find((model) => model.id === agent.catalog.defaultModel)?.id ??
-    agent.catalog.models[0]?.id
+function firstAvailableRoute(
+  agent: AgentInfo,
+  routes: PreferredAgentModel[],
+  ignoreIndex = -1,
+): PreferredAgentModel | undefined {
+  const models = agent.catalog.models ?? [];
+  const defaultModel = models.find((model) => model.id === agent.catalog.defaultModel);
+  const orderedModels = defaultModel
+    ? [defaultModel, ...models.filter((model) => model.id !== defaultModel.id)]
+    : models;
+  const candidates: PreferredAgentModel[] =
+    orderedModels.length > 0
+      ? orderedModels.map((model) => ({ agentId: agent.id, modelId: model.id }))
+      : [{ agentId: agent.id }];
+  return candidates.find(
+    (candidate) =>
+      !routes.some(
+        (route, index) => index !== ignoreIndex && sameRoute(route, candidate),
+      ),
   );
+}
+
+function sameRoute(left: PreferredAgentModel, right: PreferredAgentModel): boolean {
+  return left.agentId === right.agentId && left.modelId === right.modelId;
 }
 
 function mediaOptionLabel(label: string, support: { image: boolean; video: boolean }): string {
