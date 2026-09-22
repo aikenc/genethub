@@ -1328,8 +1328,8 @@ describe("machine-global capability routing", () => {
     },
     catalog: {
       models: [
-        { id: "sonnet", label: "Sonnet", reasoning: true, efforts: ["low", "high"] },
-        { id: "opus", label: "Opus", reasoning: true, efforts: [] },
+        { id: "sonnet", label: "Sonnet", reasoning: true, efforts: ["low", "high"], inputModalities: [] },
+        { id: "opus", label: "Opus", reasoning: true, efforts: [], inputModalities: [] },
       ],
       modes: [],
       commands: [],
@@ -1341,7 +1341,7 @@ describe("machine-global capability routing", () => {
     label: "Codex",
     catalog: {
       ...claude.catalog,
-      models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [] }],
+      models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [], inputModalities: ["image", "video"] }],
     },
   } as AgentInfo;
 
@@ -1462,6 +1462,64 @@ describe("machine-global capability routing", () => {
     });
 
     await useWorkbench.getState().send("follow the new first choice");
+    expect(sent.find((request) => request.type === "session.create")?.payload).toMatchObject({
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
+    });
+  });
+
+  it("routes a planning image to the first supporting candidate instead of the text-only first choice", async () => {
+    const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: Record<string, unknown> }) => {
+        sent.push(request);
+        if (request.type === "session.create") {
+          return {
+            type: "session",
+            data: {
+              ...SESSION,
+              id: "s-media",
+              agentId: String(request.payload?.agentId),
+              modelId: String(request.payload?.modelId),
+            },
+          };
+        }
+        return undefined;
+      },
+      subscribe: async () => ({
+        snapshot: {
+          seq: 0,
+          items: [],
+          summary: { ...SESSION, id: "s-media", agentId: "codex", modelId: "gpt-5.6-sol" },
+        },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      settings: {
+        providers: [],
+        lanEnabled: false,
+        agentPreferences: {
+          ...preferences,
+          capabilities: {
+            ...preferences.capabilities,
+            planning: [
+              { agentId: "claude", modelId: "opus" },
+              { agentId: "codex", modelId: "gpt-5.6-sol" },
+            ],
+          },
+        },
+      },
+    });
+    useWorkbench.getState().newSession("w1");
+
+    await useWorkbench.getState().send("看一下这张图", [
+      { name: "screen.png", mime: "image/png", dataBase64: "AAA" },
+    ]);
+
     expect(sent.find((request) => request.type === "session.create")?.payload).toMatchObject({
       agentId: "codex",
       modelId: "gpt-5.6-sol",

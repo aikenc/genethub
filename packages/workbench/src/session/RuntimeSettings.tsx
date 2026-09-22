@@ -15,6 +15,7 @@ import {
 } from "../presentation/catalog/resolve";
 import {
   CAPABILITIES,
+  mediaInputSupport,
   routesForCapability,
   withCapabilityRoutes,
 } from "./capability-preferences";
@@ -194,6 +195,7 @@ export function RuntimeSettings({
         {routes.map((route, index) => {
           const agent = agents.find((candidate) => candidate.id === route.agentId);
           const models = agent?.catalog.models ?? [];
+          const selectedMedia = mediaInputSupport(agent, route.modelId);
           return (
             <div
               key={`${route.agentId}:${route.modelId ?? "default"}:${index}`}
@@ -205,9 +207,9 @@ export function RuntimeSettings({
                 if (dragging !== null) move(dragging, index);
                 setDragging(null);
               }}
-              className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-1.5 rounded-xl border border-line bg-raised/45 p-1.5"
+              className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-1.5 rounded-xl border border-line bg-raised/45 p-1.5"
             >
-              <span className="flex items-center gap-1 text-[10px] text-faint" title="拖动排序">
+              <span className="flex h-9 items-center gap-1 text-[10px] text-faint" title="拖动排序">
                 <GripVertical size={14} />
                 {index + 1}
               </span>
@@ -256,22 +258,36 @@ export function RuntimeSettings({
                     update(next);
                   }}
                 >
-                  {models.length === 0 ? <option value="">Agent 默认</option> : null}
-                  {route.modelId && !models.some((model) => model.id === route.modelId) ? (
-                    <option value={route.modelId}>{route.modelId}（不可用）</option>
+                  {models.length === 0 ? (
+                    <option value="">{mediaOptionLabel("Agent 默认", selectedMedia)}</option>
                   ) : null}
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {resolveModelPresentation({
+                  {route.modelId && !models.some((model) => model.id === route.modelId) ? (
+                    <option value={route.modelId}>
+                      {mediaOptionLabel(`${route.modelId}（不可用）`, selectedMedia)}
+                    </option>
+                  ) : null}
+                  {models.map((model) => {
+                    const label = resolveModelPresentation({
                         agentId: agent?.id ?? null,
                         modelId: model.id,
                         modelLabel: model.label,
-                      }).fullLabel}
-                    </option>
-                  ))}
+                      }).fullLabel;
+                    return (
+                      <option key={model.id} value={model.id}>
+                        {mediaOptionLabel(label, mediaInputSupport(agent, model.id))}
+                      </option>
+                    );
+                  })}
                 </select>
+                <span
+                  aria-label={`第 ${index + 1} 项媒体输入支持`}
+                  className="mt-1 flex min-w-0 gap-1 text-[9px] leading-4"
+                >
+                  <MediaSupportBadge medium="图片" supported={selectedMedia.image} />
+                  <MediaSupportBadge medium="视频" supported={selectedMedia.video} />
+                </span>
               </label>
-              <div className="flex items-center">
+              <div className="flex h-9 items-center">
                 <button
                   type="button"
                   aria-label={`上移第 ${index + 1} 项`}
@@ -342,6 +358,25 @@ function modelFor(agent: AgentInfo): string | undefined {
   return (
     agent.catalog.models.find((model) => model.id === agent.catalog.defaultModel)?.id ??
     agent.catalog.models[0]?.id
+  );
+}
+
+function mediaOptionLabel(label: string, support: { image: boolean; video: boolean }): string {
+  return `${label} · 图片${support.image ? "✓" : "—"} · 视频${support.video ? "✓" : "—"}`;
+}
+
+function MediaSupportBadge({ medium, supported }: { medium: string; supported: boolean }) {
+  return (
+    <span
+      title={`${supported ? "支持" : "不支持"}${medium}输入`}
+      className={`rounded border px-1 ${
+        supported
+          ? "border-accent/35 bg-accent/10 text-accent"
+          : "border-line text-faint"
+      }`}
+    >
+      {medium} {supported ? "✓" : "—"}
+    </span>
   );
 }
 

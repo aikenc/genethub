@@ -50,6 +50,7 @@ import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
+  capabilityLabel,
   capabilityForRoute,
   normalizeAgentPreferences,
   resolveAgentRuntime,
@@ -2746,8 +2747,38 @@ async function start(
 ): Promise<string | null> {
   const state = get();
   if (state.activeSessionId) return state.activeSessionId;
-  const draft = state.draft;
+  let draft = state.draft;
   if (!draft) return null;
+
+  const requiredMedia = mediaRequiredBy(pending);
+  if (requiredMedia.length > 0) {
+    const preferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
+    );
+    const mediaRoute = resolveCapabilityRoute(
+      preferences,
+      draft.capability,
+      state.agents,
+      requiredMedia,
+    );
+    if (!mediaRoute) {
+      const mediaLabel = requiredMedia.map((medium) => medium === "image" ? "图片" : "视频").join("和");
+      set({
+        notice: `「${capabilityLabel(draft.capability)}」的首选列表中没有可用且支持${mediaLabel}的 Agent 与模型，请编辑能力首选项。`,
+      });
+      return null;
+    }
+    draft = {
+      ...draft,
+      agentId: mediaRoute.agent.id,
+      modelId: mediaRoute.modelId,
+      modeId: mediaRoute.modeId,
+      effortId: mediaRoute.effortId,
+      runtimeValues: mediaRoute.runtimeValues,
+    };
+    onDraft(get, set, draft);
+  }
 
   const agentId = draft.agentId;
   if (!agentId) return null;
@@ -2802,6 +2833,15 @@ async function start(
   // along is made immediately afterwards instead of being lost.
   if (draft.effortId) await asked(set, () => require_(state.client).call({type:"session.setEffort", payload:{sessionId:reply.data.id, effortId:draft.effortId!}}));
   return reply.data.id;
+}
+
+function mediaRequiredBy(pending: PendingMessage | null): Array<"image" | "video"> {
+  if (!pending) return [];
+  const image = pending.attachments.some((attachment) => attachment.mime.startsWith("image/"));
+  const video =
+    (pending.videoFiles?.length ?? 0) > 0 ||
+    pending.attachments.some((attachment) => attachment.mime.startsWith("video/"));
+  return [...(image ? ["image" as const] : []), ...(video ? ["video" as const] : [])];
 }
 
 /** Marks a message as definitely not sent, keeping its text where it can be reused. */

@@ -19,7 +19,7 @@ const AGENTS: AgentInfo[] = [
       permissions: false,
       resume: true,
       fork: false,
-      attachments: false,
+      attachments: true,
     },
     catalog: {
       models: [
@@ -29,6 +29,21 @@ const AGENTS: AgentInfo[] = [
           contextWindow: 128_000,
           reasoning: true,
           efforts: ["low", "medium", "high"],
+          inputModalities: [],
+        },
+        {
+          id: "vision",
+          label: "Vision",
+          reasoning: true,
+          efforts: ["medium", "high"],
+          inputModalities: ["image"],
+        },
+        {
+          id: "omni",
+          label: "Omni",
+          reasoning: true,
+          efforts: ["medium", "high"],
+          inputModalities: ["image", "video"],
         },
       ],
       modes: [],
@@ -182,6 +197,21 @@ describe("the capability-first composer control", () => {
     await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
     await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
     expect(callbacks.onSavePreferences.mock.calls[0]?.[0].capabilities.planning).toHaveLength(2);
+  });
+
+  it("marks image and video support on every model choice", async () => {
+    controls();
+    const { dialog } = await openSettings();
+    await userEvent.click(within(dialog).getByRole("button", { name: "编辑能力首选项" }));
+
+    const model = screen.getByLabelText("第 1 项模型");
+    expect(within(model).getByRole("option", { name: /DeepSeek V4 · 图片— · 视频—/ })).toBeInTheDocument();
+    expect(within(model).getByRole("option", { name: /Vision · 图片✓ · 视频—/ })).toBeInTheDocument();
+    expect(within(model).getByRole("option", { name: /Omni · 图片✓ · 视频✓/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("第 1 项媒体输入支持")).toHaveTextContent("图片 —视频 —");
+
+    await userEvent.selectOptions(model, "omni");
+    expect(screen.getByLabelText("第 1 项媒体输入支持")).toHaveTextContent("图片 ✓视频 ✓");
   });
 
   it("locks capability switching after history but leaves runtime controls usable", async () => {

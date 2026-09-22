@@ -30,6 +30,10 @@ export type ResolvedCapabilityRoute = {
   runtimeValues: Record<string, string>;
 };
 
+export type MediaInputModality = "image" | "video";
+
+export type MediaInputSupport = Record<MediaInputModality, boolean>;
+
 /**
  * Materializes a first-run proposal only while the daemon says this machine
  * has never saved capability preferences. A saved empty list stays empty.
@@ -117,11 +121,38 @@ export function withRuntimePreference(
   };
 }
 
+/**
+ * What an exact Agent + model route can accept in Chat.
+ *
+ * External Agents predate model-level modality discovery. For those catalogs,
+ * an absent field keeps the existing image-attachment compatibility behavior;
+ * video is only offered when the model reports it explicitly.
+ */
+export function mediaInputSupport(
+  agent: AgentInfo | null | undefined,
+  modelId?: string | null,
+): MediaInputSupport {
+  if (!agent?.capabilities?.attachments) return { image: false, video: false };
+
+  const models = agent.catalog.models ?? [];
+  const model = modelId
+    ? models.find((candidate) => candidate.id === modelId)
+    : models.find((candidate) => candidate.id === agent.catalog.defaultModel) ??
+      models[0];
+  if (models.length > 0 && !model) return { image: false, video: false };
+
+  return {
+    image: model?.inputModalities?.includes("image") ?? !agent.builtin,
+    video: model?.inputModalities?.includes("video") ?? false,
+  };
+}
+
 /** Selects the first currently usable exact Agent + model route. */
 export function resolveCapabilityRoute(
   preferences: AgentSelectionPreferences,
   capability: AgentCapability,
   agents: AgentInfo[],
+  requiredMedia: readonly MediaInputModality[] = [],
 ): ResolvedCapabilityRoute | null {
   for (const preferred of routesForCapability(preferences, capability)) {
     const agent = agents.find(
@@ -129,9 +160,23 @@ export function resolveCapabilityRoute(
     );
     if (!agent) continue;
     const resolved = resolveAgentRuntime(preferences, agent, preferred.modelId);
-    if (resolved) return resolved;
+    if (!resolved) continue;
+    const support = mediaInputSupport(resolved.agent, resolved.modelId);
+    if (requiredMedia.every((medium) => support[medium])) return resolved;
   }
   return null;
+}
+
+/** Media affordances available anywhere in a capability's ordered fallback list. */
+export function capabilityMediaInputSupport(
+  preferences: AgentSelectionPreferences,
+  capability: AgentCapability,
+  agents: AgentInfo[],
+): MediaInputSupport {
+  return {
+    image: Boolean(resolveCapabilityRoute(preferences, capability, agents, ["image"])),
+    video: Boolean(resolveCapabilityRoute(preferences, capability, agents, ["video"])),
+  };
 }
 
 export function resolveAgentRuntime(

@@ -45,7 +45,9 @@ import type { ForkMachineOption } from "../session/ForkDialog";
 import type { MachineCatalog } from "../session/MachineCatalogPicker";
 import { useWorkbench } from "../session/store";
 import {
+  capabilityMediaInputSupport,
   capabilityForRoute,
+  mediaInputSupport,
   normalizeAgentPreferences,
   resolveCapabilityRoute,
 } from "../session/capability-preferences";
@@ -251,7 +253,6 @@ export function App({
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
   const currentModelId = workbench.timeline.modelId ?? draft?.modelId ?? session?.modelId ?? currentAgent?.catalog.defaultModel;
-  const currentModel = currentAgent?.catalog.models.find((model) => model.id === currentModelId);
   const agentPreferences = normalizeAgentPreferences(
     workbench.settings?.agentPreferences,
     workbench.agents,
@@ -266,6 +267,16 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
+  // Before the first turn, media can select a later route from this capability's
+  // ordered fallback list. Once a Session exists its exact Agent + model is
+  // locked, so only that route's inputs remain available.
+  const composerMediaSupport = starting
+    ? capabilityMediaInputSupport(
+        agentPreferences,
+        selectedCapability,
+        workbench.agents,
+      )
+    : mediaInputSupport(currentAgent, currentModelId);
   const deviceHandle =
     workbench.client?.identity?.machineId ?? readWorkbenchLocation()?.deviceHandle ?? null;
   const hrefLocation = useMemo(() => {
@@ -1065,12 +1076,13 @@ export function App({
                           workbench.timeline.items.length > 0 || Boolean(pending)
                         }
                         attachmentsSupported={
-                          currentAgent?.capabilities.attachments ?? false
+                          composerMediaSupport.image || composerMediaSupport.video
                         }
                         inputModalities={
-                          currentAgent?.builtin
-                            ? (currentModel?.inputModalities ?? [])
-                            : currentModel?.inputModalities
+                          ([
+                            ...(composerMediaSupport.image ? ["image"] : []),
+                            ...(composerMediaSupport.video ? ["video"] : []),
+                          ] as string[])
                         }
                         commands={currentAgent?.catalog.commands}
                         restoreDraft={workbench.restoreDraft}

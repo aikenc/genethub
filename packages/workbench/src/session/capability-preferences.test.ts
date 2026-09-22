@@ -2,7 +2,9 @@ import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
 import { describe, expect, it } from "vitest";
 
 import {
+  capabilityMediaInputSupport,
   capabilityForRoute,
+  mediaInputSupport,
   normalizeAgentPreferences,
   resolveCapabilityRoute,
   withCapabilityRoutes,
@@ -32,6 +34,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
           label: "Text",
           reasoning: true,
           efforts: ["low", "medium", "high", "xhigh"],
+          inputModalities: [],
         },
         {
           id: "vision",
@@ -39,6 +42,13 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
           reasoning: true,
           efforts: ["low", "medium", "high"],
           inputModalities: ["image"],
+        },
+        {
+          id: "video",
+          label: "Video",
+          reasoning: true,
+          efforts: ["medium", "high"],
+          inputModalities: ["video"],
         },
       ],
       modes: [
@@ -126,6 +136,53 @@ describe("machine capability preferences", () => {
     expect(resolveCapabilityRoute(preferences, "planning", [agent(), fallback])?.agent.id).toBe(
       "claude",
     );
+  });
+
+  it("derives image and video support from every usable route, regardless of capability name", () => {
+    const preferences = normalizeAgentPreferences(undefined, [agent()]);
+    preferences.capabilities.planning = [
+      { agentId: "codex", modelId: "text" },
+      { agentId: "codex", modelId: "vision" },
+      { agentId: "codex", modelId: "video" },
+    ];
+
+    expect(capabilityMediaInputSupport(preferences, "planning", [agent()])).toEqual({
+      image: true,
+      video: true,
+    });
+    expect(resolveCapabilityRoute(preferences, "planning", [agent()], ["image"])?.modelId).toBe(
+      "vision",
+    );
+    expect(resolveCapabilityRoute(preferences, "planning", [agent()], ["video"])?.modelId).toBe(
+      "video",
+    );
+    expect(
+      resolveCapabilityRoute(preferences, "planning", [agent()], ["image", "video"]),
+    ).toBeNull();
+  });
+
+  it("requires both the Agent attachment transport and the model modality", () => {
+    const withoutTransport = agent({
+      capabilities: { ...agent().capabilities, attachments: false },
+    });
+    expect(mediaInputSupport(withoutTransport, "vision")).toEqual({
+      image: false,
+      video: false,
+    });
+    expect(mediaInputSupport(agent(), "vision")).toEqual({ image: true, video: false });
+    const legacyExternal = agent({
+      id: "claude",
+      builtin: false,
+      catalog: {
+        ...agent().catalog,
+        models: [{ id: "legacy", label: "Legacy", reasoning: true, efforts: [] }],
+        defaultModel: "legacy",
+      },
+    });
+    expect(mediaInputSupport(legacyExternal, "legacy")).toEqual({
+      image: true,
+      video: false,
+    });
   });
 
   it("keeps each exact route unique and prefers the remembered capability for ambiguous history", () => {
