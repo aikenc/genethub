@@ -427,30 +427,50 @@ fn legacy_capability_tags(capability: AgentCapability) -> Vec<String> {
     .to_string()]
 }
 
-async fn resolve_role_route(state: &Shared, role: &RoleSnapshot) -> Result<ResolvedRoleRoute> {
-    if role.schema == LEGACY_ROLE_SCHEMA {
-        return Ok(ResolvedRoleRoute {
-            agent_id: role
-                .agent_id
-                .clone()
-                .ok_or_else(|| anyhow!("旧角色 {} 缺少 agentId", role.id))?,
-            model_id: role.model_id.clone(),
-            effort_id: None,
-            mode_id: role.mode_id.clone(),
-            runtime_values: role.runtime_values.clone(),
-        });
-    }
-    let tags = if role.schema == CAPABILITY_ROLE_SCHEMA {
-        legacy_capability_tags(
-            role.capability
-                .ok_or_else(|| anyhow!("角色 {} 缺少 capability", role.id))?,
-        )
+fn role_tags(role: &RoleSnapshot) -> Result<Vec<String>> {
+    if role.schema == CAPABILITY_ROLE_SCHEMA {
+        Ok(legacy_capability_tags(role.capability.ok_or_else(
+            || anyhow!("角色 {} 缺少 capability", role.id),
+        )?))
     } else {
-        crate::agent_routing::normalize_tags(role.tags.clone())
-    };
-    crate::agent_routing::resolve_live_route(state, &tags, role.evidence_only)
+        Ok(crate::agent_routing::normalize_tags(role.tags.clone()))
+    }
+}
+
+async fn resolve_role_route(state: &Shared, role: &RoleSnapshot) -> Result<ResolvedRoleRoute> {
+    resolve_role_route_excluding(state, role, &BTreeSet::new())
         .await
         .map(|(route, _)| route)
+}
+
+async fn resolve_role_route_excluding(
+    state: &Shared,
+    role: &RoleSnapshot,
+    excluded: &BTreeSet<(String, Option<String>)>,
+) -> Result<(ResolvedRoleRoute, crate::adapter::ProviderMap)> {
+    if role.schema == LEGACY_ROLE_SCHEMA {
+        return Ok((
+            ResolvedRoleRoute {
+                agent_id: role
+                    .agent_id
+                    .clone()
+                    .ok_or_else(|| anyhow!("旧角色 {} 缺少 agentId", role.id))?,
+                model_id: role.model_id.clone(),
+                effort_id: None,
+                mode_id: role.mode_id.clone(),
+                runtime_values: role.runtime_values.clone(),
+            },
+            state.providers().await,
+        ));
+    }
+    let tags = role_tags(role)?;
+    crate::agent_routing::resolve_live_route_excluding(
+        state,
+        &tags,
+        role.evidence_only,
+        excluded,
+    )
+        .await
         .with_context(|| {
             format!(
                 "workflowTagRouteUnavailable: 角色 {} 需要标签「{}」；Workflow 已阻塞，请人类修复机器全局 Agent 配置后重试",
@@ -815,6 +835,12 @@ struct RunRecord {
     executor_turns: u32,
     definition: WorkflowDefinition,
     roles: BTreeMap<String, RoleSnapshot>,
+    /// Exact Agent/model destinations that failed during this Run. Tags and
+    /// costs remain live machine-global inputs; this bounded-by-catalog set
+    /// only prevents a failed operation from immediately choosing the same
+    /// dead route again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    failed_routes: Vec<FailedAgentRoute>,
     nodes: BTreeMap<String, NodeRecord>,
     leases: BTreeMap<String, LeaseRecord>,
     #[serde(default)]
@@ -826,6 +852,39 @@ struct RunRecord {
     /// snapshot itself; the private run index is only a recoverable locator.
     #[serde(skip)]
     snapshot_relative: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FailedAgentRoute {
+    agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    failed_at_ms: i64,
+}
+
+impl RunRecord {
+    fn route_exclusions(&self) -> BTreeSet<(String, Option<String>)> {
+        self.failed_routes
+            .iter()
+            .map(|route| (route.agent_id.clone(), route.model_id.clone()))
+            .collect()
+    }
+
+    fn exclude_route(&mut self, agent_id: &str, model_id: Option<&str>) {
+        if self
+            .failed_routes
+            .iter()
+            .any(|route| route.agent_id == agent_id && route.model_id.as_deref() == model_id)
+        {
+            return;
+        }
+        self.failed_routes.push(FailedAgentRoute {
+            agent_id: agent_id.to_string(),
+            model_id: model_id.map(str::to_string),
+            failed_at_ms: now_ms(),
+        });
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1785,6 +1844,7 @@ pub(crate) async fn dispatch(
         executor_turns: 0,
         definition: bundle.definition,
         roles: bundle.roles,
+        failed_routes: Vec::new(),
         nodes: BTreeMap::new(),
         leases: BTreeMap::new(),
         flow_messages: Vec::new(),
@@ -6073,6 +6133,7 @@ mod tests {
             executor_turns: 0,
             definition,
             roles: BTreeMap::new(),
+            failed_routes: Vec::new(),
             nodes: BTreeMap::from([(
                 "publish".into(),
                 NodeRecord {
@@ -6143,6 +6204,7 @@ mod tests {
                 nodes: Vec::new(),
             },
             roles: BTreeMap::new(),
+            failed_routes: Vec::new(),
             nodes: BTreeMap::new(),
             leases: BTreeMap::new(),
             flow_messages: Vec::new(),

@@ -193,6 +193,20 @@ fn continue_message(run: &RunRecord, node: &NodeDefinition) -> String {
     )
 }
 
+fn reroute_message(
+    run: &RunRecord,
+    node: &NodeDefinition,
+    previous_agent_id: &str,
+    previous_model_id: Option<&str>,
+) -> String {
+    format!(
+        "上一执行路由 `{}/{}` 已在本节点执行中失败，daemon 已按本角色标签和机器全局实时成本自动切换路由。本节点、Session 与写租约均未改变。请先核对本会话历史、任务工作目录（git status、现有文件）和已完成动作，再从失败处继续；不要重做已经完成的工作，也不要另开任务。\n\n{}",
+        previous_agent_id,
+        previous_model_id.unwrap_or("default"),
+        super::task_message(run, node)
+    )
+}
+
 pub(super) fn validate_negative_result(
     reason: Option<&str>,
     evidence: &BTreeMap<String, String>,
@@ -854,6 +868,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
             supervision::observe(state, runtime, &mut run).await?;
             let mut waiting = false;
             let mut lost = Vec::new();
+            let mut failed = Vec::new();
             let mut alive: Option<Option<u32>> = None;
             let mut unavailable: Option<String> = None;
             for (node_id, node) in &run.nodes {
@@ -872,6 +887,19 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 {
                     waiting = true;
                     continue;
+                }
+                if !state.sessions.has_execution(session_id).await {
+                    if let Ok(session) = &summary {
+                        if session.status == SessionStatus::Failed && node.uses == "agent.session" {
+                            failed.push((
+                                node_id.clone(),
+                                session_id.clone(),
+                                session.agent_id.clone(),
+                                session.model_id.clone(),
+                            ));
+                            continue;
+                        }
+                    }
                 }
                 if summary.is_err()
                     || (!state.sessions.has_execution(session_id).await
@@ -905,8 +933,133 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                     }
                 }
             }
-            let continuable = !waiting && !lost.is_empty();
-            if continuable && run.engine.is_none() {
+            for (node_id, session_id, previous_agent_id, previous_model_id) in failed {
+                let definition = runtime_node(&run, &node_id)?.clone();
+                let role_id = definition
+                    .inputs
+                    .role
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("节点 {node_id} 缺少 with.role"))?;
+                let role = run
+                    .roles
+                    .get(role_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("角色不存在：{role_id}"))?;
+                // A legacy role deliberately pins an exact destination. It
+                // keeps the existing explicit recovery path; tag roles are
+                // the contracts that authorize automatic route replacement.
+                if role.schema == LEGACY_ROLE_SCHEMA {
+                    lost.push((node_id, session_id));
+                    continue;
+                }
+                run.exclude_route(&previous_agent_id, previous_model_id.as_deref());
+                let mut last_switch_error = None;
+                let selected = loop {
+                    let excluded = run.route_exclusions();
+                    let (route, providers) = match resolve_role_route_excluding(
+                        state, &role, &excluded,
+                    )
+                    .await
+                    {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            let failed_start = last_switch_error
+                                .as_deref()
+                                .map(|detail| format!("；后续候选启动失败：{detail}"))
+                                .unwrap_or_default();
+                            request_stop(
+                                &mut run,
+                                "blocked",
+                                format!(
+                                    "workflowTagRouteExhausted: 节点 {node_id} 的路由 {}/{} 执行失败，且没有其他匹配角色标签的可用 Agent 与模型{failed_start}；{error:#}",
+                                    previous_agent_id,
+                                    previous_model_id.as_deref().unwrap_or("default")
+                                ),
+                            );
+                            break None;
+                        }
+                    };
+                    let target = genehub_proto::SessionAgentTarget {
+                        agent_id: route.agent_id.clone(),
+                        model_id: route.model_id.clone(),
+                        mode_id: route.mode_id.clone(),
+                        effort_id: route.effort_id.clone(),
+                        runtime_values: route.runtime_values.clone(),
+                    };
+                    match state
+                        .sessions
+                        .switch_managed_agent(&session_id, target, &providers)
+                        .await
+                    {
+                        Ok(_) => break Some((route, providers)),
+                        Err(error) => {
+                            let detail = format!(
+                                "{}/{}: {error:#}",
+                                route.agent_id,
+                                route.model_id.as_deref().unwrap_or("default")
+                            );
+                            tracing::warn!(
+                                run = %run.id,
+                                node = %node_id,
+                                session = %session_id,
+                                route = %detail,
+                                "Workflow failover candidate became unavailable"
+                            );
+                            last_switch_error = Some(detail);
+                            run.exclude_route(&route.agent_id, route.model_id.as_deref());
+                        }
+                    }
+                };
+                let Some((route, providers)) = selected else {
+                    break;
+                };
+                let message = reroute_message(
+                    &run,
+                    &definition,
+                    &previous_agent_id,
+                    previous_model_id.as_deref(),
+                );
+                let record = run.nodes.get_mut(&node_id).expect("failed node");
+                record.assigned_at_ms = now_ms();
+                if let Some(executor) = run.executor_session_id.clone() {
+                    let flow = flow_message(
+                        &run,
+                        "node.routeChanged",
+                        Some(&node_id),
+                        &session_id,
+                        &executor,
+                        Some(run.revision.saturating_add(1)),
+                        serde_json::json!({
+                            "sessionId": session_id,
+                            "previous": {
+                                "agentId": previous_agent_id,
+                                "modelId": previous_model_id,
+                            },
+                            "current": {
+                                "agentId": route.agent_id,
+                                "modelId": route.model_id,
+                            },
+                        }),
+                    )?;
+                    push_flow_message(&mut run, flow);
+                }
+                run.revision = run.revision.saturating_add(1);
+                run.updated_at_ms = now_ms();
+                // Persist the exclusion and route-change evidence before the
+                // replacement Agent receives work. A crash can then resume
+                // from the new binding without choosing the dead route again.
+                save_run(runtime, &run)?;
+                state
+                    .sessions
+                    .send(&session_id, message, Vec::new(), &providers, None, None)
+                    .await?;
+            }
+            let continuable = run.status == "running" && !waiting && !lost.is_empty();
+            if run.status != "running" {
+                // A tag role exhausted every matching route above. The normal
+                // stopping path closes Sessions and releases leases before the
+                // actionable blocked result becomes terminal.
+            } else if continuable && run.engine.is_none() {
                 request_stop(
                     &mut run,
                     "blocked",

@@ -9,6 +9,7 @@ const TESTS = [
   "agent_routing::tests::only_first_three_non_auto_models_are_default_until_an_exact_model_is_configured",
   "agent_routing::tests::portable_history_adds_image_and_video_requirements",
   "agent_routing::tests::routed_request_tags_are_bounded_and_media_vocabulary_is_closed",
+  "agent_routing::tests::a_failed_exact_route_falls_through_to_the_next_live_cost_match",
   "dataplane::endpoint::tests::routed_session_operations_are_scoped_to_the_destination_workspace",
   "session::manager::tests::migration_history_excludes_inputs_that_still_need_delivery",
   "session::manager::tests::migration_seed_target_distinguishes_an_explicit_default_model",

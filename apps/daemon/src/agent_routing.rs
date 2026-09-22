@@ -151,6 +151,29 @@ pub(crate) fn select_tag_route(
     registry: &Registry,
     evidence_only: bool,
 ) -> Result<ResolvedAgentRoute> {
+    select_tag_route_excluding(
+        preferences,
+        required_tags,
+        agents,
+        registry,
+        evidence_only,
+        &BTreeSet::new(),
+    )
+}
+
+/// Same live tag/cost selection as [`select_tag_route`], excluding exact
+/// Agent/model routes that have already failed during the current operation.
+/// Exclusions are deliberately supplied by the caller instead of entering the
+/// machine-global preferences: a transient provider failure must not rewrite
+/// the Human's configuration or cache the current cost order.
+pub(crate) fn select_tag_route_excluding(
+    preferences: &AgentSelectionPreferences,
+    required_tags: &[String],
+    agents: &[AgentInfo],
+    registry: &Registry,
+    evidence_only: bool,
+    excluded: &BTreeSet<(String, Option<String>)>,
+) -> Result<ResolvedAgentRoute> {
     let required = normalize_tags(required_tags.iter().cloned());
     let mut candidates = Vec::new();
     for agent in agents {
@@ -201,7 +224,10 @@ pub(crate) fn select_tag_route(
     }
 
     candidates.retain(|candidate| {
-        required.iter().all(|required| {
+        !excluded.contains(&(
+            candidate.route.agent_id.clone(),
+            candidate.route.model_id.clone(),
+        )) && required.iter().all(|required| {
             candidate
                 .tags
                 .iter()
@@ -251,6 +277,15 @@ pub(crate) async fn resolve_live_route(
     required_tags: &[String],
     evidence_only: bool,
 ) -> Result<(ResolvedAgentRoute, ProviderMap)> {
+    resolve_live_route_excluding(state, required_tags, evidence_only, &BTreeSet::new()).await
+}
+
+pub(crate) async fn resolve_live_route_excluding(
+    state: &Shared,
+    required_tags: &[String],
+    evidence_only: bool,
+    excluded: &BTreeSet<(String, Option<String>)>,
+) -> Result<(ResolvedAgentRoute, ProviderMap)> {
     let providers = state.providers().await;
     let agents = state.registry.list(&providers).await;
     // Read after catalog lookup: a cost changed while the catalog was being
@@ -263,12 +298,13 @@ pub(crate) async fn resolve_live_route(
         .clone()
         .unwrap_or_default();
     validate_exclusive_tags(required_tags, &preferences)?;
-    let route = select_tag_route(
+    let route = select_tag_route_excluding(
         &preferences,
         required_tags,
         &agents,
         state.registry.as_ref(),
         evidence_only,
+        excluded,
     )?;
     Ok((route, providers))
 }
@@ -598,6 +634,51 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn a_failed_exact_route_falls_through_to_the_next_live_cost_match() {
+        let mut candidate = agent("genet", "provider/cheap", None);
+        candidate.catalog.models.push(ModelInfo {
+            id: "provider/backup".into(),
+            label: "provider/backup".into(),
+            context_window: None,
+            reasoning: true,
+            efforts: vec!["medium".into(), "high".into()],
+            input_modalities: None,
+        });
+        let preferences = AgentSelectionPreferences {
+            model_profiles: vec![
+                AgentModelProfile {
+                    agent_id: "genet".into(),
+                    model_id: Some("provider/cheap".into()),
+                    display_name: None,
+                    tags: vec![TAG_FLUSH.into()],
+                    cost: Some(AgentCostLevel::Low),
+                },
+                AgentModelProfile {
+                    agent_id: "genet".into(),
+                    model_id: Some("provider/backup".into()),
+                    display_name: None,
+                    tags: vec![TAG_FLUSH.into()],
+                    cost: Some(AgentCostLevel::High),
+                },
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::of(Vec::new());
+        let excluded = BTreeSet::from([("genet".to_string(), Some("provider/cheap".to_string()))]);
+        let route = select_tag_route_excluding(
+            &preferences,
+            &[TAG_FLUSH.into()],
+            &[candidate],
+            &registry,
+            false,
+            &excluded,
+        )
+        .expect("the higher-cost matching route remains eligible");
+        assert_eq!(route.agent_id, "genet");
+        assert_eq!(route.model_id.as_deref(), Some("provider/backup"));
     }
 
     #[test]

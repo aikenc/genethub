@@ -3327,7 +3327,7 @@ impl SessionManager {
         target: SessionAgentTarget,
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
-        self.switch_agent_with_routing(session_id, target, providers, None)
+        self.switch_agent_with_routing(session_id, target, providers, None, false)
             .await
     }
 
@@ -3344,8 +3344,23 @@ impl SessionManager {
             target,
             providers,
             Some((routing_tags, media_tags)),
+            false,
         )
         .await
+    }
+
+    /// Rebinds a failed Workflow Worker in place. The Workflow controller is
+    /// the only caller allowed to migrate a managed Session: Human-initiated
+    /// switches stay forbidden so a project's role-tag contract remains the
+    /// authority. Session id, managed prompt, history and write lease survive.
+    pub(crate) async fn switch_managed_agent(
+        &self,
+        session_id: &str,
+        target: SessionAgentTarget,
+        providers: &ProviderMap,
+    ) -> Result<SessionSummary> {
+        self.switch_agent_with_routing(session_id, target, providers, None, true)
+            .await
     }
 
     async fn switch_agent_with_routing(
@@ -3354,6 +3369,7 @@ impl SessionManager {
         target: SessionAgentTarget,
         providers: &ProviderMap,
         routing: Option<(Vec<String>, Vec<String>)>,
+        allow_managed: bool,
     ) -> Result<SessionSummary> {
         let live = self.live(session_id).await?;
         let _interaction = live.interaction_lock.lock().await;
@@ -3378,8 +3394,11 @@ impl SessionManager {
         }
 
         let source_meta = live.meta.lock().await.clone();
-        if source_meta.managed.is_some() {
+        if source_meta.managed.is_some() && !allow_managed {
             bail!("Workflow-managed Sessions keep the Agent chosen by their tag contract");
+        }
+        if source_meta.managed.is_none() && allow_managed {
+            bail!("only Workflow-managed Sessions can use automatic Worker failover");
         }
         if source_meta
             .imported
