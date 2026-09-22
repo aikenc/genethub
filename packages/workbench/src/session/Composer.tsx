@@ -1,5 +1,5 @@
 import type { AgentInfo, Attachment, CommandInfo, SessionDraft, SessionStatus } from "@genehub/proto";
-import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
+import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Play, Square, X } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -17,9 +17,20 @@ import {
   type ActiveSpan,
   type SpeechTextRange,
 } from "../speech/SpeechComposer";
-import { attachmentPreviewUrl, fileToAttachment, imageFilesFromClipboard } from "./attachments";
+import {
+  attachmentPreviewUrl,
+  classifyAttachmentFiles,
+  fileToAttachment,
+  imageFilesFromClipboard,
+  IMAGE_ATTACHMENT_MIMES,
+  validateInlineAttachmentBudget,
+  VIDEO_ATTACHMENT_MIMES,
+} from "./attachments";
+import { resolveArtifactRef } from "../preview/resolveArtifactRef";
 import { readLocalDraft, saveLocalDraft } from "./localConversation";
 import { ComposerControls } from "./ComposerControls";
+import { useSessionArtifact } from "./useSessionArtifact";
+import { useWorkbench } from "./store";
 import type { ComposerDraftInsert, ForwardDraft } from "./store";
 
 /**
@@ -233,6 +244,7 @@ export function Composer({
   const quiet = watchingQuiet ? quietFor(lastActivityAtMs, nowMs) : null;
   const [attachments, setAttachments] = useState<Attachment[]>(saved.attachments);
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
+  const [mediaViewer, setMediaViewer] = useState<{ name: string; mime: string; url: string } | null>(null);
   const [draftSaveState, setDraftSaveState] = useState<"idle" | "saving" | "saved">("idle");
   const draftSavePending = useRef(false);
   const draftSavedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -240,6 +252,8 @@ export function Composer({
   const [expandedDraftId, setExpandedDraftId] = useState<string | null>(null);
   const draftPicker = useRef<HTMLInputElement>(null);
   const activeDraftFile = useRef<string | null>(null);
+  const artifact = useSessionArtifact();
+  const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
   const imageAllowed = Boolean(attachmentsSupported && (inputModalities?.includes("image") ?? true));
   const videoAllowed = Boolean(attachmentsSupported && inputModalities?.includes("video"));
   const fileActionLabel = !attachmentsSupported
@@ -251,6 +265,9 @@ export function Composer({
         : videoAllowed
           ? "添加视频"
           : "添加文件（当前模型不支持媒体输入）";
+  const imageAccept = IMAGE_ATTACHMENT_MIMES.join(",");
+  const videoAccept = VIDEO_ATTACHMENT_MIMES.join(",");
+  const fileAccept = videoAllowed ? (imageAllowed ? `${imageAccept},${videoAccept}` : videoAccept) : imageAccept;
   useEffect(() => {
     if (persistenceKey) saveLocalDraft(persistenceKey, { text: draft, attachments, missingAttachments });
   }, [persistenceKey, draft, attachments, missingAttachments]);
@@ -359,7 +376,7 @@ export function Composer({
     // used to reach the daemon mid-turn and come back as "a turn is already
     // running in this session", which describes our own key handler rather than
     // anything the reader did wrong.
-    if (phase === "sending" || (!durableInput && phase !== "idle") || disabled || speechInput.busy) return;
+    if (phase === "sending" || (!durableInput && phase !== "idle") || disabled || speechInput.busy || draftSaveState === "saving") return;
     const text = draft.trim();
     const selectedDrafts = (drafts ?? []).filter((item) => selectedDraftIds.has(item.id));
     if (!text && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDrafts.length === 0) return;
@@ -372,6 +389,12 @@ export function Composer({
       : text;
     const payload = [...selectedDrafts.map((item) => item.text), currentPayload].filter(Boolean).join("\n\n");
     const outgoing = [...selectedDrafts.flatMap((item) => item.attachments ?? []), ...(forwardDraft?.attachments ?? []), ...attachments];
+    try {
+      validateInlineAttachmentBudget(outgoing);
+    } catch (error) {
+      setPasteNotice(error instanceof Error ? error.message : "附件过大");
+      return;
+    }
     speechInput.dismissReview();
     setSpeechTextRange(null);
     setActiveSpeechSpan(null);
@@ -401,16 +424,22 @@ export function Composer({
     const text = draft.trim();
     const savedAttachments = attachments;
     const savedVideoFiles = videoFiles;
+    try {
+      validateInlineAttachmentBudget([...(drafts ?? []).flatMap((item) => item.attachments ?? []), ...savedAttachments]);
+    } catch (error) {
+      setPasteNotice(error instanceof Error ? error.message : "附件过大");
+      return;
+    }
     draftSavePending.current = true;
     setDraftSaveState("saving");
-    setDraft("");
-    setAttachments([]);
-    setVideoFiles([]);
-    setMissingAttachments(0);
-    if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
     try {
       const saved = await onSaveDraft(text, savedAttachments, savedVideoFiles);
       if (!saved) throw new Error("draft persistence was not confirmed");
+      setDraft("");
+      setAttachments([]);
+      setVideoFiles([]);
+      setMissingAttachments(0);
+      if (persistenceKey) saveLocalDraft(persistenceKey, { text: "", attachments: [], missingAttachments: 0 });
       setDraftSaveState("saved");
       if (draftSavedTimer.current !== null) clearTimeout(draftSavedTimer.current);
       draftSavedTimer.current = setTimeout(() => {
@@ -418,10 +447,7 @@ export function Composer({
         setDraftSaveState("idle");
       }, 1_200);
     } catch {
-      setDraft((current) => appendDraftLine(text, current));
-      setAttachments((current) => [...savedAttachments, ...current]);
-      setVideoFiles((current) => [...savedVideoFiles, ...current]);
-      setPasteNotice("草稿保存失败，内容已恢复");
+      setPasteNotice("草稿保存失败，内容仍保留在输入框中");
       setDraftSaveState("idle");
     } finally {
       draftSavePending.current = false;
@@ -457,19 +483,9 @@ export function Composer({
       return;
     }
     try {
-      const images = files.filter((file) => file.type.startsWith("image/"));
-      const videos = files.filter((file) => file.type.startsWith("video/"));
-      if (images.some((file) => !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type))) {
-        throw new Error("图片仅支持 PNG、JPEG、WebP 或 GIF");
-      }
-      if (videos.some((file) => !["video/mp4", "video/webm", "video/quicktime", "video/mpeg", "video/x-msvideo"].includes(file.type))) {
-        throw new Error("视频格式当前不支持");
-      }
-      if (images.length > 0 && !imageAllowed) throw new Error("当前模型不支持图片输入");
-      if (videos.length > 0 && !videoAllowed) throw new Error("当前模型不支持视频输入");
-      if (images.length + videos.length !== files.length) throw new Error("只支持图片和视频文件");
-      if (videos.some((file) => file.size > 64 * 1024 * 1024)) throw new Error("视频超过 64MB");
+      const { images, videos } = classifyAttachmentFiles(files, imageAllowed, videoAllowed);
       const added = await Promise.all(images.map(fileToAttachment));
+      validateInlineAttachmentBudget([...attachments, ...added]);
       setAttachments((current) => [...current, ...added]);
       setVideoFiles((current) => [...current, ...videos]);
       setPasteNotice(null);
@@ -482,17 +498,33 @@ export function Composer({
     const item = (drafts ?? []).find((candidate) => candidate.id === draftId);
     if (!item || !onUpdateDraft) return;
     try {
-      const images = files.filter((file) => file.type.startsWith("image/"));
-      const videos = files.filter((file) => file.type.startsWith("video/"));
-      if (images.length + videos.length !== files.length) throw new Error("只支持图片和视频文件");
-      if (images.length > 0 && !imageAllowed) throw new Error("当前模型不支持图片输入");
-      if (videos.length > 0 && !videoAllowed) throw new Error("当前模型不支持视频输入");
+      const { images, videos } = classifyAttachmentFiles(files, imageAllowed, videoAllowed);
       const added = await Promise.all(images.map(fileToAttachment));
-      await onUpdateDraft({ ...item, attachments: [...item.attachments, ...added] }, videos);
+      const currentAttachments = item.attachments ?? [];
+      const otherAttachments = (drafts ?? []).filter((draftItem) => draftItem.id !== draftId).flatMap((draftItem) => draftItem.attachments ?? []);
+      validateInlineAttachmentBudget([...otherAttachments, ...currentAttachments, ...added]);
+      await onUpdateDraft({ ...item, attachments: [...currentAttachments, ...added] }, videos);
       setPasteNotice(null);
     } catch (error) {
       setPasteNotice(error instanceof Error ? error.message : "读取文件失败");
     }
+  };
+
+  const openAttachment = (attachment: Attachment) => {
+    const url = attachmentPreviewUrl(attachment);
+    if (url) {
+      setMediaViewer({ name: attachment.name, mime: attachment.mime, url });
+      return;
+    }
+    if (!attachment.path || !artifact) return;
+    const resolved = resolveArtifactRef(attachment.path, artifact);
+    if (resolved.kind !== "preview") return;
+    openPreviewFloat({
+      deviceHandle: artifact.deviceHandle,
+      workspaceHandle: artifact.workspaceHandle,
+      path: resolved.path,
+      sessionId: artifact.sessionId ?? null,
+    });
   };
 
   useLayoutEffect(() => {
@@ -663,13 +695,35 @@ export function Composer({
                           if (text && text !== item.text) void onUpdateDraft?.({ ...item, text });
                         }}
                       />
-                      <div className="flex items-center gap-2">
-                        {itemAttachments.map((attachment, index) => (
-                          <span key={`${attachment.name}-${index}`} className="inline-flex max-w-32 items-center gap-1 rounded-md bg-surface px-2 py-1 text-[10px] text-muted">
-                            <span className="truncate">{attachment.name}</span>
-                            <button type="button" aria-label={`移除 ${attachment.name}`} onClick={() => void onUpdateDraft?.({ ...item, attachments: itemAttachments.filter((_, i) => i !== index) })}>×</button>
-                          </span>
-                        ))}
+                      <div className="flex flex-wrap items-center gap-2">
+                        {itemAttachments.map((attachment, index) => {
+                          const url = attachmentPreviewUrl(attachment);
+                          return (
+                            <div key={`${attachment.name}-${index}`} className="group relative h-14 w-14 shrink-0">
+                              <button
+                                type="button"
+                                aria-label={`查看 ${attachment.name}`}
+                                title={attachment.name}
+                                onClick={() => openAttachment(attachment)}
+                                className="flex h-full w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-surface text-muted"
+                              >
+                                {url && attachment.mime.startsWith("image/") ? (
+                                  <img src={url} alt={attachment.name} className="h-full w-full object-cover" />
+                                ) : url && attachment.mime.startsWith("video/") ? (
+                                  <video src={url} muted preload="metadata" className="h-full w-full object-cover" />
+                                ) : (
+                                  <span className="flex flex-col items-center gap-0.5 px-1 text-[9px]"><Play className="h-4 w-4" aria-hidden /><span className="max-w-12 truncate">{attachment.name}</span></span>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                aria-label={`移除 ${attachment.name}`}
+                                onClick={() => void onUpdateDraft?.({ ...item, attachments: itemAttachments.filter((_, i) => i !== index) })}
+                                className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-line bg-surface text-xs text-muted shadow"
+                              >×</button>
+                            </div>
+                          );
+                        })}
                         <button
                           type="button"
                           aria-label="给草稿添加图片或视频"
@@ -715,19 +769,18 @@ export function Composer({
         ) : null}
         {attachments.length > 0 || videoFiles.length > 0 ? (
           <div
-            className="flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3"
+            className={`flex flex-nowrap gap-2 overflow-x-auto px-4 pt-3 transition-opacity ${draftSaveState === "saving" ? "opacity-45" : ""}`}
             aria-label="待发送的文件"
           >
             {attachments.map((attachment, index) => (
               <div key={index} className="group relative h-14 w-14 shrink-0">
-                <img
-                  src={attachmentPreviewUrl(attachment)}
-                  alt={attachment.name}
-                  className="h-full w-full rounded-lg border border-line object-cover"
-                />
+                <button type="button" aria-label={`查看 ${attachment.name}`} onClick={() => openAttachment(attachment)} className="h-full w-full overflow-hidden rounded-lg border border-line">
+                  <img src={attachmentPreviewUrl(attachment)} alt={attachment.name} className="h-full w-full object-cover" />
+                </button>
                 <button
                   type="button"
                   aria-label={`移除 ${attachment.name}`}
+                  disabled={draftSaveState === "saving"}
                   onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))}
                   className="absolute -right-2 -top-2 flex h-6 w-6 items-center justify-center rounded-full border border-line bg-surface text-sm text-muted shadow group-hover:text-fg md:-right-1.5 md:-top-1.5 md:h-5 md:w-5 md:text-xs"
                 >
@@ -736,15 +789,13 @@ export function Composer({
               </div>
             ))}
             {videoFiles.map((file, index) => (
-              <div key={`video-${index}`} className="group relative flex h-14 max-w-40 shrink-0 items-center rounded-lg border border-line px-2 text-xs">
-                <span className="truncate" title={file.name}>视频 · {file.name}</span>
-                <button
-                  type="button"
-                  aria-label={`移除 ${file.name}`}
-                  onClick={() => setVideoFiles((current) => current.filter((_, i) => i !== index))}
-                  className="ml-2 text-muted hover:text-fg"
-                >×</button>
-              </div>
+              <LocalVideoThumbnail
+                key={`video-${index}`}
+                file={file}
+                disabled={draftSaveState === "saving"}
+                onOpen={(url) => setMediaViewer({ name: file.name, mime: file.type, url })}
+                onRemove={() => setVideoFiles((current) => current.filter((_, i) => i !== index))}
+              />
             ))}
           </div>
         ) : null}
@@ -767,7 +818,7 @@ export function Composer({
               <textarea
                 ref={textarea}
                 className={`relative z-[1] block w-full resize-none overflow-y-hidden bg-transparent px-3 py-1.5 text-base leading-9 outline-none placeholder:text-faint focus-visible:outline-transparent md:py-1 md:text-sm md:leading-6 ${
-                  speechPresentation ? "text-transparent caret-accent-bright" : "text-fg"
+                  speechPresentation ? "text-transparent caret-accent-bright" : draftSaveState === "saving" ? "text-muted" : "text-fg"
                 }`}
                 placeholder="描述任务…"
                 aria-label="任务描述"
@@ -780,9 +831,9 @@ export function Composer({
                     : undefined
                 }
                 value={visibleDraft}
-                disabled={disabled || speechInput.busy}
+                disabled={disabled || speechInput.busy || draftSaveState === "saving"}
                 rows={1}
-                onFocus={() => setFocused(true)}
+                onFocus={() => { setFocused(true); setExpandedDraftId(null); }}
                 onBlur={() => setFocused(false)}
                 onChange={(event) => {
                   if (speechInput.phase === "review") {
@@ -947,7 +998,7 @@ export function Composer({
             <input
               ref={picker}
               type="file"
-              accept={videoAllowed ? (imageAllowed ? "image/*,video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo" : "video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo") : "image/*"}
+              accept={fileAccept}
               multiple
               tabIndex={-1}
               className="hidden"
@@ -960,7 +1011,7 @@ export function Composer({
             <input
               ref={draftPicker}
               type="file"
-              accept={videoAllowed ? (imageAllowed ? "image/*,video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo" : "video/mp4,video/webm,video/quicktime,video/mpeg,video/x-msvideo") : "image/*"}
+              accept={fileAccept}
               multiple
               tabIndex={-1}
               className="hidden"
@@ -1027,7 +1078,7 @@ export function Composer({
               type="button"
               aria-label={fileActionLabel}
               title={fileActionLabel}
-              disabled={disabled || (!durableInput && phase !== "idle") || speechInput.busy || (!imageAllowed && !videoAllowed)}
+              disabled={disabled || (!durableInput && phase !== "idle") || speechInput.busy || draftSaveState === "saving" || (!imageAllowed && !videoAllowed)}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 setDismissed(true);
@@ -1109,6 +1160,7 @@ export function Composer({
                 disabled={
                   disabled ||
                   speechInput.busy ||
+                  draftSaveState === "saving" ||
                   (draft.trim().length === 0 && attachments.length === 0 && videoFiles.length === 0 && !forwardDraft && selectedDraftIds.size === 0)
                 }
                 className="flex h-9 w-9 !min-h-0 !min-w-0 shrink-0 items-center justify-center rounded-full bg-accent text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 disabled:opacity-30 md:h-6 md:w-6"
@@ -1140,6 +1192,51 @@ export function Composer({
         onClose={() => setActiveSpeechSpan(null)}
       />
       ) : null}
+      {mediaViewer ? (
+        <div
+          className="pointer-events-auto fixed inset-0 z-[90] flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setMediaViewer(null); }}
+        >
+          <div role="dialog" aria-modal="true" aria-label={`查看 ${mediaViewer.name}`} className="relative flex max-h-full max-w-5xl flex-col rounded-xl border border-line bg-bg p-2 shadow-2xl">
+            <button type="button" aria-label="关闭附件预览" onClick={() => setMediaViewer(null)} className="absolute right-2 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-white"><X className="h-5 w-5" aria-hidden /></button>
+            {mediaViewer.mime.startsWith("video/") ? (
+              <video src={mediaViewer.url} controls autoPlay className="max-h-[80vh] max-w-[90vw] rounded-lg" />
+            ) : (
+              <img src={mediaViewer.url} alt={mediaViewer.name} className="max-h-[80vh] max-w-[90vw] rounded-lg object-contain" />
+            )}
+            <p className="max-w-[90vw] truncate px-2 py-1 text-xs text-muted">{mediaViewer.name}</p>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LocalVideoThumbnail({
+  file,
+  disabled,
+  onOpen,
+  onRemove,
+}: {
+  file: File;
+  disabled: boolean;
+  onOpen(url: string): void;
+  onRemove(): void;
+}) {
+  const [url, setUrl] = useState("");
+  useEffect(() => {
+    if (typeof URL.createObjectURL !== "function") return;
+    const next = URL.createObjectURL(file);
+    setUrl(next);
+    return () => URL.revokeObjectURL(next);
+  }, [file]);
+  return (
+    <div className="group relative h-14 w-20 shrink-0">
+      <button type="button" aria-label={`查看 ${file.name}`} title={file.name} disabled={!url} onClick={() => onOpen(url)} className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-lg border border-line bg-surface text-muted disabled:opacity-70">
+        {url ? <video src={url} muted preload="metadata" className="h-full w-full object-cover" /> : null}
+        <span className="absolute inset-0 flex items-center justify-center bg-black/15"><Play className="h-5 w-5 fill-white/80 text-white" aria-hidden /></span>
+      </button>
+      <button type="button" aria-label={`移除 ${file.name}`} disabled={disabled} onClick={onRemove} className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full border border-line bg-surface text-xs text-muted shadow disabled:opacity-30">×</button>
     </div>
   );
 }

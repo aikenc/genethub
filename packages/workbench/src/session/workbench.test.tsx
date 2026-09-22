@@ -2129,6 +2129,9 @@ describe("the controls offered to the user", () => {
 
     pasteImage(screen.getByLabelText("任务描述"));
     await waitFor(() => expect(screen.getByAltText("shot.png")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "查看 shot.png" }));
+    expect(screen.getByRole("dialog", { name: "查看 shot.png" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭附件预览" }));
 
     await userEvent.click(screen.getByLabelText("发送"));
     expect(onSend).toHaveBeenCalledWith(
@@ -2186,13 +2189,33 @@ describe("the controls offered to the user", () => {
     expect(screen.getByLabelText("添加图片或视频")).toBeEnabled();
     const video = new File(["video-bytes"], "clip.mp4", { type: "video/mp4" });
     await userEvent.upload(picker, video);
-    await screen.findByText("视频 · clip.mp4");
+    await screen.findByRole("button", { name: "查看 clip.mp4" });
     await userEvent.click(screen.getByLabelText("发送"));
     expect(onSend).toHaveBeenCalledWith("", [], [video]);
 
     rerender(<Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["video"] })} />);
     expect(screen.getByLabelText("添加视频")).toBeEnabled();
     expect(picker.accept).not.toContain("image/*");
+  });
+
+  it("renders a local video frame and opens the video attachment viewer", async () => {
+    const originalCreate = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:clip-preview") });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const view = render(<Composer {...composerProps({ attachmentsSupported: true, inputModalities: ["image", "video"] })} />);
+    try {
+      const picker = view.container.querySelector<HTMLInputElement>('input[type="file"]')!;
+      await userEvent.upload(picker, new File(["video"], "clip.mp4", { type: "video/mp4" }));
+      const thumbnail = await screen.findByRole("button", { name: "查看 clip.mp4" });
+      expect(thumbnail.querySelector("video")).toBeInTheDocument();
+      await userEvent.click(thumbnail);
+      expect(screen.getByRole("dialog", { name: "查看 clip.mp4" }).querySelector("video[controls]")).toBeInTheDocument();
+    } finally {
+      view.unmount();
+      if (originalCreate) Object.defineProperty(URL, "createObjectURL", originalCreate); else delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+      if (originalRevoke) Object.defineProperty(URL, "revokeObjectURL", originalRevoke); else delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+    }
   });
 
   it("turns send into stop while a turn is running", async () => {
@@ -2507,7 +2530,7 @@ describe("the controls offered to the user", () => {
     expect(box).toHaveFocus();
   });
 
-  it("moves the current composer into a visible saving state without duplicate submits", async () => {
+  it("keeps the current composer visible but locked while a draft is saving", async () => {
     let confirm!: (saved: boolean) => void;
     const onSaveDraft = vi.fn(() => new Promise<boolean>((resolve) => { confirm = resolve; }));
     render(<Composer {...composerProps({ onSaveDraft })} />);
@@ -2517,7 +2540,8 @@ describe("the controls offered to the user", () => {
     await userEvent.click(screen.getByRole("button", { name: "存为草稿" }));
 
     expect(onSaveDraft).toHaveBeenCalledWith("稍后继续修改", [], []);
-    expect(box).toHaveValue("");
+    expect(box).toHaveValue("稍后继续修改");
+    expect(box).toBeDisabled();
     const saving = screen.getByRole("button", { name: "正在保存草稿" });
     expect(saving).toHaveAttribute("aria-busy", "true");
     expect(saving).toBeDisabled();
@@ -2526,9 +2550,10 @@ describe("the controls offered to the user", () => {
 
     await act(async () => confirm(true));
     expect(await screen.findByRole("button", { name: "草稿已保存" })).toBeInTheDocument();
+    expect(box).toHaveValue("");
   });
 
-  it("restores a failed save ahead of text typed while persistence was pending", async () => {
+  it("leaves the original content in place when draft persistence fails", async () => {
     let confirm!: (saved: boolean) => void;
     const onSaveDraft = vi.fn(() => new Promise<boolean>((resolve) => { confirm = resolve; }));
     render(<Composer {...composerProps({ onSaveDraft })} />);
@@ -2536,11 +2561,58 @@ describe("the controls offered to the user", () => {
 
     await userEvent.type(box, "原草稿");
     await userEvent.click(screen.getByRole("button", { name: "存为草稿" }));
-    await userEvent.type(box, "等待时新写的内容");
     await act(async () => confirm(false));
 
-    await waitFor(() => expect(box).toHaveValue("原草稿\n等待时新写的内容"));
-    expect(screen.getByText("草稿保存失败，内容已恢复")).toBeInTheDocument();
+    await waitFor(() => expect(box).toHaveValue("原草稿"));
+    expect(box).toBeEnabled();
+    expect(screen.getByText("草稿保存失败，内容仍保留在输入框中")).toBeInTheDocument();
+  });
+
+  it("collapses an expanded saved draft when the main composer receives focus", async () => {
+    render(<Composer {...composerProps({ drafts: [{ id: "d1", text: "稍后修改", attachments: [] }] })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "稍后修改" }));
+    expect(screen.getByRole("textbox", { name: "编辑草稿 稍后修改" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("textbox", { name: "任务描述" }));
+    expect(screen.queryByRole("textbox", { name: "编辑草稿 稍后修改" })).not.toBeInTheDocument();
+  });
+
+  it("shows a saved GIF as a thumbnail and opens it in the attachment viewer", async () => {
+    render(<Composer {...composerProps({ drafts: [{ id: "d1", text: "动图参考", attachments: [{ name: "demo.gif", mime: "image/gif", dataBase64: "R0lGODlhAQABAIAAAAUEBA==" }] }] })} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /^动图参考/ }));
+    expect(screen.getByAltText("demo.gif")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "查看 demo.gif" }));
+    expect(screen.getByRole("dialog", { name: "查看 demo.gif" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭附件预览" }));
+    expect(screen.queryByRole("dialog", { name: "查看 demo.gif" })).not.toBeInTheDocument();
+  });
+
+  it("accepts GIF through the same picker and draft-save path as other images", async () => {
+    const onSaveDraft = vi.fn(async () => true);
+    const { container } = render(<Composer {...composerProps({ onSaveDraft, attachmentsSupported: true })} />);
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const gif = new File(["GIF89a"], "demo.gif", { type: "image/gif" });
+
+    expect(picker.accept).toContain("image/gif");
+    await userEvent.upload(picker, gif);
+    await screen.findByAltText("demo.gif");
+    await userEvent.click(screen.getByRole("button", { name: "存为草稿" }));
+
+    expect(onSaveDraft).toHaveBeenCalledWith("", [expect.objectContaining({ name: "demo.gif", mime: "image/gif" })], []);
+  });
+
+  it("rejects an inline GIF that cannot fit the final RPC before draft saving starts", async () => {
+    const onSaveDraft = vi.fn(async () => true);
+    const { container } = render(<Composer {...composerProps({ onSaveDraft, attachmentsSupported: true })} />);
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const gif = new File([new Uint8Array(1_700_000)], "large.gif", { type: "image/gif" });
+
+    await userEvent.upload(picker, gif);
+
+    expect(await screen.findByText(/图片附件合计需小于约 1.6MB/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "存为草稿" })).toBeDisabled();
+    expect(onSaveDraft).not.toHaveBeenCalled();
   });
 
   it("selects multiple saved drafts, sends them in display order, then removes them", async () => {
