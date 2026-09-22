@@ -59,6 +59,7 @@ import {
 } from "./roundGallery";
 import { buildSelectionCopy } from "./selectionCopy";
 import { localValue, saveLocalValue, markContentRead, type ReadingPosition } from "./localConversation";
+import { resolveRuntimeSelection } from "./runtime-selection";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { kindEmoji, kindLabel, ToolCallView } from "./ToolCall";
@@ -241,9 +242,6 @@ export function TimelineView({
   const content = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const scrollRun = useRef(idleTimelineScroll());
-  const press = useRef<{timer: ReturnType<typeof setTimeout>; x: number; y: number} | null>(null);
-  const cancelPress = () => { if (press.current) clearTimeout(press.current.timer); press.current = null; };
-  useEffect(() => cancelPress, []);
   const [savedReading] = useState(() => readingKey ? localValue<ReadingPosition>(`position:${readingKey}`) : null);
   const restorePending = useRef(Boolean(savedReading && !savedReading.bottom));
   const pinnedRef = useRef(!restorePending.current);
@@ -306,6 +304,17 @@ export function TimelineView({
   const workspaces = useWorkbench((workbench) => workbench.workspaces);
   const settings = useWorkbench((workbench) => workbench.settings);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
+  const activeModelId = state.modelId ?? activeSession?.modelId ?? null;
+  const activeRuntime = resolveRuntimeSelection({
+    agents,
+    agentId: activeSession?.agentId ?? null,
+    modelId: activeModelId,
+    modeId: state.modeId ?? activeSession?.modeId ?? null,
+    effortId: state.effortId ?? activeSession?.effortId ?? null,
+    runtimeValues: state.runtimeValues,
+  });
+  const turnAgentLabel = activeRuntime.current?.label ?? activeSession?.agentId ?? "未知 Agent";
+  const turnModelLabel = activeRuntime.model?.label ?? activeModelId ?? "默认模型";
   const hasExecutor = !activeSession?.managed && workspaces.find((space) => space.id === activeSession?.workspaceId)
     ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
@@ -591,20 +600,7 @@ export function TimelineView({
               );
             };
             return (
-              <section key={turnSectionKey(turn, index)} data-reading-anchor={turnSectionKey(turn, index)} className="space-y-4"
-                onPointerDown={event => {
-                  if (event.pointerType !== "touch" || liveTurn || state.historyExcerptIds?.length || selection) return;
-                  const target = event.target as HTMLElement;
-                  if (target.closest("button,a,input,textarea")) return;
-                  const id = target.closest<HTMLElement>("[data-message-id]")?.dataset.messageId;
-                  if (!id || !selectableSet.has(id)) return;
-                  cancelPress();
-                  press.current = {x:event.clientX,y:event.clientY,timer:setTimeout(() => { setSelection(applySelectionAddMany(emptySelection(),[id]).next); press.current = null; }, 550)};
-                }}
-                onPointerMove={event => { if(press.current && Math.hypot(event.clientX-press.current.x,event.clientY-press.current.y)>8) cancelPress(); }}
-                onPointerUp={cancelPress} onPointerCancel={cancelPress}
-                onContextMenu={event => { if(selection) event.preventDefault(); }}
-              >
+              <section key={turnSectionKey(turn, index)} data-reading-anchor={turnSectionKey(turn, index)} className="space-y-4">
                 {selection && turnSelectable.length > 0 ? (
                   <div className="flex justify-end">
                     <button
@@ -657,6 +653,8 @@ export function TimelineView({
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
+                    agentLabel={turnAgentLabel}
+                    modelLabel={turnModelLabel}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -686,6 +684,8 @@ export function TimelineView({
                     liveUsage={state.usage ?? undefined}
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
+                    agentLabel={turnAgentLabel}
+                    modelLabel={turnModelLabel}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -2149,6 +2149,8 @@ function TurnFooter({
   liveStartedAtMs,
   liveTools = 0,
   liveItems,
+  agentLabel,
+  modelLabel,
   canFork,
   onFork,
   onSelect,
@@ -2158,6 +2160,8 @@ function TurnFooter({
   liveStartedAtMs?: number;
   liveTools?: number;
   liveItems?: TimelineItem[];
+  agentLabel: string;
+  modelLabel: string;
   canFork: boolean;
   onFork?: () => void;
   /** Enters selection mode with this turn checked; absent while selecting. */
@@ -2188,9 +2192,9 @@ function TurnFooter({
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">
       <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
-        <span>{stats ? relativeTime(stats.finishedAtMs, now) : "进行中"}</span>
+        <span title={`Agent：${agentLabel}`}>{agentLabel}</span>
         <span aria-hidden="true">·</span>
-        <span>耗时 {formatDuration(duration)}</span>
+        <span title={`模型：${modelLabel}`}>{modelLabel}</span>
         <span aria-hidden="true">·</span>
         <button
           type="button"
@@ -2223,6 +2227,9 @@ function TurnFooter({
       </div>
       {details ? (
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
+          <span data-testid="turn-timing">
+            {stats ? relativeTime(stats.finishedAtMs, now) : "进行中"} · 耗时 {formatDuration(duration)}
+          </span>
           <span data-testid="usage-summary">
             {usage
               ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`

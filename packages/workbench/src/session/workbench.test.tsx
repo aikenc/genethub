@@ -2769,7 +2769,24 @@ describe("the controls offered to the user", () => {
 });
 
 describe("a whole turn as the timeline sees it", () => {
-  it("keeps its compact metrics and reveals token details on demand", async () => {
+  it("shows the resolved Agent and model before revealing metrics on demand", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          modelId: "deepseek/v4",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "idle",
+        },
+      ],
+      activeSessionId: "s1",
+      agents: [agent({ id: "codex", label: "Codex" })],
+    });
     const call: TimelineItem = {
       type: "toolCall",
       id: "c1",
@@ -2851,17 +2868,20 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("hello.txt");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
-    expect(screen.getByTestId("turn-footer")).toHaveTextContent("2 分钟前");
-    expect(screen.getByTestId("turn-footer")).toHaveTextContent("耗时 5s");
+    expect(screen.getByTestId("turn-footer")).toHaveTextContent("Codex");
+    expect(screen.getByTestId("turn-footer")).toHaveTextContent("DeepSeek V4");
+    expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("2 分钟前");
+    expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("耗时 5s");
     expect(screen.queryByTestId("usage-summary")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /5 输出 tokens/ }));
+    expect(screen.getByTestId("turn-timing")).toHaveTextContent("2 分钟前 · 耗时 5s");
     // turnSummary stats carry cacheReadTokens:3/input:10 (uncached 7); the
     // turnCompleted event has cacheReadTokens:0 but the footer renders the
     // turnSummary stats, so the summary line shows the richer breakdown.
     expect(screen.getByTestId("usage-summary")).toHaveTextContent(
       "本 Turn · input(cached:3, uncached:7) output 5 · 工具 1 次 · 模型 1 轮 · 工具输出约 4 tokens",
     );
-    expect(screen.getByRole("button", { name: "Fork" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Fork" })).toBeEnabled();
     expect(state.status).toBe("idle");
   });
 
@@ -3023,7 +3043,7 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
   });
 
-  it("enters multi-select from a turn's 选择 button and range-selects across bubbles", async () => {
+  it("keeps touch hold native and enters multi-select from a turn's 选择 button", async () => {
     useWorkbench.setState({
       sessions: [
         {
@@ -3104,6 +3124,14 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.queryByRole("button", { name: "复制" })).toBeNull();
     const entries = screen.getAllByRole("button", { name: "选择" });
     expect(entries).toHaveLength(2);
+
+    // Touch hold belongs to the browser's native text editing/selection. The
+    // explicit footer entry is the only way into GeneHub multi-select.
+    const touchTarget = screen.getByText("第一个回答").closest("[data-message-id]");
+    expect(touchTarget).not.toBeNull();
+    fireEvent.pointerDown(touchTarget!, { pointerType: "touch", clientX: 10, clientY: 10 });
+    await new Promise((resolve) => window.setTimeout(resolve, 600));
+    expect(screen.queryByTestId("selection-bar")).toBeNull();
 
     // 选择 checks its own turn and anchors the bubble above the footer.
     await userEvent.click(entries[1]!);
