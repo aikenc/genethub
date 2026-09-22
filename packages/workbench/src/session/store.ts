@@ -1,6 +1,5 @@
 import { savedInputReceipts, saveInputReceipt, rememberDraftIdentity, draftIdentities, forgetDraftIdentity, saveLocalValue, localValue, initializeReplyReads, hasUnreadReply } from "./localConversation";
 import type {
-  AgentCapability,
   AgentSpaceBuilderOperation,
   AgentSpaceBuilderReport,
   AgentSpaceOperation,
@@ -28,6 +27,7 @@ import type {
   SessionSnapshot,
   SessionImportListing,
   SessionDraft,
+  SessionAgentTarget,
   SessionSummary,
   Settings,
   SpeechRuntimeStatus,
@@ -50,15 +50,16 @@ import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  capabilityForRoute,
+  configuredMediaInputSupport,
   definedRuntimeValues,
   IMAGE_TAG,
-  normalizeTags,
+  normalizeGroupedTags,
   normalizeAgentPreferences,
   resolveAgentRuntime,
   resolveTagRoute,
   VIDEO_TAG,
   withRuntimePreference,
+  withSelectedTags,
 } from "./capability-preferences";
 import {
   applySequenced,
@@ -126,7 +127,6 @@ export interface Draft {
   /** Local identity, never a daemon Session ID. */
   localId?: string;
   workspaceId: string;
-  capability: AgentCapability;
   tags?: string[];
   agentId: string | null;
   modelId: string | null;
@@ -413,8 +413,8 @@ interface WorkbenchState {
     options?: {
       addressScope?: AddressScope;
       localId?: string;
-      capability?: AgentCapability;
       tags?: string[];
+      target?: SessionAgentTarget;
     },
   ): void;
   selectSession(sessionId: string): Promise<void>;
@@ -478,7 +478,7 @@ interface WorkbenchState {
   importSessionCandidate(workspaceId: string, candidateId: string): Promise<boolean>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
-  setCapability(capability: AgentCapability): Promise<void>;
+  setAgentTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void>;
   setTags(tags: string[]): Promise<void>;
   setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
   setMode(modeId: string): Promise<void>;
@@ -1020,22 +1020,18 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       state.settings?.agentPreferences,
       state.agents,
     );
-    const tags = normalizeTags(
+    const tags = normalizeGroupedTags(
       options?.tags?.length
         ? options.tags
         : cachedDraft?.tags?.length
           ? cachedDraft.tags
           : normalizedPreferences.selectedTags ?? ["Flush"],
+      normalizedPreferences,
     );
-    const capability =
-      options?.capability ??
-      cachedDraft?.capability ??
-      (agentId
-        ? capabilityForRoute(normalizedPreferences, agentId, cachedDraft?.modelId ?? null)
-        : normalizedPreferences.selectedCapability);
+    const explicitTarget = options?.target;
     const preferences = normalizedPreferences;
     const resolvedRoute = resolveTagRoute(preferences, tags, state.agents);
-    const chosenAgentId = agentId ?? cachedDraft?.agentId ?? resolvedRoute?.agent.id ?? null;
+    const chosenAgentId = explicitTarget?.agentId ?? agentId ?? cachedDraft?.agentId ?? resolvedRoute?.agent.id ?? null;
     const chosenAgent = state.agents.find((candidate) => candidate.id === chosenAgentId);
     const resolvedRuntime =
       chosenAgent && chosenAgent.id === resolvedRoute?.agent.id
@@ -1043,7 +1039,14 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         : chosenAgent
           ? resolveAgentRuntime(preferences, chosenAgent, cachedDraft?.modelId)
           : null;
-    const draftRuntime = cachedDraft
+    const draftRuntime = explicitTarget
+      ? {
+          modelId: explicitTarget.modelId ?? null,
+          modeId: explicitTarget.modeId ?? null,
+          effortId: explicitTarget.effortId ?? null,
+          runtimeValues: definedRuntimeValues(explicitTarget.runtimeValues),
+        }
+      : cachedDraft
       ? {
           modelId: cachedDraft.modelId ?? resolvedRuntime?.modelId ?? null,
           modeId: cachedDraft.modeId ?? resolvedRuntime?.modeId ?? null,
@@ -1056,7 +1059,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           effortId: resolvedRuntime?.effortId ?? null,
           runtimeValues: resolvedRuntime?.runtimeValues ?? {},
         };
-    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, capability, tags, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, tags, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -1074,7 +1077,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       draft: {
         localId,
         workspaceId: target,
-        capability,
         tags,
         agentId: chosenAgentId,
         modelId: draftRuntime.modelId,
@@ -2008,51 +2010,66 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
   },
 
-  async setCapability(capability) {
-    const tag = capability === "planning" ? "Pro" : capability === "multimodal" ? IMAGE_TAG : "Flush";
-    await get().setTags([tag]);
-  },
-
-  async setTags(input) {
-    const tags = normalizeTags(input).slice(0, 4);
+  async setAgentTarget(target, filterTags) {
     const state = get();
     const preferences = normalizeAgentPreferences(
       state.settings?.agentPreferences,
       state.agents,
     );
-    const route = resolveTagRoute(preferences, tags, state.agents);
+    const tags = normalizeGroupedTags(filterTags, preferences).slice(0, 4);
+    const runtimeValues = definedRuntimeValues(target.runtimeValues);
+    const exact: SessionAgentTarget = { ...target, runtimeValues };
+    const remembered = withRuntimePreference(
+      withSelectedTags(preferences, tags),
+      target.agentId,
+      {
+        effortId: target.effortId,
+        modeId: target.modeId,
+        runtimeValues,
+      },
+    );
     if (state.draft) {
       onDraft(get, set, {
         tags,
-        ...(route
-          ? {
-              capability: capabilityForRoute(preferences, route.agent.id, route.modelId),
-              agentId: route.agent.id,
-              modelId: route.modelId,
-              modeId: route.modeId,
-              effortId: route.effortId,
-              runtimeValues: route.runtimeValues,
-            }
-          : { agentId: null, modelId: null, modeId: null, effortId: null, runtimeValues: {} }),
+        agentId: target.agentId,
+        modelId: target.modelId ?? null,
+        modeId: target.modeId ?? null,
+        effortId: target.effortId ?? null,
+        runtimeValues,
       });
+      await get().setAgentPreferences(remembered);
+      return;
     }
-    const sessionId = get().activeSessionId;
+    const sessionId = state.activeSessionId;
     if (!sessionId) return;
     const reply = await asked(set, () =>
-      require_(get().client).call({
-        type: "session.route",
-        payload: { sessionId, tags, mediaTags: [] },
+      require_(state.client).call({
+        type: "session.switchAgent",
+        payload: { sessionId, target: exact },
       }),
     );
     if (reply?.type !== "session") return;
     adoptRoutedSession(reply.data, set);
+    await get().setAgentPreferences(remembered);
+  },
+
+  async setTags(input) {
+    const state = get();
+    const preferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
+    );
+    const tags = normalizeGroupedTags(input, preferences).slice(0, 4);
+    if (state.draft) {
+      onDraft(get, set, { tags });
+    }
+    await get().setAgentPreferences(withSelectedTags(preferences, tags));
   },
 
   async setAgentPreferences(preferences) {
     const before = get().settings;
     if (before) {
       set({ settings: { ...before, agentPreferences: preferences } });
-      syncDraftRoute(get, set, preferences);
     }
     const reply = await asked(set, () =>
       require_(get().client).call({
@@ -2066,15 +2083,8 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const stillCurrent = !before || get().settings?.agentPreferences === preferences;
     if (reply?.type === "settings" && stillCurrent) {
       set({ settings: reply.data });
-      syncDraftRoute(
-        get,
-        set,
-        normalizeAgentPreferences(reply.data.agentPreferences ?? preferences, get().agents),
-      );
     } else if (before && stillCurrent) {
       set({ settings: before });
-      const restored = normalizeAgentPreferences(before.agentPreferences, get().agents);
-      syncDraftRoute(get, set, restored, get().draft?.tags);
     }
   },
 
@@ -2783,16 +2793,20 @@ async function start(
   let draft = state.draft;
   if (!draft) return null;
 
-  const requiredMedia = mediaRequiredBy(pending);
-  const mediaTags = requiredMedia.map((medium) => (medium === "image" ? IMAGE_TAG : VIDEO_TAG));
-  const tags = normalizeTags(draft.tags?.length ? draft.tags : ["Flush"]);
+  if (!draft.agentId) {
+    set({ notice: "请先在模型选择中选择一个可用的 Agent 与模型。" });
+    return null;
+  }
   const reply = await asked(set, () =>
     require_(state.client).call({
-      type: "session.createRouted",
+      type: "session.create",
       payload: {
         workspaceId: draft.workspaceId,
-        tags,
-        mediaTags,
+        agentId: draft.agentId!,
+        modelId: draft.modelId,
+        ...(draft.effortId ? { effortId: draft.effortId } : {}),
+        modeId: draft.modeId,
+        runtimeValues: draft.runtimeValues,
         title: null,
         cwd: null,
       },
@@ -2841,10 +2855,10 @@ function mediaRequiredBy(pending: PendingMessage | null): Array<"image" | "video
 }
 
 /**
- * Sessions created by older Workbench builds have an explicit Agent binding
- * and no durable tag intent. The current Workbench adopts them on their next
- * send so old conversations get the same live-cost and media migration UX as
- * new ones. Direct callers of `session.create` keep their explicit semantics.
+ * Interactive sessions keep their exact Human-picked model. Only an incoming
+ * medium the current configured profile cannot handle opts the conversation
+ * into automatic routing, preserving seamless image/video migration without
+ * turning every ordinary chat back into a cost-selected route.
  */
 async function ensureWorkbenchTagRoute(
   get: () => WorkbenchState,
@@ -2854,16 +2868,25 @@ async function ensureWorkbenchTagRoute(
   pending: PendingMessage,
 ): Promise<void> {
   if (!client.identity?.features?.includes("agent-tag-routing.v1")) return;
+  const requiredMedia = mediaRequiredBy(pending);
+  if (requiredMedia.length === 0) return;
   const session = get().sessions.find((candidate) => candidate.id === sessionId);
-  if (!session || session.routingTags?.length || session.mediaTags?.length) return;
+  if (!session) return;
   const preferences = normalizeAgentPreferences(
     get().settings?.agentPreferences,
     get().agents,
   );
-  const tags = normalizeTags(
-    preferences.selectedTags?.length ? preferences.selectedTags : ["Flush"],
+  const support = configuredMediaInputSupport(
+    preferences,
+    session.agentId,
+    session.modelId ?? null,
   );
-  const mediaTags = mediaRequiredBy(pending).map((medium) =>
+  if (requiredMedia.every((medium) => support[medium])) return;
+  const tags = normalizeGroupedTags(
+    preferences.selectedTags?.length ? preferences.selectedTags : ["Flush"],
+    preferences,
+  );
+  const mediaTags = requiredMedia.map((medium) =>
     medium === "image" ? IMAGE_TAG : VIDEO_TAG,
   );
   const reply = await client.call({
@@ -2871,7 +2894,7 @@ async function ensureWorkbenchTagRoute(
     payload: { sessionId, tags, mediaTags },
   });
   if (reply?.type !== "session") {
-    throw new Error("旧会话未能接入当前 Agent 标签路由，请重试");
+    throw new Error("没有可处理当前图片或视频的模型，请检查模型配置");
   }
   adoptRoutedSession(reply.data, set);
 }
@@ -2908,27 +2931,6 @@ function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>)
   const next = { ...draft, ...change };
   if (next.localId && get().client?.identity) rememberDraftIdentity(get().client!.identity!.machineId, {...next, localId:next.localId, title:"新会话草稿"});
   set({ draft: next });
-}
-
-/** Keeps an unstarted conversation on the cheapest route for all its tags. */
-function syncDraftRoute(
-  get: () => WorkbenchState,
-  set: Setter,
-  preferences: AgentSelectionPreferences,
-  tags = get().draft?.tags,
-): void {
-  if (!get().draft) return;
-  const selected = normalizeTags(tags?.length ? tags : preferences.selectedTags ?? ["Flush"]);
-  const route = resolveTagRoute(preferences, selected, get().agents);
-  onDraft(get, set, {
-    tags: selected,
-    capability: capabilityForRoute(preferences, route?.agent.id ?? null, route?.modelId ?? null),
-    agentId: route?.agent.id ?? null,
-    modelId: route?.modelId ?? null,
-    modeId: route?.modeId ?? null,
-    effortId: route?.effortId ?? null,
-    runtimeValues: route?.runtimeValues ?? {},
-  });
 }
 
 /**

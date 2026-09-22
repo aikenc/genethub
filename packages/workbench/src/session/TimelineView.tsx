@@ -2,10 +2,10 @@ import type {
   AgentInfo,
   BlobOverview,
   RoundBatch,
-  RoundBatchSummary,
   RoundSummary,
   RoundTrunk,
   RoundTrunkSummary,
+  SessionAgentTarget,
   SessionSummary,
   TimelineItem,
   ToolCallDetail,
@@ -31,6 +31,7 @@ import { ExecutorFlow } from "./ExecutorFlow";
 import { ImageThumbStrip } from "./ImageStrip";
 import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
+import { mediaTagsForTimeline, normalizeTags } from "./capability-preferences";
 
 import { attachmentPreviewUrl } from "./attachments";
 import {
@@ -190,7 +191,7 @@ export type ForwardTarget =
   | {
       kind: "new";
       workspaceId: string;
-      tags: string[];
+      target: SessionAgentTarget;
     };
 
 
@@ -307,6 +308,12 @@ export function TimelineView({
     activeSession?.agentId ?? null,
     activeModelId,
   );
+  const forkMediaTags = forkRequest
+    ? normalizeTags([
+        ...(activeSession?.mediaTags ?? []),
+        ...mediaTagsForTimeline(state.items.slice(0, forkTurnEnd(state.items, forkRequest.turnId))),
+      ])
+    : [];
   const hasExecutor = !activeSession?.managed && workspaces.find((space) => space.id === activeSession?.workspaceId)
     ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
@@ -626,18 +633,18 @@ export function TimelineView({
                     round={startedRound}
                     finalSummaryText={roundFinalText}
                     processItems={processItems}
+                    agentLabel={completedRuntimeLabels.agent}
+                    modelLabel={completedRuntimeLabels.model}
                     live={liveTurn}
-                    liveUsage={state.usage ?? undefined}
-                    turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ))}
                 {startedRounds.length === 0 &&
                 shouldOccupyProcessCard(turn, liveTurn, layerReady) ? (
                   <ProvisionalProcess
                     items={processItems}
+                    agentLabel={completedRuntimeLabels.agent}
+                    modelLabel={completedRuntimeLabels.model}
                     live={liveTurn}
-                    usage={state.usage ?? undefined}
-                    turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ) : null}
                 {finalAssistant ? renderItem(finalAssistant) : null}
@@ -709,7 +716,14 @@ export function TimelineView({
                 (item) => item.type === "userMessage" && item.id === round.userItemId,
               ),
           )
-          .map((round) => <RoundProgress key={round.roundId} round={round} />)}
+          .map((round) => (
+            <RoundProgress
+              key={round.roundId}
+              round={round}
+              agentLabel={liveRuntimeLabels.agent}
+              modelLabel={liveRuntimeLabels.model}
+            />
+          ))}
 
         {state.inputOutbox?.map(input => <PendingBubble key={input.messageId} pending={input} agentLabel={agentLabel} />)}
         {state.pending ? (
@@ -847,6 +861,7 @@ export function TimelineView({
           sourceAgentId={activeSession.agentId}
           sourceModelId={activeSession.modelId ?? null}
           sourceTags={activeSession.routingTags ?? []}
+          sourceMediaTags={forkMediaTags}
           sourceCatalog={{
             agents,
             workspaces,
@@ -860,11 +875,7 @@ export function TimelineView({
             if (forkController) return forkController.fork(forkRequest.turnId, selection);
             return useWorkbench
               .getState()
-              .forkSessionRouted(
-                forkRequest.turnId,
-                selection.workspaceId,
-                selection.tags,
-              );
+              .forkSession(forkRequest.turnId, selection.target ?? undefined);
           }}
         />
       ) : null}
@@ -1298,6 +1309,13 @@ function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   return turns;
 }
 
+function forkTurnEnd(items: TimelineItem[], turnId: string): number {
+  const summary = items.findIndex(
+    (item) => item.type === "turnSummary" && item.stats.turnId === turnId,
+  );
+  return summary < 0 ? items.length : summary + 1;
+}
+
 interface ContextualTurn {
   turn: TurnBlock;
   startedRounds: RoundSummary[];
@@ -1421,19 +1439,18 @@ function TurnBodyGallery({
 
 function ProvisionalProcess({
   items,
+  agentLabel,
+  modelLabel,
   live,
-  usage,
-  turnStartedAtMs,
 }: {
   items: TimelineItem[];
+  agentLabel: string;
+  modelLabel: string;
   live: boolean;
-  usage?: Usage;
-  turnStartedAtMs?: number;
 }) {
   const blobs = processBlobsFromItems(items);
   const title = provisionalProcessTitle(items, live);
   const { open, toggle } = useCardOpen(live);
-  const summary = liveProcessSummary(items, blobs.length, usage, turnStartedAtMs);
   return (
     <div className="space-y-2" data-testid="round-progress">
       <div
@@ -1452,11 +1469,7 @@ function ProvisionalProcess({
           <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={title}>
             {title}
           </span>
-          {summary ? (
-            <SummaryMetrics summary={summary} live liveSpan />
-          ) : (
-            <span className="shrink-0 text-xs text-muted">{blobs.length} 项</span>
-          )}
+          <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} />
           <span className="shrink-0 text-xs text-accent" aria-hidden="true">
             {open ? "▴" : "▾"}
           </span>
@@ -1471,62 +1484,20 @@ function ProvisionalProcess({
   );
 }
 
-/**
- * Builds the synthetic summary a still-running process card shows, from the
- * items in flight and the live turn's usage. `undefined` when neither rounds
- * nor a start time exist yet, so the card keeps the old blob count until
- * there is something meaningful to say.
- */
-function liveProcessSummary(
-  items: TimelineItem[],
-  blobCount: number,
-  usage: Usage | undefined,
-  turnStartedAtMs: number | undefined,
-): RoundTrunkSummary | undefined {
-  let startedAtMs: number | undefined;
-  let toolDurationMs = 0;
-  const now = Date.now();
-  for (const item of items) {
-    const at =
-      item.type === "toolCall"
-        ? item.startedAtMs
-        : "receivedAtMs" in item
-          ? item.receivedAtMs
-          : undefined;
-    if (at != null && (startedAtMs == null || at < startedAtMs)) startedAtMs = at;
-    if (item.type === "toolCall" && item.startedAtMs != null) {
-      toolDurationMs += Math.max(0, (item.finishedAtMs ?? now) - item.startedAtMs);
-    }
-  }
-  startedAtMs = startedAtMs ?? turnStartedAtMs;
-  const llmRounds = usage && usage.llmRounds > 0 ? usage.llmRounds : undefined;
-  if (startedAtMs == null && llmRounds == null) return undefined;
-  return {
-    index: 0,
-    firstItemId: "",
-    blobCount,
-    title: "",
-    batches: [],
-    llmRounds,
-    startedAtMs,
-    toolDurationMs: toolDurationMs > 0 ? toolDurationMs : undefined,
-  };
-}
-
 function RoundProgress({
   round,
   finalSummaryText,
   processItems = [],
+  agentLabel,
+  modelLabel,
   live = false,
-  liveUsage,
-  turnStartedAtMs,
 }: {
   round: RoundSummary;
   finalSummaryText?: string;
   processItems?: TimelineItem[];
+  agentLabel: string;
+  modelLabel: string;
   live?: boolean;
-  liveUsage?: Usage;
-  turnStartedAtMs?: number;
 }) {
   const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
   const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
@@ -1544,9 +1515,9 @@ function RoundProgress({
     return (
       <ProvisionalProcess
         items={processItems}
+        agentLabel={agentLabel}
+        modelLabel={modelLabel}
         live={live || round.outcome === "running"}
-        usage={liveUsage}
-        turnStartedAtMs={turnStartedAtMs}
       />
     );
   }
@@ -1584,6 +1555,8 @@ function RoundProgress({
           summary={trunk}
           finalSummaryText={finalSummaryText}
           hoisted={hoisted}
+          agentLabel={agentLabel}
+          modelLabel={modelLabel}
           active={round.outcome === "running" && index === trunks.length - 1}
         />
       ))}
@@ -1591,49 +1564,21 @@ function RoundProgress({
   );
 }
 
-/**
- * Right-side two-line metrics for a trunk/batch header: LLM rounds and
- * wall-clock span on top, relative start time and summed tool time below in
- * smaller type. Rows persisted before these fields existed keep the old blob
- * count rather than showing zeros.
- */
 function SummaryMetrics({
-  summary,
-  live = false,
-  liveSpan = false,
+  agentLabel,
+  modelLabel,
 }: {
-  summary: RoundTrunkSummary | RoundBatchSummary;
-  live?: boolean;
-  /** The card is still running: the span is `now - startedAtMs`, not a stored duration. */
-  liveSpan?: boolean;
+  agentLabel: string;
+  modelLabel: string;
 }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    if (!live || summary.startedAtMs == null) return;
-    const timer = window.setInterval(() => setNow(Date.now()), liveSpan ? 1_000 : 30_000);
-    return () => window.clearInterval(timer);
-  }, [live, liveSpan, summary.startedAtMs]);
-  if (summary.llmRounds == null && summary.startedAtMs == null) {
-    return <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>;
-  }
-  const durationMs =
-    liveSpan && summary.startedAtMs != null
-      ? Math.max(0, now - summary.startedAtMs)
-      : summary.durationMs;
-  const top: string[] = [];
-  if (summary.llmRounds != null) top.push(`${summary.llmRounds} 轮`);
-  if (durationMs != null) top.push(formatDuration(durationMs));
-  const bottom: string[] = [];
-  if (summary.startedAtMs != null) bottom.push(relativeTime(summary.startedAtMs, now));
-  if (summary.toolDurationMs != null && summary.toolDurationMs > 0) {
-    bottom.push(`工具 ${formatToolDuration(summary.toolDurationMs)}`);
-  }
   return (
-    <span className="flex shrink-0 flex-col items-end leading-tight" data-testid="summary-metrics">
-      {top.length > 0 ? <span className="text-xs text-muted">{top.join(" · ")}</span> : null}
-      {bottom.length > 0 ? (
-        <span className="text-[10px] text-faint">{bottom.join(" · ")}</span>
-      ) : null}
+    <span
+      className="flex max-w-[45%] shrink-0 flex-col items-end leading-tight"
+      data-testid="summary-metrics"
+      title={`Agent：${agentLabel}\n模型：${modelLabel}`}
+    >
+      <span className="max-w-full truncate text-xs text-muted">{agentLabel}</span>
+      <span className="max-w-full truncate text-[10px] text-faint">{modelLabel}</span>
     </span>
   );
 }
@@ -1643,12 +1588,16 @@ function TrunkCard({
   summary,
   finalSummaryText,
   hoisted,
+  agentLabel,
+  modelLabel,
   active,
 }: {
   round: RoundSummary;
   summary: RoundTrunkSummary;
   finalSummaryText?: string;
   hoisted: ReadonlySet<string>;
+  agentLabel: string;
+  modelLabel: string;
   active: boolean;
 }) {
   const detail = useWorkbench(
@@ -1686,7 +1635,7 @@ function TrunkCard({
         <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={trunkTitle}>
           {trunkTitle}
         </span>
-        <SummaryMetrics summary={summary} live={live && active} />
+        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1709,7 +1658,12 @@ function TrunkCard({
               ) : isImageOnlyBatch(batch) ? (
                 <ImageBatchCard key={batch.summary.index} batch={batch} />
               ) : (
-                <BatchCard key={batch.summary.index} batch={batch} />
+                <BatchCard
+                  key={batch.summary.index}
+                  batch={batch}
+                  agentLabel={agentLabel}
+                  modelLabel={modelLabel}
+                />
               ),
             )
           )}
@@ -1743,8 +1697,12 @@ function ImageBatchCard({ batch }: { batch: RoundBatch }) {
 
 function BatchCard({
   batch,
+  agentLabel,
+  modelLabel,
 }: {
   batch: RoundBatch;
+  agentLabel: string;
+  modelLabel: string;
 }) {
   const { open, toggle } = useCardOpen(false);
   const monologue = splitMonologue(batch.monologue ?? "");
@@ -1768,7 +1726,7 @@ function BatchCard({
         >
           {monologue.first || batch.summary.text}
         </span>
-        <SummaryMetrics summary={batch.summary} />
+        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>

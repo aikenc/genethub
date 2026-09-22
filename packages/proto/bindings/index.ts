@@ -53,25 +53,23 @@ export type AgentModelProfile = { agentId: string, modelId?: string, tags: Array
 export type AgentRuntimePreference = { effortId?: string, modeId?: string, runtimeValues: { [key in string]?: string }, };
 
 /**
- * Machine-global tag routing, live cost configuration and compact runtime
- * defaults. Concrete route choices are never persisted here: every dispatch
- * re-evaluates tags against the current costs.
+ * Machine-global configured models, tag/cost metadata and compact runtime
+ * defaults. Automatic dispatch never caches its resolved route: every run
+ * re-evaluates the requested tags against these current costs.
  */
-export type AgentSelectionPreferences = { 
+export type AgentSelectionPreferences = { runtimes: { [key in string]?: AgentRuntimePreference }, 
 /**
- * Deprecated read compatibility for clients older than tag routing. The
- * daemon never consults these ordered lists.
- */
-capabilities: CapabilityAgentPreferences, 
-/**
- * Deprecated read compatibility. New clients use `selectedTags`.
- */
-selectedCapability: AgentCapability, runtimes: { [key in string]?: AgentRuntimePreference }, 
-/**
- * Sparse Human overrides. Missing catalog rows use deterministic inferred
- * tags and cost until the Human changes them.
+ * Exact models enabled on this machine. New configurations start with the
+ * first three non-auto catalog models for every Agent; models outside this
+ * list are neither shown in Human pickers nor eligible for Workflow
+ * routing until explicitly added.
  */
 modelProfiles?: Array<AgentModelProfile>, 
+/**
+ * Human-created mutually-exclusive groups. Tags absent from every group
+ * are ordinary independent filters.
+ */
+tagGroups?: Array<AgentTagGroup>, 
 /**
  * Tags preselected for a new chat on this machine. Session-specific tags
  * are persisted with each conversation once it starts.
@@ -162,6 +160,13 @@ health?: AgentSpaceHealth, };
  * operation must re-check instead of diffing arbitrary fields.
  */
 export type AgentSpaceOperation = { "kind": "setComponent", componentId: string, enabled: boolean, role: string | null, } | { "kind": "removeComponent", componentId: string, } | { "kind": "setParent", parentWorkspaceId: string | null, } | { "kind": "setLifecycle", lifecycle: string, };
+
+/**
+ * One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flush
+ * membership is fixed by the product; these rows describe Human-created
+ * groups for custom tags only.
+ */
+export type AgentTagGroup = { id: string, label: string, tags: Array<string>, };
 
 export type AssetPreviewError = "notFound" | "forbidden" | "unsupported" | "tooLarge" | "sourceChanged";
 
@@ -289,12 +294,6 @@ resume: boolean,
  * completed turn. False means the UI keeps the action visible but honest.
  */
 fork: boolean, attachments: boolean, };
-
-/**
- * Deprecated capability lists retained only for wire compatibility. Current
- * clients and dispatchers use `AgentModelProfile.tags` plus live cost.
- */
-export type CapabilityAgentPreferences = { planning: Array<PreferredAgentModel>, coding: Array<PreferredAgentModel>, multimodal: Array<PreferredAgentModel>, };
 
 export type Catalog = { models: Array<ModelInfo>, modes: Array<ModeInfo>, commands: Array<CommandInfo>, 
 /**
@@ -856,16 +855,6 @@ pm: boolean,
  */
 workerRole?: string, lifecycle: string, builderLockDigest: string, };
 
-/**
- * Deprecated capability-list row retained only for older clients on the wire.
- * Tag routing ignores these rows.
- */
-export type PreferredAgentModel = { agentId: string, 
-/**
- * Catalog-less ACP Agents may intentionally own their model default.
- */
-modelId?: string, };
-
 export type ProbeState = { "state": "ready" } | { "state": "notInstalled" } | { "state": "unavailable", reason: string, };
 
 export type ProtocolError = { code: ErrorCode, message: string, };
@@ -942,7 +931,7 @@ expandLastRound: boolean,
 /**
  * Optional UI history window. Does not alter Agent context or replay semantics.
  */
-recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
+recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, effortId?: string, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
 /**
  * Where the agent starts, inside the workspace. Absent means the
  * workspace root, which is what every client sent before this field

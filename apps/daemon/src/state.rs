@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use genehub_proto::{
-    AgentSelectionPreferences, PreferredAgentModel, ProviderInfo, ServerFrame, Settings,
-    SpeechCapabilities, SpeechRuntimeStatus,
+    AgentSelectionPreferences, ProviderInfo, ServerFrame, Settings, SpeechCapabilities,
+    SpeechRuntimeStatus,
 };
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
@@ -610,26 +610,6 @@ impl AppState {
 }
 
 fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result<()> {
-    // Capability lists are no longer edited by the Workbench, but remain on
-    // the wire for role.v2 and older clients. Keep their original bounds so a
-    // compatibility field cannot become an unbounded or ambiguous input just
-    // because tag routing superseded it.
-    for (capability, routes) in [
-        ("planning", &preferences.capabilities.planning),
-        ("coding", &preferences.capabilities.coding),
-        ("multimodal", &preferences.capabilities.multimodal),
-    ] {
-        if routes.len() > 5 {
-            anyhow::bail!("{capability} 能力最多配置 5 个 Agent 与模型");
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for route in routes {
-            validate_route(route)?;
-            if !seen.insert((&route.agent_id, &route.model_id)) {
-                anyhow::bail!("{capability} 能力中不能重复配置同一个 Agent 与模型");
-            }
-        }
-    }
     if preferences.runtimes.len() > 64 {
         anyhow::bail!("最多记住 64 个 Agent 的运行设置");
     }
@@ -652,6 +632,7 @@ fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result
     if preferences.model_profiles.len() > 512 {
         anyhow::bail!("最多保存 512 组 Agent 与模型画像");
     }
+    validate_tag_groups(preferences)?;
     let mut profiles = std::collections::BTreeSet::new();
     for profile in &preferences.model_profiles {
         validate_id("Agent", &profile.agent_id, 128)?;
@@ -659,18 +640,72 @@ fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result
             validate_id("模型", model_id, 512)?;
         }
         validate_tags(&profile.tags, true)?;
+        validate_tag_group_selection(&profile.tags, preferences)?;
         if !profiles.insert((&profile.agent_id, &profile.model_id)) {
             anyhow::bail!("不能重复保存同一个 Agent 与模型画像");
         }
     }
     validate_tags(&preferences.selected_tags, false)?;
+    validate_tag_group_selection(&preferences.selected_tags, preferences)?;
     Ok(())
 }
 
-fn validate_route(route: &PreferredAgentModel) -> Result<()> {
-    validate_id("Agent", &route.agent_id, 128)?;
-    if let Some(model_id) = &route.model_id {
-        validate_id("模型", model_id, 512)?;
+fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
+    if preferences.tag_groups.len() > 32 {
+        anyhow::bail!("最多配置 32 个标签组");
+    }
+    let builtins = ["max", "pro", "flush", "视频理解", "图片理解"];
+    let mut ids = std::collections::BTreeSet::new();
+    let mut grouped_tags = std::collections::BTreeSet::new();
+    for group in &preferences.tag_groups {
+        validate_id("标签组", &group.id, 64)?;
+        validate_id("标签组名称", &group.label, 40)?;
+        if group.id.trim().eq_ignore_ascii_case("builtin-intelligence") {
+            anyhow::bail!("自定义标签组不能使用内置标签组标识");
+        }
+        if !ids.insert(group.id.trim().to_lowercase()) {
+            anyhow::bail!("标签组标识不能重复");
+        }
+        if group.tags.len() > 64 {
+            anyhow::bail!("一个标签组最多包含 64 个标签");
+        }
+        validate_tags(&group.tags, false)?;
+        for tag in &group.tags {
+            let key = tag.trim().to_lowercase();
+            if builtins.contains(&key.as_str()) {
+                anyhow::bail!("内置标签不能加入自定义标签组");
+            }
+            if !grouped_tags.insert(key) {
+                anyhow::bail!("同一个标签只能属于一个标签组");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tag_group_selection(
+    tags: &[String],
+    preferences: &AgentSelectionPreferences,
+) -> Result<()> {
+    let mut claimed = std::collections::BTreeSet::new();
+    for tag in tags {
+        let key = tag.trim().to_lowercase();
+        let group = if ["max", "pro", "flush"].contains(&key.as_str()) {
+            Some("builtin-intelligence")
+        } else {
+            preferences.tag_groups.iter().find_map(|group| {
+                group
+                    .tags
+                    .iter()
+                    .any(|member| member.trim().eq_ignore_ascii_case(tag.trim()))
+                    .then_some(group.id.as_str())
+            })
+        };
+        if let Some(group) = group {
+            if !claimed.insert(group) {
+                anyhow::bail!("同一个标签组只能选择一个标签");
+            }
+        }
     }
     Ok(())
 }
@@ -738,18 +773,46 @@ mod machine_state_tests {
             .expect_err("the same exact profile cannot be saved twice")
             .to_string();
         assert!(duplicate.contains("不能重复"), "{duplicate}");
+    }
 
-        preferences.model_profiles.clear();
-        preferences.capabilities.coding = (0..6)
-            .map(|index| PreferredAgentModel {
-                agent_id: format!("agent-{index}"),
-                model_id: Some("model".into()),
-            })
-            .collect();
-        let legacy_bound = validate_agent_preferences(&preferences)
-            .expect_err("legacy capability lists retain their original bound")
+    #[test]
+    fn tag_settings_enforce_builtin_and_custom_group_exclusivity() {
+        let profile = |tags: Vec<&str>| genehub_proto::AgentModelProfile {
+            agent_id: "codex".into(),
+            model_id: Some("model".into()),
+            tags: tags.into_iter().map(str::to_string).collect(),
+            cost: Some(genehub_proto::AgentCostLevel::Medium),
+        };
+        let mut preferences = AgentSelectionPreferences {
+            model_profiles: vec![profile(vec!["Max", "Pro"])],
+            ..Default::default()
+        };
+        let builtin = validate_agent_preferences(&preferences)
+            .expect_err("Max and Pro belong to one exclusive group")
             .to_string();
-        assert!(legacy_bound.contains("最多配置 5"), "{legacy_bound}");
+        assert!(builtin.contains("只能选择一个"), "{builtin}");
+
+        preferences.tag_groups = vec![genehub_proto::AgentTagGroup {
+            id: "quality".into(),
+            label: "质量".into(),
+            tags: vec!["审慎".into(), "快速".into()],
+        }];
+        preferences.model_profiles = vec![profile(vec!["Flush", "审慎", "快速"])];
+        let custom = validate_agent_preferences(&preferences)
+            .expect_err("a custom group is exclusive too")
+            .to_string();
+        assert!(custom.contains("只能选择一个"), "{custom}");
+
+        preferences.tag_groups = vec![genehub_proto::AgentTagGroup {
+            id: "builtin-intelligence".into(),
+            label: "冲突".into(),
+            tags: vec!["自定义".into()],
+        }];
+        preferences.model_profiles.clear();
+        let reserved = validate_agent_preferences(&preferences)
+            .expect_err("the built-in group id is reserved")
+            .to_string();
+        assert!(reserved.contains("内置标签组标识"), "{reserved}");
     }
 
     #[tokio::test]

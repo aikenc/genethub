@@ -72,6 +72,9 @@ pub enum Request {
         #[serde(default)]
         model_id: Option<String>,
         #[serde(default)]
+        #[ts(optional)]
+        effort_id: Option<String>,
+        #[serde(default)]
         mode_id: Option<String>,
         #[serde(default)]
         #[ts(optional)]

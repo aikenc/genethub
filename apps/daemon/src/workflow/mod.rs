@@ -1728,6 +1728,7 @@ pub(crate) async fn dispatch(
                     workspace.root.canonicalize()?,
                     &parent.agent_id,
                     parent.model_id.clone(),
+                    parent.effort_id.clone(),
                     parent.mode_id.clone(),
                     parent.runtime_values.clone().unwrap_or_default(),
                     Some(format!("{task_id} · executor")),

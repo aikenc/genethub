@@ -2105,31 +2105,17 @@ pub struct AgentModelProfile {
     pub cost: Option<AgentCostLevel>,
 }
 
-/// Deprecated capability-list row retained only for older clients on the wire.
-/// Tag routing ignores these rows.
+/// One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flush
+/// membership is fixed by the product; these rows describe Human-created
+/// groups for custom tags only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
-pub struct PreferredAgentModel {
-    pub agent_id: String,
-    /// Catalog-less ACP Agents may intentionally own their model default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub model_id: Option<String>,
-}
-
-/// Deprecated capability lists retained only for wire compatibility. Current
-/// clients and dispatchers use `AgentModelProfile.tags` plus live cost.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct CapabilityAgentPreferences {
+pub struct AgentTagGroup {
+    pub id: String,
+    pub label: String,
     #[serde(default)]
-    pub planning: Vec<PreferredAgentModel>,
-    #[serde(default)]
-    pub coding: Vec<PreferredAgentModel>,
-    #[serde(default)]
-    pub multimodal: Vec<PreferredAgentModel>,
+    pub tags: Vec<String>,
 }
 
 /// Last runtime choices for one Agent. Values are checked against the live
@@ -2148,36 +2134,32 @@ pub struct AgentRuntimePreference {
     pub runtime_values: std::collections::BTreeMap<String, String>,
 }
 
-/// Machine-global tag routing, live cost configuration and compact runtime
-/// defaults. Concrete route choices are never persisted here: every dispatch
-/// re-evaluates tags against the current costs.
+/// Machine-global configured models, tag/cost metadata and compact runtime
+/// defaults. Automatic dispatch never caches its resolved route: every run
+/// re-evaluates the requested tags against these current costs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct AgentSelectionPreferences {
-    /// Deprecated read compatibility for clients older than tag routing. The
-    /// daemon never consults these ordered lists.
-    #[serde(default, skip_serializing_if = "capability_preferences_empty")]
-    pub capabilities: CapabilityAgentPreferences,
-    /// Deprecated read compatibility. New clients use `selectedTags`.
-    #[serde(default)]
-    pub selected_capability: AgentCapability,
     #[serde(default)]
     pub runtimes: std::collections::BTreeMap<String, AgentRuntimePreference>,
-    /// Sparse Human overrides. Missing catalog rows use deterministic inferred
-    /// tags and cost until the Human changes them.
+    /// Exact models enabled on this machine. New configurations start with the
+    /// first three non-auto catalog models for every Agent; models outside this
+    /// list are neither shown in Human pickers nor eligible for Workflow
+    /// routing until explicitly added.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<_>")]
     pub model_profiles: Vec<AgentModelProfile>,
+    /// Human-created mutually-exclusive groups. Tags absent from every group
+    /// are ordinary independent filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub tag_groups: Vec<AgentTagGroup>,
     /// Tags preselected for a new chat on this machine. Session-specific tags
     /// are persisted with each conversation once it starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<_>")]
     pub selected_tags: Vec<String>,
-}
-
-fn capability_preferences_empty(value: &CapabilityAgentPreferences) -> bool {
-    value.planning.is_empty() && value.coding.is_empty() && value.multimodal.is_empty()
 }
 
 /// The machine-level settings a client may see and change.

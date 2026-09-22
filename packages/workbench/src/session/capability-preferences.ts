@@ -1,12 +1,12 @@
 import type {
-  AgentCapability,
   AgentCostLevel,
   AgentInfo,
   AgentModelProfile,
   AgentRuntimePreference,
   AgentSelectionPreferences,
+  AgentTagGroup,
   ModelInfo,
-  PreferredAgentModel,
+  SessionAgentTarget,
   TimelineItem,
 } from "@genehub/proto";
 
@@ -20,6 +20,11 @@ export const BUILTIN_TAGS = ["Max", "Pro", "Flush", "视频理解", "图片理�
 export type BuiltinAgentTag = (typeof BUILTIN_TAGS)[number];
 export const IMAGE_TAG: BuiltinAgentTag = "图片理解";
 export const VIDEO_TAG: BuiltinAgentTag = "视频理解";
+export const BUILTIN_TAG_GROUP: AgentTagGroup = {
+  id: "builtin-intelligence",
+  label: "智能档位",
+  tags: ["Max", "Pro", "Flush"],
+};
 
 export const COST_LEVELS: ReadonlyArray<{ id: AgentCostLevel; label: string }> = [
   { id: "veryLow", label: "超低" },
@@ -27,17 +32,6 @@ export const COST_LEVELS: ReadonlyArray<{ id: AgentCostLevel; label: string }> =
   { id: "medium", label: "中" },
   { id: "high", label: "高" },
   { id: "veryHigh", label: "超高" },
-];
-
-/** Kept only for reading old drafts and role.v2-era surfaces. */
-export const CAPABILITIES: ReadonlyArray<{
-  id: AgentCapability;
-  label: string;
-  shortDescription: string;
-}> = [
-  { id: "planning", label: "规划", shortDescription: "" },
-  { id: "coding", label: "编码", shortDescription: "" },
-  { id: "multimodal", label: "多模态理解", shortDescription: "" },
 ];
 
 export type ResolvedCapabilityRoute = {
@@ -48,55 +42,68 @@ export type ResolvedCapabilityRoute = {
   runtimeValues: Record<string, string>;
 };
 
+export type ConfiguredModelRoute = ResolvedCapabilityRoute & {
+  profile: AgentModelProfile;
+};
+
 export type MediaInputModality = "image" | "video";
 export type MediaInputSupport = Record<MediaInputModality, boolean>;
 
-const EMPTY_CAPABILITIES = { planning: [], coding: [], multimodal: [] };
-
-/** Complete machine-global Agent/model table with deterministic first-run defaults. */
+/** Exact machine-global model list with deterministic first-run defaults. */
 export function normalizeAgentPreferences(
   stored: AgentSelectionPreferences | null | undefined,
   agents: AgentInfo[],
 ): AgentSelectionPreferences {
+  const groups = normalizeTagGroups(stored?.tagGroups ?? []);
   const saved = stored?.modelProfiles ?? [];
   const discovered = agents.flatMap((agent) => {
     const models: Array<ModelInfo | null> = agent.catalog.models.length
-      ? agent.catalog.models
+      ? agent.catalog.models.filter((model) => !isAutoModel(model))
       : resolveAgentProfile(agent.id).startWithoutModelCatalog
         ? [null]
         : [];
-    return models.map((model) => {
-      const override = saved.find(
+    const savedForAgent = saved.filter((profile) => profile.agentId === agent.id);
+    const configured = models.filter((model) =>
+      savedForAgent.some(
         (profile) =>
           profile.agentId === agent.id && (profile.modelId ?? null) === (model?.id ?? null),
-      );
+      ),
+    );
+    const selected = savedForAgent.length > 0 ? configured : models.slice(0, 3);
+    return selected.map((model) => {
+      const override = saved.find((profile) =>
+        profile.agentId === agent.id && (profile.modelId ?? null) === (model?.id ?? null));
       const inferred = inferredModelProfile(agent, model);
       return {
         ...inferred,
         ...override,
-        tags: normalizeTags(override?.tags?.length ? override.tags : inferred.tags),
+        tags: normalizeGroupedTags(
+          override?.tags?.length ? override.tags : inferred.tags,
+          groups,
+        ),
         cost: override?.cost ?? inferred.cost,
       };
     });
   });
-  const stale = saved.filter(
-    (profile) =>
-      !discovered.some(
-        (row) =>
-          row.agentId === profile.agentId &&
-          (row.modelId ?? null) === (profile.modelId ?? null),
-      ),
-  );
   return {
-    capabilities: stored?.capabilities ?? EMPTY_CAPABILITIES,
-    selectedCapability: stored?.selectedCapability ?? "coding",
     runtimes: { ...(stored?.runtimes ?? {}) },
-    modelProfiles: [
-      ...discovered,
-      ...stale.map((row) => ({ ...row, tags: normalizeTags(row.tags) })),
-    ],
-    selectedTags: normalizeTags(stored?.selectedTags?.length ? stored.selectedTags : ["Flush"]),
+    modelProfiles: discovered,
+    tagGroups: groups,
+    selectedTags: normalizeGroupedTags(
+      stored?.selectedTags?.length ? stored.selectedTags : ["Flush"],
+      groups,
+    ),
   };
+}
+
+export function isAutoModel(model: Pick<ModelInfo, "id" | "label">): boolean {
+  return [model.id, model.label].some((value) =>
+    value
+      .trim()
+      .toLocaleLowerCase()
+      .split(/[^a-z0-9]+/u)
+      .includes("auto"),
+  );
 }
 
 export function inferredModelProfile(
@@ -135,6 +142,72 @@ export function normalizeTags(tags: readonly string[]): string[] {
     seen.add(key);
     return [tag];
   });
+}
+
+export function normalizeTagGroups(groups: readonly AgentTagGroup[]): AgentTagGroup[] {
+  const usedIds = new Set<string>([BUILTIN_TAG_GROUP.id.toLocaleLowerCase()]);
+  const usedTags = new Set(BUILTIN_TAGS.map((tag) => tag.toLocaleLowerCase()));
+  return groups.flatMap((group) => {
+    const id = group.id.trim();
+    const label = group.label.trim();
+    if (!id || !label || usedIds.has(id.toLocaleLowerCase())) return [];
+    const tags = normalizeTags(group.tags).filter((tag) => {
+      const key = tag.toLocaleLowerCase();
+      if (usedTags.has(key)) return false;
+      usedTags.add(key);
+      return true;
+    });
+    usedIds.add(id.toLocaleLowerCase());
+    return [{ id, label, tags }];
+  });
+}
+
+export function effectiveTagGroups(
+  preferencesOrGroups: AgentSelectionPreferences | readonly AgentTagGroup[],
+): AgentTagGroup[] {
+  const groups: readonly AgentTagGroup[] = Array.isArray(preferencesOrGroups)
+    ? preferencesOrGroups
+    : (preferencesOrGroups as AgentSelectionPreferences).tagGroups ?? [];
+  return [BUILTIN_TAG_GROUP, ...normalizeTagGroups(groups)];
+}
+
+/** De-duplicates tags and keeps at most one value from every exclusive group. */
+export function normalizeGroupedTags(
+  tags: readonly string[],
+  preferencesOrGroups: AgentSelectionPreferences | readonly AgentTagGroup[],
+): string[] {
+  const groups = effectiveTagGroups(preferencesOrGroups);
+  const claimed = new Set<string>();
+  return normalizeTags(tags).filter((tag) => {
+    const group = groups.find((candidate) =>
+      candidate.tags.some((member) => tagKey(member) === tagKey(tag)),
+    );
+    if (!group) return true;
+    if (claimed.has(group.id)) return false;
+    claimed.add(group.id);
+    return true;
+  });
+}
+
+/** Toggle helper shared by tag assignment and selector filters. */
+export function toggleGroupedTag(
+  tags: readonly string[],
+  tag: string,
+  preferencesOrGroups: AgentSelectionPreferences | readonly AgentTagGroup[],
+): string[] {
+  const selected = normalizeGroupedTags(tags, preferencesOrGroups);
+  const groups = effectiveTagGroups(preferencesOrGroups);
+  const group = groups.find((candidate) =>
+    candidate.tags.some((member) => tagKey(member) === tagKey(tag)),
+  );
+  const checked = selected.some((candidate) => tagKey(candidate) === tagKey(tag));
+  if (checked) return selected.filter((candidate) => tagKey(candidate) !== tagKey(tag));
+  const withoutGroup = group
+    ? selected.filter((candidate) =>
+        !group.tags.some((member) => tagKey(member) === tagKey(candidate)),
+      )
+    : selected;
+  return normalizeGroupedTags([...withoutGroup, tag], preferencesOrGroups).slice(0, 4);
 }
 
 /** Media tags are daemon-owned routing requirements, but the composer mirrors
@@ -187,14 +260,20 @@ export function withSelectedTags(
   preferences: AgentSelectionPreferences,
   tags: readonly string[],
 ): AgentSelectionPreferences {
-  return { ...preferences, selectedTags: normalizeTags(tags).slice(0, 4) };
+  return {
+    ...preferences,
+    selectedTags: normalizeGroupedTags(tags, preferences).slice(0, 4),
+  };
 }
 
 export function withModelProfile(
   preferences: AgentSelectionPreferences,
   profile: AgentModelProfile,
 ): AgentSelectionPreferences {
-  const next = { ...profile, tags: normalizeTags(profile.tags).slice(0, 4) };
+  const next = {
+    ...profile,
+    tags: normalizeGroupedTags(profile.tags, preferences).slice(0, 4),
+  };
   const rows = [...(preferences.modelProfiles ?? [])];
   const index = rows.findIndex(
     (row) =>
@@ -202,7 +281,40 @@ export function withModelProfile(
   );
   if (index >= 0) rows[index] = next;
   else rows.push(next);
-  return { ...preferences, modelProfiles: rows };
+  return {
+    ...preferences,
+    modelProfiles: rows,
+  };
+}
+
+export function withoutModelProfile(
+  preferences: AgentSelectionPreferences,
+  agentId: string,
+  modelId?: string | null,
+): AgentSelectionPreferences {
+  return {
+    ...preferences,
+    modelProfiles: (preferences.modelProfiles ?? []).filter(
+      (profile) =>
+        profile.agentId !== agentId || (profile.modelId ?? null) !== (modelId ?? null),
+    ),
+  };
+}
+
+export function withTagGroups(
+  preferences: AgentSelectionPreferences,
+  groups: readonly AgentTagGroup[],
+): AgentSelectionPreferences {
+  const tagGroups = normalizeTagGroups(groups);
+  const basis = { ...preferences, tagGroups };
+  return {
+    ...basis,
+    selectedTags: normalizeGroupedTags(preferences.selectedTags ?? [], tagGroups),
+    modelProfiles: (preferences.modelProfiles ?? []).map((profile) => ({
+      ...profile,
+      tags: normalizeGroupedTags(profile.tags, tagGroups),
+    })),
+  };
 }
 
 export function withRuntimePreference(
@@ -226,14 +338,14 @@ export function withRuntimePreference(
   };
 }
 
-/** Lowest-cost route whose configured tags contain every requested tag. */
-export function resolveTagRoute(
+/** Every live configured route matching all filter tags, cheapest first. */
+export function matchingTagRoutes(
   preferences: AgentSelectionPreferences,
   tags: readonly string[],
   agents: AgentInfo[],
-): ResolvedCapabilityRoute | null {
-  const required = normalizeTags(tags);
-  const candidates = (preferences.modelProfiles ?? [])
+): ConfiguredModelRoute[] {
+  const required = normalizeGroupedTags(tags, preferences);
+  return (preferences.modelProfiles ?? [])
     .flatMap((profile) => {
       const agent = agents.find(
         (candidate) => candidate.id === profile.agentId && canStartAgent(candidate),
@@ -249,7 +361,7 @@ export function resolveTagRoute(
         return [];
       }
       const runtime = resolveAgentRuntime(preferences, agent, profile.modelId);
-      return runtime ? [{ profile, runtime }] : [];
+      return runtime ? [{ ...runtime, profile }] : [];
     })
     .sort(
       (left, right) =>
@@ -257,7 +369,25 @@ export function resolveTagRoute(
         left.profile.agentId.localeCompare(right.profile.agentId) ||
         (left.profile.modelId ?? "").localeCompare(right.profile.modelId ?? ""),
     );
-  return candidates[0]?.runtime ?? null;
+}
+
+/** Lowest-cost route whose configured tags contain every requested tag. */
+export function resolveTagRoute(
+  preferences: AgentSelectionPreferences,
+  tags: readonly string[],
+  agents: AgentInfo[],
+): ResolvedCapabilityRoute | null {
+  return matchingTagRoutes(preferences, tags, agents)[0] ?? null;
+}
+
+export function routeTarget(route: ResolvedCapabilityRoute): SessionAgentTarget {
+  return {
+    agentId: route.agent.id,
+    ...(route.modelId ? { modelId: route.modelId } : {}),
+    ...(route.modeId ? { modeId: route.modeId } : {}),
+    ...(route.effortId ? { effortId: route.effortId } : {}),
+    runtimeValues: route.runtimeValues,
+  };
 }
 
 export function tagMediaInputSupport(
@@ -284,6 +414,21 @@ export function mediaInputSupport(
   return {
     image: model?.inputModalities?.includes("image") ?? false,
     video: model?.inputModalities?.includes("video") ?? false,
+  };
+}
+
+export function configuredMediaInputSupport(
+  preferences: AgentSelectionPreferences,
+  agentId: string | null | undefined,
+  modelId: string | null | undefined,
+): MediaInputSupport {
+  const profile = (preferences.modelProfiles ?? []).find(
+    (candidate) =>
+      candidate.agentId === agentId && (candidate.modelId ?? null) === (modelId ?? null),
+  );
+  return {
+    image: profile?.tags.some((tag) => tagKey(tag) === tagKey(IMAGE_TAG)) ?? false,
+    video: profile?.tags.some((tag) => tagKey(tag) === tagKey(VIDEO_TAG)) ?? false,
   };
 }
 
@@ -326,80 +471,6 @@ export function resolveAgentRuntime(
   };
 }
 
-// Compatibility adapters for old surfaces while stored capability drafts are
-// migrated to their equivalent built-in tag. Ordered lists are never used.
-export function resolveCapabilityRoute(
-  preferences: AgentSelectionPreferences,
-  capability: AgentCapability,
-  agents: AgentInfo[],
-  requiredMedia: readonly MediaInputModality[] = [],
-): ResolvedCapabilityRoute | null {
-  return resolveTagRoute(
-    preferences,
-    [
-      legacyTag(capability),
-      ...requiredMedia.map((medium) => (medium === "image" ? IMAGE_TAG : VIDEO_TAG)),
-    ],
-    agents,
-  );
-}
-
-export function capabilityMediaInputSupport(
-  preferences: AgentSelectionPreferences,
-  capability: AgentCapability,
-  agents: AgentInfo[],
-): MediaInputSupport {
-  return tagMediaInputSupport(preferences, [legacyTag(capability)], agents);
-}
-
-export function routesForCapability(
-  preferences: AgentSelectionPreferences,
-  capability: AgentCapability,
-): PreferredAgentModel[] {
-  return preferences.capabilities[capability];
-}
-
-export function withCapabilityRoutes(
-  preferences: AgentSelectionPreferences,
-  capability: AgentCapability,
-  routes: PreferredAgentModel[],
-): AgentSelectionPreferences {
-  return {
-    ...preferences,
-    capabilities: { ...preferences.capabilities, [capability]: routes.slice(0, 5) },
-  };
-}
-
-export function withSelectedCapability(
-  preferences: AgentSelectionPreferences,
-  capability: AgentCapability,
-): AgentSelectionPreferences {
-  return { ...preferences, selectedCapability: capability, selectedTags: [legacyTag(capability)] };
-}
-
-export function capabilityForRoute(
-  preferences: AgentSelectionPreferences,
-  agentId: string | null,
-  modelId: string | null,
-): AgentCapability {
-  const profile = (preferences.modelProfiles ?? []).find(
-    (row) => row.agentId === agentId && (row.modelId ?? null) === modelId,
-  );
-  if (profile?.tags.some((tag) => tag === IMAGE_TAG || tag === VIDEO_TAG)) return "multimodal";
-  if (profile?.tags.includes("Pro") || profile?.tags.includes("Max")) return "planning";
-  return "coding";
-}
-
-export function capabilityLabel(capability: AgentCapability): string {
-  return CAPABILITIES.find((candidate) => candidate.id === capability)?.label ?? capability;
-}
-
-function legacyTag(capability: AgentCapability): BuiltinAgentTag {
-  if (capability === "planning") return "Pro";
-  if (capability === "multimodal") return IMAGE_TAG;
-  return "Flush";
-}
-
 function costRank(cost: AgentCostLevel | undefined): number {
   const rank = COST_LEVELS.findIndex((entry) => entry.id === (cost ?? "medium"));
   return rank < 0 ? 2 : rank;
@@ -435,3 +506,5 @@ function validMode(agent: AgentInfo, remembered: string | undefined): string | n
     modes.find((mode) => mode.id === agent.catalog.defaultMode)?.id ?? modes[0]?.id ?? null
   );
 }
+
+const tagKey = (tag: string): string => tag.toLocaleLowerCase();

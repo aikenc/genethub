@@ -170,11 +170,31 @@ pub(crate) fn select_tag_route(
                 candidates.push(candidate_for(preferences, agent, None));
             }
         } else {
+            let configured_for_agent = preferences
+                .model_profiles
+                .iter()
+                .any(|profile| profile.agent_id == agent.id);
+            let configured: BTreeSet<&str> = preferences
+                .model_profiles
+                .iter()
+                .filter(|profile| profile.agent_id == agent.id)
+                .filter_map(|profile| profile.model_id.as_deref())
+                .filter(|model_id| {
+                    agent
+                        .catalog
+                        .models
+                        .iter()
+                        .any(|model| model.id == *model_id && !is_auto_model(model))
+                })
+                .collect();
             candidates.extend(
                 agent
                     .catalog
                     .models
                     .iter()
+                    .filter(|model| !is_auto_model(model))
+                    .filter(|model| !configured_for_agent || configured.contains(model.id.as_str()))
+                    .take(if configured_for_agent { usize::MAX } else { 3 })
                     .map(|model| candidate_for(preferences, agent, Some(model))),
             );
         }
@@ -210,6 +230,16 @@ pub(crate) fn select_tag_route(
         })
 }
 
+fn is_auto_model(model: &ModelInfo) -> bool {
+    [model.id.as_str(), model.label.as_str()]
+        .into_iter()
+        .any(|value| {
+            value
+                .split(|character: char| !character.is_ascii_alphanumeric())
+                .any(|part| part.eq_ignore_ascii_case("auto"))
+        })
+}
+
 /// Resolves against the current catalog and a fresh read of the global costs.
 /// Agent probes spawn subprocesses, so routing reuses the registry catalog
 /// populated by startup or an explicit `agent.refresh`; only the Human-edited
@@ -232,6 +262,7 @@ pub(crate) async fn resolve_live_route(
         .agent_preferences
         .clone()
         .unwrap_or_default();
+    validate_exclusive_tags(required_tags, &preferences)?;
     let route = select_tag_route(
         &preferences,
         required_tags,
@@ -240,6 +271,30 @@ pub(crate) async fn resolve_live_route(
         evidence_only,
     )?;
     Ok((route, providers))
+}
+
+fn validate_exclusive_tags(tags: &[String], preferences: &AgentSelectionPreferences) -> Result<()> {
+    let mut claimed = BTreeSet::new();
+    for tag in normalize_tags(tags.iter().cloned()) {
+        let key = tag_key(&tag);
+        let group = if [tag_key(TAG_MAX), tag_key(TAG_PRO), tag_key(TAG_FLUSH)].contains(&key) {
+            Some("builtin-intelligence")
+        } else {
+            preferences.tag_groups.iter().find_map(|group| {
+                group
+                    .tags
+                    .iter()
+                    .any(|member| tags_equal(member, &tag))
+                    .then_some(group.id.as_str())
+            })
+        };
+        if let Some(group) = group {
+            if !claimed.insert(group) {
+                anyhow::bail!("agentTagInvalid: 同一个标签组只能选择一个标签");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Re-evaluates one ordinary Session and migrates it in place if the cheapest
@@ -542,6 +597,71 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn only_first_three_non_auto_models_are_default_until_an_exact_model_is_configured() {
+        let mut candidate = agent("codex", "provider/auto", None);
+        candidate.catalog.models = ["provider/auto", "m1", "m2", "m3", "m4-max"]
+            .into_iter()
+            .map(|id| ModelInfo {
+                id: id.into(),
+                label: if id == "provider/auto" {
+                    "Auto Select".into()
+                } else {
+                    id.into()
+                },
+                context_window: None,
+                reasoning: true,
+                efforts: Vec::new(),
+                input_modalities: None,
+            })
+            .collect();
+        let registry = Registry::of(Vec::new());
+
+        assert!(select_tag_route(
+            &AgentSelectionPreferences::default(),
+            &[TAG_MAX.into()],
+            std::slice::from_ref(&candidate),
+            &registry,
+            false,
+        )
+        .is_err());
+
+        let preferences = AgentSelectionPreferences {
+            model_profiles: vec![AgentModelProfile {
+                agent_id: "codex".into(),
+                model_id: Some("m4-max".into()),
+                tags: vec![TAG_MAX.into()],
+                cost: Some(AgentCostLevel::Medium),
+            }],
+            ..Default::default()
+        };
+        let route = select_tag_route(
+            &preferences,
+            &[TAG_MAX.into()],
+            std::slice::from_ref(&candidate),
+            &registry,
+            false,
+        )
+        .expect("explicitly added fourth model is eligible");
+        assert_eq!(route.model_id.as_deref(), Some("m4-max"));
+
+        candidate
+            .catalog
+            .models
+            .retain(|model| model.id != "m4-max");
+        assert!(
+            select_tag_route(
+                &preferences,
+                &[TAG_FLUSH.into()],
+                &[candidate],
+                &registry,
+                false,
+            )
+            .is_err(),
+            "a stale configured row must not enable unconfigured defaults"
+        );
     }
 
     #[test]

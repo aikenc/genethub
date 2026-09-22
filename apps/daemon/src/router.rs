@@ -1480,6 +1480,7 @@ async fn dispatch(
             workspace_id,
             agent_id,
             model_id,
+            effort_id,
             mode_id,
             runtime_values,
             title,
@@ -1519,6 +1520,7 @@ async fn dispatch(
                     start_in,
                     &agent_id,
                     model_id,
+                    effort_id,
                     mode_id,
                     runtime_values.unwrap_or_default(),
                     title,
@@ -3728,6 +3730,7 @@ mod tests {
                 "genet",
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -3747,6 +3750,7 @@ mod tests {
                 &workspace.id,
                 project.clone(),
                 "genet",
+                None,
                 None,
                 None,
                 Default::default(),
@@ -3808,7 +3812,16 @@ mod tests {
             async move {
                 state
                     .sessions
-                    .create(&id, project, "genet", None, None, Default::default(), None)
+                    .create(
+                        &id,
+                        project,
+                        "genet",
+                        None,
+                        None,
+                        None,
+                        Default::default(),
+                        None,
+                    )
                     .await
                     .unwrap()
             }
@@ -3853,6 +3866,7 @@ mod tests {
                 "genet",
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -3864,6 +3878,7 @@ mod tests {
                 &workspace.id,
                 project,
                 "genet",
+                None,
                 None,
                 None,
                 Default::default(),
@@ -3906,6 +3921,7 @@ mod tests {
                 &workspace.id,
                 project,
                 "genet",
+                None,
                 None,
                 None,
                 Default::default(),

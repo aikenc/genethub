@@ -5,6 +5,8 @@ import { defineSpecialty } from "../../framework/public.ts";
 
 const TESTS = [
   "state::machine_state_tests::tag_settings_enforce_profile_identity_and_tag_bounds",
+  "state::machine_state_tests::tag_settings_enforce_builtin_and_custom_group_exclusivity",
+  "agent_routing::tests::only_first_three_non_auto_models_are_default_until_an_exact_model_is_configured",
   "agent_routing::tests::portable_history_adds_image_and_video_requirements",
   "agent_routing::tests::routed_request_tags_are_bounded_and_media_vocabulary_is_closed",
   "dataplane::endpoint::tests::routed_session_operations_are_scoped_to_the_destination_workspace",

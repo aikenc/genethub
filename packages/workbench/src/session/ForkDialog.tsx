@@ -1,14 +1,15 @@
+import type { ForkTarget } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import {
   MachineGrid,
-  TagGrid,
   useMachineCatalog,
   WorkspaceList,
   type MachineCatalog,
   type MachineOption,
 } from "./MachineCatalogPicker";
+import { ModelPicker } from "./ModelPicker";
 
 export type ForkMachineOption = MachineOption;
 export type ForkCatalog = MachineCatalog;
@@ -16,14 +17,16 @@ export type ForkCatalog = MachineCatalog;
 export interface ForkSelection {
   machine: ForkMachineOption;
   workspaceId: string;
-  tags: string[];
+  target: ForkTarget | null;
 }
 
 export function ForkDialog({
   sourceMachine,
   sourceWorkspaceId,
   sourceAgentId,
+  sourceModelId,
   sourceTags,
+  sourceMediaTags = [],
   sourceCatalog,
   hasNativeCheckpoint,
   listMachines,
@@ -36,6 +39,7 @@ export function ForkDialog({
   sourceAgentId: string;
   sourceModelId: string | null;
   sourceTags?: string[];
+  sourceMediaTags?: string[];
   sourceCatalog: ForkCatalog;
   hasNativeCheckpoint: boolean;
   listMachines?(): Promise<ForkMachineOption[]>;
@@ -53,6 +57,7 @@ export function ForkDialog({
     setTags: setSelectedTags,
     preferences,
     route: selectedRoute,
+    pickRoute,
     loadingMachines,
     loadingCatalog,
     problem,
@@ -63,6 +68,9 @@ export function ForkDialog({
     sourceCatalog,
     sourceWorkspaceId,
     sourceTags,
+    automaticTags: sourceMediaTags,
+    sourceAgentId,
+    sourceModelId,
     listMachines,
     loadCatalog,
   });
@@ -95,7 +103,8 @@ export function ForkDialog({
   const unchanged =
     selectedMachine.id === sourceMachine.id &&
     selectedWorkspaceId === sourceWorkspaceId &&
-    selectedRoute?.agent.id === sourceAgentId;
+    selectedRoute?.agent.id === sourceAgentId &&
+    selectedRoute?.modelId === sourceModelId;
   const native = Boolean(
     unchanged && hasNativeCheckpoint && selectedRoute?.agent.capabilities.fork,
   );
@@ -157,16 +166,24 @@ export function ForkDialog({
             onSelect={setSelectedWorkspaceId}
           />
 
-          <TagGrid
+          <fieldset disabled={busy || loadingCatalog}>
+            <legend className="text-xs font-medium uppercase tracking-wide text-faint">模型选择</legend>
+            <div className="mt-2">
+          <ModelPicker
             agents={catalog.agents}
             preferences={preferences}
-            selectedTags={selectedTags}
+            filterTags={selectedTags}
+            automaticTags={sourceMediaTags}
             disabled={busy || loadingCatalog}
-            onSelect={setSelectedTags}
-            currentTags={
-              selectedMachine.id === sourceMachine.id ? sourceTags : undefined
-            }
+            selected={{
+              agentId: selectedRoute?.agent.id ?? null,
+              modelId: selectedRoute?.modelId ?? null,
+            }}
+            onFilterTags={setSelectedTags}
+            onSelect={pickRoute}
           />
+            </div>
+          </fieldset>
 
           {problem ? <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{problem}</p> : null}
 
@@ -199,12 +216,22 @@ export function ForkDialog({
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => {
               if (!selectedRoute) return;
+              const target = native
+                ? null
+                : {
+                    agentId: selectedRoute.agent.id,
+                    workspaceId: selectedWorkspaceId,
+                    ...(selectedRoute.modelId ? { modelId: selectedRoute.modelId } : {}),
+                    ...(selectedRoute.modeId ? { modeId: selectedRoute.modeId } : {}),
+                    ...(selectedRoute.effortId ? { effortId: selectedRoute.effortId } : {}),
+                    runtimeValues: selectedRoute.runtimeValues,
+                  };
               setBusy(true);
               setProblem(null);
               void onConfirm({
                 machine: selectedMachine,
                 workspaceId: selectedWorkspaceId,
-                tags: selectedTags,
+                target,
               })
                 .then((created) => {
                   if (created) onClose();

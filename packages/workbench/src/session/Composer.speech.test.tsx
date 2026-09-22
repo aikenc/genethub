@@ -146,23 +146,14 @@ describe("Composer segmented speech review", () => {
         phase="idle"
         agents={[agent]}
         preferences={{
-          capabilities: {
-            planning: [{ agentId: "genet" }],
-            coding: [{ agentId: "genet" }],
-            multimodal: [{ agentId: "genet" }],
-          },
-          selectedCapability: "planning",
           runtimes: {},
         }}
-        capability="planning"
         agentId="genet"
         modelId={null}
         modeId={null}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
-        onPickCapability={vi.fn()}
         onSavePreferences={vi.fn()}
-        onPickMode={vi.fn()}
       />,
     );
 

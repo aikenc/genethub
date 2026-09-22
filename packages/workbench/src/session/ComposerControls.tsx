@@ -1,9 +1,5 @@
-import type {
-  AgentCapability,
-  AgentInfo,
-  AgentSelectionPreferences,
-} from "@genehub/proto";
-import { Tags } from "lucide-react";
+import type { AgentInfo, AgentSelectionPreferences, SessionAgentTarget } from "@genehub/proto";
+import { Boxes } from "lucide-react";
 import { useCallback, useId, useRef, useState } from "react";
 
 import { EffortMeter } from "../presentation/EffortMeter";
@@ -24,7 +20,6 @@ export function ComposerControls({
   preferences,
   tags,
   mediaTags,
-  capability,
   agentId,
   modelId,
   modeId,
@@ -32,34 +27,23 @@ export function ComposerControls({
   runtimeValues,
   disabled,
   onOpenChange,
-  onPickTags,
-  onPickCapability,
+  onPickTarget,
   onSavePreferences,
-  onPickMode,
-  onPickEffort,
-  onPickRuntimeAxis,
   onRefreshAgents,
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
   tags?: string[];
   mediaTags?: string[];
-  /** Compatibility for callers restored from an older draft. */
-  capability?: AgentCapability;
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
   runtimeValues?: Record<string, string> | null;
   disabled?: boolean;
-  agentLocked?: boolean;
   onOpenChange?(open: boolean): void;
-  onPickTags?(tags: string[]): void;
-  onPickCapability?(capability: AgentCapability): void;
+  onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
   onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
-  onPickMode(id: string): void;
-  onPickEffort(id: string): void;
-  onPickRuntimeAxis?(axisId: string, valueId: string): void;
   onRefreshAgents?(): void;
 }) {
   const [open, setOpen] = useState(false);
@@ -75,7 +59,7 @@ export function ComposerControls({
     runtimeValues,
   });
   const selectedTags = normalizeTags(
-    tags?.length ? tags : preferences.selectedTags?.length ? preferences.selectedTags : [legacyTag(capability)],
+    tags?.length ? tags : preferences.selectedTags?.length ? preferences.selectedTags : ["Flush"],
   );
   const automaticTags = normalizeTags(mediaTags ?? []);
   const agentProfile = selection.current ? resolveAgentProfile(selection.current.id) : null;
@@ -107,8 +91,8 @@ export function ComposerControls({
       }`
     : "未匹配 Agent";
   const summary = [
-    `路由：${routeLabel}`,
-    `标签：${[...selectedTags, ...automaticTags].join(" + ") || "无"}`,
+    `模型：${routeLabel}`,
+    `筛选：${[...selectedTags, ...automaticTags].join(" + ") || "无"}`,
     effort ? `思考强度：${effort.fullLabel}` : null,
     mode ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}` : null,
   ]
@@ -137,7 +121,7 @@ export function ComposerControls({
         className="flex h-9 !min-h-0 !min-w-0 flex-1 items-center rounded-md px-1.5 text-left text-[14px] leading-9 text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:text-[12px] md:leading-6"
       >
         <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden opacity-80">
-          <Tags className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+          <Boxes className="h-4 w-4 shrink-0 text-accent" aria-hidden />
           <span className="truncate text-fg">{routeLabel}</span>
           {effort ? (
             <span
@@ -174,29 +158,13 @@ export function ComposerControls({
           disabled={disabled}
           returnFocusRef={trigger}
           onClose={closePanel}
-          onPickTags={(next) => {
-            if (onPickTags) onPickTags(next);
-            else onPickCapability?.(tagCapability(next[0]));
+          onPickTarget={async (target, filters) => {
+            await onPickTarget?.(target, filters);
           }}
           onSavePreferences={onSavePreferences}
-          onPickMode={onPickMode}
-          onPickEffort={onPickEffort}
-          onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
           onRefreshAgents={onRefreshAgents}
         />
       ) : null}
     </>
   );
-}
-
-function legacyTag(capability: AgentCapability | undefined): string {
-  if (capability === "planning") return "Pro";
-  if (capability === "multimodal") return "图片理解";
-  return "Flush";
-}
-
-function tagCapability(tag: string | undefined): AgentCapability {
-  if (tag === "Max" || tag === "Pro") return "planning";
-  if (tag === "图片理解" || tag === "视频理解") return "multimodal";
-  return "coding";
 }

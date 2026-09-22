@@ -6,12 +6,16 @@ import {
   VIDEO_TAG,
   availableAgentTags,
   mediaInputSupport,
+  inferredModelProfile,
   normalizeAgentPreferences,
+  normalizeGroupedTags,
   resolveTagRoute,
   tagMediaInputSupport,
+  toggleGroupedTag,
   withModelProfile,
   withRuntimePreference,
   withSelectedTags,
+  withTagGroups,
 } from "./capability-preferences";
 
 function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
@@ -68,7 +72,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
 }
 
 describe("machine-global Agent tag routing", () => {
-  it("materializes every exact Agent + model row and infers deterministic defaults", () => {
+  it("materializes the first three exact Agent + model rows and infers deterministic defaults", () => {
     const preferences = normalizeAgentPreferences(undefined, [agent()]);
     expect(preferences.selectedTags).toEqual(["Flush"]);
     expect(preferences.modelProfiles).toEqual([
@@ -86,6 +90,57 @@ describe("machine-global Agent tag routing", () => {
         cost: "low",
       },
     ]);
+  });
+
+  it("filters auto and adds further models only when the Human asks", () => {
+    const rich = agent({
+      catalog: {
+        ...agent().catalog,
+        models: [
+          { id: "provider/auto", label: "Auto Select", reasoning: true, efforts: [] },
+          ...[1, 2, 3, 4, 5].map((index) => ({
+            id: `m${index}`,
+            label: `Model ${index}`,
+            reasoning: true,
+            efforts: [] as string[],
+          })),
+        ],
+      },
+    });
+    const initial = normalizeAgentPreferences(undefined, [rich]);
+    expect(initial.modelProfiles?.map((profile) => profile.modelId)).toEqual(["m1", "m2", "m3"]);
+
+    const fourth = rich.catalog.models.find((model) => model.id === "m4")!;
+    const saved = withModelProfile(initial, inferredModelProfile(rich, fourth));
+    expect(normalizeAgentPreferences(saved, [rich]).modelProfiles?.map((profile) => profile.modelId))
+      .toEqual(["m1", "m2", "m3", "m4"]);
+
+    const staleOnly = { ...saved, modelProfiles: [inferredModelProfile(rich, fourth)] };
+    const changedCatalog = {
+      ...rich,
+      catalog: { ...rich.catalog, models: rich.catalog.models.filter((model) => model.id !== "m4") },
+    };
+    expect(normalizeAgentPreferences(staleOnly, [changedCatalog]).modelProfiles).toEqual([]);
+  });
+
+  it("enforces one tag per built-in or custom group for ownership and filters", () => {
+    let preferences = normalizeAgentPreferences(undefined, [agent()]);
+    preferences = withTagGroups(preferences, [
+      { id: "speed", label: "速度", tags: ["快", "稳"] },
+      { id: "builtin-intelligence", label: "冲突", tags: ["坏"] },
+    ]);
+    expect(preferences.tagGroups?.map((group) => group.id)).toEqual(["speed"]);
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
+      modelId: "text",
+      tags: ["Max", "Pro", "快", "稳"],
+      cost: "medium",
+    });
+    expect(preferences.modelProfiles?.find((profile) => profile.modelId === "text")?.tags)
+      .toEqual(["Max", "快"]);
+    expect(toggleGroupedTag(["Pro", "稳"], "Max", preferences)).toEqual(["稳", "Max"]);
+    expect(normalizeGroupedTags(["Max", "Flush", "快", "稳"], preferences))
+      .toEqual(["Max", "快"]);
   });
 
   it("matches every requested tag and picks the available route with the lowest live cost", () => {

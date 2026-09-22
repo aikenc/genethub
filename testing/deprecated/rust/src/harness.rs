@@ -320,6 +320,7 @@ impl Journey {
                 workspace_id: self.workspace.id.clone(),
                 agent_id: agent_id.to_string(),
                 model_id: Some(model_id.to_string()),
+                effort_id: None,
                 mode_id: None,
                 runtime_values: None,
                 title: None,

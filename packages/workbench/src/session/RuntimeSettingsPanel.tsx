@@ -1,20 +1,17 @@
-import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
-import { ChevronLeft, Settings2, Tags } from "lucide-react";
+import type {
+  AgentInfo,
+  AgentSelectionPreferences,
+  SessionAgentTarget,
+} from "@genehub/proto";
+import { ChevronLeft, Settings2 } from "lucide-react";
 import type { RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import {
-  resolveAgentPresentation,
-  resolveModelPresentation,
-} from "../presentation/catalog/resolve";
-import {
-  availableAgentTags,
-  normalizeTags,
-  resolveTagRoute,
-} from "./capability-preferences";
+import { definedRuntimeValues, normalizeGroupedTags, routeTarget } from "./capability-preferences";
+import { ModelPicker } from "./ModelPicker";
 import { CompactRuntimeControls, RuntimeSettings } from "./RuntimeSettings";
-import type { RuntimeSelection } from "./runtime-selection";
+import { resolveRuntimeSelection, type RuntimeSelection } from "./runtime-selection";
 
 export function RuntimeSettingsPanel({
   id,
@@ -26,10 +23,7 @@ export function RuntimeSettingsPanel({
   disabled,
   returnFocusRef,
   onClose,
-  onPickTags,
-  onPickMode,
-  onPickEffort,
-  onPickRuntimeAxis,
+  onPickTarget,
   onSavePreferences,
   onRefreshAgents,
 }: {
@@ -42,21 +36,26 @@ export function RuntimeSettingsPanel({
   disabled?: boolean;
   returnFocusRef: RefObject<HTMLButtonElement>;
   onClose(): void;
-  onPickTags(tags: string[]): void;
-  onPickMode(id: string): void;
-  onPickEffort(id: string): void;
-  onPickRuntimeAxis(axisId: string, valueId: string): void;
+  onPickTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
   onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onRefreshAgents?(): void;
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const [view, setView] = useState<"quick" | "preferences">("quick");
-  const selectableTags = availableAgentTags(preferences);
-  const selected = normalizeTags(tags);
-  const automatic = normalizeTags(mediaTags);
-  const required = normalizeTags([...selected, ...automatic]);
-  const route = resolveTagRoute(preferences, required, agents);
+  const [filters, setFilters] = useState(() => normalizeGroupedTags(tags, preferences));
+  const [target, setTarget] = useState<SessionAgentTarget | null>(() => targetFrom(selection));
+  const [saving, setSaving] = useState(false);
+  const targetSelection = target
+    ? resolveRuntimeSelection({
+        agents,
+        agentId: target.agentId,
+        modelId: target.modelId ?? null,
+        modeId: target.modeId ?? null,
+        effortId: target.effortId ?? null,
+        runtimeValues: definedRuntimeValues(target.runtimeValues),
+      })
+    : selection;
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -89,7 +88,7 @@ export function RuntimeSettingsPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${id}-title`}
-        className="flex max-h-[min(84dvh,48rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
+        className="flex max-h-[min(88dvh,52rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
         onKeyDown={(event) => {
           if (event.key === "Tab") trapTab(event, panel.current);
         }}
@@ -98,7 +97,7 @@ export function RuntimeSettingsPanel({
           {view === "preferences" ? (
             <button
               type="button"
-              aria-label="返回标签选择"
+              aria-label="返回模型选择"
               className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg"
               onClick={() => setView("quick")}
             >
@@ -106,7 +105,7 @@ export function RuntimeSettingsPanel({
             </button>
           ) : null}
           <h2 id={`${id}-title`} className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
-            {view === "quick" ? "标签与运行设置" : "Agent 配置"}
+            {view === "quick" ? "模型选择" : "Agent 配置"}
           </h2>
           <button
             ref={close}
@@ -122,58 +121,38 @@ export function RuntimeSettingsPanel({
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
           {view === "quick" ? (
             <div className="space-y-3">
-              <div className="flex flex-wrap gap-1.5" role="group" aria-label="选择 Agent 标签">
-                {selectableTags.map((tag) => {
-                  const checked = selected.includes(tag) || automatic.includes(tag);
-                  const locked = automatic.includes(tag);
-                  return (
-                    <button
-                      key={tag}
-                      type="button"
-                      aria-pressed={checked}
-                      title={locked ? "由会话中的媒体自动添加" : undefined}
-                      disabled={
-                        disabled ||
-                        locked ||
-                        (checked && selected.length === 1) ||
-                        (!checked && required.length >= 4)
-                      }
-                      onClick={() =>
-                        onPickTags(
-                          checked
-                            ? selected.filter((candidate) => candidate !== tag)
-                            : [...selected, tag],
-                        )
-                      }
-                      className={`rounded-full border px-3 py-1.5 text-xs disabled:opacity-55 ${
-                        checked
-                          ? "border-accent/60 bg-accent/10 text-accent"
-                          : "border-line text-muted hover:bg-raised hover:text-fg"
-                      }`}
-                    >
-                      {tag}{locked ? " · 自动" : ""}
-                    </button>
-                  );
-                })}
-              </div>
+              <ModelPicker
+                agents={agents}
+                preferences={preferences}
+                filterTags={filters}
+                automaticTags={mediaTags}
+                selected={{
+                  agentId: target?.agentId ?? null,
+                  modelId: target?.modelId ?? null,
+                }}
+                disabled={disabled || saving}
+                onFilterTags={setFilters}
+                onSelect={(route) => setTarget(routeTarget(route))}
+              />
 
-              <div className="rounded-xl border border-line bg-raised/35 p-2.5">
-                <div className="mb-2 flex min-w-0 items-center gap-2 text-xs">
-                  <Tags size={14} className="shrink-0 text-accent" />
-                  <span className={`truncate ${route ? "text-fg" : "text-danger"}`}>
-                    {route ? routeLabel(route.agent, route.modelId) : "没有 Agent 与模型同时匹配全部标签"}
-                  </span>
+              {target ? (
+                <div className="rounded-xl border border-line bg-raised/35 p-2.5">
+                  <CompactRuntimeControls
+                    selection={targetSelection}
+                    disabled={disabled || saving}
+                    onPickMode={(modeId) => setTarget((current) => current ? { ...current, modeId } : current)}
+                    onPickEffort={(effortId) => setTarget((current) => current ? { ...current, effortId } : current)}
+                    onPickRuntimeAxis={(axisId, valueId) =>
+                      setTarget((current) => current ? {
+                        ...current,
+                        runtimeValues: { ...current.runtimeValues, [axisId]: valueId },
+                      } : current)
+                    }
+                  />
                 </div>
-                <CompactRuntimeControls
-                  selection={selection}
-                  disabled={disabled || !route}
-                  onPickMode={onPickMode}
-                  onPickEffort={onPickEffort}
-                  onPickRuntimeAxis={onPickRuntimeAxis}
-                />
-              </div>
+              ) : null}
 
-              <div className="flex justify-end border-t border-line pt-2">
+              <div className="flex items-center justify-between border-t border-line pt-2">
                 <button
                   type="button"
                   className="flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs text-accent hover:bg-raised"
@@ -184,6 +163,20 @@ export function RuntimeSettingsPanel({
                 >
                   <Settings2 size={14} /> Agent 配置
                 </button>
+                <button
+                  type="button"
+                  disabled={disabled || saving || !target}
+                  className="h-9 rounded-lg bg-accent px-4 text-xs font-medium text-on-accent disabled:opacity-50"
+                  onClick={() => {
+                    if (!target) return;
+                    setSaving(true);
+                    Promise.resolve(onPickTarget(target, filters))
+                      .then(onClose)
+                      .finally(() => setSaving(false));
+                  }}
+                >
+                  {saving ? "切换中…" : "使用此模型"}
+                </button>
               </div>
             </div>
           ) : (
@@ -193,6 +186,7 @@ export function RuntimeSettingsPanel({
               disabled={disabled}
               onSave={async (next) => {
                 await onSavePreferences(next);
+                setFilters(normalizeGroupedTags(filters, next));
                 setView("quick");
               }}
             />
@@ -204,15 +198,15 @@ export function RuntimeSettingsPanel({
   );
 }
 
-function routeLabel(agent: AgentInfo, modelId: string | null): string {
-  const agentLabel = resolveAgentPresentation(agent).label;
-  if (!modelId) return `${agentLabel} · Agent 默认`;
-  const model = agent.catalog.models.find((candidate) => candidate.id === modelId);
-  return `${agentLabel} · ${resolveModelPresentation({
-    agentId: agent.id,
-    modelId,
-    modelLabel: model?.label,
-  }).fullLabel}`;
+function targetFrom(selection: RuntimeSelection): SessionAgentTarget | null {
+  if (!selection.current) return null;
+  return {
+    agentId: selection.current.id,
+    ...(selection.model ? { modelId: selection.model.id } : {}),
+    ...(selection.mode ? { modeId: selection.mode.id } : {}),
+    ...(selection.effortId ? { effortId: selection.effortId } : {}),
+    runtimeValues: selection.runtimeValues,
+  };
 }
 
 function trapTab(event: React.KeyboardEvent, container: HTMLElement | null) {

@@ -484,7 +484,11 @@ export async function configureMockProvider(
       baseUrl: mock.origin,
       label: null,
       dialect: null,
-      models: null,
+      models: ["deepseek-v4-flash", "deepseek-v4-pro"],
+      modelInputs: {
+        "deepseek-v4-flash": ["image", "video"],
+        "deepseek-v4-pro": ["image", "video"],
+      },
     },
   });
   // The synthetic catalog has no trustworthy vendor modality metadata. Give
@@ -494,16 +498,20 @@ export async function configureMockProvider(
     type: "settings.setAgentPreferences",
     payload: {
       preferences: {
-        capabilities: { planning: [], coding: [], multimodal: [] },
-        selectedCapability: "planning",
         runtimes: {},
         selectedTags: ["Flush"],
         modelProfiles: [
           {
             agentId: "genet",
             modelId: "deepseek/deepseek-v4-flash",
-            tags: ["Pro", "Flush", "图片理解", "视频理解"],
+            tags: ["Flush", "图片理解", "视频理解"],
             cost: "low",
+          },
+          {
+            agentId: "genet",
+            modelId: "deepseek/deepseek-v4-pro",
+            tags: ["Pro", "图片理解", "视频理解"],
+            cost: "medium",
           },
         ],
       },

@@ -64,8 +64,6 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
 });
 
 const COMPOSER_PREFERENCES: AgentSelectionPreferences = {
-  capabilities: { planning: [], coding: [], multimodal: [] },
-  selectedCapability: "planning",
   selectedTags: ["Pro"],
   modelProfiles: [
     {
@@ -114,6 +112,26 @@ function showRounds(state: TimelineState, layer: Partial<TimelineState>): Timeli
   const timeline = { ...state, ...layer };
   useWorkbench.setState({ timeline });
   return timeline;
+}
+
+function showDefaultRuntime() {
+  useWorkbench.setState({
+    sessions: [
+      {
+        id: "s1",
+        workspaceId: "w1",
+        agentId: "genet",
+        modelId: "deepseek/v4",
+        title: undefined,
+        createdAtMs: 0,
+        updatedAtMs: 0,
+        archived: false,
+        status: "idle",
+      },
+    ],
+    activeSessionId: "s1",
+    agents: [agent()],
+  });
 }
 
 /** jsdom lays nothing out, so the scrollport has to be described by hand. */
@@ -445,7 +463,7 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
-    expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("未知 Agent默认模型");
     expect(screen.queryByTestId("batch-monologue")).not.toBeInTheDocument();
     expect(screen.getByTestId("live-tail")).toBeInTheDocument();
     expect(within(screen.getByTestId("live-tail")).getByText("确认结构")).toBeInTheDocument();
@@ -1007,7 +1025,8 @@ describe("what the user sees in a session", () => {
     expect(rows[1]!).not.toHaveTextContent("刚刚");
   });
 
-  it("shows trunk and batch metrics as rounds, duration and relative time", async () => {
+  it("shows the resolved Agent and model on trunk and batch headers", async () => {
+    showDefaultRuntime();
     const now = Date.now();
     const round = {
       roundId: "r1",
@@ -1071,21 +1090,22 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
     const trunk = screen.getByTestId("round-trunk");
     const trunkMetrics = within(trunk).getByTestId("summary-metrics");
-    expect(trunkMetrics).toHaveTextContent("12 轮 · 3m 20s");
-    expect(trunkMetrics).toHaveTextContent("3 分钟前 · 工具 1m 50s");
-    expect(trunkMetrics).not.toHaveTextContent("5 项");
+    expect(trunkMetrics).toHaveTextContent("GeneHub Agent");
+    expect(trunkMetrics).toHaveTextContent("DeepSeek V4");
+    expect(trunkMetrics).not.toHaveTextContent("3 分钟前");
+    expect(trunkMetrics).not.toHaveTextContent("3m 20s");
 
     await userEvent.click(within(trunk).getByRole("button"));
     const batches = screen.getAllByTestId("round-batch");
     const firstMetrics = within(batches[0]!).getByTestId("summary-metrics");
-    expect(firstMetrics).toHaveTextContent("5 轮 · 1m 1s");
-    expect(firstMetrics).toHaveTextContent("3 分钟前 · 工具 30s");
+    expect(firstMetrics).toHaveTextContent("GeneHub AgentDeepSeek V4");
     expect(within(batches[1]!).getByTestId("summary-metrics")).toHaveTextContent(
-      "7 轮 · 1m 59s",
+      "GeneHub AgentDeepSeek V4",
     );
   });
 
-  it("keeps the blob count for trunk rows written before metrics existed", () => {
+  it("shows runtime identity even for trunk rows written before metrics existed", () => {
+    showDefaultRuntime();
     const round = {
       roundId: "r1",
       userItemId: "u1",
@@ -1116,11 +1136,14 @@ describe("what the user sees in a session", () => {
 
     render(<TimelineView state={state} />);
     const trunk = screen.getByTestId("round-trunk");
-    expect(trunk).toHaveTextContent("4 项");
-    expect(within(trunk).queryByTestId("summary-metrics")).not.toBeInTheDocument();
+    expect(trunk).not.toHaveTextContent("4 项");
+    expect(within(trunk).getByTestId("summary-metrics")).toHaveTextContent(
+      "GeneHub AgentDeepSeek V4",
+    );
   });
 
-  it("shows live rounds and elapsed time on the in-progress card", () => {
+  it("shows the active Agent and model on the in-progress card", () => {
+    showDefaultRuntime();
     const now = Date.now();
     let state = emptyTimeline();
     state = apply(state, {
@@ -1162,9 +1185,9 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
     const card = screen.getByTestId("round-trunk");
     const metrics = within(card).getByTestId("summary-metrics");
-    expect(metrics).toHaveTextContent("3 轮");
-    expect(metrics).toHaveTextContent("1 分钟前");
-    expect(metrics).toHaveTextContent("工具 10s");
+    expect(metrics).toHaveTextContent("GeneHub AgentDeepSeek V4");
+    expect(metrics).not.toHaveTextContent("1 分钟前");
+    expect(metrics).not.toHaveTextContent("工具 10s");
     expect(card).not.toHaveTextContent("1 项");
   });
 
@@ -1208,9 +1231,9 @@ describe("what the user sees in a session", () => {
 
     const trunks = screen.getAllByTestId("round-trunk");
     expect(trunks[0]!).toHaveTextContent("🧭");
-    expect(trunks[0]!).toHaveTextContent("盘点入口。64 项");
+    expect(trunks[0]!).toHaveTextContent("盘点入口。未知 Agent默认模型");
     expect(trunks[1]!).toHaveTextContent("🧭");
-    expect(trunks[1]!).toHaveTextContent("核对权限。3 项");
+    expect(trunks[1]!).toHaveTextContent("核对权限。未知 Agent默认模型");
     // Watching an agent work is the point of a running round: its tail is open,
     // and only the settled work behind it is folded away.
     expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
@@ -1677,7 +1700,7 @@ describe("what the user sees in a session", () => {
     expect(batches).toHaveLength(2);
     expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).toHaveTextContent("2 项");
+    expect(batches[0]!).toHaveTextContent("未知 Agent默认模型");
     expect(within(batches[0]!).getByRole("button").querySelector(".line-clamp-2")).toHaveAttribute(
       "title",
       "核对入口与权限。随后检查角色边界。",
@@ -1799,7 +1822,7 @@ describe("what the user sees in a session", () => {
     const timeline = screen.getByTestId("timeline");
     expect(screen.getAllByTestId("assistant-message")).toHaveLength(1);
     expect(screen.getByTestId("round-trunk")).toHaveTextContent(
-      "先彻底核对权限链路，再给结论。8 项",
+      "先彻底核对权限链路，再给结论。未知 Agent默认模型",
     );
     expect(timeline.textContent?.indexOf("先彻底核对权限链路，再给结论。")).toBeLessThan(
       timeline.textContent?.indexOf("最终结论：需要修复授权边界。") ?? -1,
@@ -1995,16 +2018,13 @@ function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {})
     phase: "idle" as const,
     agents: [COMPOSER_AGENT],
     preferences: COMPOSER_PREFERENCES,
-    capability: "planning" as const,
     tags: ["Pro"],
     agentId: "genet",
     modelId: null,
     modeId: null,
     onSend: () => {},
     onInterrupt: () => {},
-    onPickCapability: () => {},
     onSavePreferences: () => {},
-    onPickMode: () => {},
     ...overrides,
   };
 }
@@ -2106,7 +2126,7 @@ describe("the controls offered to the user", () => {
 
   it("turns a pasted screenshot into a thumbnail and sends it as an attachment", async () => {
     const onSend = vi.fn();
-    render(<Composer {...composerProps({ onSend, attachmentsSupported: true })} />);
+    render(<Composer {...composerProps({ onSend })} />);
 
     pasteImage(screen.getByLabelText("任务描述"));
     await waitFor(() => expect(screen.getByAltText("shot.png")).toBeInTheDocument());
@@ -2128,7 +2148,7 @@ describe("the controls offered to the user", () => {
   it("uses one file button for images and resets the picker after every choice", async () => {
     const onSend = vi.fn();
     const { container } = render(
-      <Composer {...composerProps({ onSend, attachmentsSupported: true })} />,
+      <Composer {...composerProps({ onSend })} />,
     );
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const file = new File(["fake-bytes"], "picked.png", { type: "image/png" });
@@ -2255,7 +2275,7 @@ describe("the controls offered to the user", () => {
     );
     await screen.findByAltText("current.png");
 
-    await userEvent.click(screen.getByRole("button", { name: /路由：/ }));
+    await userEvent.click(screen.getByRole("button", { name: /模型：/ }));
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByRole("button", { name: "图片理解 · 自动" })).toBeDisabled();
   });
@@ -2402,7 +2422,7 @@ describe("the controls offered to the user", () => {
     const onInterrupt = vi.fn();
     render(
       <Composer
-        {...composerProps({ phase: "sending", onSend, onInterrupt, attachmentsSupported: true })}
+        {...composerProps({ phase: "sending", onSend, onInterrupt })}
       />,
     );
 
@@ -2444,7 +2464,6 @@ describe("the controls offered to the user", () => {
         {...composerProps({
           onSend,
           onRestoreDraft,
-          attachmentsSupported: true,
           restoreDraft: {
             text: "刚才没发出去的话",
             attachments: [{ name: "shot.png", mime: "image/png", dataBase64: "AAA" }],
@@ -2512,10 +2531,10 @@ describe("the controls offered to the user", () => {
   });
 
   it("keeps one writing-sized card whether or not the field has focus", async () => {
-    render(<Composer {...composerProps({ agentLocked: true })} />);
+    render(<Composer {...composerProps()} />);
 
     const box = screen.getByLabelText("任务描述");
-    const summary = screen.getByRole("button", { name: /路由：GeneHub Agent/ });
+    const summary = screen.getByRole("button", { name: /模型：GeneHub Agent/ });
     const card = box.closest("[data-composer-card]");
     const inputSlot = box.closest('[data-composer-slot="input"]');
     const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
@@ -2606,7 +2625,7 @@ describe("the controls offered to the user", () => {
 
   it("does not move the file button out from under an in-flight click", async () => {
     const { container } = render(
-      <Composer {...composerProps({ attachmentsSupported: true })} />,
+      <Composer {...composerProps()} />,
     );
     const box = screen.getByLabelText("任务描述");
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -2751,9 +2770,9 @@ describe("the controls offered to the user", () => {
   });
 
   it("keeps tag switching available for an existing conversation", async () => {
-    render(<Composer {...composerProps({ agentLocked: true })} />);
-    await userEvent.click(screen.getByRole("button", { name: /路由：GeneHub Agent/ }));
-    const dialog = screen.getByRole("dialog", { name: "标签与运行设置" });
+    render(<Composer {...composerProps()} />);
+    await userEvent.click(screen.getByRole("button", { name: /模型：GeneHub Agent/ }));
+    const dialog = screen.getByRole("dialog", { name: "模型选择" });
     expect(within(dialog).getByRole("button", { name: "Max" })).toBeEnabled();
     expect(within(dialog).getByLabelText("思考强度")).toBeEnabled();
   });
@@ -3010,6 +3029,8 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByText("写个文件")).toBeInTheDocument();
     expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("hello.txt");
+    expect(within(screen.getByTestId("round-trunk")).getByTestId("summary-metrics"))
+      .toHaveTextContent("CodexDeepSeek V4");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("Codex");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("DeepSeek V4");
@@ -3064,9 +3085,7 @@ describe("a whole turn as the timeline sees it", () => {
         providers: [],
         lanEnabled: false,
         agentPreferences: {
-          selectedCapability: "planning",
           selectedTags: ["Pro"],
-          capabilities: { planning: [], coding: [], multimodal: [] },
           modelProfiles: [
             {
               agentId: "codex",
@@ -3124,7 +3143,10 @@ describe("a whole turn as the timeline sees it", () => {
 
     expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pro" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByText("Codex · DeepSeek V4 · 当前")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Codex · DeepSeek V4/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
     expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();
@@ -3163,12 +3185,13 @@ describe("a whole turn as the timeline sees it", () => {
         providers: [],
         lanEnabled: false,
         agentPreferences: {
-          selectedCapability: "coding",
-          capabilities: {
-            planning: [],
-            coding: [{ agentId: "cursor", modelId: "deepseek/v4" }],
-            multimodal: [],
-          },
+          selectedTags: ["Flush"],
+          modelProfiles: [{
+            agentId: "cursor",
+            modelId: "deepseek/v4",
+            tags: ["Flush"],
+            cost: "medium",
+          }],
           runtimes: {},
         },
       },

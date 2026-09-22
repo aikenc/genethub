@@ -4,6 +4,7 @@ import { usePageNavigation } from "./usePageNavigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ForkTransfer,
+  ForkTarget,
   HistoryCoverage,
   SessionSummary,
 } from "@genehub/proto";
@@ -44,12 +45,10 @@ import type { ForkMachineOption } from "../session/ForkDialog";
 import type { MachineCatalog } from "../session/MachineCatalogPicker";
 import { useWorkbench } from "../session/store";
 import {
-  capabilityForRoute,
   mediaTagsForTimeline,
   normalizeTags,
   normalizeAgentPreferences,
   resolveTagRoute,
-  tagMediaInputSupport,
 } from "../session/capability-preferences";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
@@ -113,8 +112,7 @@ interface MachineBroker {
   createFork(
     machine: ForkMachineOption,
     transfer: ForkTransfer,
-    workspaceId: string,
-    tags: string[],
+    target: ForkTarget,
   ): Promise<SessionSummary>;
   jumpTo(machine: ForkMachineOption, sessionId: string): void;
 }
@@ -253,14 +251,10 @@ export function App({
   const draft = workbench.draft;
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
-  const currentModelId = workbench.timeline.modelId ?? draft?.modelId ?? session?.modelId ?? currentAgent?.catalog.defaultModel;
   const agentPreferences = normalizeAgentPreferences(
     workbench.settings?.agentPreferences,
     workbench.agents,
   );
-  const selectedCapability =
-    draft?.capability ??
-    capabilityForRoute(agentPreferences, agentId, currentModelId ?? null);
   const selectedTags = normalizeTags(
     session?.routingTags?.length
       ? session.routingTags
@@ -279,11 +273,6 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
-  const composerMediaSupport = tagMediaInputSupport(
-    agentPreferences,
-    [...selectedTags, ...automaticMediaTags],
-    workbench.agents,
-  );
   const deviceHandle =
     workbench.client?.identity?.machineId ?? readWorkbenchLocation()?.deviceHandle ?? null;
   const hrefLocation = useMemo(() => {
@@ -665,11 +654,14 @@ export function App({
             sessionId = target.sessionId;
           } else {
             const created = await client.call({
-              type: "session.createRouted",
+              type: "session.create",
               payload: {
                 workspaceId: target.workspaceId,
-                tags: target.tags,
-                mediaTags: [],
+                agentId: target.target.agentId,
+                modelId: target.target.modelId ?? null,
+                ...(target.target.effortId ? { effortId: target.target.effortId } : {}),
+                modeId: target.target.modeId ?? null,
+                runtimeValues: target.target.runtimeValues,
                 title: null,
                 cwd: null,
               },
@@ -692,11 +684,11 @@ export function App({
           return { sessionId };
         });
       },
-      async createFork(machine, transfer, workspaceId, tags) {
+      async createFork(machine, transfer, target) {
         const created = await onMachine(machine, (client) =>
           client.call({
-            type: "session.forkImportRouted",
-            payload: { transfer, workspaceId, tags },
+            type: "session.forkImport",
+            payload: { transfer, target },
           }),
         );
         if (created?.type !== "session") {
@@ -736,11 +728,7 @@ export function App({
         const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
         if (!source || !state.client) return false;
         if (selection.machine.id === broker.sourceMachine.id) {
-          return state.forkSessionRouted(
-            turnId,
-            selection.workspaceId,
-            selection.tags,
-          );
+          return state.forkSession(turnId, selection.target ?? undefined);
         }
 
         const exported = await state.client.call({
@@ -750,12 +738,8 @@ export function App({
         if (exported?.type !== "forkTransfer") {
           throw new Error("源机器没有返回可迁移的 Fork 历史。");
         }
-        const created = await broker.createFork(
-          selection.machine,
-          exported.data,
-          selection.workspaceId,
-          selection.tags,
-        );
+        if (!selection.target) throw new Error("跨机器 Fork 需要明确的 Agent 与模型");
+        const created = await broker.createFork(selection.machine, exported.data, selection.target);
         // Stay where the user is. Being yanked onto another machine the moment
         // a Fork lands is what made cross-machine Fork feel broken; the jump
         // is offered on the completion banner, not forced.
@@ -1048,7 +1032,6 @@ export function App({
                         }
                         agents={workbench.agents}
                         preferences={agentPreferences}
-                        capability={selectedCapability}
                         tags={selectedTags}
                         mediaTags={automaticMediaTags}
                         agentId={agentId}
@@ -1061,20 +1044,6 @@ export function App({
                           workbench.activeSessionId
                             ? workbench.timeline.runtimeValues
                             : (draft?.runtimeValues ?? {})
-                        }
-                        // A message in flight locks the Agent too: switching would
-                        // open a new conversation and abandon it.
-                        agentLocked={
-                          workbench.timeline.items.length > 0 || Boolean(pending)
-                        }
-                        attachmentsSupported={
-                          composerMediaSupport.image || composerMediaSupport.video
-                        }
-                        inputModalities={
-                          ([
-                            ...(composerMediaSupport.image ? ["image"] : []),
-                            ...(composerMediaSupport.video ? ["video"] : []),
-                          ] as string[])
                         }
                         commands={currentAgent?.catalog.commands}
                         restoreDraft={workbench.restoreDraft}
@@ -1120,17 +1089,11 @@ export function App({
                           if (!await workbench.send(text, attachments, videoFiles)) throw new Error("消息尚未发送");
                         }}
                         onInterrupt={() => void workbench.interrupt()}
-                        onPickCapability={(capability) =>
-                          void workbench.setCapability(capability)
+                        onPickTarget={(target, tags) =>
+                          workbench.setAgentTarget(target, tags)
                         }
-                        onPickTags={(tags) => void workbench.setTags(tags)}
                         onSavePreferences={(preferences) =>
                           workbench.setAgentPreferences(preferences)
-                        }
-                        onPickMode={(id) => void workbench.setMode(id)}
-                        onPickEffort={(id) => void workbench.setEffort(id)}
-                        onPickRuntimeAxis={(axisId, valueId) =>
-                          void workbench.setRuntimeAxis(axisId, valueId)
                         }
                         onRefreshAgents={() => void workbench.refreshAgents()}
                       />

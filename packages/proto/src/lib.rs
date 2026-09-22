@@ -122,9 +122,13 @@ mod tests {
         .expect("parse");
         match request {
             Request::SessionCreate {
-                model_id, title, ..
+                model_id,
+                effort_id,
+                title,
+                ..
             } => {
                 assert!(model_id.is_none());
+                assert!(effort_id.is_none());
                 assert!(title.is_none());
             }
             other => panic!("wrong variant: {other:?}"),

@@ -5,10 +5,11 @@ import { createPortal } from "react-dom";
 import {
   CURRENT_MACHINE,
   MachineGrid,
-  TagGrid,
   useMachineCatalog,
   WorkspaceList,
 } from "./MachineCatalogPicker";
+import { IMAGE_TAG, routeTarget } from "./capability-preferences";
+import { ModelPicker } from "./ModelPicker";
 import { SessionPicker } from "./SessionPicker";
 import {
   buildForwardCapsule,
@@ -79,6 +80,8 @@ export function ForwardDialog({
   const selectSession = useWorkbench((state) => state.selectSession);
   const setForwardDraft = useWorkbench((state) => state.setForwardDraft);
   const setCompletionNotice = useWorkbench((state) => state.setCompletionNotice);
+  const [built, setBuilt] = useState<BuiltCapsule | null>(null);
+  const automaticTags = built?.imageAttachments.length ? [IMAGE_TAG] : [];
 
   const sourceMachine = controller?.sourceMachine ?? CURRENT_MACHINE;
   const {
@@ -91,6 +94,7 @@ export function ForwardDialog({
     setTags,
     preferences,
     route,
+    pickRoute,
     loadingMachines,
     loadingCatalog,
     problem: machineProblem,
@@ -104,6 +108,7 @@ export function ForwardDialog({
       agentPreferences: settings?.agentPreferences,
     },
     sourceWorkspaceId: activeWorkspaceId ?? workspaces[0]?.id ?? "",
+    automaticTags,
     listMachines: controller?.listMachines,
     loadCatalog: controller?.loadCatalog,
   });
@@ -130,7 +135,6 @@ export function ForwardDialog({
   const [budget, setBudget] = useState<number>(DEFAULT_FORWARD_BUDGET);
   const [fillDetail, setFillDetail] = useState(true);
   const [includeBlobBodies, setIncludeBlobBodies] = useState(false);
-  const [built, setBuilt] = useState<BuiltCapsule | null>(null);
   const [building, setBuilding] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -257,7 +261,8 @@ export function ForwardDialog({
     if (onSourceMachine) {
       // Same machine: park the capsule on a composer, reviewed before sending.
       if (destination === "new") {
-        newSession(workspaceId, null, { tags });
+        if (!route) return;
+        newSession(workspaceId, route.agent.id, { tags, target: routeTarget(route) });
         setForwardDraft({
           sessionId: null,
           capsule: built.text,
@@ -295,7 +300,7 @@ export function ForwardDialog({
           ? ({
               kind: "new",
               workspaceId,
-              tags,
+              target: routeTarget(route),
             } as const)
           : null
         : targetSessionId
@@ -405,13 +410,24 @@ export function ForwardDialog({
                 onSelect={setWorkspaceId}
               />
 
-              <TagGrid
+              <fieldset disabled={busy || loadingCatalog}>
+                <legend className="text-xs font-medium uppercase tracking-wide text-faint">模型选择</legend>
+                <div className="mt-2">
+              <ModelPicker
                 agents={catalog.agents}
                 preferences={preferences}
-                selectedTags={tags}
+                filterTags={tags}
+                automaticTags={automaticTags}
+                selected={{
+                  agentId: route?.agent.id ?? null,
+                  modelId: route?.modelId ?? null,
+                }}
                 disabled={busy || loadingCatalog}
-                onSelect={setTags}
+                onFilterTags={setTags}
+                onSelect={pickRoute}
               />
+                </div>
+              </fieldset>
             </>
           ) : (
             <fieldset disabled={busy || loadingSessions}>

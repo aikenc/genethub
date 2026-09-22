@@ -1,10 +1,10 @@
 import type {
-  AgentCapability,
   AgentInfo,
   AgentSelectionPreferences,
   Attachment,
   CommandInfo,
   SessionDraft,
+  SessionAgentTarget,
   SessionStatus,
 } from "@genehub/proto";
 import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Play, Square, X } from "lucide-react";
@@ -147,7 +147,6 @@ export function Composer({
   disabledReason,
   agents,
   preferences,
-  capability,
   tags,
   mediaTags,
   agentId,
@@ -155,7 +154,6 @@ export function Composer({
   modeId,
   effortId,
   runtimeValues,
-  agentLocked,
   commands,
   restoreDraft,
   insertDraft,
@@ -168,12 +166,8 @@ export function Composer({
   onReplaceDrafts,
   onUpdateDraft,
   onInterrupt,
-  onPickCapability,
-  onPickTags,
+  onPickTarget,
   onSavePreferences,
-  onPickMode,
-  onPickEffort,
-  onPickRuntimeAxis,
   onRefreshAgents,
   onHeightChange,
   onRestoreDraft,
@@ -192,7 +186,6 @@ export function Composer({
   disabledReason?: string;
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
-  capability: AgentCapability;
   tags?: string[];
   mediaTags?: string[];
   agentId: string | null;
@@ -200,11 +193,6 @@ export function Composer({
   modeId: string | null;
   effortId?: string | null;
   runtimeValues?: Record<string, string> | null;
-  agentLocked?: boolean;
-  /** Whether the current agent accepts attachments at all. */
-  attachmentsSupported?: boolean;
-  /** Exact model media inputs; absent for external Agents with image support. */
-  inputModalities?: string[];
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];
   /** A message coming back for editing after it failed to send. */
@@ -230,12 +218,8 @@ export function Composer({
   onReplaceDrafts?(drafts: SessionDraft[]): Promise<boolean>;
   onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
-  onPickCapability(capability: AgentCapability): void;
-  onPickTags?(tags: string[]): void;
+  onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
   onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
-  onPickMode(id: string): void;
-  onPickEffort?(id: string): void;
-  onPickRuntimeAxis?(axisId: string, valueId: string): void;
   onRefreshAgents?(): void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
   onHeightChange?(height: number): void;
@@ -1020,7 +1004,6 @@ export function Composer({
             <ComposerControls
               agents={agents}
               preferences={preferences}
-              capability={capability}
               tags={effectiveTags}
               mediaTags={automaticMediaTags}
               agentId={agentId}
@@ -1029,14 +1012,9 @@ export function Composer({
               effortId={effortId ?? null}
               runtimeValues={runtimeValues}
               disabled={disabled || phase !== "idle"}
-              agentLocked={agentLocked}
               onOpenChange={setSettingsOpen}
-              onPickCapability={onPickCapability}
-              onPickTags={onPickTags}
+              onPickTarget={onPickTarget}
               onSavePreferences={onSavePreferences}
-              onPickMode={onPickMode}
-              onPickEffort={onPickEffort ?? (() => {})}
-              onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
               onRefreshAgents={onRefreshAgents}
             />
           </div>

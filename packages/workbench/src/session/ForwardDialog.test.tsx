@@ -46,9 +46,7 @@ function preferences(
   selectedTags: string[] = ["Flush"],
 ): AgentSelectionPreferences {
   return {
-    selectedCapability: "coding",
     selectedTags,
-    capabilities: { planning: [], coding: [], multimodal: [] },
     modelProfiles: [{ agentId, tags: selectedTags, cost: "medium" }],
     runtimes: {},
   };
@@ -354,7 +352,7 @@ describe("ForwardDialog", () => {
         {
           kind: "new",
           workspaceId: "rw",
-          tags: ["Flush"],
+          target: { agentId: "claude", runtimeValues: {} },
         },
         expect.stringContaining("你好"),
       ),

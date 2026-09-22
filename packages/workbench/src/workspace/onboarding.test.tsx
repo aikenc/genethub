@@ -614,7 +614,7 @@ describe("the first run", () => {
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "session.createRouted": () => ({ type: "session", data: session("s1", 0) }),
+      "session.create": () => ({ type: "session", data: session("s1", 0) }),
     });
     await start(client, hostWith());
 
@@ -626,7 +626,7 @@ describe("the first run", () => {
         agentId: "genet",
       }),
     );
-    expect(calls.some((call) => call.type === "session.createRouted")).toBe(false);
+    expect(calls.some((call) => call.type === "session.create")).toBe(false);
   });
 
   it("writes the session once that first message is actually sent", async () => {
@@ -638,17 +638,17 @@ describe("the first run", () => {
       }),
       "session.list": () => ({ type: "sessions", data: [] }),
       "hub.status": () => ({ type: "hubStatus", data: { state: "unpaired" } }),
-      "session.createRouted": () => ({ type: "session", data: session("s1", 0) }),
+      "session.create": () => ({ type: "session", data: session("s1", 0) }),
     });
     await start(client, hostWith());
 
     await userEvent.type(await screen.findByPlaceholderText(/描述任务/), "在这里改一行{Enter}");
 
     await waitFor(() => {
-      expect(calls.find((call) => call.type === "session.createRouted")?.payload).toMatchObject({
+      expect(calls.find((call) => call.type === "session.create")?.payload).toMatchObject({
         workspaceId: "w1",
-        tags: ["Flush"],
-        mediaTags: [],
+        agentId: "genet",
+        modelId: "deepseek/deepseek-v4-flash",
       });
     });
     expect(calls.find((call) => call.type === "session.send")?.payload).toMatchObject({

@@ -402,7 +402,6 @@ describe("a message that has been sent and not yet confirmed", () => {
       activeSessionId: null,
       draft: {
         workspaceId: "w1",
-        capability: "planning",
         agentId: "genet",
         modelId: null,
         modeId: null,
@@ -502,7 +501,6 @@ describe("a message that has been sent and not yet confirmed", () => {
       activeSessionId: null,
       draft: {
         workspaceId: "w1",
-        capability: "planning",
         agentId: "genet",
         modelId: null,
         modeId: null,
@@ -1004,7 +1002,6 @@ describe("an action the user asked for that fails", () => {
       sessions: [],
       draft: {
         workspaceId: "w1",
-        capability: "planning",
         agentId: "codex",
         modelId: null,
         modeId: null,
@@ -1034,7 +1031,7 @@ describe("opening a new conversation", () => {
     const client = {
       call: async (request: { type: string }) => {
         calls.push(request.type);
-        return request.type === "session.createRouted"
+        return request.type === "session.create"
           ? ({ type: "session", data: created } as const)
           : undefined;
       },
@@ -1067,7 +1064,7 @@ describe("opening a new conversation", () => {
     await useWorkbench.getState().send("hello");
     await useWorkbench.getState().send("again");
 
-    expect(calls.filter((type) => type === "session.createRouted")).toHaveLength(1);
+    expect(calls.filter((type) => type === "session.create")).toHaveLength(1);
     expect(useWorkbench.getState().activeSessionId).toBe("s-new");
     expect(useWorkbench.getState().draft).toBeNull();
   });
@@ -1079,7 +1076,7 @@ describe("opening a new conversation", () => {
       ...client,
       call: async (request: { type: string; payload?: { agentId?: string } }) => {
         sent.push(request);
-        return request.type === "session.createRouted"
+        return request.type === "session.create"
           ? ({ type: "session", data: { ...SESSION, id: "s-new", agentId: "codex" } } as const)
           : undefined;
       },
@@ -1143,10 +1140,13 @@ describe("opening a new conversation", () => {
 
     await useWorkbench.getState().send("hello");
 
-    expect(sent.find((request) => request.type === "session.createRouted")?.payload).toEqual({
+    expect(sent.find((request) => request.type === "session.create")?.payload).toEqual({
       workspaceId: "w1",
-      tags: ["Flush"],
-      mediaTags: [],
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
+      effortId: "high",
+      modeId: null,
+      runtimeValues: {},
       title: null,
       cwd: null,
     });
@@ -1198,14 +1198,14 @@ describe("opening a new conversation", () => {
     expect(defaultAgent([unconfiguredGenet])).toBeUndefined();
   });
 
-  it("carries the selected tags into the routed session it becomes", async () => {
+  it("remembers selected filters while creating the exact chosen model", async () => {
     const { client } = creatingClient();
     const sent: unknown[] = [];
     const recording = {
       ...client,
       call: async (request: { type: string; payload?: unknown }) => {
         sent.push(request);
-        return request.type === "session.createRouted"
+        return request.type === "session.create"
           ? ({ type: "session", data: { ...SESSION, id: "s-new" } } as const)
           : undefined;
       },
@@ -1217,18 +1217,26 @@ describe("opening a new conversation", () => {
     await useWorkbench.getState().send("hello");
 
     expect(sent).toContainEqual({
-      type: "session.createRouted",
+      type: "settings.setAgentPreferences",
+      payload: {
+        preferences: expect.objectContaining({ selectedTags: ["Max", "私有"] }),
+      },
+    });
+    expect(sent).toContainEqual({
+      type: "session.create",
       payload: {
         workspaceId: "w1",
-        tags: ["Max", "私有"],
-        mediaTags: [],
+        agentId: "genet",
+        modelId: null,
+        modeId: null,
+        runtimeValues: {},
         title: null,
         cwd: null,
       },
     });
   });
 
-  it("starts from the machine's selected capability instead of pinning the current Agent", () => {
+  it("starts from the configured ready Agent without a legacy capability list", () => {
     const { client } = creatingClient();
     const claude = {
       id: "claude",
@@ -1257,12 +1265,8 @@ describe("opening a new conversation", () => {
         providers: [],
         lanEnabled: false,
         agentPreferences: {
-          selectedCapability: "coding",
-          capabilities: {
-            planning: [],
-            coding: [{ agentId: "claude" }],
-            multimodal: [],
-          },
+          selectedTags: ["Flush"],
+          modelProfiles: [{ agentId: "claude", tags: ["Flush"], cost: "medium" }],
           runtimes: {},
         },
       },
@@ -1271,7 +1275,6 @@ describe("opening a new conversation", () => {
     useWorkbench.getState().newSession();
 
     expect(useWorkbench.getState().draft?.agentId).toBe("claude");
-    expect(useWorkbench.getState().draft?.capability).toBe("coding");
   });
 
   it("leaves no second 新会话 tab behind once it is a real conversation", async () => {
@@ -1375,7 +1378,7 @@ describe("switching a runtime axis mid-conversation", () => {
   });
 });
 
-describe("machine-global tag routing", () => {
+describe("machine-global model selection", () => {
   const claude = {
     id: "claude",
     label: "Claude Code",
@@ -1411,8 +1414,6 @@ describe("machine-global tag routing", () => {
   } as AgentInfo;
 
   const preferences: AgentSelectionPreferences = {
-    capabilities: { planning: [], coding: [], multimodal: [] },
-    selectedCapability: "planning" as const,
     selectedTags: ["Pro"],
     modelProfiles: [
       { agentId: "claude", modelId: "sonnet", tags: ["Pro"], cost: "high" },
@@ -1420,7 +1421,7 @@ describe("machine-global tag routing", () => {
       {
         agentId: "codex",
         modelId: "gpt-5.6-sol",
-        tags: ["Pro", "Flush", "图片理解", "视频理解"],
+        tags: ["Pro", "图片理解", "视频理解"],
         cost: "high",
       },
     ],
@@ -1454,11 +1455,22 @@ describe("machine-global tag routing", () => {
     });
   });
 
-  it("switches tags and resolves an exact Agent + model without rewriting global costs", async () => {
+  it("changes filter tags without silently replacing the draft model", async () => {
     const calls: Array<{ type: string; payload?: unknown }> = [];
     const client = {
       call: async (request: { type: string; payload?: unknown }) => {
         calls.push(request);
+        if (request.type === "settings.setAgentPreferences") {
+          return {
+            type: "settings",
+            data: {
+              providers: [],
+              lanEnabled: false,
+              agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
+                .preferences,
+            },
+          };
+        }
         return undefined;
       },
     } as unknown as Client;
@@ -1469,17 +1481,17 @@ describe("machine-global tag routing", () => {
 
     expect(useWorkbench.getState().draft).toMatchObject({
       tags: ["Flush"],
-      agentId: "codex",
-      modelId: "gpt-5.6-sol",
+      agentId: "claude",
+      modelId: "opus",
     });
-    expect(calls).toEqual([]);
+    expect(calls.map((request) => request.type)).toEqual(["settings.setAgentPreferences"]);
     expect(useWorkbench.getState().settings?.agentPreferences?.modelProfiles).toEqual(
       preferences.modelProfiles,
     );
     expect(localStorage.getItem("genehub.runtime.by-workspace")).toBeNull();
   });
 
-  it("re-resolves an open draft when live costs change but sends only tags to the daemon", async () => {
+  it("does not re-resolve an open draft when live costs change", async () => {
     const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
       call: async (request: { type: string; payload?: Record<string, unknown> }) => {
@@ -1494,21 +1506,25 @@ describe("machine-global tag routing", () => {
             },
           };
         }
-        if (request.type === "session.createRouted") {
+        if (request.type === "session.create") {
           return {
             type: "session",
             data: {
               ...SESSION,
               id: "s-ranked",
-              agentId: "codex",
-              modelId: "gpt-5.6-sol",
+              agentId: "claude",
+              modelId: "opus",
             },
           };
         }
         return undefined;
       },
       subscribe: async () => ({
-        snapshot: { seq: 0, items: [], summary: { ...SESSION, id: "s-ranked", agentId: "codex" } },
+        snapshot: {
+          seq: 0,
+          items: [],
+          summary: { ...SESSION, id: "s-ranked", agentId: "claude", modelId: "opus" },
+        },
         replayed: [],
         reset: false,
       }),
@@ -1533,26 +1549,39 @@ describe("machine-global tag routing", () => {
 
     expect(useWorkbench.getState().draft).toMatchObject({
       tags: ["Pro"],
-      agentId: "codex",
-      modelId: "gpt-5.6-sol",
+      agentId: "claude",
+      modelId: "opus",
     });
 
-    await useWorkbench.getState().send("follow the new first choice");
-    expect(sent.find((request) => request.type === "session.createRouted")?.payload).toEqual({
+    await useWorkbench.getState().send("keep the model I picked");
+    expect(sent.find((request) => request.type === "session.create")?.payload).toEqual({
       workspaceId: "w1",
-      tags: ["Pro"],
-      mediaTags: [],
+      agentId: "claude",
+      modelId: "opus",
+      modeId: null,
+      runtimeValues: {},
       title: null,
       cwd: null,
     });
   });
 
-  it("adds the image tag at creation and leaves the final route to the daemon", async () => {
+  it("creates the chosen model, then migrates for an unsupported image", async () => {
     const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
       call: async (request: { type: string; payload?: Record<string, unknown> }) => {
         sent.push(request);
-        if (request.type === "session.createRouted") {
+        if (request.type === "session.create") {
+          return {
+            type: "session",
+            data: {
+              ...SESSION,
+              id: "s-media",
+              agentId: "claude",
+              modelId: "opus",
+            },
+          };
+        }
+        if (request.type === "session.route") {
           return {
             type: "session",
             data: {
@@ -1560,16 +1589,19 @@ describe("machine-global tag routing", () => {
               id: "s-media",
               agentId: "codex",
               modelId: "gpt-5.6-sol",
+              routingTags: ["Pro"],
+              mediaTags: ["图片理解"],
             },
           };
         }
         return undefined;
       },
+      identity: { machineId: "machine-1", features: ["agent-tag-routing.v1"] },
       subscribe: async () => ({
         snapshot: {
           seq: 0,
           items: [],
-          summary: { ...SESSION, id: "s-media", agentId: "codex", modelId: "gpt-5.6-sol" },
+          summary: { ...SESSION, id: "s-media", agentId: "claude", modelId: "opus" },
         },
         replayed: [],
         reset: false,
@@ -1590,31 +1622,28 @@ describe("machine-global tag routing", () => {
       { name: "screen.png", mime: "image/png", dataBase64: "AAA" },
     ]);
 
-    expect(sent.find((request) => request.type === "session.createRouted")?.payload).toEqual({
+    expect(sent.find((request) => request.type === "session.create")?.payload).toEqual({
       workspaceId: "w1",
-      tags: ["Pro"],
-      mediaTags: ["图片理解"],
+      agentId: "claude",
+      modelId: "opus",
+      modeId: null,
+      runtimeValues: {},
       title: null,
       cwd: null,
     });
+    expect(sent.find((request) => request.type === "session.route")?.payload).toEqual({
+      sessionId: "s-media",
+      tags: ["Pro"],
+      mediaTags: ["图片理解"],
+    });
   });
 
-  it("switches an existing conversation in place when its tags change", async () => {
+  it("keeps an existing conversation on its model when only filters change", async () => {
     const calls: Array<{ type: string; payload?: unknown }> = [];
     const client = {
       call: async (request: { type: string; payload?: unknown }) => {
         calls.push(request);
-        return request.type === "session.route"
-          ? {
-              type: "session",
-              data: {
-                ...SESSION,
-                agentId: "codex",
-                modelId: "gpt-5.6-sol",
-                routingTags: ["Flush"],
-              },
-            }
-          : undefined;
+        return undefined;
       },
     } as unknown as Client;
     useWorkbench.setState({
@@ -1629,13 +1658,78 @@ describe("machine-global tag routing", () => {
 
     expect(useWorkbench.getState().activeSessionId).toBe("s1");
     expect(useWorkbench.getState().draft).toBeNull();
-    expect(calls).toContainEqual({
-      type: "session.route",
-      payload: { sessionId: "s1", tags: ["Flush"], mediaTags: [] },
-    });
+    expect(calls.map((request) => request.type)).toEqual(["settings.setAgentPreferences"]);
+    expect(useWorkbench.getState().sessions[0]).toMatchObject({ agentId: "claude" });
   });
 
-  it("adopts a pre-tag Workbench session before its next message", async () => {
+  it("switches the exact Agent and model in place when the user chooses one", async () => {
+    const calls: Array<{ type: string; payload?: unknown }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request);
+        if (request.type === "session.switchAgent") {
+          return {
+            type: "session",
+            data: {
+              ...SESSION,
+              agentId: "codex",
+              modelId: "gpt-5.6-sol",
+            },
+          };
+        }
+        if (request.type === "settings.setAgentPreferences") {
+          return {
+            type: "settings",
+            data: {
+              providers: [],
+              lanEnabled: false,
+              agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
+                .preferences,
+            },
+          };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      sessions: [{ ...SESSION, agentId: "claude", modelId: "opus" }],
+      activeSessionId: "s1",
+      activeWorkspaceId: "w1",
+      draft: null,
+    });
+
+    await useWorkbench.getState().setAgentTarget(
+      { agentId: "codex", modelId: "gpt-5.6-sol", effortId: "high", runtimeValues: {} },
+      ["Pro"],
+    );
+
+    expect(useWorkbench.getState().activeSessionId).toBe("s1");
+    expect(useWorkbench.getState().draft).toBeNull();
+    expect(useWorkbench.getState().sessions[0]).toMatchObject({
+      id: "s1",
+      agentId: "codex",
+      modelId: "gpt-5.6-sol",
+    });
+    expect(calls[0]).toEqual({
+      type: "session.switchAgent",
+      payload: {
+        sessionId: "s1",
+        target: {
+          agentId: "codex",
+          modelId: "gpt-5.6-sol",
+          effortId: "high",
+          runtimeValues: {},
+        },
+      },
+    });
+    expect(calls.map((request) => request.type)).toEqual([
+      "session.switchAgent",
+      "settings.setAgentPreferences",
+    ]);
+  });
+
+  it("migrates an existing non-image conversation before its next image", async () => {
     const calls: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
       identity: { features: ["agent-tag-routing.v1"] },

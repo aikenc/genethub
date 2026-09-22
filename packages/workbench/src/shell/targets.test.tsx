@@ -31,12 +31,8 @@ const REMOTE =
   "wss://relay.example.com/fabric/v2?ticket=client%3Aabc&route=abc";
 
 const preferencesFor = (agentId: string): AgentSelectionPreferences => ({
-  selectedCapability: "planning",
-  capabilities: {
-    planning: [{ agentId }],
-    coding: [{ agentId }],
-    multimodal: [{ agentId }],
-  },
+  selectedTags: ["Flush"],
+  modelProfiles: [{ agentId, tags: ["Flush"], cost: "medium" }],
   runtimes: {},
 });
 
@@ -564,7 +560,7 @@ describe("switching from the sidebar", () => {
                   blobAppendix: [],
                 },
               };
-            case "session.forkImportRouted":
+            case "session.forkImport":
               return { type: "session", data: forkedSession };
             default:
               return null;
@@ -622,11 +618,14 @@ describe("switching from the sidebar", () => {
       payload: { sessionId: "source-session", turnId: "turn-1" },
     }));
     await waitFor(() => expect(remoteCalls).toContainEqual({
-      type: "session.forkImportRouted",
+      type: "session.forkImport",
       payload: {
         transfer: expect.objectContaining({ sourceSessionId: "source-session" }),
-        workspaceId: "remote-workspace",
-        tags: ["Flush"],
+        target: {
+          agentId: "claude",
+          workspaceId: "remote-workspace",
+          runtimeValues: {},
+        },
       },
     }));
     // The fork lands without yanking the user onto the other machine: the
@@ -645,7 +644,7 @@ describe("switching from the sidebar", () => {
     expect(openTarget).toHaveBeenCalledWith("m_far");
   });
 
-  it("sends tags so a non-native Agent can Fork back through a fresh route", async () => {
+  it("sends an exact target so a non-native Agent can Fork back through a fresh route", async () => {
     const sourceSession: SessionSummary = {
       id: "cursor-session",
       workspaceId: "source-workspace",
@@ -741,7 +740,7 @@ describe("switching from the sidebar", () => {
             };
           case "session.list":
             return { type: "sessions", data: [sourceSession] };
-          case "session.forkRouted":
+          case "session.fork":
             return { type: "session", data: forkedSession };
           default:
             return null;
@@ -788,12 +787,15 @@ describe("switching from the sidebar", () => {
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
 
     await waitFor(() => expect(calls).toContainEqual({
-      type: "session.forkRouted",
+      type: "session.fork",
       payload: {
         sessionId: "cursor-session",
         turnId: "turn-1",
-        workspaceId: "source-workspace",
-        tags: ["Flush"],
+        target: {
+          agentId: "cursor",
+          workspaceId: "source-workspace",
+          runtimeValues: {},
+        },
       },
     }));
     await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("cursor-fork"));

@@ -22,12 +22,6 @@ const COMMANDS: CommandInfo[] = [
 ];
 
 const PREFERENCES: AgentSelectionPreferences = {
-  capabilities: {
-    planning: [{ agentId: "claude" }],
-    coding: [{ agentId: "claude" }],
-    multimodal: [],
-  },
-  selectedCapability: "planning",
   selectedTags: ["Pro"],
   modelProfiles: [{ agentId: "claude", tags: ["Pro"], cost: "medium" }],
   runtimes: {},
@@ -40,7 +34,6 @@ function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
       phase="idle"
       agents={[]}
       preferences={PREFERENCES}
-      capability="planning"
       tags={["Pro"]}
       agentId="claude"
       modelId={null}
@@ -48,9 +41,7 @@ function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
       commands={COMMANDS}
       onSend={onSend}
       onInterrupt={vi.fn()}
-      onPickCapability={vi.fn()}
       onSavePreferences={vi.fn()}
-      onPickMode={vi.fn()}
       {...overrides}
     />,
   );
@@ -138,10 +129,10 @@ describe("the slash command menu", () => {
     await userEvent.type(input, "/");
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /路由：/ }));
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /模型：/ }));
+    expect(screen.queryByRole("listbox", { name: "命令" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "关闭设置" }));
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("listbox", { name: "命令" })).not.toBeInTheDocument();
 
     await userEvent.click(input);
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();

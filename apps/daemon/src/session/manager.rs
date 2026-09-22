@@ -503,6 +503,7 @@ impl SessionManager {
         cwd: PathBuf,
         agent_id: &str,
         model_id: Option<String>,
+        effort_id: Option<String>,
         mode_id: Option<String>,
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
@@ -519,7 +520,7 @@ impl SessionManager {
             message_preview: None,
             latest_reply: None,
             drafts: vec![],
-            effort_id: None,
+            effort_id,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -601,6 +602,7 @@ impl SessionManager {
                 cwd,
                 agent_id,
                 model_id,
+                effort_id.clone(),
                 mode_id,
                 runtime_values,
                 title,
@@ -609,7 +611,6 @@ impl SessionManager {
         let live = self.live(&created.id).await?;
         let mut meta = live.meta.lock().await;
         let mut next = meta.clone();
-        next.effort_id = effort_id;
         next.tag_routing = true;
         next.routing_tags = routing_tags;
         next.media_tags = media_tags;
@@ -926,13 +927,15 @@ impl SessionManager {
             .title
             .as_deref()
             .and_then(|title| title_from(&format!("{title} · 分支")));
-        let tag_routing = routing.is_some() || source_meta.tag_routing;
-        let (routing_tags, media_tags) = routing.unwrap_or_else(|| {
-            (
+        let (tag_routing, routing_tags, media_tags) = match routing {
+            Some((routing_tags, media_tags)) => (true, routing_tags, media_tags),
+            None if explicit_target => (false, Vec::new(), source_meta.media_tags.clone()),
+            None => (
+                source_meta.tag_routing,
                 source_meta.routing_tags.clone(),
                 source_meta.media_tags.clone(),
-            )
-        });
+            ),
+        };
         let meta = SessionMeta {
             inbox: Default::default(),
             execution_retired: false,
@@ -3385,13 +3388,10 @@ impl SessionManager {
         {
             bail!("this imported conversation is read-only and cannot switch Agent");
         }
-        let tag_routing = routing.is_some() || source_meta.tag_routing;
-        let (routing_tags, media_tags) = routing.unwrap_or_else(|| {
-            (
-                source_meta.routing_tags.clone(),
-                source_meta.media_tags.clone(),
-            )
-        });
+        let (tag_routing, routing_tags, media_tags) = match routing {
+            Some((routing_tags, media_tags)) => (true, routing_tags, media_tags),
+            None => (false, Vec::new(), source_meta.media_tags.clone()),
+        };
         let same_runtime = source_meta.agent_id == target.agent_id
             && source_meta.model_id == target.model_id
             && source_meta.mode_id == target.mode_id
@@ -7615,6 +7615,7 @@ mod tests {
                 "source",
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -7761,6 +7762,7 @@ mod tests {
                 "w1",
                 dir.path().to_path_buf(),
                 "source",
+                None,
                 None,
                 None,
                 Default::default(),
@@ -7927,6 +7929,7 @@ mod tests {
                 "source",
                 None,
                 None,
+                None,
                 Default::default(),
                 Some("Portable".into()),
             )
@@ -8060,6 +8063,7 @@ mod tests {
                 "source",
                 Some("model".into()),
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8110,6 +8114,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 "source",
                 Some("model".into()),
+                None,
                 None,
                 Default::default(),
                 None,
@@ -8171,6 +8176,7 @@ mod tests {
                 "source",
                 Some("model".into()),
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8229,6 +8235,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 "cursor",
                 Some("model".into()),
+                None,
                 None,
                 Default::default(),
                 None,
@@ -8290,6 +8297,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 "source",
                 Some("model".into()),
+                None,
                 None,
                 Default::default(),
                 None,
@@ -8353,6 +8361,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 "cursor",
                 Some("model".into()),
+                None,
                 None,
                 Default::default(),
                 None,
