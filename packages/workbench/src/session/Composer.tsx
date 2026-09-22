@@ -35,6 +35,12 @@ import {
   VIDEO_ATTACHMENT_MIMES,
 } from "./attachments";
 import { resolveArtifactRef } from "../preview/resolveArtifactRef";
+import {
+  mediaTagsForMimes,
+  normalizeTags,
+  resolveTagRoute,
+  tagMediaInputSupport,
+} from "./capability-preferences";
 import { readLocalDraft, saveLocalDraft } from "./localConversation";
 import { ComposerControls } from "./ComposerControls";
 import { useSessionArtifact } from "./useSessionArtifact";
@@ -142,14 +148,14 @@ export function Composer({
   agents,
   preferences,
   capability,
+  tags,
+  mediaTags,
   agentId,
   modelId,
   modeId,
   effortId,
   runtimeValues,
   agentLocked,
-  attachmentsSupported,
-  inputModalities,
   commands,
   restoreDraft,
   insertDraft,
@@ -163,6 +169,7 @@ export function Composer({
   onUpdateDraft,
   onInterrupt,
   onPickCapability,
+  onPickTags,
   onSavePreferences,
   onPickMode,
   onPickEffort,
@@ -186,6 +193,8 @@ export function Composer({
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
   capability: AgentCapability;
+  tags?: string[];
+  mediaTags?: string[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
@@ -222,6 +231,7 @@ export function Composer({
   onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
   onPickCapability(capability: AgentCapability): void;
+  onPickTags?(tags: string[]): void;
   onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onPickMode(id: string): void;
   onPickEffort?(id: string): void;
@@ -266,11 +276,23 @@ export function Composer({
   const activeDraftFile = useRef<string | null>(null);
   const artifact = useSessionArtifact();
   const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
-  const imageAllowed = Boolean(attachmentsSupported && (inputModalities?.includes("image") ?? true));
-  const videoAllowed = Boolean(attachmentsSupported && inputModalities?.includes("video"));
-  const fileActionLabel = !attachmentsSupported
-    ? "添加文件（当前 Agent 不支持附件）"
-    : imageAllowed && videoAllowed
+  const effectiveTags = normalizeTags(tags?.length ? tags : preferences.selectedTags ?? []);
+  const automaticMediaTags = normalizeTags([
+    ...(mediaTags ?? []),
+    ...mediaTagsForMimes([
+      ...(forwardDraft?.attachments ?? []).map((attachment) => attachment.mime),
+      ...attachments.map((attachment) => attachment.mime),
+      ...videoFiles.map((file) => file.type),
+    ]),
+  ]);
+  const routeMedia = tagMediaInputSupport(
+    preferences,
+    [...effectiveTags, ...automaticMediaTags],
+    agents,
+  );
+  const imageAllowed = routeMedia.image;
+  const videoAllowed = routeMedia.video;
+  const fileActionLabel = imageAllowed && videoAllowed
       ? "添加图片或视频"
       : imageAllowed
         ? "添加文件（当前仅支持图片）"
@@ -490,12 +512,22 @@ export function Composer({
   }, [speechInput.result]);
 
   const addFiles = async (files: File[]) => {
-    if (!attachmentsSupported) {
-      setPasteNotice("当前 Agent 还不支持附件");
+    if (!imageAllowed && !videoAllowed) {
+      setPasteNotice("没有同时匹配当前标签与媒体输入的 Agent 和模型");
       return;
     }
     try {
       const { images, videos } = classifyAttachmentFiles(files, imageAllowed, videoAllowed);
+      const requestedMediaTags = mediaTagsForMimes(files.map((file) => file.type));
+      if (
+        !resolveTagRoute(
+          preferences,
+          [...effectiveTags, ...automaticMediaTags, ...requestedMediaTags],
+          agents,
+        )
+      ) {
+        throw new Error("没有一个 Agent 与模型能同时处理所选标签和这些媒体");
+      }
       const added = await Promise.all(images.map(fileToAttachment));
       validateInlineAttachmentBudget([...attachments, ...added]);
       setAttachments((current) => [...current, ...added]);
@@ -989,6 +1021,8 @@ export function Composer({
               agents={agents}
               preferences={preferences}
               capability={capability}
+              tags={effectiveTags}
+              mediaTags={automaticMediaTags}
               agentId={agentId}
               modelId={modelId}
               modeId={modeId}
@@ -998,6 +1032,7 @@ export function Composer({
               agentLocked={agentLocked}
               onOpenChange={setSettingsOpen}
               onPickCapability={onPickCapability}
+              onPickTags={onPickTags}
               onSavePreferences={onSavePreferences}
               onPickMode={onPickMode}
               onPickEffort={onPickEffort ?? (() => {})}

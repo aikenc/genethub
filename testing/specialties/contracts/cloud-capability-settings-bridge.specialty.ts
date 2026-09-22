@@ -7,14 +7,15 @@ import { BlockedError, defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.contracts.cloud-capability-settings-bridge",
-  title: "Cloud bridge permits machine-global capability preference writes",
+  title: "Cloud bridge permits machine-global Agent tag and cost writes",
   oracle:
-    "The app transport allowlist carries settings.setAgentPreferences and the owning Cloud server still typechecks",
+    "Machine diagnostics retain global Agent settings and every tag-routed Session operation, and the owning Cloud server still typechecks",
   catches: [
-    "remote Workbench can read capability preferences but cannot save them",
+    "remote Workbench can read Agent tag/cost settings but cannot save them",
+    "tag-routed Session failures are silently discarded from feedback diagnostics",
     "the Cloud app API bridge drifts from the daemon request surface",
   ],
-  tags: ["contract", "cloud-server", "capability-routing"],
+  tags: ["contract", "cloud-server", "tag-routing"],
   llm: { default: "none" },
   requiredRepos: ["cloud"],
   expectedDurationMs: 30_000,
@@ -30,10 +31,19 @@ defineSpecialty({
   const safeOperations = bridge.match(
     /const SAFE_MACHINE_OPERATIONS = new Set\(\[([\s\S]*?)\]\);/,
   )?.[1];
-  t.assertions.assert(
-    safeOperations?.includes('"settings.setAgentPreferences"') === true,
-    "settings.setAgentPreferences is missing from SAFE_MACHINE_OPERATIONS",
-  );
+  for (const operation of [
+    "settings.setAgentPreferences",
+    "session.createRouted",
+    "session.forkRouted",
+    "session.forkImportRouted",
+    "session.route",
+    "session.switchAgent",
+  ]) {
+    t.assertions.assert(
+      safeOperations?.includes(`"${operation}"`) === true,
+      `${operation} is missing from SAFE_MACHINE_OPERATIONS`,
+    );
+  }
   try {
     await promisify(execFile)(
       process.execPath,

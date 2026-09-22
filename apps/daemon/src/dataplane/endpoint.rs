@@ -1434,9 +1434,12 @@ fn request_workspace(request: &Request) -> Option<&str> {
             ..
         }
         | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
+        Request::SessionForkRouted { workspace_id, .. }
+        | Request::SessionForkImportRouted { workspace_id, .. } => Some(workspace_id),
         Request::ProcessWorkspaceList { workspace_id }
         | Request::ProcessServiceStop { workspace_id, .. }
         | Request::SessionCreate { workspace_id, .. }
+        | Request::SessionCreateRouted { workspace_id, .. }
         | Request::SessionImportList { workspace_id, .. }
         | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }
@@ -1646,13 +1649,30 @@ mod tests {
     }
 
     #[test]
-    fn directed_forks_are_scoped_to_the_destination_workspace() {
+    fn routed_session_operations_are_scoped_to_the_destination_workspace() {
+        let transfer = genehub_proto::ForkTransfer {
+            source_session_id: "source".into(),
+            source_turn_id: "turn".into(),
+            source_agent_id: "codex".into(),
+            source_round_id: None,
+            title: None,
+            items: Vec::new(),
+            coverage: genehub_proto::HistoryCoverage {
+                source_item_count: Some(0),
+                retained_item_count: 0,
+                omitted_item_count: 0,
+                retrieval: genehub_proto::RetrievalCapability::Genehub,
+                reason: None,
+            },
+            blob_appendix: vec![],
+        };
         let target = genehub_proto::ForkTarget {
             agent_id: "codex".into(),
             workspace_id: Some("target-workspace".into()),
             model_id: None,
             mode_id: None,
             effort_id: None,
+            runtime_values: Default::default(),
         };
         assert_eq!(
             request_workspace(&Request::SessionFork {
@@ -1664,25 +1684,37 @@ mod tests {
         );
         assert_eq!(
             request_workspace(&Request::SessionForkImport {
-                transfer: genehub_proto::ForkTransfer {
-                    source_session_id: "source".into(),
-                    source_turn_id: "turn".into(),
-                    source_agent_id: "codex".into(),
-                    source_round_id: None,
-                    title: None,
-                    items: Vec::new(),
-                    coverage: genehub_proto::HistoryCoverage {
-                        source_item_count: Some(0),
-                        retained_item_count: 0,
-                        omitted_item_count: 0,
-                        retrieval: genehub_proto::RetrievalCapability::Genehub,
-                        reason: None,
-                    },
-                    blob_appendix: vec![],
-                },
+                transfer: transfer.clone(),
                 target,
             }),
             Some("target-workspace")
+        );
+        assert_eq!(
+            request_workspace(&Request::SessionCreateRouted {
+                workspace_id: "created-workspace".into(),
+                tags: vec!["Flush".into()],
+                media_tags: Vec::new(),
+                title: None,
+                cwd: None,
+            }),
+            Some("created-workspace")
+        );
+        assert_eq!(
+            request_workspace(&Request::SessionForkRouted {
+                session_id: "source".into(),
+                turn_id: "turn".into(),
+                workspace_id: "routed-workspace".into(),
+                tags: vec!["Max".into()],
+            }),
+            Some("routed-workspace")
+        );
+        assert_eq!(
+            request_workspace(&Request::SessionForkImportRouted {
+                transfer,
+                workspace_id: "remote-workspace".into(),
+                tags: vec!["Flush".into()],
+            }),
+            Some("remote-workspace")
         );
     }
 }

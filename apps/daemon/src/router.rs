@@ -265,7 +265,9 @@ async fn authorize_session_request(
         && matches!(
             request,
             Request::SessionCreate { .. }
+                | Request::SessionCreateRouted { .. }
                 | Request::SessionForkImport { .. }
+                | Request::SessionForkImportRouted { .. }
                 | Request::SessionImport { .. }
         )
     {
@@ -288,6 +290,8 @@ async fn authorize_session_request(
         | Request::SessionDraftsReplace { session_id, .. }
         | Request::SessionDelete { session_id }
         | Request::SessionSetModel { session_id, .. }
+        | Request::SessionSwitchAgent { session_id, .. }
+        | Request::SessionRoute { session_id, .. }
         | Request::SessionSetMode { session_id, .. }
         | Request::SessionSetEffort { session_id, .. }
         | Request::SessionSetRuntimeAxis { session_id, .. }
@@ -384,9 +388,7 @@ async fn authorize_project_workflow_mutation(
                     .await
                     .unwrap_or(false)
             {
-                return Err(
-                    "这个项目尚未接管；请先完成 PM 接管后再修改 Workflow 配置".into(),
-                );
+                return Err("这个项目尚未接管；请先完成 PM 接管后再修改 Workflow 配置".into());
             }
             Ok(())
         }
@@ -846,6 +848,8 @@ async fn dispatch(
                 "workflow.control.v1".to_string(),
                 "agentSpace.builderPlans.v1".to_string(),
                 "session.input.v1".to_string(),
+                "session.switch-agent.v1".to_string(),
+                "agent-tag-routing.v1".to_string(),
                 genehub_proto::SPEECH_FEATURE_TRANSCRIBE.to_string(),
                 genehub_proto::SPEECH_FEATURE_PARTIAL.to_string(),
                 genehub_proto::SPEECH_FEATURE_CONTEXT_PREVIEW.to_string(),
@@ -911,13 +915,11 @@ async fn dispatch(
                     return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
                 }
             };
-            let package_id = match crate::workflow::resolve_package_id(
-                &workspace.root,
-                package_id.as_deref(),
-            ) {
-                Ok(id) => id,
-                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-            };
+            let package_id =
+                match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
+                    Ok(id) => id,
+                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                };
             let runtime = match crate::workflow::RuntimeStore::for_package(
                 &state.paths.root,
                 &workspace_id,
@@ -1174,13 +1176,11 @@ async fn dispatch(
                     return Handled::err(ErrorCode::Forbidden, format!("{error:#}"));
                 }
             };
-            let package_id = match crate::workflow::resolve_package_id(
-                &workspace.root,
-                package_id.as_deref(),
-            ) {
-                Ok(id) => id,
-                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-            };
+            let package_id =
+                match crate::workflow::resolve_package_id(&workspace.root, package_id.as_deref()) {
+                    Ok(id) => id,
+                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                };
             let runtime = match crate::workflow::RuntimeStore::for_package(
                 &state.paths.root,
                 &workspace_id,
@@ -1246,13 +1246,11 @@ async fn dispatch(
             };
             // Both selections are refused rather than defaulted when a
             // project runs several packages or a package several flows.
-            let package_id = match crate::workflow::resolve_package_id(
-                &project_root,
-                package_id.as_deref(),
-            ) {
-                Ok(id) => id,
-                Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
-            };
+            let package_id =
+                match crate::workflow::resolve_package_id(&project_root, package_id.as_deref()) {
+                    Ok(id) => id,
+                    Err(error) => return Handled::err(ErrorCode::BadRequest, format!("{error:#}")),
+                };
             let workflow_id = match crate::workflow::resolve_flow_id(
                 &project_root,
                 &package_id,
@@ -1535,6 +1533,75 @@ async fn dispatch(
             }
         }
 
+        Request::SessionCreateRouted {
+            workspace_id,
+            tags,
+            media_tags,
+            title,
+            cwd,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let start_in = match cwd {
+                Some(cwd) => {
+                    let candidate = std::path::Path::new(&cwd);
+                    match workspace
+                        .folders
+                        .iter()
+                        .find_map(|folder| {
+                            crate::session::store::ensure_within(&folder.root, candidate).ok()
+                        })
+                        .or_else(|| {
+                            crate::session::store::ensure_within(&workspace.root, candidate).ok()
+                        }) {
+                        Some(resolved) => resolved,
+                        None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
+                    }
+                }
+                None => workspace.root,
+            };
+            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
+                Ok(tags) => tags,
+                Err(error) => return failed(error),
+            };
+            let media_tags = match crate::agent_routing::validate_media_tags(media_tags) {
+                Ok(tags) => tags,
+                Err(error) => return failed(error),
+            };
+            let required = crate::agent_routing::normalize_tags(
+                routing_tags.iter().chain(media_tags.iter()).cloned(),
+            );
+            let (route, _) =
+                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                    Ok(route) => route,
+                    Err(error) => return failed(error),
+                };
+            match state
+                .sessions
+                .create_routed(
+                    &workspace_id,
+                    start_in,
+                    &route.agent_id,
+                    route.model_id,
+                    route.effort_id,
+                    route.mode_id,
+                    route.runtime_values,
+                    title,
+                    routing_tags,
+                    media_tags,
+                )
+                .await
+            {
+                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                },
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionList {
             workspace_id,
             include_archived,
@@ -1755,6 +1822,16 @@ async fn dispatch(
                     "taskRunId requires a stable messageId",
                 );
             }
+            let media_tags = crate::agent_routing::media_tags_for_mimes(
+                attachments
+                    .iter()
+                    .map(|attachment| attachment.mime.as_str()),
+            );
+            if let Err(error) =
+                crate::agent_routing::route_session(state, &session_id, None, media_tags).await
+            {
+                return failed(error);
+            }
             let providers = state.providers().await;
             match state
                 .sessions
@@ -1872,6 +1949,82 @@ async fn dispatch(
             }
         }
 
+        Request::SessionForkRouted {
+            session_id,
+            turn_id,
+            workspace_id,
+            tags,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let source = match state.sessions.summary(&session_id).await {
+                Ok(source) => source,
+                Err(error) => return failed(error),
+            };
+            let transfer = match state.sessions.fork_export(&session_id, &turn_id).await {
+                Ok(transfer) => transfer,
+                Err(error) => return failed(error),
+            };
+            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
+                Ok(tags) => tags,
+                Err(error) => return failed(error),
+            };
+            let media_tags = crate::agent_routing::media_tags_for_timeline(&transfer.items);
+            let required = crate::agent_routing::normalize_tags(
+                routing_tags.iter().chain(media_tags.iter()).cloned(),
+            );
+            let (route, providers) =
+                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                    Ok(route) => route,
+                    Err(error) => return failed(error),
+                };
+            let same_workspace = source.workspace_id == workspace_id;
+            let target = genehub_proto::ForkTarget {
+                agent_id: route.agent_id,
+                workspace_id: (!same_workspace).then_some(workspace_id.clone()),
+                model_id: route.model_id,
+                mode_id: route.mode_id,
+                effort_id: route.effort_id,
+                runtime_values: route.runtime_values,
+            };
+            let result = if same_workspace {
+                state
+                    .sessions
+                    .fork_routed(
+                        &session_id,
+                        &turn_id,
+                        target,
+                        &providers,
+                        routing_tags,
+                        media_tags,
+                    )
+                    .await
+            } else {
+                state
+                    .sessions
+                    .fork_import_routed(
+                        &workspace_id,
+                        workspace.root,
+                        transfer,
+                        target,
+                        &providers,
+                        true,
+                        routing_tags,
+                        media_tags,
+                    )
+                    .await
+            };
+            match result {
+                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                },
+                Err(error) => failed(error),
+            }
+        }
+
         Request::SessionForkExport {
             session_id,
             turn_id,
@@ -1898,6 +2051,58 @@ async fn dispatch(
                     target,
                     &providers,
                     false,
+                )
+                .await
+            {
+                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
+                    Ok(()) => Handled::ok(Reply::Session(summary)),
+                    Err(error) => failed(error),
+                },
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionForkImportRouted {
+            transfer,
+            workspace_id,
+            tags,
+        } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
+                Ok(tags) => tags,
+                Err(error) => return failed(error),
+            };
+            let media_tags = crate::agent_routing::media_tags_for_timeline(&transfer.items);
+            let required = crate::agent_routing::normalize_tags(
+                routing_tags.iter().chain(media_tags.iter()).cloned(),
+            );
+            let (route, providers) =
+                match crate::agent_routing::resolve_live_route(state, &required, false).await {
+                    Ok(route) => route,
+                    Err(error) => return failed(error),
+                };
+            let target = genehub_proto::ForkTarget {
+                agent_id: route.agent_id,
+                workspace_id: Some(workspace_id.clone()),
+                model_id: route.model_id,
+                mode_id: route.mode_id,
+                effort_id: route.effort_id,
+                runtime_values: route.runtime_values,
+            };
+            match state
+                .sessions
+                .fork_import_routed(
+                    &workspace_id,
+                    workspace.root,
+                    transfer,
+                    target,
+                    &providers,
+                    false,
+                    routing_tags,
+                    media_tags,
                 )
                 .await
             {
@@ -2040,6 +2245,39 @@ async fn dispatch(
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionSwitchAgent { session_id, target } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .switch_agent(&session_id, target, &providers)
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionRoute {
+            session_id,
+            tags,
+            media_tags,
+        } => {
+            let tags = match crate::agent_routing::validate_selected_tags(tags) {
+                Ok(tags) => tags,
+                Err(error) => return failed(error),
+            };
+            let media_tags = match crate::agent_routing::validate_media_tags(media_tags) {
+                Ok(tags) => tags,
+                Err(error) => return failed(error),
+            };
+            match crate::agent_routing::route_session(state, &session_id, Some(tags), media_tags)
+                .await
+            {
+                Ok(summary) => Handled::ok(Reply::Session(summary)),
                 Err(error) => failed(error),
             }
         }
@@ -3277,7 +3515,9 @@ async fn dispatch(
 fn diagnostic_operation(request: &Request) -> Option<&'static str> {
     match request {
         Request::AgentRefresh => Some("agent.refresh"),
-        Request::SessionCreate { .. } => Some("session.create"),
+        Request::SessionCreate { .. } | Request::SessionCreateRouted { .. } => {
+            Some("session.create")
+        }
         Request::WorkflowList { .. } => Some("workflow.list"),
         Request::WorkflowBuild { .. } => Some("workflow.build"),
         Request::WorkflowActivate { .. } => Some("workflow.activate"),
@@ -3296,16 +3536,18 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionArtifactFinish { .. } => Some("session.artifact.finish"),
         Request::SessionArtifactAbort { .. } => Some("session.artifact.abort"),
         Request::SessionFork { .. } => Some("session.fork"),
+        Request::SessionForkRouted { .. } => Some("session.forkRouted"),
         Request::SessionForkExport { .. } => Some("session.forkExport"),
         Request::SessionForkImport { .. } => Some("session.forkImport"),
+        Request::SessionForkImportRouted { .. } => Some("session.forkImportRouted"),
         Request::SessionImport { .. } => Some("session.import"),
         Request::SessionInterrupt { .. } => Some("session.interrupt"),
         Request::SessionDelete { .. } => Some("session.delete"),
+        Request::SessionSwitchAgent { .. } => Some("session.switchAgent"),
+        Request::SessionRoute { .. } => Some("session.route"),
         Request::SessionRespondPermission { .. } => Some("session.respondPermission"),
         Request::SettingsSetProvider { .. } => Some("settings.setProvider"),
-        Request::SettingsSetAgentPreferences { .. } => {
-            Some("settings.setAgentPreferences")
-        }
+        Request::SettingsSetAgentPreferences { .. } => Some("settings.setAgentPreferences"),
         Request::SettingsForgetProvider { .. } => Some("settings.forgetProvider"),
         Request::HubPair { .. } => Some("hub.pair"),
         Request::HubTrial { .. } => Some("hub.trial"),
@@ -3671,7 +3913,9 @@ mod tests {
             )
             .await
             .unwrap();
-        rebind_project_control_if_pm(&state, &session).await.unwrap();
+        rebind_project_control_if_pm(&state, &session)
+            .await
+            .unwrap();
 
         assert!(
             !state.project_control.has_binding(&workspace.id),

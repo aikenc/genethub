@@ -1,5 +1,5 @@
-import type { AgentCapability, AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
-import { Brain, ChevronLeft, Code2, ScanSearch, Settings2 } from "lucide-react";
+import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
+import { ChevronLeft, Settings2, Tags } from "lucide-react";
 import type { RefObject } from "react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -9,13 +9,11 @@ import {
   resolveModelPresentation,
 } from "../presentation/catalog/resolve";
 import {
-  CAPABILITIES,
-  resolveCapabilityRoute,
+  availableAgentTags,
+  normalizeTags,
+  resolveTagRoute,
 } from "./capability-preferences";
-import {
-  CompactRuntimeControls,
-  RuntimeSettings,
-} from "./RuntimeSettings";
+import { CompactRuntimeControls, RuntimeSettings } from "./RuntimeSettings";
 import type { RuntimeSelection } from "./runtime-selection";
 
 export function RuntimeSettingsPanel({
@@ -23,12 +21,12 @@ export function RuntimeSettingsPanel({
   selection,
   agents,
   preferences,
-  capability,
+  tags,
+  mediaTags = [],
   disabled,
-  agentLocked,
   returnFocusRef,
   onClose,
-  onPickCapability,
+  onPickTags,
   onPickMode,
   onPickEffort,
   onPickRuntimeAxis,
@@ -39,12 +37,12 @@ export function RuntimeSettingsPanel({
   selection: RuntimeSelection;
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
-  capability: AgentCapability;
+  tags: string[];
+  mediaTags?: string[];
   disabled?: boolean;
-  agentLocked?: boolean;
   returnFocusRef: RefObject<HTMLButtonElement>;
   onClose(): void;
-  onPickCapability(capability: AgentCapability): void;
+  onPickTags(tags: string[]): void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
   onPickRuntimeAxis(axisId: string, valueId: string): void;
@@ -54,6 +52,11 @@ export function RuntimeSettingsPanel({
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const [view, setView] = useState<"quick" | "preferences">("quick");
+  const selectableTags = availableAgentTags(preferences);
+  const selected = normalizeTags(tags);
+  const automatic = normalizeTags(mediaTags);
+  const required = normalizeTags([...selected, ...automatic]);
+  const route = resolveTagRoute(preferences, required, agents);
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
@@ -63,12 +66,7 @@ export function RuntimeSettingsPanel({
       else onClose();
     };
     document.addEventListener("keydown", dismiss);
-    const frame = window.requestAnimationFrame(() => {
-      const chosen = panel.current?.querySelector<HTMLElement>(
-        '[role="radio"][aria-checked="true"]:not(:disabled), [role="tab"][aria-selected="true"]',
-      );
-      (chosen ?? close.current)?.focus();
-    });
+    const frame = window.requestAnimationFrame(() => close.current?.focus());
     return () => {
       document.removeEventListener("keydown", dismiss);
       window.cancelAnimationFrame(frame);
@@ -91,7 +89,7 @@ export function RuntimeSettingsPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${id}-title`}
-        className="flex max-h-[min(82dvh,46rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
+        className="flex max-h-[min(84dvh,48rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
         onKeyDown={(event) => {
           if (event.key === "Tab") trapTab(event, panel.current);
         }}
@@ -100,27 +98,20 @@ export function RuntimeSettingsPanel({
           {view === "preferences" ? (
             <button
               type="button"
-              aria-label="返回能力选择"
+              aria-label="返回标签选择"
               className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg"
               onClick={() => setView("quick")}
             >
               <ChevronLeft size={17} />
             </button>
           ) : null}
-          <div className="min-w-0 flex-1">
-            <h2 id={`${id}-title`} className="text-sm font-medium text-fg">
-              {view === "quick" ? "能力与运行设置" : "能力首选 Agent"}
-            </h2>
-            <p className="text-[11px] text-faint">
-              {view === "quick"
-                ? "紧凑选择；这台机器会记住上一次设置"
-                : "每种能力最多 5 组，按顺序自动降级"}
-            </p>
-          </div>
+          <h2 id={`${id}-title`} className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
+            {view === "quick" ? "标签与运行设置" : "Agent 配置"}
+          </h2>
           <button
             ref={close}
             type="button"
-            aria-label="关闭能力设置"
+            aria-label="关闭设置"
             className="flex h-8 w-8 items-center justify-center rounded-full text-lg text-muted hover:bg-raised hover:text-fg"
             onClick={onClose}
           >
@@ -131,64 +122,67 @@ export function RuntimeSettingsPanel({
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
           {view === "quick" ? (
             <div className="space-y-3">
-              <div role="radiogroup" aria-label="选择能力" className="grid grid-cols-3 gap-1.5">
-                {CAPABILITIES.map((item) => {
-                  const route = resolveCapabilityRoute(preferences, item.id, agents);
-                  const selected = item.id === capability;
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="选择 Agent 标签">
+                {selectableTags.map((tag) => {
+                  const checked = selected.includes(tag) || automatic.includes(tag);
+                  const locked = automatic.includes(tag);
                   return (
                     <button
-                      key={item.id}
+                      key={tag}
                       type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      disabled={disabled || agentLocked || !route}
-                      onClick={() => onPickCapability(item.id)}
-                      className={`flex min-h-16 min-w-0 flex-col items-start justify-center rounded-xl border px-2.5 py-2 text-left disabled:cursor-not-allowed disabled:opacity-45 ${
-                        selected
-                          ? "border-accent bg-accent/10 text-fg"
+                      aria-pressed={checked}
+                      title={locked ? "由会话中的媒体自动添加" : undefined}
+                      disabled={
+                        disabled ||
+                        locked ||
+                        (checked && selected.length === 1) ||
+                        (!checked && required.length >= 4)
+                      }
+                      onClick={() =>
+                        onPickTags(
+                          checked
+                            ? selected.filter((candidate) => candidate !== tag)
+                            : [...selected, tag],
+                        )
+                      }
+                      className={`rounded-full border px-3 py-1.5 text-xs disabled:opacity-55 ${
+                        checked
+                          ? "border-accent/60 bg-accent/10 text-accent"
                           : "border-line text-muted hover:bg-raised hover:text-fg"
                       }`}
                     >
-                      <span className="flex items-center gap-1.5 text-xs font-medium">
-                        <CapabilityIcon capability={item.id} />
-                        <span className="truncate">{item.label}</span>
-                      </span>
-                      <span className="mt-1 block w-full truncate text-[10px] text-faint">
-                        {route ? routeLabel(route.agent, route.modelId) : "尚未配置可用首选项"}
-                      </span>
+                      {tag}{locked ? " · 自动" : ""}
                     </button>
                   );
                 })}
               </div>
 
-              {agentLocked ? (
-                <p className="text-[11px] text-faint">当前会话已有内容；运行参数仍可调整，切换能力请新建会话。</p>
-              ) : null}
-
               <div className="rounded-xl border border-line bg-raised/35 p-2.5">
+                <div className="mb-2 flex min-w-0 items-center gap-2 text-xs">
+                  <Tags size={14} className="shrink-0 text-accent" />
+                  <span className={`truncate ${route ? "text-fg" : "text-danger"}`}>
+                    {route ? routeLabel(route.agent, route.modelId) : "没有 Agent 与模型同时匹配全部标签"}
+                  </span>
+                </div>
                 <CompactRuntimeControls
                   selection={selection}
-                  disabled={disabled}
+                  disabled={disabled || !route}
                   onPickMode={onPickMode}
                   onPickEffort={onPickEffort}
                   onPickRuntimeAxis={onPickRuntimeAxis}
                 />
-                {!selection.current ? (
-                  <p className="text-xs text-danger">此能力没有可用的 Agent 与模型，请先编辑首选项。</p>
-                ) : null}
               </div>
 
-              <div className="flex items-center justify-between gap-3 border-t border-line pt-2">
-                <p className="text-[11px] text-faint">默认思考强度为中偏高（优先 high 档），权限为全开；选择保存在 daemon 的机器配置中。</p>
+              <div className="flex justify-end border-t border-line pt-2">
                 <button
                   type="button"
-                  className="flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-accent hover:bg-raised"
+                  className="flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs text-accent hover:bg-raised"
                   onClick={() => {
                     onRefreshAgents?.();
                     setView("preferences");
                   }}
                 >
-                  <Settings2 size={14} /> 编辑能力首选项
+                  <Settings2 size={14} /> Agent 配置
                 </button>
               </div>
             </div>
@@ -196,7 +190,6 @@ export function RuntimeSettingsPanel({
             <RuntimeSettings
               agents={agents}
               preferences={preferences}
-              initialCapability={capability}
               disabled={disabled}
               onSave={async (next) => {
                 await onSavePreferences(next);
@@ -211,12 +204,6 @@ export function RuntimeSettingsPanel({
   );
 }
 
-function CapabilityIcon({ capability }: { capability: AgentCapability }) {
-  if (capability === "planning") return <Brain size={15} aria-hidden />;
-  if (capability === "coding") return <Code2 size={15} aria-hidden />;
-  return <ScanSearch size={15} aria-hidden />;
-}
-
 function routeLabel(agent: AgentInfo, modelId: string | null): string {
   const agentLabel = resolveAgentPresentation(agent).label;
   if (!modelId) return `${agentLabel} · Agent 默认`;
@@ -225,7 +212,7 @@ function routeLabel(agent: AgentInfo, modelId: string | null): string {
     agentId: agent.id,
     modelId,
     modelLabel: model?.label,
-  }).shortLabel}`;
+  }).fullLabel}`;
 }
 
 function trapTab(event: React.KeyboardEvent, container: HTMLElement | null) {

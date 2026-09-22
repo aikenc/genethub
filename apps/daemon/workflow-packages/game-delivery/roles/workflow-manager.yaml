@@ -1,5 +1,5 @@
-schema: genehub.workflow.role.v2
+schema: genehub.workflow.role.v3
 id: workflow-manager
-capability: planning
+tags: [Pro]
 userInteraction: readOnly
 prompt: prompts/workflow-manager.md

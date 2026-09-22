@@ -28,6 +28,8 @@ const PREFERENCES: AgentSelectionPreferences = {
     multimodal: [],
   },
   selectedCapability: "planning",
+  selectedTags: ["Pro"],
+  modelProfiles: [{ agentId: "claude", tags: ["Pro"], cost: "medium" }],
   runtimes: {},
 };
 
@@ -39,6 +41,7 @@ function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
       agents={[]}
       preferences={PREFERENCES}
       capability="planning"
+      tags={["Pro"]}
       agentId="claude"
       modelId={null}
       modeId={null}
@@ -135,9 +138,9 @@ describe("the slash command menu", () => {
     await userEvent.type(input, "/");
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /能力：规划/ }));
+    await userEvent.click(screen.getByRole("button", { name: /路由：/ }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "关闭能力设置" }));
+    await userEvent.click(screen.getByRole("button", { name: "关闭设置" }));
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
 
     await userEvent.click(input);

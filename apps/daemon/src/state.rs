@@ -326,9 +326,9 @@ impl AppState {
         }
     }
 
-    /// Replaces the capability router as one machine-level value. Keeping this
+    /// Replaces tag/cost routing as one machine-level value. Keeping this
     /// beside provider and speech settings means every workspace and client on
-    /// the machine sees the same order and last runtime choices.
+    /// the machine sees the same profiles and last runtime choices.
     pub async fn set_agent_preferences(
         &self,
         preferences: AgentSelectionPreferences,
@@ -610,6 +610,10 @@ impl AppState {
 }
 
 fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result<()> {
+    // Capability lists are no longer edited by the Workbench, but remain on
+    // the wire for role.v2 and older clients. Keep their original bounds so a
+    // compatibility field cannot become an unbounded or ambiguous input just
+    // because tag routing superseded it.
     for (capability, routes) in [
         ("planning", &preferences.capabilities.planning),
         ("coding", &preferences.capabilities.coding),
@@ -645,6 +649,21 @@ fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result
             validate_id("运行参数值", value_id, 128)?;
         }
     }
+    if preferences.model_profiles.len() > 512 {
+        anyhow::bail!("最多保存 512 组 Agent 与模型画像");
+    }
+    let mut profiles = std::collections::BTreeSet::new();
+    for profile in &preferences.model_profiles {
+        validate_id("Agent", &profile.agent_id, 128)?;
+        if let Some(model_id) = &profile.model_id {
+            validate_id("模型", model_id, 512)?;
+        }
+        validate_tags(&profile.tags, true)?;
+        if !profiles.insert((&profile.agent_id, &profile.model_id)) {
+            anyhow::bail!("不能重复保存同一个 Agent 与模型画像");
+        }
+    }
+    validate_tags(&preferences.selected_tags, false)?;
     Ok(())
 }
 
@@ -652,6 +671,26 @@ fn validate_route(route: &PreferredAgentModel) -> Result<()> {
     validate_id("Agent", &route.agent_id, 128)?;
     if let Some(model_id) = &route.model_id {
         validate_id("模型", model_id, 512)?;
+    }
+    Ok(())
+}
+
+fn validate_tags(tags: &[String], required: bool) -> Result<()> {
+    if required && tags.is_empty() {
+        anyhow::bail!("每组 Agent 与模型至少需要 1 个标签");
+    }
+    if tags.len() > 4 {
+        anyhow::bail!("最多选择 4 个标签");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.chars().count() > 40 || tag.chars().any(char::is_control) {
+            anyhow::bail!("标签不能为空、不能包含控制字符且不能超过 40 个字符");
+        }
+        if !seen.insert(tag.to_lowercase()) {
+            anyhow::bail!("同一组设置不能重复标签");
+        }
     }
     Ok(())
 }
@@ -669,34 +708,48 @@ mod machine_state_tests {
     use crate::config::{Enrollment, Rendezvous};
 
     #[test]
-    fn capability_settings_enforce_ordered_list_bounds_and_unique_routes() {
-        let route = |agent: &str, model: &str| PreferredAgentModel {
-            agent_id: agent.into(),
-            model_id: Some(model.into()),
-        };
+    fn tag_settings_enforce_profile_identity_and_tag_bounds() {
+        let profile =
+            |agent: &str, model: &str, tags: Vec<&str>| genehub_proto::AgentModelProfile {
+                agent_id: agent.into(),
+                model_id: Some(model.into()),
+                tags: tags.into_iter().map(str::to_string).collect(),
+                cost: Some(genehub_proto::AgentCostLevel::Medium),
+            };
         let mut preferences = AgentSelectionPreferences::default();
-        preferences.capabilities.coding = (0..5)
-            .map(|index| route(&format!("agent-{index}"), "model"))
-            .collect();
-        validate_agent_preferences(&preferences).expect("five ordered routes are valid");
+        preferences.model_profiles = vec![profile(
+            "codex",
+            "model",
+            vec!["Max", "图片理解", "视频理解", "私有"],
+        )];
+        validate_agent_preferences(&preferences).expect("four distinct tags are valid");
 
-        preferences
-            .capabilities
-            .coding
-            .push(route("agent-5", "model"));
+        preferences.model_profiles[0].tags.push("第五个".into());
         let too_many = validate_agent_preferences(&preferences)
-            .expect_err("a sixth route must be rejected")
+            .expect_err("a fifth tag must be rejected")
             .to_string();
-        assert!(too_many.contains("最多配置 5"), "{too_many}");
+        assert!(too_many.contains("最多选择 4"), "{too_many}");
 
-        preferences.capabilities.coding = vec![
-            route("codex", "model"),
-            route("codex", "model"),
+        preferences.model_profiles = vec![
+            profile("codex", "model", vec!["Flush"]),
+            profile("codex", "model", vec!["Pro"]),
         ];
         let duplicate = validate_agent_preferences(&preferences)
-            .expect_err("the same exact route cannot occupy two ranks")
+            .expect_err("the same exact profile cannot be saved twice")
             .to_string();
         assert!(duplicate.contains("不能重复"), "{duplicate}");
+
+        preferences.model_profiles.clear();
+        preferences.capabilities.coding = (0..6)
+            .map(|index| PreferredAgentModel {
+                agent_id: format!("agent-{index}"),
+                model_id: Some("model".into()),
+            })
+            .collect();
+        let legacy_bound = validate_agent_preferences(&preferences)
+            .expect_err("legacy capability lists retain their original bound")
+            .to_string();
+        assert!(legacy_bound.contains("最多配置 5"), "{legacy_bound}");
     }
 
     #[tokio::test]

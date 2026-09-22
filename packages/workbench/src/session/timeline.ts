@@ -14,6 +14,8 @@ import type {
   Usage,
 } from "@genehub/proto";
 
+import { definedRuntimeValues } from "./capability-preferences";
+
 /**
  * A message that has left the composer but that the daemon has not echoed yet.
  *
@@ -280,6 +282,15 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
 
     case "modelChanged":
       return { ...state, modelId: event.modelId };
+
+    case "agentChanged":
+      return {
+        ...state,
+        modelId: event.modelId ?? null,
+        modeId: event.modeId ?? null,
+        effortId: event.effortId ?? null,
+        runtimeValues: definedRuntimeValues(event.runtimeValues),
+      };
 
     case "modeChanged":
       return { ...state, modeId: event.modeId };

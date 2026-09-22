@@ -488,6 +488,32 @@ pub struct ForkTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+    /// Runtime axes selected for this exact Agent. Routed forks fill these
+    /// from the machine-global remembered choices at execution time.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
+}
+
+/// One complete runtime destination for changing the Agent behind an existing
+/// GeneHub Session. Unlike a Fork target it cannot change workspace identity:
+/// the conversation stays put while its Agent-native context is reconstructed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionAgentTarget {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
 }
 
 /// Portable, untrusted material exported by the source daemon for a fork on a
@@ -781,6 +807,16 @@ pub struct SessionSummary {
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
+    /// Human-selected AND-match tags for this conversation. The concrete
+    /// Agent/model may change whenever current machine costs change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub routing_tags: Vec<String>,
+    /// Media requirements accumulated from the visible conversation. These
+    /// tags are daemon-owned and cannot be removed by the composer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub media_tags: Vec<String>,
     /// Present only when a project Workflow created this otherwise ordinary
     /// Session. There is no parallel WorkSession runtime: timeline, storage,
     /// recovery, fork and Workspace membership remain the normal ones.
@@ -839,7 +875,7 @@ pub struct SessionSummary {
 }
 
 /// A content cursor independent of status, rename and transport sequence numbers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionMessagePreview {
@@ -2037,8 +2073,41 @@ pub enum AgentCapability {
     Multimodal,
 }
 
-/// One exact route in a capability's ordered fallback list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// A deliberately coarse, comparable five-step cost level used by the
+/// machine-global tag router. It is intentionally independent of provider
+/// billing units so local and hosted Agents remain comparable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentCostLevel {
+    VeryLow,
+    Low,
+    #[default]
+    Medium,
+    High,
+    VeryHigh,
+}
+
+/// Machine-global routing configuration for one exact Agent + model pair.
+/// Every route has one to four AND-match tags and one live cost level.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentModelProfile {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost: Option<AgentCostLevel>,
+}
+
+/// Deprecated capability-list row retained only for older clients on the wire.
+/// Tag routing ignores these rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct PreferredAgentModel {
@@ -2049,8 +2118,8 @@ pub struct PreferredAgentModel {
     pub model_id: Option<String>,
 }
 
-/// Built-in capability routes. Order is significant and every list is bounded
-/// to five entries by the daemon's settings mutation.
+/// Deprecated capability lists retained only for wire compatibility. Current
+/// clients and dispatchers use `AgentModelProfile.tags` plus live cost.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -2079,17 +2148,36 @@ pub struct AgentRuntimePreference {
     pub runtime_values: std::collections::BTreeMap<String, String>,
 }
 
-/// Machine-global capability routing and compact runtime defaults.
+/// Machine-global tag routing, live cost configuration and compact runtime
+/// defaults. Concrete route choices are never persisted here: every dispatch
+/// re-evaluates tags against the current costs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct AgentSelectionPreferences {
-    #[serde(default)]
+    /// Deprecated read compatibility for clients older than tag routing. The
+    /// daemon never consults these ordered lists.
+    #[serde(default, skip_serializing_if = "capability_preferences_empty")]
     pub capabilities: CapabilityAgentPreferences,
+    /// Deprecated read compatibility. New clients use `selectedTags`.
     #[serde(default)]
     pub selected_capability: AgentCapability,
     #[serde(default)]
     pub runtimes: std::collections::BTreeMap<String, AgentRuntimePreference>,
+    /// Sparse Human overrides. Missing catalog rows use deterministic inferred
+    /// tags and cost until the Human changes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub model_profiles: Vec<AgentModelProfile>,
+    /// Tags preselected for a new chat on this machine. Session-specific tags
+    /// are persisted with each conversation once it starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub selected_tags: Vec<String>,
+}
+
+fn capability_preferences_empty(value: &CapabilityAgentPreferences) -> bool {
+    value.planning.is_empty() && value.coding.is_empty() && value.multimodal.is_empty()
 }
 
 /// The machine-level settings a client may see and change.

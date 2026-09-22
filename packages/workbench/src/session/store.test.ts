@@ -1,4 +1,4 @@
-import type { AgentInfo, SequencedEvent, SessionSummary, WorkspaceInfo } from "@genehub/proto";
+import type { AgentInfo, AgentSelectionPreferences, SequencedEvent, SessionSummary, WorkspaceInfo } from "@genehub/proto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Client } from "../protocol/client";
@@ -883,6 +883,36 @@ describe("forking a completed turn", () => {
     expect(useWorkbench.getState().activeSessionId).toBe(forked.id);
     expect(useWorkbench.getState().activeWorkspaceId).toBe("w2");
   });
+
+  it("sends only tags for a daemon-resolved Fork route", async () => {
+    const forked: SessionSummary = { ...SESSION, id: "s-routed", workspaceId: "w2" };
+    const calls: unknown[] = [];
+    const client = {
+      call: async (request: unknown) => {
+        calls.push(request);
+        return { type: "session", data: forked };
+      },
+      subscribe: async () => ({
+        snapshot: { seq: 0, items: [], pendingPermissions: [], summary: forked },
+        replayed: [],
+        reset: false,
+      }),
+      unsubscribe: async () => {},
+    } as unknown as Client;
+    useWorkbench.setState({ client, activeSessionId: SESSION.id });
+
+    await useWorkbench.getState().forkSessionRouted("turn-8", "w2", ["Max", "图片理解"]);
+
+    expect(calls[0]).toEqual({
+      type: "session.forkRouted",
+      payload: {
+        sessionId: SESSION.id,
+        turnId: "turn-8",
+        workspaceId: "w2",
+        tags: ["Max", "图片理解"],
+      },
+    });
+  });
 });
 
 /**
@@ -1004,7 +1034,7 @@ describe("opening a new conversation", () => {
     const client = {
       call: async (request: { type: string }) => {
         calls.push(request.type);
-        return request.type === "session.create"
+        return request.type === "session.createRouted"
           ? ({ type: "session", data: created } as const)
           : undefined;
       },
@@ -1037,7 +1067,7 @@ describe("opening a new conversation", () => {
     await useWorkbench.getState().send("hello");
     await useWorkbench.getState().send("again");
 
-    expect(calls.filter((type) => type === "session.create")).toHaveLength(1);
+    expect(calls.filter((type) => type === "session.createRouted")).toHaveLength(1);
     expect(useWorkbench.getState().activeSessionId).toBe("s-new");
     expect(useWorkbench.getState().draft).toBeNull();
   });
@@ -1049,7 +1079,7 @@ describe("opening a new conversation", () => {
       ...client,
       call: async (request: { type: string; payload?: { agentId?: string } }) => {
         sent.push(request);
-        return request.type === "session.create"
+        return request.type === "session.createRouted"
           ? ({ type: "session", data: { ...SESSION, id: "s-new", agentId: "codex" } } as const)
           : undefined;
       },
@@ -1057,15 +1087,50 @@ describe("opening a new conversation", () => {
     const agents = [
       {
         id: "genet",
+        label: "GeneHub Agent",
         builtin: true,
         probe: { state: "notInstalled" },
-        catalog: { models: [] },
+        capabilities: {
+          interrupt: true,
+          setModel: true,
+          setEffort: true,
+          setMode: false,
+          permissions: false,
+          resume: true,
+          fork: false,
+          attachments: true,
+        },
+        catalog: { models: [], modes: [], commands: [] },
       },
       {
         id: "codex",
+        label: "Codex",
         builtin: false,
         probe: { state: "ready" },
-        catalog: { models: [{ id: "gpt-5.6-sol" }] },
+        capabilities: {
+          interrupt: true,
+          setModel: true,
+          setEffort: true,
+          setMode: true,
+          permissions: true,
+          resume: true,
+          fork: false,
+          attachments: true,
+        },
+        catalog: {
+          models: [
+            {
+              id: "gpt-5.6-sol",
+              label: "GPT-5.6-Sol",
+              reasoning: true,
+              efforts: ["high"],
+              inputModalities: [],
+            },
+          ],
+          modes: [],
+          commands: [],
+          defaultModel: "gpt-5.6-sol",
+        },
       },
     ] as AgentInfo[];
     useWorkbench.setState({
@@ -1078,9 +1143,13 @@ describe("opening a new conversation", () => {
 
     await useWorkbench.getState().send("hello");
 
-    expect(sent.find((request) => request.type === "session.create")?.payload?.agentId).toBe(
-      "codex",
-    );
+    expect(sent.find((request) => request.type === "session.createRouted")?.payload).toEqual({
+      workspaceId: "w1",
+      tags: ["Flush"],
+      mediaTags: [],
+      title: null,
+      cwd: null,
+    });
   });
 
   it("lets an external Agent use its own default even when discovery returned no models", () => {
@@ -1129,14 +1198,14 @@ describe("opening a new conversation", () => {
     expect(defaultAgent([unconfiguredGenet])).toBeUndefined();
   });
 
-  it("carries the model chosen in the empty chat into the session it becomes", async () => {
+  it("carries the selected tags into the routed session it becomes", async () => {
     const { client } = creatingClient();
     const sent: unknown[] = [];
     const recording = {
       ...client,
       call: async (request: { type: string; payload?: unknown }) => {
         sent.push(request);
-        return request.type === "session.create"
+        return request.type === "session.createRouted"
           ? ({ type: "session", data: { ...SESSION, id: "s-new" } } as const)
           : undefined;
       },
@@ -1144,20 +1213,16 @@ describe("opening a new conversation", () => {
     useWorkbench.setState({ client: recording, sessions: [], activeWorkspaceId: "w1" });
     useWorkbench.getState().newSession("w1", "genet");
 
-    await useWorkbench.getState().setModel("opus");
+    await useWorkbench.getState().setTags(["Max", "私有"]);
     await useWorkbench.getState().send("hello");
 
     expect(sent).toContainEqual({
-      type: "session.create",
+      type: "session.createRouted",
       payload: {
         workspaceId: "w1",
-        agentId: "genet",
-        modelId: "opus",
-        modeId: null,
-        runtimeValues: {},
+        tags: ["Max", "私有"],
+        mediaTags: [],
         title: null,
-        // The workbench opens a session at the workspace root; naming a
-        // directory inside it is something only the CLI does today.
         cwd: null,
       },
     });
@@ -1310,7 +1375,7 @@ describe("switching a runtime axis mid-conversation", () => {
   });
 });
 
-describe("machine-global capability routing", () => {
+describe("machine-global tag routing", () => {
   const claude = {
     id: "claude",
     label: "Claude Code",
@@ -1345,13 +1410,20 @@ describe("machine-global capability routing", () => {
     },
   } as AgentInfo;
 
-  const preferences = {
-    capabilities: {
-      planning: [{ agentId: "claude", modelId: "opus" }],
-      coding: [{ agentId: "codex", modelId: "gpt-5.6-sol" }],
-      multimodal: [],
-    },
+  const preferences: AgentSelectionPreferences = {
+    capabilities: { planning: [], coding: [], multimodal: [] },
     selectedCapability: "planning" as const,
+    selectedTags: ["Pro"],
+    modelProfiles: [
+      { agentId: "claude", modelId: "sonnet", tags: ["Pro"], cost: "high" },
+      { agentId: "claude", modelId: "opus", tags: ["Pro"], cost: "medium" },
+      {
+        agentId: "codex",
+        modelId: "gpt-5.6-sol",
+        tags: ["Pro", "Flush", "图片理解", "视频理解"],
+        cost: "high",
+      },
+    ],
     runtimes: { claude: { effortId: "high", runtimeValues: {} } },
   };
 
@@ -1364,11 +1436,11 @@ describe("machine-global capability routing", () => {
     });
   });
 
-  it("uses the same selected capability route in every workspace", () => {
+  it("uses the same selected tag contract in every workspace", () => {
     useWorkbench.getState().newSession("w1");
     expect(useWorkbench.getState().draft).toMatchObject({
       workspaceId: "w1",
-      capability: "planning",
+      tags: ["Pro"],
       agentId: "claude",
       modelId: "opus",
     });
@@ -1376,37 +1448,38 @@ describe("machine-global capability routing", () => {
     useWorkbench.getState().newSession("w2");
     expect(useWorkbench.getState().draft).toMatchObject({
       workspaceId: "w2",
-      capability: "planning",
+      tags: ["Pro"],
       agentId: "claude",
       modelId: "opus",
     });
   });
 
-  it("switches capability, exact Agent and model as one machine preference", async () => {
+  it("switches tags and resolves an exact Agent + model without rewriting global costs", async () => {
     const calls: Array<{ type: string; payload?: unknown }> = [];
     const client = {
       call: async (request: { type: string; payload?: unknown }) => {
         calls.push(request);
-        return request.type === "settings.setAgentPreferences"
-          ? { type: "settings", data: { providers: [], lanEnabled: false, agentPreferences: (request.payload as { preferences: typeof preferences }).preferences } }
-          : undefined;
+        return undefined;
       },
     } as unknown as Client;
     useWorkbench.setState({ client });
     useWorkbench.getState().newSession("w1");
 
-    await useWorkbench.getState().setCapability("coding");
+    await useWorkbench.getState().setTags(["Flush"]);
 
     expect(useWorkbench.getState().draft).toMatchObject({
-      capability: "coding",
+      tags: ["Flush"],
       agentId: "codex",
       modelId: "gpt-5.6-sol",
     });
-    expect(calls.at(-1)?.type).toBe("settings.setAgentPreferences");
+    expect(calls).toEqual([]);
+    expect(useWorkbench.getState().settings?.agentPreferences?.modelProfiles).toEqual(
+      preferences.modelProfiles,
+    );
     expect(localStorage.getItem("genehub.runtime.by-workspace")).toBeNull();
   });
 
-  it("re-resolves an open draft before sending when the saved ranking changes", async () => {
+  it("re-resolves an open draft when live costs change but sends only tags to the daemon", async () => {
     const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
       call: async (request: { type: string; payload?: Record<string, unknown> }) => {
@@ -1421,13 +1494,14 @@ describe("machine-global capability routing", () => {
             },
           };
         }
-        if (request.type === "session.create") {
+        if (request.type === "session.createRouted") {
           return {
             type: "session",
             data: {
               ...SESSION,
               id: "s-ranked",
-              agentId: String(request.payload?.agentId),
+              agentId: "codex",
+              modelId: "gpt-5.6-sol",
             },
           };
         }
@@ -1443,44 +1517,49 @@ describe("machine-global capability routing", () => {
     useWorkbench.setState({ client });
     useWorkbench.getState().newSession("w1");
 
-    const reordered = {
+    const reordered: AgentSelectionPreferences = {
       ...preferences,
-      capabilities: {
-        ...preferences.capabilities,
-        planning: [
-          { agentId: "codex", modelId: "gpt-5.6-sol" },
-          { agentId: "claude", modelId: "opus" },
-        ],
-      },
+      modelProfiles: preferences.modelProfiles?.map((profile) => ({
+        ...profile,
+        cost:
+          profile.agentId === "codex"
+            ? ("veryLow" as const)
+            : profile.modelId === "opus"
+              ? ("veryHigh" as const)
+              : profile.cost,
+      })),
     };
     await useWorkbench.getState().setAgentPreferences(reordered);
 
     expect(useWorkbench.getState().draft).toMatchObject({
-      capability: "planning",
+      tags: ["Pro"],
       agentId: "codex",
       modelId: "gpt-5.6-sol",
     });
 
     await useWorkbench.getState().send("follow the new first choice");
-    expect(sent.find((request) => request.type === "session.create")?.payload).toMatchObject({
-      agentId: "codex",
-      modelId: "gpt-5.6-sol",
+    expect(sent.find((request) => request.type === "session.createRouted")?.payload).toEqual({
+      workspaceId: "w1",
+      tags: ["Pro"],
+      mediaTags: [],
+      title: null,
+      cwd: null,
     });
   });
 
-  it("routes a planning image to the first supporting candidate instead of the text-only first choice", async () => {
+  it("adds the image tag at creation and leaves the final route to the daemon", async () => {
     const sent: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
       call: async (request: { type: string; payload?: Record<string, unknown> }) => {
         sent.push(request);
-        if (request.type === "session.create") {
+        if (request.type === "session.createRouted") {
           return {
             type: "session",
             data: {
               ...SESSION,
               id: "s-media",
-              agentId: String(request.payload?.agentId),
-              modelId: String(request.payload?.modelId),
+              agentId: "codex",
+              modelId: "gpt-5.6-sol",
             },
           };
         }
@@ -1502,16 +1581,7 @@ describe("machine-global capability routing", () => {
       settings: {
         providers: [],
         lanEnabled: false,
-        agentPreferences: {
-          ...preferences,
-          capabilities: {
-            ...preferences.capabilities,
-            planning: [
-              { agentId: "claude", modelId: "opus" },
-              { agentId: "codex", modelId: "gpt-5.6-sol" },
-            ],
-          },
-        },
+        agentPreferences: preferences,
       },
     });
     useWorkbench.getState().newSession("w1");
@@ -1520,26 +1590,32 @@ describe("machine-global capability routing", () => {
       { name: "screen.png", mime: "image/png", dataBase64: "AAA" },
     ]);
 
-    expect(sent.find((request) => request.type === "session.create")?.payload).toMatchObject({
-      agentId: "codex",
-      modelId: "gpt-5.6-sol",
+    expect(sent.find((request) => request.type === "session.createRouted")?.payload).toEqual({
+      workspaceId: "w1",
+      tags: ["Pro"],
+      mediaTags: ["图片理解"],
+      title: null,
+      cwd: null,
     });
   });
 
-  it("opens a fresh draft when capability changes from an existing empty session", async () => {
+  it("switches an existing conversation in place when its tags change", async () => {
+    const calls: Array<{ type: string; payload?: unknown }> = [];
     const client = {
-      call: async (request: { type: string; payload?: unknown }) =>
-        request.type === "settings.setAgentPreferences"
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request);
+        return request.type === "session.route"
           ? {
-              type: "settings",
+              type: "session",
               data: {
-                providers: [],
-                lanEnabled: false,
-                agentPreferences: (request.payload as { preferences: typeof preferences })
-                  .preferences,
+                ...SESSION,
+                agentId: "codex",
+                modelId: "gpt-5.6-sol",
+                routingTags: ["Flush"],
               },
             }
-          : undefined,
+          : undefined;
+      },
     } as unknown as Client;
     useWorkbench.setState({
       client,
@@ -1549,32 +1625,67 @@ describe("machine-global capability routing", () => {
       draft: null,
     });
 
-    await useWorkbench.getState().setCapability("coding");
+    await useWorkbench.getState().setTags(["Flush"]);
 
-    expect(useWorkbench.getState().activeSessionId).toBeNull();
-    expect(useWorkbench.getState().draft).toMatchObject({
-      workspaceId: "w1",
-      capability: "coding",
-      agentId: "codex",
-      modelId: "gpt-5.6-sol",
+    expect(useWorkbench.getState().activeSessionId).toBe("s1");
+    expect(useWorkbench.getState().draft).toBeNull();
+    expect(calls).toContainEqual({
+      type: "session.route",
+      payload: { sessionId: "s1", tags: ["Flush"], mediaTags: [] },
     });
   });
 
-  it("honors an intentionally empty saved list instead of deriving defaults", () => {
-    useWorkbench.setState({
-      settings: {
-        providers: [],
-        lanEnabled: false,
-        agentPreferences: {
-          ...preferences,
-          capabilities: { ...preferences.capabilities, planning: [] },
-        },
+  it("adopts a pre-tag Workbench session before its next message", async () => {
+    const calls: Array<{ type: string; payload?: Record<string, unknown> }> = [];
+    const client = {
+      identity: { features: ["agent-tag-routing.v1"] },
+      call: async (request: { type: string; payload?: Record<string, unknown> }) => {
+        calls.push(request);
+        if (request.type === "session.route") {
+          return {
+            type: "session",
+            data: {
+              ...SESSION,
+              agentId: "codex",
+              modelId: "gpt-5.6-sol",
+              routingTags: ["Pro"],
+              mediaTags: ["图片理解"],
+            },
+          };
+        }
+        return { type: "ok" };
       },
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      sessions: [{ ...SESSION, agentId: "claude" }],
+      activeSessionId: "s1",
+      activeWorkspaceId: "w1",
+      draft: null,
     });
 
-    useWorkbench.getState().newSession("w1");
+    await useWorkbench.getState().send("继续看图", [
+      { name: "legacy.png", mime: "image/png", dataBase64: "AAA" },
+    ]);
+
+    expect(calls.map((request) => request.type)).toEqual(["session.route", "session.send"]);
+    expect(calls[0]?.payload).toEqual({
+      sessionId: "s1",
+      tags: ["Pro"],
+      mediaTags: ["图片理解"],
+    });
+    expect(useWorkbench.getState().sessions[0]).toMatchObject({
+      id: "s1",
+      agentId: "codex",
+      routingTags: ["Pro"],
+      mediaTags: ["图片理解"],
+    });
+  });
+
+  it("keeps an unmatched custom tag visible without inventing a fallback Agent", () => {
+    useWorkbench.getState().newSession("w1", null, { tags: ["私有且未配置"] });
     expect(useWorkbench.getState().draft).toMatchObject({
-      capability: "planning",
+      tags: ["私有且未配置"],
       agentId: null,
       modelId: null,
     });

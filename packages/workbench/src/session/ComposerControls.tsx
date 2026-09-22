@@ -3,23 +3,27 @@ import type {
   AgentInfo,
   AgentSelectionPreferences,
 } from "@genehub/proto";
-import { Brain, Code2, ScanSearch } from "lucide-react";
+import { Tags } from "lucide-react";
 import { useCallback, useId, useRef, useState } from "react";
 
 import { EffortMeter } from "../presentation/EffortMeter";
 import {
+  resolveAgentPresentation,
   resolveAgentProfile,
   resolveEffortBadge,
   resolveModeBadge,
+  resolveModelPresentation,
 } from "../presentation/catalog/resolve";
-import { capabilityLabel } from "./capability-preferences";
+import { normalizeTags } from "./capability-preferences";
 import { resolveRuntimeSelection } from "./runtime-selection";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
-/** One capability-first summary in the composer footer. */
+/** Compact route summary plus the tag/runtime configuration entry. */
 export function ComposerControls({
   agents,
   preferences,
+  tags,
+  mediaTags,
   capability,
   agentId,
   modelId,
@@ -27,8 +31,8 @@ export function ComposerControls({
   effortId,
   runtimeValues,
   disabled,
-  agentLocked,
   onOpenChange,
+  onPickTags,
   onPickCapability,
   onSavePreferences,
   onPickMode,
@@ -38,7 +42,10 @@ export function ComposerControls({
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
-  capability: AgentCapability;
+  tags?: string[];
+  mediaTags?: string[];
+  /** Compatibility for callers restored from an older draft. */
+  capability?: AgentCapability;
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
@@ -47,7 +54,8 @@ export function ComposerControls({
   disabled?: boolean;
   agentLocked?: boolean;
   onOpenChange?(open: boolean): void;
-  onPickCapability(capability: AgentCapability): void;
+  onPickTags?(tags: string[]): void;
+  onPickCapability?(capability: AgentCapability): void;
   onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
@@ -66,9 +74,11 @@ export function ComposerControls({
     effortId,
     runtimeValues,
   });
-  const agentProfile = selection.current
-    ? resolveAgentProfile(selection.current.id)
-    : null;
+  const selectedTags = normalizeTags(
+    tags?.length ? tags : preferences.selectedTags?.length ? preferences.selectedTags : [legacyTag(capability)],
+  );
+  const automaticTags = normalizeTags(mediaTags ?? []);
+  const agentProfile = selection.current ? resolveAgentProfile(selection.current.id) : null;
   const permissionAxis = Boolean(
     selection.current?.capabilities.permissions && agentProfile?.modeKind === "permission",
   );
@@ -85,8 +95,20 @@ export function ComposerControls({
           modeLabel: selection.mode.label,
         })
       : null;
+  const routeLabel = selection.current
+    ? `${resolveAgentPresentation(selection.current).label} · ${
+        selection.model
+          ? resolveModelPresentation({
+              agentId: selection.current.id,
+              modelId: selection.model.id,
+              modelLabel: selection.model.label,
+            }).fullLabel
+          : modelId ?? "默认"
+      }`
+    : "未匹配 Agent";
   const summary = [
-    `能力：${capabilityLabel(capability)}`,
+    `路由：${routeLabel}`,
+    `标签：${[...selectedTags, ...automaticTags].join(" + ") || "无"}`,
     effort ? `思考强度：${effort.fullLabel}` : null,
     mode ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}` : null,
   ]
@@ -115,8 +137,8 @@ export function ComposerControls({
         className="flex h-9 !min-h-0 !min-w-0 flex-1 items-center rounded-md px-1.5 text-left text-[14px] leading-9 text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:text-[12px] md:leading-6"
       >
         <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden opacity-80">
-          <CapabilityIcon capability={capability} />
-          <span className="truncate text-fg">{capabilityLabel(capability)}</span>
+          <Tags className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+          <span className="truncate text-fg">{routeLabel}</span>
           {effort ? (
             <span
               className="flex shrink-0 items-center gap-0.5 whitespace-nowrap text-muted"
@@ -147,12 +169,15 @@ export function ComposerControls({
           selection={selection}
           agents={agents}
           preferences={preferences}
-          capability={capability}
+          tags={selectedTags}
+          mediaTags={automaticTags}
           disabled={disabled}
-          agentLocked={agentLocked}
           returnFocusRef={trigger}
           onClose={closePanel}
-          onPickCapability={onPickCapability}
+          onPickTags={(next) => {
+            if (onPickTags) onPickTags(next);
+            else onPickCapability?.(tagCapability(next[0]));
+          }}
           onSavePreferences={onSavePreferences}
           onPickMode={onPickMode}
           onPickEffort={onPickEffort}
@@ -164,9 +189,14 @@ export function ComposerControls({
   );
 }
 
-function CapabilityIcon({ capability }: { capability: AgentCapability }) {
-  const className = "h-4 w-4 shrink-0 text-accent";
-  if (capability === "planning") return <Brain className={className} aria-hidden />;
-  if (capability === "coding") return <Code2 className={className} aria-hidden />;
-  return <ScanSearch className={className} aria-hidden />;
+function legacyTag(capability: AgentCapability | undefined): string {
+  if (capability === "planning") return "Pro";
+  if (capability === "multimodal") return "图片理解";
+  return "Flush";
+}
+
+function tagCapability(tag: string | undefined): AgentCapability {
+  if (tag === "Max" || tag === "Pro") return "planning";
+  if (tag === "图片理解" || tag === "视频理解") return "multimodal";
+  return "coding";
 }

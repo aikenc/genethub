@@ -3,9 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import {
-  CapabilityGrid,
   CURRENT_MACHINE,
   MachineGrid,
+  TagGrid,
   useMachineCatalog,
   WorkspaceList,
 } from "./MachineCatalogPicker";
@@ -87,8 +87,8 @@ export function ForwardDialog({
     catalog,
     workspaceId,
     setWorkspaceId,
-    capability,
-    setCapability,
+    tags,
+    setTags,
     preferences,
     route,
     loadingMachines,
@@ -257,7 +257,7 @@ export function ForwardDialog({
     if (onSourceMachine) {
       // Same machine: park the capsule on a composer, reviewed before sending.
       if (destination === "new") {
-        newSession(workspaceId, null, { capability });
+        newSession(workspaceId, null, { tags });
         setForwardDraft({
           sessionId: null,
           capsule: built.text,
@@ -295,12 +295,7 @@ export function ForwardDialog({
           ? ({
               kind: "new",
               workspaceId,
-              capability,
-              agentId: route.agent.id,
-              modelId: route.modelId,
-              modeId: route.modeId,
-              effortId: route.effortId,
-              runtimeValues: route.runtimeValues,
+              tags,
             } as const)
           : null
         : targetSessionId
@@ -410,12 +405,12 @@ export function ForwardDialog({
                 onSelect={setWorkspaceId}
               />
 
-              <CapabilityGrid
+              <TagGrid
                 agents={catalog.agents}
                 preferences={preferences}
-                selectedCapability={capability}
+                selectedTags={tags}
                 disabled={busy || loadingCatalog}
-                onSelect={setCapability}
+                onSelect={setTags}
               />
             </>
           ) : (

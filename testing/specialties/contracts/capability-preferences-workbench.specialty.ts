@@ -19,16 +19,16 @@ const FILES = [
 
 defineSpecialty({
   id: "specialty.contracts.capability-preferences-workbench",
-  title: "Workbench capability routing and compact runtime preferences",
+  title: "Workbench tag routing, live cost and compact runtime preferences",
   oracle:
-    "All UI and store boundaries affected by capability-first routing pass without pending tests",
+    "All UI and store boundaries affected by AND-tag routing pass without pending tests",
   catches: [
-    "an execution surface exposes a concrete Agent picker",
-    "one Agent cannot occupy multiple ordered routes with different models",
-    "machine-global capability or runtime preferences are lost",
-    "Fork or Forward bypasses the target machine's capability order",
+    "a surface still exposes the removed capability-first interaction",
+    "same-Agent model rows collapse instead of retaining independent tags and costs",
+    "machine-global tag, cost or runtime preferences are lost",
+    "Fork or Forward bypasses the target machine's AND-tag route",
   ],
-  tags: ["contract", "workbench", "capability-routing"],
+  tags: ["contract", "workbench", "tag-routing"],
   llm: { default: "none" },
   expectedDurationMs: 90_000,
   timeoutMs: 220_000,
@@ -65,13 +65,13 @@ defineSpecialty({
         result.numPassedTests > 0 &&
         result.numFailedTests === 0 &&
         result.numPendingTests === 0,
-      `Capability Workbench suite was not clean: ${JSON.stringify({
+      `Tag routing Workbench suite was not clean: ${JSON.stringify({
         passed: result.numPassedTests,
         failed: result.numFailedTests,
         pending: result.numPendingTests,
       })}`,
     );
-    t.note(`capabilityWorkbenchTests=${result.numPassedTests}`);
+    t.note(`tagRoutingWorkbenchTests=${result.numPassedTests}`);
   } catch (error) {
     const result = existsSync(report) ? JSON.parse(readFileSync(report, "utf8")) : undefined;
     const failures =
@@ -85,7 +85,7 @@ defineSpecialty({
       ) ?? [];
     const failure = error as Error & { stdout?: string; stderr?: string };
     throw new Error(
-      `Capability Workbench regressions failed: ${JSON.stringify({
+      `Tag routing Workbench regressions failed: ${JSON.stringify({
         passed: result?.numPassedTests,
         failed: result?.numFailedTests,
         pending: result?.numPendingTests,

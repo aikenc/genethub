@@ -1,5 +1,5 @@
-schema: genehub.workflow.role.v2
+schema: genehub.workflow.role.v3
 id: reviewer
-capability: coding
+tags: [Pro, 视频理解]
 userInteraction: readOnly
 prompt: prompts/reviewer.md

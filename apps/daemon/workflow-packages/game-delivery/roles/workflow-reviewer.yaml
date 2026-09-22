@@ -1,6 +1,6 @@
-schema: genehub.workflow.role.v2
+schema: genehub.workflow.role.v3
 id: workflow-reviewer
-capability: planning
+tags: [Pro]
 evidenceOnly: true
 userInteraction: readOnly
 prompt: prompts/workflow-reviewer.md

@@ -3,7 +3,6 @@ import "../ui/entity-lists.css";
 import { usePageNavigation } from "./usePageNavigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  ForkTarget,
   ForkTransfer,
   HistoryCoverage,
   SessionSummary,
@@ -45,11 +44,12 @@ import type { ForkMachineOption } from "../session/ForkDialog";
 import type { MachineCatalog } from "../session/MachineCatalogPicker";
 import { useWorkbench } from "../session/store";
 import {
-  capabilityMediaInputSupport,
   capabilityForRoute,
-  mediaInputSupport,
+  mediaTagsForTimeline,
+  normalizeTags,
   normalizeAgentPreferences,
-  resolveCapabilityRoute,
+  resolveTagRoute,
+  tagMediaInputSupport,
 } from "../session/capability-preferences";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
@@ -113,7 +113,8 @@ interface MachineBroker {
   createFork(
     machine: ForkMachineOption,
     transfer: ForkTransfer,
-    target: ForkTarget,
+    workspaceId: string,
+    tags: string[],
   ): Promise<SessionSummary>;
   jumpTo(machine: ForkMachineOption, sessionId: string): void;
 }
@@ -260,6 +261,17 @@ export function App({
   const selectedCapability =
     draft?.capability ??
     capabilityForRoute(agentPreferences, agentId, currentModelId ?? null);
+  const selectedTags = normalizeTags(
+    session?.routingTags?.length
+      ? session.routingTags
+      : draft?.tags?.length
+        ? draft.tags
+        : agentPreferences.selectedTags ?? ["Flush"],
+  );
+  const automaticMediaTags = normalizeTags([
+    ...(session?.mediaTags ?? []),
+    ...mediaTagsForTimeline(workbench.timeline.items),
+  ]);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
   const managedReadOnly = session?.managed?.userInteraction === "readOnly";
   const sessionReadOnly = importedReadOnly || managedReadOnly;
@@ -267,16 +279,11 @@ export function App({
   // An unstarted conversation: no session on the machine, and so nothing a
   // transcript could be drawn from.
   const starting = Boolean(draft && !workbench.activeSessionId);
-  // Before the first turn, media can select a later route from this capability's
-  // ordered fallback list. Once a Session exists its exact Agent + model is
-  // locked, so only that route's inputs remain available.
-  const composerMediaSupport = starting
-    ? capabilityMediaInputSupport(
-        agentPreferences,
-        selectedCapability,
-        workbench.agents,
-      )
-    : mediaInputSupport(currentAgent, currentModelId);
+  const composerMediaSupport = tagMediaInputSupport(
+    agentPreferences,
+    [...selectedTags, ...automaticMediaTags],
+    workbench.agents,
+  );
   const deviceHandle =
     workbench.client?.identity?.machineId ?? readWorkbenchLocation()?.deviceHandle ?? null;
   const hrefLocation = useMemo(() => {
@@ -629,7 +636,7 @@ export function App({
             workspaces?.type !== "workspaces" ||
             settings?.type !== "settings"
           ) {
-            throw new Error("目标机器没有返回能力配置、执行引擎和项目列表。");
+            throw new Error("目标机器没有返回标签配置、执行引擎和项目列表。");
           }
           return {
             agents: agents.data,
@@ -658,13 +665,11 @@ export function App({
             sessionId = target.sessionId;
           } else {
             const created = await client.call({
-              type: "session.create",
+              type: "session.createRouted",
               payload: {
                 workspaceId: target.workspaceId,
-                agentId: target.agentId,
-                modelId: target.modelId,
-                modeId: target.modeId,
-                runtimeValues: target.runtimeValues,
+                tags: target.tags,
+                mediaTags: [],
                 title: null,
                 cwd: null,
               },
@@ -673,15 +678,6 @@ export function App({
               throw new Error("目标机器没有创建会话。");
             }
             sessionId = created.data.id;
-            if (target.effortId) {
-              const updated = await client.call({
-                type: "session.setEffort",
-                payload: { sessionId, effortId: target.effortId },
-              });
-              if (updated?.type !== "ack") {
-                throw new Error("目标机器没有应用该能力的思考强度。");
-              }
-            }
           }
           await client.call({
             type: "session.send",
@@ -696,11 +692,11 @@ export function App({
           return { sessionId };
         });
       },
-      async createFork(machine, transfer, target) {
+      async createFork(machine, transfer, workspaceId, tags) {
         const created = await onMachine(machine, (client) =>
           client.call({
-            type: "session.forkImport",
-            payload: { transfer, target },
+            type: "session.forkImportRouted",
+            payload: { transfer, workspaceId, tags },
           }),
         );
         if (created?.type !== "session") {
@@ -740,16 +736,11 @@ export function App({
         const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
         if (!source || !state.client) return false;
         if (selection.machine.id === broker.sourceMachine.id) {
-          // Always send an explicit target. The daemon still takes the native
-          // path when the same Agent has a checkpoint; omitting target is the
-          // legacy "native only" request and would refuse Cursor-class Agents.
-          return state.forkSession(turnId, {
-            agentId: selection.agentId,
-            workspaceId: selection.workspaceId,
-            ...(selection.modelId ? { modelId: selection.modelId } : {}),
-            ...(selection.modeId ? { modeId: selection.modeId } : {}),
-            ...(selection.effortId ? { effortId: selection.effortId } : {}),
-          });
+          return state.forkSessionRouted(
+            turnId,
+            selection.workspaceId,
+            selection.tags,
+          );
         }
 
         const exported = await state.client.call({
@@ -759,13 +750,12 @@ export function App({
         if (exported?.type !== "forkTransfer") {
           throw new Error("源机器没有返回可迁移的 Fork 历史。");
         }
-        const created = await broker.createFork(selection.machine, exported.data, {
-          agentId: selection.agentId,
-          workspaceId: selection.workspaceId,
-          ...(selection.modelId ? { modelId: selection.modelId } : {}),
-          ...(selection.modeId ? { modeId: selection.modeId } : {}),
-          ...(selection.effortId ? { effortId: selection.effortId } : {}),
-        });
+        const created = await broker.createFork(
+          selection.machine,
+          exported.data,
+          selection.workspaceId,
+          selection.tags,
+        );
         // Stay where the user is. Being yanked onto another machine the moment
         // a Fork lands is what made cross-machine Fork feel broken; the jump
         // is offered on the completion banner, not forced.
@@ -1059,6 +1049,8 @@ export function App({
                         agents={workbench.agents}
                         preferences={agentPreferences}
                         capability={selectedCapability}
+                        tags={selectedTags}
+                        mediaTags={automaticMediaTags}
                         agentId={agentId}
                         modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
                         modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
@@ -1131,6 +1123,7 @@ export function App({
                         onPickCapability={(capability) =>
                           void workbench.setCapability(capability)
                         }
+                        onPickTags={(tags) => void workbench.setTags(tags)}
                         onSavePreferences={(preferences) =>
                           workbench.setAgentPreferences(preferences)
                         }
@@ -1327,7 +1320,7 @@ function FirstRun({
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   const preferences = normalizeAgentPreferences(settings?.agentPreferences, agents);
-  const route = resolveCapabilityRoute(preferences, preferences.selectedCapability, agents);
+  const route = resolveTagRoute(preferences, preferences.selectedTags ?? ["Flush"], agents);
   const hasUsableAgent = agents.some(canStartAgent);
 
   // An empty catalog while the socket is still coming up (or already dead) is
@@ -1397,16 +1390,14 @@ function FirstRun({
         <span>{workspace.name} 已就绪。</span>
       </p>
       <p className="mb-3 text-xs text-muted">
-        {route
-          ? "开一个会话，直接说你想做什么。"
-          : "当前能力还没有可用首选项；进入会话后可从聊天框编辑这台机器的能力配置。"}
+        {route ? "开一个会话，直接说你想做什么。" : "当前标签没有匹配项；进入会话后可编辑这台机器的 Agent 配置。"}
       </p>
       <button
         type="button"
         className="min-h-11 rounded-xl bg-accent px-4 text-sm text-white md:min-h-0 md:rounded-md md:px-3 md:py-1.5 md:text-xs"
-        onClick={() => newSession(workspace.id, null, { capability: preferences.selectedCapability })}
+        onClick={() => newSession(workspace.id, null, { tags: preferences.selectedTags ?? ["Flush"] })}
       >
-        {route ? "新建会话" : "配置能力并新建会话"}
+        {route ? "新建会话" : "配置 Agent 并新建会话"}
       </button>
     </Splash>
   );

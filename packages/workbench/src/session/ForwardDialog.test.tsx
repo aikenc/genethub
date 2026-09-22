@@ -43,12 +43,13 @@ function workspace(id: string, name: string): WorkspaceInfo {
 
 function preferences(
   agentId: string,
-  selectedCapability: AgentSelectionPreferences["selectedCapability"] = "planning",
+  selectedTags: string[] = ["Flush"],
 ): AgentSelectionPreferences {
-  const route = [{ agentId }];
   return {
-    selectedCapability,
-    capabilities: { planning: route, coding: route, multimodal: route },
+    selectedCapability: "coding",
+    selectedTags,
+    capabilities: { planning: [], coding: [], multimodal: [] },
+    modelProfiles: [{ agentId, tags: selectedTags, cost: "medium" }],
     runtimes: {},
   };
 }
@@ -325,7 +326,7 @@ describe("ForwardDialog", () => {
       loadCatalog: async () => ({
         agents: [agent("claude", "Claude Code")],
         workspaces: [workspace("rw", "远程项目")],
-        agentPreferences: preferences("claude", "coding"),
+        agentPreferences: preferences("claude", ["Flush"]),
       }),
       loadSessions: async () => [],
       deliver,
@@ -353,12 +354,7 @@ describe("ForwardDialog", () => {
         {
           kind: "new",
           workspaceId: "rw",
-          capability: "coding",
-          agentId: "claude",
-          modelId: null,
-          modeId: null,
-          effortId: null,
-          runtimeValues: {},
+          tags: ["Flush"],
         },
         expect.stringContaining("你好"),
       ),

@@ -24,9 +24,9 @@ pub(crate) fn schema() -> Value {
         "capabilities": ["agent.session", "result.publish", "request.budget"],
         "role": {
             "schema": ROLE_SCHEMA,
-            "binding": "capability only",
-            "capabilities": ["planning", "coding", "multimodal"],
-            "resolution": "At each dispatch, use the first currently available Agent + model in this machine's ordered capability preferences; block for human action when none are usable.",
+            "binding": "built-in tags only",
+            "tags": ["Max", "Pro", "Flush", "视频理解", "图片理解"],
+            "resolution": "At each dispatch, freshly read machine-global costs and choose the lowest-cost available Agent + model matching every tag; block for human action when none are usable.",
             "forbiddenExactFields": ["agentId", "modelId", "modeId", "runtimeValues"],
             "legacyReadOnlySchema": LEGACY_ROLE_SCHEMA,
         },
@@ -217,9 +217,9 @@ pub(super) fn check_draft(
                 .flat_map(|bundle| bundle.roles.values())
             {
                 // Legacy role.v1 pins an exact adapter, so draft checking can
-                // still prove its evidence boundary. role.v2 resolves a live
-                // capability route only when dispatched and filters every
-                // fallback by this same requirement then.
+                // still prove its evidence boundary. Current roles resolve a
+                // live tag route only when dispatched and filter every
+                // candidate by this same requirement then.
                 if role.evidence_only && role.schema == LEGACY_ROLE_SCHEMA {
                     let agent_id = role.agent_id.as_deref().unwrap_or_default();
                     if let Err(error) = registry.require_evidence_scope(agent_id) {

@@ -50,13 +50,15 @@ import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  capabilityLabel,
   capabilityForRoute,
+  definedRuntimeValues,
+  IMAGE_TAG,
+  normalizeTags,
   normalizeAgentPreferences,
   resolveAgentRuntime,
-  resolveCapabilityRoute,
+  resolveTagRoute,
+  VIDEO_TAG,
   withRuntimePreference,
-  withSelectedCapability,
 } from "./capability-preferences";
 import {
   applySequenced,
@@ -125,6 +127,7 @@ export interface Draft {
   localId?: string;
   workspaceId: string;
   capability: AgentCapability;
+  tags?: string[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
@@ -411,6 +414,7 @@ interface WorkbenchState {
       addressScope?: AddressScope;
       localId?: string;
       capability?: AgentCapability;
+      tags?: string[];
     },
   ): void;
   selectSession(sessionId: string): Promise<void>;
@@ -466,6 +470,8 @@ interface WorkbenchState {
   fetchBlobPayloads(sessionId: string, refs: BlobRef[]): Promise<BlobPayload[] | null>;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
+  /** Resolves a Fork target from fresh machine-global tag costs on the daemon. */
+  forkSessionRouted(turnId: string, workspaceId: string, tags: string[]): Promise<boolean>;
   /** Lightweight provider discovery; full history is read only after selection. */
   listImportableSessions(workspaceId: string): Promise<SessionImportListing | null>;
   /** Imports one expiring candidate and opens the resulting GeneHub session. */
@@ -473,6 +479,7 @@ interface WorkbenchState {
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
   setCapability(capability: AgentCapability): Promise<void>;
+  setTags(tags: string[]): Promise<void>;
   setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
@@ -1013,29 +1020,26 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       state.settings?.agentPreferences,
       state.agents,
     );
+    const tags = normalizeTags(
+      options?.tags?.length
+        ? options.tags
+        : cachedDraft?.tags?.length
+          ? cachedDraft.tags
+          : normalizedPreferences.selectedTags ?? ["Flush"],
+    );
     const capability =
       options?.capability ??
       cachedDraft?.capability ??
       (agentId
         ? capabilityForRoute(normalizedPreferences, agentId, cachedDraft?.modelId ?? null)
         : normalizedPreferences.selectedCapability);
-    const preferences = withSelectedCapability(normalizedPreferences, capability);
-    // The first-run proposal becomes an actual machine-global configuration
-    // when it is first used. Until then `None` remains distinguishable from a
-    // deliberately saved empty list, which Workflow must block on.
-    if (
-      state.settings &&
-      (!state.settings.agentPreferences ||
-        state.settings.agentPreferences.selectedCapability !== capability)
-    ) {
-      void state.setAgentPreferences(preferences);
-    }
-    const resolvedCapability = resolveCapabilityRoute(preferences, capability, state.agents);
-    const chosenAgentId = agentId ?? cachedDraft?.agentId ?? resolvedCapability?.agent.id ?? null;
+    const preferences = normalizedPreferences;
+    const resolvedRoute = resolveTagRoute(preferences, tags, state.agents);
+    const chosenAgentId = agentId ?? cachedDraft?.agentId ?? resolvedRoute?.agent.id ?? null;
     const chosenAgent = state.agents.find((candidate) => candidate.id === chosenAgentId);
     const resolvedRuntime =
-      chosenAgent && chosenAgent.id === resolvedCapability?.agent.id
-        ? resolvedCapability
+      chosenAgent && chosenAgent.id === resolvedRoute?.agent.id
+        ? resolvedRoute
         : chosenAgent
           ? resolveAgentRuntime(preferences, chosenAgent, cachedDraft?.modelId)
           : null;
@@ -1052,7 +1056,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           effortId: resolvedRuntime?.effortId ?? null,
           runtimeValues: resolvedRuntime?.runtimeValues ?? {},
         };
-    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, capability, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, capability, tags, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -1071,6 +1075,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         localId,
         workspaceId: target,
         capability,
+        tags,
         agentId: chosenAgentId,
         modelId: draftRuntime.modelId,
         modeId: draftRuntime.modeId,
@@ -1637,6 +1642,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (originKey && originKey !== sentKey) saveLocalValue(originKey, null);
     if (machine && originDraft && !active) forgetDraftIdentity(machine, originDraft);
     try {
+      await ensureWorkbenchTagRoute(get, set, require_(originClient), sessionId, pending);
       // Artifact storage requires ASCII file names. Keep the original names in
       // chat while using fixed names for the files the Agent reads.
       const stagedVideos = videoFiles.map((file, index) => ({
@@ -1944,6 +1950,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     return true;
   },
 
+  async forkSessionRouted(turnId, workspaceId, tags) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return false;
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.forkRouted",
+        payload: { sessionId, turnId, workspaceId, tags },
+      }),
+    );
+    if (reply?.type !== "session") return false;
+    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
+    await get().selectSession(reply.data.id);
+    return true;
+  },
+
   async listImportableSessions(workspaceId) {
     const reply = await asked(set, () =>
       require_(get().client).call({
@@ -1988,31 +2009,43 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   },
 
   async setCapability(capability) {
-    let state = get();
-    // A daemon Session already owns a concrete Agent. Before it has visible
-    // history the picker is still offered, but changing capability must open a
-    // fresh local draft rather than pretending the existing Session changed
-    // identity underneath it.
-    if (!state.draft && state.activeSessionId) {
-      get().newSession(state.activeWorkspaceId, null, { capability });
-      state = get();
-    }
-    const preferences = withSelectedCapability(
-      normalizeAgentPreferences(state.settings?.agentPreferences, state.agents),
-      capability,
+    const tag = capability === "planning" ? "Pro" : capability === "multimodal" ? IMAGE_TAG : "Flush";
+    await get().setTags([tag]);
+  },
+
+  async setTags(input) {
+    const tags = normalizeTags(input).slice(0, 4);
+    const state = get();
+    const preferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
     );
-    const route = resolveCapabilityRoute(preferences, capability, state.agents);
+    const route = resolveTagRoute(preferences, tags, state.agents);
     if (state.draft) {
       onDraft(get, set, {
-        capability,
-        agentId: route?.agent.id ?? null,
-        modelId: route?.modelId ?? null,
-        modeId: route?.modeId ?? null,
-        effortId: route?.effortId ?? null,
-        runtimeValues: route?.runtimeValues ?? {},
+        tags,
+        ...(route
+          ? {
+              capability: capabilityForRoute(preferences, route.agent.id, route.modelId),
+              agentId: route.agent.id,
+              modelId: route.modelId,
+              modeId: route.modeId,
+              effortId: route.effortId,
+              runtimeValues: route.runtimeValues,
+            }
+          : { agentId: null, modelId: null, modeId: null, effortId: null, runtimeValues: {} }),
       });
     }
-    await get().setAgentPreferences(preferences);
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return;
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.route",
+        payload: { sessionId, tags, mediaTags: [] },
+      }),
+    );
+    if (reply?.type !== "session") return;
+    adoptRoutedSession(reply.data, set);
   },
 
   async setAgentPreferences(preferences) {
@@ -2041,13 +2074,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     } else if (before && stillCurrent) {
       set({ settings: before });
       const restored = normalizeAgentPreferences(before.agentPreferences, get().agents);
-      const draft = get().draft;
-      const capability =
-        draft?.capability === preferences.selectedCapability &&
-        preferences.selectedCapability !== restored.selectedCapability
-          ? restored.selectedCapability
-          : draft?.capability;
-      syncDraftRoute(get, set, restored, capability);
+      syncDraftRoute(get, set, restored, get().draft?.tags);
     }
   },
 
@@ -2602,8 +2629,13 @@ async function land(get: () => WorkbenchState): Promise<void> {
     return;
   }
 
-  const preferences = normalizeAgentPreferences(state.settings?.agentPreferences, state.agents);
-  if (!resolveCapabilityRoute(preferences, preferences.selectedCapability, state.agents)) return;
+  // Catalog probing runs beside workspace loading. Do not manufacture a draft
+  // before it has answered, or a machine with no configured model is pulled
+  // past FirstRun's actionable key prompt into an unusable composer. A usable
+  // Agent with no matching tag is different: that draft is where the person
+  // can open the global Agent configuration and repair the route.
+  if (!state.agents.some(canStartAgent)) return;
+
   // An empty conversation, not a stored one. Landing somewhere used to write a
   // session on every first visit to a project, whether or not anything was ever
   // said in it.
@@ -2721,6 +2753,7 @@ async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: st
       }
       if (input.missingAttachments) throw new Error("本地附件已失效，原消息仍待核对；请检查服务端记录并重新附加图片。");
     }
+    await ensureWorkbenchTagRoute(get, set, client, sessionId, input);
     let sentAttachments = input.attachments;
     if ((input.videoFiles?.length ?? 0) > 0) {
       const uploaded = await uploadChatVideos(get, sessionId, input.videoFiles ?? []);
@@ -2751,47 +2784,15 @@ async function start(
   if (!draft) return null;
 
   const requiredMedia = mediaRequiredBy(pending);
-  if (requiredMedia.length > 0) {
-    const preferences = normalizeAgentPreferences(
-      state.settings?.agentPreferences,
-      state.agents,
-    );
-    const mediaRoute = resolveCapabilityRoute(
-      preferences,
-      draft.capability,
-      state.agents,
-      requiredMedia,
-    );
-    if (!mediaRoute) {
-      const mediaLabel = requiredMedia.map((medium) => medium === "image" ? "图片" : "视频").join("和");
-      set({
-        notice: `「${capabilityLabel(draft.capability)}」的首选列表中没有可用且支持${mediaLabel}的 Agent 与模型，请编辑能力首选项。`,
-      });
-      return null;
-    }
-    draft = {
-      ...draft,
-      agentId: mediaRoute.agent.id,
-      modelId: mediaRoute.modelId,
-      modeId: mediaRoute.modeId,
-      effortId: mediaRoute.effortId,
-      runtimeValues: mediaRoute.runtimeValues,
-    };
-    onDraft(get, set, draft);
-  }
-
-  const agentId = draft.agentId;
-  if (!agentId) return null;
-
+  const mediaTags = requiredMedia.map((medium) => (medium === "image" ? IMAGE_TAG : VIDEO_TAG));
+  const tags = normalizeTags(draft.tags?.length ? draft.tags : ["Flush"]);
   const reply = await asked(set, () =>
     require_(state.client).call({
-      type: "session.create",
+      type: "session.createRouted",
       payload: {
         workspaceId: draft.workspaceId,
-        agentId,
-        modelId: draft.modelId,
-        modeId: draft.modeId,
-        runtimeValues: draft.runtimeValues,
+        tags,
+        mediaTags,
         title: null,
         cwd: null,
       },
@@ -2826,12 +2827,7 @@ async function start(
   if (!pending && draft.localId && state.client?.identity) forgetDraftIdentity(state.client.identity.machineId, draft.localId);
   // Only the originating draft may follow this late create response.
   if (get().draft?.localId === draft.localId && !get().activeSessionId) await get().selectSession(reply.data.id);
-  // Before `setEffort`, which is another round trip: the first message of a new
-  // conversation should not be the one message that waits longest to appear.
   if (pending) patchTimeline(reply.data.id, set, () => ({ pending }));
-  // `session.create` has no field for it, so the one choice that cannot ride
-  // along is made immediately afterwards instead of being lost.
-  if (draft.effortId) await asked(set, () => require_(state.client).call({type:"session.setEffort", payload:{sessionId:reply.data.id, effortId:draft.effortId!}}));
   return reply.data.id;
 }
 
@@ -2842,6 +2838,60 @@ function mediaRequiredBy(pending: PendingMessage | null): Array<"image" | "video
     (pending.videoFiles?.length ?? 0) > 0 ||
     pending.attachments.some((attachment) => attachment.mime.startsWith("video/"));
   return [...(image ? ["image" as const] : []), ...(video ? ["video" as const] : [])];
+}
+
+/**
+ * Sessions created by older Workbench builds have an explicit Agent binding
+ * and no durable tag intent. The current Workbench adopts them on their next
+ * send so old conversations get the same live-cost and media migration UX as
+ * new ones. Direct callers of `session.create` keep their explicit semantics.
+ */
+async function ensureWorkbenchTagRoute(
+  get: () => WorkbenchState,
+  set: Setter,
+  client: Client,
+  sessionId: string,
+  pending: PendingMessage,
+): Promise<void> {
+  if (!client.identity?.features?.includes("agent-tag-routing.v1")) return;
+  const session = get().sessions.find((candidate) => candidate.id === sessionId);
+  if (!session || session.routingTags?.length || session.mediaTags?.length) return;
+  const preferences = normalizeAgentPreferences(
+    get().settings?.agentPreferences,
+    get().agents,
+  );
+  const tags = normalizeTags(
+    preferences.selectedTags?.length ? preferences.selectedTags : ["Flush"],
+  );
+  const mediaTags = mediaRequiredBy(pending).map((medium) =>
+    medium === "image" ? IMAGE_TAG : VIDEO_TAG,
+  );
+  const reply = await client.call({
+    type: "session.route",
+    payload: { sessionId, tags, mediaTags },
+  });
+  if (reply?.type !== "session") {
+    throw new Error("旧会话未能接入当前 Agent 标签路由，请重试");
+  }
+  adoptRoutedSession(reply.data, set);
+}
+
+function adoptRoutedSession(summary: SessionSummary, set: Setter): void {
+  set((current) => ({
+    sessions: current.sessions.map((session) =>
+      session.id === summary.id ? summary : session,
+    ),
+    timeline:
+      current.activeSessionId === summary.id
+        ? {
+            ...current.timeline,
+            modelId: summary.modelId ?? null,
+            modeId: summary.modeId ?? null,
+            effortId: summary.effortId ?? null,
+            runtimeValues: definedRuntimeValues(summary.runtimeValues),
+          }
+        : current.timeline,
+  }));
 }
 
 /** Marks a message as definitely not sent, keeping its text where it can be reused. */
@@ -2860,17 +2910,19 @@ function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>)
   set({ draft: next });
 }
 
-/** Keeps an unstarted conversation on the route its capability now resolves to. */
+/** Keeps an unstarted conversation on the cheapest route for all its tags. */
 function syncDraftRoute(
   get: () => WorkbenchState,
   set: Setter,
   preferences: AgentSelectionPreferences,
-  capability = get().draft?.capability,
+  tags = get().draft?.tags,
 ): void {
-  if (!capability || !get().draft) return;
-  const route = resolveCapabilityRoute(preferences, capability, get().agents);
+  if (!get().draft) return;
+  const selected = normalizeTags(tags?.length ? tags : preferences.selectedTags ?? ["Flush"]);
+  const route = resolveTagRoute(preferences, selected, get().agents);
   onDraft(get, set, {
-    capability,
+    tags: selected,
+    capability: capabilityForRoute(preferences, route?.agent.id ?? null, route?.modelId ?? null),
     agentId: route?.agent.id ?? null,
     modelId: route?.modelId ?? null,
     modeId: route?.modeId ?? null,
@@ -3064,6 +3116,25 @@ function applySessionStatus(
   event: import("@genehub/proto").SessionEvent,
   set: Setter,
 ): void {
+  if (event.type === "agentChanged") {
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              agentId: event.agentId,
+              modelId: event.modelId,
+              modeId: event.modeId,
+              effortId: event.effortId,
+              runtimeValues: event.runtimeValues,
+              routingTags: event.routingTags ?? session.routingTags,
+              mediaTags: event.mediaTags ?? session.mediaTags,
+            }
+          : session,
+      ),
+    }));
+    return;
+  }
   const status =
     event.type === "turnStarted"
       ? "running"

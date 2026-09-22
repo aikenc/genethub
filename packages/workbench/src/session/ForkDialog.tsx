@@ -2,18 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import {
-  CapabilityGrid,
   MachineGrid,
+  TagGrid,
   useMachineCatalog,
   WorkspaceList,
   type MachineCatalog,
   type MachineOption,
 } from "./MachineCatalogPicker";
-import {
-  capabilityForRoute,
-  normalizeAgentPreferences,
-} from "./capability-preferences";
-import type { AgentCapability } from "@genehub/proto";
 
 export type ForkMachineOption = MachineOption;
 export type ForkCatalog = MachineCatalog;
@@ -21,18 +16,14 @@ export type ForkCatalog = MachineCatalog;
 export interface ForkSelection {
   machine: ForkMachineOption;
   workspaceId: string;
-  capability: AgentCapability;
-  agentId: string;
-  modelId: string | null;
-  modeId: string | null;
-  effortId: string | null;
+  tags: string[];
 }
 
 export function ForkDialog({
   sourceMachine,
   sourceWorkspaceId,
   sourceAgentId,
-  sourceModelId,
+  sourceTags,
   sourceCatalog,
   hasNativeCheckpoint,
   listMachines,
@@ -44,6 +35,7 @@ export function ForkDialog({
   sourceWorkspaceId: string;
   sourceAgentId: string;
   sourceModelId: string | null;
+  sourceTags?: string[];
   sourceCatalog: ForkCatalog;
   hasNativeCheckpoint: boolean;
   listMachines?(): Promise<ForkMachineOption[]>;
@@ -51,23 +43,14 @@ export function ForkDialog({
   onClose(): void;
   onConfirm(selection: ForkSelection): Promise<boolean>;
 }) {
-  const sourcePreferences = normalizeAgentPreferences(
-    sourceCatalog.agentPreferences,
-    sourceCatalog.agents,
-  );
-  const sourceCapability = capabilityForRoute(
-    sourcePreferences,
-    sourceAgentId,
-    sourceModelId,
-  );
   const {
     machines,
     selectedMachine,
     catalog,
     workspaceId: selectedWorkspaceId,
     setWorkspaceId: setSelectedWorkspaceId,
-    capability: selectedCapability,
-    setCapability: setSelectedCapability,
+    tags: selectedTags,
+    setTags: setSelectedTags,
     preferences,
     route: selectedRoute,
     loadingMachines,
@@ -79,7 +62,7 @@ export function ForkDialog({
     sourceMachine,
     sourceCatalog,
     sourceWorkspaceId,
-    sourceCapability,
+    sourceTags,
     listMachines,
     loadCatalog,
   });
@@ -174,14 +157,14 @@ export function ForkDialog({
             onSelect={setSelectedWorkspaceId}
           />
 
-          <CapabilityGrid
+          <TagGrid
             agents={catalog.agents}
             preferences={preferences}
-            selectedCapability={selectedCapability}
+            selectedTags={selectedTags}
             disabled={busy || loadingCatalog}
-            onSelect={setSelectedCapability}
-            currentCapability={
-              selectedMachine.id === sourceMachine.id ? sourceCapability : undefined
+            onSelect={setSelectedTags}
+            currentTags={
+              selectedMachine.id === sourceMachine.id ? sourceTags : undefined
             }
           />
 
@@ -221,11 +204,7 @@ export function ForkDialog({
               void onConfirm({
                 machine: selectedMachine,
                 workspaceId: selectedWorkspaceId,
-                capability: selectedCapability,
-                agentId: selectedRoute.agent.id,
-                modelId: selectedRoute.modelId,
-                modeId: selectedRoute.modeId,
-                effortId: selectedRoute.effortId,
+                tags: selectedTags,
               })
                 .then((created) => {
                   if (created) onClose();

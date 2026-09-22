@@ -83,12 +83,20 @@ const AGENTS: AgentInfo[] = [
 ];
 
 const PREFERENCES: AgentSelectionPreferences = {
-  capabilities: {
-    planning: [{ agentId: "genet", modelId: "deepseek/v4" }],
-    coding: [{ agentId: "claude" }],
-    multimodal: [],
-  },
+  capabilities: { planning: [], coding: [], multimodal: [] },
   selectedCapability: "planning",
+  selectedTags: ["Pro"],
+  modelProfiles: [
+    { agentId: "genet", modelId: "deepseek/v4", tags: ["Pro"], cost: "medium" },
+    { agentId: "genet", modelId: "vision", tags: ["Pro", "图片理解"], cost: "high" },
+    {
+      agentId: "genet",
+      modelId: "omni",
+      tags: ["Pro", "图片理解", "视频理解"],
+      cost: "veryHigh",
+    },
+    { agentId: "claude", tags: ["Flush"], cost: "low" },
+  ],
   runtimes: {
     genet: { effortId: "high", runtimeValues: {} },
     claude: { modeId: "bypassPermissions", runtimeValues: {} },
@@ -97,7 +105,7 @@ const PREFERENCES: AgentSelectionPreferences = {
 
 function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {}) {
   const callbacks = {
-    onPickCapability: vi.fn(),
+    onPickTags: vi.fn(),
     onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => {}),
     onPickMode: vi.fn(),
     onPickEffort: vi.fn(),
@@ -108,7 +116,7 @@ function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {
     <ComposerControls
       agents={AGENTS}
       preferences={PREFERENCES}
-      capability="planning"
+      tags={["Pro"]}
       agentId="genet"
       modelId="deepseek/v4"
       modeId={null}
@@ -120,45 +128,46 @@ function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {
   return callbacks;
 }
 
-async function openSettings(name: RegExp = /能力：规划/) {
+async function openSettings(name: RegExp = /路由：GeneHub Agent/) {
   const trigger = screen.getByRole("button", { name });
   await userEvent.click(trigger);
-  return { trigger, dialog: screen.getByRole("dialog", { name: "能力与运行设置" }) };
+  return { trigger, dialog: screen.getByRole("dialog", { name: "标签与运行设置" }) };
 }
 
-describe("the capability-first composer control", () => {
-  it("shows capability and compact runtime state without exposing Agent selection", () => {
+describe("the tag-routed composer control", () => {
+  it("shows the resolved Agent and model in the compact trigger", () => {
     controls();
-    expect(
-      screen.getByRole("button", { name: "能力：规划；思考强度：高" }),
-    ).toHaveAttribute("aria-expanded", "false");
-    expect(screen.getByText("规划")).toBeInTheDocument();
-    expect(screen.queryByText("GeneHub Agent")).not.toBeInTheDocument();
-    expect(screen.queryByText("DeepSeek V4")).not.toBeInTheDocument();
+    const trigger = screen.getByRole("button", {
+      name: /路由：GeneHub Agent · DeepSeek.*标签：Pro.*思考强度：高/,
+    });
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
+    expect(trigger).toHaveTextContent(/GeneHub Agent · DeepSeek/);
   });
 
-  it("offers exactly the three built-in capabilities and disables an empty route", async () => {
+  it("selects multiple tags with AND semantics", async () => {
     const callbacks = controls();
     const { dialog } = await openSettings();
-    expect(within(dialog).getAllByRole("radio")).toHaveLength(3);
-    expect(within(dialog).getByRole("radio", { name: /规划/ })).toBeChecked();
-    expect(within(dialog).getByRole("radio", { name: /多模态理解/ })).toBeDisabled();
-
-    await userEvent.click(within(dialog).getByRole("radio", { name: /编码/ }));
-    expect(callbacks.onPickCapability).toHaveBeenCalledWith("coding");
+    expect(within(dialog).getByRole("button", { name: "Pro" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await userEvent.click(within(dialog).getByRole("button", { name: "Max" }));
+    expect(callbacks.onPickTags).toHaveBeenCalledWith(["Pro", "Max"]);
   });
 
-  it("does not substitute a default Agent when the selected capability has no route", async () => {
-    controls({
-      capability: "multimodal",
-      agentId: null,
-      modelId: null,
-      modeId: null,
-      effortId: null,
-    });
-    const { dialog } = await openSettings(/能力：多模态理解/);
+  it("shows media tags as automatic and prevents removing them", async () => {
+    controls({ mediaTags: ["图片理解"] });
+    const { dialog } = await openSettings();
+    const image = within(dialog).getByRole("button", { name: /图片理解 · 自动/ });
+    expect(image).toBeDisabled();
+    expect(image).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("does not substitute an Agent when no row matches every tag", async () => {
+    controls({ tags: ["Max"], agentId: null, modelId: null, effortId: null });
+    const { dialog } = await openSettings(/路由：未匹配 Agent/);
+    expect(within(dialog).getByText(/没有 Agent 与模型同时匹配全部标签/)).toBeInTheDocument();
     expect(within(dialog).queryByLabelText("思考强度")).not.toBeInTheDocument();
-    expect(within(dialog).getByText(/没有可用的 Agent 与模型/)).toBeInTheDocument();
   });
 
   it("keeps thinking and permission in compact selects", async () => {
@@ -166,71 +175,42 @@ describe("the capability-first composer control", () => {
     let opened = await openSettings();
     await userEvent.selectOptions(within(opened.dialog).getByLabelText("思考强度"), "medium");
     expect(planning.onPickEffort).toHaveBeenCalledWith("medium");
-    await userEvent.click(within(opened.dialog).getByRole("button", { name: "关闭能力设置" }));
+    await userEvent.click(within(opened.dialog).getByRole("button", { name: "关闭设置" }));
 
     const coding = controls({
-      capability: "coding",
+      tags: ["Flush"],
       agentId: "claude",
       modelId: null,
       modeId: "bypassPermissions",
       effortId: null,
     });
-    opened = await openSettings(/能力：编码；权限：完全访问/);
+    opened = await openSettings(/路由：Claude Code/);
     expect(within(opened.dialog).getByLabelText("权限")).toHaveValue("bypassPermissions");
     await userEvent.selectOptions(within(opened.dialog).getByLabelText("权限"), "default");
     expect(coding.onPickMode).toHaveBeenCalledWith("default");
   });
 
-  it("opens the ordered Agent + model editor and saves the whole machine value", async () => {
+  it("edits cost and one-to-four tags for every exact Agent + model row", async () => {
     const callbacks = controls();
     const { dialog } = await openSettings();
-    await userEvent.click(within(dialog).getByRole("button", { name: "编辑能力首选项" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
 
-    expect(screen.getByRole("dialog", { name: "能力首选 Agent" })).toBeInTheDocument();
-    expect(screen.getByRole("tablist", { name: "内置能力" })).toBeInTheDocument();
-    expect(screen.getByLabelText("第 1 项 Agent")).toHaveValue("genet");
-    expect(screen.getByLabelText("第 1 项模型")).toHaveValue("deepseek/v4");
-    expect(screen.getByRole("button", { name: "保存到这台机器" })).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole("button", { name: "添加首选项" }));
-    expect(screen.getByLabelText("第 2 项 Agent")).toHaveValue("genet");
-    expect(screen.getByLabelText("第 2 项模型")).toHaveValue("vision");
-    expect(
-      within(screen.getByLabelText("第 2 项模型")).getByRole("option", {
-        name: /DeepSeek V4（已配置）/,
-      }),
-    ).toBeDisabled();
-    await userEvent.selectOptions(screen.getByLabelText("第 2 项模型"), "omni");
-    await userEvent.click(screen.getByRole("button", { name: "上移第 2 项" }));
+    expect(screen.getByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(4);
+    const cost = screen.getByLabelText("GeneHub Agent DeepSeek V4 成本");
+    await userEvent.selectOptions(cost, "veryHigh");
+    await userEvent.click(screen.getAllByRole("button", { name: "Max" })[0]!);
+    const custom = screen.getByLabelText("GeneHub Agent DeepSeek V4 自定义标签");
+    await userEvent.type(custom, "私有{Enter}");
     await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
+
     await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
-    expect(callbacks.onSavePreferences.mock.calls[0]?.[0].capabilities.planning).toEqual([
-      { agentId: "genet", modelId: "omni" },
-      { agentId: "genet", modelId: "deepseek/v4" },
-    ]);
-  });
-
-  it("marks image and video support on every model choice", async () => {
-    controls();
-    const { dialog } = await openSettings();
-    await userEvent.click(within(dialog).getByRole("button", { name: "编辑能力首选项" }));
-
-    const model = screen.getByLabelText("第 1 项模型");
-    expect(within(model).getByRole("option", { name: /DeepSeek V4 · 图片— · 视频—/ })).toBeInTheDocument();
-    expect(within(model).getByRole("option", { name: /Vision · 图片✓ · 视频—/ })).toBeInTheDocument();
-    expect(within(model).getByRole("option", { name: /Omni · 图片✓ · 视频✓/ })).toBeInTheDocument();
-    expect(screen.getByLabelText("第 1 项媒体输入支持")).toHaveTextContent("图片 —视频 —");
-
-    await userEvent.selectOptions(model, "omni");
-    expect(screen.getByLabelText("第 1 项媒体输入支持")).toHaveTextContent("图片 ✓视频 ✓");
-  });
-
-  it("locks capability switching after history but leaves runtime controls usable", async () => {
-    controls({ agentLocked: true });
-    const { dialog } = await openSettings();
-    expect(within(dialog).getByRole("radio", { name: /规划/ })).toBeDisabled();
-    expect(within(dialog).getByLabelText("思考强度")).toBeEnabled();
-    expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
+    const saved = callbacks.onSavePreferences.mock.calls[0]![0];
+    expect(saved.modelProfiles?.find((row) => row.modelId === "deepseek/v4")).toMatchObject({
+      agentId: "genet",
+      cost: "veryHigh",
+      tags: ["Pro", "Max", "私有"],
+    });
   });
 
   it("restores focus and closes on Escape", async () => {

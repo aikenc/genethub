@@ -1,5 +1,5 @@
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
@@ -92,7 +92,7 @@ defineSpecialty({
     const workflowFile = path.join(source, "flows/game-dev.yaml");
     const schema = "genehub.workflow.definition.v1"; // This permission fixture intentionally exercises legacy compatibility.
     const roleFile = path.join(source, "roles/coder.yaml");
-    const roleSchema = readFileSync(roleFile, "utf8").split("\n")[0]?.split(": ")[1];
+    const roleSchema = "genehub.workflow.role.v1";
     writeFileSync(roleFile, JSON.stringify({ schema: roleSchema, id: "coder", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/exception-worker.md" }));
     writeFileSync(path.join(source, "prompts/exception-worker.md"), "EXCEPTION_TEST_WORKER: complete assigned node only.");
     writeFileSync(workflowFile, JSON.stringify({ schema, id: "game-dev", version: 1, entry: "check", nodes: [

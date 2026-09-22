@@ -1,5 +1,5 @@
-schema: genehub.workflow.role.v2
+schema: genehub.workflow.role.v3
 id: coder
-capability: coding
+tags: [Flush]
 userInteraction: readOnly
 prompt: prompts/coder.md

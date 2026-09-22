@@ -427,6 +427,32 @@ impl SessionManager {
                 }
             }
         }
+        // Route only when delivery is actually about to start. Durable input
+        // may wait behind another turn; switching at admission would either
+        // reject a safely queued message or race the Agent that is still
+        // producing the current answer.
+        let queued_ids = meta
+            .inbox
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.state.as_str(), "queued" | "sent"))
+            .map(|entry| entry.message_id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let media_tags = {
+            let items = live.items.lock().await;
+            crate::agent_routing::media_tags_for_mimes(items.iter().flat_map(|item| {
+                match item {
+                    TimelineItem::UserMessage {
+                        id, attachments, ..
+                    } if queued_ids.contains(id.as_str()) => attachments
+                        .iter()
+                        .map(|attachment| attachment.mime.as_str())
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                }
+            }))
+        };
+        crate::agent_routing::route_session(state, &meta.id, None, media_tags).await?;
         let _interaction = live.interaction_lock.lock().await;
         if live.execution.lock().await.is_some() || live.meta.lock().await.inbox.paused {
             return Ok(());
@@ -616,13 +642,19 @@ mod tests {
 
         assert_eq!(primary, Lane::Human, "a waiting person wins the turn");
         assert_eq!(
-            pending.iter().map(|e| e.message_id.as_str()).collect::<Vec<_>>(),
+            pending
+                .iter()
+                .map(|e| e.message_id.as_str())
+                .collect::<Vec<_>>(),
             ["m_typed"],
         );
         // Deferred entries are not dropped: they stay queued, and the 250ms
         // delivery tick picks them up once the human lane is drained.
         assert_eq!(
-            deferred.iter().map(|e| e.message_id.as_str()).collect::<Vec<_>>(),
+            deferred
+                .iter()
+                .map(|e| e.message_id.as_str())
+                .collect::<Vec<_>>(),
             ["m_notice", "m_second_notice"],
         );
     }

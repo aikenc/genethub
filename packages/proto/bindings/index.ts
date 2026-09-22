@@ -26,6 +26,13 @@ enabled: boolean,
  */
 role?: string, };
 
+/**
+ * A deliberately coarse, comparable five-step cost level used by the
+ * machine-global tag router. It is intentionally independent of provider
+ * billing units so local and hosted Agents remain comparable.
+ */
+export type AgentCostLevel = "veryLow" | "low" | "medium" | "high" | "veryHigh";
+
 export type AgentInfo = { id: string, label: string, probe: ProbeState, capabilities: Capabilities, catalog: Catalog, 
 /**
  * True for the agent shipped in the installer, which is preselected on
@@ -34,15 +41,42 @@ export type AgentInfo = { id: string, label: string, probe: ProbeState, capabili
 builtin: boolean, };
 
 /**
+ * Machine-global routing configuration for one exact Agent + model pair.
+ * Every route has one to four AND-match tags and one live cost level.
+ */
+export type AgentModelProfile = { agentId: string, modelId?: string, tags: Array<string>, cost?: AgentCostLevel, };
+
+/**
  * Last runtime choices for one Agent. Values are checked against the live
  * catalog by the client before they are used; stale ids remain harmless.
  */
 export type AgentRuntimePreference = { effortId?: string, modeId?: string, runtimeValues: { [key in string]?: string }, };
 
 /**
- * Machine-global capability routing and compact runtime defaults.
+ * Machine-global tag routing, live cost configuration and compact runtime
+ * defaults. Concrete route choices are never persisted here: every dispatch
+ * re-evaluates tags against the current costs.
  */
-export type AgentSelectionPreferences = { capabilities: CapabilityAgentPreferences, selectedCapability: AgentCapability, runtimes: { [key in string]?: AgentRuntimePreference }, };
+export type AgentSelectionPreferences = { 
+/**
+ * Deprecated read compatibility for clients older than tag routing. The
+ * daemon never consults these ordered lists.
+ */
+capabilities: CapabilityAgentPreferences, 
+/**
+ * Deprecated read compatibility. New clients use `selectedTags`.
+ */
+selectedCapability: AgentCapability, runtimes: { [key in string]?: AgentRuntimePreference }, 
+/**
+ * Sparse Human overrides. Missing catalog rows use deterministic inferred
+ * tags and cost until the Human changes them.
+ */
+modelProfiles?: Array<AgentModelProfile>, 
+/**
+ * Tags preselected for a new chat on this machine. Session-specific tags
+ * are persisted with each conversation once it starts.
+ */
+selectedTags?: Array<string>, };
 
 export type AgentSpaceBuilderDiagnostic = { level: string, code: string, message: string, sources: Array<string>, target?: string, semanticKey?: string, action?: string, };
 
@@ -257,8 +291,8 @@ resume: boolean,
 fork: boolean, attachments: boolean, };
 
 /**
- * Built-in capability routes. Order is significant and every list is bounded
- * to five entries by the daemon's settings mutation.
+ * Deprecated capability lists retained only for wire compatibility. Current
+ * clients and dispatchers use `AgentModelProfile.tags` plus live cost.
  */
 export type CapabilityAgentPreferences = { planning: Array<PreferredAgentModel>, coding: Array<PreferredAgentModel>, multimodal: Array<PreferredAgentModel>, };
 
@@ -484,7 +518,12 @@ export type ForkTarget = { agentId: string,
  * Required destination workspace for a directed fork. Older clients omit
  * it and keep the source workspace on the current machine.
  */
-workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, };
+workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, 
+/**
+ * Runtime axes selected for this exact Agent. Routed forks fill these
+ * from the machine-global remembered choices at execution time.
+ */
+runtimeValues?: { [key in string]?: string }, };
 
 /**
  * Portable, untrusted material exported by the source daemon for a fork on a
@@ -818,7 +857,8 @@ pm: boolean,
 workerRole?: string, lifecycle: string, builderLockDigest: string, };
 
 /**
- * One exact route in a capability's ordered fallback list.
+ * Deprecated capability-list row retained only for older clients on the wire.
+ * Tag routing ignores these rows.
  */
 export type PreferredAgentModel = { agentId: string, 
 /**
@@ -911,7 +951,7 @@ recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: st
  * than clamping — a task silently run in the wrong directory is worse
  * than one that refused to start.
  */
-cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, 
+cwd: string | null, } } | { "type": "session.createRouted", "payload": { workspaceId: string, tags: Array<string>, mediaTags: Array<string>, title: string | null, cwd: string | null, } } | { "type": "workflow.inspect", "payload": { workspaceId: string, 
 /**
  * Required once a project holds more than one package.
  */
@@ -1010,7 +1050,7 @@ continuesRound: string | null, } } | { "type": "session.artifact.begin", "payloa
  * explicit target to opt into provider-agnostic reconstruction when
  * any destination dimension changes or a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -1166,6 +1206,13 @@ export type SequencedEvent = { seq: number, sessionId: string, event: SessionEve
 export type ServerFrame = { "type": "event", topic: string, payload: SequencedEvent, } | { "type": "pty", ptyId: string, data: string, } | { "type": "ptyClosed", ptyId: string, exitCode?: number, } | { "type": "notice", level: NoticeLevel, message: string, } | { "type": "updateDownload", download: UpdateDownload, } | { "type": "processes", processes: Array<BackgroundProcess>, } | { "type": "desync", sessionId: string, missed: number, };
 
 /**
+ * One complete runtime destination for changing the Agent behind an existing
+ * GeneHub Session. Unlike a Fork target it cannot change workspace identity:
+ * the conversation stays put while its Agent-native context is reconstructed.
+ */
+export type SessionAgentTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, runtimeValues: { [key in string]?: string }, };
+
+/**
  * A complete daemon-owned artifact bundle. Chat needs only these locators and
  * counts; the payload remains on the machine that owns the session.
  */
@@ -1218,7 +1265,7 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * Zero is accepted from adapters; the session boundary replaces it
  * with its own wall clock before the event reaches a client.
  */
-startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "agentChanged", agentId: string, modelId?: string, modeId?: string, effortId?: string, runtimeValues: { [key in string]?: string }, routingTags?: Array<string>, mediaTags?: Array<string>, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
  * Immutable evidence access granted to a managed analysis session.
@@ -1364,6 +1411,16 @@ messagePreview?: SessionMessagePreview,
  * only for the open composer so session lists never carry attachment data.
  */
 draftCount?: number, id: string, workspaceId: string, agentId: string, 
+/**
+ * Human-selected AND-match tags for this conversation. The concrete
+ * Agent/model may change whenever current machine costs change.
+ */
+routingTags?: Array<string>, 
+/**
+ * Media requirements accumulated from the visible conversation. These
+ * tags are daemon-owned and cannot be removed by the composer.
+ */
+mediaTags?: Array<string>, 
 /**
  * Present only when a project Workflow created this otherwise ordinary
  * Session. There is no parallel WorkSession runtime: timeline, storage,
@@ -1754,6 +1811,11 @@ export type TurnOutcome = "completed" | "failed" | "canceled";
  * Metrics retained with the turn rather than only with the latest event.
  */
 export type TurnStats = { turnId: string, outcome: TurnOutcome, startedAtMs: number, finishedAtMs: number, durationMs: number, usage: Usage, toolCalls: number, 
+/**
+ * Exact runtime that produced this turn. Optional for histories written
+ * before in-session Agent switching existed.
+ */
+agentId?: string, modelId?: string, 
 /**
  * Opaque Agent checkpoint used only when that Agent supports true forks.
  */

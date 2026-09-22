@@ -87,6 +87,20 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
+    /// Creates a Session by resolving AND-match tags against live machine
+    /// configuration. No concrete route is cached by the client.
+    #[serde(rename = "session.createRouted", rename_all = "camelCase")]
+    SessionCreateRouted {
+        workspace_id: String,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        media_tags: Vec<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
     /// Reads and validates one Workflow package's source under
     /// `.genethub/workflows/<id>/`. The target must be a non-worker project
     /// entry; its optional PM marker is irrelevant. This is a pure projection
@@ -512,12 +526,32 @@ pub enum Request {
         #[ts(optional)]
         target: Option<ForkTarget>,
     },
+    /// Forks by an AND-match tag contract. The daemon resolves the concrete
+    /// Agent/model from fresh machine-global costs only when this executes.
+    #[serde(rename = "session.forkRouted", rename_all = "camelCase")]
+    SessionForkRouted {
+        session_id: String,
+        turn_id: String,
+        workspace_id: String,
+        #[serde(default)]
+        tags: Vec<String>,
+    },
     #[serde(rename = "session.forkExport", rename_all = "camelCase")]
     SessionForkExport { session_id: String, turn_id: String },
     #[serde(rename = "session.forkImport", rename_all = "camelCase")]
     SessionForkImport {
         transfer: ForkTransfer,
         target: ForkTarget,
+    },
+    /// Cross-machine counterpart of `session.forkRouted`. The destination
+    /// daemon owns route resolution, so source-machine costs never leak into
+    /// the decision.
+    #[serde(rename = "session.forkImportRouted", rename_all = "camelCase")]
+    SessionForkImportRouted {
+        transfer: ForkTransfer,
+        workspace_id: String,
+        #[serde(default)]
+        tags: Vec<String>,
     },
     /// Lists lightweight, workspace-scoped candidates from every installed
     /// Agent. Full histories are not read until `session.import` selects one.
@@ -560,6 +594,22 @@ pub enum Request {
     SessionSetModel {
         session_id: String,
         model_id: String,
+    },
+    /// Reconstructs the current conversation into a different Agent/model
+    /// while preserving the GeneHub Session id and visible timeline.
+    #[serde(rename = "session.switchAgent", rename_all = "camelCase")]
+    SessionSwitchAgent {
+        session_id: String,
+        target: SessionAgentTarget,
+    },
+    /// Resolves all tags with AND semantics against the latest machine-global
+    /// costs, then migrates this same Session when the winning route changes.
+    #[serde(rename = "session.route", rename_all = "camelCase")]
+    SessionRoute {
+        session_id: String,
+        tags: Vec<String>,
+        #[serde(default)]
+        media_tags: Vec<String>,
     },
     #[serde(rename = "session.setMode", rename_all = "camelCase")]
     SessionSetMode { session_id: String, mode_id: String },
@@ -612,7 +662,7 @@ pub enum Request {
         model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
     },
 
-    /// Replaces the machine-global capability routes and remembered runtime
+    /// Replaces machine-global Agent/model tag, cost and remembered runtime
     /// choices. These preferences are deliberately independent of workspaces.
     #[serde(rename = "settings.setAgentPreferences", rename_all = "camelCase")]
     SettingsSetAgentPreferences {

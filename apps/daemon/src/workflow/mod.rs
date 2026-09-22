@@ -14,10 +14,9 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use genehub_proto::{
-    AgentCapability, AgentInfo, AgentSelectionPreferences, ExecutorFlowStatus, FlowMessageStatus,
-    ManagedSessionInfo, ProbeState, SessionSummary, SessionUserInteraction,
-    WorkflowActivationStatus, WorkflowCatalogEntryStatus, WorkflowNodeRunStatus,
-    WorkflowProjectStatus, WorkflowRequestBudgetStatus, WorkflowRunStatus,
+    AgentCapability, ExecutorFlowStatus, FlowMessageStatus, ManagedSessionInfo, SessionSummary,
+    SessionUserInteraction, WorkflowActivationStatus, WorkflowCatalogEntryStatus,
+    WorkflowNodeRunStatus, WorkflowProjectStatus, WorkflowRequestBudgetStatus, WorkflowRunStatus,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -64,7 +63,8 @@ const MAX_LEASE_SECONDS: u64 = 24 * 60 * 60;
 const DEFINITION_SCHEMA: &str = "genehub.workflow.definition.v1";
 const PROCEDURES_SCHEMA: &str = "genehub.workflow.procedures.v1";
 const LEGACY_ROLE_SCHEMA: &str = "genehub.workflow.role.v1";
-const ROLE_SCHEMA: &str = "genehub.workflow.role.v2";
+const CAPABILITY_ROLE_SCHEMA: &str = "genehub.workflow.role.v2";
+const ROLE_SCHEMA: &str = "genehub.workflow.role.v3";
 const CANDIDATE_SCHEMA: &str = "genehub.workflow.candidate.v1";
 const ACTIVATION_SCHEMA: &str = "genehub.workflow.activation.v1";
 
@@ -113,7 +113,10 @@ const VERIFIERS: &[Verifier] = &[
         expects_value: true,
         check: |value, expected| {
             let expected = expected.expect("value.oneOf declares an expected value");
-            if !expected.split('|').any(|candidate| candidate.trim() == value) {
+            if !expected
+                .split('|')
+                .any(|candidate| candidate.trim() == value)
+            {
                 bail!("证据必须是 {expected:?} 之一，收到 {value:?}");
             }
             Ok(())
@@ -334,6 +337,8 @@ struct RoleSnapshot {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capability: Option<AgentCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
     /// Read-only compatibility for already activated role.v1 snapshots. New
     /// role.v2 source cannot name an Agent or model; it declares capability
     /// intent and lets this machine resolve the concrete route at dispatch.
@@ -356,23 +361,50 @@ impl RoleSnapshot {
     fn validate_binding(&self) -> Result<()> {
         match self.schema.as_str() {
             ROLE_SCHEMA => {
-                if self.capability.is_none() {
-                    bail!("角色 {} 必须声明 capability", self.id);
+                if self.tags.is_empty() || self.tags.len() > 4 {
+                    bail!("角色 {} 必须声明 1 至 4 个 tags", self.id);
                 }
-                if self.agent_id.is_some()
+                if self
+                    .tags
+                    .iter()
+                    .any(|tag| !crate::agent_routing::is_builtin_tag(tag))
+                {
+                    bail!("角色 {} 的 tags 只能使用平台内置标签", self.id);
+                }
+                if self.capability.is_some()
+                    || self.agent_id.is_some()
                     || self.model_id.is_some()
                     || self.mode_id.is_some()
                     || !self.runtime_values.is_empty()
                 {
                     bail!(
-                        "角色 {} 使用 {ROLE_SCHEMA} 时只能声明能力方向，不能配置 agentId、modelId、modeId 或 runtimeValues",
+                        "角色 {} 使用 {ROLE_SCHEMA} 时只能声明内置 tags，不能配置 capability、agentId、modelId、modeId 或 runtimeValues",
+                        self.id
+                    );
+                }
+            }
+            CAPABILITY_ROLE_SCHEMA => {
+                if self.capability.is_none() {
+                    bail!("角色 {} 必须声明 capability", self.id);
+                }
+                if !self.tags.is_empty()
+                    || self.agent_id.is_some()
+                    || self.model_id.is_some()
+                    || self.mode_id.is_some()
+                    || !self.runtime_values.is_empty()
+                {
+                    bail!(
+                        "角色 {} 使用 {CAPABILITY_ROLE_SCHEMA} 时只能声明 capability",
                         self.id
                     );
                 }
             }
             LEGACY_ROLE_SCHEMA => {
-                if self.capability.is_some() {
-                    bail!("旧角色 {} 不能声明 capability；请迁移到 {ROLE_SCHEMA}", self.id);
+                if self.capability.is_some() || !self.tags.is_empty() {
+                    bail!(
+                        "旧角色 {} 不能声明 capability 或 tags；请迁移到 {ROLE_SCHEMA}",
+                        self.id
+                    );
                 }
                 if self.agent_id.as_deref().is_none_or(str::is_empty) {
                     bail!("旧角色 {} 缺少 agentId", self.id);
@@ -384,241 +416,15 @@ impl RoleSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
-struct ResolvedRoleRoute {
-    agent_id: String,
-    model_id: Option<String>,
-    effort_id: Option<String>,
-    mode_id: Option<String>,
-    runtime_values: BTreeMap<String, String>,
-}
+type ResolvedRoleRoute = crate::agent_routing::ResolvedAgentRoute;
 
-#[derive(Debug)]
-struct CapabilityRouteUnavailable {
-    message: String,
-}
-
-impl std::fmt::Display for CapabilityRouteUnavailable {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
+fn legacy_capability_tags(capability: AgentCapability) -> Vec<String> {
+    vec![match capability {
+        AgentCapability::Planning => crate::agent_routing::TAG_PRO,
+        AgentCapability::Coding => crate::agent_routing::TAG_FLUSH,
+        AgentCapability::Multimodal => crate::agent_routing::TAG_IMAGE,
     }
-}
-
-impl std::error::Error for CapabilityRouteUnavailable {}
-
-fn capability_label(capability: AgentCapability) -> &'static str {
-    match capability {
-        AgentCapability::Planning => "规划",
-        AgentCapability::Coding => "编码",
-        AgentCapability::Multimodal => "多模态理解",
-    }
-}
-
-fn capability_routes(
-    preferences: &AgentSelectionPreferences,
-    capability: AgentCapability,
-) -> &[genehub_proto::PreferredAgentModel] {
-    match capability {
-        AgentCapability::Planning => &preferences.capabilities.planning,
-        AgentCapability::Coding => &preferences.capabilities.coding,
-        AgentCapability::Multimodal => &preferences.capabilities.multimodal,
-    }
-}
-
-fn can_start_without_model_catalog(agent_id: &str) -> bool {
-    agent_id != "genet"
-}
-
-fn default_effort(agent: &AgentInfo, model_id: Option<&str>) -> Option<String> {
-    let efforts = model_id
-        .and_then(|id| agent.catalog.models.iter().find(|model| model.id == id))
-        .map(|model| model.efforts.as_slice())
-        .unwrap_or_default();
-    if efforts.iter().any(|effort| effort == "high") {
-        return Some("high".into());
-    }
-    if efforts.is_empty() {
-        return None;
-    }
-    efforts
-        .get(((efforts.len() * 2) / 3).min(efforts.len() - 1))
-        .cloned()
-}
-
-fn unrestricted_mode(agent: &AgentInfo) -> Option<String> {
-    if !agent.capabilities.permissions {
-        return None;
-    }
-    let known = match agent.id.as_str() {
-        "codex" | "acp:codex" | "acp:codex-acp" => &["full-access"][..],
-        "claude" | "tclaude" | "acp:claude" | "acp:claude-code" => {
-            &["bypassPermissions"][..]
-        }
-        _ => &[][..],
-    };
-    known
-        .iter()
-        .find_map(|id| {
-            agent
-                .catalog
-                .modes
-                .iter()
-                .find(|mode| mode.id.eq_ignore_ascii_case(id))
-        })
-        .or_else(|| {
-            agent.catalog.modes.iter().find(|mode| {
-                let id = mode.id.to_ascii_lowercase();
-                let label = mode.label.to_ascii_lowercase();
-                matches!(
-                    id.as_str(),
-                    "full-access" | "full_access" | "unrestricted" | "bypasspermissions"
-                ) || label.contains("full access")
-                    || label.contains("unrestricted")
-                    || mode.label.contains("完全")
-                    || mode.label.contains("全开")
-            })
-        })
-        .map(|mode| mode.id.clone())
-}
-
-fn select_capability_route(
-    preferences: &AgentSelectionPreferences,
-    capability: AgentCapability,
-    agents: &[AgentInfo],
-    registry: &crate::adapter::registry::Registry,
-    evidence_only: bool,
-) -> Result<ResolvedRoleRoute> {
-    let routes = capability_routes(preferences, capability);
-    if routes.is_empty() {
-        return Err(anyhow::Error::new(CapabilityRouteUnavailable {
-            message: format!(
-                "workflowCapabilityUnavailable: 能力「{}」尚未配置首选 Agent；请在聊天框的能力设置中为这台机器配置后重试",
-                capability_label(capability)
-            ),
-        }));
-    }
-    if routes.len() > 5 {
-        return Err(anyhow::Error::new(CapabilityRouteUnavailable {
-            message: format!(
-                "workflowCapabilityUnavailable: 能力「{}」的机器级首选列表超过 5 项；请由人类修正配置后重试",
-                capability_label(capability)
-            ),
-        }));
-    }
-
-    let mut rejected = Vec::new();
-    for preferred in routes {
-        let Some(agent) = agents.iter().find(|agent| agent.id == preferred.agent_id) else {
-            rejected.push(format!("{}：未注册", preferred.agent_id));
-            continue;
-        };
-        match &agent.probe {
-            ProbeState::Ready => {}
-            ProbeState::NotInstalled => {
-                rejected.push(format!("{}：未安装", preferred.agent_id));
-                continue;
-            }
-            ProbeState::Unavailable { reason } => {
-                rejected.push(format!("{}：{}", preferred.agent_id, reason));
-                continue;
-            }
-        }
-        if evidence_only
-            && registry
-                .get(&agent.id)
-                .is_none_or(|adapter| !adapter.supports_evidence_scope())
-        {
-            rejected.push(format!("{}：不支持 evidenceOnly", preferred.agent_id));
-            continue;
-        }
-
-        let model_id = if agent.catalog.models.is_empty() {
-            if can_start_without_model_catalog(&agent.id) {
-                preferred.model_id.clone()
-            } else {
-                rejected.push(format!("{}：没有可用模型", preferred.agent_id));
-                continue;
-            }
-        } else if let Some(model_id) = preferred.model_id.as_deref() {
-            if agent.catalog.models.iter().any(|model| model.id == model_id) {
-                Some(model_id.to_string())
-            } else {
-                rejected.push(format!("{} / {}：模型不可用", preferred.agent_id, model_id));
-                continue;
-            }
-        } else {
-            agent
-                .catalog
-                .default_model
-                .as_ref()
-                .filter(|id| agent.catalog.models.iter().any(|model| &model.id == *id))
-                .cloned()
-                .or_else(|| agent.catalog.models.first().map(|model| model.id.clone()))
-        };
-
-        let remembered = preferences.runtimes.get(&agent.id);
-        let offered_efforts = model_id
-            .as_deref()
-            .and_then(|id| agent.catalog.models.iter().find(|model| model.id == id))
-            .map(|model| model.efforts.as_slice())
-            .unwrap_or_default();
-        let effort_id = remembered
-            .and_then(|runtime| runtime.effort_id.as_ref())
-            .filter(|id| offered_efforts.contains(id))
-            .cloned()
-            .or_else(|| default_effort(agent, model_id.as_deref()));
-        let mode_id = remembered
-            .and_then(|runtime| runtime.mode_id.as_ref())
-            .filter(|id| agent.catalog.modes.iter().any(|mode| &mode.id == *id))
-            .cloned()
-            .or_else(|| unrestricted_mode(agent))
-            .or_else(|| {
-                agent
-                    .catalog
-                    .default_mode
-                    .as_ref()
-                    .filter(|id| agent.catalog.modes.iter().any(|mode| &mode.id == *id))
-                    .cloned()
-            })
-            .or_else(|| agent.catalog.modes.first().map(|mode| mode.id.clone()));
-        let runtime_values = agent
-            .catalog
-            .runtime_axes
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|axis| {
-                let remembered = remembered
-                    .and_then(|runtime| runtime.runtime_values.get(&axis.id))
-                    .filter(|id| axis.values.iter().any(|value| &value.id == *id))
-                    .cloned();
-                let default = axis
-                    .default_value
-                    .as_ref()
-                    .filter(|id| axis.values.iter().any(|value| &value.id == *id))
-                    .cloned();
-                remembered
-                    .or(default)
-                    .or_else(|| axis.values.first().map(|value| value.id.clone()))
-                    .map(|value| (axis.id.clone(), value))
-            })
-            .collect();
-        return Ok(ResolvedRoleRoute {
-            agent_id: agent.id.clone(),
-            model_id,
-            effort_id,
-            mode_id,
-            runtime_values,
-        });
-    }
-
-    Err(anyhow::Error::new(CapabilityRouteUnavailable {
-        message: format!(
-            "workflowCapabilityUnavailable: 能力「{}」的首选列表当前均不可用（{}）；Workflow 已阻塞，请人类修复安装、登录、模型或能力设置后重试",
-            capability_label(capability),
-            rejected.join("；")
-        ),
-    }))
+    .to_string()]
 }
 
 async fn resolve_role_route(state: &Shared, role: &RoleSnapshot) -> Result<ResolvedRoleRoute> {
@@ -634,32 +440,24 @@ async fn resolve_role_route(state: &Shared, role: &RoleSnapshot) -> Result<Resol
             runtime_values: role.runtime_values.clone(),
         });
     }
-    let capability = role
-        .capability
-        .ok_or_else(|| anyhow!("角色 {} 缺少 capability", role.id))?;
-    let preferences = state
-        .config
-        .read()
+    let tags = if role.schema == CAPABILITY_ROLE_SCHEMA {
+        legacy_capability_tags(
+            role.capability
+                .ok_or_else(|| anyhow!("角色 {} 缺少 capability", role.id))?,
+        )
+    } else {
+        crate::agent_routing::normalize_tags(role.tags.clone())
+    };
+    crate::agent_routing::resolve_live_route(state, &tags, role.evidence_only)
         .await
-        .agent_preferences
-        .clone()
-        .ok_or_else(|| {
-            anyhow::Error::new(CapabilityRouteUnavailable {
-                message: format!(
-                    "workflowCapabilityUnavailable: 这台机器尚未保存能力首选列表，无法执行「{}」角色；请由人类从聊天框打开能力设置并保存后重试",
-                    capability_label(capability)
-                ),
-            })
-        })?;
-    let providers = state.providers().await;
-    let agents = state.registry.list(&providers).await;
-    select_capability_route(
-        &preferences,
-        capability,
-        &agents,
-        state.registry.as_ref(),
-        role.evidence_only,
-    )
+        .map(|(route, _)| route)
+        .with_context(|| {
+            format!(
+                "workflowTagRouteUnavailable: 角色 {} 需要标签「{}」；Workflow 已阻塞，请人类修复机器全局 Agent 配置后重试",
+                role.id,
+                tags.join(" + ")
+            )
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1457,7 +1255,9 @@ pub(crate) async fn list_packages(
     let mut reported = Vec::new();
     for entry in &packages {
         let (source_url, source_commit, source_dirty) = package_provenance(&entry.root).await;
-        let compile_error = compile_candidate(entry).err().map(|error| format!("{error:#}"));
+        let compile_error = compile_candidate(entry)
+            .err()
+            .map(|error| format!("{error:#}"));
         let mut spaces = Vec::new();
         let mut built = !entry.spaces.is_empty();
         let mut drifted = false;
@@ -1467,7 +1267,10 @@ pub(crate) async fn list_packages(
                 .workspaces
                 .registration_at(&project_root, &project_root.join(&relative))
                 .await;
-            let materialized = project_root.join(&relative).join("pipespace.json").is_file();
+            let materialized = project_root
+                .join(&relative)
+                .join("pipespace.json")
+                .is_file();
             built &= registered && materialized;
             drifted |= registered && space_drifted;
             spaces.push(genehub_proto::WorkflowPackageSpaceStatus {
@@ -1603,8 +1406,12 @@ pub(crate) async fn apply_build(
     controller_session_id: &str,
     mut report: genehub_proto::WorkflowBuildReport,
 ) -> Result<genehub_proto::WorkflowBuildReport> {
-    let runtime =
-        RuntimeStore::for_package(&state.paths.root, workspace_id, project_root, &plan.package_id)?;
+    let runtime = RuntimeStore::for_package(
+        &state.paths.root,
+        workspace_id,
+        project_root,
+        &plan.package_id,
+    )?;
     let _execution_guard = lock_project_execution(&runtime)?;
     let conflicts = project_active_run_ids(&state.paths.root, workspace_id, project_root)?;
     if !conflicts.is_empty() {
@@ -1639,9 +1446,7 @@ pub(crate) async fn apply_build(
     // activated package must not silently retarget its Runs.
     let status = match load_activation(&runtime)? {
         None => activate_package_source(project_root, &runtime, &plan.package_id)?,
-        Some(activation) => {
-            activate_project(project_root, &runtime, None, activation.revision)?
-        }
+        Some(activation) => activate_project(project_root, &runtime, None, activation.revision)?,
     };
     report.status = "applied".into();
     report.active_digest = status.active_digest;
@@ -1661,10 +1466,7 @@ pub(crate) async fn activate_bound_project(
 ) -> Result<WorkflowProjectStatus> {
     let candidate = match requested_digest {
         Some(digest) => capture_candidate(root, runtime, digest)?,
-        None => persist_candidate(
-            runtime,
-            compile_package(root, runtime.require_package()?)?,
-        )?,
+        None => persist_candidate(runtime, compile_package(root, runtime.require_package()?)?)?,
     };
     resolve_execution_binding(state, project_id, root, &candidate, None).await?;
     activate_project(root, runtime, Some(&candidate.digest), expected_revision)
@@ -2039,11 +1841,10 @@ pub(crate) async fn dispatch(
     {
         Ok(sessions) => sessions,
         Err(error) => {
-            if error
-                .downcast_ref::<CapabilityRouteUnavailable>()
-                .is_some()
+            let reason = format!("{error:#}");
+            if reason.contains("workflowTagRouteUnavailable")
+                || reason.contains("agentTagRouteUnavailable")
             {
-                let reason = format!("{error:#}");
                 let blocked_at = now_ms();
                 for (node_id, node) in &mut run.nodes {
                     if node.status != "pending" {
@@ -2071,7 +1872,7 @@ pub(crate) async fn dispatch(
                     if let Some(executor) = &executor_session {
                         let _ = state.sessions.delete(&executor.id).await;
                     }
-                    return Err(save_error.context("持久化能力路由阻塞的 Workflow Run"));
+                    return Err(save_error.context("持久化标签路由阻塞的 Workflow Run"));
                 }
                 return Ok(Transition {
                     status: run_status(&runtime, &run)?,
@@ -2559,19 +2360,12 @@ async fn activate(
             }
             match node.uses.as_str() {
                 "pack.script" => {
-                    let definition = node
-                        .inputs
-                        .script
-                        .as_ref()
-                        .ok_or_else(|| anyhow!("pack.script 节点 {} 缺少 with.script", node.id))?;
-                    let outcome = run_pack_script(
-                        state,
-                        project_root,
-                        run,
-                        &node,
-                        definition,
-                    )
-                    .await?;
+                    let definition =
+                        node.inputs.script.as_ref().ok_or_else(|| {
+                            anyhow!("pack.script 节点 {} 缺少 with.script", node.id)
+                        })?;
+                    let outcome =
+                        run_pack_script(state, project_root, run, &node, definition).await?;
                     let record = run.nodes.get_mut(&node_id).expect("validated node");
                     record.output = Some(outcome.output);
                     record.outcome = Some(outcome.outcome.clone());
@@ -2612,7 +2406,7 @@ async fn activate(
                         .cloned()
                         .ok_or_else(|| anyhow!("角色不存在：{role_id}"))?;
                     // Resolve at the instant this activity is dispatched. A
-                    // Candidate pins capability intent, never a machine's
+                    // Candidate pins tag intent, never a machine's
                     // transient Agent/model availability.
                     let route = resolve_role_route(state, &role).await?;
                     // A structured node resolved its directory when the activity
@@ -3146,7 +2940,10 @@ fn load_lease_if_present(path: &Path) -> Result<Option<LeaseRecord>> {
 /// in sync with what the directory actually contains.
 fn package_snapshot(package: &package::Package) -> Result<PackageSnapshot> {
     if package.flow_ids.is_empty() || package.flow_ids.len() > MAX_WORKFLOWS {
-        bail!("Workflow 包 {} 的流程数量必须在 1..={MAX_WORKFLOWS} 之间", package.id);
+        bail!(
+            "Workflow 包 {} 的流程数量必须在 1..={MAX_WORKFLOWS} 之间",
+            package.id
+        );
     }
     Ok(PackageSnapshot {
         id: package.id.clone(),
@@ -3170,7 +2967,10 @@ fn load_bundle_from(source: &Path, flow_id: &str) -> Result<Bundle> {
     // The file name is the flow's identity in the directory, so a mismatching
     // inner `id` would create two names for one flow.
     if definition.id != flow_id {
-        bail!("流程文件 flows/{flow_id}.yaml 的 id 是 {}，与文件名不一致", definition.id);
+        bail!(
+            "流程文件 flows/{flow_id}.yaml 的 id 是 {}，与文件名不一致",
+            definition.id
+        );
     }
     resolve_includes(source, &mut definition, &mut digest_files)?;
     validate_definition(&definition)?;
@@ -4810,8 +4610,8 @@ fn hex_digest(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use genehub_proto::{
-        AgentRuntimePreference, Capabilities, CapabilityAgentPreferences, Catalog, ModeInfo,
-        ModelInfo, PreferredAgentModel,
+        AgentCostLevel, AgentInfo, AgentModelProfile, AgentSelectionPreferences, Capabilities,
+        Catalog, ModeInfo, ModelInfo, ProbeState,
     };
 
     const TEST_PACKAGE: &str = "local";
@@ -4974,7 +4774,9 @@ mod tests {
         let package = seed_package(root.path());
         let flow = |verify: &str, expected: Option<&str>| {
             let requirement = match expected {
-                Some(expected) => format!("{{ key: review, verify: {verify}, expected: {expected} }}"),
+                Some(expected) => {
+                    format!("{{ key: review, verify: {verify}, expected: {expected} }}")
+                }
                 None => format!("{{ key: review, verify: {verify} }}"),
             };
             write(
@@ -4984,10 +4786,13 @@ mod tests {
             compile_package(root.path(), TEST_PACKAGE).map(|_| ())
         };
 
-        flow("value.oneOf", Some("approved|partial")).expect("a registered verifier with its value");
+        flow("value.oneOf", Some("approved|partial"))
+            .expect("a registered verifier with its value");
         let missing = flow("value.oneOf", None).unwrap_err().to_string();
         assert!(missing.contains("expected"), "{missing}");
-        let unwanted = flow("value.nonEmpty", Some("approved")).unwrap_err().to_string();
+        let unwanted = flow("value.nonEmpty", Some("approved"))
+            .unwrap_err()
+            .to_string();
         assert!(unwanted.contains("不接受 expected"), "{unwanted}");
         let unknown = flow("value.matchesRegex", None).unwrap_err().to_string();
         assert!(unknown.contains("未注册"), "{unknown}");
@@ -5026,27 +4831,27 @@ mod tests {
     }
 
     #[test]
-    fn role_v2_declares_only_a_capability_direction() {
+    fn role_v3_declares_only_builtin_tags() {
         let root = tempfile::tempdir().unwrap();
         let package = seed_package(root.path());
         let role = package.join("roles/worker.yaml");
 
         write(
             &role,
-            "schema: genehub.workflow.role.v2\nid: worker\ncapability: coding\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\n",
+            "schema: genehub.workflow.role.v3\nid: worker\ntags: [Pro, 视频理解]\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\n",
         );
-        compile_package(root.path(), TEST_PACKAGE).expect("a capability role compiles");
+        compile_package(root.path(), TEST_PACKAGE).expect("a built-in tag role compiles");
 
         write(
             &role,
-            "schema: genehub.workflow.role.v2\nid: worker\ncapability: coding\nagentId: genet\nmodelId: provider/model\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\n",
+            "schema: genehub.workflow.role.v3\nid: worker\ntags: [my-custom-tag]\nuserInteraction: readOnly\nprompt: prompts/direct-worker.md\n",
         );
-        let exact = format!(
+        let custom = format!(
             "{:#}",
             compile_package(root.path(), TEST_PACKAGE)
-                .expect_err("role.v2 cannot pin an Agent or model")
+                .expect_err("Workflow roles cannot depend on custom machine tags")
         );
-        assert!(exact.contains("只能声明能力方向"), "{exact}");
+        assert!(custom.contains("只能使用平台内置标签"), "{custom}");
 
         write(
             &role,
@@ -5054,90 +4859,67 @@ mod tests {
         );
         let missing = format!(
             "{:#}",
-            compile_package(root.path(), TEST_PACKAGE)
-                .expect_err("role.v2 requires capability")
+            compile_package(root.path(), TEST_PACKAGE).expect_err("role.v2 requires capability")
         );
         assert!(missing.contains("必须声明 capability"), "{missing}");
     }
 
     #[test]
-    fn capability_routes_use_order_then_machine_runtime_defaults() {
+    fn tag_routes_use_live_cost_and_and_matching() {
         let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
         let agents = vec![
-            AgentInfo {
-                probe: ProbeState::NotInstalled,
-                ..ready_agent("claude", &[("opus", &["low", "medium", "high"])], &[])
-            },
+            ready_agent("claude", &[("opus-max", &["low", "medium", "high"])], &[]),
             ready_agent(
                 "codex",
-                &[("gpt", &["low", "medium", "high", "xhigh"])],
+                &[("gpt-max", &["low", "medium", "high", "xhigh"])],
                 &["read-only", "full-access"],
             ),
         ];
         let preferences = AgentSelectionPreferences {
-            capabilities: CapabilityAgentPreferences {
-                planning: vec![
-                    PreferredAgentModel {
-                        agent_id: "claude".into(),
-                        model_id: Some("opus".into()),
-                    },
-                    PreferredAgentModel {
-                        agent_id: "codex".into(),
-                        model_id: Some("gpt".into()),
-                    },
-                ],
-                ..Default::default()
-            },
-            selected_capability: AgentCapability::Planning,
-            runtimes: BTreeMap::from([(
-                "codex".into(),
-                AgentRuntimePreference {
-                    effort_id: None,
-                    mode_id: None,
-                    runtime_values: BTreeMap::new(),
+            model_profiles: vec![
+                AgentModelProfile {
+                    agent_id: "claude".into(),
+                    model_id: Some("opus-max".into()),
+                    tags: vec!["Max".into(), "视频理解".into()],
+                    cost: Some(AgentCostLevel::High),
                 },
-            )]),
+                AgentModelProfile {
+                    agent_id: "codex".into(),
+                    model_id: Some("gpt-max".into()),
+                    tags: vec!["Max".into(), "视频理解".into()],
+                    cost: Some(AgentCostLevel::Low),
+                },
+            ],
+            ..Default::default()
         };
 
-        let selected = select_capability_route(
+        let selected = crate::agent_routing::select_tag_route(
             &preferences,
-            AgentCapability::Planning,
+            &["Max".into(), "视频理解".into()],
             &agents,
             &registry,
             false,
         )
         .unwrap();
         assert_eq!(selected.agent_id, "codex");
-        assert_eq!(selected.model_id.as_deref(), Some("gpt"));
+        assert_eq!(selected.model_id.as_deref(), Some("gpt-max"));
         assert_eq!(selected.effort_id.as_deref(), Some("high"));
         assert_eq!(selected.mode_id.as_deref(), Some("full-access"));
     }
 
     #[test]
-    fn capability_route_failure_is_human_actionable() {
+    fn tag_route_failure_is_human_actionable() {
         let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
-        let preferences = AgentSelectionPreferences {
-            capabilities: CapabilityAgentPreferences {
-                multimodal: vec![PreferredAgentModel {
-                    agent_id: "missing".into(),
-                    model_id: Some("vision".into()),
-                }],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let error = select_capability_route(
-            &preferences,
-            AgentCapability::Multimodal,
+        let error = crate::agent_routing::select_tag_route(
+            &AgentSelectionPreferences::default(),
+            &["视频理解".into()],
             &[],
             &registry,
             false,
         )
         .unwrap_err();
-        assert!(error.is::<CapabilityRouteUnavailable>());
         let message = format!("{error:#}");
-        assert!(message.contains("多模态理解"), "{message}");
-        assert!(message.contains("Workflow 已阻塞"), "{message}");
+        assert!(message.contains("视频理解"), "{message}");
         assert!(message.contains("人类"), "{message}");
     }
 
@@ -5224,8 +5006,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         seed_named_package(root.path(), "alpha");
         seed_named_package(root.path(), "beta");
-        let alpha = RuntimeStore::for_package(root.path(), "workspace", root.path(), "alpha")
-            .unwrap();
+        let alpha =
+            RuntimeStore::for_package(root.path(), "workspace", root.path(), "alpha").unwrap();
         let beta =
             RuntimeStore::for_package(root.path(), "workspace", root.path(), "beta").unwrap();
         activate_package_source(root.path(), &alpha, "alpha").unwrap();
@@ -5246,9 +5028,13 @@ mod tests {
         seed_named_package(root.path(), "alpha");
         let beta_source = seed_named_package(root.path(), "beta");
         // Give beta a different digest so this is not merely a digest match.
-        fs::write(beta_source.join("prompts/direct-worker.md"), "不同的提示词\n").unwrap();
-        let alpha = RuntimeStore::for_package(root.path(), "workspace", root.path(), "alpha")
-            .unwrap();
+        fs::write(
+            beta_source.join("prompts/direct-worker.md"),
+            "不同的提示词\n",
+        )
+        .unwrap();
+        let alpha =
+            RuntimeStore::for_package(root.path(), "workspace", root.path(), "alpha").unwrap();
         let beta =
             RuntimeStore::for_package(root.path(), "workspace", root.path(), "beta").unwrap();
         let beta_candidate =
@@ -5263,16 +5049,23 @@ mod tests {
     #[test]
     fn naming_a_package_is_required_once_a_project_holds_several() {
         let root = tempfile::tempdir().unwrap();
-        let error = resolve_package_id(root.path(), None).unwrap_err().to_string();
+        let error = resolve_package_id(root.path(), None)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains(".genethub/workflows"), "{error}");
 
         seed_named_package(root.path(), "alpha");
         assert_eq!(resolve_package_id(root.path(), None).unwrap(), "alpha");
 
         seed_named_package(root.path(), "beta");
-        let error = resolve_package_id(root.path(), None).unwrap_err().to_string();
+        let error = resolve_package_id(root.path(), None)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("alpha") && error.contains("beta"), "{error}");
-        assert_eq!(resolve_package_id(root.path(), Some("beta")).unwrap(), "beta");
+        assert_eq!(
+            resolve_package_id(root.path(), Some("beta")).unwrap(),
+            "beta"
+        );
         assert!(resolve_package_id(root.path(), Some("absent")).is_err());
     }
 
@@ -5336,7 +5129,11 @@ mod tests {
             &source.join("flows/direct-change.yaml"),
             "schema: genehub.workflow.definition.v2\nid: direct-change\nversion: 2\nnodes:\n  - id: deliver\n    uses: agent.session\n    with:\n      role: worker\nstructure:\n  body:\n    id: gate\n    type: if\n    condition:\n      op: literal\n      value: \"true\"\n    then:\n      id: deliver-step\n      type: task\n      activity: deliver\n",
         );
-        let report = authoring::check_draft(root.path(), Some(TEST_PACKAGE), &crate::adapter::registry::Registry::new(&BTreeMap::new()));
+        let report = authoring::check_draft(
+            root.path(),
+            Some(TEST_PACKAGE),
+            &crate::adapter::registry::Registry::new(&BTreeMap::new()),
+        );
         let first = report.diagnostics.first().expect("a diagnostic");
         assert_eq!(first.code, "WF_EXPRESSION_TYPE", "{report:?}");
         assert_eq!(first.path, "/structure/body/condition", "{report:?}");
@@ -5452,7 +5249,7 @@ mod tests {
         write(
             &source.join("roles/worker.yaml"),
             &format!(
-                "schema: {ROLE_SCHEMA}\nid: worker\ncapability: coding\nuserInteraction: readOnly\nprompt: prompts/shared.md\n"
+                "schema: {ROLE_SCHEMA}\nid: worker\ntags: [Flush]\nuserInteraction: readOnly\nprompt: prompts/shared.md\n"
             ),
         );
         fs::create_dir_all(source.join("prompts")).unwrap();
@@ -5643,8 +5440,10 @@ mod tests {
     fn broken_candidate_source_does_not_disable_the_active_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let runtime = test_runtime(root.path());
-        let initialized =
-            { seed_package(root.path()); activate_package_source(root.path(), &runtime, TEST_PACKAGE).unwrap() };
+        let initialized = {
+            seed_package(root.path());
+            activate_package_source(root.path(), &runtime, TEST_PACKAGE).unwrap()
+        };
         let active = initialized.active_digest.unwrap();
         fs::write(
             package::packages_root(root.path())
@@ -5669,8 +5468,10 @@ mod tests {
     fn missing_candidate_source_does_not_disable_the_active_snapshot() {
         let root = tempfile::tempdir().unwrap();
         let runtime = test_runtime(root.path());
-        let initialized =
-            { seed_package(root.path()); activate_package_source(root.path(), &runtime, TEST_PACKAGE).unwrap() };
+        let initialized = {
+            seed_package(root.path());
+            activate_package_source(root.path(), &runtime, TEST_PACKAGE).unwrap()
+        };
         let active = initialized.active_digest.unwrap();
         fs::remove_dir_all(package::packages_root(root.path()).join(TEST_PACKAGE)).unwrap();
 
@@ -5692,8 +5493,10 @@ mod tests {
     fn a_failed_activation_save_keeps_the_previous_pointer() {
         let root = tempfile::tempdir().unwrap();
         let runtime = test_runtime(root.path());
-        let initialized =
-            { seed_package(root.path()); activate_package_source(root.path(), &runtime, TEST_PACKAGE).unwrap() };
+        let initialized = {
+            seed_package(root.path());
+            activate_package_source(root.path(), &runtime, TEST_PACKAGE).unwrap()
+        };
         let active = initialized.active_digest.unwrap();
         fs::write(
             package::packages_root(root.path())
@@ -5846,8 +5649,7 @@ mod tests {
             RuntimeStore::for_package(data.path(), "workspace", project.path(), TEST_PACKAGE)
                 .unwrap();
         seed_package(project.path());
-        let initialized =
-            activate_package_source(project.path(), &runtime, TEST_PACKAGE).unwrap();
+        let initialized = activate_package_source(project.path(), &runtime, TEST_PACKAGE).unwrap();
         let active = initialized.active_digest.unwrap();
 
         let untrusted = project.path().join(".genethub/runtime/workflows");
@@ -5873,8 +5675,7 @@ mod tests {
             RuntimeStore::for_package(data.path(), "workspace", project.path(), TEST_PACKAGE)
                 .unwrap();
         seed_package(project.path());
-        let initialized =
-            activate_package_source(project.path(), &runtime, TEST_PACKAGE).unwrap();
+        let initialized = activate_package_source(project.path(), &runtime, TEST_PACKAGE).unwrap();
         let digest = initialized.active_digest.unwrap();
         let mut candidate = load_candidate(&runtime, &digest).unwrap();
         candidate

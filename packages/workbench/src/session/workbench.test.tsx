@@ -64,14 +64,30 @@ const agent = (overrides: Partial<AgentInfo> = {}): AgentInfo => ({
 });
 
 const COMPOSER_PREFERENCES: AgentSelectionPreferences = {
-  capabilities: {
-    planning: [{ agentId: "genet", modelId: "deepseek/v4" }],
-    coding: [{ agentId: "genet", modelId: "deepseek/v4" }],
-    multimodal: [{ agentId: "genet", modelId: "deepseek/v4" }],
-  },
+  capabilities: { planning: [], coding: [], multimodal: [] },
   selectedCapability: "planning",
+  selectedTags: ["Pro"],
+  modelProfiles: [
+    {
+      agentId: "genet",
+      modelId: "deepseek/v4",
+      tags: ["Pro", "图片理解"],
+      cost: "medium",
+    },
+  ],
   runtimes: {},
 };
+
+const COMPOSER_AGENT = agent({
+  capabilities: { ...agent().capabilities, setEffort: true, attachments: true },
+  catalog: {
+    ...agent().catalog,
+    models: agent().catalog.models.map((model) => ({
+      ...model,
+      inputModalities: ["image", "video"],
+    })),
+  },
+});
 
 /** Real actions, so a test that stubs one hands it back. */
 const { retryPending, editPending } = useWorkbench.getState();
@@ -1977,9 +1993,10 @@ describe("what the user sees in a session", () => {
 function composerProps(overrides: Partial<ComponentProps<typeof Composer>> = {}) {
   return {
     phase: "idle" as const,
-    agents: [agent()],
+    agents: [COMPOSER_AGENT],
     preferences: COMPOSER_PREFERENCES,
     capability: "planning" as const,
+    tags: ["Pro"],
     agentId: "genet",
     modelId: null,
     modeId: null,
@@ -2133,22 +2150,56 @@ describe("the controls offered to the user", () => {
 
   it("leaves a pasted screenshot as an inert paste when the agent can't take attachments", async () => {
     const onSend = vi.fn();
-    render(<Composer {...composerProps({ onSend, attachmentsSupported: false })} />);
+    render(
+      <Composer
+        {...composerProps({
+          onSend,
+          preferences: {
+            ...COMPOSER_PREFERENCES,
+            modelProfiles: [
+              {
+                agentId: "genet",
+                modelId: "deepseek/v4",
+                tags: ["Pro"],
+                cost: "medium",
+              },
+            ],
+          },
+        })}
+      />,
+    );
 
     pasteImage(screen.getByLabelText("任务描述"));
-    await waitFor(() => expect(screen.getByText("当前 Agent 还不支持附件")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        screen.getByText("没有同时匹配当前标签与媒体输入的 Agent 和模型"),
+      ).toBeInTheDocument(),
+    );
     expect(screen.queryByAltText("shot.png")).not.toBeInTheDocument();
   });
 
-  it("offers video only when the selected model declares native video input", async () => {
+  it("offers media types only when a matching globally tagged route exists", async () => {
     const onSend = vi.fn();
     const { container, rerender } = render(
-      <Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["image"] })} />,
+      <Composer {...composerProps({ onSend })} />,
     );
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     expect(picker.accept).not.toContain("video/mp4");
 
-    rerender(<Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["image", "video"] })} />);
+    rerender(
+      <Composer
+        {...composerProps({
+          onSend,
+          preferences: {
+            ...COMPOSER_PREFERENCES,
+            modelProfiles: COMPOSER_PREFERENCES.modelProfiles?.map((profile) => ({
+              ...profile,
+              tags: ["Pro", "图片理解", "视频理解"],
+            })),
+          },
+        })}
+      />,
+    );
     expect(picker.accept).toContain("video/mp4");
     expect(screen.getByLabelText("添加图片或视频")).toBeEnabled();
     const video = new File(["video-bytes"], "clip.mp4", { type: "video/mp4" });
@@ -2157,7 +2208,20 @@ describe("the controls offered to the user", () => {
     await userEvent.click(screen.getByLabelText("发送"));
     expect(onSend).toHaveBeenCalledWith("", [], [video]);
 
-    rerender(<Composer {...composerProps({ onSend, attachmentsSupported: true, inputModalities: ["video"] })} />);
+    rerender(
+      <Composer
+        {...composerProps({
+          onSend,
+          preferences: {
+            ...COMPOSER_PREFERENCES,
+            modelProfiles: COMPOSER_PREFERENCES.modelProfiles?.map((profile) => ({
+              ...profile,
+              tags: ["Pro", "视频理解"],
+            })),
+          },
+        })}
+      />,
+    );
     expect(screen.getByLabelText("添加视频")).toBeEnabled();
     expect(picker.accept).not.toContain("image/*");
   });
@@ -2180,6 +2244,80 @@ describe("the controls offered to the user", () => {
       if (originalCreate) Object.defineProperty(URL, "createObjectURL", originalCreate); else delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
       if (originalRevoke) Object.defineProperty(URL, "revokeObjectURL", originalRevoke); else delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
     }
+  });
+
+  it("shows media in the current input as an automatic routing tag", async () => {
+    const { container } = render(<Composer {...composerProps()} />);
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    await userEvent.upload(
+      picker,
+      new File(["image-bytes"], "current.png", { type: "image/png" }),
+    );
+    await screen.findByAltText("current.png");
+
+    await userEvent.click(screen.getByRole("button", { name: /路由：/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByRole("button", { name: "图片理解 · 自动" })).toBeDisabled();
+  });
+
+  it("requires one route to satisfy history and every newly selected medium", async () => {
+    const videoAgent = agent({
+      id: "video-agent",
+      label: "Video Agent",
+      capabilities: { ...COMPOSER_AGENT.capabilities },
+      catalog: {
+        ...COMPOSER_AGENT.catalog,
+        models: COMPOSER_AGENT.catalog.models.map((model) => ({
+          ...model,
+          id: "video-model",
+        })),
+        defaultModel: "video-model",
+      },
+    });
+    const preferences: AgentSelectionPreferences = {
+      ...COMPOSER_PREFERENCES,
+      modelProfiles: [
+        {
+          agentId: "genet",
+          modelId: "deepseek/v4",
+          tags: ["Pro", "图片理解"],
+          cost: "medium",
+        },
+        {
+          agentId: "video-agent",
+          modelId: "video-model",
+          tags: ["Pro", "视频理解"],
+          cost: "medium",
+        },
+      ],
+    };
+    const { container, rerender } = render(
+      <Composer
+        {...composerProps({
+          agents: [COMPOSER_AGENT, videoAgent],
+          preferences,
+        })}
+      />,
+    );
+    const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const image = new File(["image"], "both.png", { type: "image/png" });
+    const video = new File(["video"], "both.mp4", { type: "video/mp4" });
+    await userEvent.upload(picker, [image, video]);
+    await screen.findByText("没有一个 Agent 与模型能同时处理所选标签和这些媒体");
+    expect(screen.queryByAltText("both.png")).not.toBeInTheDocument();
+    expect(screen.queryByText("视频 · both.mp4")).not.toBeInTheDocument();
+
+    rerender(
+      <Composer
+        {...composerProps({
+          agents: [COMPOSER_AGENT, videoAgent],
+          preferences,
+          mediaTags: ["图片理解"],
+        })}
+      />,
+    );
+     expect(picker.accept).not.toContain("video/mp4");
+     expect(screen.getByRole("button", { name: "添加文件（当前仅支持图片）" })).toBeEnabled();
   });
 
   it("turns send into stop while a turn is running", async () => {
@@ -2377,7 +2515,7 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
 
     const box = screen.getByLabelText("任务描述");
-    const summary = screen.getByRole("button", { name: /能力：规划/ });
+    const summary = screen.getByRole("button", { name: /路由：GeneHub Agent/ });
     const card = box.closest("[data-composer-card]");
     const inputSlot = box.closest('[data-composer-slot="input"]');
     const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
@@ -2612,12 +2750,12 @@ describe("the controls offered to the user", () => {
     expect(onSend).toHaveBeenCalledWith("旧草稿仍可继续", []);
   });
 
-  it("keeps the rich settings viewable when Agent switching is locked", async () => {
+  it("keeps tag switching available for an existing conversation", async () => {
     render(<Composer {...composerProps({ agentLocked: true })} />);
-    await userEvent.click(screen.getByRole("button", { name: /能力：规划/ }));
-    const dialog = screen.getByRole("dialog", { name: "能力与运行设置" });
-    expect(within(dialog).getByRole("radio", { name: /规划/ })).toBeDisabled();
-    expect(within(dialog).getByText(/当前会话已有内容/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /路由：GeneHub Agent/ }));
+    const dialog = screen.getByRole("dialog", { name: "标签与运行设置" });
+    expect(within(dialog).getByRole("button", { name: "Max" })).toBeEnabled();
+    expect(within(dialog).getByLabelText("思考强度")).toBeEnabled();
   });
 
   it("asks for approval in the timeline and reports which option was chosen", async () => {
@@ -2775,8 +2913,8 @@ describe("a whole turn as the timeline sees it", () => {
         {
           id: "s1",
           workspaceId: "w1",
-          agentId: "codex",
-          modelId: "deepseek/v4",
+          agentId: "claude",
+          modelId: "claude-sonnet-4-5",
           title: undefined,
           createdAtMs: 0,
           updatedAtMs: 0,
@@ -2785,7 +2923,10 @@ describe("a whole turn as the timeline sees it", () => {
         },
       ],
       activeSessionId: "s1",
-      agents: [agent({ id: "codex", label: "Codex" })],
+      agents: [
+        agent({ id: "codex", label: "Codex" }),
+        agent({ id: "claude", label: "Claude Code" }),
+      ],
     });
     const call: TimelineItem = {
       type: "toolCall",
@@ -2840,6 +2981,8 @@ describe("a whole turn as the timeline sees it", () => {
               costUsd: undefined,
             },
             toolCalls: 1,
+            agentId: "codex",
+            modelId: "deepseek/v4",
             forkCheckpoint: undefined,
           },
         },
@@ -2870,6 +3013,7 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("Codex");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("DeepSeek V4");
+    expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("Claude Code");
     expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("2 分钟前");
     expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("耗时 5s");
     expect(screen.queryByTestId("usage-summary")).not.toBeInTheDocument();
@@ -2885,13 +3029,14 @@ describe("a whole turn as the timeline sees it", () => {
     expect(state.status).toBe("idle");
   });
 
-  it("opens capability selection for a completed turn without a native checkpoint", async () => {
+  it("opens tag selection for a completed turn without a native checkpoint", async () => {
     useWorkbench.setState({
       sessions: [
         {
           id: "s1",
           workspaceId: "w1",
           agentId: "codex",
+          routingTags: ["Pro"],
           title: undefined,
           createdAtMs: 0,
           updatedAtMs: 0,
@@ -2920,11 +3065,22 @@ describe("a whole turn as the timeline sees it", () => {
         lanEnabled: false,
         agentPreferences: {
           selectedCapability: "planning",
-          capabilities: {
-            planning: [{ agentId: "codex", modelId: "deepseek/v4" }],
-            coding: [{ agentId: "claude", modelId: "deepseek/v4" }],
-            multimodal: [],
-          },
+          selectedTags: ["Pro"],
+          capabilities: { planning: [], coding: [], multimodal: [] },
+          modelProfiles: [
+            {
+              agentId: "codex",
+              modelId: "deepseek/v4",
+              tags: ["Pro"],
+              cost: "low",
+            },
+            {
+              agentId: "claude",
+              modelId: "deepseek/v4",
+              tags: ["Flush"],
+              cost: "medium",
+            },
+          ],
           runtimes: {},
         },
       },
@@ -2967,7 +3123,8 @@ describe("a whole turn as the timeline sees it", () => {
     await userEvent.click(screen.getByRole("button", { name: "Fork" }));
 
     expect(screen.getByRole("dialog", { name: "Fork 会话" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "规划 Codex" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Pro" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Codex · DeepSeek V4 · 当前")).toBeInTheDocument();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重建到所选目标" })).toBeEnabled();
     expect(screen.getByRole("option", { name: /GeneHub/ }).querySelector("[data-workspace-icon=folder]")).toBeTruthy();

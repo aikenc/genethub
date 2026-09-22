@@ -564,7 +564,7 @@ describe("switching from the sidebar", () => {
                   blobAppendix: [],
                 },
               };
-            case "session.forkImport":
+            case "session.forkImportRouted":
               return { type: "session", data: forkedSession };
             default:
               return null;
@@ -622,10 +622,11 @@ describe("switching from the sidebar", () => {
       payload: { sessionId: "source-session", turnId: "turn-1" },
     }));
     await waitFor(() => expect(remoteCalls).toContainEqual({
-      type: "session.forkImport",
+      type: "session.forkImportRouted",
       payload: {
         transfer: expect.objectContaining({ sourceSessionId: "source-session" }),
-        target: { agentId: "claude", workspaceId: "remote-workspace" },
+        workspaceId: "remote-workspace",
+        tags: ["Flush"],
       },
     }));
     // The fork lands without yanking the user onto the other machine: the
@@ -644,7 +645,7 @@ describe("switching from the sidebar", () => {
     expect(openTarget).toHaveBeenCalledWith("m_far");
   });
 
-  it("sends an explicit target so a non-native Agent can Fork back to itself", async () => {
+  it("sends tags so a non-native Agent can Fork back through a fresh route", async () => {
     const sourceSession: SessionSummary = {
       id: "cursor-session",
       workspaceId: "source-workspace",
@@ -740,7 +741,7 @@ describe("switching from the sidebar", () => {
             };
           case "session.list":
             return { type: "sessions", data: [sourceSession] };
-          case "session.fork":
+          case "session.forkRouted":
             return { type: "session", data: forkedSession };
           default:
             return null;
@@ -787,11 +788,12 @@ describe("switching from the sidebar", () => {
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
 
     await waitFor(() => expect(calls).toContainEqual({
-      type: "session.fork",
+      type: "session.forkRouted",
       payload: {
         sessionId: "cursor-session",
         turnId: "turn-1",
-        target: { agentId: "cursor", workspaceId: "source-workspace" },
+        workspaceId: "source-workspace",
+        tags: ["Flush"],
       },
     }));
     await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("cursor-fork"));

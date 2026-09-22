@@ -381,6 +381,7 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::SessionCreateRouted { .. }
         | Request::AgentSpaceBuilder { .. }
         | Request::ProjectApprovalRequest { .. }
         | Request::WorkflowBuild { .. }
@@ -396,8 +397,10 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionArtifactFinish { .. }
         | Request::SessionArtifactAbort { .. }
         | Request::SessionFork { .. }
+        | Request::SessionForkRouted { .. }
         | Request::SessionForkExport { .. }
         | Request::SessionForkImport { .. }
+        | Request::SessionForkImportRouted { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }
@@ -407,6 +410,8 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionDraftsReplace { .. }
         | Request::SessionDelete { .. }
         | Request::SessionSetModel { .. }
+        | Request::SessionSwitchAgent { .. }
+        | Request::SessionRoute { .. }
         | Request::SessionSetMode { .. }
         | Request::SessionSetEffort { .. }
         | Request::SessionSetRuntimeAxis { .. }

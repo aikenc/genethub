@@ -1,11 +1,6 @@
-import type {
-  AgentCapability,
-  AgentInfo,
-  AgentSelectionPreferences,
-  PreferredAgentModel,
-} from "@genehub/proto";
-import { GripVertical, Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
+import { Plus, Tags } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   resolveAgentPresentation,
@@ -14,10 +9,11 @@ import {
   resolveModelPresentation,
 } from "../presentation/catalog/resolve";
 import {
-  CAPABILITIES,
-  mediaInputSupport,
-  routesForCapability,
-  withCapabilityRoutes,
+  availableAgentTags,
+  COST_LEVELS,
+  normalizeAgentPreferences,
+  normalizeTags,
+  withModelProfile,
 } from "./capability-preferences";
 import type { RuntimeSelection } from "./runtime-selection";
 
@@ -117,237 +113,163 @@ export function CompactRuntimeControls({
   );
 }
 
-/** Ordered Agent + model routes for the three built-in capabilities. */
+/** Flat machine-global Agent + model configuration; there is no route order. */
 export function RuntimeSettings({
   agents,
   preferences,
   disabled,
-  initialCapability,
   onSave,
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
   disabled?: boolean;
-  initialCapability: AgentCapability;
   onSave(preferences: AgentSelectionPreferences): Promise<void> | void;
 }) {
-  const [draft, setDraft] = useState(preferences);
-  const [capability, setCapability] = useState(initialCapability);
-  const [dragging, setDragging] = useState<number | null>(null);
+  const [draft, setDraft] = useState(() => normalizeAgentPreferences(preferences, agents));
+  const [customTag, setCustomTag] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => setDraft(preferences), [preferences]);
-  const routes = routesForCapability(draft, capability);
-  const update = (next: PreferredAgentModel[]) =>
-    setDraft((current) => withCapabilityRoutes(current, capability, next));
-  const availableToAdd =
-    routes.length < 5
-      ? agents
-          .map((agent) => firstAvailableRoute(agent, routes))
-          .find((route): route is PreferredAgentModel => Boolean(route))
-      : undefined;
-  const move = (from: number, to: number) => {
-    if (to < 0 || to >= routes.length || from === to) return;
-    const next = [...routes];
-    const [route] = next.splice(from, 1);
-    if (!route) return;
-    next.splice(to, 0, route);
-    update(next);
-  };
-  const add = () => {
-    if (!availableToAdd) return;
-    update([...routes, availableToAdd]);
-  };
+  useEffect(() => setDraft(normalizeAgentPreferences(preferences, agents)), [preferences, agents]);
+  const tags = useMemo(() => availableAgentTags(draft), [draft]);
+  const rows = draft.modelProfiles ?? [];
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <div role="tablist" aria-label="内置能力" className="grid grid-cols-3 gap-1 rounded-xl bg-raised p-1">
-        {CAPABILITIES.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={capability === item.id}
-            onClick={() => setCapability(item.id)}
-            className={`min-w-0 rounded-lg px-2 py-2 text-xs ${
-              capability === item.id ? "bg-surface text-fg shadow-sm" : "text-muted hover:text-fg"
-            }`}
-          >
-            <span className="block truncate">{item.label}</span>
-            <span className="mt-0.5 block text-[10px] text-faint">
-              {draft.capabilities[item.id].length}/5
-            </span>
-          </button>
-        ))}
-      </div>
-
-      <div>
-        <p className="text-xs text-muted">
-          {CAPABILITIES.find((item) => item.id === capability)?.shortDescription}
-        </p>
-        <p className="mt-0.5 text-[11px] text-faint">按顺序尝试第一组可用的 Agent 与模型。</p>
-      </div>
-
-      <div className="space-y-1.5" role="list" aria-label={`${capability} 首选列表`}>
-        {routes.map((route, index) => {
-          const agent = agents.find((candidate) => candidate.id === route.agentId);
-          const models = agent?.catalog.models ?? [];
-          const selectedMedia = mediaInputSupport(agent, route.modelId);
+      <div className="space-y-2" role="list" aria-label="Agent 与模型配置">
+        {rows.map((profile) => {
+          const key = `${profile.agentId}\u0000${profile.modelId ?? ""}`;
+          const agent = agents.find((candidate) => candidate.id === profile.agentId);
+          const model = agent?.catalog.models.find((candidate) => candidate.id === profile.modelId);
+          const agentLabel = agent ? resolveAgentPresentation(agent).label : profile.agentId;
+          const modelLabel = profile.modelId
+            ? resolveModelPresentation({
+                agentId: profile.agentId,
+                modelId: profile.modelId,
+                modelLabel: model?.label,
+              }).fullLabel
+            : "Agent 默认";
+          const selected = normalizeTags(profile.tags);
+          const updateTags = (next: string[]) => {
+            const normalized = normalizeTags(next).slice(0, 4);
+            if (normalized.length === 0) return;
+            setDraft((current) => withModelProfile(current, { ...profile, tags: normalized }));
+          };
           return (
-            <div
-              key={`${route.agentId}:${route.modelId ?? "default"}:${index}`}
+            <article
+              key={key}
               role="listitem"
-              draggable={!disabled}
-              onDragStart={() => setDragging(index)}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={() => {
-                if (dragging !== null) move(dragging, index);
-                setDragging(null);
-              }}
-              className="grid grid-cols-[auto_minmax(0,1fr)_minmax(0,1fr)_auto] items-start gap-1.5 rounded-xl border border-line bg-raised/45 p-1.5"
+              className="rounded-xl border border-line bg-raised/35 px-3 py-2.5"
             >
-              <span className="flex h-9 items-center gap-1 text-[10px] text-faint" title="拖动排序">
-                <GripVertical size={14} />
-                {index + 1}
-              </span>
-              <label className="min-w-0">
-                <span className="sr-only">第 {index + 1} 项 Agent</span>
-                <select
-                  aria-label={`第 ${index + 1} 项 Agent`}
-                  value={route.agentId}
-                  disabled={disabled}
-                  className="h-9 w-full min-w-0 rounded-lg border border-line bg-surface px-2 text-xs text-fg"
-                  onChange={(event) => {
-                    const nextAgent = agents.find(
-                      (candidate) => candidate.id === event.currentTarget.value,
-                    );
-                    if (!nextAgent) return;
-                    const replacement = firstAvailableRoute(nextAgent, routes, index);
-                    if (!replacement) return;
-                    const next = [...routes];
-                    next[index] = replacement;
-                    update(next);
-                  }}
-                >
-                  {!agent ? <option value={route.agentId}>{route.agentId}（已移除）</option> : null}
-                  {agents.map((candidate) => {
-                    const selectable = Boolean(firstAvailableRoute(candidate, routes, index));
-                    return (
-                      <option key={candidate.id} value={candidate.id} disabled={!selectable}>
-                        {resolveAgentPresentation(candidate).label}
-                        {selectable ? "" : "（模型均已添加）"}
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium text-fg">{agentLabel}</div>
+                  <div className="truncate text-[11px] text-faint">{modelLabel}</div>
+                </div>
+                <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-faint">
+                  <span>成本</span>
+                  <select
+                    aria-label={`${agentLabel} ${modelLabel} 成本`}
+                    value={profile.cost ?? "medium"}
+                    disabled={disabled}
+                    className="h-8 rounded-lg border border-line bg-surface px-2 text-xs text-fg"
+                    onChange={(event) => {
+                      const cost = event.currentTarget.value as NonNullable<typeof profile.cost>;
+                      setDraft((current) =>
+                        withModelProfile(current, {
+                          ...profile,
+                          cost,
+                        }),
+                      );
+                    }}
+                  >
+                    {COST_LEVELS.map((level) => (
+                      <option key={level.id} value={level.id}>
+                        {level.label}
                       </option>
-                    );
-                  })}
-                </select>
-              </label>
-              <label className="min-w-0">
-                <span className="sr-only">第 {index + 1} 项模型</span>
-                <select
-                  aria-label={`第 ${index + 1} 项模型`}
-                  value={route.modelId ?? ""}
-                  disabled={disabled || !agent}
-                  className="h-9 w-full min-w-0 rounded-lg border border-line bg-surface px-2 text-xs text-fg"
-                  onChange={(event) => {
-                    const next = [...routes];
-                    next[index] = {
-                      agentId: route.agentId,
-                      ...(event.currentTarget.value ? { modelId: event.currentTarget.value } : {}),
-                    };
-                    update(next);
-                  }}
-                >
-                  {models.length === 0 ? (
-                    <option value="">{mediaOptionLabel("Agent 默认", selectedMedia)}</option>
-                  ) : null}
-                  {route.modelId && !models.some((model) => model.id === route.modelId) ? (
-                    <option value={route.modelId}>
-                      {mediaOptionLabel(`${route.modelId}（不可用）`, selectedMedia)}
-                    </option>
-                  ) : null}
-                  {models.map((model) => {
-                    const alreadyConfigured = routes.some(
-                      (candidate, candidateIndex) =>
-                        candidateIndex !== index &&
-                        sameRoute(candidate, { agentId: route.agentId, modelId: model.id }),
-                    );
-                    const label = resolveModelPresentation({
-                        agentId: agent?.id ?? null,
-                        modelId: model.id,
-                        modelLabel: model.label,
-                      }).fullLabel;
-                    return (
-                      <option key={model.id} value={model.id} disabled={alreadyConfigured}>
-                        {mediaOptionLabel(
-                          `${label}${alreadyConfigured ? "（已配置）" : ""}`,
-                          mediaInputSupport(agent, model.id),
-                        )}
-                      </option>
-                    );
-                  })}
-                </select>
-                <span
-                  aria-label={`第 ${index + 1} 项媒体输入支持`}
-                  className="mt-1 flex min-w-0 gap-1 text-[9px] leading-4"
-                >
-                  <MediaSupportBadge medium="图片" supported={selectedMedia.image} />
-                  <MediaSupportBadge medium="视频" supported={selectedMedia.video} />
-                </span>
-              </label>
-              <div className="flex h-9 items-center">
-                <button
-                  type="button"
-                  aria-label={`上移第 ${index + 1} 项`}
-                  title="上移"
-                  disabled={disabled || index === 0}
-                  className="h-8 w-7 rounded text-xs text-muted hover:bg-raised disabled:opacity-25"
-                  onClick={() => move(index, index - 1)}
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  aria-label={`下移第 ${index + 1} 项`}
-                  title="下移"
-                  disabled={disabled || index === routes.length - 1}
-                  className="h-8 w-7 rounded text-xs text-muted hover:bg-raised disabled:opacity-25"
-                  onClick={() => move(index, index + 1)}
-                >
-                  ↓
-                </button>
-                <button
-                  type="button"
-                  aria-label={`删除第 ${index + 1} 项`}
-                  title="删除"
-                  disabled={disabled}
-                  className="flex h-8 w-7 items-center justify-center rounded text-muted hover:bg-danger/10 hover:text-danger disabled:opacity-25"
-                  onClick={() => update(routes.filter((_, candidate) => candidate !== index))}
-                >
-                  <Trash2 size={13} />
-                </button>
+                    ))}
+                  </select>
+                </label>
               </div>
-            </div>
+
+              <div className="mt-2 flex flex-wrap gap-1" aria-label={`${agentLabel} ${modelLabel} 标签`}>
+                {tags.map((tag) => {
+                  const checked = selected.includes(tag);
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      aria-pressed={checked}
+                      disabled={
+                        disabled ||
+                        (!checked && selected.length >= 4) ||
+                        (checked && selected.length === 1)
+                      }
+                      onClick={() =>
+                        updateTags(
+                          checked ? selected.filter((candidate) => candidate !== tag) : [...selected, tag],
+                        )
+                      }
+                      className={`rounded-full border px-2 py-1 text-[10px] disabled:opacity-35 ${
+                        checked
+                          ? "border-accent/60 bg-accent/10 text-accent"
+                          : "border-line text-faint hover:text-fg"
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  );
+                })}
+                <span className="flex h-7 items-center rounded-full border border-dashed border-line px-1">
+                  <input
+                    aria-label={`${agentLabel} ${modelLabel} 自定义标签`}
+                    value={customTag[key] ?? ""}
+                    disabled={disabled || selected.length >= 4}
+                    placeholder="自定义"
+                    maxLength={40}
+                    className="w-14 bg-transparent px-1 text-[10px] text-fg outline-none placeholder:text-faint"
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setCustomTag((current) => ({ ...current, [key]: value }));
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter") return;
+                      event.preventDefault();
+                      const value = customTag[key]?.trim();
+                      if (!value) return;
+                      updateTags([...selected, value]);
+                      setCustomTag((current) => ({ ...current, [key]: "" }));
+                    }}
+                  />
+                  <button
+                    type="button"
+                    aria-label="添加自定义标签"
+                    disabled={disabled || selected.length >= 4 || !customTag[key]?.trim()}
+                    className="flex h-5 w-5 items-center justify-center rounded-full text-faint hover:text-accent disabled:opacity-30"
+                    onClick={() => {
+                      const value = customTag[key]?.trim();
+                      if (!value) return;
+                      updateTags([...selected, value]);
+                      setCustomTag((current) => ({ ...current, [key]: "" }));
+                    }}
+                  >
+                    <Plus size={11} />
+                  </button>
+                </span>
+              </div>
+            </article>
           );
         })}
-        {routes.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line px-3 py-5 text-center text-xs text-faint">
-            此能力还没有首选项；聊天框会提示先完成配置。
+        {rows.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line px-3 py-8 text-center text-xs text-faint">
+            <Tags size={18} /> 当前没有可配置的 Agent 与模型
           </div>
         ) : null}
       </div>
 
-      <div className="flex items-center justify-between gap-3">
+      <div className="sticky bottom-0 flex justify-end border-t border-line bg-surface pt-3">
         <button
           type="button"
-          disabled={disabled || !availableToAdd}
-          onClick={add}
-          className="flex h-9 items-center gap-1 rounded-lg border border-line px-3 text-xs text-muted hover:bg-raised hover:text-fg disabled:opacity-40"
-        >
-          <Plus size={14} /> 添加首选项
-        </button>
-        <button
-          type="button"
-          disabled={disabled || saving}
+          disabled={disabled || saving || rows.some((row) => row.tags.length === 0)}
           onClick={() => {
             setSaving(true);
             Promise.resolve(onSave(draft)).finally(() => setSaving(false));
@@ -361,61 +283,11 @@ export function RuntimeSettings({
   );
 }
 
-function firstAvailableRoute(
-  agent: AgentInfo,
-  routes: PreferredAgentModel[],
-  ignoreIndex = -1,
-): PreferredAgentModel | undefined {
-  const models = agent.catalog.models ?? [];
-  const defaultModel = models.find((model) => model.id === agent.catalog.defaultModel);
-  const orderedModels = defaultModel
-    ? [defaultModel, ...models.filter((model) => model.id !== defaultModel.id)]
-    : models;
-  const candidates: PreferredAgentModel[] =
-    orderedModels.length > 0
-      ? orderedModels.map((model) => ({ agentId: agent.id, modelId: model.id }))
-      : [{ agentId: agent.id }];
-  return candidates.find(
-    (candidate) =>
-      !routes.some(
-        (route, index) => index !== ignoreIndex && sameRoute(route, candidate),
-      ),
-  );
-}
-
-function sameRoute(left: PreferredAgentModel, right: PreferredAgentModel): boolean {
-  return left.agentId === right.agentId && left.modelId === right.modelId;
-}
-
-function mediaOptionLabel(label: string, support: { image: boolean; video: boolean }): string {
-  return `${label} · 图片${support.image ? "✓" : "—"} · 视频${support.video ? "✓" : "—"}`;
-}
-
-function MediaSupportBadge({ medium, supported }: { medium: string; supported: boolean }) {
-  return (
-    <span
-      title={`${supported ? "支持" : "不支持"}${medium}输入`}
-      className={`rounded border px-1 ${
-        supported
-          ? "border-accent/35 bg-accent/10 text-accent"
-          : "border-line text-faint"
-      }`}
-    >
-      {medium} {supported ? "✓" : "—"}
-    </span>
-  );
-}
-
 function effortLabel(id: string): string {
-  const labels: Record<string, string> = {
-    off: "关闭",
-    minimal: "极低",
-    low: "低",
-    medium: "中",
-    high: "高",
-    xhigh: "很高",
-    max: "最高",
-    ultra: "极致",
-  };
-  return labels[id] ?? id;
+  const normalized = id.toLowerCase();
+  if (normalized === "low" || normalized === "minimal") return "低";
+  if (normalized === "medium") return "中";
+  if (normalized === "high") return "高";
+  if (normalized === "xhigh" || normalized === "max") return "超高";
+  return id;
 }

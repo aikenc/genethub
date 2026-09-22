@@ -111,6 +111,14 @@ pub struct TurnStats {
     pub usage: Usage,
     #[ts(type = "number")]
     pub tool_calls: u64,
+    /// Exact runtime that produced this turn. Optional for histories written
+    /// before in-session Agent switching existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
     /// Opaque Agent checkpoint used only when that Agent supports true forks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -321,6 +329,29 @@ pub enum SessionEvent {
     },
     #[serde(rename_all = "camelCase")]
     ModelChanged { model_id: String },
+    /// Atomic identity/runtime replacement for one durable Session. One event
+    /// prevents clients from rendering a mixed old-Agent/new-model state.
+    #[serde(rename_all = "camelCase")]
+    AgentChanged {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        model_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        mode_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        effort_id: Option<String>,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        runtime_values: std::collections::BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(optional, as = "Option<_>")]
+        routing_tags: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(optional, as = "Option<_>")]
+        media_tags: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
     ModeChanged { mode_id: String },
     #[serde(rename_all = "camelCase")]

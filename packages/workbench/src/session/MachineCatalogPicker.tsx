@@ -1,5 +1,4 @@
 import type {
-  AgentCapability,
   AgentInfo,
   AgentSelectionPreferences,
   WorkspaceInfo,
@@ -11,9 +10,10 @@ import { resolveAgentPresentation } from "../presentation/catalog/resolve";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { buildAgentSpaceTree, flattenAgentSpaceTree } from "../workspace/agent-space-tree";
 import {
-  CAPABILITIES,
+  availableAgentTags,
   normalizeAgentPreferences,
-  resolveCapabilityRoute,
+  normalizeTags,
+  resolveTagRoute,
   type ResolvedCapabilityRoute,
 } from "./capability-preferences";
 
@@ -44,23 +44,23 @@ export const CURRENT_MACHINE: MachineOption = {
 };
 
 /**
- * The machine + workspace + capability picking state shared by Fork and Forward:
+ * The machine + workspace + tag picking state shared by Fork and Forward:
  * the machine grid drives a catalog load, and switching machines re-seeds the
- * workspace/capability choices from what the target actually has. Presentational
+ * workspace/tag choices from what the target actually has. Presentational
  * pieces below stay dumb so each dialog composes only the fieldsets it needs.
  */
 export function useMachineCatalog({
   sourceMachine,
   sourceCatalog,
   sourceWorkspaceId,
-  sourceCapability,
+  sourceTags,
   listMachines,
   loadCatalog,
 }: {
   sourceMachine: MachineOption;
   sourceCatalog: MachineCatalog;
   sourceWorkspaceId: string;
-  sourceCapability?: AgentCapability;
+  sourceTags?: string[];
   listMachines?(): Promise<MachineOption[]>;
   loadCatalog?(machine: MachineOption): Promise<MachineCatalog>;
 }) {
@@ -72,8 +72,8 @@ export function useMachineCatalog({
     sourceCatalog.agentPreferences,
     sourceCatalog.agents,
   );
-  const [capability, setCapability] = useState<AgentCapability>(
-    sourceCapability ?? sourcePreferences.selectedCapability,
+  const [tags, setTags] = useState<string[]>(
+    normalizeTags(sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flush"]),
   );
   const [loadingMachines, setLoadingMachines] = useState(Boolean(listMachines));
   const [loadingCatalog, setLoadingCatalog] = useState(false);
@@ -112,7 +112,9 @@ export function useMachineCatalog({
     if (machine.id === sourceMachine.id) {
       setCatalog(sourceCatalog);
       setWorkspaceId(sourceWorkspaceId);
-      setCapability(sourceCapability ?? sourcePreferences.selectedCapability);
+      setTags(
+        normalizeTags(sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flush"]),
+      );
       setLoadingCatalog(false);
       return;
     }
@@ -128,9 +130,8 @@ export function useMachineCatalog({
             ? sourceWorkspaceId
             : (loaded.workspaces[0]?.id ?? ""),
         );
-        setCapability(
-          normalizeAgentPreferences(loaded.agentPreferences, loaded.agents)
-            .selectedCapability,
+        setTags(
+          normalizeAgentPreferences(loaded.agentPreferences, loaded.agents).selectedTags ?? ["Flush"],
         );
       })
       .catch((error: unknown) => {
@@ -144,7 +145,7 @@ export function useMachineCatalog({
   const selectedMachine =
     machines.find((machine) => machine.id === selectedMachineId) ?? sourceMachine;
   const preferences = normalizeAgentPreferences(catalog.agentPreferences, catalog.agents);
-  const route = resolveCapabilityRoute(preferences, capability, catalog.agents);
+  const route = resolveTagRoute(preferences, tags, catalog.agents);
 
   return {
     machines,
@@ -152,8 +153,8 @@ export function useMachineCatalog({
     catalog,
     workspaceId,
     setWorkspaceId,
-    capability,
-    setCapability,
+    tags,
+    setTags,
     preferences,
     route,
     loadingMachines,
@@ -278,64 +279,72 @@ export function WorkspaceList({
   );
 }
 
-export function CapabilityGrid({
+export function TagGrid({
   agents,
   preferences,
-  selectedCapability,
+  selectedTags,
   disabled,
   onSelect,
-  currentCapability,
+  currentTags,
 }: {
   agents: AgentInfo[];
   preferences: AgentSelectionPreferences;
-  selectedCapability: AgentCapability;
+  selectedTags: string[];
   disabled?: boolean;
-  onSelect(capability: AgentCapability): void;
-  /** Shown when the source session resolves through this capability. */
-  currentCapability?: AgentCapability;
+  onSelect(tags: string[]): void;
+  /** Shown when the source session uses this exact tag contract. */
+  currentTags?: string[];
 }) {
+  const selected = normalizeTags(selectedTags);
+  const available = availableAgentTags(preferences);
+  const route = resolveTagRoute(preferences, selected, agents);
+  const presentation = route ? resolveAgentPresentation(route.agent) : null;
+  const modelLabel = route ? resolveModelLabel(route) : null;
+  const isCurrent =
+    currentTags !== undefined &&
+    normalizeTags(currentTags).map(tagKey).sort().join("\u0000") ===
+      selected.map(tagKey).sort().join("\u0000");
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标能力</legend>
-      <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
-        {CAPABILITIES.map((candidate) => {
-          const route = resolveCapabilityRoute(preferences, candidate.id, agents);
-          const presentation = route ? resolveAgentPresentation(route.agent) : null;
-          const modelLabel = route ? resolveModelLabel(route) : null;
+      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标标签</legend>
+      <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="目标标签">
+        {available.map((tag) => {
+          const checked = selected.some((candidate) => tagKey(candidate) === tagKey(tag));
           return (
-            <label
-              key={candidate.id}
-              className="flex min-h-16 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
+            <button
+              key={tag}
+              type="button"
+              aria-pressed={checked}
+              disabled={(checked && selected.length === 1) || (!checked && selected.length >= 4)}
+              onClick={() =>
+                onSelect(
+                  checked
+                    ? selected.filter((candidate) => tagKey(candidate) !== tagKey(tag))
+                    : [...selected, tag],
+                )
+              }
+              className={`rounded-full border px-3 py-1.5 text-xs disabled:opacity-40 ${
+                checked
+                  ? "border-accent/60 bg-accent/10 text-accent"
+                  : "border-line text-muted hover:bg-raised hover:text-fg"
+              }`}
             >
-              <input
-                type="radio"
-                name="machine-catalog-capability"
-                value={candidate.id}
-                aria-label={`${candidate.label}${route ? ` ${presentation?.label ?? route.agent.label}` : " 当前不可用"}`}
-                checked={candidate.id === selectedCapability}
-                disabled={!route}
-                onChange={() => onSelect(candidate.id)}
-                className="sr-only"
-              />
-              {route && presentation?.kind !== "text" ? (
-                <AgentMark agent={route.agent} className="h-6 w-6" fallbackToText={false} />
-              ) : null}
-              {!route ? (
-                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-raised text-xs text-faint" aria-hidden>
-                  —
-                </span>
-              ) : null}
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-fg">{candidate.label}</span>
-                <span className={`block truncate text-[10px] ${route ? "text-faint" : "text-danger"}`}>
-                  {route
-                    ? `${presentation?.label ?? route.agent.label}${modelLabel ? ` · ${modelLabel}` : ""}${candidate.id === currentCapability ? " · 当前" : ""}`
-                    : "未配置或当前不可用"}
-                </span>
-              </span>
-            </label>
+              {tag}
+            </button>
           );
         })}
+      </div>
+      <div className={`mt-2 flex min-h-12 items-center gap-2 rounded-xl border px-3 py-2 text-sm ${
+        route ? "border-line bg-raised/50" : "border-danger/30 bg-danger/10"
+      }`}>
+        {route && presentation?.kind !== "text" ? (
+          <AgentMark agent={route.agent} className="h-6 w-6" fallbackToText={false} />
+        ) : null}
+        <span className={`min-w-0 flex-1 truncate ${route ? "text-fg" : "text-danger"}`}>
+          {route
+            ? `${presentation?.label ?? route.agent.label}${modelLabel ? ` · ${modelLabel}` : ""}${isCurrent ? " · 当前" : ""}`
+            : `没有 Agent 与模型同时匹配${selected.length ? `「${selected.join(" + ")}」` : "当前标签"}`}
+        </span>
       </div>
     </fieldset>
   );
@@ -348,5 +357,7 @@ function resolveModelLabel(route: ResolvedCapabilityRoute): string | null {
     route.modelId
   );
 }
+
+const tagKey = (tag: string) => tag.toLocaleLowerCase();
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));

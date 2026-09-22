@@ -16,12 +16,12 @@ use genehub_proto::{
     Attachment, BlobOverview, BlobPayload, BlobRef, Catalog, ForkMethod, ForkTarget, ForkTransfer,
     HistoryCoverage, ImportContinuation, ItemDelta, ManagedSessionInfo, PermissionOptionKind,
     PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState, RetrievalCapability,
-    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionArtifactBundle,
-    SessionArtifactFile, SessionArtifactUpload, SessionContext, SessionEvent,
-    SessionImportCandidate, SessionImportListing, SessionImportSource, SessionInspection,
-    SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage, SessionSnapshot,
-    SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator, TurnErrorCode,
-    TurnOutcome, TurnStats, Usage,
+    RoundLayer, RoundLayerOutcome, RoundSummary, RoundTrunk, SequencedEvent, SessionAgentTarget,
+    SessionArtifactBundle, SessionArtifactFile, SessionArtifactUpload, SessionContext,
+    SessionEvent, SessionImportCandidate, SessionImportListing, SessionImportSource,
+    SessionInspection, SessionLineage, SessionNarrativePage, SessionReadSource, SessionRoundPage,
+    SessionSnapshot, SessionStatus, SessionSummary, TimelineItem, ToolStatus, TrunkLocator,
+    TurnErrorCode, TurnOutcome, TurnStats, Usage,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -35,8 +35,8 @@ use super::overview;
 use super::rounds::{self, RoundOutcome, RoundRecord, TrunkBuilder, TrunkItem, TrunkSummary};
 use super::store::{
     self, agent_title_fits_current, apply_catalog_title_repair, is_catalog_noise_title,
-    normalize_session_title, now_ms, title_from, ChatLog, ContextSeedState, HumanContinuation,
-    ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
+    normalize_session_title, now_ms, title_from, ChatLog, ContextSeed, ContextSeedState,
+    HumanContinuation, ImportedSessionMeta, SessionMeta, Store, SESSION_FORMAT,
 };
 use crate::adapter::registry::Registry;
 use crate::adapter::usage::{self as token_usage};
@@ -525,6 +525,9 @@ impl SessionManager {
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
+            tag_routing: false,
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title,
             title_locked: false,
             cwd,
@@ -574,6 +577,45 @@ impl SessionManager {
             Arc::new(Live::new(meta, self.store.clone())),
         );
         Ok(summary)
+    }
+
+    /// Creates an ordinary Session from a tag-router result and records only
+    /// the intent tags, never a sticky resolved route.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn create_routed(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        effort_id: Option<String>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+        routing_tags: Vec<String>,
+        media_tags: Vec<String>,
+    ) -> Result<SessionSummary> {
+        let created = self
+            .create(
+                workspace_id,
+                cwd,
+                agent_id,
+                model_id,
+                mode_id,
+                runtime_values,
+                title,
+            )
+            .await?;
+        let live = self.live(&created.id).await?;
+        let mut meta = live.meta.lock().await;
+        let mut next = meta.clone();
+        next.effort_id = effort_id;
+        next.tag_routing = true;
+        next.routing_tags = routing_tags;
+        next.media_tags = media_tags;
+        self.store.save_meta(&next)?;
+        *meta = next.clone();
+        Ok(next.summary(SessionStatus::Idle))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -652,6 +694,9 @@ impl SessionManager {
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: agent_id.to_string(),
+            tag_routing: false,
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title,
             title_locked: false,
             cwd,
@@ -712,6 +757,37 @@ impl SessionManager {
         target: Option<ForkTarget>,
         providers: &ProviderMap,
     ) -> Result<SessionSummary> {
+        self.fork_with_routing(session_id, turn_id, target, providers, None)
+            .await
+    }
+
+    pub(crate) async fn fork_routed(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        target: ForkTarget,
+        providers: &ProviderMap,
+        routing_tags: Vec<String>,
+        media_tags: Vec<String>,
+    ) -> Result<SessionSummary> {
+        self.fork_with_routing(
+            session_id,
+            turn_id,
+            Some(target),
+            providers,
+            Some((routing_tags, media_tags)),
+        )
+        .await
+    }
+
+    async fn fork_with_routing(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        target: Option<ForkTarget>,
+        providers: &ProviderMap,
+        routing: Option<(Vec<String>, Vec<String>)>,
+    ) -> Result<SessionSummary> {
         let source = self.live(session_id).await?;
         let busy = matches!(
             *source.status.lock().await,
@@ -739,6 +815,7 @@ impl SessionManager {
             model_id: source_meta.model_id.clone(),
             mode_id: source_meta.mode_id.clone(),
             effort_id: source_meta.effort_id.clone(),
+            runtime_values: source_meta.runtime_values.clone(),
         });
         let same_agent = target.agent_id == source_meta.agent_id;
         // A live turn still has usable history, but the agent is mid-prompt.
@@ -849,6 +926,13 @@ impl SessionManager {
             .title
             .as_deref()
             .and_then(|title| title_from(&format!("{title} · 分支")));
+        let tag_routing = routing.is_some() || source_meta.tag_routing;
+        let (routing_tags, media_tags) = routing.unwrap_or_else(|| {
+            (
+                source_meta.routing_tags.clone(),
+                source_meta.media_tags.clone(),
+            )
+        });
         let meta = SessionMeta {
             inbox: Default::default(),
             execution_retired: false,
@@ -857,11 +941,14 @@ impl SessionManager {
             message_preview: None,
             latest_reply: None,
             drafts: vec![],
-            runtime_values: Default::default(),
+            runtime_values: target.runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: target.workspace_id.unwrap_or(source_meta.workspace_id),
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
+            tag_routing,
+            routing_tags,
+            media_tags,
             title,
             title_locked: source_meta.title_locked,
             cwd: source_meta.cwd,
@@ -973,10 +1060,55 @@ impl SessionManager {
         &self,
         workspace_id: &str,
         cwd: PathBuf,
+        transfer: ForkTransfer,
+        target: ForkTarget,
+        providers: &ProviderMap,
+        source_accessible: bool,
+    ) -> Result<SessionSummary> {
+        self.fork_import_with_routing(
+            workspace_id,
+            cwd,
+            transfer,
+            target,
+            providers,
+            source_accessible,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn fork_import_routed(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        transfer: ForkTransfer,
+        target: ForkTarget,
+        providers: &ProviderMap,
+        source_accessible: bool,
+        routing_tags: Vec<String>,
+        media_tags: Vec<String>,
+    ) -> Result<SessionSummary> {
+        self.fork_import_with_routing(
+            workspace_id,
+            cwd,
+            transfer,
+            target,
+            providers,
+            source_accessible,
+            Some((routing_tags, media_tags)),
+        )
+        .await
+    }
+
+    async fn fork_import_with_routing(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
         mut transfer: ForkTransfer,
         target: ForkTarget,
         providers: &ProviderMap,
         source_accessible: bool,
+        routing: Option<(Vec<String>, Vec<String>)>,
     ) -> Result<SessionSummary> {
         let blob_appendix = std::mem::take(&mut transfer.blob_appendix);
         if target.workspace_id.as_deref() != Some(workspace_id) {
@@ -1055,6 +1187,8 @@ impl SessionManager {
             )
         };
         let now = now_ms();
+        let tag_routing = routing.is_some();
+        let (routing_tags, media_tags) = routing.unwrap_or_default();
         let meta = SessionMeta {
             inbox: Default::default(),
             execution_retired: false,
@@ -1063,11 +1197,14 @@ impl SessionManager {
             message_preview: None,
             latest_reply: None,
             drafts: vec![],
-            runtime_values: Default::default(),
+            runtime_values: target.runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: target.agent_id,
+            tag_routing,
+            routing_tags,
+            media_tags,
             title: transfer
                 .title
                 .as_deref()
@@ -1285,6 +1422,9 @@ impl SessionManager {
             workspace_id: workspace_id.to_string(),
             format: SESSION_FORMAT,
             agent_id: candidate.agent_id.clone(),
+            tag_routing: false,
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title: history.title.or(Some(candidate.title)),
             title_locked: false,
             cwd,
@@ -1481,6 +1621,24 @@ impl SessionManager {
             live.pending_permissions.lock().await.iter(),
         ));
         Ok(summary)
+    }
+
+    /// Returns the durable Human tags plus media requirements observed anywhere
+    /// in the visible history. Scanning also upgrades sessions written before
+    /// `mediaTags` existed without a migration pass over every workspace.
+    pub(crate) async fn routing_requirements(
+        &self,
+        session_id: &str,
+    ) -> Result<(bool, Vec<String>, Vec<String>)> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await.clone();
+        let items = live.items.lock().await;
+        let historical = crate::agent_routing::media_tags_for_timeline(&items);
+        let enabled =
+            meta.tag_routing || !meta.routing_tags.is_empty() || !meta.media_tags.is_empty();
+        let media_tags =
+            crate::agent_routing::normalize_tags(meta.media_tags.into_iter().chain(historical));
+        Ok((enabled, meta.routing_tags, media_tags))
     }
 
     /// A snapshot of live member turns; reading it never starts an Agent.
@@ -2601,7 +2759,21 @@ impl SessionManager {
             let meta = live.meta.lock().await;
             (meta.workspace_id.clone(), meta.id.clone())
         };
+        let current_route = {
+            let meta = live.meta.lock().await;
+            (meta.agent_id.clone(), meta.model_id.clone())
+        };
         let mut applying_seed = match self.store.load_seed(&seed_owner.0, &seed_owner.1)? {
+            Some(seed)
+                if !context_seed_targets_route(&seed, &current_route.0, &current_route.1) =>
+            {
+                tracing::warn!(
+                    session = %session_id,
+                    target_agent = ?seed.target_agent_id,
+                    "ignored an uncommitted Agent migration context seed"
+                );
+                None
+            }
             Some(mut seed) if seed.state == ContextSeedState::Pending => {
                 seed.state = ContextSeedState::Applying;
                 self.store.save_seed(&seed_owner.0, &seed_owner.1, &seed)?;
@@ -3141,6 +3313,237 @@ impl SessionManager {
         })
         .await;
         Ok(drafts)
+    }
+
+    /// Rebinds one durable GeneHub Session to a different Agent-native
+    /// context. The visible timeline and Session id remain unchanged; the next
+    /// user message carries a bounded reconstruction of all completed history.
+    pub async fn switch_agent(
+        &self,
+        session_id: &str,
+        target: SessionAgentTarget,
+        providers: &ProviderMap,
+    ) -> Result<SessionSummary> {
+        self.switch_agent_with_routing(session_id, target, providers, None)
+            .await
+    }
+
+    pub(crate) async fn switch_agent_routed(
+        &self,
+        session_id: &str,
+        target: SessionAgentTarget,
+        providers: &ProviderMap,
+        routing_tags: Vec<String>,
+        media_tags: Vec<String>,
+    ) -> Result<SessionSummary> {
+        self.switch_agent_with_routing(
+            session_id,
+            target,
+            providers,
+            Some((routing_tags, media_tags)),
+        )
+        .await
+    }
+
+    async fn switch_agent_with_routing(
+        &self,
+        session_id: &str,
+        target: SessionAgentTarget,
+        providers: &ProviderMap,
+        routing: Option<(Vec<String>, Vec<String>)>,
+    ) -> Result<SessionSummary> {
+        let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        let _retirement = live.retirement.lock().await;
+
+        {
+            let mut execution = live.execution.lock().await;
+            if execution
+                .as_ref()
+                .is_some_and(|current| current.phase == ExecutionPhase::Saving)
+            {
+                flush_turn(&live, &self.store).await?;
+                execution.take();
+            }
+            if execution.is_some() {
+                bail!("wait for the current Agent turn to finish before switching Agent");
+            }
+        }
+        let status = *live.status.lock().await;
+        if !matches!(status, SessionStatus::Idle | SessionStatus::Failed) {
+            bail!("this Session cannot switch Agent while it is {status:?}");
+        }
+
+        let source_meta = live.meta.lock().await.clone();
+        if source_meta.managed.is_some() {
+            bail!("Workflow-managed Sessions keep the Agent chosen by their tag contract");
+        }
+        if source_meta
+            .imported
+            .as_ref()
+            .is_some_and(|imported| imported.continuation == ImportContinuation::ReadOnly)
+        {
+            bail!("this imported conversation is read-only and cannot switch Agent");
+        }
+        let tag_routing = routing.is_some() || source_meta.tag_routing;
+        let (routing_tags, media_tags) = routing.unwrap_or_else(|| {
+            (
+                source_meta.routing_tags.clone(),
+                source_meta.media_tags.clone(),
+            )
+        });
+        let same_runtime = source_meta.agent_id == target.agent_id
+            && source_meta.model_id == target.model_id
+            && source_meta.mode_id == target.mode_id
+            && source_meta.effort_id == target.effort_id
+            && source_meta.runtime_values == target.runtime_values;
+        if same_runtime {
+            if source_meta.tag_routing == tag_routing
+                && source_meta.routing_tags == routing_tags
+                && source_meta.media_tags == media_tags
+            {
+                return Ok(source_meta.summary(status));
+            }
+            // A new tag or newly observed medium can still resolve to the
+            // exact running destination. Persist that intent atomically, but
+            // keep the Agent-native thread and its context alive.
+            let mut next = source_meta.clone();
+            next.tag_routing = tag_routing;
+            next.routing_tags = routing_tags;
+            next.media_tags = media_tags;
+            next.updated_at_ms = now_ms();
+            self.store.save_meta(&next)?;
+            *live.meta.lock().await = next.clone();
+            live.publish(SessionEvent::AgentChanged {
+                agent_id: next.agent_id.clone(),
+                model_id: next.model_id.clone(),
+                mode_id: next.mode_id.clone(),
+                effort_id: next.effort_id.clone(),
+                runtime_values: next.runtime_values.clone(),
+                routing_tags: next.routing_tags.clone(),
+                media_tags: next.media_tags.clone(),
+            })
+            .await;
+            return Ok(next.summary(status));
+        }
+        let adapter = self.registry.require(&target.agent_id)?;
+        match adapter.probe().await {
+            ProbeState::Ready => {}
+            ProbeState::NotInstalled => {
+                bail!("the {} agent is not installed", target.agent_id)
+            }
+            ProbeState::Unavailable { reason } => {
+                bail!("the {} agent is unavailable: {reason}", target.agent_id)
+            }
+        }
+        let catalog = adapter.catalog(providers).await;
+        let mut next = source_meta.clone();
+        next.agent_id = target.agent_id.clone();
+        next.model_id = target.model_id.clone();
+        next.mode_id = target.mode_id.clone();
+        next.effort_id = target.effort_id.clone();
+        next.runtime_values = target.runtime_values.clone();
+        next.tag_routing = tag_routing;
+        next.routing_tags = routing_tags;
+        next.media_tags = media_tags;
+        let requested = (
+            next.model_id.clone(),
+            next.mode_id.clone(),
+            next.effort_id.clone(),
+            next.runtime_values.clone(),
+        );
+        if normalize_runtime_selection(&mut next, &catalog)
+            || requested
+                != (
+                    next.model_id.clone(),
+                    next.mode_id.clone(),
+                    next.effort_id.clone(),
+                    next.runtime_values.clone(),
+                )
+        {
+            bail!("the selected Agent runtime is no longer available; refresh the Agent list");
+        }
+
+        let items = migration_seed_history(&source_meta, &live.items.lock().await);
+        let last_turn = items.iter().rev().find_map(|item| match item {
+            TimelineItem::TurnSummary { stats, .. } => Some(stats.turn_id.clone()),
+            _ => None,
+        });
+        let source_round_id = {
+            let rounds = live.rounds.lock().await;
+            last_turn.as_deref().and_then(|turn_id| {
+                rounds
+                    .iter()
+                    .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
+                    .map(|round| round.round_id.clone())
+            })
+        };
+        let target_seed = if items.is_empty() {
+            None
+        } else {
+            let context_window = target
+                .model_id
+                .as_deref()
+                .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                .or_else(|| {
+                    catalog
+                        .default_model
+                        .as_deref()
+                        .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                })
+                .and_then(|model| model.context_window);
+            let mut built = build_context_seed(
+                session_id,
+                last_turn.as_deref().unwrap_or("latest"),
+                source_round_id.as_deref(),
+                &source_meta.agent_id,
+                &items,
+                seed_token_budget(context_window),
+                coverage_for_meta(&source_meta, items.len()),
+            )
+            .seed;
+            built.target_agent_id = Some(target.agent_id.clone());
+            built.target_model_id = target.model_id.clone();
+            Some(built)
+        };
+
+        // Stop the event pump before closing the old process so its channel
+        // closure cannot be mistaken for a failed turn after the new binding
+        // has been committed.
+        live.stop_pump().await?;
+        close_current_agent(&live).await?;
+
+        let old_seed = self
+            .store
+            .load_seed(&source_meta.workspace_id, &source_meta.id)?;
+        if let Some(seed) = &target_seed {
+            self.store
+                .save_seed(&source_meta.workspace_id, &source_meta.id, seed)?;
+        }
+        next.persist = None;
+        next.agent_pid = None;
+        next.updated_at_ms = now_ms();
+        if let Err(error) = self.store.save_meta(&next) {
+            if let Some(seed) = old_seed.as_ref() {
+                let _ = self
+                    .store
+                    .save_seed(&source_meta.workspace_id, &source_meta.id, seed);
+            }
+            return Err(error).context("persisting the new Agent binding");
+        }
+        *live.meta.lock().await = next.clone();
+        *live.additional_system_prompt.lock().await = None;
+        live.publish(SessionEvent::AgentChanged {
+            agent_id: next.agent_id.clone(),
+            model_id: next.model_id.clone(),
+            mode_id: next.mode_id.clone(),
+            effort_id: next.effort_id.clone(),
+            runtime_values: next.runtime_values.clone(),
+            routing_tags: next.routing_tags.clone(),
+            media_tags: next.media_tags.clone(),
+        })
+        .await;
+        Ok(next.summary(status))
     }
 
     /// Same shape as `set_model`, and for the same two reasons.
@@ -4043,6 +4446,41 @@ fn round_summary(view: &RoundView) -> RoundSummary {
         outcome: view.outcome,
         trunk_count: view.trunk_count,
     }
+}
+
+/// Seeds written before in-session migration had no target marker and remain
+/// valid for their owning fork/import. A migration marker, once present, must
+/// match both Agent and model; the Agent marker also makes an explicit
+/// no-model target distinguishable from an old unmarked seed on disk.
+fn context_seed_targets_route(
+    seed: &ContextSeed,
+    agent_id: &str,
+    model_id: &Option<String>,
+) -> bool {
+    match seed.target_agent_id.as_deref() {
+        None => true,
+        Some(target_agent) => {
+            target_agent == agent_id && seed.target_model_id.as_deref() == model_id.as_deref()
+        }
+    }
+}
+
+/// Durable inbox messages are already visible in `items`, but they have not
+/// yet been handed to an Agent. They must be the next current prompt, not also
+/// quoted inside the reconstructed history that precedes that prompt.
+fn migration_seed_history(meta: &SessionMeta, items: &[TimelineItem]) -> Vec<TimelineItem> {
+    let pending = meta
+        .inbox
+        .entries
+        .iter()
+        .filter(|entry| entry.state != "handled")
+        .map(|entry| entry.message_id.as_str())
+        .collect::<HashSet<_>>();
+    items
+        .iter()
+        .filter(|item| !pending.contains(item.id()))
+        .cloned()
+        .collect()
 }
 
 fn coverage_for_meta(meta: &SessionMeta, retained_items: usize) -> HistoryCoverage {
@@ -5835,7 +6273,11 @@ async fn pump_events(
             let items = live.items.lock().await;
             turn_summary(&event, &mut turns, &mut live_usage, &items)
         };
-        if let Some(stats) = summary {
+        if let Some(mut stats) = summary {
+            let meta = live.meta.lock().await;
+            stats.agent_id = Some(meta.agent_id.clone());
+            stats.model_id = meta.model_id.clone();
+            drop(meta);
             let summary_event = SessionEvent::Item {
                 turn_id: stats.turn_id.clone(),
                 item: TimelineItem::TurnSummary {
@@ -6041,6 +6483,8 @@ fn turn_summary(
         duration_ms: finished_at_ms.saturating_sub(started_at_ms) as u64,
         usage,
         tool_calls: tools.len() as u64,
+        agent_id: None,
+        model_id: None,
         fork_checkpoint,
     })
 }
@@ -6189,6 +6633,24 @@ async fn apply(live: &Live, event: &SessionEvent) {
         SessionEvent::ModelChanged { model_id } => {
             let mut meta = live.meta.lock().await;
             meta.model_id = Some(model_id.clone());
+        }
+        SessionEvent::AgentChanged {
+            agent_id,
+            model_id,
+            mode_id,
+            effort_id,
+            runtime_values,
+            routing_tags,
+            media_tags,
+        } => {
+            let mut meta = live.meta.lock().await;
+            meta.agent_id = agent_id.clone();
+            meta.model_id = model_id.clone();
+            meta.mode_id = mode_id.clone();
+            meta.effort_id = effort_id.clone();
+            meta.runtime_values = runtime_values.clone();
+            meta.routing_tags = routing_tags.clone();
+            meta.media_tags = media_tags.clone();
         }
         SessionEvent::ModeChanged { mode_id } => {
             let mut meta = live.meta.lock().await;
@@ -6471,6 +6933,9 @@ mod tests {
             workspace_id: "w1".into(),
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
+            tag_routing: false,
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title: None,
             title_locked: false,
             cwd: PathBuf::from("/tmp"),
@@ -6498,6 +6963,75 @@ mod tests {
             text: text.into(),
             received_at_ms: None,
         }
+    }
+
+    #[test]
+    fn migration_history_excludes_inputs_that_still_need_delivery() {
+        let mut session = meta();
+        session.inbox.entries = vec![
+            crate::session::store::InboxEntry {
+                message_id: "handled".into(),
+                received_at_ms: 1,
+                digest: "handled-digest".into(),
+                source: "user".into(),
+                task_run_id: None,
+                state: "handled".into(),
+                turn_id: Some("turn-1".into()),
+            },
+            crate::session::store::InboxEntry {
+                message_id: "queued".into(),
+                received_at_ms: 2,
+                digest: "queued-digest".into(),
+                source: "user".into(),
+                task_run_id: None,
+                state: "queued".into(),
+                turn_id: None,
+            },
+        ];
+        let items = vec![
+            TimelineItem::UserMessage {
+                id: "handled".into(),
+                text: "already delivered".into(),
+                attachments: Vec::new(),
+            },
+            TimelineItem::UserMessage {
+                id: "queued".into(),
+                text: "deliver exactly once".into(),
+                attachments: Vec::new(),
+            },
+        ];
+
+        let history = migration_seed_history(&session, &items);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id(), "handled");
+    }
+
+    #[test]
+    fn migration_seed_target_distinguishes_an_explicit_default_model() {
+        let legacy = ContextSeed {
+            state: ContextSeedState::Pending,
+            text: "legacy".into(),
+            target_agent_id: None,
+            target_model_id: None,
+        };
+        assert!(context_seed_targets_route(
+            &legacy,
+            "any-agent",
+            &Some("any-model".into())
+        ));
+
+        let routed_default = ContextSeed {
+            state: ContextSeedState::Pending,
+            text: "routed".into(),
+            target_agent_id: Some("target".into()),
+            target_model_id: None,
+        };
+        assert!(context_seed_targets_route(&routed_default, "target", &None));
+        assert!(!context_seed_targets_route(
+            &routed_default,
+            "target",
+            &Some("old-model".into())
+        ));
     }
 
     /// A store whose single workspace, `w1`, is a throwaway directory. Sessions
@@ -6893,10 +7427,172 @@ mod tests {
                     duration_ms: 1,
                     usage: Usage::default(),
                     tool_calls: 3,
+                    agent_id: None,
+                    model_id: None,
                     fork_checkpoint: checkpoint.map(str::to_string),
                 },
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn routing_metadata_change_keeps_the_same_agent_context() {
+        let workspace = tempfile::tempdir().unwrap();
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(workspace.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: false,
+                prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let created = sessions
+            .create_routed(
+                "w1",
+                workspace.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+                Default::default(),
+                None,
+                vec!["Flush".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        *sessions.live(&created.id).await.unwrap().items.lock().await = completed_turn(None);
+
+        let updated = sessions
+            .switch_agent_routed(
+                &created.id,
+                SessionAgentTarget {
+                    agent_id: "source".into(),
+                    model_id: Some("model".into()),
+                    mode_id: None,
+                    effort_id: None,
+                    runtime_values: Default::default(),
+                },
+                &ProviderMap::new(),
+                vec!["Pro".into()],
+                vec![crate::agent_routing::TAG_IMAGE.into()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.routing_tags, vec!["Pro"]);
+        assert_eq!(updated.media_tags, vec![crate::agent_routing::TAG_IMAGE]);
+        assert!(sessions
+            .store
+            .load_seed("w1", &created.id)
+            .unwrap()
+            .is_none());
+        assert!(starts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cross_agent_migration_keeps_session_and_replays_history_once() {
+        let workspace = tempfile::tempdir().unwrap();
+        let source_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let source_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target_starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(workspace.path()),
+            Arc::new(Registry::of(vec![
+                Arc::new(ForkHarness {
+                    id: "source",
+                    native_fork: false,
+                    prompts: source_prompts.clone(),
+                    starts: source_starts.clone(),
+                }),
+                Arc::new(ForkHarness {
+                    id: "target",
+                    native_fork: false,
+                    prompts: target_prompts.clone(),
+                    starts: target_starts.clone(),
+                }),
+            ])),
+            16,
+        );
+        let created = sessions
+            .create_routed(
+                "w1",
+                workspace.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+                Default::default(),
+                None,
+                vec!["Flush".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        *sessions.live(&created.id).await.unwrap().items.lock().await = completed_turn(None);
+
+        let migrated = sessions
+            .switch_agent_routed(
+                &created.id,
+                SessionAgentTarget {
+                    agent_id: "target".into(),
+                    model_id: Some("model".into()),
+                    mode_id: None,
+                    effort_id: None,
+                    runtime_values: Default::default(),
+                },
+                &ProviderMap::new(),
+                vec!["Pro".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(migrated.id, created.id);
+        assert_eq!(migrated.agent_id, "target");
+        let staged = sessions
+            .store
+            .load_seed("w1", &created.id)
+            .unwrap()
+            .expect("migration stages reconstructed history");
+        assert_eq!(staged.state, ContextSeedState::Pending);
+        assert_eq!(staged.target_agent_id.as_deref(), Some("target"));
+        assert_eq!(staged.target_model_id.as_deref(), Some("model"));
+
+        sessions
+            .send(
+                &created.id,
+                "Continue the investigation".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(source_starts.lock().unwrap().is_empty());
+        assert!(source_prompts.lock().unwrap().is_empty());
+        assert_eq!(target_starts.lock().unwrap().len(), 1);
+        let target = target_prompts.lock().unwrap();
+        assert_eq!(target.len(), 1);
+        assert!(target[0].text.contains("Investigate the failing deploy"));
+        assert!(target[0].text.contains("The health check path is stale"));
+        assert!(target[0].text.contains("Continue the investigation"));
+        drop(target);
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &created.id)
+                .unwrap()
+                .expect("applied migration seed remains auditable")
+                .state,
+            ContextSeedState::Applied
+        );
     }
 
     #[tokio::test]
@@ -7019,6 +7715,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
                 false,
@@ -7109,6 +7806,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
             )
@@ -7284,6 +7982,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
                 false,
@@ -7303,6 +8002,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
                 false,
@@ -7378,6 +8078,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
             )
@@ -7488,6 +8189,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
             )
@@ -7546,6 +8248,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
             )
@@ -7607,6 +8310,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
             )
@@ -7680,6 +8384,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
             )

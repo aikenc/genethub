@@ -2126,6 +2126,8 @@ mod tests {
             id: "s_1".into(),
             workspace_id: "w_1".into(),
             agent_id: "genet".into(),
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title: None,
             status: SessionStatus::Idle,
             model_id: None,

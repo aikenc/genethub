@@ -1,14 +1,17 @@
-import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
+import type { AgentInfo } from "@genehub/proto";
 import { describe, expect, it } from "vitest";
 
 import {
-  capabilityMediaInputSupport,
-  capabilityForRoute,
+  IMAGE_TAG,
+  VIDEO_TAG,
+  availableAgentTags,
   mediaInputSupport,
   normalizeAgentPreferences,
-  resolveCapabilityRoute,
-  withCapabilityRoutes,
+  resolveTagRoute,
+  tagMediaInputSupport,
+  withModelProfile,
   withRuntimePreference,
+  withSelectedTags,
 } from "./capability-preferences";
 
 function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
@@ -37,15 +40,15 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
           inputModalities: [],
         },
         {
-          id: "vision",
-          label: "Vision",
+          id: "vision-pro",
+          label: "Vision Pro",
           reasoning: true,
           efforts: ["low", "medium", "high"],
           inputModalities: ["image"],
         },
         {
-          id: "video",
-          label: "Video",
+          id: "video-flush",
+          label: "Video Flush",
           reasoning: true,
           efforts: ["medium", "high"],
           inputModalities: ["video"],
@@ -64,25 +67,88 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
   };
 }
 
-describe("machine capability preferences", () => {
-  it("derives a first-run proposal but keeps a saved empty list empty", () => {
-    const derived = normalizeAgentPreferences(undefined, [agent()]);
-    expect(derived.capabilities.planning).toEqual([{ agentId: "codex", modelId: "text" }]);
-    expect(derived.capabilities.multimodal).toEqual([
-      { agentId: "codex", modelId: "vision" },
+describe("machine-global Agent tag routing", () => {
+  it("materializes every exact Agent + model row and infers deterministic defaults", () => {
+    const preferences = normalizeAgentPreferences(undefined, [agent()]);
+    expect(preferences.selectedTags).toEqual(["Flush"]);
+    expect(preferences.modelProfiles).toEqual([
+      { agentId: "codex", modelId: "text", tags: ["Flush"], cost: "medium" },
+      {
+        agentId: "codex",
+        modelId: "vision-pro",
+        tags: ["Pro", IMAGE_TAG],
+        cost: "medium",
+      },
+      {
+        agentId: "codex",
+        modelId: "video-flush",
+        tags: ["Flush", VIDEO_TAG],
+        cost: "low",
+      },
     ]);
-
-    const saved = { ...derived, capabilities: { ...derived.capabilities, planning: [] } };
-    expect(normalizeAgentPreferences(saved, [agent()]).capabilities.planning).toEqual([]);
   });
 
-  it("defaults to high thinking and unrestricted permission", () => {
-    const preferences = normalizeAgentPreferences(undefined, [agent()]);
-    const route = resolveCapabilityRoute(preferences, "planning", [agent()]);
-    expect(route).toMatchObject({
+  it("matches every requested tag and picks the available route with the lowest live cost", () => {
+    let preferences = normalizeAgentPreferences(undefined, [agent()]);
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
       modelId: "text",
+      tags: ["Flush", "我的标签"],
+      cost: "high",
+    });
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
+      modelId: "video-flush",
+      tags: ["Flush", "我的标签", VIDEO_TAG],
+      cost: "veryLow",
+    });
+
+    expect(resolveTagRoute(preferences, ["Flush", "我的标签"], [agent()])?.modelId).toBe(
+      "video-flush",
+    );
+    expect(resolveTagRoute(preferences, ["Flush", "不存在"], [agent()])).toBeNull();
+
+    const unavailable = agent({ probe: { state: "unavailable", reason: "offline" } });
+    expect(resolveTagRoute(preferences, ["Flush"], [unavailable])).toBeNull();
+  });
+
+  it("re-evaluates changed costs instead of preserving a previous route", () => {
+    let preferences = normalizeAgentPreferences(undefined, [agent()]);
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
+      modelId: "text",
+      tags: ["Flush"],
+      cost: "veryLow",
+    });
+    expect(resolveTagRoute(preferences, ["Flush"], [agent()])?.modelId).toBe("text");
+
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
+      modelId: "text",
+      tags: ["Flush"],
+      cost: "veryHigh",
+    });
+    expect(resolveTagRoute(preferences, ["Flush"], [agent()])?.modelId).toBe("video-flush");
+  });
+
+  it("defaults runtime controls high and unrestricted, then remembers the last valid choice", () => {
+    const initial = withModelProfile(normalizeAgentPreferences(undefined, [agent()]), {
+      agentId: "codex",
+      modelId: "text",
+      tags: ["Flush"],
+      cost: "veryLow",
+    });
+    expect(resolveTagRoute(initial, ["Flush"], [agent()])).toMatchObject({
       effortId: "high",
       modeId: "full-access",
+    });
+    const remembered = withRuntimePreference(initial, "codex", {
+      effortId: "xhigh",
+      modeId: "read-only",
+    });
+    expect(resolveTagRoute(remembered, ["Flush"], [agent()])).toMatchObject({
+      effortId: "xhigh",
+      modeId: "read-only",
     });
   });
 
@@ -100,104 +166,62 @@ describe("machine capability preferences", () => {
         ],
       },
     });
-    const preferences = normalizeAgentPreferences(undefined, [custom]);
-    expect(resolveCapabilityRoute(preferences, "planning", [custom])?.effortId).toBe(
-      "xhigh",
-    );
+    expect(
+      resolveTagRoute(normalizeAgentPreferences(undefined, [custom]), ["Flush"], [custom])
+        ?.effortId,
+    ).toBe("xhigh");
   });
 
-  it("remembers the last valid runtime choices at machine scope", () => {
-    const initial = normalizeAgentPreferences(undefined, [agent()]);
-    const remembered = withRuntimePreference(initial, "codex", {
-      effortId: "xhigh",
-      modeId: "read-only",
+  it("derives media affordances from all matching candidates, not from the current route", () => {
+    let preferences = normalizeAgentPreferences(undefined, [agent()]);
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
+      modelId: "vision-pro",
+      tags: ["Flush", IMAGE_TAG],
+      cost: "high",
     });
-    expect(resolveCapabilityRoute(remembered, "planning", [agent()])).toMatchObject({
-      effortId: "xhigh",
-      modeId: "read-only",
-    });
-  });
-
-  it("tries the next exact route when a preferred Agent or model is unavailable", () => {
-    const fallback = agent({ id: "claude", label: "Claude", builtin: false });
-    const preferences: AgentSelectionPreferences = {
-      capabilities: {
-        planning: [
-          { agentId: "missing", modelId: "text" },
-          { agentId: "codex", modelId: "withdrawn" },
-          { agentId: "claude", modelId: "text" },
-        ],
-        coding: [],
-        multimodal: [],
-      },
-      selectedCapability: "planning",
-      runtimes: {},
-    };
-    expect(resolveCapabilityRoute(preferences, "planning", [agent(), fallback])?.agent.id).toBe(
-      "claude",
-    );
-  });
-
-  it("derives image and video support from every usable route, regardless of capability name", () => {
-    const preferences = normalizeAgentPreferences(undefined, [agent()]);
-    preferences.capabilities.planning = [
-      { agentId: "codex", modelId: "text" },
-      { agentId: "codex", modelId: "vision" },
-      { agentId: "codex", modelId: "video" },
-    ];
-
-    expect(capabilityMediaInputSupport(preferences, "planning", [agent()])).toEqual({
+    expect(tagMediaInputSupport(preferences, ["Flush"], [agent()])).toEqual({
       image: true,
       video: true,
     });
-    expect(resolveCapabilityRoute(preferences, "planning", [agent()], ["image"])?.modelId).toBe(
-      "vision",
+    expect(resolveTagRoute(preferences, ["Flush", IMAGE_TAG], [agent()])?.modelId).toBe(
+      "vision-pro",
     );
-    expect(resolveCapabilityRoute(preferences, "planning", [agent()], ["video"])?.modelId).toBe(
-      "video",
-    );
-    expect(
-      resolveCapabilityRoute(preferences, "planning", [agent()], ["image", "video"]),
-    ).toBeNull();
   });
 
-  it("requires both the Agent attachment transport and the model modality", () => {
-    const withoutTransport = agent({
-      capabilities: { ...agent().capabilities, attachments: false },
-    });
-    expect(mediaInputSupport(withoutTransport, "vision")).toEqual({
-      image: false,
-      video: false,
-    });
-    expect(mediaInputSupport(agent(), "vision")).toEqual({ image: true, video: false });
-    const legacyExternal = agent({
-      id: "claude",
+  it("treats unknown third-party modalities as unsupported until the user tags them", () => {
+    const external = agent({
+      id: "third-party",
       builtin: false,
       catalog: {
         ...agent().catalog,
-        models: [{ id: "legacy", label: "Legacy", reasoning: true, efforts: [] }],
-        defaultModel: "legacy",
+        models: [{ id: "opaque", label: "Opaque", reasoning: true, efforts: [] }],
+        defaultModel: "opaque",
       },
     });
-    expect(mediaInputSupport(legacyExternal, "legacy")).toEqual({
-      image: true,
-      video: false,
+    expect(mediaInputSupport(external, "opaque")).toEqual({ image: false, video: false });
+    const configured = withModelProfile(normalizeAgentPreferences(undefined, [external]), {
+      agentId: "third-party",
+      modelId: "opaque",
+      tags: ["Flush", IMAGE_TAG],
+      cost: "medium",
     });
+    expect(resolveTagRoute(configured, ["Flush", IMAGE_TAG], [external])?.agent.id).toBe(
+      "third-party",
+    );
   });
 
-  it("keeps each exact route unique and prefers the remembered capability for ambiguous history", () => {
-    const initial = normalizeAgentPreferences(undefined, [agent()]);
-    const duplicated = withCapabilityRoutes(initial, "coding", [
-      { agentId: "codex", modelId: "text" },
-      { agentId: "codex", modelId: "text" },
-      { agentId: "codex", modelId: "vision" },
-    ]);
-    expect(duplicated.capabilities.coding).toEqual([
-      { agentId: "codex", modelId: "text" },
-      { agentId: "codex", modelId: "vision" },
-    ]);
-
-    const selectedCoding = { ...duplicated, selectedCapability: "coding" as const };
-    expect(capabilityForRoute(selectedCoding, "codex", "text")).toBe("coding");
+  it("keeps multiple models from the same Agent and custom tags as independent rows", () => {
+    let preferences = normalizeAgentPreferences(undefined, [agent()]);
+    preferences = withModelProfile(preferences, {
+      agentId: "codex",
+      modelId: "text",
+      tags: ["Max", "私有"],
+      cost: "veryHigh",
+    });
+    preferences = withSelectedTags(preferences, ["max", "私有", "MAX"]);
+    expect(preferences.modelProfiles?.filter((row) => row.agentId === "codex")).toHaveLength(3);
+    expect(preferences.selectedTags).toEqual(["Max", "私有"]);
+    expect(availableAgentTags(preferences)).toContain("私有");
   });
 });

@@ -487,6 +487,28 @@ export async function configureMockProvider(
       models: null,
     },
   });
+  // The synthetic catalog has no trustworthy vendor modality metadata. Give
+  // the one fixture model an explicit machine-global profile so Workflow
+  // role.v3 tests exercise tag routing instead of relying on inference.
+  await client.call({
+    type: "settings.setAgentPreferences",
+    payload: {
+      preferences: {
+        capabilities: { planning: [], coding: [], multimodal: [] },
+        selectedCapability: "planning",
+        runtimes: {},
+        selectedTags: ["Flush"],
+        modelProfiles: [
+          {
+            agentId: "genet",
+            modelId: "deepseek/deepseek-v4-flash",
+            tags: ["Pro", "Flush", "图片理解", "视频理解"],
+            cost: "low",
+          },
+        ],
+      },
+    },
+  });
 }
 
 export async function createBuiltinSession(

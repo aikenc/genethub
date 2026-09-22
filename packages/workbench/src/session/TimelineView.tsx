@@ -1,5 +1,5 @@
 import type {
-  AgentCapability,
+  AgentInfo,
   BlobOverview,
   RoundBatch,
   RoundBatchSummary,
@@ -15,7 +15,11 @@ import type {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
 
-import { canStartAgent } from "../presentation/catalog/resolve";
+import {
+  canStartAgent,
+  resolveAgentPresentation,
+  resolveModelPresentation,
+} from "../presentation/catalog/resolve";
 import {
   ForkDialog,
   type ForkCatalog,
@@ -59,7 +63,6 @@ import {
 } from "./roundGallery";
 import { buildSelectionCopy } from "./selectionCopy";
 import { localValue, saveLocalValue, markContentRead, type ReadingPosition } from "./localConversation";
-import { resolveRuntimeSelection } from "./runtime-selection";
 import { useWorkbench } from "./store";
 import type { PendingMessage, TimelineState } from "./timeline";
 import { kindEmoji, kindLabel, ToolCallView } from "./ToolCall";
@@ -187,12 +190,7 @@ export type ForwardTarget =
   | {
       kind: "new";
       workspaceId: string;
-      capability: AgentCapability;
-      agentId: string;
-      modelId: string | null;
-      modeId: string | null;
-      effortId: string | null;
-      runtimeValues: Record<string, string>;
+      tags: string[];
     };
 
 
@@ -295,7 +293,6 @@ export function TimelineView({
     messages: CapsuleMessage[];
     rounds: RoundSummary[];
   } | null>(null);
-  const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const roundLayers = useWorkbench((workbench) => workbench.timeline.roundLayers);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
@@ -305,16 +302,11 @@ export function TimelineView({
   const settings = useWorkbench((workbench) => workbench.settings);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
   const activeModelId = state.modelId ?? activeSession?.modelId ?? null;
-  const activeRuntime = resolveRuntimeSelection({
+  const liveRuntimeLabels = runtimeLabels(
     agents,
-    agentId: activeSession?.agentId ?? null,
-    modelId: activeModelId,
-    modeId: state.modeId ?? activeSession?.modeId ?? null,
-    effortId: state.effortId ?? activeSession?.effortId ?? null,
-    runtimeValues: state.runtimeValues,
-  });
-  const turnAgentLabel = activeRuntime.current?.label ?? activeSession?.agentId ?? "未知 Agent";
-  const turnModelLabel = activeRuntime.model?.label ?? activeModelId ?? "默认模型";
+    activeSession?.agentId ?? null,
+    activeModelId,
+  );
   const hasExecutor = !activeSession?.managed && workspaces.find((space) => space.id === activeSession?.workspaceId)
     ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
@@ -550,6 +542,13 @@ export function TimelineView({
             // being written, and a capsule built from them would go stale
             // before it was ever reviewed.
             const turnSelectable = selectableByTurn[index] ?? [];
+            const completedRuntimeLabels = turn.stats
+              ? runtimeLabels(
+                  agents,
+                  turn.stats.agentId ?? activeSession?.agentId ?? null,
+                  turn.stats.agentId ? (turn.stats.modelId ?? null) : activeModelId,
+                )
+              : liveRuntimeLabels;
             const renderItem = (item: TimelineItem) => {
               if (state.historyExcerptIds?.includes(item.id)) return <div key={item.id}><Item item={item} /><button type="button" disabled={state.status === "running"} className="min-h-11 text-sm text-accent disabled:text-muted" onClick={() => void useWorkbench.getState().loadNarrativeItem(item.id).catch(error => setHistoryError(String(error)))}>长消息仅显示摘要 · 加载完整内容与附件</button></div>;
               if (!selection || !selectableSet.has(item.id)) {
@@ -653,8 +652,8 @@ export function TimelineView({
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
-                    agentLabel={turnAgentLabel}
-                    modelLabel={turnModelLabel}
+                    agentLabel={completedRuntimeLabels.agent}
+                    modelLabel={completedRuntimeLabels.model}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -684,8 +683,8 @@ export function TimelineView({
                     liveUsage={state.usage ?? undefined}
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
-                    agentLabel={turnAgentLabel}
-                    modelLabel={turnModelLabel}
+                    agentLabel={liveRuntimeLabels.agent}
+                    modelLabel={liveRuntimeLabels.model}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -847,6 +846,7 @@ export function TimelineView({
           sourceWorkspaceId={activeSession.workspaceId}
           sourceAgentId={activeSession.agentId}
           sourceModelId={activeSession.modelId ?? null}
+          sourceTags={activeSession.routingTags ?? []}
           sourceCatalog={{
             agents,
             workspaces,
@@ -858,13 +858,13 @@ export function TimelineView({
           onClose={() => setForkRequest(null)}
           onConfirm={(selection) => {
             if (forkController) return forkController.fork(forkRequest.turnId, selection);
-            return forkSession(forkRequest.turnId, {
-              agentId: selection.agentId,
-              workspaceId: selection.workspaceId,
-              ...(selection.modelId ? { modelId: selection.modelId } : {}),
-              ...(selection.modeId ? { modeId: selection.modeId } : {}),
-              ...(selection.effortId ? { effortId: selection.effortId } : {}),
-            });
+            return useWorkbench
+              .getState()
+              .forkSessionRouted(
+                forkRequest.turnId,
+                selection.workspaceId,
+                selection.tags,
+              );
           }}
         />
       ) : null}
@@ -2143,6 +2143,26 @@ function estimateToolOutputTokens(items: TimelineItem[]): number {
   return items.reduce((total, item) => total + Math.floor((textOf(item).length + 3) / 4), 0);
 }
 
+function runtimeLabels(
+  agents: AgentInfo[],
+  agentId: string | null,
+  modelId: string | null,
+): { agent: string; model: string } {
+  const agent = agents.find((candidate) => candidate.id === agentId);
+  const resolvedModelId = modelId ?? agent?.catalog.defaultModel ?? null;
+  const model = agent?.catalog.models.find((candidate) => candidate.id === resolvedModelId);
+  return {
+    agent: agent ? resolveAgentPresentation(agent).label : agentId ?? "未知 Agent",
+    model: resolvedModelId
+      ? resolveModelPresentation({
+          agentId: agentId ?? "",
+          modelId: resolvedModelId,
+          modelLabel: model?.label,
+        }).fullLabel
+      : "默认模型",
+  };
+}
+
 function TurnFooter({
   stats,
   liveUsage,
@@ -2186,8 +2206,8 @@ function TurnFooter({
   const forkTitle = canFork
     ? live
       ? "从当前进行中的内容重建分支"
-      : "从这个 turn 创建分支并选择能力"
-    : "当前没有可用的目标能力路由";
+      : "从这个 turn 创建分支并选择标签"
+    : "当前没有匹配所选标签的可用 Agent 与模型";
 
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">
