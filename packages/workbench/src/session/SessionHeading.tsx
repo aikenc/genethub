@@ -28,7 +28,7 @@ export function SessionHeading({ session, workspace, onOpenExpert, onReportSessi
       <h1 aria-label={session.title || "未命名会话"} className="gh-session-title truncate font-medium"><button type="button" aria-label="修改会话标题"
         title="点击修改会话标题" className="block min-w-0 max-w-full truncate rounded text-left hover:text-accent focus-visible:outline-accent"
         onClick={() => { setTitle(session.title ?? ""); setError(""); setEditing(true); }}>{session.title || "未命名会话"}</button></h1>
-      {workspace ? <button type="button" aria-label="当前专家" title={`进入专家：${workspace.name}`}
+      {workspace ? <button type="button" aria-label="当前项目" title={`进入项目：${workspace.name}`}
         className="gh-session-expert flex min-w-0 max-w-full items-center gap-1 rounded text-muted hover:bg-raised hover:text-accent focus-visible:outline-accent"
         onClick={() => onOpenExpert(workspace.id)}>
         <AgentAvatar id={workspace.id} name={workspace.name} size="small" />

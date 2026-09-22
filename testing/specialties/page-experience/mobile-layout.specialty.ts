@@ -16,11 +16,11 @@ defineSpecialty({
   let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: "很长的专家名称用于检查列表布局" } });
+    await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: "很长的项目名称用于检查列表布局" } });
     const session = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, session);
     const page = browser.page;
-    await page.getByRole("button", { name: "当前专家", exact: true }).waitFor();
+    await page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
     const nav = page.getByRole("navigation", { name: "工作台导航" });
     await nav.getByRole("button", { name: "会话", exact: true }).click();
     const checkFilters = async (label: string) => {
@@ -62,11 +62,11 @@ defineSpecialty({
     t.assertions.assert(!!bounds && bounds.y >= 0 && bounds.y + bounds.height <= 844, "scaled dialog leaves visible viewport");
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
-    await nav.getByRole("button", { name: "专家", exact: true }).click();
-    await page.getByRole("button", { name: "很长的专家名称用于检查列表布局", exact: true }).click();
+    await nav.getByRole("button", { name: "项目", exact: true }).click();
+    await page.getByRole("button", { name: "很长的项目名称用于检查列表布局", exact: true }).click();
     await page.setViewportSize({ width: 320, height: 844 });
-    await checkFilters("当前专家会话状态");
-    const destinations = page.getByRole("navigation", { name: "专家页签" });
+    await checkFilters("当前项目会话状态");
+    const destinations = page.getByRole("navigation", { name: "项目页签" });
     for (const text of ["会话", "组件", "目录", "小队"]) {
       const button = destinations.getByRole("button", { name: text, exact: true });
       await button.scrollIntoViewIfNeeded();

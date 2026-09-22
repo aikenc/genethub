@@ -69,10 +69,10 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
   );
   const Container = inline ? Fragment : "details";
   return <>
-          <Container>{!inline && <summary className="cursor-pointer py-2 text-sm text-muted">高级专家配置</summary>}
+          <Container>{!inline && <summary className="cursor-pointer py-2 text-sm text-muted">高级项目配置</summary>}
           <div>
             <div className="flex items-center justify-between gap-2">
-              <span className="font-medium text-fg">专家配置</span>
+              <span className="font-medium text-fg">项目配置</span>
               <span className="text-xs text-faint">
                 revision {revision}
               </span>
@@ -196,8 +196,8 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
             </button></>}
 
             {section !== "components" && <div className="mt-3 flex gap-1">
-              <button type="button" aria-label="选择上级专家" disabled={spaceBusy} className="min-h-11 min-w-0 flex-1 truncate rounded-lg border border-line px-3 text-left text-sm" onClick={() => setChoosingParent(true)}>{workspaces.find(w => w.id === parentId)?.name ?? "无上级专家"}</button>
-              {choosingParent && <ExpertPickerDialog title="选择上级专家" selectedId={parentId} allowedIds={parentChoices.map(w => w.id)} allowNone noneLabel="无上级专家" onClose={() => setChoosingParent(false)} onPick={id => { setParentId(id); setChoosingParent(false); }} />}
+              <button type="button" aria-label="选择上级项目" disabled={spaceBusy} className="min-h-11 min-w-0 flex-1 truncate rounded-lg border border-line px-3 text-left text-sm" onClick={() => setChoosingParent(true)}>{workspaces.find(w => w.id === parentId)?.name ?? "无上级项目"}</button>
+              {choosingParent && <ExpertPickerDialog title="选择上级项目" selectedId={parentId} allowedIds={parentChoices.map(w => w.id)} allowNone noneLabel="无上级项目" onClose={() => setChoosingParent(false)} onPick={id => { setParentId(id); setChoosingParent(false); }} />}
               <button
                 type="button"
                 disabled={spaceBusy || !workspace.agentSpace}
@@ -215,7 +215,7 @@ export function AgentAdvancedSettings({ workspace, section = "all", inline = fal
 
             <div className="mt-2 flex gap-1">
               <select
-                aria-label="专家生命周期"
+                aria-label="项目生命周期"
                 value={lifecycle}
                 onChange={(event) => setLifecycle(event.target.value)}
                 className="min-w-0 flex-1 rounded border border-line bg-raised min-h-10 px-2 py-2 text-fg"

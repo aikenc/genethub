@@ -18,12 +18,12 @@ export function AgentGroupManager({ groups, workspaces, error, update, onClose }
     onSave={(saved) => update((current) => current.some((g) => g.id === saved.id) ? current.map((g) => g.id === saved.id ? saved : g) : [...current, saved])}
     onDelete={(id) => { if (update((current) => current.filter((g) => g.id !== id))) setEditing(null); }}
     onClose={() => setEditing(null)} />;
-  return <WorkspaceDetailsDialog title="专家分组" onClose={onClose}>
-    <div className="flex items-center justify-between gap-3"><p className="text-sm text-muted">管理常驻专家，会话自动跟随分组。</p><button className={listPrimaryAction} onClick={() => setEditing("new")}>新建分组</button></div>
+  return <WorkspaceDetailsDialog title="项目分组" onClose={onClose}>
+    <div className="flex items-center justify-between gap-3"><p className="text-sm text-muted">管理常驻项目，会话自动跟随分组。</p><button className={listPrimaryAction} onClick={() => setEditing("new")}>新建分组</button></div>
     <ul className="mt-3 divide-y divide-line">
-      {groups.map((group) => <li key={group.id} className="flex min-w-0 items-center gap-3 py-2"><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{group.name}</p><p className="text-xs text-muted">{group.workspaceIds.length} 个专家</p></div><button aria-label={`编辑 ${group.name}`} className="min-h-11 rounded-lg px-3 text-sm text-accent hover:bg-raised" onClick={() => setEditing(group.id)}>编辑</button></li>)}
+      {groups.map((group) => <li key={group.id} className="flex min-w-0 items-center gap-3 py-2"><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{group.name}</p><p className="text-xs text-muted">{group.workspaceIds.length} 个项目</p></div><button aria-label={`编辑 ${group.name}`} className="min-h-11 rounded-lg px-3 text-sm text-accent hover:bg-raised" onClick={() => setEditing(group.id)}>编辑</button></li>)}
     </ul>
-    {!groups.length && <p className="py-8 text-center text-sm text-muted">还没有专家分组，先创建一个并勾选成员。</p>}
+    {!groups.length && <p className="py-8 text-center text-sm text-muted">还没有项目分组，先创建一个并勾选成员。</p>}
     {error && <p role="alert" className="text-sm text-danger">{error}</p>}
     <p className="mt-3 text-xs text-muted">分组保存在当前浏览器，按机器分别保存。</p>
   </WorkspaceDetailsDialog>;
