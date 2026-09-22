@@ -244,6 +244,73 @@ describe("the exact model composer control", () => {
     expect(saved.modelProfiles?.some((row) => row.modelId === "auto")).toBe(false);
   });
 
+  it("keeps unsaved model edits across a structurally identical Agent refresh", async () => {
+    const callbacks = {
+      onPickTarget: vi.fn(async () => {}),
+      onSavePreferences: vi.fn(async (_preferences: AgentSelectionPreferences) => {}),
+      onRefreshAgents: vi.fn(),
+    };
+    const props = {
+      preferences: PREFERENCES,
+      tags: ["Pro"],
+      agentId: "genet",
+      modelId: "deepseek/v4",
+      modeId: null,
+      effortId: "high",
+      ...callbacks,
+    };
+    const rendered = render(<ComposerControls agents={AGENTS} {...props} />);
+    await openSettings();
+    await userEvent.click(screen.getByRole("button", { name: "Agent 配置" }));
+    await userEvent.click(screen.getByRole("button", { name: "移除 GeneHub Agent Omni" }));
+    await userEvent.click(screen.getByRole("button", { name: "添加模型" }));
+    await userEvent.click(screen.getByRole("button", { name: "Extra" }));
+
+    const refreshedAgents = AGENTS.map((agent) => ({
+      ...agent,
+      catalog: {
+        ...agent.catalog,
+        models: agent.catalog.models.map((model) => ({ ...model })),
+      },
+    }));
+    const refreshedPreferences: AgentSelectionPreferences = {
+      ...PREFERENCES,
+      modelProfiles: PREFERENCES.modelProfiles?.map((profile) => ({
+        ...profile,
+        tags: [...profile.tags],
+      })),
+      runtimes: { ...PREFERENCES.runtimes },
+    };
+    rendered.rerender(
+      <ComposerControls
+        agents={refreshedAgents}
+        {...props}
+        preferences={refreshedPreferences}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "移除 GeneHub Agent Omni" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除 GeneHub Agent Extra" })).toBeInTheDocument();
+    const group = screen.getAllByRole("group", { name: "智能档位" })[0]!;
+    expect(within(group).getByText("Max")).toBeInTheDocument();
+    expect(within(group).getByText("Pro")).toBeInTheDocument();
+    expect(within(group).getByText("Flush")).toBeInTheDocument();
+  });
+
+  it("does not show models for an inactive Agent", async () => {
+    const inactive: AgentInfo = {
+      ...AGENTS[0]!,
+      id: "inactive",
+      label: "Inactive Agent",
+      probe: { state: "notInstalled" },
+    };
+    controls({ agents: [...AGENTS, inactive] });
+    const { dialog } = await openSettings();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
+
+    expect(screen.queryByText("Inactive Agent")).not.toBeInTheDocument();
+  });
+
   it("restores focus and closes on Escape", async () => {
     controls();
     const { trigger } = await openSettings();

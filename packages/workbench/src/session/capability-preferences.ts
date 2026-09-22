@@ -56,7 +56,7 @@ export function normalizeAgentPreferences(
 ): AgentSelectionPreferences {
   const groups = normalizeTagGroups(stored?.tagGroups ?? []);
   const saved = stored?.modelProfiles ?? [];
-  const discovered = agents.flatMap((agent) => {
+  const discovered = agents.filter(canStartAgent).flatMap((agent) => {
     const models: Array<ModelInfo | null> = agent.catalog.models.length
       ? agent.catalog.models.filter((model) => !isAutoModel(model))
       : resolveAgentProfile(agent.id).startWithoutModelCatalog

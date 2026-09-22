@@ -1,4 +1,4 @@
-import type { AgentInfo } from "@genehub/proto";
+import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -121,6 +121,24 @@ describe("machine-global Agent tag routing", () => {
       catalog: { ...rich.catalog, models: rich.catalog.models.filter((model) => model.id !== "m4") },
     };
     expect(normalizeAgentPreferences(staleOnly, [changedCatalog]).modelProfiles).toEqual([]);
+  });
+
+  it("does not materialize or retain model rows for an inactive Agent", () => {
+    const inactive = agent({
+      id: "inactive",
+      label: "Inactive",
+      probe: { state: "notInstalled" },
+    });
+    const stored: AgentSelectionPreferences = {
+      selectedTags: ["Flush"],
+      modelProfiles: [
+        { agentId: "inactive", modelId: "text", tags: ["Flush"], cost: "medium" },
+      ],
+      runtimes: {},
+    };
+
+    expect(normalizeAgentPreferences(undefined, [inactive]).modelProfiles).toEqual([]);
+    expect(normalizeAgentPreferences(stored, [inactive]).modelProfiles).toEqual([]);
   });
 
   it("enforces one tag per built-in or custom group for ownership and filters", () => {

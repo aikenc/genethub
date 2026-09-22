@@ -55,7 +55,7 @@ export function ModelPicker({
   const independent = available.filter((tag) => !grouped.has(tagKey(tag)));
   const routes = matchingTagRoutes(preferences, required, agents);
 
-  const tagButton = (tag: string) => {
+  const tagButton = (tag: string, grouped = false) => {
     const checked = required.some((candidate) => sameTag(candidate, tag));
     const locked = automatic.some((candidate) => sameTag(candidate, tag));
     return (
@@ -67,10 +67,12 @@ export function ModelPicker({
         title={locked ? "由当前输入或会话中的媒体自动添加" : undefined}
         disabled={disabled || locked || (!checked && required.length >= 4)}
         onClick={() => onFilterTags(toggleGroupedTag(filters, tag, preferences))}
-        className={`rounded-full border px-2.5 py-1 text-[11px] disabled:opacity-50 ${
+        className={`${grouped ? "rounded-md border border-transparent" : "rounded-full border"} px-2.5 py-1 text-[11px] disabled:opacity-50 ${
           checked
             ? "border-accent/60 bg-accent/10 text-accent"
-            : "border-line text-muted hover:bg-raised hover:text-fg"
+            : grouped
+              ? "text-muted hover:bg-raised hover:text-fg"
+              : "border-line text-muted hover:bg-raised hover:text-fg"
         }`}
       >
         {tag}{locked ? " · 自动" : ""}
@@ -80,19 +82,18 @@ export function ModelPicker({
 
   return (
     <div className="space-y-3">
-      <div className="space-y-2" aria-label="模型筛选">
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5" aria-label="模型筛选">
         {groups.map((group) => (
-          <div key={group.id} className="flex min-w-0 items-center gap-2">
-            <span className="w-14 shrink-0 truncate text-[10px] text-faint">{group.label}</span>
-            <div className="flex min-w-0 flex-wrap gap-1">{group.tags.map(tagButton)}</div>
+          <div
+            key={group.id}
+            role="group"
+            aria-label={group.label}
+            className="inline-flex min-w-0 flex-wrap gap-0.5 rounded-lg border border-line bg-raised/35 p-0.5"
+          >
+            {group.tags.map((tag) => tagButton(tag, true))}
           </div>
         ))}
-        {independent.length > 0 ? (
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="w-14 shrink-0 text-[10px] text-faint">标签</span>
-            <div className="flex min-w-0 flex-wrap gap-1">{independent.map(tagButton)}</div>
-          </div>
-        ) : null}
+        {independent.map((tag) => tagButton(tag))}
       </div>
 
       <div

@@ -3,6 +3,7 @@ import { Plus, Tags, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  canStartAgent,
   resolveAgentPresentation,
   resolveAgentProfile,
   resolveModeBadge,
@@ -10,8 +11,10 @@ import {
 } from "../presentation/catalog/resolve";
 import {
   availableAgentTags,
+  BUILTIN_TAG_GROUP,
   BUILTIN_TAGS,
   COST_LEVELS,
+  effectiveTagGroups,
   inferredModelProfile,
   isAutoModel,
   normalizeAgentPreferences,
@@ -137,12 +140,32 @@ export function RuntimeSettings({
   const [newGroup, setNewGroup] = useState("");
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => setDraft(normalizeAgentPreferences(preferences, agents)), [preferences, agents]);
+  useEffect(() => {
+    // Agent refreshes often return a fresh array after the editor opens. Merge
+    // catalog/availability changes into the live draft instead of replacing a
+    // Human's unsaved edits with the last machine snapshot. A reopened editor
+    // mounts from the latest saved preferences, so an open draft stays owned
+    // by the Human until they save or leave it.
+    setDraft((current) => normalizeAgentPreferences(current, agents));
+  }, [agents]);
   const tags = useMemo(() => availableAgentTags(draft), [draft]);
   const customTags = tags.filter(
     (tag) => !BUILTIN_TAGS.some((builtin) => builtin.toLocaleLowerCase() === tag.toLocaleLowerCase()),
   );
   const rows = draft.modelProfiles ?? [];
+  const configurableAgents = agents.filter(canStartAgent);
+  const groupedTags = effectiveTagGroups(draft)
+    .map((group) => ({
+      ...group,
+      tags: group.tags.filter((tag) =>
+        tags.some((candidate) => candidate.toLocaleLowerCase() === tag.toLocaleLowerCase()),
+      ),
+    }))
+    .filter((group) => group.tags.length > 0);
+  const groupedTagKeys = new Set(
+    groupedTags.flatMap((group) => group.tags.map((tag) => tag.toLocaleLowerCase())),
+  );
+  const independentTags = tags.filter((tag) => !groupedTagKeys.has(tag.toLocaleLowerCase()));
 
   const assignTagGroup = (tag: string, groupId: string) => {
     const groups = (draft.tagGroups ?? []).map((group) => ({
@@ -160,19 +183,26 @@ export function RuntimeSettings({
       <details className="rounded-xl border border-line bg-raised/25 px-3 py-2">
         <summary className="cursor-pointer text-xs font-medium text-fg">标签组</summary>
         <div className="mt-3 space-y-3">
-          <div className="flex items-center justify-between gap-2 text-xs">
-            <span className="text-fg">智能档位</span>
-            <span className="text-faint">Max · Pro · Flush（单选）</span>
+          <div
+            role="group"
+            aria-label={BUILTIN_TAG_GROUP.label}
+            className="inline-flex gap-0.5 rounded-lg border border-line bg-surface p-0.5"
+          >
+            {BUILTIN_TAG_GROUP.tags.map((tag) => (
+              <span key={tag} className="rounded-md px-2 py-1 text-[10px] text-muted">{tag}</span>
+            ))}
           </div>
           {(draft.tagGroups ?? []).map((group) => (
-            <div key={group.id} className="flex items-center gap-2 rounded-lg border border-line px-2 py-1.5">
-              <span className="min-w-0 flex-1 truncate text-xs text-fg">{group.label}</span>
-              <span className="truncate text-[10px] text-faint">{group.tags.join(" · ") || "尚未分配标签"}</span>
+            <div key={group.id} role="group" aria-label={group.label} className="inline-flex max-w-full items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5">
+              <span className="truncate rounded-md px-2 py-1 text-[10px] text-fg">{group.label}</span>
+              {group.tags.map((tag) => (
+                <span key={tag} className="truncate rounded-md bg-raised px-2 py-1 text-[10px] text-muted">{tag}</span>
+              ))}
               <button
                 type="button"
                 aria-label={`删除标签组 ${group.label}`}
                 disabled={disabled}
-                className="text-faint hover:text-danger disabled:opacity-40"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-faint hover:bg-raised hover:text-danger disabled:opacity-40"
                 onClick={() => setDraft(withTagGroups(draft, (draft.tagGroups ?? []).filter((item) => item.id !== group.id)))}
               >
                 <Trash2 size={13} />
@@ -236,7 +266,7 @@ export function RuntimeSettings({
       </details>
 
       <div className="space-y-3" aria-label="Agent 与模型配置">
-        {agents.map((agent) => {
+        {configurableAgents.map((agent) => {
           const agentRows = rows.filter((profile) => profile.agentId === agent.id);
           const remaining = agent.catalog.models.filter(
             (model) =>
@@ -299,8 +329,32 @@ export function RuntimeSettings({
                         </button>
                       </div>
 
-                      <div className="mt-2 flex flex-wrap items-center gap-1" aria-label={`${agentLabel} ${modelLabel} 标签`}>
-                        {tags.map((tag) => {
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-label={`${agentLabel} ${modelLabel} 标签`}>
+                        {groupedTags.map((group) => (
+                          <span
+                            key={group.id}
+                            role="group"
+                            aria-label={group.label}
+                            className="inline-flex flex-wrap gap-0.5 rounded-lg border border-line bg-surface/60 p-0.5"
+                          >
+                            {group.tags.map((tag) => {
+                              const checked = selected.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase());
+                              return (
+                                <button
+                                  key={tag}
+                                  type="button"
+                                  aria-pressed={checked}
+                                  disabled={disabled || (checked && selected.length === 1) || (!checked && selected.length >= 4)}
+                                  onClick={() => updateTags(toggleGroupedTag(selected, tag, draft))}
+                                  className={`rounded-md border border-transparent px-2 py-1 text-[10px] disabled:opacity-35 ${checked ? "border-accent/60 bg-accent/10 text-accent" : "text-faint hover:bg-raised hover:text-fg"}`}
+                                >
+                                  {tag}
+                                </button>
+                              );
+                            })}
+                          </span>
+                        ))}
+                        {independentTags.map((tag) => {
                           const checked = selected.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase());
                           return (
                             <button
