@@ -168,7 +168,7 @@ export const OpenProject = forwardRef<
     }
     // Let the daemon choose its home only after the two user-owned hints.
     starts.push(undefined);
-    let failure: unknown = new Error("无法读取专家位置");
+    let failure: unknown = new Error("无法读取项目位置");
     for (const start of starts) {
       try {
         const listing = await readDirectory(start);
@@ -248,7 +248,7 @@ export const OpenProject = forwardRef<
     }
   };
 
-  const triggerLabel = pickerBusy ? "读取中…" : busy ? "保存中…" : directoryAction ? "添加目录" : "添加专家";
+  const triggerLabel = pickerBusy ? "读取中…" : busy ? "保存中…" : directoryAction ? "添加目录" : "添加项目";
   const triggerDisabled = busy || pickerBusy || (!canBrowseThisMachine && !client);
 
   const trigger =
@@ -291,16 +291,16 @@ export const OpenProject = forwardRef<
             <div
               role="dialog"
               aria-modal="true"
-              aria-label="打开专家"
+              aria-label="打开项目"
               className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-3"
               onKeyDown={(event) => {
                 if (event.key === "Escape") closePicker();
               }}
             >
               <div className="w-full max-w-sm rounded-xl border border-line-strong bg-surface p-4 shadow-2xl">
-                <h2 className="text-sm font-medium text-fg">打开专家</h2>
+                <h2 className="text-sm font-medium text-fg">打开项目</h2>
                 <p className="mt-1 text-xs text-muted">
-                 为专家选择工作目录，或使用 .code-workspace 管理多个目录。
+                 为项目选择工作目录，或使用 .code-workspace 管理多个目录。
                 </p>
                 <div className="mt-3 flex flex-col gap-2">
                   <button
@@ -342,7 +342,7 @@ export const OpenProject = forwardRef<
               aria-label={
                 picker.roots
                   ? "选择" + endpoint.label + "上的磁盘"
-                  : "打开" + endpoint.label + "上的专家"
+                  : "打开" + endpoint.label + "上的项目"
               }
               className={`fixed inset-0 ${directoryAction ? "z-[90]" : "z-[70]"} flex items-center justify-center bg-black/60 p-3 md:p-4`}
               onKeyDown={(event) => {
@@ -363,7 +363,7 @@ export const OpenProject = forwardRef<
                 <header className="flex items-center gap-3 border-b border-line px-4 py-3">
                   <div className="min-w-0 flex-1">
                     <h2 className="text-sm font-medium text-fg">
-                      {picker.roots ? "选择磁盘" : directoryAction ? "添加目录" : "添加专家"}
+                      {picker.roots ? "选择磁盘" : directoryAction ? "添加目录" : "添加项目"}
                     </h2>
                     <p className="truncate text-xs text-faint" title={picker.path || undefined}>
                       {picker.roots ? "此设备上的可用位置" : picker.path}
@@ -371,7 +371,7 @@ export const OpenProject = forwardRef<
                   </div>
                   <button
                     type="button"
-                    aria-label="关闭专家选择器"
+                    aria-label="关闭项目选择器"
                     className="rounded px-2 py-1 text-muted hover:bg-raised"
                     onClick={() => closePicker()}
                   >
@@ -484,7 +484,7 @@ export const OpenProject = forwardRef<
                       disabled={busy || pickerBusy || picker.roots || !picker.path}
                       onClick={() => void open(picker.path)}
                     >
-                      {busy ? "保存中…" : directoryAction ? "添加此目录" : "添加此专家"}
+                      {busy ? "保存中…" : directoryAction ? "添加此目录" : "添加此项目"}
                     </button>
                   </div>
                 </footer>

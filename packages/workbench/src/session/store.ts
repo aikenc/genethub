@@ -881,7 +881,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         payload: { workspaceId, name: wanted },
       }),
     );
-    if (reply?.type !== "workspace") throw new Error("专家重命名失败，请检查连接或错误提示。");
+    if (reply?.type !== "workspace") throw new Error("项目重命名失败，请检查连接或错误提示。");
     // The rename reply is the authority for this action. A follow-up list can
     // lag behind it (and older daemons may not answer that request at all), so
     // applying the returned Workspace locally also updates every derived
@@ -895,7 +895,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const client = require_(get().client);
     // Plan from current public facts; never infer membership from names or paths.
     const catalog = await client.call({ type: "workspace.list" });
-    if (catalog?.type !== "workspaces") throw new Error("无法读取专家列表，未执行移除。");
+    if (catalog?.type !== "workspaces") throw new Error("无法读取项目列表，未执行移除。");
     const planned = new Set<string>();
     const order: string[] = [];
     const visit = (id: string) => {
@@ -908,7 +908,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const summary = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
     if (summary?.type !== "sessions") throw new Error("无法确认会话状态，未执行移除。");
     if (summary.data.some(s => planned.has(s.workspaceId) && ["running", "waiting"].includes(s.status))) {
-      throw new Error("专家或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
+      throw new Error("项目或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
     }
     let remaining = catalog.data;
     let failure: unknown;
@@ -971,7 +971,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         type: "agentSpace.configure",
         payload: { workspaceId, expectedRevision, operation },
       });
-    if (reply?.type !== "workspace") throw new Error("未收到专家配置更新结果");
+    if (reply?.type !== "workspace") throw new Error("未收到项目配置更新结果");
     await get().refreshWorkspaces();
   },
 
@@ -2389,7 +2389,7 @@ async function refreshCatalog(
   const workspaces = await client.call({ type: "workspace.list" });
   if (useWorkbench.getState().client !== client) return;
   if (workspaces?.type !== "workspaces") {
-    throw new Error("专家目录暂不可用，请重新连接后再试。");
+    throw new Error("项目列表暂不可用，请重新连接后再试。");
   }
   set({ workspaces: workspaces.data });
   const first = workspaces.data[0];

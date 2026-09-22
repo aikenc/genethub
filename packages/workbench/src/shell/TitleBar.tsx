@@ -202,7 +202,7 @@ function Items({
             });
           })}
         >
-          打开专家…
+          打开项目…
         </Item>
         <Item
           disabled={endpoint.via !== "loopback" || !host.pickWorkspaceFile}

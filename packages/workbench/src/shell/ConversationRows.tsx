@@ -83,7 +83,7 @@ export function WorkspaceRow({
       {editing ? (
         <Rename
           initial={workspace.name}
-          label="专家名称"
+          label="项目名称"
           onCommit={(name) => {
             setEditing(false);
             onRename(name);
@@ -141,7 +141,7 @@ export function WorkspaceRow({
           {childCount > 0 && onExpand && (
             <button
               type="button"
-              aria-label={`${expanded ? "收起" : "展开"} ${workspace.name} 的子专家`}
+              aria-label={`${expanded ? "收起" : "展开"} ${workspace.name} 的子项目`}
               aria-expanded={expanded}
               onClick={onExpand}
               className="entity-expand flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-raised"
@@ -152,7 +152,7 @@ export function WorkspaceRow({
           {actions && (
             <button
               type="button"
-              aria-label={`${workspace.name} 的专家操作`}
+              aria-label={`${workspace.name} 的项目操作`}
               aria-expanded={menu}
               className="entity-more flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:bg-sidebar-hover hover:text-fg"
               onClick={() => setMenu((open) => !open)}
@@ -167,7 +167,7 @@ export function WorkspaceRow({
         <>
           <button
             type="button"
-            aria-label="收起专家操作"
+            aria-label="收起项目操作"
             className="fixed inset-0 z-40 cursor-default"
             onClick={() => setMenu(false)}
           />
@@ -203,7 +203,7 @@ export function WorkspaceRow({
               disabled={running > 0}
               title={
                 running > 0
-                  ? "先停止这个专家中正在运行或等待的会话"
+                  ? "先停止这个项目中正在运行或等待的会话"
                   : undefined
               }
               className="flex min-h-10 w-full items-center px-3 text-left text-sm text-danger hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 md:min-h-0 md:py-1.5 md:text-xs"
@@ -364,13 +364,13 @@ function SessionRow({
         }`}
         onClick={() => selection ? selection.toggle(session.id) : onPickSession(session.id)}
       >
-        <EntityAvatar id={session.workspaceId} name={project?.name ?? "专家"} badge={session.unread ? <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 rounded-full bg-accent" /> : undefined}/>
-        <EntityText title={title(session)} hint={`${messageDate.toLocaleString()} · ${project?.name ?? "专家"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
+        <EntityAvatar id={session.workspaceId} name={project?.name ?? "项目"} badge={session.unread ? <span role="img" aria-label="有未读新回复" title="有未读新回复" className="block h-2 w-2 rounded-full bg-accent" /> : undefined}/>
+        <EntityText title={title(session)} hint={`${messageDate.toLocaleString()} · ${project?.name ?? "项目"}${groupNames.length ? " · " + groupNames.join("、") : ""}`}>
           <span className="min-w-0 flex-1">
           {(facts.label || stale) && <span className="block"><SessionStatusIcon session={session} sessions={summaries} showLabel stale={stale} /></span>}
           <span className="flex min-w-0 items-center gap-1">
           <time dateTime={messageDate.toISOString()} className="shrink-0">{relativeTime(messageDate.getTime())}</time>
-          <span className="truncate">· {project?.name ?? "专家"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
+          <span className="truncate">· {project?.name ?? "项目"}{groupNames.length ? ` · ${groupNames.join("、")}` : ""}{session.draftCount ? ` · ${session.draftCount} 个草稿` : ""}{managedReadOnly ? " · 只读" : ""}{session.archived ? " · 已归档" : ""}{unsupported ? " · 需升级" : ""}</span>
           </span></span>
         </EntityText>
       </button>

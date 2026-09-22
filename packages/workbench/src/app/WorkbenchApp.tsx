@@ -596,7 +596,7 @@ export function App({
             client.call({ type: "workspace.list" }),
           ]);
           if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-            throw new Error("目标机器没有返回可用的执行引擎和专家列表。");
+            throw new Error("目标机器没有返回可用的执行引擎和项目列表。");
           }
           return { agents: agents.data, workspaces: workspaces.data };
         });
@@ -816,15 +816,15 @@ export function App({
           onNavigate={() => { rootNextPage(); setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }}
         />
 
-        {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="专家列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
+        {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="项目列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
           <WorkspaceBrowser host={host} endpoint={endpoint} key={workbench.client.identity.machineId} deviceName={endpoint.label}
             selectedId={starting ? draft?.workspaceId : undefined} onNewSession={id => { rootNextPage(); openOverview(id); }} />
         </ListPane> : null}
-        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备专家列表…</p>}
-        {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个专家的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一专家，请专家基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览专家</button></div></section> : null}
-        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属专家。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
+        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备项目列表…</p>}
+        {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个项目的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一项目，让它基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览项目</button></div></section> : null}
+        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属项目。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
-        {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一位专家，查看会话与配置" : "选择会话，继续话题"}</section>}
+        {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一个项目，查看会话与配置" : "选择会话，继续话题"}</section>}
         <main className={(section === "sessions" && (!starting || !showChat)) || (section === "spaces" && starting && showChat) ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
               two 44px targets — the session list and the tools drawer.
@@ -1000,7 +1000,7 @@ export function App({
                           managedReadOnly
                             ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
                             : importedReadOnly
-                            ? "这是只读导入历史：原专家没有提供可恢复会话。"
+                            ? "这是只读导入历史：原项目没有提供可恢复会话。"
                             : undefined
                         }
                         agents={workbench.agents}
@@ -1187,8 +1187,8 @@ function importCoverageLabel(coverage: HistoryCoverage): string {
   const source = coverage.sourceItemCount ?? coverage.retainedItemCount + coverage.omittedItemCount;
   const recovery = {
     genehub: "可在 GeneHub 继续检索",
-    external: "需从原专家继续检索",
-    nativeOnly: "仅原专家原生会话可找回",
+    external: "需从原项目继续检索",
+    nativeOnly: "仅原项目原生会话可找回",
     unavailable: "省略部分不可找回",
   }[coverage.retrieval];
   return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
@@ -1305,9 +1305,9 @@ function FirstRun({
   if (!workspace) {
     return (
       <Splash>
-        <p className="text-sm">先打开一个专家。</p>
+        <p className="text-sm">先打开一个项目。</p>
         <p className="mb-3 text-xs text-muted">
-          为专家选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
+          为项目选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
         </p>
         <OpenProject host={host} endpoint={endpoint} />
       </Splash>

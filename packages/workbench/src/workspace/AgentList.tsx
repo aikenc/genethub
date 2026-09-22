@@ -94,11 +94,11 @@ export function AgentList({
     <ul
       data-density={density}
       className="entity-list agent-list space-y-1"
-      aria-label="专家列表"
+      aria-label="项目列表"
     >
       {sorted(visible).map((node) => row(node))}
       {!visible.length && (
-        <li className="px-4 py-8 text-sm text-muted">没有匹配的专家</li>
+        <li className="px-4 py-8 text-sm text-muted">没有匹配的项目</li>
       )}
     </ul>
   );

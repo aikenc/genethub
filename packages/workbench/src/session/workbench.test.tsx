@@ -3195,7 +3195,7 @@ describe("an unstarted conversation", () => {
     render(<NewSessionPanel />);
 
     expect(screen.getByRole("heading", { name: "genethub" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "切换专家" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "切换项目" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "console" })).not.toBeInTheDocument();
   });
 
@@ -3230,8 +3230,8 @@ describe("an unstarted conversation", () => {
   it("shows every available expert in the explicit switch dialog", async () => {
     draft();
     render(<NewSessionPanel />);
-    await userEvent.click(screen.getByRole("button", { name: "切换专家" }));
-    const dialog = screen.getByRole("dialog", { name: "切换专家" });
+    await userEvent.click(screen.getByRole("button", { name: "切换项目" }));
+    const dialog = screen.getByRole("dialog", { name: "切换项目" });
     expect(within(dialog).getByText("genethub")).toBeInTheDocument();
     expect(within(dialog).getByText("console")).toBeInTheDocument();
     expect(useWorkbench.getState().draft?.workspaceId).toBe("w1");
