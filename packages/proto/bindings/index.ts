@@ -44,7 +44,12 @@ builtin: boolean, };
  * Machine-global routing configuration for one exact Agent + model pair.
  * Every route has one to four AND-match tags and one live cost level.
  */
-export type AgentModelProfile = { agentId: string, modelId?: string, tags: Array<string>, cost?: AgentCostLevel, };
+export type AgentModelProfile = { agentId: string, modelId?: string, 
+/**
+ * Human-owned display override. Routing always continues to use
+ * `agent_id + model_id`, so shortening a long catalog label is cosmetic.
+ */
+displayName?: string, tags: Array<string>, cost?: AgentCostLevel, };
 
 /**
  * Last runtime choices for one Agent. Values are checked against the live
@@ -65,6 +70,12 @@ export type AgentSelectionPreferences = { runtimes: { [key in string]?: AgentRun
  * routing until explicitly added.
  */
 modelProfiles?: Array<AgentModelProfile>, 
+/**
+ * Agents whose last model was explicitly removed by the Human. Keeping
+ * this separate from an empty profile list distinguishes opt-out from a
+ * newly discovered Agent that should receive first-run defaults.
+ */
+disabledAgentIds?: Array<string>, 
 /**
  * Human-created mutually-exclusive groups. Tags absent from every group
  * are ordinary independent filters.

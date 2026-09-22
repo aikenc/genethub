@@ -24,9 +24,9 @@ describe("Agent marks across themes", () => {
     expect(images[1]).toHaveClass("agent-brand-light");
   });
 
-  it("uses the Agent name when there is no configured icon", () => {
+  it("uses a compact C glyph for Codex", () => {
     render(<AgentMark agent={{ id: "codex", label: "Codex" }} />);
-    expect(screen.getByText("Codex")).toBeInTheDocument();
+    expect(screen.getByText("C")).toBeInTheDocument();
   });
 
   it("falls back to the Agent name if a bundled image cannot load", () => {
@@ -34,6 +34,6 @@ describe("Agent marks across themes", () => {
       <AgentMark agent={{ id: "genet", label: "GeneHub Agent" }} />,
     );
     fireEvent.error(container.querySelector("img")!);
-    expect(screen.getByText("GeneHub Agent")).toBeInTheDocument();
+    expect(screen.getByText("Genet")).toBeInTheDocument();
   });
 });

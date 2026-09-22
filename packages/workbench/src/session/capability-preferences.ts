@@ -56,7 +56,10 @@ export function normalizeAgentPreferences(
 ): AgentSelectionPreferences {
   const groups = normalizeTagGroups(stored?.tagGroups ?? []);
   const saved = stored?.modelProfiles ?? [];
+  const disabledAgentIds = normalizeAgentIds(stored?.disabledAgentIds ?? []);
+  const disabled = new Set(disabledAgentIds.map((agentId) => agentId.toLocaleLowerCase()));
   const discovered = agents.filter(canStartAgent).flatMap((agent) => {
+    if (disabled.has(agent.id.toLocaleLowerCase())) return [];
     const models: Array<ModelInfo | null> = agent.catalog.models.length
       ? agent.catalog.models.filter((model) => !isAutoModel(model))
       : resolveAgentProfile(agent.id).startWithoutModelCatalog
@@ -74,9 +77,11 @@ export function normalizeAgentPreferences(
       const override = saved.find((profile) =>
         profile.agentId === agent.id && (profile.modelId ?? null) === (model?.id ?? null));
       const inferred = inferredModelProfile(agent, model);
+      const displayName = override?.displayName?.trim();
       return {
         ...inferred,
         ...override,
+        ...(displayName ? { displayName } : { displayName: undefined }),
         tags: normalizeGroupedTags(
           override?.tags?.length ? override.tags : inferred.tags,
           groups,
@@ -88,6 +93,7 @@ export function normalizeAgentPreferences(
   return {
     runtimes: { ...(stored?.runtimes ?? {}) },
     modelProfiles: discovered,
+    ...(disabledAgentIds.length > 0 ? { disabledAgentIds } : {}),
     tagGroups: groups,
     selectedTags: normalizeGroupedTags(
       stored?.selectedTags?.length ? stored.selectedTags : ["Flush"],
@@ -284,6 +290,9 @@ export function withModelProfile(
   return {
     ...preferences,
     modelProfiles: rows,
+    disabledAgentIds: (preferences.disabledAgentIds ?? []).filter(
+      (agentId) => agentId.toLocaleLowerCase() !== next.agentId.toLocaleLowerCase(),
+    ),
   };
 }
 
@@ -292,12 +301,17 @@ export function withoutModelProfile(
   agentId: string,
   modelId?: string | null,
 ): AgentSelectionPreferences {
+  const modelProfiles = (preferences.modelProfiles ?? []).filter(
+    (profile) =>
+      profile.agentId !== agentId || (profile.modelId ?? null) !== (modelId ?? null),
+  );
+  const hasAgentProfile = modelProfiles.some((profile) => profile.agentId === agentId);
   return {
     ...preferences,
-    modelProfiles: (preferences.modelProfiles ?? []).filter(
-      (profile) =>
-        profile.agentId !== agentId || (profile.modelId ?? null) !== (modelId ?? null),
-    ),
+    modelProfiles,
+    disabledAgentIds: hasAgentProfile
+      ? preferences.disabledAgentIds ?? []
+      : normalizeAgentIds([...(preferences.disabledAgentIds ?? []), agentId]),
   };
 }
 
@@ -474,6 +488,17 @@ export function resolveAgentRuntime(
 function costRank(cost: AgentCostLevel | undefined): number {
   const rank = COST_LEVELS.findIndex((entry) => entry.id === (cost ?? "medium"));
   return rank < 0 ? 2 : rank;
+}
+
+function normalizeAgentIds(agentIds: readonly string[]): string[] {
+  const seen = new Set<string>();
+  return agentIds.flatMap((raw) => {
+    const agentId = raw.trim();
+    const key = agentId.toLocaleLowerCase();
+    if (!agentId || seen.has(key)) return [];
+    seen.add(key);
+    return [agentId];
+  });
 }
 
 function validEffort(remembered: string | undefined, efforts: string[]): string | null {

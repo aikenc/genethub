@@ -88,7 +88,7 @@ export function RuntimeSettingsPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${id}-title`}
-        className="flex max-h-[min(88dvh,52rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
+        className="flex h-[min(88dvh,52rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
         onKeyDown={(event) => {
           if (event.key === "Tab") trapTab(event, panel.current);
         }}

@@ -125,7 +125,7 @@ function controls(overrides: Partial<Parameters<typeof ComposerControls>[0]> = {
   return callbacks;
 }
 
-async function openSettings(name: RegExp = /模型：GeneHub Agent/) {
+async function openSettings(name: RegExp = /模型：Genet/) {
   const trigger = screen.getByRole("button", { name });
   await userEvent.click(trigger);
   return { trigger, dialog: screen.getByRole("dialog", { name: "模型选择" }) };
@@ -135,10 +135,10 @@ describe("the exact model composer control", () => {
   it("shows the resolved Agent and model in the compact trigger", () => {
     controls();
     const trigger = screen.getByRole("button", {
-      name: /模型：GeneHub Agent · DeepSeek.*筛选：Pro.*思考强度：高/,
+      name: /模型：Genet · DeepSeek.*筛选：Pro.*思考强度：高/,
     });
     expect(trigger).toHaveAttribute("aria-expanded", "false");
-    expect(trigger).toHaveTextContent(/GeneHub Agent · DeepSeek/);
+    expect(trigger).toHaveTextContent(/Genet · DeepSeek/);
   });
 
   it("keeps Max, Pro and Flush mutually exclusive while filtering", async () => {
@@ -184,7 +184,7 @@ describe("the exact model composer control", () => {
       modeId: "bypassPermissions",
       effortId: null,
     });
-    opened = await openSettings(/模型：Claude Code/);
+    opened = await openSettings(/模型：Claude/);
     expect(within(opened.dialog).getByLabelText("权限")).toHaveValue("bypassPermissions");
     await userEvent.selectOptions(within(opened.dialog).getByLabelText("权限"), "default");
     await userEvent.click(within(opened.dialog).getByRole("button", { name: "使用此模型" }));
@@ -197,15 +197,26 @@ describe("the exact model composer control", () => {
   it("edits cost and one-to-four tags for every exact Agent + model row", async () => {
     const callbacks = controls();
     const { dialog } = await openSettings();
+    expect(dialog).toHaveClass("h-[min(88dvh,52rem)]");
     await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
 
     expect(screen.getByRole("dialog", { name: "Agent 配置" })).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(4);
-    const cost = screen.getByLabelText("GeneHub Agent DeepSeek V4 成本");
+    const cost = screen.getByLabelText("Genet DeepSeek V4 成本");
+    const row = cost.closest("article")!;
+    const proBefore = within(row).getByRole("button", { name: "Pro" });
+    const selectedClass = proBefore.className;
+    await userEvent.click(within(row).getByRole("button", { name: "图片理解" }));
+    expect(within(row).getByRole("button", { name: "Pro" }).className).toBe(selectedClass);
+    await userEvent.click(within(row).getByRole("button", { name: "图片理解" }));
     await userEvent.selectOptions(cost, "veryHigh");
     await userEvent.click(screen.getAllByRole("button", { name: "Max" })[0]!);
-    const custom = screen.getByLabelText("GeneHub Agent DeepSeek V4 自定义标签");
+    const custom = screen.getByLabelText("Genet DeepSeek V4 自定义标签");
     await userEvent.type(custom, "私有{Enter}");
+    await userEvent.click(screen.getByRole("button", { name: "重命名 Genet DeepSeek V4" }));
+    const rename = screen.getByLabelText("Genet DeepSeek V4 新名称");
+    await userEvent.clear(rename);
+    await userEvent.type(rename, "主模型{Enter}");
     await userEvent.click(screen.getByText("标签组"));
     await userEvent.type(screen.getByLabelText("新标签组名称"), "偏好");
     await userEvent.click(screen.getByRole("button", { name: "添加" }));
@@ -220,6 +231,7 @@ describe("the exact model composer control", () => {
     expect(saved.modelProfiles?.find((row) => row.modelId === "deepseek/v4")).toMatchObject({
       agentId: "genet",
       cost: "veryHigh",
+      displayName: "主模型",
       tags: ["Max", "私有"],
     });
     expect(saved.tagGroups).toEqual([
@@ -262,7 +274,7 @@ describe("the exact model composer control", () => {
     const rendered = render(<ComposerControls agents={AGENTS} {...props} />);
     await openSettings();
     await userEvent.click(screen.getByRole("button", { name: "Agent 配置" }));
-    await userEvent.click(screen.getByRole("button", { name: "移除 GeneHub Agent Omni" }));
+    await userEvent.click(screen.getByRole("button", { name: "移除 Genet Omni" }));
     await userEvent.click(screen.getByRole("button", { name: "添加模型" }));
     await userEvent.click(screen.getByRole("button", { name: "Extra" }));
 
@@ -289,12 +301,42 @@ describe("the exact model composer control", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "移除 GeneHub Agent Omni" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "移除 GeneHub Agent Extra" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "移除 Genet Omni" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移除 Genet Extra" })).toBeInTheDocument();
     const group = screen.getAllByRole("group", { name: "智能档位" })[0]!;
     expect(within(group).getByText("Max")).toBeInTheDocument();
     expect(within(group).getByText("Pro")).toBeInTheDocument();
     expect(within(group).getByText("Flush")).toBeInTheDocument();
+  });
+
+  it("allows removing the last model to disable an Agent", async () => {
+    const callbacks = controls();
+    const { dialog } = await openSettings();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Agent 配置" }));
+
+    await userEvent.click(screen.getByRole("button", { name: "移除 Claude Agent 默认" }));
+    expect(screen.queryByRole("button", { name: "移除 Claude Agent 默认" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "保存到这台机器" }));
+
+    await waitFor(() => expect(callbacks.onSavePreferences).toHaveBeenCalledOnce());
+    const saved = callbacks.onSavePreferences.mock.calls[0]![0];
+    expect(saved.disabledAgentIds).toContain("claude");
+    expect(saved.modelProfiles?.some((profile) => profile.agentId === "claude")).toBe(false);
+  });
+
+  it("shows a custom model name in the picker", async () => {
+    controls({
+      preferences: {
+        ...PREFERENCES,
+        modelProfiles: PREFERENCES.modelProfiles?.map((profile) =>
+          profile.modelId === "deepseek/v4"
+            ? { ...profile, displayName: "主模型" }
+            : profile,
+        ),
+      },
+    });
+    const { dialog } = await openSettings(/模型：Genet · 主模型/);
+    expect(within(dialog).getByRole("option", { name: /Genet · 主模型/ })).toBeInTheDocument();
   });
 
   it("does not show models for an inactive Agent", async () => {

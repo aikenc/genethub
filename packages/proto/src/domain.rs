@@ -2098,6 +2098,11 @@ pub struct AgentModelProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model_id: Option<String>,
+    /// Human-owned display override. Routing always continues to use
+    /// `agent_id + model_id`, so shortening a long catalog label is cosmetic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2150,6 +2155,12 @@ pub struct AgentSelectionPreferences {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(optional, as = "Option<_>")]
     pub model_profiles: Vec<AgentModelProfile>,
+    /// Agents whose last model was explicitly removed by the Human. Keeping
+    /// this separate from an empty profile list distinguishes opt-out from a
+    /// newly discovered Agent that should receive first-run defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub disabled_agent_ids: Vec<String>,
     /// Human-created mutually-exclusive groups. Tags absent from every group
     /// are ordinary independent filters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

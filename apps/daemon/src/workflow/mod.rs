@@ -4881,12 +4881,14 @@ mod tests {
                 AgentModelProfile {
                     agent_id: "claude".into(),
                     model_id: Some("opus-max".into()),
+                    display_name: None,
                     tags: vec!["Max".into(), "视频理解".into()],
                     cost: Some(AgentCostLevel::High),
                 },
                 AgentModelProfile {
                     agent_id: "codex".into(),
                     model_id: Some("gpt-max".into()),
+                    display_name: None,
                     tags: vec!["Max".into(), "视频理解".into()],
                     cost: Some(AgentCostLevel::Low),
                 },

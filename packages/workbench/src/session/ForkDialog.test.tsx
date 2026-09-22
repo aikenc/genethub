@@ -94,7 +94,7 @@ describe("ForkDialog", () => {
 
     expect(screen.getByRole("button", { name: "图片理解 · 自动" })).toBeDisabled();
     expect(screen.queryByRole("option", { name: /Codex · Model/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Claude Code · Model.*当前/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Claude · Model.*当前/ })).toBeInTheDocument();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
   });
 
@@ -132,7 +132,7 @@ describe("ForkDialog", () => {
     expect(screen.getByText("原生分支")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Flush" }));
-    expect(screen.getByRole("option", { name: /Claude Code · Model/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Claude · Model/ })).toBeInTheDocument();
     expect(screen.getByText("重建会话")).toBeInTheDocument();
     expect(screen.getByText(/上下文窗口的 35%/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
@@ -278,7 +278,7 @@ describe("ForkDialog", () => {
 
     expect(await screen.findByRole("option", { name: /模型仓库/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Flush" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("option", { name: /Claude Code · Model/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Claude · Model/ })).toBeInTheDocument();
     expect(loadCatalog).toHaveBeenCalledWith(remote);
     await userEvent.click(screen.getByRole("button", { name: "重建到所选目标" }));
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({

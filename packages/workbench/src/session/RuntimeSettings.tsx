@@ -1,7 +1,13 @@
-import type { AgentInfo, AgentSelectionPreferences } from "@genehub/proto";
-import { Plus, Tags, Trash2 } from "lucide-react";
+import type {
+  AgentInfo,
+  AgentModelProfile,
+  AgentSelectionPreferences,
+  ModelInfo,
+} from "@genehub/proto";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { AgentMark } from "../presentation/AgentMark";
 import {
   canStartAgent,
   resolveAgentPresentation,
@@ -137,6 +143,8 @@ export function RuntimeSettings({
   const [draft, setDraft] = useState(() => normalizeAgentPreferences(preferences, agents));
   const [customTag, setCustomTag] = useState<Record<string, string>>({});
   const [addingAgent, setAddingAgent] = useState<string | null>(null);
+  const [renamingProfile, setRenamingProfile] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [newGroup, setNewGroup] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -268,17 +276,27 @@ export function RuntimeSettings({
       <div className="space-y-3" aria-label="Agent 与模型配置">
         {configurableAgents.map((agent) => {
           const agentRows = rows.filter((profile) => profile.agentId === agent.id);
-          const remaining = agent.catalog.models.filter(
+          const catalogModels = agent.catalog.models.filter((model) => !isAutoModel(model));
+          const availableModels: Array<ModelInfo | null> = catalogModels.length > 0
+            ? catalogModels
+            : resolveAgentProfile(agent.id).startWithoutModelCatalog
+              ? [null]
+              : [];
+          const remaining = availableModels.filter(
             (model) =>
-              !isAutoModel(model) &&
-              !agentRows.some((profile) => profile.modelId === model.id),
+              !agentRows.some(
+                (profile) => (profile.modelId ?? null) === (model?.id ?? null),
+              ),
           );
           if (agentRows.length === 0 && remaining.length === 0) return null;
           const agentLabel = resolveAgentPresentation(agent).label;
           return (
             <section key={agent.id} className="space-y-2">
               <div className="flex items-center justify-between px-1">
-                <h3 className="truncate text-xs font-medium text-fg">{agentLabel}</h3>
+                <div className="flex min-w-0 items-center gap-2">
+                  <AgentMark agent={agent} className="h-5 w-5" fallbackToText={false} />
+                  <h3 className="truncate text-xs font-medium text-fg">{agentLabel}</h3>
+                </div>
                 <span className="text-[10px] text-faint">{agentRows.length} 个模型</span>
               </div>
               <div role="list" className="space-y-2">
@@ -292,16 +310,71 @@ export function RuntimeSettings({
                         modelLabel: model?.label,
                       }).fullLabel
                     : "Agent 默认";
+                  const displayName = profile.displayName?.trim() || modelLabel;
                   const selected = normalizeGroupedTags(profile.tags, draft);
+                  const updateProfile = (change: Partial<AgentModelProfile>) => {
+                    setDraft((current) => {
+                      const latest = (current.modelProfiles ?? []).find(
+                        (candidate) =>
+                          candidate.agentId === profile.agentId &&
+                          (candidate.modelId ?? null) === (profile.modelId ?? null),
+                      );
+                      return latest
+                        ? withModelProfile(current, { ...latest, ...change })
+                        : current;
+                    });
+                  };
                   const updateTags = (next: string[]) => {
                     const normalized = normalizeGroupedTags(next, draft).slice(0, 4);
                     if (normalized.length === 0) return;
-                    setDraft((current) => withModelProfile(current, { ...profile, tags: normalized }));
+                    updateProfile({ tags: normalized });
                   };
                   return (
                     <article key={key} role="listitem" className="rounded-xl border border-line bg-raised/35 px-3 py-2.5">
                       <div className="flex items-center gap-2">
-                        <div className="min-w-0 flex-1 truncate text-xs font-medium text-fg">{modelLabel}</div>
+                        {renamingProfile === key ? (
+                          <input
+                            autoFocus
+                            aria-label={`${agentLabel} ${modelLabel} 新名称`}
+                            value={renameValue}
+                            maxLength={80}
+                            className="h-8 min-w-0 flex-1 rounded-lg border border-accent bg-surface px-2 text-xs font-medium text-fg outline-none"
+                            onChange={(event) => setRenameValue(event.currentTarget.value)}
+                            onBlur={() => {
+                              const renamed = renameValue.trim();
+                              updateProfile({
+                                displayName: renamed && renamed !== modelLabel ? renamed : undefined,
+                              });
+                              setRenamingProfile(null);
+                              setRenameValue("");
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") event.currentTarget.blur();
+                              if (event.key === "Escape") {
+                                event.preventDefault();
+                                setRenamingProfile(null);
+                                setRenameValue("");
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="min-w-0 flex-1 truncate text-xs font-medium text-fg" title={displayName}>
+                            {displayName}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          aria-label={`重命名 ${agentLabel} ${displayName}`}
+                          title="重命名"
+                          disabled={disabled || renamingProfile === key}
+                          className="shrink-0 text-faint hover:text-accent disabled:opacity-30"
+                          onClick={() => {
+                            setRenamingProfile(key);
+                            setRenameValue(displayName);
+                          }}
+                        >
+                          <Pencil size={13} />
+                        </button>
                         <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-faint">
                           <span>成本</span>
                           <select
@@ -311,7 +384,7 @@ export function RuntimeSettings({
                             className="h-8 rounded-lg border border-line bg-surface px-2 text-xs text-fg"
                             onChange={(event) => {
                               const cost = event.currentTarget.value as NonNullable<typeof profile.cost>;
-                              setDraft((current) => withModelProfile(current, { ...profile, cost }));
+                              updateProfile({ cost });
                             }}
                           >
                             {COST_LEVELS.map((level) => <option key={level.id} value={level.id}>{level.label}</option>)}
@@ -320,8 +393,8 @@ export function RuntimeSettings({
                         <button
                           type="button"
                           aria-label={`移除 ${agentLabel} ${modelLabel}`}
-                          title={agentRows.length === 1 ? "每个 Agent 至少保留一个模型" : "移除模型"}
-                          disabled={disabled || agentRows.length === 1}
+                          title="移除模型"
+                          disabled={disabled}
                           className="text-faint hover:text-danger disabled:opacity-25"
                           onClick={() => setDraft((current) => withoutModelProfile(current, profile.agentId, profile.modelId))}
                         >
@@ -346,7 +419,7 @@ export function RuntimeSettings({
                                   aria-pressed={checked}
                                   disabled={disabled || (checked && selected.length === 1) || (!checked && selected.length >= 4)}
                                   onClick={() => updateTags(toggleGroupedTag(selected, tag, draft))}
-                                  className={`rounded-md border border-transparent px-2 py-1 text-[10px] disabled:opacity-35 ${checked ? "border-accent/60 bg-accent/10 text-accent" : "text-faint hover:bg-raised hover:text-fg"}`}
+                                  className={`rounded-md border border-transparent px-2 py-1 text-[10px] ${checked ? "border-accent/60 bg-accent/10 text-accent disabled:opacity-100" : "text-faint hover:bg-raised hover:text-fg disabled:opacity-35"}`}
                                 >
                                   {tag}
                                 </button>
@@ -363,7 +436,7 @@ export function RuntimeSettings({
                               aria-pressed={checked}
                               disabled={disabled || (checked && selected.length === 1) || (!checked && selected.length >= 4)}
                               onClick={() => updateTags(toggleGroupedTag(selected, tag, draft))}
-                              className={`rounded-full border px-2 py-1 text-[10px] disabled:opacity-35 ${checked ? "border-accent/60 bg-accent/10 text-accent" : "border-line text-faint hover:text-fg"}`}
+                              className={`rounded-full border px-2 py-1 text-[10px] ${checked ? "border-accent/60 bg-accent/10 text-accent disabled:opacity-100" : "border-line text-faint hover:text-fg disabled:opacity-35"}`}
                             >
                               {tag}
                             </button>
@@ -426,7 +499,7 @@ export function RuntimeSettings({
                     <div className="mt-1 grid grid-cols-1 gap-1 rounded-xl border border-line p-1 sm:grid-cols-2">
                       {remaining.map((model) => (
                         <button
-                          key={model.id}
+                          key={model?.id ?? "agent-default"}
                           type="button"
                           className="truncate rounded-lg px-2 py-2 text-left text-xs text-muted hover:bg-raised hover:text-fg"
                           onClick={() => {
@@ -434,7 +507,9 @@ export function RuntimeSettings({
                             setAddingAgent(null);
                           }}
                         >
-                          {resolveModelPresentation({ agentId: agent.id, modelId: model.id, modelLabel: model.label }).fullLabel}
+                          {model
+                            ? resolveModelPresentation({ agentId: agent.id, modelId: model.id, modelLabel: model.label }).fullLabel
+                            : "Agent 默认"}
                         </button>
                       ))}
                     </div>
@@ -444,17 +519,12 @@ export function RuntimeSettings({
             </section>
           );
         })}
-        {rows.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line px-3 py-8 text-center text-xs text-faint">
-            <Tags size={18} /> 当前没有可配置的 Agent 与模型
-          </div>
-        ) : null}
       </div>
 
       <div className="sticky bottom-0 flex justify-end border-t border-line bg-surface pt-3">
         <button
           type="button"
-          disabled={disabled || saving || rows.length === 0 || rows.some((row) => row.tags.length === 0)}
+          disabled={disabled || saving || rows.some((row) => row.tags.length === 0)}
           onClick={() => {
             setSaving(true);
             Promise.resolve(onSave(draft)).finally(() => setSaving(false));

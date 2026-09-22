@@ -79,15 +79,20 @@ export function ComposerControls({
           modeLabel: selection.mode.label,
         })
       : null;
+  const configuredProfile = preferences.modelProfiles?.find(
+    (profile) =>
+      profile.agentId === selection.current?.id &&
+      (profile.modelId ?? null) === (selection.model?.id ?? modelId ?? null),
+  );
   const routeLabel = selection.current
     ? `${resolveAgentPresentation(selection.current).label} · ${
-        selection.model
+        configuredProfile?.displayName?.trim() || (selection.model
           ? resolveModelPresentation({
               agentId: selection.current.id,
               modelId: selection.model.id,
               modelLabel: selection.model.label,
             }).fullLabel
-          : modelId ?? "默认"
+          : modelId ?? "默认")
       }`
     : "未匹配 Agent";
   const summary = [

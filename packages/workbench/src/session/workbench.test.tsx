@@ -1090,7 +1090,7 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
     const trunk = screen.getByTestId("round-trunk");
     const trunkMetrics = within(trunk).getByTestId("summary-metrics");
-    expect(trunkMetrics).toHaveTextContent("GeneHub Agent");
+    expect(trunkMetrics).toHaveTextContent("Genet");
     expect(trunkMetrics).toHaveTextContent("DeepSeek V4");
     expect(trunkMetrics).not.toHaveTextContent("3 分钟前");
     expect(trunkMetrics).not.toHaveTextContent("3m 20s");
@@ -1098,9 +1098,9 @@ describe("what the user sees in a session", () => {
     await userEvent.click(within(trunk).getByRole("button"));
     const batches = screen.getAllByTestId("round-batch");
     const firstMetrics = within(batches[0]!).getByTestId("summary-metrics");
-    expect(firstMetrics).toHaveTextContent("GeneHub AgentDeepSeek V4");
+    expect(firstMetrics).toHaveTextContent("GenetDeepSeek V4");
     expect(within(batches[1]!).getByTestId("summary-metrics")).toHaveTextContent(
-      "GeneHub AgentDeepSeek V4",
+      "GenetDeepSeek V4",
     );
   });
 
@@ -1138,7 +1138,7 @@ describe("what the user sees in a session", () => {
     const trunk = screen.getByTestId("round-trunk");
     expect(trunk).not.toHaveTextContent("4 项");
     expect(within(trunk).getByTestId("summary-metrics")).toHaveTextContent(
-      "GeneHub AgentDeepSeek V4",
+      "GenetDeepSeek V4",
     );
   });
 
@@ -1185,7 +1185,7 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
     const card = screen.getByTestId("round-trunk");
     const metrics = within(card).getByTestId("summary-metrics");
-    expect(metrics).toHaveTextContent("GeneHub AgentDeepSeek V4");
+    expect(metrics).toHaveTextContent("GenetDeepSeek V4");
     expect(metrics).not.toHaveTextContent("1 分钟前");
     expect(metrics).not.toHaveTextContent("工具 10s");
     expect(card).not.toHaveTextContent("1 项");
@@ -2534,7 +2534,7 @@ describe("the controls offered to the user", () => {
     render(<Composer {...composerProps()} />);
 
     const box = screen.getByLabelText("任务描述");
-    const summary = screen.getByRole("button", { name: /模型：GeneHub Agent/ });
+    const summary = screen.getByRole("button", { name: /模型：Genet/ });
     const card = box.closest("[data-composer-card]");
     const inputSlot = box.closest('[data-composer-slot="input"]');
     const runtimeRow = card?.querySelector('[data-composer-slot="runtime"]');
@@ -2771,7 +2771,7 @@ describe("the controls offered to the user", () => {
 
   it("keeps tag switching available for an existing conversation", async () => {
     render(<Composer {...composerProps()} />);
-    await userEvent.click(screen.getByRole("button", { name: /模型：GeneHub Agent/ }));
+    await userEvent.click(screen.getByRole("button", { name: /模型：Genet/ }));
     const dialog = screen.getByRole("dialog", { name: "模型选择" });
     expect(within(dialog).getByRole("button", { name: "Max" })).toBeEnabled();
     expect(within(dialog).getByLabelText("思考强度")).toBeEnabled();

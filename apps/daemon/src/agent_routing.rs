@@ -456,6 +456,7 @@ pub(crate) fn inferred_profile(agent: &AgentInfo, model: Option<&ModelInfo>) -> 
     AgentModelProfile {
         agent_id: agent.id.clone(),
         model_id: model.map(|model| model.id.clone()),
+        display_name: None,
         tags,
         cost: Some(if flush {
             AgentCostLevel::Low
@@ -632,6 +633,7 @@ mod tests {
             model_profiles: vec![AgentModelProfile {
                 agent_id: "codex".into(),
                 model_id: Some("m4-max".into()),
+                display_name: None,
                 tags: vec![TAG_MAX.into()],
                 cost: Some(AgentCostLevel::Medium),
             }],

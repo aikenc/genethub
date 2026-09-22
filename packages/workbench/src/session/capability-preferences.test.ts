@@ -13,6 +13,7 @@ import {
   tagMediaInputSupport,
   toggleGroupedTag,
   withModelProfile,
+  withoutModelProfile,
   withRuntimePreference,
   withSelectedTags,
   withTagGroups,
@@ -121,6 +122,27 @@ describe("machine-global Agent tag routing", () => {
       catalog: { ...rich.catalog, models: rich.catalog.models.filter((model) => model.id !== "m4") },
     };
     expect(normalizeAgentPreferences(staleOnly, [changedCatalog]).modelProfiles).toEqual([]);
+  });
+
+  it("keeps an Agent disabled after its last model is removed and re-enables it on add", () => {
+    const current = agent();
+    let preferences = normalizeAgentPreferences(undefined, [current]);
+    for (const profile of [...(preferences.modelProfiles ?? [])]) {
+      preferences = withoutModelProfile(preferences, profile.agentId, profile.modelId);
+    }
+
+    expect(preferences.modelProfiles).toEqual([]);
+    expect(preferences.disabledAgentIds).toEqual(["codex"]);
+    expect(normalizeAgentPreferences(preferences, [current]).modelProfiles).toEqual([]);
+
+    preferences = withModelProfile(
+      preferences,
+      { ...inferredModelProfile(current, current.catalog.models[0]!), displayName: "主模型" },
+    );
+    expect(preferences.disabledAgentIds).toEqual([]);
+    expect(normalizeAgentPreferences(preferences, [current]).modelProfiles).toEqual([
+      expect.objectContaining({ modelId: "text", displayName: "主模型" }),
+    ]);
   });
 
   it("does not materialize or retain model rows for an inactive Agent", () => {

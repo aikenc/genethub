@@ -67,7 +67,7 @@ export function AgentMark({
 /**
  * The Agent's initial, for the ones this build has no mark for.
  *
- * Codex, Copilot, Gemini and every locally configured ACP Agent have no
+ * Copilot, Gemini and every locally configured ACP Agent have no
  * bundled icon — their vendors' marks are trademarks we do not redistribute —
  * and in a row of tabs that showed as an empty gap where the others have a
  * logo. A letter is not a brand and does not claim to be one; it just keeps

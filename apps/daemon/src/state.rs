@@ -632,12 +632,34 @@ fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result
     if preferences.model_profiles.len() > 512 {
         anyhow::bail!("最多保存 512 组 Agent 与模型画像");
     }
+    if preferences.disabled_agent_ids.len() > 64 {
+        anyhow::bail!("最多停用 64 个 Agent");
+    }
+    let mut disabled_agents = std::collections::BTreeSet::new();
+    for agent_id in &preferences.disabled_agent_ids {
+        validate_id("Agent", agent_id, 128)?;
+        if !disabled_agents.insert(agent_id.trim().to_lowercase()) {
+            anyhow::bail!("不能重复停用同一个 Agent");
+        }
+    }
     validate_tag_groups(preferences)?;
     let mut profiles = std::collections::BTreeSet::new();
     for profile in &preferences.model_profiles {
         validate_id("Agent", &profile.agent_id, 128)?;
+        if disabled_agents.contains(&profile.agent_id.trim().to_lowercase()) {
+            anyhow::bail!("已停用的 Agent 不能保留模型画像");
+        }
         if let Some(model_id) = &profile.model_id {
             validate_id("模型", model_id, 512)?;
+        }
+        if let Some(display_name) = &profile.display_name {
+            let display_name = display_name.trim();
+            if display_name.is_empty()
+                || display_name.chars().count() > 80
+                || display_name.chars().any(char::is_control)
+            {
+                anyhow::bail!("模型显示名不能为空、不能包含控制字符且不能超过 80 个字符");
+            }
         }
         validate_tags(&profile.tags, true)?;
         validate_tag_group_selection(&profile.tags, preferences)?;
@@ -748,6 +770,7 @@ mod machine_state_tests {
             |agent: &str, model: &str, tags: Vec<&str>| genehub_proto::AgentModelProfile {
                 agent_id: agent.into(),
                 model_id: Some(model.into()),
+                display_name: None,
                 tags: tags.into_iter().map(str::to_string).collect(),
                 cost: Some(genehub_proto::AgentCostLevel::Medium),
             };
@@ -773,6 +796,20 @@ mod machine_state_tests {
             .expect_err("the same exact profile cannot be saved twice")
             .to_string();
         assert!(duplicate.contains("不能重复"), "{duplicate}");
+
+        preferences.model_profiles = vec![profile("codex", "model", vec!["Flush"])];
+        preferences.disabled_agent_ids = vec!["codex".into()];
+        let disabled = validate_agent_preferences(&preferences)
+            .expect_err("a disabled Agent cannot retain a route")
+            .to_string();
+        assert!(disabled.contains("已停用"), "{disabled}");
+
+        preferences.disabled_agent_ids.clear();
+        preferences.model_profiles[0].display_name = Some("bad\nname".into());
+        let display_name = validate_agent_preferences(&preferences)
+            .expect_err("a display name cannot contain controls")
+            .to_string();
+        assert!(display_name.contains("模型显示名"), "{display_name}");
     }
 
     #[test]
@@ -780,6 +817,7 @@ mod machine_state_tests {
         let profile = |tags: Vec<&str>| genehub_proto::AgentModelProfile {
             agent_id: "codex".into(),
             model_id: Some("model".into()),
+            display_name: None,
             tags: tags.into_iter().map(str::to_string).collect(),
             cost: Some(genehub_proto::AgentCostLevel::Medium),
         };

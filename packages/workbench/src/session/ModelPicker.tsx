@@ -99,20 +99,20 @@ export function ModelPicker({
       <div
         role="listbox"
         aria-label="Agent 与模型"
-        className="max-h-72 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
+        className="h-72 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
       >
         {routes.map((route) => {
           const chosen =
             selected?.agentId === route.agent.id &&
             selected.modelId === route.modelId;
           const agent = resolveAgentPresentation(route.agent);
-          const model = route.modelId
+          const model = route.profile.displayName?.trim() || (route.modelId
             ? resolveModelPresentation({
                 agentId: route.agent.id,
                 modelId: route.modelId,
                 modelLabel: route.agent.catalog.models.find((item) => item.id === route.modelId)?.label,
               }).fullLabel
-            : "Agent 默认";
+            : "Agent 默认");
           const cost = COST_LEVELS.find((level) => level.id === (route.profile.cost ?? "medium"));
           return (
             <button
@@ -128,9 +128,7 @@ export function ModelPicker({
                   : "text-muted hover:bg-raised hover:text-fg"
               }`}
             >
-              {agent.kind !== "text" ? (
-                <AgentMark agent={route.agent} className="h-6 w-6" fallbackToText={false} />
-              ) : null}
+              <AgentMark agent={route.agent} className="h-6 w-6" fallbackToText={false} />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-medium text-fg">
                   {agent.label} · {model}
