@@ -127,7 +127,7 @@ window.mc=mc;client.connect();
     const vite = await import(pathToFileURL(require.resolve("vite")).href);
     const server = await vite.createServer({ configFile: false, root, logLevel: "error",
       resolve: { alias: [{ find: "@genehub/workbench/client", replacement: testRequire.resolve("@genehub/workbench/client") }, { find: /^@genehub\/workbench$/, replacement: testRequire.resolve("@genehub/workbench") }] },
-      server: { host: "127.0.0.1", port: 0, fs: { allow: [root, t.openRoot] } } });
+      server: { host: "127.0.0.1", port: 0, watch: null, fs: { allow: [root, t.openRoot] } } });
     app = server; await server.listen();
     await page.goto(server.resolvedUrls.local[0]);
     await page.waitForFunction(() => (window as any).mc?.client.connectionState === "ready", null, { timeout: 30000 });

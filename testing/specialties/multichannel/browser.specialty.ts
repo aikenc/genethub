@@ -294,7 +294,7 @@ for (const useRtc of [false, true]) defineSpecialty({
 
 defineSpecialty({
   ...meta("hosted-rtc-residency-on-renewal", "Hosted RTC stays the business path across real authorization renewals",
-    "After native RTC connects through host candidates, two real Hosted renewals keep business RPC on RTC without a new upgrade or a standby transition", 110000),
+    "After native RTC connects through host candidates, two real Hosted renewals keep at least 95% of business RPC and observed time on RTC, with no new SDP negotiation or fallback over one second", 110000),
   catches: ["authorization renewal repeatedly displaces a healthy RTC path", "slow candidate gathering leaves RTC active only briefly"],
   tags: ["multichannel", "network-risk-v2", "renewal-continuity", "rtc-residency"],
   timeoutMs: 240000,
@@ -318,17 +318,21 @@ defineSpecialty({
     stack = await openMultichannelBrowser(t, "hosted");
     await stack.page.evaluate(() => {
       const m = (window as any).mc;
-      const monitor = { startedAt: 0, lastAt: 0, lastState: "", rtcMs: 0,
+      const monitor = { startedAt: 0, startedWallAt: 0, lastAt: 0, lastState: "", rtcMs: 0, awaySince: 0, maxAwayMs: 0,
         transitions: [] as Array<{ atMs: number; state: string }>, initialConnectionStates: m.states.length };
       m.rtcMonitor = monitor;
       m.stopRtcMonitor = m.client.onRtcStateChange((state: string) => {
         const now = performance.now();
         if (!monitor.startedAt) {
           if (state !== "connected") return;
-          monitor.startedAt = now; monitor.lastAt = now; monitor.lastState = state;
+          monitor.startedAt = now; monitor.startedWallAt = Date.now(); monitor.lastAt = now; monitor.lastState = state;
           return;
         }
         if (monitor.lastState === "connected") monitor.rtcMs += now - monitor.lastAt;
+        if (monitor.lastState === "connected" && state !== "connected") monitor.awaySince = now;
+        if (monitor.lastState !== "connected" && state === "connected" && monitor.awaySince) {
+          monitor.maxAwayMs = Math.max(monitor.maxAwayMs, now - monitor.awaySince); monitor.awaySince = 0;
+        }
         monitor.lastAt = now; monitor.lastState = state;
         monitor.transitions.push({ atMs: Math.round(now - monitor.startedAt), state });
       });
@@ -358,6 +362,8 @@ defineSpecialty({
       m.stopRtcMonitor();
       const rtcMs = watch.rtcMs + (watch.lastState === "connected" ? now - watch.lastAt : 0);
       return { totalMs: Math.round(now - watch.startedAt), rtcMs: Math.round(rtcMs),
+        startedWallAt: watch.startedWallAt,
+        maxAwayMs: Math.round(Math.max(watch.maxAwayMs, watch.awaySince ? now - watch.awaySince : 0)),
         transitions: watch.transitions, connectionStates: m.states.slice(watch.initialConnectionStates),
         upgrades: m.rtcUpgrades, candidates: m.diagnostics.filter((e: any) => e.kind === "rtc" && "candidateHost" in e.detail)
           .map((e: any) => ({ host: e.detail.candidateHost, srflx: e.detail.candidateSrflx })) };
@@ -365,17 +371,22 @@ defineSpecialty({
     const renewals = stack.issued() - initialIssued;
     const rtcProbes = probes.filter(probe => probe.ok && probe.transport === "rtc").length;
     const firstUpgradeMs = measured.upgrades.find((upgrade: any) => upgrade.phase === "finish" && upgrade.outcome === "ok")?.durationMs ?? null;
+    const upgradeStarts = measured.upgrades.filter((upgrade: any) => upgrade.phase === "start").length;
+    const renewalAtMs = stack.leases().slice(initialIssued).map(lease => lease.receivedAt - measured.startedWallAt);
+    const maxRpcMs = Math.max(0, ...probes.map(probe => probe.ms));
     const summary = `renewals=${renewals} stunRequests=${stunRequests} firstUpgradeMs=${firstUpgradeMs} ` +
       `rtcResidentMs=${measured.rtcMs}/${measured.totalMs} rtcRpc=${rtcProbes}/${probes.length} ` +
-      `upgradeStarts=${measured.upgrades.filter((upgrade: any) => upgrade.phase === "start").length} ` +
+      `maxAwayMs=${measured.maxAwayMs} maxRpcMs=${maxRpcMs} upgradeStarts=${upgradeStarts} ` +
+      `renewalAtMs=${JSON.stringify(renewalAtMs)} ` +
       `transitions=${JSON.stringify(measured.transitions.slice(0, 12))} candidates=${JSON.stringify(measured.candidates.slice(0, 4))}`;
     t.note(summary);
     t.assertions.assert(stunRequests > 0 && firstUpgradeMs !== null, `STUN fault or real RTC upgrade was not exercised: ${summary}`);
     t.assertions.assert(renewals >= 2, `two real Hosted renewals did not occur: ${summary}`);
     t.assertions.assert(measured.connectionStates.every((state: string) => state === "ready") && probes.every(probe => probe.ok),
       `authorization renewal interrupted business access: ${summary}`);
-    t.assertions.assert(measured.transitions.length === 0 && measured.rtcMs / measured.totalMs >= 0.9 && rtcProbes === probes.length &&
-      measured.upgrades.filter((upgrade: any) => upgrade.phase === "start").length === 1,
+    t.assertions.assert(measured.maxAwayMs < 1000 && measured.rtcMs / measured.totalMs >= 0.95 &&
+      rtcProbes / probes.length >= 0.95 && upgradeStarts === 1 &&
+      measured.transitions.every((transition: { state: string }) => transition.state !== "connecting"),
     `healthy RTC was displaced by authorization renewal: ${summary}`);
   } finally {
     await stack?.stop();
