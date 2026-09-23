@@ -54,9 +54,10 @@ pub struct AcpAdapter {
     extra_dirs: Vec<PathBuf>,
     /// When set, probe also asks this CLI whether it is logged in.
     login_status: bool,
-    /// What `session/new` told us about models and modes, read once per daemon
-    /// run so the picker can be drawn before anyone opens a session.
-    hello: tokio::sync::OnceCell<Option<Hello>>,
+    /// What `session/new` told us about models and modes. Remembered so the
+    /// picker can be drawn before anyone opens a session; `agent.refresh`
+    /// clears it so a later Cursor catalog (new models) can appear.
+    hello: tokio::sync::RwLock<Option<Hello>>,
 }
 
 /// What one `session/new` told us about this install.
@@ -91,7 +92,7 @@ impl AcpAdapter {
             command,
             extra_dirs: Vec::new(),
             login_status: false,
-            hello: tokio::sync::OnceCell::new(),
+            hello: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -110,16 +111,15 @@ impl AcpAdapter {
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
-        // A failed handshake must not be remembered for the rest of the
-        // daemon's life: Cursor's ACP model table is sometimes empty on the
-        // first try, and a timeout while the CLI is updating used to hide the
-        // picker until someone restarted us.
-        if let Some(cached) = self.hello.get() {
-            return cached.clone();
+        // A failed handshake is not remembered: Cursor's ACP model table is
+        // sometimes empty on the first try, and a timeout while the CLI is
+        // updating used to hide the picker until someone restarted us.
+        if let Some(cached) = self.hello.read().await.clone() {
+            return Some(cached);
         }
         let found = discover(program, &self.command).await;
         if let Some(hello) = found.clone() {
-            let _ = self.hello.set(Some(hello));
+            *self.hello.write().await = Some(hello);
         }
         found
     }
@@ -175,6 +175,10 @@ impl AgentAdapter for AcpAdapter {
             // is sitting right there.
             _ => ProbeState::Ready,
         }
+    }
+
+    async fn invalidate_catalog(&self) {
+        *self.hello.write().await = None;
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
@@ -3399,6 +3403,30 @@ mod tests {
             Some(true)
         );
         assert_eq!(login_from_status_output(b"usage: cursor-agent", b""), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_forgets_a_successful_handshake() {
+        let adapter = AcpAdapter::new("t", "T", vec!["true".into(), "acp".into()]);
+        *adapter.hello.write().await = Some(Hello {
+            models: vec![ModelInfo {
+                id: "stale".into(),
+                label: "stale".into(),
+                context_window: None,
+                reasoning: false,
+                efforts: Vec::new(),
+                input_modalities: None,
+            }],
+            default_model: Some("stale".into()),
+            ..Hello::default()
+        });
+        let before = adapter.catalog(&Default::default()).await;
+        assert_eq!(before.default_model.as_deref(), Some("stale"));
+        adapter.invalidate_catalog().await;
+        let after = adapter.catalog(&Default::default()).await;
+        assert!(after.models.is_empty());
+        assert!(after.default_model.is_none());
     }
 
     #[test]

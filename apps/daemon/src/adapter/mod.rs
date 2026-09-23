@@ -144,6 +144,11 @@ pub trait AgentAdapter: Send + Sync {
 
     async fn catalog(&self, providers: &ProviderMap) -> Catalog;
 
+    /// Forget process-lifetime handshake caches so `agent.refresh` can ask the
+    /// CLI again. Default is a no-op: adapters that always live-query have
+    /// nothing to drop.
+    async fn invalidate_catalog(&self) {}
+
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>>;
 
     /// `None` means this Agent does not publish an import surface. Listing is

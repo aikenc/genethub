@@ -151,7 +151,7 @@ export function RuntimeSettings({
             className="h-8 shrink-0 rounded-lg px-2 text-xs text-accent hover:bg-raised"
             onClick={() => onRefreshAgents()}
           >
-            重新检测
+            刷新
           </button>
         ) : null}
       </div>

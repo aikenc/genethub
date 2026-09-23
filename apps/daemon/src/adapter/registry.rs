@@ -171,8 +171,14 @@ impl Registry {
         // sequence, which looked like a dead connection on a cold install.
         // `join_all` preserves registry order while bounding the wait to the
         // slowest probe instead of the sum of all of them.
+        //
+        // Drop handshake caches first. Probe already ran on every refresh;
+        // catalog used to replay the first successful `session/new` /
+        // `initialize` / `model/list` for the rest of the daemon's life, so
+        // Cursor adding a model never appeared until restart.
         let infos =
             futures_util::future::join_all(self.adapters.iter().map(|adapter| async move {
+                adapter.invalidate_catalog().await;
                 let probe = adapter.probe().await;
                 // Cataloguing an absent agent would spawn a process that is not
                 // there; skip straight to an empty catalog.
@@ -393,5 +399,78 @@ mod tests {
     async fn requiring_an_unknown_adapter_is_an_error_not_a_panic() {
         let registry = Registry::new(&BTreeMap::new());
         assert!(registry.require("nope").is_err());
+    }
+
+    /// `agent.refresh` must drop adapter handshake caches. Registry used to
+    /// re-call `catalog()` while Cursor/Claude/Codex replayed the first
+    /// successful hello for the rest of the daemon run.
+    #[tokio::test]
+    async fn refresh_asks_each_adapter_for_a_new_catalog() {
+        struct Cached {
+            latest: tokio::sync::RwLock<String>,
+            remembered: tokio::sync::RwLock<Option<genehub_proto::Catalog>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::adapter::AgentAdapter for Cached {
+            fn id(&self) -> &str {
+                "cached"
+            }
+            fn label(&self) -> &str {
+                "Cached"
+            }
+            fn capabilities(&self) -> genehub_proto::Capabilities {
+                Default::default()
+            }
+            async fn probe(&self) -> ProbeState {
+                ProbeState::Ready
+            }
+            async fn invalidate_catalog(&self) {
+                *self.remembered.write().await = None;
+            }
+            async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+                if let Some(cached) = self.remembered.read().await.clone() {
+                    return cached;
+                }
+                let id = self.latest.read().await.clone();
+                let catalog = genehub_proto::Catalog {
+                    models: vec![genehub_proto::ModelInfo {
+                        id: id.clone(),
+                        label: id,
+                        context_window: None,
+                        reasoning: false,
+                        efforts: Vec::new(),
+                        input_modalities: None,
+                    }],
+                    ..Default::default()
+                };
+                *self.remembered.write().await = Some(catalog.clone());
+                catalog
+            }
+            async fn start(
+                &self,
+                _config: crate::adapter::SessionConfig,
+            ) -> Result<Box<dyn crate::adapter::AgentSession>> {
+                anyhow::bail!("not started")
+            }
+        }
+
+        let adapter = Arc::new(Cached {
+            latest: tokio::sync::RwLock::new("old".into()),
+            remembered: tokio::sync::RwLock::new(None),
+        });
+        let registry = Registry::of(vec![adapter.clone()]);
+        let providers = ProviderMap::new();
+        let first = registry.list(&providers).await;
+        assert_eq!(first[0].catalog.models[0].id, "old");
+
+        *adapter.latest.write().await = "new".into();
+        let listed = registry.list(&providers).await;
+        assert_eq!(
+            listed[0].catalog.models[0].id, "old",
+            "list keeps the registry cache"
+        );
+        let refreshed = registry.refresh(&providers).await;
+        assert_eq!(refreshed[0].catalog.models[0].id, "new");
     }
 }

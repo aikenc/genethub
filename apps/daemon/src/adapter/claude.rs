@@ -187,13 +187,12 @@ fn apply_claude_sandbox_compat(command: &mut Command) {
 pub struct ClaudeAdapter {
     flavor: ClaudeFlavor,
     extra_dirs: Vec<PathBuf>,
-    /// This build's `--help`, read once per daemon run: it is the only place
-    /// this CLI says which permission modes it accepts, and the answer cannot
-    /// change without the binary being replaced under us.
-    help: tokio::sync::OnceCell<String>,
-    /// What the CLI answered to an `initialize` control request — its model list,
-    /// its slash commands, its sub-agents. Also asked once per daemon run.
-    hello: tokio::sync::OnceCell<Option<Value>>,
+    /// This build's `--help`: the only place this CLI says which permission
+    /// modes it accepts. Remembered until `agent.refresh`.
+    help: tokio::sync::RwLock<Option<String>>,
+    /// What the CLI answered to an `initialize` control request — its model
+    /// list, slash commands, and sub-agents. Remembered until `agent.refresh`.
+    hello: tokio::sync::RwLock<Option<Value>>,
     /// A CLI to run instead of the one on `PATH`.
     ///
     /// Only ever set by tests, and a field rather than an environment variable
@@ -221,8 +220,8 @@ impl ClaudeAdapter {
         ClaudeAdapter {
             flavor,
             extra_dirs,
-            help: tokio::sync::OnceCell::new(),
-            hello: tokio::sync::OnceCell::new(),
+            help: tokio::sync::RwLock::new(None),
+            hello: tokio::sync::RwLock::new(None),
             program: None,
         }
     }
@@ -251,71 +250,74 @@ impl ClaudeAdapter {
         }
     }
 
-    /// This build's own help text, read once and remembered.
-    async fn help(&self, program: &std::path::Path) -> &str {
+    /// This build's own help text, remembered until `invalidate_catalog`.
+    async fn help(&self, program: &std::path::Path) -> String {
+        if let Some(cached) = self.help.read().await.clone() {
+            return cached;
+        }
         let help_args = self.flavor.help_args;
-        self.help
-            .get_or_init(|| async {
-                let mut text = Command::new(program)
-                    .args(help_args)
-                    .output()
-                    .await
-                    .ok()
-                    .map(|out| {
-                        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
-                        text.push_str(&String::from_utf8_lossy(&out.stderr));
-                        text
-                    })
-                    .unwrap_or_default();
-                // Some CLI builds exit before their piped help is fully flushed.
-                // A short --version invocation still validates preceding options,
-                // and reaches no model. Probe the actual launch parser, rather
-                // than trusting set_permission_mode (some builds accept unknowns).
-                if !text.contains("--permission-mode") {
-                    let mut modes = Vec::new();
-                    // Current Claude and TClaude builds publish `manual`; some
-                    // newer parsers also accept the undocumented alias
-                    // `default`. Prefer the published spelling when both work,
-                    // while retaining `default` as a compatibility fallback.
-                    for mode in ["manual", "default"] {
-                        let mut command = Command::new(program);
-                        command
-                            .args(&help_args[..help_args.len() - 1])
-                            .args(["--permission-mode", mode, "--version"])
-                            .kill_on_drop(true);
-                        if let Ok(Ok(output)) =
-                            tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
-                        {
-                            if output.status.success() {
-                                modes.push(mode);
-                                break;
-                            }
+        let text = {
+            let mut text = Command::new(program)
+                .args(help_args)
+                .output()
+                .await
+                .ok()
+                .map(|out| {
+                    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+                    text.push_str(&String::from_utf8_lossy(&out.stderr));
+                    text
+                })
+                .unwrap_or_default();
+            // Some CLI builds exit before their piped help is fully flushed.
+            // A short --version invocation still validates preceding options,
+            // and reaches no model. Probe the actual launch parser, rather
+            // than trusting set_permission_mode (some builds accept unknowns).
+            if !text.contains("--permission-mode") {
+                let mut modes = Vec::new();
+                // Current Claude and TClaude builds publish `manual`; some
+                // newer parsers also accept the undocumented alias
+                // `default`. Prefer the published spelling when both work,
+                // while retaining `default` as a compatibility fallback.
+                for mode in ["manual", "default"] {
+                    let mut command = Command::new(program);
+                    command
+                        .args(&help_args[..help_args.len() - 1])
+                        .args(["--permission-mode", mode, "--version"])
+                        .kill_on_drop(true);
+                    if let Ok(Ok(output)) =
+                        tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
+                    {
+                        if output.status.success() {
+                            modes.push(mode);
+                            break;
                         }
                     }
-                    for mode in [MODE_ACCEPT_EDITS, MODE_PLAN, MODE_BYPASS] {
-                        let mut command = Command::new(program);
-                        command
-                            .args(&help_args[..help_args.len() - 1])
-                            .args(["--permission-mode", mode, "--version"])
-                            .kill_on_drop(true);
-                        if let Ok(Ok(output)) =
-                            tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
-                        {
-                            if output.status.success() {
-                                modes.push(mode);
-                            }
-                        }
-                    }
-                    text.push_str(&format!("\n--permission-mode choices: {}\n", json!(modes)));
                 }
-                text
-            })
-            .await
+                for mode in [MODE_ACCEPT_EDITS, MODE_PLAN, MODE_BYPASS] {
+                    let mut command = Command::new(program);
+                    command
+                        .args(&help_args[..help_args.len() - 1])
+                        .args(["--permission-mode", mode, "--version"])
+                        .kill_on_drop(true);
+                    if let Ok(Ok(output)) =
+                        tokio::time::timeout(CONTROL_TIMEOUT, command.output()).await
+                    {
+                        if output.status.success() {
+                            modes.push(mode);
+                        }
+                    }
+                }
+                text.push_str(&format!("\n--permission-mode choices: {}\n", json!(modes)));
+            }
+            text
+        };
+        *self.help.write().await = Some(text.clone());
+        text
     }
 
     /// The permission modes to offer for this build.
     async fn modes(&self, program: &std::path::Path) -> Vec<ModeInfo> {
-        modes_in(self.help(program).await)
+        modes_in(&self.help(program).await)
     }
 
     /// The CLI's answer to an `initialize` control request, asked once per daemon
@@ -331,12 +333,12 @@ impl ClaudeAdapter {
     /// refuses the bypass flag as root and would otherwise leave the model
     /// picker empty until the daemon restarted.
     async fn hello(&self, program: &std::path::Path) -> Option<Value> {
-        if let Some(cached) = self.hello.get() {
-            return cached.clone();
+        if let Some(cached) = self.hello.read().await.clone() {
+            return Some(cached);
         }
         let found = initialize(program).await;
         if let Some(hello) = found.clone() {
-            let _ = self.hello.set(Some(hello));
+            *self.hello.write().await = Some(hello);
         }
         found
     }
@@ -635,6 +637,11 @@ impl AgentAdapter for ClaudeAdapter {
             Some(_) => ProbeState::Ready,
             None => ProbeState::NotInstalled,
         }
+    }
+
+    async fn invalidate_catalog(&self) {
+        *self.hello.write().await = None;
+        *self.help.write().await = None;
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {

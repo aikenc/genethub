@@ -361,7 +361,7 @@ describe("the rich runtime settings panel", () => {
     expect(labels()).toHaveLength(4);
   });
 
-  it("re-probes when the picker opens and when 重新检测 is pressed", async () => {
+  it("re-probes when the picker opens and when 刷新 is pressed", async () => {
     const onRefreshAgents = vi.fn();
     const variants: AgentInfo[] = [
       AGENTS[0]!,
@@ -371,9 +371,9 @@ describe("the rich runtime settings panel", () => {
     expect(onRefreshAgents).not.toHaveBeenCalled();
     const { dialog } = await openSettings();
     expect(onRefreshAgents).toHaveBeenCalledTimes(1);
-    expect(within(dialog).getByRole("button", { name: "重新检测" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "刷新" })).toBeInTheDocument();
     expect(within(dialog).getByText("未安装")).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole("button", { name: "重新检测" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "刷新" }));
     expect(onRefreshAgents).toHaveBeenCalledTimes(2);
   });
 
