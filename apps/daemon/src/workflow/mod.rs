@@ -4591,17 +4591,7 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
     };
     Ok(WorkflowRunStatus {
         structure: structured::projection(run),
-        triage: run.supervision.triage.as_ref().map(|triage| genehub_proto::WorkflowTriageStatus {
-            episode_id: triage.episode_id.clone(),
-            cause_code: triage.cause_code.clone(),
-            source: triage.source.clone(),
-            phase: triage.phase.clone(),
-            owner: triage.owner.clone(),
-            next_action: triage.next_action.clone(),
-            created_at_ms: triage.created_at_ms,
-            updated_at_ms: triage.updated_at_ms,
-            attempts: triage.attempts,
-        }),
+        triage: run.supervision.triage.as_ref().map(supervision::triage_status),
         diagnostics: Some(
             run.supervision
                 .diagnostics

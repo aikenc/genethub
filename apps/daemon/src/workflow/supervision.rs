@@ -48,6 +48,20 @@ pub(super) struct Triage {
     pub reminders: u8,
 }
 
+pub(super) fn triage_status(triage: &Triage) -> genehub_proto::WorkflowTriageStatus {
+    genehub_proto::WorkflowTriageStatus {
+        episode_id: triage.episode_id.clone(),
+        cause_code: triage.cause_code.clone(),
+        source: triage.source.clone(),
+        phase: triage.phase.clone(),
+        owner: triage.owner.clone(),
+        next_action: triage.next_action.clone(),
+        created_at_ms: triage.created_at_ms,
+        updated_at_ms: triage.updated_at_ms,
+        attempts: triage.attempts,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Diagnostic {

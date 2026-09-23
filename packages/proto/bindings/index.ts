@@ -2266,7 +2266,7 @@ humanWaitMs: number,
  */
 recoveryWaitMs: number, waiting: boolean, silenceThresholdMs: number, };
 
-export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, triage?: WorkflowTriageStatus, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkflowTriageStatus = { episodeId: string, causeCode: string, source: string, phase: string, owner: string, nextAction: string, createdAtMs: number, updatedAtMs: number, attempts: number, };
 

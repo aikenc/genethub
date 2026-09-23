@@ -977,6 +977,9 @@ pub struct WorkflowTaskSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub report_pending: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub triage: Option<WorkflowTriageStatus>,
 
     pub run_id: String,
     pub task_id: String,

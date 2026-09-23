@@ -90,6 +90,7 @@ pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSu
                                     .collect()
                             }),
                             request_run_id: Some(request::group_id(run).into()),
+                            triage: run.supervision.triage.as_ref().map(supervision::triage_status),
                             report_pending: Some(grouped.get(request::group_id(run)).is_some_and(
                                 |group| group.iter().any(|run| supervision::report_pending(run)),
                             )),

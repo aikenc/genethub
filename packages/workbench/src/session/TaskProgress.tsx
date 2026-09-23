@@ -106,6 +106,10 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
               }}>{busy === task.runId ? "正在提交终止…" : task.status === "cancelling" ? "停止中" : "终止任务"}</button>}
           </div>
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}
+          {task.triage && task.triage.phase !== "closed" && <div role="status" className="mt-2 rounded-lg border border-line px-2 py-2 text-xs">
+            <p className="font-medium">后续处置 · {task.triage.phase === "reviewing" ? "WR 分析中" : task.triage.phase === "pendingWr" ? "待 WR 分析" : task.triage.phase === "pendingHuman" ? "需要你处理" : "待 PM 处理"}</p>
+            <p className="mt-1 break-words">{task.triage.nextAction}</p>
+          </div>}
           {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.join("、")}</p>}
           {task.reason && <details className="mt-1 text-xs"><summary className="cursor-pointer truncate">{task.reason.split("\n")[0]}</summary><p className="mt-2 whitespace-pre-wrap break-words">{task.reason}</p></details>}
           {task.waiting?.map(waiting => {

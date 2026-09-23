@@ -377,6 +377,11 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             && reply.data.triage.source === "wr" && reply.data.triage.attempts === 1
             && reply.data.diagnostics?.some(diagnostic => diagnostic.status === "finished") === true;
         }, 45_000);
+        const pmSnapshot = await opened.client.call({ type: "session.get", payload: { sessionId: pmSessionId } });
+        t.assertions.assert(pmSnapshot?.type === "snapshot"
+          && pmSnapshot.data.summary.workSummary?.tasks.some(task => task.runId === runId
+            && task.triage?.phase === "pendingPm" && task.triage.owner === "pm") === true,
+          "PM task card did not carry the WR handoff after the notice was handled");
       }
       t.assertions.assert(run?.executorTurns === 0, "deterministic Executor used an LLM turn");
       t.assertions.assert(Boolean(run?.executorSessionId), "Run has no Executor Session");
