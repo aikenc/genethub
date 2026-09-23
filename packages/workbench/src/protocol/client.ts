@@ -1873,7 +1873,12 @@ export class Client {
       this.authorizationExpiresAt = dial.fabricAuthorizationExpiresAt;
       previous?.fabric.close();
       this.scheduleAuthorizationRenewal();
-      if (this.rtcEnabled) void this.startRtc(endpoint, epoch);
+      if (this.rtcEnabled) {
+        const retainedRtc = this.dataRtcLink && this.rtcLink?.endpoint.state === "open"
+          ? await endpoint.promoteStandby("rtc").catch((error: unknown) => { this.report(error); return false; })
+          : false;
+        if (!retainedRtc && current()) void this.startRtc(endpoint, epoch);
+      }
     } catch (error) {
       if (this.stopped || this.endpoint !== endpoint || this.epoch !== epoch) return;
       const status = error && typeof error === "object" && "status" in error ? error.status : undefined;

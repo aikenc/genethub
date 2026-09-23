@@ -134,6 +134,19 @@ export class LogicalConnection {
     }
     return ready;
   }
+  /** Reauthenticate an already open standby after a fresh Fabric lease takes over.
+   * The daemon accepts ATTACH on that same authenticated carrier, so no new
+   * PeerConnection or SDP exchange is needed. */
+  promoteStandby(path: ResumePath): Promise<boolean> {
+    this.live();
+    const channel = this.standby;
+    if (this.active?.phase !== "ready" || !channel || channel.path !== path || this.candidate) return Promise.resolve(false);
+    this.standby = null; this.candidate = channel;
+    channel.attempt = randomNonce(); channel.phase = "created"; channel.committed = false; channel.reused = true;
+    const ready = new Promise<void>((resolve, reject) => { channel.resolve = resolve; channel.reject = reject; });
+    void this.sendAttach(channel).catch((error: unknown) => this.lost(channel, error));
+    return ready.then(() => true);
+  }
   async send(frame: ResumeFrame): Promise<void> {
     this.live();
     const progress = frame.kind >= 4, bytes = frame.payload.length + 36;

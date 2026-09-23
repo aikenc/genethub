@@ -54,6 +54,8 @@ impl Admission {
 /// when a caller still has an attachment handle.
 struct Entry {
     admission: Admission,
+    /// A restricted RTC peer inherits this ordinary logical peer's Hosted grant.
+    parent_id: Option<String>,
     policy: Policy,
     secret: String,
     resumable: bool,
@@ -127,6 +129,11 @@ impl Registry {
             id.clone(),
             Entry {
                 admission,
+                parent_id: if policy == Policy::DirectOnly && matches!(carrier, CarrierKind::Rtc) {
+                    access.logical_id.clone()
+                } else {
+                    None
+                },
                 policy,
                 secret: secret.clone(),
                 resumable,
@@ -182,6 +189,60 @@ impl Registry {
         proof: &str,
         now: Instant,
     ) -> Result<(u64, String)> {
+        self.attach_inner(
+            id,
+            incarnation,
+            key,
+            access,
+            carrier,
+            attempt,
+            proof,
+            now,
+            false,
+        )
+    }
+
+    /// A previously activated physical channel may resume after another
+    /// channel renewed the logical peer's Hosted lease. Keep the fresh grant
+    /// stored on the peer; the retained channel's original grant is stale.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reattach_retained(
+        &self,
+        id: &str,
+        incarnation: &str,
+        key: &SessionKey,
+        access: &PeerAccess,
+        carrier: CarrierKind,
+        attempt: &str,
+        proof: &str,
+        now: Instant,
+    ) -> Result<(u64, String)> {
+        self.attach_inner(
+            id,
+            incarnation,
+            key,
+            access,
+            carrier,
+            attempt,
+            proof,
+            now,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attach_inner(
+        &self,
+        id: &str,
+        incarnation: &str,
+        key: &SessionKey,
+        access: &PeerAccess,
+        carrier: CarrierKind,
+        attempt: &str,
+        proof: &str,
+        now: Instant,
+        retained: bool,
+    ) -> Result<(u64, String)> {
         if incarnation != self.incarnation {
             bail!("SessionLost");
         }
@@ -197,9 +258,16 @@ impl Registry {
         {
             bail!("PolicyDenied");
         }
-        if access.authorization_expires_at.is_some_and(|at| at <= now)
-            || (entry.authorization_expires_at.is_some()
-                && access.authorization_expires_at.is_none())
+        if entry.authorization_expires_at.is_some_and(|at| at <= now)
+            || entry
+                .access
+                .hosted_authority
+                .as_ref()
+                .is_some_and(|a| !a.load(std::sync::atomic::Ordering::Acquire))
+            || (!retained
+                && (access.authorization_expires_at.is_some_and(|at| at <= now)
+                    || (entry.authorization_expires_at.is_some()
+                        && access.authorization_expires_at.is_none())))
         {
             bail!("PolicyDenied");
         }
@@ -207,12 +275,33 @@ impl Registry {
             &key.resume_proof(&entry.secret, id, incarnation, attempt),
             proof,
         )?;
-        entry.authorization_expires_at = access.authorization_expires_at;
-        entry.access = access.clone();
-        Ok((
-            entry.epoch,
-            key.resume_server_proof(&entry.secret, id, incarnation, attempt, entry.epoch),
-        ))
+        if !retained {
+            entry.authorization_expires_at = access.authorization_expires_at;
+            entry.access = access.clone();
+        }
+        let epoch = entry.epoch;
+        let proof = key.resume_server_proof(&entry.secret, id, incarnation, attempt, epoch);
+        let refreshed_scope = if !retained && matches!(carrier, CarrierKind::Fabric) {
+            Some(entry.admission.clone())
+        } else {
+            None
+        };
+        if let Some(scope) = refreshed_scope {
+            // Only a newly authenticated Fabric carrier can refresh the grant.
+            // Restricted RTC children were admitted through this exact logical
+            // parent, so they keep their original direct-only scope and carrier.
+            for child in entries.values_mut() {
+                if child.parent_id.as_deref() == Some(id)
+                    && child.policy == Policy::DirectOnly
+                    && child.admission == scope
+                {
+                    child.authorization_expires_at = access.authorization_expires_at;
+                    child.access.authorization_expires_at = access.authorization_expires_at;
+                    child.access.hosted_authority = access.hosted_authority.clone();
+                }
+            }
+        }
+        Ok((epoch, proof))
     }
 
     /// Called only by the connection actor after a successful ATTACH on this
@@ -320,4 +409,130 @@ fn direct_path(carrier: CarrierKind, transport: genehub_proto::TransportKind) ->
     matches!(carrier, CarrierKind::Rtc)
         || (matches!(carrier, CarrierKind::WebSocket)
             && transport == genehub_proto::TransportKind::Loopback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn retained_rtc_uses_the_fresh_lease_without_reopening_expired_admission() -> Result<()> {
+        let registry = Registry::default();
+        let now = Instant::now();
+        let old_expiry = now + Duration::from_secs(10);
+        let new_expiry = now + Duration::from_secs(100);
+        let old_key =
+            channel_auth::derive_key("old-secret", "hosted:test", "old-client", "old-server");
+        let new_key =
+            channel_auth::derive_key("new-secret", "hosted:test", "new-client", "new-server");
+        let old_authority = Arc::new(AtomicBool::new(true));
+        let new_authority = Arc::new(AtomicBool::new(true));
+        let old_access = PeerAccess {
+            principal: "hosted:test".into(),
+            logical_id: None,
+            hosted_authority: Some(old_authority),
+            direct_only: false,
+            authorization_expires_at: Some(old_expiry),
+            transport: genehub_proto::TransportKind::Forwarded,
+            device_id: None,
+            workspace_id: Some("workspace".into()),
+            workspace_handle: Some("handle".into()),
+            bootstrap_invite: None,
+        };
+        let created = registry.create(
+            &old_key,
+            &old_access,
+            CarrierKind::Rtc,
+            Policy::RelayAllowed,
+            true,
+            now,
+        )?;
+        let restricted_key = channel_auth::derive_key(
+            "restricted-secret",
+            "hosted:test",
+            "restricted-client",
+            "restricted-server",
+        );
+        let restricted_access = PeerAccess {
+            logical_id: Some(created.id.clone()),
+            direct_only: true,
+            ..old_access.clone()
+        };
+        let restricted = registry.create(
+            &restricted_key,
+            &restricted_access,
+            CarrierKind::Rtc,
+            Policy::DirectOnly,
+            true,
+            now,
+        )?;
+        let fresh_access = PeerAccess {
+            hosted_authority: Some(new_authority.clone()),
+            authorization_expires_at: Some(new_expiry),
+            ..old_access.clone()
+        };
+        let attempt = "a".repeat(32);
+        let fresh_proof =
+            new_key.resume_proof(&created.secret, &created.id, &created.incarnation, &attempt);
+        registry.attach(
+            &created.id,
+            &created.incarnation,
+            &new_key,
+            &fresh_access,
+            CarrierKind::Fabric,
+            &attempt,
+            &fresh_proof,
+            now + Duration::from_secs(5),
+        )?;
+
+        let old_proof =
+            old_key.resume_proof(&created.secret, &created.id, &created.incarnation, &attempt);
+        assert!(registry
+            .attach(
+                &created.id,
+                &created.incarnation,
+                &old_key,
+                &old_access,
+                CarrierKind::Rtc,
+                &attempt,
+                &old_proof,
+                now + Duration::from_secs(20)
+            )
+            .is_err());
+        registry.reattach_retained(
+            &created.id,
+            &created.incarnation,
+            &old_key,
+            &old_access,
+            CarrierKind::Rtc,
+            &attempt,
+            &old_proof,
+            now + Duration::from_secs(20),
+        )?;
+        assert_eq!(
+            registry.access(&created.id)?.authorization_expires_at,
+            Some(new_expiry)
+        );
+        assert_eq!(
+            registry.access(&restricted.id)?.authorization_expires_at,
+            Some(new_expiry)
+        );
+
+        new_authority.store(false, std::sync::atomic::Ordering::Release);
+        assert!(registry.access(&restricted.id).is_err());
+        assert!(registry
+            .reattach_retained(
+                &created.id,
+                &created.incarnation,
+                &old_key,
+                &old_access,
+                CarrierKind::Rtc,
+                &attempt,
+                &old_proof,
+                now + Duration::from_secs(21)
+            )
+            .is_err());
+        Ok(())
+    }
 }
