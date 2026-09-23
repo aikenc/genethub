@@ -15,6 +15,8 @@ const TESTS = [
   "session::manager::tests::migration_seed_target_distinguishes_an_explicit_default_model",
   "session::manager::tests::routing_metadata_change_keeps_the_same_agent_context",
   "session::manager::tests::cross_agent_migration_keeps_session_and_replays_history_once",
+  "session::manager::tests::same_agent_model_switch_replays_accepted_history_once",
+  "session::manager::tests::delivered_worker_without_matching_pending_migration_stays_blocked",
   "workflow::tests::role_v3_declares_only_builtin_tags",
   "workflow::tests::tag_routes_use_live_cost_and_and_matching",
   "workflow::tests::tag_route_failure_is_human_actionable",

@@ -1702,14 +1702,38 @@ impl SessionManager {
             if crate::process::exists(pid) {
                 return WorkerContinuation::ProcessAlive { pid: Some(pid) };
             }
-            return WorkerContinuation::Ready;
         }
         if meta.persist.is_none() && meta.inbox.has_delivered {
-            return WorkerContinuation::Unavailable {
-                reason: format!("缺少原生会话句柄，不能续接 Worker {session_id}"),
-            };
+            match self.has_pending_migration_seed(&meta) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return WorkerContinuation::Unavailable {
+                        reason: format!("缺少原生会话句柄，不能续接 Worker {session_id}"),
+                    };
+                }
+                Err(error) => {
+                    return WorkerContinuation::Unavailable {
+                        reason: format!("读取 Worker {session_id} 的迁移上下文失败：{error:#}"),
+                    };
+                }
+            }
         }
         WorkerContinuation::Ready
+    }
+
+    /// A route switch deliberately clears the old Agent's native handle. It
+    /// can continue only while a fresh, route-bound history seed is waiting to
+    /// be handed to the replacement Agent for the first time.
+    fn has_pending_migration_seed(&self, meta: &SessionMeta) -> Result<bool> {
+        Ok(self
+            .store
+            .load_seed(&meta.workspace_id, &meta.id)?
+            .is_some_and(|seed| {
+                seed.state == ContextSeedState::Pending
+                    && seed.target_agent_id.is_some()
+                    && !seed.text.trim().is_empty()
+                    && context_seed_targets_route(&seed, &meta.agent_id, &meta.model_id)
+            }))
     }
 
     pub async fn begin_artifact(
@@ -3050,7 +3074,10 @@ impl SessionManager {
             resume,
         };
 
-        if meta.persist.is_none() && meta.inbox.has_delivered {
+        if meta.persist.is_none()
+            && meta.inbox.has_delivered
+            && !self.has_pending_migration_seed(&meta)?
+        {
             bail!("the accepted messages require the original Agent context, but no native resume handle is available");
         }
         // A resume handle points at state the session directory does not own —
@@ -7350,14 +7377,17 @@ mod tests {
 
         async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
             genehub_proto::Catalog {
-                models: vec![genehub_proto::ModelInfo {
-                    id: "model".into(),
-                    label: "Model".into(),
-                    context_window: Some(10_000),
-                    reasoning: true,
-                    efforts: Vec::new(),
-                    input_modalities: None,
-                }],
+                models: ["model", "model-alt"]
+                    .into_iter()
+                    .map(|id| genehub_proto::ModelInfo {
+                        id: id.into(),
+                        label: id.into(),
+                        context_window: Some(10_000),
+                        reasoning: true,
+                        efforts: Vec::new(),
+                        input_modalities: None,
+                    })
+                    .collect(),
                 modes: Vec::new(),
                 commands: Vec::new(),
                 runtime_axes: None,
@@ -7553,6 +7583,12 @@ mod tests {
             .await
             .unwrap();
         *sessions.live(&created.id).await.unwrap().items.lock().await = completed_turn(None);
+        {
+            let live = sessions.live(&created.id).await.unwrap();
+            let mut meta = live.meta.lock().await;
+            meta.inbox.has_delivered = true;
+            sessions.store.save_meta(&meta).unwrap();
+        }
 
         let migrated = sessions
             .switch_agent_routed(
@@ -7581,6 +7617,10 @@ mod tests {
         assert_eq!(staged.state, ContextSeedState::Pending);
         assert_eq!(staged.target_agent_id.as_deref(), Some("target"));
         assert_eq!(staged.target_model_id.as_deref(), Some("model"));
+        assert!(matches!(
+            sessions.worker_continuation(&created.id).await,
+            WorkerContinuation::Ready
+        ));
 
         sessions
             .send(
@@ -7612,6 +7652,134 @@ mod tests {
                 .state,
             ContextSeedState::Applied
         );
+    }
+
+    #[tokio::test]
+    async fn same_agent_model_switch_replays_accepted_history_once() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(workspace.path()),
+            Arc::new(Registry::of(vec![Arc::new(ForkHarness {
+                id: "source",
+                native_fork: false,
+                prompts: prompts.clone(),
+                starts: starts.clone(),
+            })])),
+            16,
+        );
+        let created = sessions
+            .create_routed(
+                "w1",
+                workspace.path().to_path_buf(),
+                "source",
+                Some("model".into()),
+                None,
+                None,
+                Default::default(),
+                None,
+                vec!["Flush".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let live = sessions.live(&created.id).await.unwrap();
+        *live.items.lock().await = completed_turn(None);
+        {
+            let mut meta = live.meta.lock().await;
+            meta.inbox.has_delivered = true;
+            sessions.store.save_meta(&meta).unwrap();
+        }
+
+        let migrated = sessions
+            .switch_agent_routed(
+                &created.id,
+                SessionAgentTarget {
+                    agent_id: "source".into(),
+                    model_id: Some("model-alt".into()),
+                    mode_id: None,
+                    effort_id: None,
+                    runtime_values: Default::default(),
+                },
+                &ProviderMap::new(),
+                vec!["Pro".into()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(migrated.model_id.as_deref(), Some("model-alt"));
+        assert!(matches!(
+            sessions.worker_continuation(&created.id).await,
+            WorkerContinuation::Ready
+        ));
+
+        sessions
+            .send(
+                &created.id,
+                "Continue on the new model".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(starts.lock().unwrap().len(), 1);
+        let prompts = prompts.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].text.contains("Investigate the failing deploy"));
+        assert!(prompts[0].text.contains("Continue on the new model"));
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &created.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ContextSeedState::Applied
+        );
+    }
+
+    #[tokio::test]
+    async fn delivered_worker_without_matching_pending_migration_stays_blocked() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        let mut record = meta();
+        record.cwd = workspace.path().to_path_buf();
+        record.inbox.has_delivered = true;
+        sessions.store.save_meta(&record).unwrap();
+
+        assert!(matches!(
+            sessions.worker_continuation("s1").await,
+            WorkerContinuation::Unavailable { .. }
+        ));
+        let mut seed = ContextSeed {
+            state: ContextSeedState::Pending,
+            text: "portable history".into(),
+            target_agent_id: Some("genet".into()),
+            target_model_id: None,
+        };
+        sessions.store.save_seed("w1", "s1", &seed).unwrap();
+        assert!(matches!(
+            sessions.worker_continuation("s1").await,
+            WorkerContinuation::Ready
+        ));
+
+        seed.target_model_id = Some("wrong-model".into());
+        sessions.store.save_seed("w1", "s1", &seed).unwrap();
+        assert!(matches!(
+            sessions.worker_continuation("s1").await,
+            WorkerContinuation::Unavailable { .. }
+        ));
+        seed.target_model_id = None;
+        seed.state = ContextSeedState::Applying;
+        sessions.store.save_seed("w1", "s1", &seed).unwrap();
+        assert!(matches!(
+            sessions.worker_continuation("s1").await,
+            WorkerContinuation::Unavailable { .. }
+        ));
     }
 
     #[tokio::test]
