@@ -2,6 +2,7 @@ import type {
   AgentInfo,
   BlobOverview,
   RoundBatch,
+  RoundBatchSummary,
   RoundSummary,
   RoundTrunk,
   RoundTrunkSummary,
@@ -633,18 +634,18 @@ export function TimelineView({
                     round={startedRound}
                     finalSummaryText={roundFinalText}
                     processItems={processItems}
-                    agentLabel={completedRuntimeLabels.agent}
-                    modelLabel={completedRuntimeLabels.model}
                     live={liveTurn}
+                    liveUsage={state.usage ?? undefined}
+                    turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ))}
                 {startedRounds.length === 0 &&
                 shouldOccupyProcessCard(turn, liveTurn, layerReady) ? (
                   <ProvisionalProcess
                     items={processItems}
-                    agentLabel={completedRuntimeLabels.agent}
-                    modelLabel={completedRuntimeLabels.model}
                     live={liveTurn}
+                    usage={state.usage ?? undefined}
+                    turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ) : null}
                 {finalAssistant ? renderItem(finalAssistant) : null}
@@ -720,8 +721,8 @@ export function TimelineView({
             <RoundProgress
               key={round.roundId}
               round={round}
-              agentLabel={liveRuntimeLabels.agent}
-              modelLabel={liveRuntimeLabels.model}
+              liveUsage={state.usage ?? undefined}
+              turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
             />
           ))}
 
@@ -1439,18 +1440,19 @@ function TurnBodyGallery({
 
 function ProvisionalProcess({
   items,
-  agentLabel,
-  modelLabel,
   live,
+  usage,
+  turnStartedAtMs,
 }: {
   items: TimelineItem[];
-  agentLabel: string;
-  modelLabel: string;
   live: boolean;
+  usage?: Usage;
+  turnStartedAtMs?: number;
 }) {
   const blobs = processBlobsFromItems(items);
   const title = provisionalProcessTitle(items, live);
   const { open, toggle } = useCardOpen(live);
+  const summary = liveProcessSummary(items, blobs.length, usage, turnStartedAtMs);
   return (
     <div className="space-y-2" data-testid="round-progress">
       <div
@@ -1469,7 +1471,11 @@ function ProvisionalProcess({
           <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={title}>
             {title}
           </span>
-          <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} />
+          {summary ? (
+            <SummaryMetrics summary={summary} live liveSpan />
+          ) : (
+            <span className="shrink-0 text-xs text-muted">{blobs.length} 项</span>
+          )}
           <span className="shrink-0 text-xs text-accent" aria-hidden="true">
             {open ? "▴" : "▾"}
           </span>
@@ -1484,20 +1490,57 @@ function ProvisionalProcess({
   );
 }
 
+/** A live process has not yet been written to the round layer. */
+function liveProcessSummary(
+  items: TimelineItem[],
+  blobCount: number,
+  usage: Usage | undefined,
+  turnStartedAtMs: number | undefined,
+): RoundTrunkSummary | undefined {
+  let startedAtMs: number | undefined;
+  let toolDurationMs = 0;
+  const now = Date.now();
+  for (const item of items) {
+    const at =
+      item.type === "toolCall"
+        ? item.startedAtMs
+        : "receivedAtMs" in item
+          ? item.receivedAtMs
+          : undefined;
+    if (at != null && (startedAtMs == null || at < startedAtMs)) startedAtMs = at;
+    if (item.type === "toolCall" && item.startedAtMs != null) {
+      toolDurationMs += Math.max(0, (item.finishedAtMs ?? now) - item.startedAtMs);
+    }
+  }
+  startedAtMs = startedAtMs ?? turnStartedAtMs;
+  const llmRounds = usage && usage.llmRounds > 0 ? usage.llmRounds : undefined;
+  if (startedAtMs == null && llmRounds == null) return undefined;
+  return {
+    index: 0,
+    firstItemId: "",
+    blobCount,
+    title: "",
+    batches: [],
+    llmRounds,
+    startedAtMs,
+    toolDurationMs: toolDurationMs > 0 ? toolDurationMs : undefined,
+  };
+}
+
 function RoundProgress({
   round,
   finalSummaryText,
   processItems = [],
-  agentLabel,
-  modelLabel,
   live = false,
+  liveUsage,
+  turnStartedAtMs,
 }: {
   round: RoundSummary;
   finalSummaryText?: string;
   processItems?: TimelineItem[];
-  agentLabel: string;
-  modelLabel: string;
   live?: boolean;
+  liveUsage?: Usage;
+  turnStartedAtMs?: number;
 }) {
   const layer = useWorkbench((state) => state.timeline.roundLayers[round.roundId]);
   const roundTrunks = useWorkbench((state) => state.timeline.roundTrunks);
@@ -1515,9 +1558,9 @@ function RoundProgress({
     return (
       <ProvisionalProcess
         items={processItems}
-        agentLabel={agentLabel}
-        modelLabel={modelLabel}
         live={live || round.outcome === "running"}
+        usage={liveUsage}
+        turnStartedAtMs={turnStartedAtMs}
       />
     );
   }
@@ -1555,8 +1598,6 @@ function RoundProgress({
           summary={trunk}
           finalSummaryText={finalSummaryText}
           hoisted={hoisted}
-          agentLabel={agentLabel}
-          modelLabel={modelLabel}
           active={round.outcome === "running" && index === trunks.length - 1}
         />
       ))}
@@ -1565,30 +1606,41 @@ function RoundProgress({
 }
 
 function SummaryMetrics({
-  agentLabel,
-  modelLabel,
   summary,
+  live = false,
+  liveSpan = false,
 }: {
-  agentLabel: string;
-  modelLabel: string;
-  summary?: Pick<RoundTrunkSummary, "llmRounds" | "durationMs" | "toolDurationMs">;
+  summary: RoundTrunkSummary | RoundBatchSummary;
+  live?: boolean;
+  liveSpan?: boolean;
 }) {
-  const rounds = summary?.llmRounds;
-  const duration = summary?.durationMs;
-  const toolDuration = summary?.toolDurationMs;
-  const timing = [
-    rounds == null ? null : `${rounds}轮`,
-    duration == null ? null : `耗时 ${formatDuration(duration)}`,
-  ].filter(Boolean).join(" · ");
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!live || summary.startedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), liveSpan ? 1_000 : 30_000);
+    return () => window.clearInterval(timer);
+  }, [live, liveSpan, summary.startedAtMs]);
+  if (summary.llmRounds == null && summary.startedAtMs == null) {
+    return <span className="shrink-0 text-xs text-muted">{summary.blobCount} 项</span>;
+  }
+  const durationMs =
+    liveSpan && summary.startedAtMs != null
+      ? Math.max(0, now - summary.startedAtMs)
+      : summary.durationMs;
+  const top: string[] = [];
+  if (summary.llmRounds != null) top.push(`${summary.llmRounds} 轮`);
+  if (durationMs != null) top.push(formatDuration(durationMs));
+  const bottom: string[] = [];
+  if (summary.startedAtMs != null) bottom.push(relativeTime(summary.startedAtMs, now));
+  if (summary.toolDurationMs != null && summary.toolDurationMs > 0) {
+    bottom.push(`工具 ${formatToolDuration(summary.toolDurationMs)}`);
+  }
   return (
-    <span
-      className="flex max-w-[45%] shrink-0 flex-col items-end leading-tight"
-      data-testid="summary-metrics"
-      title={`Agent：${agentLabel}\n模型：${modelLabel}${timing ? `\nLLM ${rounds ?? "—"} 轮；过程耗时 ${duration == null ? "—" : formatDuration(duration)}${toolDuration == null ? "" : `；工具 ${formatDuration(toolDuration)}`}` : ""}`}
-    >
-      <span className="max-w-full truncate text-xs text-muted">{agentLabel}</span>
-      <span className="max-w-full truncate text-[10px] text-faint">{modelLabel}</span>
-      {timing ? <span className="max-w-full truncate text-[10px] text-muted">{timing}</span> : null}
+    <span className="flex shrink-0 flex-col items-end leading-tight" data-testid="summary-metrics">
+      {top.length > 0 ? <span className="text-xs text-muted">{top.join(" · ")}</span> : null}
+      {bottom.length > 0 ? (
+        <span className="text-[10px] text-faint">{bottom.join(" · ")}</span>
+      ) : null}
     </span>
   );
 }
@@ -1598,16 +1650,12 @@ function TrunkCard({
   summary,
   finalSummaryText,
   hoisted,
-  agentLabel,
-  modelLabel,
   active,
 }: {
   round: RoundSummary;
   summary: RoundTrunkSummary;
   finalSummaryText?: string;
   hoisted: ReadonlySet<string>;
-  agentLabel: string;
-  modelLabel: string;
   active: boolean;
 }) {
   const detail = useWorkbench(
@@ -1645,7 +1693,7 @@ function TrunkCard({
         <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={trunkTitle}>
           {trunkTitle}
         </span>
-        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} summary={summary} />
+        <SummaryMetrics summary={summary} live={live && active} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1668,12 +1716,7 @@ function TrunkCard({
               ) : isImageOnlyBatch(batch) ? (
                 <ImageBatchCard key={batch.summary.index} batch={batch} />
               ) : (
-                <BatchCard
-                  key={batch.summary.index}
-                  batch={batch}
-                  agentLabel={agentLabel}
-                  modelLabel={modelLabel}
-                />
+                <BatchCard key={batch.summary.index} batch={batch} />
               ),
             )
           )}
@@ -1707,12 +1750,8 @@ function ImageBatchCard({ batch }: { batch: RoundBatch }) {
 
 function BatchCard({
   batch,
-  agentLabel,
-  modelLabel,
 }: {
   batch: RoundBatch;
-  agentLabel: string;
-  modelLabel: string;
 }) {
   const { open, toggle } = useCardOpen(false);
   const monologue = splitMonologue(batch.monologue ?? "");
@@ -1736,7 +1775,7 @@ function BatchCard({
         >
           {monologue.first || batch.summary.text}
         </span>
-        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} summary={batch.summary} />
+        <SummaryMetrics summary={batch.summary} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>

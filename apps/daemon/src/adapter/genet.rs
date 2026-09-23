@@ -339,6 +339,7 @@ struct TurnState {
     text_item: Option<String>,
     reasoning_item: Option<String>,
     usage: Usage,
+    assistant_in_flight: bool,
     /// Tool call id -> (normalized name, raw arguments), captured when the call
     /// is announced so the result can be rendered with its inputs.
     calls: HashMap<String, (String, Value)>,
@@ -608,6 +609,24 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             started_at_ms: 0,
         }),
 
+        "message_start" => {
+            if frame
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                == Some("assistant")
+                && !state.assistant_in_flight
+            {
+                // The built-in Agent emits this before any reasoning/text/tool
+                // item. Attribute the LLM call to that item and show the round
+                // while it is still running, not only after message_end.
+                state.assistant_in_flight = true;
+                state.usage.llm_rounds += 1;
+                usage::record_round_start(&mut state.usage);
+                usage::emit_progress(events, &turn_id, &state.usage);
+            }
+        }
+
         "user_input_requested" => {
             let Some(questions) = builtin_questions(frame) else {
                 return;
@@ -787,7 +806,11 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             if let Some(usage) = message.get("usage") {
                 usage::add_usage(&mut state.usage, usage);
             }
-            state.usage.llm_rounds += 1;
+            // Older/partial streams may lack message_start; still count each
+            // completed assistant response exactly once.
+            if !std::mem::take(&mut state.assistant_in_flight) {
+                state.usage.llm_rounds += 1;
+            }
             usage::emit_progress(events, &turn_id, &state.usage);
             match message.get("stopReason").and_then(Value::as_str) {
                 Some("error") => {
@@ -827,6 +850,7 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sen
             state.calls.clear();
             state.text_item = None;
             state.reasoning_item = None;
+            state.assistant_in_flight = false;
             state.canceled = false;
 
             if let Some(error) = failure {
@@ -1491,6 +1515,11 @@ mod tests {
         let mut state = state_with_turn();
         for _ in 0..2 {
             translate_frame(
+                &json!({"type": "message_start", "message": {"role": "assistant"}}),
+                &mut state,
+                &tx,
+            );
+            translate_frame(
                 &json!({"type": "message_end", "message": {
                     "role": "assistant", "stopReason": "stop",
                     "usage": {"input": 10, "output": 5, "cost": {"total": 0.25}}
@@ -1509,6 +1538,51 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn builtin_reports_each_llm_round_before_its_first_process_item() {
+        let (tx, mut rx) = broadcast::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({"type": "message_start", "message": {"role": "user"}}),
+            &mut state,
+            &tx,
+        );
+        assert!(drain(&mut rx).is_empty());
+
+        translate_frame(
+            &json!({"type": "message_start", "message": {"role": "assistant"}}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&update(json!({"type": "thinking_start"})), &mut state, &tx);
+        let events = drain(&mut rx);
+        assert!(matches!(
+            &events[0],
+            SessionEvent::TurnProgress { usage, .. } if usage.llm_rounds == 1
+        ));
+        assert!(matches!(
+            &events[1],
+            SessionEvent::Item {
+                item: TimelineItem::Reasoning { .. },
+                ..
+            }
+        ));
+
+        translate_frame(
+            &json!({"type": "message_end", "message": {
+                "role": "assistant", "stopReason": "stop", "usage": {"output": 5}
+            }}),
+            &mut state,
+            &tx,
+        );
+        translate_frame(&json!({"type": "agent_end"}), &mut state, &tx);
+        assert!(matches!(
+            drain(&mut rx).last(),
+            Some(SessionEvent::TurnCompleted { usage, .. })
+                if usage.llm_rounds == 1 && usage.output_tokens == 5
+        ));
     }
 
     #[test]

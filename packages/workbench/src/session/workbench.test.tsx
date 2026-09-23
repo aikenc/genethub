@@ -463,7 +463,7 @@ describe("what the user sees in a session", () => {
     expect(screen.getByTestId("round-progress")).not.toHaveTextContent("阶段");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("🧭");
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("先检查配置。");
-    expect(screen.getByTestId("round-trunk")).toHaveTextContent("未知 Agent默认模型");
+    expect(screen.getByTestId("round-trunk")).toHaveTextContent("2 项");
     expect(screen.queryByTestId("batch-monologue")).not.toBeInTheDocument();
     expect(screen.getByTestId("live-tail")).toBeInTheDocument();
     expect(within(screen.getByTestId("live-tail")).getByText("确认结构")).toBeInTheDocument();
@@ -1025,7 +1025,7 @@ describe("what the user sees in a session", () => {
     expect(rows[1]!).not.toHaveTextContent("刚刚");
   });
 
-  it("shows Agent, model, LLM rounds and elapsed time on trunk and batch headers", async () => {
+  it("keeps the two-line round, timing and tool metrics on trunk and batch headers", async () => {
     showDefaultRuntime();
     const now = Date.now();
     const round = {
@@ -1090,22 +1090,22 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
     const trunk = screen.getByTestId("round-trunk");
     const trunkMetrics = within(trunk).getByTestId("summary-metrics");
-    expect(trunkMetrics).toHaveTextContent("Genet");
-    expect(trunkMetrics).toHaveTextContent("DeepSeek V4");
-    expect(trunkMetrics).not.toHaveTextContent("3 分钟前");
-    expect(trunkMetrics).toHaveTextContent("12轮 · 耗时 3m 20s");
-    expect(trunkMetrics).toHaveAttribute("title", expect.stringContaining("工具 1m 50s"));
+    expect(trunkMetrics).toHaveTextContent("12 轮 · 3m 20s");
+    expect(trunkMetrics).toHaveTextContent("3 分钟前 · 工具 1m 50s");
+    expect(trunkMetrics).not.toHaveTextContent("Genet");
+    expect(trunkMetrics).not.toHaveTextContent("DeepSeek V4");
 
     await userEvent.click(within(trunk).getByRole("button"));
     const batches = screen.getAllByTestId("round-batch");
     const firstMetrics = within(batches[0]!).getByTestId("summary-metrics");
-    expect(firstMetrics).toHaveTextContent("GenetDeepSeek V45轮 · 耗时 1m 1s");
+    expect(firstMetrics).toHaveTextContent("5 轮 · 1m 1s");
+    expect(firstMetrics).toHaveTextContent("3 分钟前 · 工具 30s");
     expect(within(batches[1]!).getByTestId("summary-metrics")).toHaveTextContent(
-      "GenetDeepSeek V47轮 · 耗时 1m 59s",
+      "7 轮 · 1m 59s",
     );
   });
 
-  it("shows runtime identity even for trunk rows written before metrics existed", () => {
+  it("keeps the blob count for trunk rows written before metrics existed", () => {
     showDefaultRuntime();
     const round = {
       roundId: "r1",
@@ -1137,13 +1137,11 @@ describe("what the user sees in a session", () => {
 
     render(<TimelineView state={state} />);
     const trunk = screen.getByTestId("round-trunk");
-    expect(trunk).not.toHaveTextContent("4 项");
-    expect(within(trunk).getByTestId("summary-metrics")).toHaveTextContent(
-      "GenetDeepSeek V4",
-    );
+    expect(trunk).toHaveTextContent("4 项");
+    expect(within(trunk).queryByTestId("summary-metrics")).not.toBeInTheDocument();
   });
 
-  it("shows the active Agent and model on the in-progress card", () => {
+  it("shows live LLM rounds and elapsed time on the in-progress card", () => {
     showDefaultRuntime();
     const now = Date.now();
     let state = emptyTimeline();
@@ -1186,9 +1184,9 @@ describe("what the user sees in a session", () => {
     render(<TimelineView state={state} />);
     const card = screen.getByTestId("round-trunk");
     const metrics = within(card).getByTestId("summary-metrics");
-    expect(metrics).toHaveTextContent("GenetDeepSeek V4");
-    expect(metrics).not.toHaveTextContent("1 分钟前");
-    expect(metrics).not.toHaveTextContent("工具 10s");
+    expect(metrics).toHaveTextContent("3 轮");
+    expect(metrics).toHaveTextContent("1 分钟前");
+    expect(metrics).toHaveTextContent("工具 10s");
     expect(card).not.toHaveTextContent("1 项");
   });
 
@@ -1232,9 +1230,9 @@ describe("what the user sees in a session", () => {
 
     const trunks = screen.getAllByTestId("round-trunk");
     expect(trunks[0]!).toHaveTextContent("🧭");
-    expect(trunks[0]!).toHaveTextContent("盘点入口。未知 Agent默认模型");
+    expect(trunks[0]!).toHaveTextContent("盘点入口。64 项");
     expect(trunks[1]!).toHaveTextContent("🧭");
-    expect(trunks[1]!).toHaveTextContent("核对权限。未知 Agent默认模型");
+    expect(trunks[1]!).toHaveTextContent("核对权限。3 项");
     // Watching an agent work is the point of a running round: its tail is open,
     // and only the settled work behind it is folded away.
     expect(within(trunks[0]!).getByRole("button")).toHaveAttribute("aria-expanded", "false");
@@ -1701,7 +1699,7 @@ describe("what the user sees in a session", () => {
     expect(batches).toHaveLength(2);
     expect(batches[0]!).toHaveTextContent("💭");
     expect(batches[0]!).toHaveTextContent("核对入口与权限");
-    expect(batches[0]!).toHaveTextContent("未知 Agent默认模型");
+    expect(batches[0]!).toHaveTextContent("2 项");
     expect(within(batches[0]!).getByRole("button").querySelector(".line-clamp-2")).toHaveAttribute(
       "title",
       "核对入口与权限。随后检查角色边界。",
@@ -1823,7 +1821,7 @@ describe("what the user sees in a session", () => {
     const timeline = screen.getByTestId("timeline");
     expect(screen.getAllByTestId("assistant-message")).toHaveLength(1);
     expect(screen.getByTestId("round-trunk")).toHaveTextContent(
-      "先彻底核对权限链路，再给结论。未知 Agent默认模型",
+      "先彻底核对权限链路，再给结论。8 项",
     );
     expect(timeline.textContent?.indexOf("先彻底核对权限链路，再给结论。")).toBeLessThan(
       timeline.textContent?.indexOf("最终结论：需要修复授权边界。") ?? -1,
@@ -3039,7 +3037,7 @@ describe("a whole turn as the timeline sees it", () => {
     expect(screen.queryByTestId("tool-call")).not.toBeInTheDocument();
     expect(screen.getByTestId("round-trunk")).toHaveTextContent("hello.txt");
     expect(within(screen.getByTestId("round-trunk")).getByTestId("summary-metrics"))
-      .toHaveTextContent("CodexDeepSeek V4");
+      .toHaveTextContent("1 轮");
     expect(screen.getByTestId("assistant-message")).toHaveTextContent("写好了。");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("Codex");
     expect(screen.getByTestId("turn-footer")).toHaveTextContent("DeepSeek V4");
