@@ -190,17 +190,22 @@ pub(super) fn request_lock(runtime: &RuntimeStore, root: &str) -> Result<Exclusi
 
 pub(super) fn ensure_open(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
     let root = load_run(runtime, group_id(run))?;
-    if root
-        .request
-        .as_ref()
-        .map(|request| request.cancelled)
-        .unwrap_or(matches!(root.status.as_str(), "cancelling" | "cancelled"))
-    {
+    if cancelled(&root) {
         bail!(
             "taskCancelled: the original request was cancelled; explicit user recovery is required"
         );
     }
     Ok(())
+}
+
+pub(super) fn cancelled(root: &RunRecord) -> bool {
+    // A root Run may stay cancelled after an explicit retry reopens its
+    // request. The request fence, not that old attempt's status, owns the
+    // entire retry group.
+    root.request
+        .as_ref()
+        .map(|request| request.cancelled)
+        .unwrap_or(matches!(root.status.as_str(), "cancelling" | "cancelled"))
 }
 
 pub(super) async fn association(

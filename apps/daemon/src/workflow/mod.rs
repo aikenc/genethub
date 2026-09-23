@@ -996,7 +996,7 @@ pub(crate) async fn workflow_notice_current(
     let root = load_run(&runtime, request::group_id(&run))?;
     Ok(notice_recipient(state, &run).await? == session_id
         && !supervision::cancellation_requested(&run)
-        && !supervision::cancellation_requested(&root))
+        && !request::cancelled(&root))
 }
 
 /// The Session a Run's notices belong to right now.

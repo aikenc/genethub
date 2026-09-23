@@ -301,7 +301,7 @@ pub(super) async fn deliver_notice(
         let mut run = load_run(runtime, run_id)?;
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         let root = load_run(runtime, request::group_id(&run))?;
-        let cancelled = cancellation_requested(&run) || cancellation_requested(&root);
+        let cancelled = cancellation_requested(&run) || request::cancelled(&root);
         let notice = run
             .supervision
             .notices

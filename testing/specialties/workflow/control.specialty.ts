@@ -5,7 +5,7 @@ import path from "node:path";
 import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
-for (const structured of [false,true]) for (const scenario of ["negative", "orphan", "cancel", "self-cancel", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
+for (const structured of [false,true]) for (const scenario of ["negative", "orphan", "cancel", "self-cancel", "self-cancel-report", "late-resume", "independent", "bounds", "silence-wr", "silence-wr-limit", "silence-no-wr", "silence-human"] as const) {
   if (structured && !["independent","silence-wr","silence-human","cancel"].includes(scenario)) continue;
   const silence = scenario.startsWith("silence");
   const wr = scenario.startsWith("silence-wr");
@@ -13,8 +13,8 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
   defineSpecialty({
     id: `specialty.workflow-control.${scenario}${structured ? ".structured" : ""}`,
     title: `Project workflow recovery across ${scenario}`,
-    oracle: "Public Run, Session and checker facts agree; negative outcomes have a default exit, PM input leaves Workers executing, cancellation fences all related work, and actual 180-second silence creates bounded diagnostics that can change failed models",
-    catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM cannot raise an exhausted request budget", "a stale budget update overwrites a PM decision", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery", "diagnosis reuses a route that already failed in this Run", "diagnosis gives up after one model fails or loses its read-only scope", "the executor's own cleanup demands a user message the user never owed"],
+    oracle: "Public Run, Session and checker facts agree; blocked retries reach PM after a cancelled predecessor, cancellation fences withdrawn work, and actual 180-second silence creates bounded diagnostics that can change failed models",
+    catches: ["idle PM hides an active task", "negative review leaves an ownerless running node", "repair keys reset the original request budget", "PM cannot raise an exhausted request budget", "a stale budget update overwrites a PM decision", "PM consultation interrupts a Worker", "silence or Human waiting is mistaken for cancellation", "a cancelled task restarts without new user recovery", "a blocked retry after self-cancellation never reaches PM", "diagnosis reuses a route that already failed in this Run", "diagnosis gives up after one model fails or loses its read-only scope", "the executor's own cleanup demands a user message the user never owed"],
     tags: ["core", ...(structured ? ["structured-workflow"] : []), ...(wr ? ["pm-exception-recovery"] : []), "workflow-control", "workflow-recovery", ...(scenario === "cancel" ? ["session-attention", "session-control-fixes"] : [])],
     llm: { default: "mock" }, expectedDurationMs: silence ? 200_000 : 30_000, timeoutMs: silence ? 270_000 : 150_000,
     resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -94,6 +94,9 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
         }
         if (body.includes("WORKFLOW_CONTROL_WORKER")) {
           workerCalls++;
+          if (scenario === "self-cancel-report" && workerCalls > 1) return workerCalls === 2
+            ? { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow complete --outcome blocked --reason "缺少交付证据，交回 PM" --evidence checks=missing' } } }
+            : { text: "阻断已上报。" };
           if (diagnosticFailover) {
             const model = String((request as { model?: string }).model);
             workerModels.push(model);
@@ -278,7 +281,7 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
           independent = (await history()).find(other => other.id !== original)!;
           t.assertions.assert(independent.requestRunId !== original, "new independent user request was silently attached to existing work");
         }
-        if (scenario === "self-cancel") {
+        if (scenario === "self-cancel" || scenario === "self-cancel-report") {
           // The executor cancels its own stuck execution and continues the same
           // request. The user withdrew nothing, so there is no user message
           // after the cancellation and the shared budget stays the limiter.
@@ -294,6 +297,16 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
           t.assertions.assert(JSON.stringify(resumed.requestBudget) === JSON.stringify(run.requestBudget),
             "self-recovery opened a fresh request budget");
           await t.tools.waitUntil(async () => !(await snapshot()).summary.inputSummary?.pendingMessageIds.includes("u_self_cancel"), 30_000);
+          if (scenario === "self-cancel-report") {
+            await t.tools.waitUntil(async () => (await get(resumed.id)).status === "blocked", 35_000);
+            await t.tools.waitUntil(async () => (await snapshot()).items.some(item => item.type === "userMessage"
+              && item.id.startsWith("flow_") && item.text.includes(resumed.id) && item.text.includes("状态 blocked")), 35_000);
+            const reports = (await snapshot()).items.filter(item => item.type === "userMessage"
+              && item.id.startsWith("flow_") && item.text.includes(resumed.id) && item.text.includes("状态 blocked"));
+            t.assertions.assert(reports.length === 1, "blocked retry notice was dropped or duplicated before reaching PM");
+            t.note(`scenario=${scenario}; retry=${resumed.id}; PM received one blocked notice`);
+            return;
+          }
           await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: resumed.id, expectedRevision: (await get(resumed.id)).revision } });
           await t.tools.waitUntil(async () => (await get(resumed.id)).status === "cancelled", 35_000);
           t.note(`scenario=${scenario}; worker calls=${workerCalls}; PM calls=${pmCalls}`);
