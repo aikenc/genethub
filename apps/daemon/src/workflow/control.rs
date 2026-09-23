@@ -686,7 +686,8 @@ pub(crate) async fn maintain(state: &Shared) {
                     run.status.as_str(),
                     "running" | "stopping" | "cancelling" | "recoverable"
                 )
-                || run.supervision.notices.iter().any(|notice| !notice.handled)
+                || (!cancelled.contains(request::group_id(&run))
+                    && supervision::report_pending(&run))
                 || run.supervision.diagnostics.iter().any(|diagnostic| {
                     matches!(
                         diagnostic.state.as_str(),

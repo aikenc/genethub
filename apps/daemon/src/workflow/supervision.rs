@@ -293,7 +293,10 @@ pub(super) async fn deliver_notice(
         .supervision
         .notices
         .into_iter()
-        .filter(|notice| !notice.handled)
+        // Older builds could mark a notice handled while discarding it under
+        // a cancelled predecessor. Reconsider only notices never accepted by
+        // the recipient's inbox; accepted notices remain exactly-once.
+        .filter(|notice| !notice.handled || !notice.accepted)
         .map(|notice| notice.id)
         .collect::<Vec<_>>();
     for id in ids {
@@ -366,7 +369,12 @@ pub(super) fn cancellation_requested(run: &RunRecord) -> bool {
 }
 
 pub(super) fn report_pending(run: &RunRecord) -> bool {
-    !cancellation_requested(run) && run.supervision.notices.iter().any(|notice| !notice.handled)
+    !cancellation_requested(run)
+        && run
+            .supervision
+            .notices
+            .iter()
+            .any(|notice| !notice.handled || !notice.accepted)
 }
 
 pub(super) async fn diagnostics(
