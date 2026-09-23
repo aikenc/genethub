@@ -5,6 +5,7 @@ use genehub_proto::SessionStatus;
 pub(super) const SILENCE_MS: i64 = 180_000;
 const DIAGNOSTIC_DEADLINE_MS: i64 = 180_000;
 const MAX_DIAGNOSTICS: usize = 2;
+const MAX_TRIAGE_DIAGNOSTICS: usize = 3;
 const DIAGNOSTIC_CALLS: u64 = 8;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -24,6 +25,27 @@ pub(super) struct Supervision {
     pub diagnostics: Vec<Diagnostic>,
     #[serde(default)]
     pub notices: Vec<Notice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triage: Option<Triage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct Triage {
+    pub episode_id: String,
+    pub cause_code: String,
+    #[serde(default)]
+    pub source: String,
+    pub phase: String,
+    pub owner: String,
+    pub next_action: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub attempts: u8,
+    #[serde(default)]
+    pub next_check_at_ms: i64,
+    #[serde(default)]
+    pub reminders: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +56,199 @@ pub(super) struct Diagnostic {
     pub created_at_ms: i64,
     pub activity: crate::session::store::ExecutionActivity,
     pub error: Option<String>,
+    #[serde(default)]
+    pub triage: bool,
+}
+
+pub(super) fn begin_triage(run: &mut RunRecord, cause_code: &str) {
+    if run.supervision.triage.as_ref().is_some_and(|triage| triage.phase != "closed")
+        || request::cancelled(run) {
+        return;
+    }
+    let direct_pm = matches!(cause_code, "requestBudget" | "routeUnavailable" | "recoverable");
+    let now = now_ms();
+    run.supervision.triage = Some(Triage {
+        episode_id: format!("{}:{}", run.id, run.revision.saturating_add(1)),
+        cause_code: cause_code.into(),
+        source: "executor".into(),
+        phase: if direct_pm { "pendingPm" } else { "pendingWr" }.into(),
+        owner: if direct_pm { "pm" } else { "wr" }.into(),
+        next_action: match cause_code {
+            "requestBudget" => "核对原请求预算；在授权范围内调整，或向人请求明确额度".into(),
+            "routeUnavailable" => "核对可用 Agent/模型配置；无法配置时请人处理或提交反馈".into(),
+            "recoverable" => "核对原 Worker 的副作用和写租约，安全时恢复同一会话".into(),
+            _ => "对执行异常进行只读复盘".into(),
+        },
+        created_at_ms: now,
+        updated_at_ms: now,
+        attempts: 0,
+        next_check_at_ms: now.saturating_add(300_000),
+        reminders: 0,
+    });
+}
+
+pub(super) fn close_triage(run: &mut RunRecord, source: &str, action: &str) {
+    if let Some(triage) = run.supervision.triage.as_mut() {
+        triage.phase = "closed".into();
+        triage.source = source.into();
+        triage.owner = "executor".into();
+        triage.next_action = action.into();
+        triage.updated_at_ms = now_ms();
+    }
+}
+
+/// Advance the one durable handoff record. Both an immediate transition and
+/// the periodic controller may call this; the Run lock makes reservation
+/// idempotent and the Session name is fixed before any Agent work is sent.
+pub(super) fn advance_triage(runtime: &RuntimeStore, run_id: &str) -> Result<()> {
+    let _lock = lock_run(runtime, run_id)?;
+    let mut run = load_run(runtime, run_id)?;
+    if run.supervision.triage.as_ref().is_none_or(|triage| triage.phase == "closed")
+        && run.status == "cancelling"
+        && run.stop.as_ref().is_some_and(|stop| stop.cleanup_error.is_some())
+        && now_ms().saturating_sub(run.updated_at_ms) >= 60_000
+    {
+        let now = now_ms();
+        run.supervision.triage = Some(Triage {
+            episode_id: format!("{}:cleanup", run.id),
+            cause_code: "cleanupFailure".into(),
+            source: "executor".into(),
+            phase: "pendingHuman".into(),
+            owner: "human".into(),
+            next_action: format!("取消 Run {} 的资源清理持续失败；业务不会恢复，请通过会话「反馈问题」入口报告此故障", run.id),
+            created_at_ms: now,
+            updated_at_ms: now,
+            attempts: 0,
+            next_check_at_ms: now,
+            reminders: 0,
+        });
+        return save_run(runtime, &run);
+    }
+    let Some(mut triage) = run.supervision.triage.clone() else {
+        return Ok(());
+    };
+    if triage.cause_code == "cleanupFailure" && run.status == "cancelled" {
+        close_triage(&mut run, "executor", "取消后的资源已清理完毕");
+        return save_run(runtime, &run);
+    }
+    if cancellation_requested(&run) && triage.cause_code != "cleanupFailure" {
+        if triage.phase != "closed" {
+            triage.phase = "closed".into();
+            triage.source = "pm".into();
+            triage.owner = "executor".into();
+            triage.next_action = "取消请求已生效，不再恢复业务执行".into();
+            triage.updated_at_ms = now_ms();
+            run.supervision.triage = Some(triage);
+            save_run(runtime, &run)?;
+        }
+        return Ok(());
+    }
+    let now = now_ms();
+    if matches!(triage.phase.as_str(), "pendingPm" | "pendingHuman")
+        && now >= triage.next_check_at_ms
+        && matches!(run.status.as_str(), "blocked" | "failed")
+    {
+        if let Some(next) = maintenance_runs(runtime)?.into_iter().find(|candidate| {
+            candidate.request.as_ref().and_then(|link| link.retry_of.as_deref()) == Some(run.id.as_str())
+                && request::group_id(candidate) == request::group_id(&run)
+        }) {
+            triage.phase = "closed".into();
+            triage.source = "pm".into();
+            triage.owner = "executor".into();
+            triage.next_action = format!("PM 已派发同一请求的后继 Run {}；由后继 Run 继续负责目标", next.id);
+            triage.updated_at_ms = now;
+            run.supervision.triage = Some(triage);
+            return save_run(runtime, &run);
+        }
+    }
+    if triage.phase == "pendingWr" {
+        if run.supervision.diagnostic_role.is_none() {
+            triage.phase = "pendingPm".into();
+            triage.owner = "pm".into();
+            triage.next_action = "WR 未配置；按机械事实处理并补齐诊断能力".into();
+            run.supervision.finding = Some(triage.next_action.clone());
+            prepare_notice(&mut run, "triage-unavailable");
+        } else if triage.attempts < MAX_TRIAGE_DIAGNOSTICS as u8 {
+            let session_id = format!(
+                "s_diag_{:x}",
+                Sha256::digest(format!("{}:triage:{}", triage.episode_id, triage.attempts))
+            );
+            run.supervision.diagnostics.push(Diagnostic {
+                session_id,
+                state: "reserved".into(),
+                created_at_ms: now,
+                activity: Default::default(),
+                error: None,
+                triage: true,
+            });
+            triage.attempts += 1;
+            triage.phase = "reviewing".into();
+            triage.next_action = "WR 正在只读复盘，结束后交 PM".into();
+            run.supervision.finding = Some(triage.next_action.clone());
+            prepare_notice(&mut run, "triage-started");
+        } else {
+            triage.phase = "pendingPm".into();
+            triage.owner = "pm".into();
+            triage.next_action = "WR 尝试已达上限；依据机械事实处理或请求人类协助".into();
+            run.supervision.finding = Some(triage.next_action.clone());
+            prepare_notice(&mut run, "triage-exhausted");
+        }
+    } else if triage.phase == "reviewing" {
+        let result = run
+            .supervision
+            .diagnostics
+            .iter()
+            .rev()
+            .find(|diagnostic| diagnostic.triage);
+        if let Some(result) = result {
+            if !matches!(result.state.as_str(), "reserved" | "launching" | "running") {
+                if result.state != "finished" && triage.attempts < MAX_TRIAGE_DIAGNOSTICS as u8 {
+                    // A failed or interrupted WR attempt has no report to hand
+                    // off. The next scan reserves a new attempt; a daemon
+                    // restart with a live Session stays in `reviewing` above.
+                    triage.phase = "pendingWr".into();
+                    triage.source = "executor".into();
+                    triage.owner = "wr".into();
+                    triage.next_action = format!("WR 会话 {} 未产出结论；自动续办第 {} 次诊断", result.session_id, triage.attempts + 1);
+                } else {
+                    triage.phase = "pendingPm".into();
+                    triage.source = if result.state == "finished" { "wr" } else { "executor" }.into();
+                    triage.owner = "pm".into();
+                    triage.next_action = if result.state == "finished" {
+                        format!("读取 WR 会话 {} 的报告并执行下一步", result.session_id)
+                    } else {
+                        format!("WR 三次诊断均未产出结论；依据机械事实处理或请求人类协助（最近会话 {}）", result.session_id)
+                    };
+                    run.supervision.finding = Some(triage.next_action.clone());
+                    prepare_notice(&mut run, "triage-result");
+                }
+            }
+        }
+    } else if triage.phase == "pendingPm" && now >= triage.next_check_at_ms {
+        if triage.reminders < 2 {
+            triage.reminders += 1;
+            triage.next_check_at_ms = now.saturating_add(300_000);
+            run.supervision.finding = Some(format!("PM 尚未记录后续行动。{}", triage.next_action));
+            prepare_notice(&mut run, &format!("triage-reminder-{}", triage.reminders));
+        } else {
+            triage.phase = "pendingHuman".into();
+            triage.source = "executor".into();
+            triage.owner = "human".into();
+            triage.next_action = format!("Run {} 在两次 PM 提醒后仍无可核验的后继动作；请核对后授权下一步，或使用会话的「反馈问题」入口提交故障", run.id);
+            run.supervision.finding = Some(triage.next_action.clone());
+        }
+    }
+    if run.supervision.triage.as_ref().is_some_and(|old| {
+        old.phase == triage.phase
+            && old.attempts == triage.attempts
+            && old.reminders == triage.reminders
+    }) {
+        return Ok(());
+    }
+    triage.updated_at_ms = now;
+    triage.next_check_at_ms = now.saturating_add(300_000);
+    run.supervision.triage = Some(triage);
+    save_run(runtime, &run)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,10 +378,11 @@ pub(super) async fn observe(
         stalled.push("Run 尚未收敛且没有 Worker 接棒".into());
     }
     if request::budget_exhausted(runtime, run, now)? {
-        control::request_stop(
+        control::request_stop_with_cause(
             run,
             "blocked",
             "原始请求达到执行期限或 LLM 调用上限，交回 PM 处理".into(),
+            "requestBudget",
         );
         return Ok(());
     }
@@ -213,6 +429,7 @@ pub(super) async fn observe(
             created_at_ms: now,
             activity: Default::default(),
             error: None,
+            triage: false,
         });
     } else {
         run.supervision
@@ -242,12 +459,14 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
         Sha256::digest(format!(
             "{}:{kind}:{}",
             run.id,
-            if kind == "diagnostic" {
+            if kind.starts_with("triage-") {
+                run.supervision.triage.as_ref().map(|triage| triage.episode_id.as_str()).unwrap_or("").to_string()
+            } else if kind == "diagnostic" {
                 // At most two diagnoses plus one unavailable-role notice per
                 // Run; repeated quiet episodes never create an LLM wake loop.
-                run.supervision.diagnostics.len()
+                run.supervision.diagnostics.len().to_string()
             } else {
-                0
+                String::new()
             }
         ))
     );
@@ -377,6 +596,21 @@ pub(super) fn report_pending(run: &RunRecord) -> bool {
             .any(|notice| !notice.handled || !notice.accepted)
 }
 
+fn diagnosis_allowed(run: &RunRecord, diagnostic: &Diagnostic) -> bool {
+    if cancellation_requested(run) {
+        return false;
+    }
+    if !diagnostic.triage {
+        return run.status == "running";
+    }
+    matches!(run.status.as_str(), "stopping" | "blocked" | "failed")
+        && run
+            .supervision
+            .triage
+            .as_ref()
+            .is_some_and(|triage| triage.phase == "reviewing")
+}
+
 pub(super) async fn diagnostics(
     state: &Shared,
     runtime: &RuntimeStore,
@@ -393,20 +627,22 @@ pub(super) async fn diagnostics(
     };
     let diagnostic = run.supervision.diagnostics[index].clone();
     let session_id = diagnostic.session_id.clone();
-    if diagnostic.state == "reserved" && run.status != "running" {
+    if diagnostic.state == "reserved" && !diagnosis_allowed(&run, &diagnostic) {
         let _lock = lock_run(runtime, run_id)?;
         run = load_run(runtime, run_id)?;
         run.supervision.diagnostics[index].state = "stopped".into();
         save_run(runtime, &run)?;
         return Ok(());
     }
-    if diagnostic.state == "reserved" && run.status == "running" {
+    if diagnostic.state == "reserved" && diagnosis_allowed(&run, &diagnostic) {
         let result: Result<()> = async {
             let _lock = lock_run(runtime, run_id)?;
             let _request = request::request_lock(runtime, request::group_id(&run))?;
             run = load_run(runtime, run_id)?;
             request::ensure_open(runtime, &run)?;
-            if run.status != "running" { bail!("Run stopped before diagnosis creation"); }
+            if !diagnosis_allowed(&run, &diagnostic) {
+                bail!("Run changed before diagnosis creation");
+            }
             let role = run.supervision.diagnostic_role.as_ref().ok_or_else(|| anyhow!("diagnostic role unavailable"))?;
             if !role.evidence_only { bail!("automatic diagnostics require an evidence-only role"); }
             let (route, providers) = resolve_role_route_excluding(state, role, &run.route_exclusions()).await?;
@@ -444,8 +680,10 @@ pub(super) async fn diagnostics(
             if result.is_ok() { "running" } else { "failed" }.into();
         if let Err(error) = result {
             run.supervision.diagnostics[index].error = Some(format!("{error:#}"));
-            run.supervision.finding = Some(format!("WR 启动失败：{error:#}；机械问题仍需 PM 处理"));
-            prepare_notice(&mut run, "diagnostic");
+            if !diagnostic.triage {
+                run.supervision.finding = Some(format!("WR 启动失败：{error:#}；机械问题仍需 PM 处理"));
+                prepare_notice(&mut run, "diagnostic");
+            }
         }
         save_run(runtime, &run)?;
         return Ok(());
@@ -464,7 +702,7 @@ pub(super) async fn diagnostics(
     });
     if ended
         && !over_budget
-        && run.status == "running"
+        && diagnosis_allowed(&run, &diagnostic)
         && diagnostic.state == "running"
         && summary
             .as_ref()
@@ -481,7 +719,7 @@ pub(super) async fn diagnostics(
             let _lock = lock_run(runtime, run_id)?;
             let _request = request::request_lock(runtime, request::group_id(&run))?;
             run = load_run(runtime, run_id)?;
-            if run.status == "running" {
+            if diagnosis_allowed(&run, &diagnostic) {
                 let role = run.supervision.diagnostic_role.clone().expect("diagnostic role");
                 run.exclude_route(&failed.agent_id, failed.model_id.as_deref());
                 let mut last_switch_error = None;
@@ -554,13 +792,13 @@ pub(super) async fn diagnostics(
             return Ok(());
         }
     }
-    if ended || over_budget || run.status != "running" {
+    if ended || over_budget || !diagnosis_allowed(&run, &diagnostic) {
         state.sessions.fence_execution(&session_id).await?;
         state.sessions.close(&session_id).await?;
         let _lock = lock_run(runtime, run_id)?;
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         run = load_run(runtime, run_id)?;
-        if run.status != "running" {
+        if !diagnosis_allowed(&run, &diagnostic) {
             run.supervision.diagnostics[index].state = "stopped".into();
             run.supervision.diagnostics[index].activity = activity;
             save_run(runtime, &run)?;
@@ -594,8 +832,12 @@ pub(super) async fn diagnostics(
             run.supervision.diagnostics[index].error = Some(reason.clone());
             format!("WR 诊断失败：{reason}，不能视为已有诊断结论。会话 {session_id} 的部分记录仅供参考；PM 应依据 workflow get/check 事实处置原任务，异常期间具备本项目管理权限，不要求用户换会话。")
         };
-        run.supervision.finding = Some(detail);
-        prepare_notice(&mut run, "diagnostic");
+        if !diagnostic.triage || finished {
+            run.supervision.finding = Some(detail);
+            if !diagnostic.triage {
+                prepare_notice(&mut run, "diagnostic");
+            }
+        }
         save_run(runtime, &run)?;
     }
     Ok(())

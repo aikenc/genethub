@@ -220,6 +220,9 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       t.assertions.assert(run!.nodes.filter(n => n.uses === "agent.session").length === 2, "aggregation consumed another Worker");
       t.assertions.assert(run!.nodes.some(n => n.uses === "result.publish") === result.approved, "negative verdict was published");
     } else if (scenario === "parallel-failure") {
+      t.assertions.assert(run!.triage?.causeCode === "executionException"
+        && ["pendingWr", "reviewing", "pendingPm"].includes(run!.triage.phase),
+        "unhandled execution failure has no durable WR/PM handoff");
       t.assertions.assert(run!.nodes.some(n => n.outcome === "failed") && !run!.nodes.some(n => n.uses === "result.publish"), "host failure was turned into a business result");
       for (const node of run!.nodes.filter(n => n.sessionId)) {
         const reply = await opened.client.call({ type: "session.get", payload: { sessionId: node.sessionId! } });

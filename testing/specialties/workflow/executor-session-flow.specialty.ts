@@ -110,6 +110,9 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       let repairedFromFinding = false;
       const respond = (request: unknown) => {
         const body = JSON.stringify(request);
+        if (body.includes("bounded, read-only Workflow diagnosis")) {
+          return { text: "The repair path exhausted after a second rejected review. PM should replan the acceptance path; the Worker result is preserved." };
+        }
         if (body.includes("你是小游戏项目的 Coder")) {
           const operation = body.match(/当前节点：(operation-\d+)/)?.[1];
           if (operation) coderOperations.add(operation);
@@ -321,6 +324,12 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             const session=await opened.client.call({type:"session.get",payload:{sessionId:worker.sessionId!}});
             return session?.type === "snapshot" && session.data.summary.status === "closed";
           },35_000);
+          await t.tools.waitUntil(async()=>{
+            const reply=await opened.client.call({type:"workflow.get",payload:{workspaceId:projectId,runId:accepted!.id}});
+            return reply?.type === "workflowRun" && reply.data.triage?.causeCode === "executionException"
+              && reply.data.triage.attempts >= 1 && reply.data.triage.attempts <= 3
+              && (reply.data.diagnostics?.length ?? 0) >= reply.data.triage.attempts;
+          },35_000);
           return;
         }
       }
@@ -337,7 +346,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       });
       t.assertions.assert(listed?.type === "sessions", `session.list returned ${listed?.type}`);
       const sessions = listed?.type === "sessions" ? listed.data : [];
-      const workers = sessions.filter((session) => session.managed?.workflowRunId);
+      const workers = sessions.filter((session) => ["coder", "reviewer"].includes(session.managed?.role ?? ""));
       t.assertions.assert(
         workers.length === (repairs ? 4 : 2),
         `expected Coder and Reviewer, got ${JSON.stringify(workers)}; PM events=${JSON.stringify(
@@ -361,6 +370,14 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
           pmEvents.map((event) => event.raw),
         ).slice(-12000)}`,
       );
+      if (outcome === "exhausted") {
+        await t.tools.waitUntil(async () => {
+          const reply = await opened.client.call({ type: "workflow.get", payload: { workspaceId: projectId, runId } });
+          return reply?.type === "workflowRun" && reply.data.triage?.phase === "pendingPm"
+            && reply.data.triage.source === "wr" && reply.data.triage.attempts === 1
+            && reply.data.diagnostics?.some(diagnostic => diagnostic.status === "finished") === true;
+        }, 45_000);
+      }
       t.assertions.assert(run?.executorTurns === 0, "deterministic Executor used an LLM turn");
       t.assertions.assert(Boolean(run?.executorSessionId), "Run has no Executor Session");
       t.assertions.assert(

@@ -226,6 +226,18 @@ pub(super) fn validate_negative_result(
 }
 
 pub(super) fn request_stop(run: &mut RunRecord, target: &str, reason: String) {
+    request_stop_with_cause(run, target, reason, "executionException");
+}
+
+pub(super) fn request_stop_with_cause(
+    run: &mut RunRecord,
+    target: &str,
+    reason: String,
+    cause_code: &str,
+) {
+    if matches!(target, "blocked" | "failed") {
+        supervision::begin_triage(run, cause_code);
+    }
     run.status = if target == "cancelled" {
         "cancelling"
     } else {
@@ -262,13 +274,18 @@ pub(crate) async fn start_assigned(
         .as_ref()
         .and_then(|engine| workflow_engine::pending(engine).wake_at_ms)
         .is_some_and(|deadline| now_ms().max(0) as u64 >= deadline);
-    if run.engine.is_some()
-        && (deadline_reached || request::budget_exhausted(&runtime, &run, now_ms())?)
-    {
-        request_stop(
+    let request_budget_exhausted =
+        run.engine.is_some() && request::budget_exhausted(&runtime, &run, now_ms())?;
+    if run.engine.is_some() && (deadline_reached || request_budget_exhausted) {
+        request_stop_with_cause(
             &mut run,
             "blocked",
             "流程或活动达到期限，或原始请求耗尽 LLM 调用上限".into(),
+            if request_budget_exhausted {
+                "requestBudget"
+            } else {
+                "activityDeadline"
+            },
         );
         run.revision += 1;
         save_run(&runtime, &run)?;
@@ -470,6 +487,7 @@ pub(crate) async fn recover(
             run.recovery = None;
             run.stop = None;
             run.status = "running".into();
+            supervision::close_triage(&mut run, "pm", "PM 已确认并恢复原 Worker 会话");
             run.revision = run.revision.saturating_add(1);
             run.updated_at_ms = now_ms();
             if let Some(executor) = run.executor_session_id.clone() {
@@ -529,6 +547,7 @@ pub(crate) async fn recover(
             run.recovery = None;
             run.stop = None;
             run.status = "running".into();
+            supervision::close_triage(&mut run, "pm", "PM 已确认并恢复受阻节点");
             run.revision = run.revision.saturating_add(1);
             run.updated_at_ms = now_ms();
             if let Some(executor) = run.executor_session_id.clone() {
@@ -663,7 +682,7 @@ pub(crate) async fn maintain(state: &Shared) {
                 continue;
             }
         };
-        let runs = match all_runs(&runtime) {
+        let runs = match maintenance_runs(&runtime) {
             Ok(runs) => runs,
             Err(error) => {
                 tracing::warn!(%error, "workflow index needs reconciliation");
@@ -686,6 +705,7 @@ pub(crate) async fn maintain(state: &Shared) {
                     run.status.as_str(),
                     "running" | "stopping" | "cancelling" | "recoverable"
                 )
+                || run.supervision.triage.as_ref().is_some_and(|triage| triage.phase != "closed")
                 || (!cancelled.contains(request::group_id(&run))
                     && supervision::report_pending(&run))
                 || run.supervision.diagnostics.iter().any(|diagnostic| {
@@ -711,15 +731,28 @@ pub(crate) async fn maintain(state: &Shared) {
             let owner = state.clone();
             state.workflow_tasks.spawn(async move {
                 let _job = job;
-                let result: Result<()> = async {
+                let execution = async {
                     finish_nodes(&owner, &runtime, &run.id).await?;
                     structured::drive(&owner, &runtime, &run.id).await?;
-                    reconcile(&owner, &runtime, &run.id).await?;
-                    supervision::diagnostics(&owner, &runtime, &run.id).await?;
-                    supervision::deliver_notice(&owner, &runtime, &run.id).await?;
-                    Ok(())
+                    reconcile(&owner, &runtime, &run.id).await
                 }.await;
-                if let Err(error) = result { tracing::warn!(run = %run.id, %error, "workflow reconciliation remains pending"); }
+                if let Err(error) = execution {
+                    tracing::warn!(run = %run.id, %error, "workflow execution reconciliation remains pending");
+                }
+                // A failed business or cleanup step must not suppress its
+                // independent read-only diagnosis and durable PM handoff.
+                if let Err(error) = supervision::advance_triage(&runtime, &run.id) {
+                    tracing::warn!(run = %run.id, %error, "workflow triage remains pending");
+                }
+                if let Err(error) = supervision::diagnostics(&owner, &runtime, &run.id).await {
+                    tracing::warn!(run = %run.id, %error, "workflow diagnosis remains pending");
+                }
+                if let Err(error) = supervision::advance_triage(&runtime, &run.id) {
+                    tracing::warn!(run = %run.id, %error, "workflow triage result remains pending");
+                }
+                if let Err(error) = supervision::deliver_notice(&owner, &runtime, &run.id).await {
+                    tracing::warn!(run = %run.id, %error, "workflow PM handoff remains pending");
+                }
             });
         }
     }
@@ -1112,6 +1145,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                         .collect(),
                 });
                 run.status = "recoverable".into();
+                supervision::begin_triage(&mut run, "recoverable");
                 run.stop = Some(StopRequest {
                     target: "recoverable".into(),
                     reason,
@@ -1147,10 +1181,12 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         .filter_map(|node| node.session_id.clone())
         .collect::<BTreeSet<_>>();
     session_ids.extend(run.executor_session_id.clone());
+    let cancelling = run.stop.as_ref().is_some_and(|stop| stop.target == "cancelled");
     session_ids.extend(
         run.supervision
             .diagnostics
             .iter()
+            .filter(|diagnostic| cancelling || !diagnostic.triage)
             .map(|diagnostic| diagnostic.session_id.clone()),
     );
     let mut errors = Vec::new();
@@ -1230,7 +1266,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         }
         current.leases.clear();
         for diagnostic in &mut current.supervision.diagnostics {
-            if matches!(
+            if (stop.target == "cancelled" || !diagnostic.triage) && matches!(
                 diagnostic.state.as_str(),
                 "reserved" | "launching" | "running"
             ) {

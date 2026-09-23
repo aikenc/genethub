@@ -1,4 +1,8 @@
-GeneHub 的 Workflow 能力从人的意图出发：PM 理解目标，交给 Workflow Manager（WM）创建或改进 Workflow，由 Executor 承载运行，再用代表任务验证，最后根据 Workflow Reviewer（WR）的证据决定采用或继续调整。
+> **Workflow 要让目标一路有人负责：Executor 推进工作，异常由 WR 查明并交回 PM 解决；只有必须由人授权、提供信息或亲自验收时，才停下来等人。**
+>
+> 这是产品目标，不表示当前实现已覆盖所有异常和故障恢复。执行状态仍须如实显示；一次 Run 的 `blocked` 不能自动等同于用户请求无人负责或已经结束。
+
+GeneHub 的 Workflow 能力从人的意图出发：PM 理解目标，交给 Workflow Manager（WM）创建或改进 Workflow，由 Executor 承载运行，再用代表任务验证，最后根据 Workflow Reviewer（WR）的证据决定采用或继续调整。目标态中，原始目标的后续责任由 PM 承担；平台保存执行事实和交接义务，让异常不会因通知已读、进程重启或单次 Run 结束而消失。
 
 Workflow 是被创建、验证和采用的执行方案。Executor 是使这个方案能够运行的载体。测试项目提供输入、仓库、数据和产物，用来观察方案的行为。一个测试项目完成，只能提供本次运行的证据；Workflow 的有效性还要对照原始意图、验收范围和成本判断。
 

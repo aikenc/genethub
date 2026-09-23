@@ -48,6 +48,7 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function refresh() {
       let completed = false;
+      let delay = 2_000;
       try {
         const reply = await client!.call({ type: "session.flow", payload: { sessionId } });
         if (disposed) return;
@@ -56,13 +57,15 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         }
         setSnapshot({ owner: client, data: reply.data });
         setError(null);
-        completed = ["completed", "cancelled", "blocked", "failed"].includes(reply.data.run.status);
+        completed = ["completed", "cancelled", "blocked", "failed"].includes(reply.data.run.status)
+          && (!reply.data.run.triage || reply.data.run.triage.phase === "closed");
+        if (["pendingPm", "pendingHuman"].includes(reply.data.run.triage?.phase ?? "")) delay = 15_000;
       } catch (cause) {
         if (disposed) return;
         setError(cause instanceof Error ? cause.message : String(cause));
         return;
       }
-      if (!disposed && !completed) timer = setTimeout(() => void refresh(), 2_000);
+      if (!disposed && !completed) timer = setTimeout(() => void refresh(), delay);
     }
     void refresh();
     return () => { disposed = true; clearTimeout(timer); };
@@ -82,6 +85,10 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
           <p className="mt-1 text-sm">{flow.run.workflowId} · {labelStatus(flow.run.status)}</p>
           {flow.run.reason ? <p className="mt-1 text-sm">{flow.run.reason}</p> : null}
           {flow.run.cleanupError ? <p role="alert" className="mt-1 text-sm text-danger">收尾待处理：{flow.run.cleanupError}</p> : null}
+          {flow.run.triage && flow.run.triage.phase !== "closed" ? <div role="status" className="mt-2 rounded-lg border border-line px-3 py-2 text-sm">
+            <p>受阻处置：{flow.run.triage.phase === "reviewing" ? "WR 分析中" : flow.run.triage.phase === "pendingWr" ? "待 WR 分析" : flow.run.triage.phase === "pendingHuman" ? "待人处理" : "待 PM 处理"} · 负责人 {flow.run.triage.owner.toUpperCase()}</p>
+            <p className="mt-1 break-words">{flow.run.triage.nextAction}</p>
+          </div> : null}
           <p className="mt-1 text-xs text-muted">最后更新：{new Date(flow.run.updatedAtMs).toLocaleString()}</p>
           <button type="button" className="mt-2 min-h-11 text-xs text-accent md:min-h-0"
             onClick={() => void selectSession(flow.run.parentSessionId)}>返回发起会话</button>

@@ -2212,7 +2212,11 @@ export type WorkflowRunStatus = {
 /**
  * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
  */
-structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
+structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, 
+/**
+ * Request follow-up for a Run that stopped before the original goal was resolved.
+ */
+triage?: WorkflowTriageStatus, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
 /**
  * Why execution is blocked, stopping or cancelled.
  */
@@ -2263,6 +2267,8 @@ humanWaitMs: number,
 recoveryWaitMs: number, waiting: boolean, silenceThresholdMs: number, };
 
 export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+
+export type WorkflowTriageStatus = { episodeId: string, causeCode: string, source: string, phase: string, owner: string, nextAction: string, createdAtMs: number, updatedAtMs: number, attempts: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

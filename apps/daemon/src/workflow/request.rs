@@ -122,12 +122,6 @@ pub(super) fn activities(
                 .iter()
                 .chain(std::iter::once(&node.activity))
         })
-        .chain(
-            run.supervision
-                .diagnostics
-                .iter()
-                .map(|diagnostic| &diagnostic.activity),
-        )
 }
 
 /// One accounting projection for graph queries, check and admission. Replace

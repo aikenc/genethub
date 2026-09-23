@@ -88,6 +88,9 @@ defineSpecialty({
     }, 45_000);
     t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor changed during restart");
     t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === interruptedId)?.status === "interrupted", "unfinished Worker was not marked for continuation");
+    t.assertions.assert(recoverable!.triage?.causeCode === "recoverable"
+      && recoverable!.triage.phase === "pendingPm" && recoverable!.triage.owner === "pm",
+      "interrupted Worker has no durable PM recovery owner");
     const check = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: recoverable!.id } });
     t.assertions.assert(check?.type === "workflowCheck" && check.data.findings.some(f => f.code === "recoverableOperation" && f.detail.includes("仍保留")), "PM did not receive a same-session recovery finding");
     const stale = await runGenetAsync(opened.daemon.genet, ["workflow", "recover", "--run", recoverable!.id, "--revision", String(recoverable!.revision - 1)], opened.daemon.env, { cwd: opened.workspaceRoot });
@@ -102,6 +105,7 @@ defineSpecialty({
       return completed?.status === "completed";
     }, 45_000);
     t.assertions.assert(completed!.id === before!.id, "recovery replaced the pinned Run");
+    t.assertions.assert(completed!.triage?.phase === "closed", "successful same-Session recovery left the handoff open");
     t.assertions.assert(completed!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor was replayed");
     const recovered = completed!.nodes.find(n => n.id === recoverable!.nodes.find(n => n.sessionId === interruptedId)!.id)!;
     t.assertions.assert(recovered.sessionId === interruptedId && recovered.status === "completed", "recovery replaced the original Worker Session");

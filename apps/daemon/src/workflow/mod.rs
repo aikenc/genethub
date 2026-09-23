@@ -1928,6 +1928,7 @@ pub(crate) async fn dispatch(
                     reason,
                     cleanup_error: None,
                 });
+                supervision::begin_triage(&mut run, "routeUnavailable");
                 run.revision = 1;
                 run.updated_at_ms = blocked_at;
                 record_flow_start(&mut run, &[])?;
@@ -2041,6 +2042,36 @@ fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
             continue;
         };
         runs.push(load_run(runtime, run_id)?);
+    }
+    Ok(runs)
+}
+
+/// A damaged locator must not stop supervision of every other Run. Keep the
+/// strict reader above for user-facing history and authorization decisions.
+fn maintenance_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
+    let directory = runtime.directory(Path::new("runs"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("读取 Workflow Run maintenance index"),
+    };
+    let mut runs = Vec::new();
+    for (scanned, item) in listing.enumerate() {
+        if scanned >= 4_096 {
+            bail!("Workflow Run maintenance index exceeds the bounded project index");
+        }
+        let path = item?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        match load_run(runtime, run_id) {
+            Ok(run) => runs.push(run),
+            Err(error) => tracing::error!(%run_id, %error,
+                "Workflow Run index is unreadable; other Runs remain supervised, this Run requires repair"),
+        }
     }
     Ok(runs)
 }
@@ -4560,6 +4591,17 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
     };
     Ok(WorkflowRunStatus {
         structure: structured::projection(run),
+        triage: run.supervision.triage.as_ref().map(|triage| genehub_proto::WorkflowTriageStatus {
+            episode_id: triage.episode_id.clone(),
+            cause_code: triage.cause_code.clone(),
+            source: triage.source.clone(),
+            phase: triage.phase.clone(),
+            owner: triage.owner.clone(),
+            next_action: triage.next_action.clone(),
+            created_at_ms: triage.created_at_ms,
+            updated_at_ms: triage.updated_at_ms,
+            attempts: triage.attempts,
+        }),
         diagnostics: Some(
             run.supervision
                 .diagnostics

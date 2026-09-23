@@ -1335,6 +1335,10 @@ pub struct WorkflowRunStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub diagnostics: Option<Vec<WorkflowDiagnosticStatus>>,
+    /// Request follow-up for a Run that stopped before the original goal was resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub triage: Option<WorkflowTriageStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub request_run_id: Option<String>,
@@ -1534,6 +1538,23 @@ pub struct WorkflowDiagnosticStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowTriageStatus {
+    pub episode_id: String,
+    pub cause_code: String,
+    pub source: String,
+    pub phase: String,
+    pub owner: String,
+    pub next_action: String,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+    #[ts(type = "number")]
+    pub updated_at_ms: i64,
+    pub attempts: u8,
 }
 
 /// A node's settled outcome, as a bare string on the wire and on disk.
