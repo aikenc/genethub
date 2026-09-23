@@ -212,10 +212,9 @@ fn with_developer_instructions(mut params: Value, prompt: Option<&str>) -> Value
 
 #[derive(Default)]
 pub struct CodexAdapter {
-    /// What the CLI answered when asked for its model table, read once per
-    /// daemon run: the picker wants it long before anyone opens a session, and
-    /// the only way to ask this CLI anything is to run it.
-    hello: tokio::sync::OnceCell<Option<Hello>>,
+    /// What the CLI answered when asked for its model table. The picker wants
+    /// it long before anyone opens a session; `agent.refresh` clears it.
+    hello: tokio::sync::RwLock<Option<Hello>>,
 }
 
 /// What one handshake told us about this install.
@@ -234,14 +233,14 @@ impl CodexAdapter {
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
-        // A timeout or refused `model/list` must not hide the picker for the
-        // rest of this daemon run. A later catalog refresh gets another try.
-        if let Some(cached) = self.hello.get() {
-            return cached.clone();
+        // A timeout or refused `model/list` must not hide the picker: leave
+        // the cell empty so a later catalog refresh gets another try.
+        if let Some(cached) = self.hello.read().await.clone() {
+            return Some(cached);
         }
         let found = discover(program).await;
         if let Some(hello) = found.clone() {
-            let _ = self.hello.set(Some(hello));
+            *self.hello.write().await = Some(hello);
         }
         found
     }
@@ -292,6 +291,10 @@ impl AgentAdapter for CodexAdapter {
             // sitting right there.
             _ => ProbeState::Ready,
         }
+    }
+
+    async fn invalidate_catalog(&self) {
+        *self.hello.write().await = None;
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
