@@ -1025,7 +1025,7 @@ describe("what the user sees in a session", () => {
     expect(rows[1]!).not.toHaveTextContent("刚刚");
   });
 
-  it("shows the resolved Agent and model on trunk and batch headers", async () => {
+  it("shows Agent, model, LLM rounds and elapsed time on trunk and batch headers", async () => {
     showDefaultRuntime();
     const now = Date.now();
     const round = {
@@ -1093,14 +1093,15 @@ describe("what the user sees in a session", () => {
     expect(trunkMetrics).toHaveTextContent("Genet");
     expect(trunkMetrics).toHaveTextContent("DeepSeek V4");
     expect(trunkMetrics).not.toHaveTextContent("3 分钟前");
-    expect(trunkMetrics).not.toHaveTextContent("3m 20s");
+    expect(trunkMetrics).toHaveTextContent("12轮 · 耗时 3m 20s");
+    expect(trunkMetrics).toHaveAttribute("title", expect.stringContaining("工具 1m 50s"));
 
     await userEvent.click(within(trunk).getByRole("button"));
     const batches = screen.getAllByTestId("round-batch");
     const firstMetrics = within(batches[0]!).getByTestId("summary-metrics");
-    expect(firstMetrics).toHaveTextContent("GenetDeepSeek V4");
+    expect(firstMetrics).toHaveTextContent("GenetDeepSeek V45轮 · 耗时 1m 1s");
     expect(within(batches[1]!).getByTestId("summary-metrics")).toHaveTextContent(
-      "GenetDeepSeek V4",
+      "GenetDeepSeek V47轮 · 耗时 1m 59s",
     );
   });
 
@@ -2251,7 +2252,15 @@ describe("the controls offered to the user", () => {
     const originalRevoke = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
     Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:clip-preview") });
     Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
-    const view = render(<Composer {...composerProps({ attachmentsSupported: true, inputModalities: ["image", "video"] })} />);
+    const view = render(<Composer {...composerProps({
+      preferences: {
+        ...COMPOSER_PREFERENCES,
+        modelProfiles: COMPOSER_PREFERENCES.modelProfiles?.map((profile) => ({
+          ...profile,
+          tags: ["Pro", "图片理解", "视频理解"],
+        })),
+      },
+    })} />);
     try {
       const picker = view.container.querySelector<HTMLInputElement>('input[type="file"]')!;
       await userEvent.upload(picker, new File(["video"], "clip.mp4", { type: "video/mp4" }));
@@ -2711,7 +2720,7 @@ describe("the controls offered to the user", () => {
 
   it("accepts GIF through the same picker and draft-save path as other images", async () => {
     const onSaveDraft = vi.fn(async () => true);
-    const { container } = render(<Composer {...composerProps({ onSaveDraft, attachmentsSupported: true })} />);
+    const { container } = render(<Composer {...composerProps({ onSaveDraft })} />);
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const gif = new File(["GIF89a"], "demo.gif", { type: "image/gif" });
 
@@ -2725,7 +2734,7 @@ describe("the controls offered to the user", () => {
 
   it("rejects an inline GIF that cannot fit the final RPC before draft saving starts", async () => {
     const onSaveDraft = vi.fn(async () => true);
-    const { container } = render(<Composer {...composerProps({ onSaveDraft, attachmentsSupported: true })} />);
+    const { container } = render(<Composer {...composerProps({ onSaveDraft })} />);
     const picker = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const gif = new File([new Uint8Array(1_700_000)], "large.gif", { type: "image/gif" });
 

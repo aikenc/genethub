@@ -1567,18 +1567,28 @@ function RoundProgress({
 function SummaryMetrics({
   agentLabel,
   modelLabel,
+  summary,
 }: {
   agentLabel: string;
   modelLabel: string;
+  summary?: Pick<RoundTrunkSummary, "llmRounds" | "durationMs" | "toolDurationMs">;
 }) {
+  const rounds = summary?.llmRounds;
+  const duration = summary?.durationMs;
+  const toolDuration = summary?.toolDurationMs;
+  const timing = [
+    rounds == null ? null : `${rounds}轮`,
+    duration == null ? null : `耗时 ${formatDuration(duration)}`,
+  ].filter(Boolean).join(" · ");
   return (
     <span
       className="flex max-w-[45%] shrink-0 flex-col items-end leading-tight"
       data-testid="summary-metrics"
-      title={`Agent：${agentLabel}\n模型：${modelLabel}`}
+      title={`Agent：${agentLabel}\n模型：${modelLabel}${timing ? `\nLLM ${rounds ?? "—"} 轮；过程耗时 ${duration == null ? "—" : formatDuration(duration)}${toolDuration == null ? "" : `；工具 ${formatDuration(toolDuration)}`}` : ""}`}
     >
       <span className="max-w-full truncate text-xs text-muted">{agentLabel}</span>
       <span className="max-w-full truncate text-[10px] text-faint">{modelLabel}</span>
+      {timing ? <span className="max-w-full truncate text-[10px] text-muted">{timing}</span> : null}
     </span>
   );
 }
@@ -1635,7 +1645,7 @@ function TrunkCard({
         <span className={`${HEADER_TITLE_CLASS} text-sm font-medium`} title={trunkTitle}>
           {trunkTitle}
         </span>
-        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} />
+        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} summary={summary} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>
@@ -1726,7 +1736,7 @@ function BatchCard({
         >
           {monologue.first || batch.summary.text}
         </span>
-        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} />
+        <SummaryMetrics agentLabel={agentLabel} modelLabel={modelLabel} summary={batch.summary} />
         <span className="shrink-0 text-xs text-accent" aria-hidden="true">
           {open ? "▴" : "▾"}
         </span>

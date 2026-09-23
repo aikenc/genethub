@@ -2351,7 +2351,7 @@ impl SessionManager {
             }
             round.closed_trunks.len() as u32
         };
-        live.build_open_trunk(index).await
+        live.build_open_trunk(index, None).await
     }
 
     async fn build_round_layer(
@@ -4854,14 +4854,14 @@ impl Live {
                 .lock()
                 .await
                 .push(item.id().to_string());
-            self.finish_trunk().await;
+            self.finish_trunk(None).await;
             return;
         }
         if closed.is_some() {
             // `push` closes the previous trunk before placing this item in the
             // new one. Keep the trigger out of the old trunk's persisted id
             // set, then retain it after that set has been drained.
-            self.finish_trunk().await;
+            self.finish_trunk(None).await;
         }
         self.open_trunk_items
             .lock()
@@ -4871,7 +4871,11 @@ impl Live {
 
     /// The trunk being built right now, assembled from the items still in
     /// memory. `None` when nothing has been recorded into it yet.
-    async fn build_open_trunk(&self, index: u32) -> Option<RoundTrunk> {
+    async fn build_open_trunk(
+        &self,
+        index: u32,
+        finished_at_ms: Option<i64>,
+    ) -> Option<RoundTrunk> {
         let ids = self.open_trunk_items.lock().await.clone();
         if ids.is_empty() {
             return None;
@@ -4892,6 +4896,9 @@ impl Live {
         let mut trunk = rounds::trunks_from_items_with_rounds(&items, &round_deltas)
             .into_iter()
             .next()?;
+        if let Some(finished_at_ms) = finished_at_ms {
+            rounds::extend_last_span(&mut trunk, finished_at_ms);
+        }
         rounds::exclude_blocked(&mut trunk, &blocked_intervals);
         trunk.summary.index = index;
         let refs = self.blob_refs.lock().await;
@@ -4909,13 +4916,13 @@ impl Live {
     /// disk it is addressable by path, so its work items and their blob
     /// references are dropped. What stays behind is one summary line per
     /// closed trunk, which is what the round layer pages over.
-    async fn finish_trunk(&self) {
+    async fn finish_trunk(&self, finished_at_ms: Option<i64>) {
         let (ord, index) = {
             let active = self.active_round.lock().await;
             let Some(round) = active.as_ref() else { return };
             (round.ord, round.closed_trunks.len() as u32)
         };
-        let Some(trunk) = self.build_open_trunk(index).await else {
+        let Some(trunk) = self.build_open_trunk(index, finished_at_ms).await else {
             return;
         };
         let meta = self.meta.lock().await.clone();
@@ -5020,7 +5027,7 @@ impl Live {
             let Some(round) = active.as_ref() else { return };
             (round.ord, round.closed_trunks.len() as u32)
         };
-        let Some(trunk) = self.build_open_trunk(index).await else {
+        let Some(trunk) = self.build_open_trunk(index, None).await else {
             return;
         };
         let meta = self.meta.lock().await.clone();
@@ -5067,7 +5074,9 @@ impl Live {
             }
         };
         if has_open_trunk {
-            self.finish_trunk().await;
+            // Supersession can happen after a long idle gap. Only a real
+            // terminal event can close the final LLM span at wall-clock now.
+            self.finish_trunk(None).await;
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();
@@ -5231,7 +5240,7 @@ impl Live {
             round.close_current_trunk_pending().is_some()
         };
         if has_open_trunk {
-            self.finish_trunk().await;
+            self.finish_trunk(Some(now_ms())).await;
         }
         self.open_trunk_items.lock().await.clear();
         self.blob_refs.lock().await.clear();

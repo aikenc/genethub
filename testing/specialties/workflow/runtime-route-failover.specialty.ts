@@ -164,8 +164,8 @@ defineSpecialty({
     t.assertions.fileEquals(opened.workspaceRoot, "runtime-before-failover.txt", "preserved");
 
     const snapshotReply = await opened.client.call({ type: "session.get", payload: { sessionId: originalWorkerId! } });
-    t.assertions.assert(snapshotReply?.type === "snapshot", "migrated Worker Session is unreadable");
-    const snapshot = snapshotReply!.data as SessionSnapshot;
+    if (snapshotReply?.type !== "snapshot") throw new Error("migrated Worker Session is unreadable");
+    const snapshot = snapshotReply.data as SessionSnapshot;
     t.assertions.assert(
       snapshot.summary.agentId === "genet" && snapshot.summary.modelId === "deepseek/deepseek-v4-pro",
       `Worker did not retain the replacement route: ${snapshot.summary.agentId}/${snapshot.summary.modelId}`,
