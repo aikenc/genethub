@@ -562,11 +562,14 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
         rtcSupported: true,
       },
     });
-    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async (base) => ({
-      endpoint: base,
-      peer: {} as RTCPeerConnection,
-      close() {},
-    }));
+    let releaseRestricted: (() => void) | undefined;
+    const rtcFactory = vi.fn<NonNullable<ClientOptions["rtcFactory"]>>(async (base, _id, _diagnostic, options) => {
+      if (options?.policy === "direct-only") {
+        await new Promise<void>((resolve) => { releaseRestricted = resolve; });
+      }
+      await options?.attachWhen;
+      return { endpoint: base, peer: {} as RTCPeerConnection, close() {} };
+    });
     const client = new Client({
       url: "wss://relay.example/fabric/v2",
       channelCredential: { capabilityId: "cap-1", secret },
@@ -578,12 +581,18 @@ describe("events, Preview and RTC use the same endpoint abstraction", () => {
     queue.latest().open();
     await waitFor(() => queue.latest().sent.length === 1);
     queue.latest().acceptHandshake();
-    await waitFor(() => client.rtcState === "connected");
-
     await waitFor(() => rtcFactory.mock.calls.length === 2);
+    // Both ICE handshakes have started before the restricted identity can be
+    // checked. The business carrier still cannot attach until that check ends.
+    expect(client.rtcState).toBe("connecting");
     expect(rtcFactory).toHaveBeenCalledTimes(2);
     expect(rtcFactory.mock.calls[0]?.[3]).toEqual({ policy: "direct-only" });
-    expect(rtcFactory.mock.calls[1]?.[3]).toEqual({ endpoint: rtcFactory.mock.calls[1]?.[0] });
+    expect(rtcFactory.mock.calls[1]?.[3]).toEqual({
+      endpoint: rtcFactory.mock.calls[1]?.[0],
+      attachWhen: expect.any(Promise),
+    });
+    releaseRestricted?.();
+    await waitFor(() => client.rtcState === "connected");
     client.setRtcEnabled(false);
     expect(client.rtcState).toBe("disabled");
     client.close();

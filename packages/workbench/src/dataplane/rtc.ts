@@ -53,7 +53,12 @@ export interface RtcDataLink {
   close(): void;
 }
 
-export interface RtcLinkOptions { endpoint?: DataEndpoint; policy?: ResumePolicy }
+export interface RtcLinkOptions {
+  endpoint?: DataEndpoint;
+  policy?: ResumePolicy;
+  /** Finish ICE and the E2EE handshake, but wait to activate an existing owner. */
+  attachWhen?: Promise<void>;
+}
 
 /** Negotiates one reliable ordered DataChannel through the base E2EE link. */
 export async function openRtcDataLink(
@@ -176,7 +181,11 @@ export async function openRtcDataLink(
       maxBulkStreamWindowBytes: handshake.maxBulkStreamWindowBytes,
       maxReceiveBytesPerStream: 64 * 1024 * 1024,
     });
-    if (options.endpoint) await endpoint.attach(carrier, handshake.key, "rtc");
+    if (options.endpoint) {
+      await options.attachWhen;
+      if (channel.readyState !== "open") fail("RTC DataChannel closed before activation");
+      await endpoint.attach(carrier, handshake.key, "rtc");
+    }
     else await endpoint.ready();
     return {
       endpoint,

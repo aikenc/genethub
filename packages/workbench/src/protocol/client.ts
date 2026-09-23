@@ -1658,13 +1658,33 @@ export class Client {
       phase: "start",
       transport: this.carrier,
     });
+    const factory = this.options.rtcFactory ?? openRtcDataLink;
+    let allowBusiness!: () => void;
+    let rejectBusiness!: (reason: unknown) => void;
+    const attachWhen = new Promise<void>((resolve, reject) => {
+      allowBusiness = resolve;
+      rejectBusiness = reject;
+    });
+    // The business carrier may finish before the restricted carrier. Keep its
+    // rejection observed until both negotiations have been joined below.
+    void attachWhen.catch(() => {});
+    const directTask = Promise.resolve().then(() => factory(
+      base, requestId,
+      (detail) => this.diagnostic("rtc", { channelRole: "restricted", ...detail }),
+      previousDirect ? { endpoint: previousDirect, policy: "direct-only" } : { policy: "direct-only" },
+    ));
+    const businessTask = Promise.resolve().then(() => factory(
+      base, requestId,
+      (detail) => this.diagnostic("rtc", { channelRole: "business", ...detail }),
+      { endpoint: base, attachWhen },
+    ));
+    void businessTask.catch(() => {});
+    const discardBusiness = (reason: unknown) => {
+      rejectBusiness(reason);
+      void businessTask.then((link) => link.close(), () => {});
+    };
     try {
-      const link = await (this.options.rtcFactory ?? openRtcDataLink)(
-        base,
-        requestId,
-        (detail) => this.diagnostic("rtc", detail),
-        previousDirect ? { endpoint: previousDirect, policy: "direct-only" } : { policy: "direct-only" },
-      );
+      const link = await directTask;
       if (
         generation !== this.rtcGeneration ||
         this.stopped ||
@@ -1672,6 +1692,7 @@ export class Client {
         this.epoch !== epoch
       ) {
         link.close();
+        discardBusiness(new Error("RTC upgrade was superseded"));
         return;
       }
       const identity = await this.rpc(link.endpoint, { type: "connection.identity" });
@@ -1687,6 +1708,7 @@ export class Client {
       }
       if (generation !== this.rtcGeneration || this.endpoint !== base || this.epoch !== epoch) {
         link.close();
+        discardBusiness(new Error("RTC upgrade was superseded"));
         return;
       }
       this.rtcFailure_ = null;
@@ -1715,9 +1737,8 @@ export class Client {
       this.rtcLifecycleCleanup = () => { stopRecovering(); stopClose(); };
       // Restricted service bytes have their own immutable direct-only journal.
       // The second channel activates the existing ordinary logical peer, including events.
-      const dataLink = await (this.options.rtcFactory ?? openRtcDataLink)(
-        base, requestId, (detail) => this.diagnostic("rtc", detail), { endpoint: base },
-      );
+      allowBusiness();
+      const dataLink = await businessTask;
       if (dataLink.endpoint !== base) {
         dataLink.close();
         throw new DataPlaneError("RTC provider did not retain the logical endpoint");
@@ -1739,6 +1760,7 @@ export class Client {
         durationMs: Math.round(this.now() - started),
       });
     } catch (error) {
+      discardBusiness(error);
       if (generation !== this.rtcGeneration || this.stopped || this.endpoint !== base) return;
       if (!this.rtcLink && previousDirect?.state === "open") this.rtcLink = previousDirectLink;
       this.report(error);

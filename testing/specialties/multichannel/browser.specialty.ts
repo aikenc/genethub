@@ -294,8 +294,8 @@ for (const useRtc of [false, true]) defineSpecialty({
 
 defineSpecialty({
   ...meta("hosted-rtc-residency-on-renewal", "Hosted RTC stays the business path across real authorization renewals",
-    "After native RTC connects through host candidates, two real Hosted renewals keep at least 95% of business RPC and observed time on RTC, with no new SDP negotiation or fallback over one second", 110000),
-  catches: ["authorization renewal repeatedly displaces a healthy RTC path", "slow candidate gathering leaves RTC active only briefly"],
+    "With an unresponsive STUN server, two RTC channels connect within 25 seconds through host candidates; two real Hosted renewals then keep at least 95% of business RPC and observed time on RTC, with no new SDP negotiation or fallback over one second", 110000),
+  catches: ["authorization renewal repeatedly displaces a healthy RTC path", "serial candidate gathering delays both RTC channels", "slow candidate gathering leaves RTC active only briefly"],
   tags: ["multichannel", "network-risk-v2", "renewal-continuity", "rtc-residency"],
   timeoutMs: 240000,
 }, async t => {
@@ -381,6 +381,7 @@ defineSpecialty({
       `transitions=${JSON.stringify(measured.transitions.slice(0, 12))} candidates=${JSON.stringify(measured.candidates.slice(0, 4))}`;
     t.note(summary);
     t.assertions.assert(stunRequests > 0 && firstUpgradeMs !== null, `STUN fault or real RTC upgrade was not exercised: ${summary}`);
+    t.assertions.assert(firstUpgradeMs < 25_000, `blackholed STUN serialized RTC channel setup: ${summary}`);
     t.assertions.assert(renewals >= 2, `two real Hosted renewals did not occur: ${summary}`);
     t.assertions.assert(measured.connectionStates.every((state: string) => state === "ready") && probes.every(probe => probe.ok),
       `authorization renewal interrupted business access: ${summary}`);
