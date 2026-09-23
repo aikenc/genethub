@@ -65,6 +65,16 @@ pub(super) async fn observe(
             if let Ok(activity) = state.sessions.execution_activity(session_id).await {
                 node.activity = activity;
             }
+        }
+        // A completed node or a newly pending successor is progress too. An
+        // old Run can briefly have no running Worker during a handoff; using
+        // only its creation time would diagnose that gap immediately.
+        activity_ms = activity_ms
+            .max(node.pending_since_ms)
+            .max(node.assigned_at_ms)
+            .max(node.settled_at_ms)
+            .max(node.activity.last_at_ms);
+        if let Some(session_id) = &node.session_id {
             if node.status == "running" {
                 running += 1;
                 let summary = state.sessions.summary(session_id).await;
@@ -375,6 +385,13 @@ pub(super) async fn diagnostics(
     };
     let diagnostic = run.supervision.diagnostics[index].clone();
     let session_id = diagnostic.session_id.clone();
+    if diagnostic.state == "reserved" && run.status != "running" {
+        let _lock = lock_run(runtime, run_id)?;
+        run = load_run(runtime, run_id)?;
+        run.supervision.diagnostics[index].state = "stopped".into();
+        save_run(runtime, &run)?;
+        return Ok(());
+    }
     if diagnostic.state == "reserved" && run.status == "running" {
         let result: Result<()> = async {
             let _lock = lock_run(runtime, run_id)?;
@@ -384,7 +401,7 @@ pub(super) async fn diagnostics(
             if run.status != "running" { bail!("Run stopped before diagnosis creation"); }
             let role = run.supervision.diagnostic_role.as_ref().ok_or_else(|| anyhow!("diagnostic role unavailable"))?;
             if !role.evidence_only { bail!("automatic diagnostics require an evidence-only role"); }
-            let route = resolve_role_route(state, role).await?;
+            let (route, providers) = resolve_role_route_excluding(state, role, &run.route_exclusions()).await?;
             // Diagnosis belongs to the same pinned carrier/material as the Run,
             // not necessarily the project that owns its Workflow definition.
             let task_root = run.execution_root.as_deref().map(Path::new).unwrap_or(&runtime.project_root);
@@ -404,7 +421,12 @@ pub(super) async fn diagnostics(
             save_run(runtime, &run)?;
             drop(_request);
             drop(_lock);
-            state.sessions.send(&session_id, prompt, Vec::new(), &state.providers().await, None, None).await?;
+            // A failed handover retires the Session as Failed. Keep the
+            // diagnosis live so the next reconciliation can try another tag
+            // match in this same Session, just as a failed Worker does.
+            if let Err(error) = state.sessions.send(&session_id, prompt, Vec::new(), &providers, None, None).await {
+                tracing::warn!(run = %run.id, session = %session_id, %error, "Workflow diagnosis handover failed; checking route fallback");
+            }
             Ok(())
         }.await;
         let _lock = lock_run(runtime, run_id)?;
@@ -428,22 +450,113 @@ pub(super) async fn diagnostics(
     let ended = !state.sessions.has_execution(&session_id).await;
     let over_budget = now_ms() - diagnostic.created_at_ms >= DIAGNOSTIC_DEADLINE_MS
         || activity.llm_rounds >= DIAGNOSTIC_CALLS;
-    if ended || over_budget || run.status != "running" {
-        let completed_reply =
-            state
+    let summary = state.sessions.summary(&session_id).await.ok();
+    let completed_reply = summary.as_ref().is_some_and(|summary| {
+        summary.status == SessionStatus::Idle && summary.latest_reply.is_some()
+    });
+    if ended
+        && !over_budget
+        && run.status == "running"
+        && diagnostic.state == "running"
+        && summary
+            .as_ref()
+            .is_some_and(|summary| summary.status == SessionStatus::Failed)
+        && run
+            .supervision
+            .diagnostic_role
+            .as_ref()
+            .is_some_and(|role| role.schema != LEGACY_ROLE_SCHEMA)
+    {
+        let failed = summary.as_ref().expect("failed diagnostic summary");
+        let mut replacement = None;
+        {
+            let _lock = lock_run(runtime, run_id)?;
+            let _request = request::request_lock(runtime, request::group_id(&run))?;
+            run = load_run(runtime, run_id)?;
+            if run.status == "running" {
+                let role = run.supervision.diagnostic_role.clone().expect("diagnostic role");
+                run.exclude_route(&failed.agent_id, failed.model_id.as_deref());
+                let mut last_switch_error = None;
+                loop {
+                    let (route, providers) = match resolve_role_route_excluding(
+                        state,
+                        &role,
+                        &run.route_exclusions(),
+                    )
+                    .await
+                    {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            let failed_start = last_switch_error
+                                .as_deref()
+                                .map(|detail| format!("；后续候选启动失败：{detail}"))
+                                .unwrap_or_default();
+                            run.supervision.diagnostics[index].error = Some(format!(
+                                "匹配诊断角色的 Agent 与模型已用尽{failed_start}；{error:#}"
+                            ));
+                            break;
+                        }
+                    };
+                    let target = genehub_proto::SessionAgentTarget {
+                        agent_id: route.agent_id.clone(),
+                        model_id: route.model_id.clone(),
+                        mode_id: route.mode_id.clone(),
+                        effort_id: route.effort_id.clone(),
+                        runtime_values: route.runtime_values.clone(),
+                    };
+                    match state
+                        .sessions
+                        .switch_managed_agent(&session_id, target, &providers)
+                        .await
+                    {
+                        Ok(_) => {
+                            replacement = Some((route, providers));
+                            break;
+                        }
+                        Err(error) => {
+                            let detail = format!(
+                                "{}/{}: {error:#}",
+                                route.agent_id,
+                                route.model_id.as_deref().unwrap_or("default")
+                            );
+                            tracing::warn!(run = %run.id, session = %session_id, route = %detail,
+                                "Workflow diagnosis fallback candidate became unavailable");
+                            last_switch_error = Some(detail);
+                            run.exclude_route(&route.agent_id, route.model_id.as_deref());
+                        }
+                    }
+                }
+                // Persist exclusions before sending again. The Session id,
+                // read-only scope and cumulative diagnosis budget stay intact.
+                save_run(runtime, &run)?;
+            }
+        }
+        if let Some((route, providers)) = replacement {
+            let prompt = "The previous diagnostic Agent/model failed. Continue this same bounded, read-only Workflow diagnosis from the existing evidence and history. Do not repeat completed tools. Report known facts and an actionable recommendation within the remaining budget.".to_string();
+            if let Err(error) = state
                 .sessions
-                .summary(&session_id)
+                .send(&session_id, prompt, Vec::new(), &providers, None, None)
                 .await
-                .ok()
-                .is_some_and(|summary| {
-                    summary.status == genehub_proto::SessionStatus::Idle
-                        && summary.latest_reply.is_some()
-                });
+            {
+                tracing::warn!(run = %run.id, session = %session_id, agent = %route.agent_id,
+                    model = ?route.model_id, %error,
+                    "Workflow diagnosis fallback handover failed; checking next route");
+            }
+            return Ok(());
+        }
+    }
+    if ended || over_budget || run.status != "running" {
         state.sessions.fence_execution(&session_id).await?;
         state.sessions.close(&session_id).await?;
         let _lock = lock_run(runtime, run_id)?;
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         run = load_run(runtime, run_id)?;
+        if run.status != "running" {
+            run.supervision.diagnostics[index].state = "stopped".into();
+            run.supervision.diagnostics[index].activity = activity;
+            save_run(runtime, &run)?;
+            return Ok(());
+        }
         run.supervision.diagnostics[index].state = if ended && completed_reply {
             "finished"
         } else if over_budget {
@@ -462,11 +575,14 @@ pub(super) async fn diagnostics(
             format!("诊断会话 {session_id} 已完成并有回复；PM 请读取报告核对结论后处理原任务。")
         } else {
             let reason = if over_budget {
-                "达到诊断调用或时间上限"
+                "达到诊断调用或时间上限".to_string()
             } else {
-                "未产出完整回复或执行异常"
+                run.supervision.diagnostics[index]
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "未产出完整回复或执行异常".into())
             };
-            run.supervision.diagnostics[index].error = Some(reason.into());
+            run.supervision.diagnostics[index].error = Some(reason.clone());
             format!("WR 诊断失败：{reason}，不能视为已有诊断结论。会话 {session_id} 的部分记录仅供参考；PM 应依据 workflow get/check 事实处置原任务，异常期间具备本项目管理权限，不要求用户换会话。")
         };
         run.supervision.finding = Some(detail);
