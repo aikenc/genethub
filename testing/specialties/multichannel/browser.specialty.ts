@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createSocket } from "node:dgram";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { defineSpecialty, openMultichannelBrowser, allocatePort, registerControlledAgent, readControlledAgentJournal } from "../../framework/public.ts";
@@ -10,7 +11,7 @@ const meta = (name: string, title: string, oracle: string, duration = 30000) => 
   expectedDurationMs: duration, timeoutMs: duration + 120000,
   resources: { environments: 1, cpu: 2, memoryMb: 1280, io: 1, browser: 1, pool: "browser" as const },
   surfaces: ["browser", "daemon", "relay", "cloud-server"], productInterfaces: ["@genehub/workbench/client", "hub-http"],
-  requiredArtifacts: ["genehub-host-local", "genehub_guest.wasm"],
+  requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
 });
 defineSpecialty(meta("hosted-live-revocation", "Revoking a Hosted session stops its already active RTC access",
   "After public session revoke, fresh admission fails and the active browser stops successful RPC within the proposed 5-second revocation SLO"), async t => {
@@ -289,6 +290,101 @@ for (const useRtc of [false, true]) defineSpecialty({
     t.assertions.assert(actual.retained && actual.repairs === 0 && actual.states.every((s: string) => s === "ready"), "renewal replaced or interrupted the business owner");
     t.assertions.assert(JSON.stringify(actual.titles) === JSON.stringify(expected), "renewal lost, duplicated or reordered subscription events");
   } finally { await stack.stop(); }
+});
+
+defineSpecialty({
+  ...meta("hosted-rtc-residency-on-renewal", "Hosted RTC stays the business path across real authorization renewals",
+    "After native RTC connects through host candidates, two real Hosted renewals keep business RPC on RTC without a new upgrade or a standby transition", 110000),
+  catches: ["authorization renewal repeatedly displaces a healthy RTC path", "slow candidate gathering leaves RTC active only briefly"],
+  tags: ["multichannel", "network-risk-v2", "renewal-continuity", "rtc-residency"],
+  timeoutMs: 240000,
+}, async t => {
+  // A UDP endpoint that receives STUN requests without answering is an external
+  // network fault. Chromium, Hub, Relay and the daemon remain real product paths.
+  const blackhole = createSocket("udp4");
+  let stunRequests = 0;
+  blackhole.on("message", () => { stunRequests++; });
+  await new Promise<void>((resolve, reject) => {
+    const failed = (error: Error) => reject(error);
+    blackhole.once("error", failed);
+    blackhole.bind(0, "127.0.0.1", () => { blackhole.off("error", failed); resolve(); });
+  });
+  const stunUrl = `stun:127.0.0.1:${blackhole.address().port}`;
+  const iceKeys = ["HUB_ICE_SERVERS", "HUB_DEV_ICE_SERVERS", "HUB_BETA_ICE_SERVERS"] as const;
+  const previousIce = iceKeys.map(key => process.env[key]);
+  for (const key of iceKeys) process.env[key] = JSON.stringify([stunUrl]);
+  let stack: Awaited<ReturnType<typeof openMultichannelBrowser>> | undefined;
+  try {
+    stack = await openMultichannelBrowser(t, "hosted");
+    await stack.page.evaluate(() => {
+      const m = (window as any).mc;
+      const monitor = { startedAt: 0, lastAt: 0, lastState: "", rtcMs: 0,
+        transitions: [] as Array<{ atMs: number; state: string }>, initialConnectionStates: m.states.length };
+      m.rtcMonitor = monitor;
+      m.stopRtcMonitor = m.client.onRtcStateChange((state: string) => {
+        const now = performance.now();
+        if (!monitor.startedAt) {
+          if (state !== "connected") return;
+          monitor.startedAt = now; monitor.lastAt = now; monitor.lastState = state;
+          return;
+        }
+        if (monitor.lastState === "connected") monitor.rtcMs += now - monitor.lastAt;
+        monitor.lastAt = now; monitor.lastState = state;
+        monitor.transitions.push({ atMs: Math.round(now - monitor.startedAt), state });
+      });
+      m.client.setRtcEnabled(true);
+    });
+    await stack.page.waitForFunction(() => (window as any).mc.rtcMonitor.startedAt > 0, null, { timeout: 80000 });
+    const initialIssued = stack.issued();
+    const probes: Array<{ ok: boolean; transport: string | null; ms: number }> = [];
+    const deadline = Date.now() + 115000;
+    while (stack.issued() < initialIssued + 2 && Date.now() < deadline) {
+      probes.push(await stack.page.evaluate(async () => {
+        const m = (window as any).mc, started = performance.now();
+        try {
+          const reply = await m.client.call({ type: "workspace.list" });
+          return { ok: reply?.type === "workspaces",
+            transport: m.operations.findLast((o: any) => o.operation === "workspace.list")?.transport ?? null,
+            ms: Math.round(performance.now() - started) };
+        } catch {
+          return { ok: false, transport: null, ms: Math.round(performance.now() - started) };
+        }
+      }));
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const measured = await stack.page.evaluate(() => {
+      const m = (window as any).mc, watch = m.rtcMonitor, now = performance.now();
+      m.stopRtcMonitor();
+      const rtcMs = watch.rtcMs + (watch.lastState === "connected" ? now - watch.lastAt : 0);
+      return { totalMs: Math.round(now - watch.startedAt), rtcMs: Math.round(rtcMs),
+        transitions: watch.transitions, connectionStates: m.states.slice(watch.initialConnectionStates),
+        upgrades: m.rtcUpgrades, candidates: m.diagnostics.filter((e: any) => e.kind === "rtc" && "candidateHost" in e.detail)
+          .map((e: any) => ({ host: e.detail.candidateHost, srflx: e.detail.candidateSrflx })) };
+    });
+    const renewals = stack.issued() - initialIssued;
+    const rtcProbes = probes.filter(probe => probe.ok && probe.transport === "rtc").length;
+    const firstUpgradeMs = measured.upgrades.find((upgrade: any) => upgrade.phase === "finish" && upgrade.outcome === "ok")?.durationMs ?? null;
+    const summary = `renewals=${renewals} stunRequests=${stunRequests} firstUpgradeMs=${firstUpgradeMs} ` +
+      `rtcResidentMs=${measured.rtcMs}/${measured.totalMs} rtcRpc=${rtcProbes}/${probes.length} ` +
+      `upgradeStarts=${measured.upgrades.filter((upgrade: any) => upgrade.phase === "start").length} ` +
+      `transitions=${JSON.stringify(measured.transitions.slice(0, 12))} candidates=${JSON.stringify(measured.candidates.slice(0, 4))}`;
+    t.note(summary);
+    t.assertions.assert(stunRequests > 0 && firstUpgradeMs !== null, `STUN fault or real RTC upgrade was not exercised: ${summary}`);
+    t.assertions.assert(renewals >= 2, `two real Hosted renewals did not occur: ${summary}`);
+    t.assertions.assert(measured.connectionStates.every((state: string) => state === "ready") && probes.every(probe => probe.ok),
+      `authorization renewal interrupted business access: ${summary}`);
+    t.assertions.assert(measured.transitions.length === 0 && measured.rtcMs / measured.totalMs >= 0.9 && rtcProbes === probes.length &&
+      measured.upgrades.filter((upgrade: any) => upgrade.phase === "start").length === 1,
+    `healthy RTC was displaced by authorization renewal: ${summary}`);
+  } finally {
+    await stack?.stop();
+    for (const [index, key] of iceKeys.entries()) {
+      const value = previousIce[index];
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await new Promise<void>(resolve => blackhole.close(() => resolve()));
+  }
 });
 
 for (const path of ["fabric", "rtc"] as const) defineSpecialty({
