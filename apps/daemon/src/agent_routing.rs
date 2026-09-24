@@ -5,6 +5,7 @@
 //! cost edit affects the very next turn or Workflow activity.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use anyhow::{anyhow, Result};
 use genehub_proto::{
@@ -21,6 +22,15 @@ pub const TAG_FLUSH: &str = "Flush";
 pub const TAG_VIDEO: &str = "视频理解";
 pub const TAG_IMAGE: &str = "图片理解";
 pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLUSH, TAG_VIDEO, TAG_IMAGE];
+
+#[derive(Debug)]
+pub(crate) struct RouteUnavailable(pub String);
+
+impl fmt::Display for RouteUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
+
+impl std::error::Error for RouteUnavailable {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedAgentRoute {
@@ -251,9 +261,9 @@ pub(crate) fn select_tag_route_excluding(
             } else {
                 required.join(" + ")
             };
-            anyhow!(
+            anyhow!(RouteUnavailable(format!(
                 "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
-            )
+            )))
         })
 }
 

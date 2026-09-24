@@ -116,6 +116,36 @@ fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecor
     Ok(record)
 }
 
+/// Resolve an implicit retry from PM's request record. Parsing every Run in
+/// the project would let one unrelated damaged snapshot block a new request.
+fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<String>> {
+    let directory = runtime.directory(Path::new("requests"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("读取 Workflow PM request 目录"),
+    };
+    let mut found = None;
+    for entry in listing {
+        let entry = entry?;
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+        validate_id(&id, "request id")?;
+        let record = match read_record(runtime, &id) {
+            Ok(record) => record,
+            Err(error) if error.downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
+                && !run_path(runtime, &id, false)?.exists() => continue,
+            Err(error) => return Err(error).with_context(|| format!("读取 Workflow 请求 {id}")),
+        };
+        if record.original_message_id == message_id {
+            if found.replace(record.root_run_id).is_some() {
+                bail!("多个 Workflow 请求绑定同一 PM 消息");
+            }
+        }
+    }
+    Ok(found)
+}
+
 pub(super) fn recovery_extra(runtime: &RuntimeStore, root_run_id: &str) -> Result<RecoveryExtra> {
     Ok(read_record(runtime, root_run_id)?.recovery_extra)
 }
@@ -330,7 +360,6 @@ pub(super) async fn association(
     retry_of: Option<&str>,
 ) -> Result<RequestLink> {
     let (message_id, task_run, _) = state.sessions.current_request(parent).await?;
-    let runs = all_runs(runtime)?;
     let previous = match retry_of.or(task_run.as_deref()) {
         Some(id) => {
             let run = load_run(runtime, id)?;
@@ -341,18 +370,19 @@ pub(super) async fn association(
             }
             Some(run)
         }
-        None => message_id
-            .as_ref()
-            .and_then(|message| {
-                runs.iter().find(|run| {
-                    run.parent_session_id == parent
-                        && run
-                            .request
-                            .as_ref()
-                            .is_some_and(|request| &request.original_message_id == message)
-                })
-            })
-            .cloned(),
+        None => match message_id.as_deref() {
+            Some(message) => match root_for_message(runtime, message)? {
+                Some(id) => {
+                    let run = load_run(runtime, &id)?;
+                    if run.parent_session_id != parent {
+                        bail!("request target belongs to another PM session");
+                    }
+                    Some(run)
+                }
+                None => None,
+            },
+            None => None,
+        },
     };
     if let Some(previous) = previous {
         let root = load_run(runtime, group_id(&previous))?;

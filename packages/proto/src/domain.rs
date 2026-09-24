@@ -2311,10 +2311,17 @@ pub struct SupportDiagnostics {
     pub uptime_seconds: u64,
     pub hub_state: String,
     pub remote_state: String,
-    /// Milliseconds since the Workflow scheduler last completed a patrol pass.
+    /// Milliseconds since the Workflow scheduler last completed a scan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub workflow_patrol_lag_ms: Option<u64>,
+    /// Queued and running Workflow patrol jobs on this daemon.
+    #[serde(default)]
+    pub workflow_patrol_active_jobs: u32,
+    /// Age of the oldest queued or running patrol job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub workflow_patrol_oldest_job_ms: Option<u64>,
     pub events: Vec<SupportDiagnosticEvent>,
     #[ts(type = "number")]
     pub dropped_events: u64,

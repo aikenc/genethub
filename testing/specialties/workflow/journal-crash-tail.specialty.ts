@@ -8,8 +8,8 @@ import { defineSpecialty } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.workflow.journal-crash-tail",
   title: "Workflow journal discards crash tails and retains seven UTC days",
-  oracle: "only committed bytes survive a crash and day rotation prunes segments outside the seven-day window",
-  catches: ["a crash tail appears as committed history", "retry duplicates a journal sequence", "old journal segments remain after rotation"],
+  oracle: "only committed bytes survive a crash and both active and settled Runs lose segments outside the seven-day window",
+  catches: ["a crash tail appears as committed history", "retry duplicates a journal sequence", "old journal segments remain after rotation", "settled Run logs are skipped by daily pruning"],
   tags: ["contract", "workflow", "storage", "native-intrinsic"],
   llm: { default: "none" },
   expectedDurationMs: 30_000,
@@ -23,7 +23,8 @@ defineSpecialty({
     "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,
     "--", "--nocapture",
   ], { cwd: t.openRoot, timeout: 160_000, maxBuffer: 4 * 1024 * 1024 });
-  t.assertions.assert(stdout.includes("test result: ok. 6 passed; 0 failed"),
+  const result = stdout.match(/test result: ok\. (\d+) passed; 0 failed/);
+  t.assertions.assert(result != null && Number(result[1]) === 7,
     `journal crash and retention tests did not pass: ${stdout.slice(-2000)}`);
   const generated = await mkdtemp(join(t.env.root, "workflow-journal-proto-"));
   const binding = await promisify(execFile)("cargo", [

@@ -39,7 +39,7 @@ pub(crate) use authoring::procedures_schema as authoring_procedures_schema;
 pub(crate) use authoring::schema as authoring_schema;
 pub(crate) use check::check;
 pub(crate) use control::{
-    budget, cancel, maintain, patrol_lag_ms, recover, start_assigned, summarize_sessions, validate_input_target,
+    budget, cancel, maintain, patrol_jobs, patrol_lag_ms, recover, start_assigned, summarize_sessions, validate_input_target,
 };
 
 const MAX_SOURCE_BYTES: u64 = 256 * 1024;
@@ -448,9 +448,7 @@ async fn resolve_role_route(state: &Shared, role: &RoleSnapshot) -> Result<Resol
 }
 
 fn is_route_unavailable(error: &anyhow::Error) -> bool {
-    let detail = format!("{error:#}");
-    detail.contains("workflowTagRouteUnavailable")
-        || detail.contains("agentTagRouteUnavailable")
+    error.downcast_ref::<crate::agent_routing::RouteUnavailable>().is_some()
 }
 
 async fn resolve_role_route_excluding(
@@ -482,12 +480,15 @@ async fn resolve_role_route_excluding(
         excluded,
     )
         .await
-        .with_context(|| {
-            format!(
+        .map_err(|error| {
+            if error.downcast_ref::<crate::agent_routing::RouteUnavailable>().is_none() {
+                return error;
+            }
+            error.context(format!(
                 "workflowTagRouteUnavailable: 角色 {} 需要标签「{}」；Workflow 已阻塞，请人类修复机器全局 Agent 配置后重试",
                 role.id,
                 tags.join(" + ")
-            )
+            ))
         })
 }
 
@@ -975,6 +976,8 @@ impl RunRecord {
 struct RunIndex {
     schema: String,
     run_id: String,
+    #[serde(default)]
+    package_id: String,
     snapshot_relative: String,
     status: String,
     revision: u64,
@@ -1844,10 +1847,7 @@ pub(crate) async fn start_recovery(
     let runtime = RuntimeStore::for_package(&state.paths.root, workspace_id, &workspace.root, &package_id)?;
     let package_guard_id = format!("recovery-package-{}", &hex_digest(package_id.as_bytes())[..32]);
     let _package_recovery = lock_run(&runtime, &package_guard_id)?;
-    if all_runs(&runtime)?.iter().any(|run| run.package_id == package_id
-        && !run.handles.is_empty()
-        && matches!(run.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable"))
-    {
+    if package_has_active_recovery(&runtime, &package_id)? {
         bail!("recoveryQueueBusy: package {package_id} already has an active recovery Run");
     }
     let group = request_runs(&runtime, request::group_id(&target))?;
@@ -1996,6 +1996,9 @@ pub(crate) async fn dispatch(
     if recovery_handle.is_none() {
         request::admit(state, &runtime, parent_session_id, &request, resume_cancelled).await?;
     }
+    // A settled request may gain a successor. Invalidate its patrol marker
+    // before reserving a Session or Run directory, including crash windows.
+    invalidate_settled_marker(&runtime, &request.root_run_id)?;
     let _execution_guard = lock_project_execution(&runtime)?;
     let builtin_recovery = recovery_handle.is_some() && workflow_id == "builtin-recovery";
     let (active, activation_revision) = match dispatch_candidate(&workspace.root, &runtime) {
@@ -2302,17 +2305,33 @@ pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<Workflow
             .then_with(|| right.id.cmp(&left.id))
     });
     runs.truncate(limit);
-    runs.iter().map(|run| run_status(runtime, run)).collect()
+    let mut visible = Vec::new();
+    for run in &runs {
+        match run_status(runtime, run) {
+            Ok(status) => visible.push(status),
+            Err(error) => tracing::error!(run = %run.id, %error,
+                "Workflow Run cannot be projected; other requests remain visible"),
+        }
+    }
+    Ok(visible)
 }
 
-fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
+struct RunScan {
+    runs: Vec<RunRecord>,
+    unreadable: Vec<(String, String)>,
+}
+
+/// Project listings are observational. A damaged request must remain visible
+/// to `workflow check`, while healthy requests remain queryable.
+fn scan_runs(runtime: &RuntimeStore) -> Result<RunScan> {
     let directory = runtime.directory(Path::new("runs"), false)?;
     let listing = match fs::read_dir(&directory) {
         Ok(listing) => listing,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(RunScan { runs: Vec::new(), unreadable: Vec::new() }),
         Err(error) => return Err(error).context("读取 Workflow Run history"),
     };
     let mut runs = Vec::new();
+    let mut unreadable = Vec::new();
     for item in listing {
         let path = item?.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
@@ -2321,9 +2340,59 @@ fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
         let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        runs.push(load_run(runtime, run_id)?);
+        match load_run(runtime, run_id) {
+            Ok(run) => runs.push(run),
+            Err(error) => {
+                tracing::error!(%run_id, %error, "Workflow Run is unreadable; other requests remain visible");
+                unreadable.push((run_id.to_string(), format!("{error:#}")));
+            }
+        }
     }
-    Ok(runs)
+    Ok(RunScan { runs, unreadable })
+}
+
+fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
+    Ok(scan_runs(runtime)?.runs)
+}
+
+/// Admission stays fail-closed for the affected package. The locator carries
+/// immutable package identity, so damage in another package cannot prevent
+/// recovery here; matching snapshots are still read strictly, including when
+/// a locator is behind the committed snapshot.
+fn package_has_active_recovery(runtime: &RuntimeStore, package_id: &str) -> Result<bool> {
+    let directory = runtime.directory(Path::new("runs"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("读取 Workflow Run locator 目录"),
+    };
+    for item in listing {
+        let path = item?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else { continue; };
+        validate_id(run_id, "run id")?;
+        let metadata = crate::config::sensitive_metadata(&path)?;
+        crate::config::reject_link_or_reparse(&path, &metadata)?;
+        if !metadata.is_file() { bail!("Workflow Run locator 不是普通文件：{}", path.display()); }
+        ensure_record_size("Workflow Run locator", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+        let index: RunIndex = serde_json::from_slice(&fs::read(&path)?)
+            .with_context(|| format!("读取 Workflow Run locator：{}", path.display()))?;
+        if index.schema != RUN_INDEX_SCHEMA || index.run_id != run_id {
+            bail!("Workflow Run locator identity mismatch：{}", path.display());
+        }
+        if !index.package_id.is_empty() && index.package_id != package_id { continue; }
+        // A terminal Run never reopens under the same id. The locator commits
+        // after the snapshot, so a terminal locator cannot hide active work.
+        if matches!(index.status.as_str(), "completed" | "cancelled") { continue; }
+        let run = load_run(runtime, run_id)?;
+        if run.package_id == package_id && !run.handles.is_empty()
+            && matches!(run.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Patrol reads authoritative PM request directories, never the project-wide
@@ -2341,6 +2410,9 @@ fn maintenance_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
         let Some(request_id) = item.file_name().to_str().map(str::to_string) else {
             continue;
         };
+        if settled_marker_valid(runtime, &request_id) {
+            continue;
+        }
         match request_runs(runtime, &request_id) {
             Ok(group) => runs.extend(group),
             Err(error) => tracing::error!(%request_id, %error,
@@ -2348,6 +2420,78 @@ fn maintenance_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
         }
     }
     Ok(runs)
+}
+
+fn settled_marker_path(runtime: &RuntimeStore, request_id: &str) -> Result<PathBuf> {
+    validate_id(request_id, "request id")?;
+    Ok(runtime.directory(&Path::new("requests").join(request_id), false)?.join("settled"))
+}
+
+fn settled_marker_valid(runtime: &RuntimeStore, request_id: &str) -> bool {
+    let result = (|| -> Result<bool> {
+        let path = settled_marker_path(runtime, request_id)?;
+        let metadata = match crate::config::sensitive_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        crate::config::reject_link_or_reparse(&path, &metadata)?;
+        if !metadata.is_file() || metadata.len() > 128 { bail!("invalid Workflow settled marker"); }
+        Ok(fs::read(&path)? == format!("genehub.workflow.settled.v1:{request_id}\n").as_bytes())
+    })();
+    match result {
+        Ok(valid) => valid,
+        Err(error) => {
+            tracing::warn!(%request_id, %error, "Workflow settled marker is unusable; scanning request");
+            false
+        }
+    }
+}
+
+fn invalidate_settled_marker(runtime: &RuntimeStore, request_id: &str) -> Result<()> {
+    match fs::remove_file(settled_marker_path(runtime, request_id)?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("移除 Workflow settled marker"),
+    }
+}
+
+fn mark_settled_if_quiescent(runtime: &RuntimeStore, run: &RunRecord) {
+    if !matches!(run.status.as_str(), "completed" | "cancelled" | "blocked" | "failed")
+        || supervision::report_pending(run) { return; }
+    let request_id = request::group_id(run);
+    let result = (|| -> Result<()> {
+        let group = request_runs(runtime, request_id)?;
+        if request_is_quiescent(&group)
+            && group.iter().try_fold(true, |clear, item| {
+                let exit = recovery::read_human_exit(runtime, item)?;
+                Ok::<bool, anyhow::Error>(clear && exit.is_none_or(|exit| exit.answer.is_some()))
+            })? {
+            crate::config::save_private(
+                &settled_marker_path(runtime, request_id)?,
+                format!("genehub.workflow.settled.v1:{request_id}\n").as_bytes(),
+            )?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%request_id, %error, "Workflow settled marker remains pending");
+    }
+}
+
+fn request_is_quiescent(group: &[RunRecord]) -> bool {
+    let Some(root) = group.iter().find(|run| run.id == request::group_id(run)) else { return false; };
+    if group.iter().any(|run| matches!(run.status.as_str(), "running" | "stopping" | "cancelling" | "recoverable")
+        || (!run.handles.is_empty() && run.status == "blocked")
+        || supervision::report_pending(run)) {
+        return false;
+    }
+    if request::cancelled(root) { return true; }
+    let business = group.iter().filter(|run| run.handles.is_empty()).collect::<Vec<_>>();
+    if business.is_empty() { return false; }
+    let predecessors = business.iter().filter_map(|run| run.request.as_ref().and_then(|link| link.retry_of.as_deref()))
+        .collect::<BTreeSet<_>>();
+    business.iter().filter(|run| !predecessors.contains(run.id.as_str())).all(|run| run.status == "completed")
 }
 
 /// A strict, request-local read for admission and takeover. An unrelated
@@ -2419,7 +2563,9 @@ pub async fn executor_flow(
     let project_id = state.workspaces.project_root(&workspace_id).await?;
     let project = state.workspaces.project_entry(&project_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, &project_id, &project.root)?;
-    let mut runs = maintenance_runs(&runtime)?
+    // A completed Executor Session still has a queryable flow. Patrol skips
+    // settled requests, but this explicit session query must include them.
+    let mut runs = all_runs(&runtime)?
         .into_iter()
         .filter(|run| run.executor_session_id.as_deref() == Some(executor_session_id))
         .collect::<Vec<_>>();
@@ -2917,13 +3063,11 @@ async fn activate(
                             Some(format!("{} · {}", run.task_id, role.id)),
                             managed,
                             system_prompt,
-                            run.engine.as_ref().map(|_| {
-                                structured::session_id_for_attempt(
-                                    &run.id,
-                                    &node.id,
-                                    run.nodes.get(&node.id).map_or(0, |record| record.attempt),
-                                )
-                            }),
+                            Some(structured::session_id_for_attempt(
+                                &run.id,
+                                &node.id,
+                                run.nodes.get(&node.id).map_or(0, |record| record.attempt),
+                            )),
                         )
                         .await?;
                     let record = run.nodes.get_mut(&node.id).expect("validated node");
@@ -4625,6 +4769,9 @@ fn save_run_with_journal_time(runtime: &RuntimeStore, run: &RunRecord, journal_n
 
 fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journal_now_ms: i64, segment_limit: u64) -> Result<()> {
     require_request_writer(runtime, run)?;
+    if run.snapshot_relative.is_some() {
+        invalidate_settled_marker(runtime, request::group_id(run))?;
+    }
     let mut stored = run.clone();
     if matches!(stored.status.as_str(), "stopping" | "cancelling") {
         if let Some(stop) = stored.stop.as_mut() {
@@ -4702,6 +4849,7 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
     let index = RunIndex {
         schema: RUN_INDEX_SCHEMA.into(),
         run_id: run.id.clone(),
+        package_id: run.package_id.clone(),
         snapshot_relative: snapshot_relative.to_string(),
         status: run.status.clone(),
         revision: run.revision,
@@ -4714,6 +4862,7 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
     if matches!(run.status.as_str(), "completed" | "cancelled") {
         release_request_writer_if_resolved(runtime, run)?;
     }
+    mark_settled_if_quiescent(runtime, run);
     // session.flow reads delivery_queue from this authoritative snapshot.
     Ok(())
 }
@@ -4799,6 +4948,7 @@ fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
     let mut run = decode_run_record(&fs::read(&snapshot)?)
         .with_context(|| format!("读取 Executor Session Run snapshot：{}", snapshot.display()))?;
     if run.id != index.run_id
+        || (!index.package_id.is_empty() && run.package_id != index.package_id)
         || run.revision < index.revision
         || run.executor_workspace_id != index.executor_workspace_id
         || run.executor_session_id != index.executor_session_id
@@ -5252,6 +5402,14 @@ mod tests {
 
     const TEST_PACKAGE: &str = "local";
 
+    #[test]
+    fn route_classification_uses_error_type_through_context() {
+        let unavailable = anyhow::Error::new(crate::agent_routing::RouteUnavailable("route changed".into()))
+            .context("Workflow node dispatch failed");
+        assert!(is_route_unavailable(&unavailable));
+        assert!(!is_route_unavailable(&anyhow!("agentTagRouteUnavailable is merely quoted text")));
+    }
+
     fn test_runtime(root: &Path) -> RuntimeStore {
         RuntimeStore::for_package(root, "workspace", root, TEST_PACKAGE).unwrap()
     }
@@ -5456,6 +5614,64 @@ mod tests {
         let snapshot = request::observation(&[root.clone(), recovery], &root, 3).unwrap();
         assert_eq!(snapshot.used_runs, 1);
         assert_eq!(snapshot.remaining_runs, snapshot.budget.max_runs - 1);
+    }
+
+    #[test]
+    fn settled_request_accepts_blocked_ancestor_only_after_completed_successor() {
+        let root: RunRecord = serde_json::from_value(serde_json::json!({
+            "request": {"originalMessageId": "m_1", "rootRunId": "wr_root"},
+            "id": "wr_root", "workspaceId": "workspace", "parentSessionId": "s_pm",
+            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "deliver", "status": "blocked", "revision": 1,
+            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 2
+        })).unwrap();
+        assert!(!request_is_quiescent(&[root.clone()]));
+        let mut successor = root.clone();
+        successor.id = "wr_successor".into();
+        successor.request.as_mut().unwrap().retry_of = Some(root.id.clone());
+        successor.status = "completed".into();
+        assert!(request_is_quiescent(&[root.clone(), successor.clone()]));
+        successor.status = "blocked".into();
+        assert!(!request_is_quiescent(&[root.clone(), successor]));
+        let mut recovery = root.clone();
+        recovery.id = "wr_recovery".into();
+        recovery.handles.push(recovery::Handle {
+            run_id: root.id.clone(), trigger_seq: 1, reason: "failure".into(),
+        });
+        let mut successful = root.clone();
+        successful.id = "wr_successor".into();
+        successful.request.as_mut().unwrap().retry_of = Some(root.id.clone());
+        successful.status = "completed".into();
+        assert!(!request_is_quiescent(&[root, recovery, successful]));
+    }
+
+    #[test]
+    fn settled_request_skips_patrol_but_remains_in_history() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        seed_package(project.path());
+        let runtime = RuntimeStore::new(data.path(), "workspace", project.path()).unwrap();
+        let mut run: RunRecord = serde_json::from_value(serde_json::json!({
+            "request": {"originalMessageId": "m_1", "rootRunId": "wr_root"},
+            "id": "wr_root", "workspaceId": "workspace", "parentSessionId": "s_pm",
+            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "deliver", "status": "completed", "revision": 1,
+            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 2
+        })).unwrap();
+        run.package_id = TEST_PACKAGE.into();
+        run.snapshot_relative = Some(pm_snapshot_relative(&runtime, &run.id, &run.id).unwrap());
+        supervision::prepare_notice(&mut run, "completed");
+        for notice in &mut run.supervision.notices {
+            notice.accepted = true;
+            notice.handled = true;
+        }
+        assert!(claim_request_writer(&runtime, &run).unwrap());
+        save_run(&runtime, &run).unwrap();
+        assert!(settled_marker_valid(&runtime, &run.id));
+        assert!(maintenance_runs(&runtime).unwrap().is_empty());
+        assert_eq!(all_runs(&runtime).unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), ["wr_root"]);
     }
 
     #[test]

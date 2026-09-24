@@ -26,11 +26,12 @@ pub(crate) async fn check(
         });
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
-    let runs = if let Some(id) = run_id {
-        vec![load_run(&runtime, id)?]
+    let scan = if let Some(id) = run_id {
+        RunScan { runs: vec![load_run(&runtime, id)?], unreadable: Vec::new() }
     } else {
-        all_runs(&runtime)?
+        scan_runs(&runtime)?
     };
+    let runs = scan.runs;
     let all = if run_id.is_some() {
         request_runs(&runtime, request::group_id(&runs[0]))?
     } else {
@@ -42,6 +43,15 @@ pub(crate) async fn check(
         runs: Vec::new(),
         draft: None,
     };
+    for (id, detail) in scan.unreadable {
+        report.findings.push(WorkflowFinding {
+            run_id: id,
+            node_id: None,
+            code: "runUnreadable".into(),
+            severity: "error".into(),
+            detail: detail.chars().take(2048).collect(),
+        });
+    }
     for run in runs {
         let mut finding = |node_id: Option<String>, code: &str, severity: &str, detail: String| {
             report.findings.push(WorkflowFinding {
@@ -182,7 +192,13 @@ pub(crate) async fn check(
             .iter()
             .filter(|other| request::group_id(other) == request::group_id(&run))
             .collect::<Vec<_>>();
-        let snapshot = request::observation(&all, &run, now_ms())?;
+        let snapshot = match request::observation(&all, &run, now_ms()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                finding(None, "requestUnreadable", "error", format!("请求预算无法读取：{error:#}"));
+                continue;
+            }
+        };
         let tokens = group
             .iter()
             .flat_map(|run| request::activities(run))
@@ -210,7 +226,10 @@ pub(crate) async fn check(
                 ),
             );
         }
-        report.runs.push(run_status(&runtime, &run)?);
+        match run_status(&runtime, &run) {
+            Ok(status) => report.runs.push(status),
+            Err(error) => finding(None, "requestUnreadable", "error", format!("Run 状态无法读取：{error:#}")),
+        }
     }
     Ok(report)
 }

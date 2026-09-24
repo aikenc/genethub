@@ -949,6 +949,8 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         "daemon": {
             "version": hello.daemon_version,
             "workflowPatrolLagMs": crate::workflow::patrol_lag_ms(),
+            "workflowPatrolActiveJobs": crate::workflow::patrol_jobs().0,
+            "workflowPatrolOldestJobMs": crate::workflow::patrol_jobs().1,
             "webProtocol": hello.web_protocol,
             "machineId": hello.machine_id,
             "machineName": hello.machine_name,

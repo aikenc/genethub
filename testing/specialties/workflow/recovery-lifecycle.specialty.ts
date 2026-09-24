@@ -371,15 +371,26 @@ defineSpecialty({
     "PM-selected recovery branch used the wrong Candidate identity");
     const archive = path.join(opened.workspaceRoot, ".genethub/components/executor/recoveries.jsonl");
     t.assertions.assert(existsSync(archive), "recovery summary was not written");
-    const summaries = readFileSync(archive, "utf8").trim().split("\n").map(line => JSON.parse(line) as { runId: string; handledRunId: string; result: string });
+    const summaries = readFileSync(archive, "utf8").trim().split("\n").map(line => JSON.parse(line) as { runId: string; handledRunId: string; result: string; repair: string });
     t.assertions.assert(summaries.filter(summary => summary.runId === recovery!.id).length === 1
       && summaries.some(summary => summary.runId === recovery!.id && summary.handledRunId === originalId && summary.result === "completed"),
     "recovery archive did not record one successful handled Run");
+    if (mode === "normal") t.assertions.assert(summaries.some(summary => summary.runId === recovery!.id
+      && summary.repair.includes("changes=activated")),
+    "recovery archive lost submitted intervention evidence");
     const daemonStatus = await runGenetAsync(opened.daemon.genet, ["daemon", "status"], opened.daemon.env, { cwd: opened.workspaceRoot });
     t.assertions.assert(daemonStatus.code === 0, "daemon status was unavailable after patrol");
-    const status = JSON.parse(daemonStatus.stdout) as { workflowPatrolLagMs?: number };
+    const status = JSON.parse(daemonStatus.stdout) as {
+      workflowPatrolLagMs?: number;
+      workflowPatrolActiveJobs?: number;
+      workflowPatrolOldestJobMs?: number | null;
+    };
     t.assertions.assert(typeof status.workflowPatrolLagMs === "number" && status.workflowPatrolLagMs < 30_000,
       "daemon status omitted the Workflow patrol heartbeat");
+    t.assertions.assert(typeof status.workflowPatrolActiveJobs === "number"
+      && status.workflowPatrolActiveJobs >= 0
+      && (status.workflowPatrolOldestJobMs == null || status.workflowPatrolOldestJobMs >= 0),
+    "daemon status omitted pending patrol work");
   } catch (error) {
     const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 20 } }).catch(() => null);
     const reviewerReply = reviewerId ? await opened.client.call({ type: "session.get", payload: { sessionId: reviewerId } }).catch(() => null) : null;

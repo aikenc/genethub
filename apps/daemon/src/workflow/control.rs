@@ -713,8 +713,16 @@ pub(crate) async fn budget(
     run_status(&runtime, &root)
 }
 
-static RECONCILING: LazyLock<Mutex<BTreeSet<PathBuf>>> =
-    LazyLock::new(|| Mutex::new(BTreeSet::new()));
+static RECONCILING: LazyLock<Mutex<BTreeMap<PathBuf, i64>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// Includes jobs waiting for a semaphore as well as jobs inside the patrol.
+pub(crate) fn patrol_jobs() -> (u32, Option<u64>) {
+    let Ok(jobs) = RECONCILING.lock() else { return (0, None); };
+    let oldest = jobs.values().min().copied();
+    (jobs.len().min(u32::MAX as usize) as u32,
+        oldest.map(|started| now_ms().saturating_sub(started).max(0) as u64))
+}
 // Bound simultaneous reconciliation work without discarding requests beyond
 // the old global 64-job cutoff. Every request remains queued for a patrol.
 static RECONCILE_PERMITS: LazyLock<tokio::sync::Semaphore> =
@@ -760,14 +768,9 @@ pub(crate) async fn maintain(state: &Shared) {
             .map(|days| days.get(&runtime.project_root).copied() != Some(utc_day))
             .unwrap_or(true);
         if prune_logs {
-            let mut pruned = true;
-            for run in &runs {
-                if let Err(error) = journal::prune(&runtime, run, now) {
-                    pruned = false;
-                    tracing::warn!(run = %run.id, %error, "workflow journal retention remains pending");
-                }
-            }
-            if pruned {
+            if let Err(error) = journal::prune_project(&runtime, now) {
+                tracing::warn!(%error, "workflow journal retention remains pending");
+            } else {
                 if let Ok(mut days) = LAST_JOURNAL_PRUNE_DAYS.lock() {
                     days.insert(runtime.project_root.clone(), utc_day);
                 }
@@ -828,7 +831,13 @@ pub(crate) async fn maintain(state: &Shared) {
             let key = runtime.root.join(&run.id);
             let inserted = RECONCILING
                 .lock()
-                .map(|mut jobs| jobs.insert(key.clone()))
+                .map(|mut jobs| match jobs.entry(key.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(now_ms());
+                        true
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => false,
+                })
                 .unwrap_or(false);
             if !inserted {
                 continue;
@@ -862,7 +871,7 @@ pub(crate) async fn maintain(state: &Shared) {
                         Ok(true) => return,
                         Ok(false) => {}
                         Err(error) => {
-                            if format!("{error:#}").contains("recoveryBudgetExceeded") {
+                            if error.downcast_ref::<recovery::RecoveryBudgetExceeded>().is_some() {
                                 if let Ok(current) = load_run(&runtime, &run.id) {
                                     if let Err(handoff) = recovery::ensure_human_exit(&owner, &runtime, &current, "c", None).await {
                                         tracing::warn!(run = %run.id, %handoff, "recovery budget Human exit remains pending");
@@ -886,8 +895,17 @@ pub(crate) async fn maintain(state: &Shared) {
                         tracing::warn!(run = %run.id, %error, "workflow PM handoff remains pending");
                     }
                 };
-                if tokio::time::timeout(Duration::from_secs(300), patrol).await.is_err() {
-                    tracing::error!(run = %run.id, "workflow patrol job timed out; next tick will retry");
+                // Cancelling this future can discard a pack.script result after
+                // its external side effect but before the Run commit. Keep the
+                // per-job deadline as a visible watchdog; the declared script
+                // timeout and request budget own execution termination.
+                tokio::pin!(patrol);
+                tokio::select! {
+                    _ = &mut patrol => {},
+                    _ = tokio::time::sleep(Duration::from_secs(300)) => {
+                        tracing::error!(run = %run.id, "workflow patrol job exceeded 300 seconds; waiting for a durable outcome");
+                        patrol.await;
+                    }
                 }
             });
         }

@@ -293,9 +293,10 @@ fn archive_with_result(runtime: &super::RuntimeStore, run: &super::RunRecord, re
     let target = super::load_run(&scoped, &handle.run_id)?;
     let cause = run.nodes.values().filter_map(|node| node.reason.as_deref())
         .collect::<Vec<_>>().join("; ");
-    let repair = run.nodes.iter().filter(|(id, _)| id.contains("repair"))
-        .flat_map(|(_, node)| node.evidence.values()).map(String::as_str)
-        .collect::<Vec<_>>().join("; ");
+    // A custom recovery can name its repair node anything. Preserve bounded
+    // submitted evidence with its node and key instead of guessing meaning
+    // from an id; the archive is context, never an instruction source.
+    let repair = recovery_evidence(run);
     let after_digest = super::dispatch_candidate(&runtime.project_root, &scoped)
         .ok().map(|(candidate, _)| candidate.digest);
     let summary = Summary {
@@ -307,6 +308,12 @@ fn archive_with_result(runtime: &super::RuntimeStore, run: &super::RunRecord, re
         result: result.into(), journal_run_id: run.id.clone(), journal_seq: run.journal_seq,
     };
     append_summary(&dir, &summary)
+}
+
+fn recovery_evidence(run: &super::RunRecord) -> String {
+    run.nodes.iter().flat_map(|(id, node)| node.evidence.iter()
+        .map(move |(key, value)| format!("{id}.{key}={value}")))
+        .collect::<Vec<_>>().join("; ")
 }
 
 fn append_summary(dir: &Path, summary: &Summary) -> Result<()> {
@@ -361,6 +368,21 @@ mod tests {
         let record = summary("r1", "symptom".into());
         append_summary(dir.path(), &record).unwrap();
         assert_eq!(latest_in(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn custom_node_name_keeps_submitted_repair_evidence() {
+        let mut run: super::super::RunRecord = serde_json::from_value(serde_json::json!({
+            "id": "wr_custom", "workspaceId": "workspace", "parentSessionId": "s_pm",
+            "workflowId": "custom-recovery", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "recover", "status": "completed", "revision": 1,
+            "definition": {"schema": "genehub.workflow.definition.v1", "id": "custom-recovery", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {"fix-process": {"uses": "agent.session", "status": "completed", "evidence": {"changes": "activated"}}},
+            "leases": {}, "createdAtMs": 1, "updatedAtMs": 2
+        })).unwrap();
+        assert_eq!(recovery_evidence(&run), "fix-process.changes=activated");
+        run.nodes.clear();
+        assert!(recovery_evidence(&run).is_empty());
     }
 
     #[test]
@@ -482,16 +504,25 @@ pub(super) fn validate_contract(definition: &super::WorkflowDefinition) -> Resul
 pub(super) fn admit(runtime: &super::RuntimeStore, target: &super::RunRecord, budget: &RecoveryBudget, now: i64) -> Result<u32> {
     let usage = observe_budget(runtime, target, budget, now)?;
     if usage.runs >= usage.limits.max_runs {
-        bail!("recoveryBudgetExceeded: request has used all {} recovery Runs", usage.limits.max_runs);
+        bail!(RecoveryBudgetExceeded(format!("recoveryBudgetExceeded: request has used all {} recovery Runs", usage.limits.max_runs)));
     }
     if usage.rounds >= usage.limits.max_llm_rounds {
-        bail!("recoveryBudgetExceeded: request has exhausted recovery LLM rounds");
+        bail!(RecoveryBudgetExceeded("recoveryBudgetExceeded: request has exhausted recovery LLM rounds".into()));
     }
     if usage.execution_ms >= usage.limits.deadline_seconds.saturating_mul(1000) {
-        bail!("recoveryBudgetExceeded: request has exhausted recovery execution time");
+        bail!(RecoveryBudgetExceeded("recoveryBudgetExceeded: request has exhausted recovery execution time".into()));
     }
     Ok(usage.runs.saturating_add(1))
 }
+
+#[derive(Debug)]
+pub(super) struct RecoveryBudgetExceeded(pub String);
+
+impl std::fmt::Display for RecoveryBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.0) }
+}
+
+impl std::error::Error for RecoveryBudgetExceeded {}
 
 struct BudgetObservation {
     limits: RecoveryBudget,

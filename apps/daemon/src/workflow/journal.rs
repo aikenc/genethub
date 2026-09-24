@@ -92,9 +92,38 @@ fn prune_directory(directory: &Path, at_ms: i64) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn prune(runtime: &RuntimeStore, run: &RunRecord, at_ms: i64) -> Result<()> {
-    if let Some(directory) = directory(runtime, run)? {
-        prune_directory(&directory, at_ms)?;
+/// Daily retention must include settled requests, which the frequent patrol
+/// deliberately skips. Locate segment directories without decoding Run JSON.
+pub(super) fn prune_project(runtime: &RuntimeStore, at_ms: i64) -> Result<()> {
+    let requests = runtime.directory(Path::new("requests"), false)?;
+    let listing = match fs::read_dir(&requests) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for request in listing {
+        let request = request?;
+        let metadata = crate::config::sensitive_metadata(&request.path())?;
+        crate::config::reject_link_or_reparse(&request.path(), &metadata)?;
+        if !metadata.is_dir() { continue; }
+        let request_id = request.file_name().to_string_lossy().to_string();
+        validate_id(&request_id, "request id")?;
+        let runs = runtime.directory(&Path::new("requests").join(&request_id).join("runs"), false)?;
+        let run_listing = match fs::read_dir(&runs) {
+            Ok(listing) => listing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for run in run_listing {
+            let run = run?;
+            let metadata = crate::config::sensitive_metadata(&run.path())?;
+            crate::config::reject_link_or_reparse(&run.path(), &metadata)?;
+            if !metadata.is_dir() { continue; }
+            let run_id = run.file_name().to_string_lossy().to_string();
+            validate_id(&run_id, "run id")?;
+            let run_path = runtime.directory(&Path::new("requests").join(&request_id).join("runs").join(&run_id), false)?;
+            prune_directory(&run_path, at_ms)?;
+        }
     }
     Ok(())
 }
@@ -417,6 +446,33 @@ mod tests {
         let events = read_at(&runtime, &second, 0, 10, eighth_day).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, 2);
+    }
+
+    #[test]
+    fn daily_prune_includes_settled_requests() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run = run(&runtime, "wr_settled");
+        run.request = Some(request::RequestLink {
+            original_message_id: "msg_settled".into(),
+            root_run_id: run.id.clone(),
+            budget: request::RequestBudget::default(),
+            retry_of: None,
+            cancelled: true,
+            cancelled_at_ms: 1,
+            cancelled_by_agent: false,
+            resume_message_id: None,
+        });
+        run.status = "cancelled".into();
+        let first_day = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z").unwrap().timestamp_millis();
+        save_run_with_journal_time(&runtime, &run, first_day).unwrap();
+        assert!(settled_marker_valid(&runtime, &run.id));
+        let stored = load_run(&runtime, &run.id).unwrap();
+        let segment = directory(&runtime, &stored).unwrap().unwrap().join(&stored.journal_segment);
+        assert!(segment.exists());
+        prune_project(&runtime, first_day + 7 * DAY_MS).unwrap();
+        assert!(!segment.exists());
     }
 
     #[test]

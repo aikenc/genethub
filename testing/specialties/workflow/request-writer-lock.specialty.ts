@@ -22,6 +22,8 @@ defineSpecialty({
     "workflow::tests::recovery_completion_keeps_request_writer_until_business_success",
     "workflow::tests::human_acceptance_settles_business_and_recovery_once",
     "workflow::tests::patrol_reads_each_request_without_project_locator_dependency",
+    "workflow::tests::settled_request_accepts_blocked_ancestor_only_after_completed_successor",
+    "workflow::tests::settled_request_skips_patrol_but_remains_in_history",
   ]) {
     const { stdout } = await promisify(execFile)("cargo", [
       "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,

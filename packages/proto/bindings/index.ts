@@ -1735,9 +1735,17 @@ count: number, };
  */
 export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, 
 /**
- * Milliseconds since the Workflow scheduler last completed a patrol pass.
+ * Milliseconds since the Workflow scheduler last completed a scan.
  */
-workflowPatrolLagMs?: number, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
+workflowPatrolLagMs?: number, 
+/**
+ * Queued and running Workflow patrol jobs on this daemon.
+ */
+workflowPatrolActiveJobs: number, 
+/**
+ * Age of the oldest queued or running patrol job.
+ */
+workflowPatrolOldestJobMs?: number, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.
