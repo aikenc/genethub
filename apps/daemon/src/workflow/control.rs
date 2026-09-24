@@ -660,6 +660,10 @@ pub(crate) async fn budget(
 
 static RECONCILING: LazyLock<Mutex<BTreeSet<PathBuf>>> =
     LazyLock::new(|| Mutex::new(BTreeSet::new()));
+// Bound simultaneous reconciliation work without discarding requests beyond
+// the old global 64-job cutoff. Every request remains queued for a patrol.
+static RECONCILE_PERMITS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(64));
 struct ReconcileJob(PathBuf);
 impl Drop for ReconcileJob {
     fn drop(&mut self) {
@@ -760,10 +764,12 @@ pub(crate) async fn maintain(state: &Shared) {
                     continue;
                 }
             }
+            // Retain per-Run de-duplication. The request writer and operation
+            // locks serialize mutations across its Run history.
             let key = runtime.root.join(&run.id);
             let inserted = RECONCILING
                 .lock()
-                .map(|mut jobs| jobs.len() < 64 && jobs.insert(key.clone()))
+                .map(|mut jobs| jobs.insert(key.clone()))
                 .unwrap_or(false);
             if !inserted {
                 continue;
@@ -774,6 +780,9 @@ pub(crate) async fn maintain(state: &Shared) {
             let owner = state.clone();
             state.workflow_tasks.spawn(async move {
                 let _job = job;
+                let Ok(_permit) = RECONCILE_PERMITS.acquire().await else {
+                    return;
+                };
                 let patrol = async {
                     let execution = async {
                         finish_nodes(&owner, &runtime, &run.id).await?;
