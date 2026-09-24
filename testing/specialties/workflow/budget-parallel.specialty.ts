@@ -19,11 +19,11 @@ function assignment(value: unknown): { key: string } | undefined {
   return undefined;
 }
 
-for (const scenario of ["observation", "retry", "entries", "entries-empty", "entries-type", "entries-limit", "entries-max", "parallel-restart", "parallel-sibling-lost", "parallel-failure", "parallel-double-failure", "parallel-human-wait"] as const) defineSpecialty({
+for (const scenario of ["observation", "retry", "budget-expiry", "entries", "entries-empty", "entries-type", "entries-limit", "entries-max", "parallel-restart", "parallel-sibling-lost", "parallel-failure", "parallel-double-failure", "parallel-human-wait"] as const) defineSpecialty({
   id: `specialty.workflow.budget-parallel.${scenario}`,
   title: `Budget observations and deterministic parallel data: ${scenario}`,
   oracle: "Public Run output preserves budget observations across amendments/restart and request retries; independently overlapping Workers reduce by stable keys, while host failures clean up and only a wholly waiting Run pauses execution time",
-  catches: ["budget read mutates limits", "restart refreshes a committed observation", "retry resets shared usage", "a fourth Run bypasses the shared limit", "stale budget revision overwrites PM", "entries depends on completion order", "entries accepts wrong types or unbounded data", "parallel work is serialized", "one Human wait exempts working siblings", "failure leaves live siblings", "one lost sibling silently continues a partially failed Run or replays a side effect"],
+  catches: ["budget read mutates limits", "restart refreshes a committed observation", "retry resets shared usage", "a fourth Run bypasses the shared limit", "structured budget expiry loses its PM handoff cause", "stale budget revision overwrites PM", "entries depends on completion order", "entries accepts wrong types or unbounded data", "parallel work is serialized", "one Human wait exempts working siblings", "failure leaves live siblings", "one lost sibling silently continues a partially failed Run or replays a side effect"],
   tags: ["core", "workflow", "structured-workflow", "budget-parallel"],
   llm: { default: "mock" }, expectedDurationMs: 20_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -41,7 +41,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
         const source = t.flows.main.seedDirectChangePackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "BUDGET_PARALLEL_WORKER: execute only the bound assignment and submit actual results.\n");
-    const budgetCase = scenario === "observation" || scenario === "retry";
+    const budgetCase = scenario === "observation" || scenario === "retry" || scenario === "budget-expiry";
     const pure = scenario.startsWith("entries-");
     const input = scenario === "entries-empty" ? {} : scenario === "entries-type" ? []
       : Object.fromEntries(Array.from({ length: scenario === "entries-limit" ? 4097 : 4096 }, (_, n) => [`k${n.toString().padStart(4, "0")}`, n]));
@@ -92,7 +92,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       if (scenario === "parallel-human-wait" && data.key === "a") return { tool: { name: "request_user_input", arguments: { questions: [{ id: "scope", header: "Scope", question: "Confirm this acceptance scope", options: [{ label: "yes", description: "Approve" }, { label: "no", description: "Decline" }] }] } } };
       const finish = (scenario === "parallel-failure" && data.key === "a") || scenario === "parallel-double-failure" ? '--outcome failed --reason "checker unavailable"'
         : `--output ${q(JSON.stringify({ passed: scenario !== "entries" || data.key !== "z" }))}`;
-      const barrier = scenario === "observation" || scenario === "parallel-human-wait" ? waitFile(release)
+      const barrier = scenario === "observation" || scenario === "budget-expiry" || scenario === "parallel-human-wait" ? waitFile(release)
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
@@ -117,6 +117,33 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
     const restart = async () => { opened.client.close(); await cli(["daemon", "stop"]); await cli(["daemon", "start"]); opened.client = await connectProductClient(daemonEndpoint(opened.daemon)); };
     await send("Execute the configured Workflow and retain its facts.");
     let before: WorkflowRequestBudgetSnapshot | undefined;
+    if (scenario === "budget-expiry") {
+      await t.tools.waitUntil(async () => !!(await current()) && existsSync(effect("budget")), 35_000);
+      const original = run!.id;
+      nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 0 --deadline-seconds 1`;
+      await send("Limit this request to one second of execution time.");
+      await t.tools.waitUntil(async () => (await current())?.requestBudget.revision === 1, 25_000);
+      await t.tools.waitUntil(async () => (await current())?.status === "blocked", 25_000);
+      const snapshotPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", original,
+        "runs", original, "run.json");
+      const saved = JSON.parse(readFileSync(snapshotPath, "utf8")) as { run: { stop?: { causeCode?: string }; updatedAtMs: number } };
+      t.assertions.assert(saved.run.stop?.causeCode === "requestBudget",
+        `structured budget expiry lost its PM handoff cause: ${saved.run.stop?.causeCode}`);
+      t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
+        "ordinary request budget expiry started a recovery Run");
+      opened.client.close();
+      await cli(["daemon", "stop"]);
+      // Advance only the persisted PM answer clock; the patrol must create
+      // the same Human feedback exit it creates for other budget blocks.
+      saved.run.updatedAtMs = Date.now() - 1_805_000;
+      writeFileSync(snapshotPath, JSON.stringify(saved));
+      await cli(["daemon", "start"]);
+      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+      await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.humanExit?.kind === "d", 25_000);
+      t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
+        "PM timeout created a recovery Run for a structured budget block");
+      return;
+    }
     if (scenario === "observation") {
       await t.tools.waitUntil(async () => !!(await current()) && existsSync(effect("budget")), 35_000);
       before = run!.nodes.find(n => n.uses === "request.budget")!.output as WorkflowRequestBudgetSnapshot;

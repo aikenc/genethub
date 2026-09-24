@@ -296,15 +296,18 @@ pub(crate) async fn start_assigned(
     let request_budget_exhausted =
         run.engine.is_some() && request::budget_exhausted(&runtime, &run, now_ms())?;
     if run.engine.is_some() && (deadline_reached || request_budget_exhausted) {
+        let (reason, cause) = if request_budget_exhausted && !run.handles.is_empty() {
+            ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
+        } else if request_budget_exhausted {
+            ("原始请求达到执行期限或 LLM 调用上限", "requestBudget")
+        } else {
+            ("结构化流程活动达到期限", "activityDeadline")
+        };
         request_stop_with_cause(
             &mut run,
             "blocked",
-            "流程或活动达到期限，或原始请求耗尽 LLM 调用上限".into(),
-            if request_budget_exhausted {
-                "requestBudget"
-            } else {
-                "activityDeadline"
-            },
+            reason.into(),
+            cause,
         );
         run.revision += 1;
         save_run(&runtime, &run)?;

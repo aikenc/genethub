@@ -118,7 +118,12 @@ pub(super) fn settled(run: &mut RunRecord, id: &str) -> Result<()> {
     }) {
         Ok(p) => p,
         Err(error) => {
-            control::request_stop(run, "blocked", format!("结构化执行快照无法恢复：{error:#}"));
+            control::request_stop_with_cause(
+                run,
+                "blocked",
+                format!("结构化执行快照无法恢复：{error:#}"),
+                "structuredSnapshotCorrupt",
+            );
             return Ok(());
         }
     };
@@ -178,10 +183,16 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         request::ensure_open(runtime, &run)?;
         if request::budget_exhausted(runtime, &run, now_ms())? {
-            control::request_stop(
+            let (reason, cause) = if run.handles.is_empty() {
+                ("原始请求达到执行期限或 LLM 调用上限", "requestBudget")
+            } else {
+                ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
+            };
+            control::request_stop_with_cause(
                 &mut run,
                 "blocked",
-                "原始请求达到执行期限或 LLM 调用上限".into(),
+                reason.into(),
+                cause,
             );
             run.revision += 1;
             save_run(runtime, &run)?;
@@ -193,10 +204,11 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
         }) {
             Ok(p) => p,
             Err(error) => {
-                control::request_stop(
+                control::request_stop_with_cause(
                     &mut run,
                     "blocked",
                     format!("结构化执行快照无法恢复：{error:#}"),
+                    "structuredSnapshotCorrupt",
                 );
                 run.revision += 1;
                 save_run(runtime, &run)?;
