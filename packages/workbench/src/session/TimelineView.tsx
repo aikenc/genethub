@@ -540,12 +540,15 @@ export function TimelineView({
             const liveTurn =
               index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
             const processItems = processItemsOf(turn);
+            const provisional =
+              startedRounds.length === 0 &&
+              shouldOccupyProcessCard(turn, liveTurn, layerReady);
             const narrative = turnNarrativeItems(
               turn,
               hasRound,
               layerReady,
               absorbedCompactions,
-            );
+            ).filter((item) => !(provisional && item.type === "compaction"));
             // A turn still in flight is not selectable: its items are still
             // being written, and a capsule built from them would go stale
             // before it was ever reviewed.
@@ -631,7 +634,7 @@ export function TimelineView({
                 {startedRounds.map((startedRound) => (
                   <RoundProgress
                     key={startedRound.roundId}
-                    round={startedRound}
+                    round={settledRound(startedRound, state.items)}
                     finalSummaryText={roundFinalText}
                     processItems={processItems}
                     live={liveTurn}
@@ -639,10 +642,13 @@ export function TimelineView({
                     turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ))}
-                {startedRounds.length === 0 &&
-                shouldOccupyProcessCard(turn, liveTurn, layerReady) ? (
+                {provisional ? (
                   <ProvisionalProcess
                     items={processItems}
+                    compactions={turn.items.filter(
+                      (item): item is Extract<TimelineItem, { type: "compaction" }> =>
+                        item.type === "compaction",
+                    )}
                     live={liveTurn}
                     usage={state.usage ?? undefined}
                     turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
@@ -691,6 +697,7 @@ export function TimelineView({
                     liveUsage={state.usage ?? undefined}
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
+                    hideElapsed={provisional}
                     agentLabel={liveRuntimeLabels.agent}
                     modelLabel={liveRuntimeLabels.model}
                     canFork={canFork}
@@ -720,7 +727,7 @@ export function TimelineView({
           .map((round) => (
             <RoundProgress
               key={round.roundId}
-              round={round}
+              round={settledRound(round, state.items)}
               liveUsage={state.usage ?? undefined}
               turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
             />
@@ -1175,6 +1182,16 @@ function processItemsOf(
  * daemon's trunk grouping may arrive later; until then the same chrome holds
  * the event-stream items so they never paint as a flat narrative first.
  */
+/** A still-running round belongs to an earlier request once a later user message exists. */
+function settledRound(round: RoundSummary, items: TimelineItem[]): RoundSummary {
+  if (round.outcome !== "running" || !round.userItemId) return round;
+  const at = items.findIndex((item) => item.id === round.userItemId);
+  if (at < 0) return round;
+  const followed = items.slice(at + 1).some((item) => item.type === "userMessage");
+  if (!followed) return round;
+  return { ...round, outcome: "completed", endedAtMs: round.endedAtMs || round.startedAtMs };
+}
+
 function shouldOccupyProcessCard(
   turn: TurnBlock,
   liveTurn: boolean,
@@ -1440,11 +1457,13 @@ function TurnBodyGallery({
 
 function ProvisionalProcess({
   items,
+  compactions = [],
   live,
   usage,
   turnStartedAtMs,
 }: {
   items: TimelineItem[];
+  compactions?: Extract<TimelineItem, { type: "compaction" }>[];
   live: boolean;
   usage?: Usage;
   turnStartedAtMs?: number;
@@ -1453,6 +1472,12 @@ function ProvisionalProcess({
   const title = provisionalProcessTitle(items, live);
   const { open, toggle } = useCardOpen(live);
   const summary = liveProcessSummary(items, blobs.length, usage, turnStartedAtMs);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!live || turnStartedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [live, turnStartedAtMs]);
   return (
     <div className="space-y-2" data-testid="round-progress">
       <div
@@ -1476,12 +1501,20 @@ function ProvisionalProcess({
           ) : (
             <span className="shrink-0 text-xs text-muted">{blobs.length} 项</span>
           )}
+          {live && turnStartedAtMs != null ? (
+            <span className="shrink-0 text-xs text-muted">
+              耗时 {formatDuration(Math.max(0, now - turnStartedAtMs))}
+            </span>
+          ) : null}
           <span className="shrink-0 text-xs text-accent" aria-hidden="true">
             {open ? "▴" : "▾"}
           </span>
         </button>
         {open ? (
           <div className="space-y-2 px-2 pb-2">
+            {compactions.map((item) => (
+              <CompactionMarker key={item.id} reason={item.reason} />
+            ))}
             <LiveTail blobs={blobs} />
           </div>
         ) : null}
@@ -2176,6 +2209,7 @@ function TurnFooter({
   liveStartedAtMs,
   liveTools = 0,
   liveItems,
+  hideElapsed = false,
   agentLabel,
   modelLabel,
   canFork,
@@ -2187,6 +2221,8 @@ function TurnFooter({
   liveStartedAtMs?: number;
   liveTools?: number;
   liveItems?: TimelineItem[];
+  /** The process card already shows elapsed time, so the footer does not repeat it. */
+  hideElapsed?: boolean;
   agentLabel: string;
   modelLabel: string;
   canFork: boolean;
@@ -2254,9 +2290,11 @@ function TurnFooter({
       </div>
       {details ? (
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
-          <span data-testid="turn-timing">
-            {stats ? relativeTime(stats.finishedAtMs, now) : "进行中"} · 耗时 {formatDuration(duration)}
-          </span>
+          {hideElapsed ? null : (
+            <span data-testid="turn-timing">
+              {stats ? relativeTime(stats.finishedAtMs, now) : "进行中"} · 耗时 {formatDuration(duration)}
+            </span>
+          )}
           <span data-testid="usage-summary">
             {usage
               ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`

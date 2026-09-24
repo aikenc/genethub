@@ -230,6 +230,88 @@ describe("what the user sees in a session", () => {
     expect(screen.getByText("正在写下一答")).toBeInTheDocument();
   });
 
+  it("freezes the previous running trunk after a later user message and keeps the new reply inside a process card", () => {
+    const now = Date.now();
+    const round = {
+      roundId: "r1",
+      userItemId: "u1",
+      startedAtMs: now - 60_000,
+      endedAtMs: 0,
+      outcome: "running" as const,
+      trunkCount: 1,
+    };
+    const summary = {
+      index: 0,
+      firstItemId: "a0",
+      blobCount: 1,
+      title: "旧过程",
+      batches: [],
+      llmRounds: 1,
+      startedAtMs: now - 60_000,
+      durationMs: 30_000,
+      toolDurationMs: 10_000,
+    };
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "上一问", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "assistantMessage", id: "a0", text: "旧回复" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t2",
+      item: { type: "userMessage", id: "u2", text: "下一问", attachments: [] },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t2",
+      item: {
+        type: "toolCall",
+        id: "c2",
+        name: "Read",
+        status: "running",
+        detail: { kind: "read", path: "role.json", content: "", truncated: false },
+        images: [],
+      },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t2",
+      item: { type: "compaction", id: "k1", reason: "auto" },
+    });
+    state = apply(state, {
+      type: "item",
+      turnId: "t2",
+      item: { type: "assistantMessage", id: "a2", text: "新回复" },
+    });
+    state = { ...state, activeTurn: "t2", activeTurnStartedAtMs: now - 5_000 };
+    state = showRounds(state, {
+      rounds: [round],
+      roundLayers: { r1: { round, trunks: [summary] } },
+      roundTrunks: { "r1:0": { summary, batches: [] } },
+    });
+
+    render(<TimelineView state={state} />);
+
+    const trunks = screen.getAllByTestId("round-trunk");
+    const previous = trunks.find((node) => within(node).queryByText("旧过程"));
+    expect(previous).toBeTruthy();
+    expect(within(previous!).queryByTestId("live-tail")).toBe(null);
+
+    const current = trunks.find((node) => within(node).queryByTestId("compaction-marker"));
+    expect(current).toBeTruthy();
+    expect(within(current!).getByTestId("compaction-marker")).toHaveTextContent("上下文压缩");
+    expect(within(current!).getByText(/耗时/)).toBeInTheDocument();
+    expect(screen.getByText("新回复")).toBeInTheDocument();
+    expect(screen.queryByTestId("tool-call")).toBe(null);
+    expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("耗时");
+  });
+
   it("occupies a process card as soon as a live request exists, before any tool arrives", () => {
     let state = emptyTimeline();
     state = apply(state, {
