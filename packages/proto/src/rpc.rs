@@ -75,6 +75,9 @@ pub enum Request {
         #[ts(optional)]
         effort_id: Option<String>,
         #[serde(default)]
+        #[ts(optional)]
+        fast: Option<bool>,
+        #[serde(default)]
         mode_id: Option<String>,
         #[serde(default)]
         #[ts(optional)]
@@ -620,6 +623,11 @@ pub enum Request {
     SessionSetEffort {
         session_id: String,
         effort_id: String,
+    },
+    #[serde(rename = "session.setFast", rename_all = "camelCase")]
+    SessionSetFast {
+        session_id: String,
+        fast: bool,
     },
     #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
     SessionSetRuntimeAxis {

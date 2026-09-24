@@ -549,6 +549,7 @@ async fn create(rpc: &Rpc, run: &Run, here: bool) -> Result<SessionSummary, CliF
             agent_id,
             model_id: run.model_id.clone(),
             effort_id: None,
+            fast: None,
             mode_id: run.mode_id.clone(),
             runtime_values: None,
             title: run.title.clone(),

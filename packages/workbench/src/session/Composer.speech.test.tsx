@@ -101,6 +101,7 @@ const agent: AgentInfo = {
     setModel: false,
     setMode: false,
     setEffort: false,
+    setFast: false,
     permissions: false,
     resume: true,
     fork: false,

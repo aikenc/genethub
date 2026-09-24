@@ -4705,6 +4705,7 @@ mod tests {
                         reasoning: !efforts.is_empty(),
                         efforts: efforts.iter().map(|value| (*value).into()).collect(),
                         input_modalities: None,
+                        supports_fast: false,
                     })
                     .collect(),
                 modes: modes

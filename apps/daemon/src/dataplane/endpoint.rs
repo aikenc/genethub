@@ -1672,6 +1672,7 @@ mod tests {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
         };
         assert_eq!(

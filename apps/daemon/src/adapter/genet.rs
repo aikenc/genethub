@@ -127,6 +127,7 @@ impl AgentAdapter for GenetAdapter {
             // tool-approval policy — one chip meaning two unrelated things
             // depending on which agent you were talking to.
             set_effort: true,
+            set_fast: false,
             // No permission modes: it has no approval flow to have policy about.
             set_mode: false,
             // Structured user questions are durable stopped interactions. A
@@ -171,6 +172,7 @@ impl AgentAdapter for GenetAdapter {
                 // than asked of the provider.
                 efforts: THINKING_LEVELS.iter().map(|l| (*l).to_string()).collect(),
                 input_modalities: Some(model.input_modalities),
+                supports_fast: false,
             })
             .collect();
         Catalog {

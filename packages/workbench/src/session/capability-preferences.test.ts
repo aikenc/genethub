@@ -29,6 +29,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
       interrupt: true,
       setModel: true,
       setEffort: true,
+      setFast: true,
       setMode: true,
       permissions: true,
       resume: true,
@@ -43,6 +44,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
           reasoning: true,
           efforts: ["low", "medium", "high", "xhigh"],
           inputModalities: [],
+          supportsFast: false,
         },
         {
           id: "vision-pro",
@@ -50,6 +52,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
           reasoning: true,
           efforts: ["low", "medium", "high"],
           inputModalities: ["image"],
+          supportsFast: false,
         },
         {
           id: "video-flush",
@@ -57,6 +60,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
           reasoning: true,
           efforts: ["medium", "high"],
           inputModalities: ["video"],
+          supportsFast: false,
         },
       ],
       modes: [
@@ -98,12 +102,13 @@ describe("machine-global Agent tag routing", () => {
       catalog: {
         ...agent().catalog,
         models: [
-          { id: "provider/auto", label: "Auto Select", reasoning: true, efforts: [] },
+          { id: "provider/auto", label: "Auto Select", reasoning: true, efforts: [], supportsFast: false },
           ...[1, 2, 3, 4, 5].map((index) => ({
             id: `m${index}`,
             label: `Model ${index}`,
             reasoning: true,
             efforts: [] as string[],
+            supportsFast: false,
           })),
         ],
       },
@@ -257,6 +262,7 @@ describe("machine-global Agent tag routing", () => {
             label: "Text",
             reasoning: true,
             efforts: ["low", "medium", "xhigh", "max"],
+            supportsFast: false,
           },
         ],
       },
@@ -290,7 +296,7 @@ describe("machine-global Agent tag routing", () => {
       builtin: false,
       catalog: {
         ...agent().catalog,
-        models: [{ id: "opaque", label: "Opaque", reasoning: true, efforts: [] }],
+        models: [{ id: "opaque", label: "Opaque", reasoning: true, efforts: [], supportsFast: false }],
         defaultModel: "opaque",
       },
     });

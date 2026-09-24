@@ -15,6 +15,7 @@ const AGENTS: AgentInfo[] = [
       interrupt: true,
       setModel: true,
       setEffort: true,
+      setFast: true,
       setMode: false,
       permissions: false,
       resume: true,
@@ -30,6 +31,7 @@ const AGENTS: AgentInfo[] = [
           reasoning: true,
           efforts: ["low", "medium", "high"],
           inputModalities: [],
+          supportsFast: false,
         },
         {
           id: "vision",
@@ -37,6 +39,7 @@ const AGENTS: AgentInfo[] = [
           reasoning: true,
           efforts: ["medium", "high"],
           inputModalities: ["image"],
+          supportsFast: false,
         },
         {
           id: "omni",
@@ -44,9 +47,10 @@ const AGENTS: AgentInfo[] = [
           reasoning: true,
           efforts: ["medium", "high"],
           inputModalities: ["image", "video"],
+          supportsFast: false,
         },
-        { id: "auto", label: "Auto", reasoning: true, efforts: [], inputModalities: [] },
-        { id: "extra", label: "Extra", reasoning: true, efforts: ["high"], inputModalities: [] },
+        { id: "auto", label: "Auto", reasoning: true, efforts: [], inputModalities: [], supportsFast: false },
+        { id: "extra", label: "Extra", reasoning: true, efforts: ["high"], inputModalities: [], supportsFast: true },
       ],
       modes: [],
       commands: [],
@@ -64,6 +68,7 @@ const AGENTS: AgentInfo[] = [
       interrupt: true,
       setModel: true,
       setEffort: false,
+      setFast: false,
       setMode: true,
       permissions: true,
       resume: true,
@@ -359,5 +364,10 @@ describe("the exact model composer control", () => {
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("renders the ⚡ Fast badge when fast mode is enabled", () => {
+    controls({ fast: true, modelId: "extra" });
+    expect(screen.getByTitle("极速模式（⚡ Fast）：已开启")).toBeInTheDocument();
   });
 });

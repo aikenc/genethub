@@ -37,12 +37,14 @@ export function CompactRuntimeControls({
   disabled,
   onPickMode,
   onPickEffort,
+  onPickFast,
   onPickRuntimeAxis,
 }: {
   selection: RuntimeSelection;
   disabled?: boolean;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
+  onPickFast?(fast: boolean): void;
   onPickRuntimeAxis(axisId: string, valueId: string): void;
 }) {
   const current = selection.current;
@@ -74,6 +76,30 @@ export function CompactRuntimeControls({
             ))}
           </select>
         </label>
+      ) : null}
+
+      {onPickFast && (selection.model?.supportsFast || current?.capabilities.setFast) ? (
+        <button
+          type="button"
+          aria-label="极速模式"
+          disabled={disabled || !selection.model?.supportsFast}
+          onClick={() => onPickFast(!selection.fast)}
+          className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+            selection.fast
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
+              : "border-line bg-raised text-faint hover:text-fg disabled:opacity-40"
+          }`}
+          title={
+            selection.model?.supportsFast
+              ? selection.fast
+                ? "极速模式（⚡ Fast）：已开启，点击关闭"
+                : "极速模式（⚡ Fast）：已关闭，点击开启"
+              : "当前模型不支持极速模式"
+          }
+        >
+          <span className="text-[13px] leading-none">⚡</span>
+          <span>Fast</span>
+        </button>
       ) : null}
 
       {current?.capabilities.setMode && modes.length > 0 ? (
@@ -540,9 +566,10 @@ export function RuntimeSettings({
 
 function effortLabel(id: string): string {
   const normalized = id.toLowerCase();
+  if (normalized === "none") return "关闭";
   if (normalized === "low" || normalized === "minimal") return "低";
   if (normalized === "medium") return "中";
   if (normalized === "high") return "高";
-  if (normalized === "xhigh" || normalized === "max") return "超高";
+  if (normalized === "xhigh" || normalized === "extra-high" || normalized === "max") return "超高";
   return id;
 }

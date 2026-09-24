@@ -294,6 +294,7 @@ async fn authorize_session_request(
         | Request::SessionRoute { session_id, .. }
         | Request::SessionSetMode { session_id, .. }
         | Request::SessionSetEffort { session_id, .. }
+        | Request::SessionSetFast { session_id, .. }
         | Request::SessionSetRuntimeAxis { session_id, .. }
         | Request::SessionRespondPermission { session_id, .. }
         | Request::ProcessKill { session_id, .. }
@@ -1481,6 +1482,7 @@ async fn dispatch(
             agent_id,
             model_id,
             effort_id,
+            fast,
             mode_id,
             runtime_values,
             title,
@@ -1515,12 +1517,13 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .create(
+                .create_with_fast(
                     &workspace_id,
                     start_in,
                     &agent_id,
                     model_id,
                     effort_id,
+                    fast,
                     mode_id,
                     runtime_values.unwrap_or_default(),
                     title,
@@ -1989,6 +1992,7 @@ async fn dispatch(
                 model_id: route.model_id,
                 mode_id: route.mode_id,
                 effort_id: route.effort_id,
+                fast: None,
                 runtime_values: route.runtime_values,
             };
             let result = if same_workspace {
@@ -2092,6 +2096,7 @@ async fn dispatch(
                 model_id: route.model_id,
                 mode_id: route.mode_id,
                 effort_id: route.effort_id,
+                fast: None,
                 runtime_values: route.runtime_values,
             };
             match state
@@ -2307,6 +2312,21 @@ async fn dispatch(
             match state
                 .sessions
                 .set_effort(&session_id, &effort_id, &providers)
+                .await
+            {
+                Ok(()) => Handled::ok(Reply::Ack),
+                Err(error) => failed(error),
+            }
+        }
+
+        Request::SessionSetFast {
+            session_id,
+            fast,
+        } => {
+            let providers = state.providers().await;
+            match state
+                .sessions
+                .set_fast(&session_id, fast, &providers)
                 .await
             {
                 Ok(()) => Handled::ok(Reply::Ack),

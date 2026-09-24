@@ -38,6 +38,7 @@ export type ResolvedCapabilityRoute = {
   agent: AgentInfo;
   modelId: string | null;
   effortId: string | null;
+  fast?: boolean | null;
   modeId: string | null;
   runtimeValues: Record<string, string>;
 };
@@ -400,6 +401,7 @@ export function routeTarget(route: ResolvedCapabilityRoute): SessionAgentTarget 
     ...(route.modelId ? { modelId: route.modelId } : {}),
     ...(route.modeId ? { modeId: route.modeId } : {}),
     ...(route.effortId ? { effortId: route.effortId } : {}),
+    ...(route.fast ? { fast: true } : {}),
     runtimeValues: route.runtimeValues,
   };
 }
@@ -461,6 +463,7 @@ export function resolveAgentRuntime(
 
   const remembered = preferences.runtimes[agent.id];
   const effortId = validEffort(remembered?.effortId, model?.efforts ?? []);
+  const fast = model?.supportsFast ? (remembered?.fast ?? false) : false;
   const modeId = validMode(agent, remembered?.modeId);
   const runtimeValues = Object.fromEntries(
     (agent.catalog.runtimeAxes ?? []).flatMap((axis) => {
@@ -480,6 +483,7 @@ export function resolveAgentRuntime(
     agent,
     modelId: model?.id ?? preferredModelId ?? null,
     effortId,
+    fast,
     modeId,
     runtimeValues,
   };

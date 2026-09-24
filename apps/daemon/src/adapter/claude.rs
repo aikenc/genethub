@@ -471,6 +471,7 @@ fn models_in(hello: &Value) -> Vec<ModelInfo> {
                     Vec::new()
                 },
                 input_modalities: None,
+                supports_fast: false,
             })
         })
         .collect()
@@ -616,6 +617,7 @@ impl AgentAdapter for ClaudeAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             set_effort: true,
+            set_fast: false,
             interrupt: true,
             // Switching between them is a control request this CLI answers;
             // *which* models there are is still its own business (env vars, its
@@ -2919,6 +2921,7 @@ mod tests {
             .start(SessionConfig {
                 evidence_scope: None,
                 effort_id: None,
+                fast: None,
                 additional_system_prompt: None,
                 skills_dir: None,
                 front_door_cli: None,

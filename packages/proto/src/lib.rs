@@ -166,6 +166,7 @@ mod tests {
                 model_id: Some("sonnet".into()),
                 mode_id: None,
                 effort_id: None,
+                fast: None,
                 runtime_values: Default::default(),
             }),
         });

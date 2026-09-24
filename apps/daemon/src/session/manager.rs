@@ -508,11 +508,37 @@ impl SessionManager {
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
     ) -> Result<SessionSummary> {
+        self.create_with_fast(
+            workspace_id,
+            cwd,
+            agent_id,
+            model_id,
+            effort_id,
+            None,
+            mode_id,
+            runtime_values,
+            title,
+        )
+        .await
+    }
+
+    pub async fn create_with_fast(
+        &self,
+        workspace_id: &str,
+        cwd: PathBuf,
+        agent_id: &str,
+        model_id: Option<String>,
+        effort_id: Option<String>,
+        fast: Option<bool>,
+        mode_id: Option<String>,
+        runtime_values: std::collections::BTreeMap<String, String>,
+        title: Option<String>,
+    ) -> Result<SessionSummary> {
         // Fail before creating anything if the agent is not real.
         self.registry.require(agent_id)?;
 
         let now = now_ms();
-        let meta = SessionMeta {
+        let mut meta = SessionMeta {
             inbox: Default::default(),
             execution_retired: false,
             execution_cleanup: None,
@@ -521,6 +547,7 @@ impl SessionManager {
             latest_reply: None,
             drafts: vec![],
             effort_id,
+            fast,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -690,6 +717,7 @@ impl SessionManager {
             latest_reply: None,
             drafts: vec![],
             effort_id,
+            fast: None,
             runtime_values,
             id: stable_id.unwrap_or_else(|| format!("s_{}", uuid::Uuid::new_v4().simple())),
             workspace_id: workspace_id.to_string(),
@@ -816,6 +844,7 @@ impl SessionManager {
             model_id: source_meta.model_id.clone(),
             mode_id: source_meta.mode_id.clone(),
             effort_id: source_meta.effort_id.clone(),
+            fast: source_meta.fast,
             runtime_values: source_meta.runtime_values.clone(),
         });
         let same_agent = target.agent_id == source_meta.agent_id;
@@ -958,6 +987,7 @@ impl SessionManager {
             model_id,
             mode_id,
             effort_id,
+            fast: target.fast.or(source_meta.fast),
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
@@ -1217,6 +1247,7 @@ impl SessionManager {
             model_id,
             mode_id: target.mode_id,
             effort_id: target.effort_id,
+            fast: target.fast,
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
@@ -1434,6 +1465,7 @@ impl SessionManager {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
             created_at_ms,
             updated_at_ms,
@@ -3064,6 +3096,7 @@ impl SessionManager {
             model_id: meta.model_id.clone(),
             mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
             effort_id: meta.effort_id.clone(),
+            fast: meta.fast,
             runtime_values: meta.runtime_values.clone(),
             additional_system_prompt: additional_system_prompt.clone(),
             skills_dir: self.skills_dir.clone(),
@@ -3442,6 +3475,7 @@ impl SessionManager {
             && source_meta.model_id == target.model_id
             && source_meta.mode_id == target.mode_id
             && source_meta.effort_id == target.effort_id
+            && source_meta.fast == target.fast
             && source_meta.runtime_values == target.runtime_values;
         if same_runtime {
             if source_meta.tag_routing == tag_routing
@@ -3465,6 +3499,7 @@ impl SessionManager {
                 model_id: next.model_id.clone(),
                 mode_id: next.mode_id.clone(),
                 effort_id: next.effort_id.clone(),
+                fast: next.fast,
                 runtime_values: next.runtime_values.clone(),
                 routing_tags: next.routing_tags.clone(),
                 media_tags: next.media_tags.clone(),
@@ -3488,6 +3523,7 @@ impl SessionManager {
         next.model_id = target.model_id.clone();
         next.mode_id = target.mode_id.clone();
         next.effort_id = target.effort_id.clone();
+        next.fast = target.fast;
         next.runtime_values = target.runtime_values.clone();
         next.tag_routing = tag_routing;
         next.routing_tags = routing_tags;
@@ -3496,6 +3532,7 @@ impl SessionManager {
             next.model_id.clone(),
             next.mode_id.clone(),
             next.effort_id.clone(),
+            next.fast,
             next.runtime_values.clone(),
         );
         if normalize_runtime_selection(&mut next, &catalog)
@@ -3504,6 +3541,7 @@ impl SessionManager {
                     next.model_id.clone(),
                     next.mode_id.clone(),
                     next.effort_id.clone(),
+                    next.fast,
                     next.runtime_values.clone(),
                 )
         {
@@ -3584,6 +3622,7 @@ impl SessionManager {
             model_id: next.model_id.clone(),
             mode_id: next.mode_id.clone(),
             effort_id: next.effort_id.clone(),
+            fast: next.fast,
             runtime_values: next.runtime_values.clone(),
             routing_tags: next.routing_tags.clone(),
             media_tags: next.media_tags.clone(),
@@ -3624,6 +3663,38 @@ impl SessionManager {
             effort_id: effort_id.to_string(),
         })
         .await;
+        Ok(())
+    }
+
+    pub async fn set_fast(
+        &self,
+        session_id: &str,
+        fast: bool,
+        providers: &ProviderMap,
+    ) -> Result<()> {
+        let live = self.live(session_id).await?;
+        match live.agent().await {
+            Some(agent) => agent.set_fast(fast).await?,
+            None => {
+                let offered = self.offered(&live, providers).await?;
+                let current_model_id = live.meta.lock().await.model_id.clone();
+                let model = current_model_id
+                    .as_deref()
+                    .and_then(|id| offered.models.iter().find(|m| m.id == id));
+                if let Some(model) = model {
+                    if fast && !model.supports_fast {
+                        bail!("the selected model '{}' does not support fast mode", model.id);
+                    }
+                }
+            }
+        }
+        {
+            let mut meta = live.meta.lock().await;
+            meta.fast = Some(fast);
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        live.publish(SessionEvent::FastChanged { fast }).await;
         Ok(())
     }
 
@@ -6694,6 +6765,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
             model_id,
             mode_id,
             effort_id,
+            fast,
             runtime_values,
             routing_tags,
             media_tags,
@@ -6703,6 +6775,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
             meta.model_id = model_id.clone();
             meta.mode_id = mode_id.clone();
             meta.effort_id = effort_id.clone();
+            meta.fast = *fast;
             meta.runtime_values = runtime_values.clone();
             meta.routing_tags = routing_tags.clone();
             meta.media_tags = media_tags.clone();
@@ -6714,6 +6787,10 @@ async fn apply(live: &Live, event: &SessionEvent) {
         SessionEvent::EffortChanged { effort_id } => {
             let mut meta = live.meta.lock().await;
             meta.effort_id = Some(effort_id.clone());
+        }
+        SessionEvent::FastChanged { fast } => {
+            let mut meta = live.meta.lock().await;
+            meta.fast = Some(*fast);
         }
         SessionEvent::RuntimeAxisChanged { axis_id, value_id } => {
             let mut meta = live.meta.lock().await;
@@ -6902,6 +6979,7 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
         meta.model_id.clone(),
         meta.mode_id.clone(),
         meta.effort_id.clone(),
+        meta.fast,
         meta.runtime_values.clone(),
     );
 
@@ -6933,10 +7011,11 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
     }
 
     if !catalog.models.is_empty() {
-        let efforts = meta
+        let model = meta
             .model_id
             .as_ref()
-            .and_then(|id| catalog.models.iter().find(|model| &model.id == id))
+            .and_then(|id| catalog.models.iter().find(|model| &model.id == id));
+        let efforts = model
             .map(|model| model.efforts.as_slice())
             .unwrap_or(&[]);
         if meta
@@ -6949,6 +7028,11 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
                 .as_ref()
                 .filter(|id| efforts.contains(id))
                 .cloned();
+        }
+        if let Some(model) = model {
+            if !model.supports_fast && meta.fast == Some(true) {
+                meta.fast = Some(false);
+            }
         }
     }
 
@@ -6965,6 +7049,7 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
             meta.model_id.clone(),
             meta.mode_id.clone(),
             meta.effort_id.clone(),
+            meta.fast,
             meta.runtime_values.clone(),
         )
 }
@@ -6984,6 +7069,7 @@ mod tests {
             latest_reply: None,
             drafts: vec![],
             effort_id: None,
+            fast: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
             format: SESSION_FORMAT,
@@ -7268,6 +7354,7 @@ mod tests {
                 interrupt: false,
                 set_model: false,
                 set_effort: false,
+                set_fast: false,
                 set_mode: false,
                 permissions: false,
                 resume: true,
@@ -7395,6 +7482,7 @@ mod tests {
                         reasoning: true,
                         efforts: Vec::new(),
                         input_modalities: None,
+                        supports_fast: false,
                     })
                     .collect(),
                 modes: Vec::new(),
@@ -7532,6 +7620,7 @@ mod tests {
                     model_id: Some("model".into()),
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -7607,6 +7696,7 @@ mod tests {
                     model_id: Some("model".into()),
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -7709,6 +7799,7 @@ mod tests {
                     model_id: Some("model-alt".into()),
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -7912,6 +8003,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -8004,6 +8096,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8181,6 +8274,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -8201,6 +8295,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -8278,6 +8373,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8391,6 +8487,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8451,6 +8548,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8514,6 +8612,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8589,6 +8688,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -12188,6 +12288,7 @@ mod tests {
                 reasoning: true,
                 efforts: vec!["medium".into(), "high".into()],
                 input_modalities: None,
+                supports_fast: true,
             }],
             modes: vec![genehub_proto::ModeInfo {
                 id: "agent".into(),

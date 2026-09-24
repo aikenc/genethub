@@ -1040,6 +1040,9 @@ export function App({
                         effortId={
                           workbench.timeline.effortId ?? draft?.effortId ?? null
                         }
+                        fast={
+                          workbench.timeline.fast ?? draft?.fast ?? false
+                        }
                         runtimeValues={
                           workbench.activeSessionId
                             ? workbench.timeline.runtimeValues

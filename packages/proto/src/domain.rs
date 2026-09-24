@@ -20,6 +20,9 @@ pub struct Capabilities {
     /// and which levels exist is the model's own business (`ModelInfo::efforts`).
     #[serde(default)]
     pub set_effort: bool,
+    /// The agent supports fast / turbo accelerated execution mode.
+    #[serde(default)]
+    pub set_fast: bool,
     pub set_mode: bool,
     pub permissions: bool,
     /// The agent can rehydrate a past session itself. When false the daemon
@@ -52,6 +55,9 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub input_modalities: Option<Vec<String>>,
+    /// Supports fast / turbo / accelerated execution variant.
+    #[serde(default)]
+    pub supports_fast: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -488,6 +494,9 @@ pub struct ForkTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fast: Option<bool>,
     /// Runtime axes selected for this exact Agent. Routed forks fill these
     /// from the machine-global remembered choices at execution time.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -512,6 +521,9 @@ pub struct SessionAgentTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fast: Option<bool>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub runtime_values: std::collections::BTreeMap<String, String>,
 }
@@ -836,6 +848,9 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default)]
     pub effort_id: Option<String>,
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime_values: Option<std::collections::BTreeMap<String, String>>,
@@ -2132,6 +2147,9 @@ pub struct AgentRuntimePreference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fast: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mode_id: Option<String>,

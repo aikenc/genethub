@@ -24,6 +24,7 @@ export function ComposerControls({
   modelId,
   modeId,
   effortId,
+  fast,
   runtimeValues,
   disabled,
   onOpenChange,
@@ -39,6 +40,7 @@ export function ComposerControls({
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast?: boolean | null;
   runtimeValues?: Record<string, string> | null;
   disabled?: boolean;
   onOpenChange?(open: boolean): void;
@@ -56,6 +58,7 @@ export function ComposerControls({
     modelId,
     modeId,
     effortId,
+    fast,
     runtimeValues,
   });
   const selectedTags = normalizeTags(
@@ -100,6 +103,7 @@ export function ComposerControls({
     `筛选：${[...selectedTags, ...automaticTags].join(" + ") || "无"}`,
     effort ? `思考强度：${effort.fullLabel}` : null,
     mode ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}` : null,
+    selection.fast && selection.model?.supportsFast ? "极速模式：已开启" : null,
   ]
     .filter(Boolean)
     .join("；");
@@ -144,6 +148,15 @@ export function ComposerControls({
               aria-hidden
             >
               {mode.emoji}
+            </span>
+          ) : null}
+          {selection.fast && selection.model?.supportsFast ? (
+            <span
+              className="flex shrink-0 items-center gap-0.5 whitespace-nowrap text-amber-500 font-medium"
+              title="极速模式（⚡ Fast）：已开启"
+            >
+              <span className="text-[12px] leading-none" aria-hidden>⚡</span>
+              <span aria-hidden>Fast</span>
             </span>
           ) : null}
           <span className="ml-auto shrink-0 text-[12px] text-faint md:text-[8px]" aria-hidden>

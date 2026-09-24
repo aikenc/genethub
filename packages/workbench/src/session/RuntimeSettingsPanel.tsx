@@ -53,6 +53,7 @@ export function RuntimeSettingsPanel({
         modelId: target.modelId ?? null,
         modeId: target.modeId ?? null,
         effortId: target.effortId ?? null,
+        fast: target.fast ?? null,
         runtimeValues: definedRuntimeValues(target.runtimeValues),
       })
     : selection;
@@ -142,6 +143,7 @@ export function RuntimeSettingsPanel({
                     disabled={disabled || saving}
                     onPickMode={(modeId) => setTarget((current) => current ? { ...current, modeId } : current)}
                     onPickEffort={(effortId) => setTarget((current) => current ? { ...current, effortId } : current)}
+                    onPickFast={(fast) => setTarget((current) => current ? { ...current, fast } : current)}
                     onPickRuntimeAxis={(axisId, valueId) =>
                       setTarget((current) => current ? {
                         ...current,
@@ -205,6 +207,7 @@ function targetFrom(selection: RuntimeSelection): SessionAgentTarget | null {
     ...(selection.model ? { modelId: selection.model.id } : {}),
     ...(selection.mode ? { modeId: selection.mode.id } : {}),
     ...(selection.effortId ? { effortId: selection.effortId } : {}),
+    ...(typeof selection.fast === "boolean" ? { fast: selection.fast } : {}),
     runtimeValues: selection.runtimeValues,
   };
 }

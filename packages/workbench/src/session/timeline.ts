@@ -62,6 +62,7 @@ export interface TimelineState {
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast: boolean | null;
   runtimeValues: Record<string, string>;
   seq: number;
   /** Every round of this session, in order, unexpanded. */
@@ -91,6 +92,7 @@ export function emptyTimeline(): TimelineState {
     modelId: null,
     modeId: null,
     effortId: null,
+    fast: null,
     runtimeValues: {},
     seq: 0,
     rounds: [],
@@ -146,6 +148,7 @@ export function fromSnapshot(
     modelId: snapshot.summary.modelId ?? null,
     modeId: snapshot.summary.modeId ?? null,
     effortId: snapshot.summary.effortId ?? null,
+    fast: snapshot.summary.fast ?? null,
     runtimeValues: Object.fromEntries(
       Object.entries(snapshot.summary.runtimeValues ?? {}).filter(
         (entry): entry is [string, string] => entry[1] !== undefined,
@@ -289,6 +292,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         modelId: event.modelId ?? null,
         modeId: event.modeId ?? null,
         effortId: event.effortId ?? null,
+        fast: event.fast ?? null,
         runtimeValues: definedRuntimeValues(event.runtimeValues),
       };
 
@@ -297,6 +301,9 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
 
     case "effortChanged":
       return { ...state, effortId: event.effortId };
+
+    case "fastChanged":
+      return { ...state, fast: event.fast };
 
     case "runtimeAxisChanged":
       return {

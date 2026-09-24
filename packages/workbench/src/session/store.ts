@@ -132,6 +132,7 @@ export interface Draft {
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast?: boolean | null;
   runtimeValues: Record<string, string>;
 }
 
@@ -483,6 +484,7 @@ interface WorkbenchState {
   setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
+  setFast(fast: boolean): Promise<void>;
   setRuntimeAxis(axisId: string, valueId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
   /**
@@ -1044,6 +1046,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           modelId: explicitTarget.modelId ?? null,
           modeId: explicitTarget.modeId ?? null,
           effortId: explicitTarget.effortId ?? null,
+          fast: explicitTarget.fast ?? null,
           runtimeValues: definedRuntimeValues(explicitTarget.runtimeValues),
         }
       : cachedDraft
@@ -1051,15 +1054,17 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
           modelId: cachedDraft.modelId ?? resolvedRuntime?.modelId ?? null,
           modeId: cachedDraft.modeId ?? resolvedRuntime?.modeId ?? null,
           effortId: cachedDraft.effortId ?? resolvedRuntime?.effortId ?? null,
+          fast: cachedDraft.fast ?? resolvedRuntime?.fast ?? null,
           runtimeValues: cachedDraft.runtimeValues ?? resolvedRuntime?.runtimeValues ?? {},
         }
       : {
           modelId: resolvedRuntime?.modelId ?? null,
           modeId: resolvedRuntime?.modeId ?? null,
           effortId: resolvedRuntime?.effortId ?? null,
+          fast: resolvedRuntime?.fast ?? null,
           runtimeValues: resolvedRuntime?.runtimeValues ?? {},
         };
-    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, tags, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, tags, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, fast:draftRuntime.fast, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -1082,6 +1087,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         modelId: draftRuntime.modelId,
         modeId: draftRuntime.modeId,
         effortId: draftRuntime.effortId,
+        fast: draftRuntime.fast,
         runtimeValues: draftRuntime.runtimeValues,
       },
       activeWorkspaceId: target,
@@ -2024,6 +2030,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       target.agentId,
       {
         effortId: target.effortId,
+        fast: target.fast,
         modeId: target.modeId,
         runtimeValues,
       },
@@ -2035,6 +2042,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         modelId: target.modelId ?? null,
         modeId: target.modeId ?? null,
         effortId: target.effortId ?? null,
+        fast: target.fast ?? null,
         runtimeValues,
       });
       await get().setAgentPreferences(remembered);
@@ -2123,6 +2131,25 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       get().timeline.effortId === effortId
     ) {
       await rememberMachineRuntime(get, { effortId });
+    }
+  },
+
+  async setFast(fast) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) {
+      onDraft(get, set, { fast });
+      await rememberMachineRuntime(get, { fast });
+      return;
+    }
+    const applied = await switched(get, set, sessionId, "fast", fast, () =>
+      require_(get().client).call({ type: "session.setFast", payload: { sessionId, fast } }),
+    );
+    if (
+      applied &&
+      get().activeSessionId === sessionId &&
+      get().timeline.fast === fast
+    ) {
+      await rememberMachineRuntime(get, { fast });
     }
   },
 
@@ -2805,6 +2832,7 @@ async function start(
         agentId: draft.agentId!,
         modelId: draft.modelId,
         ...(draft.effortId ? { effortId: draft.effortId } : {}),
+        ...(draft.fast ? { fast: true } : {}),
         modeId: draft.modeId,
         runtimeValues: draft.runtimeValues,
         title: null,
@@ -2948,12 +2976,12 @@ function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>)
  * still the one on screen and still showing the value we put there — a later
  * pick, or an event, has already answered the question this one asked.
  */
-async function switched(
+async function switched<T extends "modelId" | "modeId" | "effortId" | "fast">(
   get: () => WorkbenchState,
   set: Setter,
   sessionId: string,
-  axis: "modelId" | "modeId" | "effortId",
-  value: string,
+  axis: T,
+  value: WorkbenchState["timeline"][T],
   run: () => Promise<unknown>,
 ): Promise<boolean> {
   const before = get().timeline[axis];
@@ -3128,11 +3156,20 @@ function applySessionStatus(
               modelId: event.modelId,
               modeId: event.modeId,
               effortId: event.effortId,
+              fast: event.fast,
               runtimeValues: event.runtimeValues,
               routingTags: event.routingTags ?? session.routingTags,
               mediaTags: event.mediaTags ?? session.mediaTags,
             }
           : session,
+      ),
+    }));
+    return;
+  }
+  if (event.type === "fastChanged") {
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId ? { ...session, fast: event.fast } : session,
       ),
     }));
     return;

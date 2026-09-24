@@ -365,6 +365,7 @@ pub(crate) async fn route_session(
                 model_id: route.model_id,
                 mode_id: route.mode_id,
                 effort_id: route.effort_id,
+                fast: None,
                 runtime_values: route.runtime_values,
             },
             &providers,
@@ -596,6 +597,7 @@ mod tests {
                     efforts: vec!["medium".into(), "high".into()],
                     input_modalities: modalities
                         .map(|items| items.into_iter().map(str::to_string).collect()),
+                    supports_fast: false,
                 }],
                 ..Default::default()
             },
@@ -646,6 +648,7 @@ mod tests {
             reasoning: true,
             efforts: vec!["medium".into(), "high".into()],
             input_modalities: None,
+            supports_fast: false,
         });
         let preferences = AgentSelectionPreferences {
             model_profiles: vec![
@@ -697,6 +700,7 @@ mod tests {
                 reasoning: true,
                 efforts: Vec::new(),
                 input_modalities: None,
+                supports_fast: false,
             })
             .collect();
         let registry = Registry::of(Vec::new());
