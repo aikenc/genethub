@@ -1,16 +1,17 @@
-//! Bounded, append-only references for committed Workflow Run revisions.
+//! Committed Run event references, rolled by UTC day and segment size.
 use super::*;
 use std::collections::BTreeSet;
 use std::io::{Seek, SeekFrom};
 
 const MAX_LINE_BYTES: usize = 4 * 1024;
-pub(super) const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
-const FINAL_EVENT_RESERVE: u64 = MAX_LINE_BYTES as u64;
+pub(super) const MAX_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const RETAIN_DAYS: i64 = 7;
 
 pub(super) struct AppendOutcome {
     pub seq: u64,
     pub bytes: u64,
-    pub full: bool,
+    pub segment: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,57 +32,82 @@ pub(super) struct JournalEvent {
     pub message_id: Option<String>,
 }
 
-fn path(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
+fn directory(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
     let Some(relative) = run.snapshot_relative.as_deref() else {
         return Ok(None);
     };
     let snapshot = runtime.project_file(relative)?;
-    Ok(Some(snapshot.with_file_name("journal.jsonl")))
+    Ok(Some(snapshot.parent().ok_or_else(|| anyhow!("Run snapshot 缺少父目录"))?.to_path_buf()))
 }
 
-/// Returns the committed high-water marks to store in the same Run snapshot.
-/// The old snapshot commits the journal length, so an uncommitted crash tail
-/// can be truncated before retrying without interpreting its contents.
-pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum: u64) -> Result<AppendOutcome> {
-    let Some(path) = path(runtime, run)? else {
-        return Ok(AppendOutcome { seq: 0, bytes: 0, full: false });
-    };
-    let snapshot = path.with_file_name("run.json");
-    let (committed_seq, committed_bytes, committed_revision, previous_status, previous_messages, previously_full) =
-        match crate::config::sensitive_metadata(&snapshot) {
-            Ok(metadata) => {
-                crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
-                if !metadata.is_file() {
-                    bail!("Workflow Run snapshot 不是普通文件");
-                }
-                ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
-                let previous = decode_run_record(&fs::read(&snapshot)?)?;
-                (previous.journal_seq, previous.journal_bytes, previous.revision, Some(previous.status),
-                    previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>(), previous.journal_full)
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0, None, BTreeSet::new(), false),
-            Err(error) => return Err(error.into()),
-        };
-    if run.revision < committed_revision {
-        bail!("Workflow Run revision 不得回退");
+fn day_key(at_ms: i64) -> Result<String> {
+    let at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(at_ms)
+        .ok_or_else(|| anyhow!("Workflow journal 时间超出可表示范围"))?;
+    Ok(at.format("%Y%m%d").to_string())
+}
+
+fn segment_name(day: &str, ordinal: u32) -> String {
+    format!("journal-{day}-{ordinal:04}.jsonl")
+}
+
+fn segment_parts(name: &str) -> Option<(&str, u32)> {
+    let body = name.strip_prefix("journal-")?.strip_suffix(".jsonl")?;
+    let (day, ordinal) = body.split_once('-')?;
+    if day.len() != 8 || !day.bytes().all(|byte| byte.is_ascii_digit())
+        || ordinal.len() != 4 || !ordinal.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
     }
-    if previously_full {
-        return Ok(AppendOutcome { seq: committed_seq, bytes: committed_bytes, full: true });
+    Some((day, ordinal.parse().ok()?))
+}
+
+fn segments(directory: &Path) -> Result<Vec<(String, PathBuf)>> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if segment_parts(&name).is_none() {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = crate::config::sensitive_metadata(&path)?;
+        crate::config::reject_link_or_reparse(&path, &metadata)?;
+        if !metadata.is_file() || metadata.len() > MAX_SEGMENT_BYTES {
+            bail!("Workflow journal 分段损坏：{}", path.display());
+        }
+        found.push((name, path));
     }
-    if run.revision == committed_revision
-        && previous_status.as_deref() == Some(run.status.as_str())
-        && run.flow_messages.iter().all(|message| previous_messages.contains(&message.message_id))
-    {
-        return Ok(AppendOutcome { seq: committed_seq, bytes: committed_bytes, full: false });
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(found)
+}
+
+fn prune_directory(directory: &Path, at_ms: i64) -> Result<()> {
+    let cutoff = day_key(at_ms.saturating_sub((RETAIN_DAYS - 1) * DAY_MS))?;
+    for (name, path) in segments(directory)? {
+        let (day, _) = segment_parts(&name).expect("listed segment");
+        if day < cutoff.as_str() {
+            fs::remove_file(&path)?;
+        }
     }
+    Ok(())
+}
+
+pub(super) fn prune(runtime: &RuntimeStore, run: &RunRecord, at_ms: i64) -> Result<()> {
+    if let Some(directory) = directory(runtime, run)? {
+        prune_directory(&directory, at_ms)?;
+    }
+    Ok(())
+}
+
+fn append_line(directory: &Path, name: &str, committed_bytes: u64, line: &[u8]) -> Result<u64> {
+    let path = directory.join(name);
     match crate::config::sensitive_metadata(&path) {
         Ok(metadata) => {
             crate::config::reject_link_or_reparse(&path, &metadata)?;
-            if !metadata.is_file() || metadata.len() > MAX_JOURNAL_BYTES {
-                bail!("Workflow journal 损坏或超过上限");
+            if !metadata.is_file() || metadata.len() != committed_bytes {
+                bail!("Workflow journal 分段长度与 Run 快照不一致");
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound && committed_bytes == 0 => {}
         Err(error) => return Err(error.into()),
     }
     let mut options = OpenOptions::new();
@@ -93,45 +119,83 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
     }
     let mut file = options.open(&path)?;
     crate::config::restrict_to_owner(&path)?;
-    if file.metadata()?.len() < committed_bytes {
-        bail!("Workflow journal 比已提交的 Run 快照短");
-    }
-    file.set_len(committed_bytes)?;
     file.seek(SeekFrom::Start(committed_bytes))?;
+    file.write_all(line)?;
+    file.sync_data()?;
+    Ok(committed_bytes + line.len() as u64)
+}
+
+/// The Run snapshot commits the current segment and its byte high-water mark.
+/// Any newer segment or trailing bytes left by a crash are discarded on retry.
+pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_ms: i64, maximum: u64) -> Result<AppendOutcome> {
+    let Some(directory) = directory(runtime, run)? else {
+        return Ok(AppendOutcome { seq: 0, bytes: 0, segment: String::new() });
+    };
+    let snapshot = directory.join("run.json");
+    let (mut seq, mut bytes, mut current, revision, status, previous_messages) =
+        match crate::config::sensitive_metadata(&snapshot) {
+            Ok(metadata) => {
+                crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
+                if !metadata.is_file() {
+                    bail!("Workflow Run snapshot 不是普通文件");
+                }
+                ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+                let previous = decode_run_record(&fs::read(&snapshot)?)?;
+                (previous.journal_seq, previous.journal_bytes, previous.journal_segment,
+                    previous.revision, Some(previous.status),
+                    previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound =>
+                (0, 0, String::new(), 0, None, BTreeSet::new()),
+            Err(error) => return Err(error.into()),
+        };
+    if run.revision < revision {
+        bail!("Workflow Run revision 不得回退");
+    }
+    if seq > 0 && segment_parts(&current).is_none() {
+        bail!("Workflow journal 缺少分段定位；旧单文件日志不自动迁移");
+    }
+    let current_exists = !current.is_empty()
+        && segments(&directory)?.iter().any(|(name, _)| name == &current);
+    let cutoff = day_key(at_ms.saturating_sub((RETAIN_DAYS - 1) * DAY_MS))?;
+    if !current.is_empty() && !current_exists
+        && segment_parts(&current).expect("validated segment").0 >= cutoff.as_str() {
+        bail!("Workflow journal 已提交分段不存在");
+    }
+    for (name, path) in segments(&directory)? {
+        if current.is_empty() || name > current {
+            fs::remove_file(&path)?;
+        } else if name == current {
+            let file = OpenOptions::new().write(true).open(&path)?;
+            if file.metadata()?.len() < bytes {
+                bail!("Workflow journal 比已提交的 Run 快照短");
+            }
+            file.set_len(bytes)?;
+            file.sync_data()?;
+        }
+    }
+    prune_directory(&directory, at_ms)?;
     let mut events = Vec::new();
     for message in &run.flow_messages {
-        if previous_messages.contains(&message.message_id) {
-            continue;
+        if !previous_messages.contains(&message.message_id) {
+            events.push(JournalEvent {
+                seq: 0, revision: run.revision, at_ms: message.created_at_ms,
+                event_type: message.kind.clone(), actor: "event".into(), rule: "flow-message".into(),
+                run_id: run.id.clone(), session_id: Some(message.sender_session_id.clone()),
+                node_id: message.node_id.clone(), message_id: Some(message.message_id.clone()),
+            });
         }
+    }
+    if run.revision != revision || status.as_deref() != Some(run.status.as_str()) {
         events.push(JournalEvent {
-            seq: 0,
-            revision: run.revision,
-            at_ms: message.created_at_ms,
-            event_type: message.kind.clone(),
-            actor: "event".into(),
-            rule: "flow-message".into(),
-            run_id: run.id.clone(),
-            session_id: Some(message.sender_session_id.clone()),
-            node_id: message.node_id.clone(),
-            message_id: Some(message.message_id.clone()),
+            seq: 0, revision: run.revision, at_ms,
+            event_type: format!("run.{}", run.status),
+            actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
+            rule: "save-run".into(), run_id: run.id.clone(),
+            session_id: run.executor_session_id.clone(), node_id: None, message_id: None,
         });
     }
-    events.push(JournalEvent {
-        seq: 0,
-        revision: run.revision,
-        at_ms: now_ms(),
-        event_type: format!("run.{}", run.status),
-        actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
-        rule: "save-run".into(),
-        run_id: run.id.clone(),
-        session_id: run.executor_session_id.clone(),
-        node_id: None,
-        message_id: None,
-    });
-    let mut lines = Vec::new();
-    let mut next_bytes = committed_bytes;
-    let mut seq = committed_seq;
-    let mut full = false;
+    let today = day_key(at_ms)?;
     for mut event in events {
         seq = seq.checked_add(1).ok_or_else(|| anyhow!("Workflow journal seq 已耗尽"))?;
         event.seq = seq;
@@ -140,39 +204,24 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
         if line.len() > MAX_LINE_BYTES {
             bail!("Workflow journal 单行超过 4 KiB");
         }
-        next_bytes = next_bytes.checked_add(line.len() as u64)
-            .ok_or_else(|| anyhow!("Workflow journal 大小溢出"))?;
-        if next_bytes > maximum.saturating_sub(FINAL_EVENT_RESERVE) {
-            full = true;
-            break;
+        let (current_day, ordinal) = segment_parts(&current).unwrap_or(("", 0));
+        let day = if current_day > today.as_str() { current_day } else { today.as_str() };
+        if line.len() as u64 > maximum {
+            bail!("Workflow journal 事件超过分段容量");
         }
-        lines.extend_from_slice(&line);
-    }
-    if full {
-        lines.clear();
-        seq = committed_seq.checked_add(1).ok_or_else(|| anyhow!("Workflow journal seq 已耗尽"))?;
-        let event = JournalEvent {
-            seq,
-            revision: run.revision,
-            at_ms: now_ms(),
-            event_type: "journalFull".into(),
-            actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
-            rule: "capacity".into(),
-            run_id: run.id.clone(),
-            session_id: run.executor_session_id.clone(),
-            node_id: None,
-            message_id: None,
-        };
-        lines = serde_json::to_vec(&event)?;
-        lines.push(b'\n');
-        next_bytes = committed_bytes + lines.len() as u64;
-        if next_bytes > maximum {
-            bail!("journalFull 预留空间不足");
+        if current.is_empty() || current_day != day || bytes + line.len() as u64 > maximum {
+            let next_ordinal = if current_day == day && !current.is_empty() {
+                ordinal.checked_add(1).ok_or_else(|| anyhow!("Workflow journal 当日分段序号耗尽"))?
+            } else { 0 };
+            if next_ordinal > 9999 {
+                bail!("Workflow journal 当日分段序号耗尽");
+            }
+            current = segment_name(day, next_ordinal);
+            bytes = 0;
         }
+        bytes = append_line(&directory, &current, bytes, &line)?;
     }
-    file.write_all(&lines)?;
-    file.sync_data()?;
-    Ok(AppendOutcome { seq, bytes: next_bytes, full })
+    Ok(AppendOutcome { seq, bytes, segment: current })
 }
 
 pub(super) fn read(
@@ -181,113 +230,126 @@ pub(super) fn read(
     since: u64,
     limit: usize,
 ) -> Result<Vec<JournalEvent>> {
-    let Some(path) = path(runtime, run)? else {
-        return Ok(Vec::new());
-    };
-    let metadata = crate::config::sensitive_metadata(&path)?;
-    crate::config::reject_link_or_reparse(&path, &metadata)?;
-    if !metadata.is_file() || metadata.len() > MAX_JOURNAL_BYTES || metadata.len() < run.journal_bytes {
-        bail!("Workflow journal 损坏或长度无效");
-    }
-    let bytes = fs::read(&path)?;
-    let committed = &bytes[..run.journal_bytes as usize];
-    if !committed.is_empty() && committed.last() != Some(&b'\n') {
-        bail!("Workflow journal 已提交尾部不完整");
-    }
-    let mut events = Vec::new();
-    let mut expected = 1u64;
-    for line in committed.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
-        if line.len() + 1 > MAX_LINE_BYTES {
-            bail!("Workflow journal 单行超过 4 KiB");
+    read_at(runtime, run, since, limit, now_ms())
+}
+
+fn read_at(runtime: &RuntimeStore, run: &RunRecord, since: u64, limit: usize, at_ms: i64) -> Result<Vec<JournalEvent>> {
+    let Some(directory) = directory(runtime, run)? else { return Ok(Vec::new()); };
+    if run.journal_seq == 0 { return Ok(Vec::new()); }
+    let (current_day, _) = segment_parts(&run.journal_segment)
+        .ok_or_else(|| anyhow!("Workflow journal 分段定位无效"))?;
+    let cutoff = day_key(at_ms.saturating_sub((RETAIN_DAYS - 1) * DAY_MS))?;
+    if current_day < cutoff.as_str() { return Ok(Vec::new()); }
+    let mut result = Vec::new();
+    let mut previous_seq = None;
+    let mut saw_current = false;
+    for (name, path) in segments(&directory)? {
+        let (day, _) = segment_parts(&name).expect("listed segment");
+        if day < cutoff.as_str() || name > run.journal_segment { continue; }
+        let mut bytes = fs::read(&path)?;
+        if name == run.journal_segment {
+            saw_current = true;
+            if bytes.len() < run.journal_bytes as usize { bail!("Workflow journal 已提交尾部缺失"); }
+            bytes.truncate(run.journal_bytes as usize);
         }
-        let event: JournalEvent = serde_json::from_slice(line)?;
-        if event.run_id != run.id || event.seq != expected || event.revision > run.revision {
-            bail!("Workflow journal 与 Run 快照不一致");
+        if !bytes.is_empty() && bytes.last() != Some(&b'\n') {
+            bail!("Workflow journal 已提交尾部不完整");
         }
-        expected += 1;
-        if event.seq > since {
-            events.push(event);
-            if events.len() >= limit.clamp(1, 1024) {
-                break;
+        for line in bytes.split(|byte| *byte == b'\n').filter(|line| !line.is_empty()) {
+            if line.len() + 1 > MAX_LINE_BYTES { bail!("Workflow journal 单行超过 4 KiB"); }
+            let event: JournalEvent = serde_json::from_slice(line)?;
+            if event.run_id != run.id || event.revision > run.revision || event.seq > run.journal_seq
+                || previous_seq.is_some_and(|previous| event.seq != previous + 1) {
+                bail!("Workflow journal 与 Run 快照不一致");
+            }
+            previous_seq = Some(event.seq);
+            if event.seq > since && result.len() < limit.clamp(1, 1024) {
+                result.push(event);
             }
         }
     }
-    if expected - 1 != run.journal_seq {
+    if !saw_current || previous_seq != Some(run.journal_seq) {
         bail!("Workflow journal 缺少已提交事件");
     }
-    Ok(events)
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn run(runtime: &RuntimeStore, id: &str) -> RunRecord {
+        let mut run: RunRecord = serde_json::from_value(serde_json::json!({
+            "id": id, "workspaceId": "w_project", "parentSessionId": "s_pm",
+            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "work", "status": "running", "revision": 1,
+            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
+        })).unwrap();
+        run.snapshot_relative = Some(pm_snapshot_relative(runtime, id, id).unwrap());
+        run
+    }
+
     #[test]
     fn crash_tail_is_discarded_before_the_next_commit() {
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
-        let mut run: RunRecord = serde_json::from_value(serde_json::json!({
-            "id": "wr_root", "workspaceId": "w_project", "parentSessionId": "s_pm",
-            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
-            "taskPrompt": "work", "status": "running", "revision": 1,
-            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
-            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
-        })).unwrap();
-        run.snapshot_relative = Some(pm_snapshot_relative(&runtime, "wr_root", "wr_root").unwrap());
+        let mut run = run(&runtime, "wr_root");
         save_run(&runtime, &run).unwrap();
         let first = load_run(&runtime, &run.id).unwrap();
         assert_eq!(first.journal_seq, 1);
         save_run(&runtime, &run).unwrap();
         assert_eq!(load_run(&runtime, &run.id).unwrap().journal_seq, 1);
-        let journal = path(&runtime, &first).unwrap().unwrap();
+        let journal = directory(&runtime, &first).unwrap().unwrap().join(&first.journal_segment);
         OpenOptions::new().append(true).open(&journal).unwrap().write_all(b"orphan\n").unwrap();
         run.revision = 2;
         run.status = "completed".into();
         run.journal_actor = "patrol".into();
-        run.flow_messages.push(serde_json::from_value(serde_json::json!({
-            "schema": "test", "messageId": "fm_first", "kind": "node.completed",
-            "projectWorkspaceId": "w_project", "executorSessionId": "s_executor",
-            "runId": "wr_root", "nodeId": "review", "senderSessionId": "s_worker",
-            "recipientSessionId": "s_executor", "payload": {"private": "body"},
-            "createdAtMs": 2
-        })).unwrap());
         save_run(&runtime, &run).unwrap();
         let second = load_run(&runtime, &run.id).unwrap();
-        assert_eq!(second.journal_seq, 3);
+        assert_eq!(second.journal_seq, 2);
         assert_eq!(fs::metadata(&journal).unwrap().len(), second.journal_bytes);
         let events = read(&runtime, &second, 0, 10).unwrap();
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[1].event_type, "node.completed");
-        assert_eq!(events[1].node_id.as_deref(), Some("review"));
-        assert!(!serde_json::to_string(&events).unwrap().contains("body"));
-        assert_eq!(events[2].event_type, "run.completed");
-        assert_eq!(events[2].actor, "patrol");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].event_type, "run.completed");
+        assert_eq!(events[1].actor, "patrol");
     }
 
     #[test]
-    fn capacity_reserve_records_journal_full() {
+    fn seven_day_rotation_prunes_old_segments() {
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
-        let mut run: RunRecord = serde_json::from_value(serde_json::json!({
-            "id": "wr_full", "workspaceId": "w_project", "parentSessionId": "s_pm",
-            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
-            "taskPrompt": "work", "status": "running", "revision": 1,
-            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
-            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
-        })).unwrap();
-        run.snapshot_relative = Some(pm_snapshot_relative(&runtime, "wr_full", "wr_full").unwrap());
-        save_run(&runtime, &run).unwrap();
+        let mut run = run(&runtime, "wr_roll");
+        let first_day = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z").unwrap().timestamp_millis();
+        save_run_with_journal_time(&runtime, &run, first_day).unwrap();
         let first = load_run(&runtime, &run.id).unwrap();
         run.revision = 2;
-        save_run_with_journal_limit(&runtime, &run, first.journal_bytes + FINAL_EVENT_RESERVE + 1).unwrap();
-        let stopped = load_run(&runtime, &run.id).unwrap();
-        assert!(stopped.journal_full);
-        assert_eq!(stopped.status, "stopping");
-        assert_eq!(stopped.stop.as_ref().unwrap().target, "blocked");
-        assert_eq!(stopped.journal_seq, first.journal_seq + 1);
-        assert_eq!(read(&runtime, &stopped, 0, 10).unwrap().last().unwrap().event_type, "journalFull");
-        assert!(stopped.journal_bytes <= first.journal_bytes + FINAL_EVENT_RESERVE + 1);
+        let eighth_day = first_day + 7 * DAY_MS;
+        save_run_with_journal_time(&runtime, &run, eighth_day).unwrap();
+        let second = load_run(&runtime, &run.id).unwrap();
+        assert_ne!(first.journal_segment, second.journal_segment);
+        assert!(!directory(&runtime, &first).unwrap().unwrap().join(&first.journal_segment).exists());
+        let events = read_at(&runtime, &second, 0, 10, eighth_day).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, 2);
+    }
+
+    #[test]
+    fn full_segment_rolls_without_stopping_run() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run = run(&runtime, "wr_size");
+        let at = now_ms();
+        save_run_with_journal_time(&runtime, &run, at).unwrap();
+        let first = load_run(&runtime, &run.id).unwrap();
+        run.revision = 2;
+        save_run_with_journal_options(&runtime, &run, at, first.journal_bytes + 1).unwrap();
+        let second = load_run(&runtime, &run.id).unwrap();
+        assert_ne!(first.journal_segment, second.journal_segment);
+        assert_eq!(second.status, "running");
+        assert_eq!(read_at(&runtime, &second, 0, 10, at).unwrap().len(), 2);
     }
 }

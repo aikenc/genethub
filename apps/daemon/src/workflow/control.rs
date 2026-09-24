@@ -3,6 +3,9 @@
 
 use super::*;
 use genehub_proto::SessionStatus;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+static LAST_JOURNAL_PRUNE_DAY: AtomicI64 = AtomicI64::new(0);
 
 pub(crate) async fn summarize_sessions(state: &Shared, sessions: &mut [SessionSummary]) {
     let executing_runs = state.sessions.executing_workflow_runs().await;
@@ -670,6 +673,13 @@ impl Drop for ReconcileJob {
 }
 
 pub(crate) async fn maintain(state: &Shared) {
+    let now = now_ms();
+    let utc_day = now.div_euclid(24 * 60 * 60 * 1000);
+    let last_prune = LAST_JOURNAL_PRUNE_DAY.load(Ordering::Relaxed);
+    let prune_logs = utc_day != last_prune
+        && LAST_JOURNAL_PRUNE_DAY
+            .compare_exchange(last_prune, utc_day, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
     // Maintenance only needs registered identities. The presentation list
     // verifies every AgentSpace on disk and would block the guest on each tick.
     for summary in state.workspaces.catalog().await.workspaces {
@@ -690,6 +700,13 @@ pub(crate) async fn maintain(state: &Shared) {
                 continue;
             }
         };
+        if prune_logs {
+            for run in &runs {
+                if let Err(error) = journal::prune(&runtime, run, now) {
+                    tracing::warn!(run = %run.id, %error, "workflow journal retention remains pending");
+                }
+            }
+        }
         let mut latest = BTreeMap::<&str, &RunRecord>::new();
         for run in &runs {
             let id = request::group_id(run);

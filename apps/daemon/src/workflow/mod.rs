@@ -868,7 +868,7 @@ struct RunRecord {
     #[serde(default)]
     journal_bytes: u64,
     #[serde(default)]
-    journal_full: bool,
+    journal_segment: String,
     #[serde(skip)]
     journal_actor: String,
     #[serde(default)]
@@ -1861,7 +1861,7 @@ pub(crate) async fn dispatch(
         revision: 0,
         journal_seq: 0,
         journal_bytes: 0,
-        journal_full: false,
+        journal_segment: String::new(),
         journal_actor: String::new(),
         executor_turns: 0,
         definition: bundle.definition,
@@ -4230,10 +4230,14 @@ fn active_run_records(
 }
 
 fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
-    save_run_with_journal_limit(runtime, run, journal::MAX_JOURNAL_BYTES)
+    save_run_with_journal_time(runtime, run, now_ms())
 }
 
-fn save_run_with_journal_limit(runtime: &RuntimeStore, run: &RunRecord, journal_limit: u64) -> Result<()> {
+fn save_run_with_journal_time(runtime: &RuntimeStore, run: &RunRecord, journal_now_ms: i64) -> Result<()> {
+    save_run_with_journal_options(runtime, run, journal_now_ms, journal::MAX_SEGMENT_BYTES)
+}
+
+fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journal_now_ms: i64, segment_limit: u64) -> Result<()> {
     require_request_writer(runtime, run)?;
     let mut stored = run.clone();
     if stored.status == "completed"
@@ -4262,18 +4266,11 @@ fn save_run_with_journal_limit(runtime: &RuntimeStore, run: &RunRecord, journal_
         let kind = stored.status.clone();
         supervision::prepare_notice(&mut stored, &kind);
     }
-    if stored.snapshot_relative.is_some() && !stored.journal_full {
-        let outcome = journal::append_with_limit(runtime, &stored, journal_limit)?;
+    if stored.snapshot_relative.is_some() {
+        let outcome = journal::append_at_with_limit(runtime, &stored, journal_now_ms, segment_limit)?;
         stored.journal_seq = outcome.seq;
         stored.journal_bytes = outcome.bytes;
-        if outcome.full {
-            stored.journal_full = true;
-            if !matches!(stored.status.as_str(), "stopping" | "cancelling" | "cancelled") {
-                control::request_stop(&mut stored, "blocked", "Workflow journal 已达到 16 MiB 上限".into());
-                stored.revision = stored.revision.saturating_add(1);
-                stored.updated_at_ms = now_ms();
-            }
-        }
+        stored.journal_segment = outcome.segment;
     }
     let run = &stored;
     // The envelope deliberately lacks the legacy top-level Run fields. An
@@ -6275,7 +6272,7 @@ mod tests {
             revision: 0,
             journal_seq: 0,
             journal_bytes: 0,
-            journal_full: false,
+            journal_segment: String::new(),
             journal_actor: String::new(),
             executor_turns: 0,
             definition,
@@ -6341,7 +6338,7 @@ mod tests {
             revision: 0,
             journal_seq: 0,
             journal_bytes: 0,
-            journal_full: false,
+            journal_segment: String::new(),
             journal_actor: String::new(),
             executor_turns: 0,
             definition: WorkflowDefinition {

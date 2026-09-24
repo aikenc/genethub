@@ -7,9 +7,9 @@ import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.workflow.journal-crash-tail",
-  title: "Workflow journal discards an uncommitted crash tail",
-  oracle: "only bytes named by the committed Run snapshot survive the next append",
-  catches: ["a crash tail appears as committed history", "retry duplicates a journal sequence"],
+  title: "Workflow journal discards crash tails and retains seven UTC days",
+  oracle: "only committed bytes survive a crash and day rotation prunes segments outside the seven-day window",
+  catches: ["a crash tail appears as committed history", "retry duplicates a journal sequence", "old journal segments remain after rotation"],
   tags: ["contract", "workflow", "storage", "native-intrinsic"],
   llm: { default: "none" },
   expectedDurationMs: 30_000,
@@ -23,8 +23,8 @@ defineSpecialty({
     "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,
     "--", "--nocapture",
   ], { cwd: t.openRoot, timeout: 160_000, maxBuffer: 4 * 1024 * 1024 });
-  t.assertions.assert(stdout.includes("test result: ok. 2 passed; 0 failed"),
-    `journal crash and capacity tests did not pass: ${stdout.slice(-2000)}`);
+  t.assertions.assert(stdout.includes("test result: ok. 3 passed; 0 failed"),
+    `journal crash and retention tests did not pass: ${stdout.slice(-2000)}`);
   const generated = await mkdtemp(join(t.env.root, "workflow-journal-proto-"));
   const binding = await promisify(execFile)("cargo", [
     "test", "--profile", "iterate", "-p", "genehub-proto", "--lib", "export_bindings",
