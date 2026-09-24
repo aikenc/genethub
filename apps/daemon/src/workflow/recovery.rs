@@ -2,6 +2,29 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct Handle {
+    pub run_id: String,
+    pub trigger_seq: u64,
+    pub reason: String,
+}
+
+pub(super) fn budget_exhausted(runtime: &super::RuntimeStore, run: &super::RunRecord, now: i64) -> Result<bool> {
+    let budget = run.definition.budget.clone().unwrap_or_default();
+    budget.validate()?;
+    let group = super::request_runs(runtime, super::request::group_id(run))?;
+    let mut rounds = 0u64;
+    let mut execution_ms = 0u64;
+    for recovery in group.iter().filter(|other| !other.handles.is_empty()) {
+        rounds = rounds.saturating_add(super::request::activities(recovery)
+            .fold(0u64, |sum, activity| sum.saturating_add(activity.llm_rounds)));
+        execution_ms = execution_ms.saturating_add(super::request::execution_ms(recovery, now) as u64);
+    }
+    Ok(rounds >= budget.max_llm_rounds
+        || execution_ms >= budget.deadline_seconds.saturating_mul(1000))
+}
+
 pub(super) const DEFAULT_PM_ANSWER_SECONDS: u64 = 1800;
 pub(super) const MAX_PM_ANSWER_SECONDS: u64 = 86400;
 

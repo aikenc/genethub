@@ -845,6 +845,8 @@ struct RunRecord {
     engine: Option<workflow_engine::EngineState>,
     #[serde(default)]
     request: Option<request::RequestLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    handles: Vec<recovery::Handle>,
     #[serde(default)]
     supervision: supervision::Supervision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1845,6 +1847,7 @@ pub(crate) async fn dispatch(
         stop: None,
         recovery: None,
         request: Some(request),
+        handles: Vec::new(),
         supervision: supervision::Supervision {
             diagnostic_role,
             ..Default::default()
@@ -5035,6 +5038,27 @@ mod tests {
         assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("只有 workflow.md"));
     }
 
+    #[test]
+    fn recovery_runs_do_not_spend_business_run_allowance() {
+        let root: RunRecord = serde_json::from_value(serde_json::json!({
+            "request": {"originalMessageId": "m_1", "rootRunId": "wr_root"},
+            "id": "wr_root", "workspaceId": "workspace", "parentSessionId": "s_pm",
+            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "deliver", "status": "blocked", "revision": 1,
+            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 2
+        })).unwrap();
+        let mut recovery = root.clone();
+        recovery.id = "wr_recovery".into();
+        recovery.request.as_mut().unwrap().retry_of = Some(root.id.clone());
+        recovery.handles.push(recovery::Handle {
+            run_id: root.id.clone(), trigger_seq: 1, reason: "execution failed".into(),
+        });
+        let snapshot = request::observation(&[root.clone(), recovery], &root, 3).unwrap();
+        assert_eq!(snapshot.used_runs, 1);
+        assert_eq!(snapshot.remaining_runs, snapshot.budget.max_runs - 1);
+    }
+
     /// The de-Git boundary, asserted on the source rather than trusted to a
     /// review: the kernel may not reach for Git to decide anything it could
     /// have decided for a project that has no repository.
@@ -6512,6 +6536,7 @@ mod tests {
             stop: None,
             recovery: None,
             request: None,
+            handles: Vec::new(),
             supervision: Default::default(),
             execution_root: None,
             experimental: false,
@@ -6579,6 +6604,7 @@ mod tests {
             stop: None,
             recovery: None,
             request: None,
+            handles: Vec::new(),
             supervision: Default::default(),
             execution_root: None,
             experimental: false,

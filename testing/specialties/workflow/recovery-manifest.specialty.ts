@@ -20,6 +20,7 @@ defineSpecialty({
     "workflow::package::tests::frontmatter_accepts_only_description_dev_and_recovery",
     "workflow::tests::recovery_selector_is_pinned_and_requires_a_package_flow",
     "workflow::tests::recovery_flow_limits_are_checked_before_candidate_activation",
+    "workflow::tests::recovery_runs_do_not_spend_business_run_allowance",
   ]) {
     const { stdout } = await promisify(execFile)("cargo", [
       "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,

@@ -140,6 +140,9 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
                 }
                 ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
                 let previous = decode_run_record(&fs::read(&snapshot)?)?;
+                if previous.handles != run.handles {
+                    bail!("Workflow recovery handles 创建后不可改变");
+                }
                 (previous.journal_seq, previous.journal_bytes, previous.journal_segment,
                     previous.revision, Some(previous.status),
                     previous.flow_message_total)
@@ -381,5 +384,19 @@ mod tests {
         assert_eq!(events.last().unwrap().seq, committed.journal_seq);
         save_run(&runtime, &run).unwrap();
         assert_eq!(load_run(&runtime, &run.id).unwrap().journal_seq, committed.journal_seq);
+    }
+
+    #[test]
+    fn recovery_handles_cannot_change_after_first_snapshot() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run = run(&runtime, "wr_handle");
+        run.handles.push(recovery::Handle {
+            run_id: "wr_business".into(), trigger_seq: 1, reason: "execution failed".into(),
+        });
+        save_run(&runtime, &run).unwrap();
+        run.handles[0].trigger_seq = 2;
+        assert!(save_run(&runtime, &run).unwrap_err().to_string().contains("handles"));
     }
 }

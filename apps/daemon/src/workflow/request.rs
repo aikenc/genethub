@@ -197,8 +197,8 @@ pub(super) fn observation(
 ) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
     let group = runs
         .iter()
-        .filter(|other| group_id(other) == group_id(run) && other.id != run.id)
-        .chain(std::iter::once(run))
+        .filter(|other| group_id(other) == group_id(run) && other.id != run.id && other.handles.is_empty())
+        .chain(std::iter::once(run).filter(|run| run.handles.is_empty()))
         .collect::<Vec<_>>();
     let root = group
         .iter()
@@ -237,6 +237,7 @@ pub(super) fn snapshot(
 }
 
 pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
+    if !run.handles.is_empty() { return recovery::budget_exhausted(runtime, run, now); }
     let snapshot = snapshot(runtime, run, now)?;
     Ok(snapshot.remaining_llm_rounds == 0
         || (!run.supervision.waiting && snapshot.remaining_execution_ms == 0))
