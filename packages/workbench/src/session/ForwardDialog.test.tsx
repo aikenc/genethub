@@ -27,6 +27,7 @@ function agent(id: string, label: string): AgentInfo {
       interrupt: false,
       setModel: false,
       setEffort: false,
+      setFast: false,
       setMode: false,
       permissions: false,
       resume: false,

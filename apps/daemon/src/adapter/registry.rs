@@ -441,6 +441,7 @@ mod tests {
                         reasoning: false,
                         efforts: Vec::new(),
                         input_modalities: None,
+                        supports_fast: false,
                     }],
                     ..Default::default()
                 };

@@ -191,6 +191,7 @@ describe("re-probing agents after they may have been installed", () => {
       interrupt: true,
       setModel: true,
       setEffort: false,
+      setFast: false,
       setMode: true,
       permissions: true,
       resume: true,
@@ -212,7 +213,7 @@ describe("re-probing agents after they may have been installed", () => {
     probe: { state: "ready" as const },
     catalog: {
       ...cursorMissing.catalog,
-      models: [{ id: "auto", label: "Auto", contextWindow: undefined, reasoning: false, efforts: [] }],
+      models: [{ id: "auto", label: "Auto", contextWindow: undefined, reasoning: false, efforts: [], supportsFast: false }],
       defaultModel: "auto",
     },
   } as AgentInfo;
@@ -1091,6 +1092,7 @@ describe("opening a new conversation", () => {
           interrupt: true,
           setModel: true,
           setEffort: true,
+          setFast: false,
           setMode: false,
           permissions: false,
           resume: true,
@@ -1108,6 +1110,7 @@ describe("opening a new conversation", () => {
           interrupt: true,
           setModel: true,
           setEffort: true,
+          setFast: false,
           setMode: true,
           permissions: true,
           resume: true,
@@ -1122,6 +1125,7 @@ describe("opening a new conversation", () => {
               reasoning: true,
               efforts: ["high"],
               inputModalities: [],
+              supportsFast: false,
             },
           ],
           modes: [],
@@ -1162,6 +1166,7 @@ describe("opening a new conversation", () => {
         interrupt: true,
         setModel: true,
         setEffort: false,
+        setFast: false,
         setMode: false,
         permissions: false,
         resume: true,
@@ -1185,7 +1190,7 @@ describe("opening a new conversation", () => {
       label: "Codex",
       catalog: {
         ...external.catalog,
-        models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [] }],
+        models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [], supportsFast: false }],
       },
     } as AgentInfo;
     expect(defaultAgent([external, catalogued])?.id).toBe("codex");
@@ -1247,6 +1252,7 @@ describe("opening a new conversation", () => {
         interrupt: true,
         setModel: true,
         setEffort: true,
+        setFast: false,
         setMode: true,
         permissions: false,
         resume: true,
@@ -1388,6 +1394,7 @@ describe("machine-global model selection", () => {
       interrupt: true,
       setModel: true,
       setEffort: true,
+      setFast: false,
       setMode: true,
       permissions: false,
       resume: true,
@@ -1396,8 +1403,8 @@ describe("machine-global model selection", () => {
     },
     catalog: {
       models: [
-        { id: "sonnet", label: "Sonnet", reasoning: true, efforts: ["low", "high"], inputModalities: [] },
-        { id: "opus", label: "Opus", reasoning: true, efforts: [], inputModalities: [] },
+        { id: "sonnet", label: "Sonnet", reasoning: true, efforts: ["low", "high"], inputModalities: [], supportsFast: false },
+        { id: "opus", label: "Opus", reasoning: true, efforts: [], inputModalities: [], supportsFast: false },
       ],
       modes: [],
       commands: [],
@@ -1409,7 +1416,7 @@ describe("machine-global model selection", () => {
     label: "Codex",
     catalog: {
       ...claude.catalog,
-      models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [], inputModalities: ["image", "video"] }],
+      models: [{ id: "gpt-5.6-sol", label: "GPT-5.6-Sol", reasoning: true, efforts: [], inputModalities: ["image", "video"], supportsFast: false }],
     },
   } as AgentInfo;
 

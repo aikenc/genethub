@@ -48,6 +48,7 @@ impl AgentAdapter for OpenCodeAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             set_effort: false,
+            set_fast: false,
             interrupt: true,
             set_model: true,
             set_mode: false,

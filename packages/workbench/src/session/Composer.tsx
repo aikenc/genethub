@@ -153,6 +153,7 @@ export function Composer({
   modelId,
   modeId,
   effortId,
+  fast,
   runtimeValues,
   commands,
   restoreDraft,
@@ -192,6 +193,7 @@ export function Composer({
   modelId: string | null;
   modeId: string | null;
   effortId?: string | null;
+  fast?: boolean | null;
   runtimeValues?: Record<string, string> | null;
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];
@@ -1010,6 +1012,7 @@ export function Composer({
               modelId={modelId}
               modeId={modeId}
               effortId={effortId ?? null}
+              fast={fast ?? null}
               runtimeValues={runtimeValues}
               disabled={disabled}
               busy={phase !== "idle"}

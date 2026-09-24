@@ -74,6 +74,7 @@ const READY_AGENT: AgentInfo = {
     setModel: true,
     setMode: true,
     setEffort: false,
+    setFast: false,
     permissions: true,
     resume: true,
     fork: false,
@@ -81,7 +82,7 @@ const READY_AGENT: AgentInfo = {
   },
   catalog: {
     models: [
-      { id: "deepseek/deepseek-v4-flash", label: "flash", reasoning: false, efforts: [] },
+      { id: "deepseek/deepseek-v4-flash", label: "flash", reasoning: false, efforts: [], supportsFast: false },
     ],
     modes: [],
     commands: [],

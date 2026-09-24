@@ -263,6 +263,7 @@ impl AgentAdapter for CodexAdapter {
             // every `turn/start` carries the model, the level and the policy.
             set_model: true,
             set_effort: true,
+            set_fast: false,
             set_mode: true,
             permissions: true,
             // `thread/resume` with the id we stored from `thread/start`.
@@ -811,6 +812,7 @@ fn models_in(listed: &Value) -> Vec<ModelInfo> {
                 reasoning: !efforts.is_empty(),
                 efforts,
                 input_modalities: None,
+                supports_fast: false,
             })
         })
         .collect()

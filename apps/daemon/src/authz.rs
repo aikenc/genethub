@@ -414,6 +414,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionRoute { .. }
         | Request::SessionSetMode { .. }
         | Request::SessionSetEffort { .. }
+        | Request::SessionSetFast { .. }
         | Request::SessionSetRuntimeAxis { .. }
         | Request::SessionRespondPermission { .. } => Capability::Session,
 

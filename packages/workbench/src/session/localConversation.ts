@@ -72,7 +72,7 @@ export function useConversationLocalChanges(): void {
   }, []);
 }
 
-export interface DraftIdentity { localId: string; workspaceId: string; tags?: string[]; agentId: string | null; title: string; modelId?: string | null; modeId?: string | null; effortId?: string | null; runtimeValues?: Record<string,string> }
+export interface DraftIdentity { localId: string; workspaceId: string; tags?: string[]; agentId: string | null; title: string; modelId?: string | null; modeId?: string | null; effortId?: string | null; fast?: boolean | null; runtimeValues?: Record<string,string> }
 export function draftIdentities(machine: string): DraftIdentity[] { const value = localValue<DraftIdentity[]>(`drafts:${machine}`); return Array.isArray(value) ? value.filter(item => item && typeof item.localId === "string" && typeof item.workspaceId === "string") : []; }
 export function rememberDraftIdentity(machine: string, draft: DraftIdentity): void {
  saveLocalValue(`drafts:${machine}`, [...draftIdentities(machine).filter(item => item.localId !== draft.localId && Boolean(readLocalDraft(`${machine}:${item.localId}`).text || readLocalDraft(`${machine}:${item.localId}`).attachments.length || readLocalDraft(`${machine}:${item.localId}`).missingAttachments)), draft]);

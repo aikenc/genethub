@@ -504,6 +504,7 @@ impl SessionManager {
         agent_id: &str,
         model_id: Option<String>,
         effort_id: Option<String>,
+        fast: Option<bool>,
         mode_id: Option<String>,
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
@@ -521,6 +522,7 @@ impl SessionManager {
             latest_reply: None,
             drafts: vec![],
             effort_id,
+            fast,
             runtime_values,
             id: format!("s_{}", uuid::Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
@@ -590,6 +592,7 @@ impl SessionManager {
         agent_id: &str,
         model_id: Option<String>,
         effort_id: Option<String>,
+        fast: Option<bool>,
         mode_id: Option<String>,
         runtime_values: std::collections::BTreeMap<String, String>,
         title: Option<String>,
@@ -603,6 +606,7 @@ impl SessionManager {
                 agent_id,
                 model_id,
                 effort_id.clone(),
+                fast,
                 mode_id,
                 runtime_values,
                 title,
@@ -690,6 +694,7 @@ impl SessionManager {
             latest_reply: None,
             drafts: vec![],
             effort_id,
+            fast: None,
             runtime_values,
             id: stable_id.unwrap_or_else(|| format!("s_{}", uuid::Uuid::new_v4().simple())),
             workspace_id: workspace_id.to_string(),
@@ -816,6 +821,7 @@ impl SessionManager {
             model_id: source_meta.model_id.clone(),
             mode_id: source_meta.mode_id.clone(),
             effort_id: source_meta.effort_id.clone(),
+            fast: source_meta.fast,
             runtime_values: source_meta.runtime_values.clone(),
         });
         let same_agent = target.agent_id == source_meta.agent_id;
@@ -958,6 +964,7 @@ impl SessionManager {
             model_id,
             mode_id,
             effort_id,
+            fast: target.fast.or(source_meta.fast),
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
@@ -1217,6 +1224,7 @@ impl SessionManager {
             model_id,
             mode_id: target.mode_id,
             effort_id: target.effort_id,
+            fast: target.fast,
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
@@ -1434,6 +1442,7 @@ impl SessionManager {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
             created_at_ms,
             updated_at_ms,
@@ -3064,6 +3073,7 @@ impl SessionManager {
             model_id: meta.model_id.clone(),
             mode_id: mode_override.clone().or_else(|| meta.mode_id.clone()),
             effort_id: meta.effort_id.clone(),
+            fast: meta.fast,
             runtime_values: meta.runtime_values.clone(),
             additional_system_prompt: additional_system_prompt.clone(),
             skills_dir: self.skills_dir.clone(),
@@ -3282,20 +3292,41 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent().await {
-            Some(agent) => agent.set_model(model_id).await?,
-            None => {
-                let offered = self.offered(&live, providers).await?;
-                listed(
-                    "model",
-                    model_id,
-                    offered.models.iter().map(|model| model.id.as_str()),
-                )?;
+        let offered = self.offered(&live, providers).await?;
+        listed(
+            "model",
+            model_id,
+            offered.models.iter().map(|model| model.id.as_str()),
+        )?;
+        let is_cursor = live.meta.lock().await.agent_id == "cursor";
+        if is_cursor {
+            if live.execution.lock().await.is_none() {
+                if let Some(agent) = live.agent().await {
+                    if let Some(handle) = agent.persistence() {
+                        let mut meta = live.meta.lock().await;
+                        meta.persist = Some(handle);
+                        let _ = self.store.save_meta(&meta);
+                    }
+                }
+                let _ = live.stop_pump().await;
+                let _ = close_current_agent(&live).await;
             }
+        } else if let Some(agent) = live.agent().await {
+            agent.set_model(model_id).await?;
         }
         {
             let mut meta = live.meta.lock().await;
             meta.model_id = Some(model_id.to_string());
+            if let Some(model) = offered.models.iter().find(|m| m.id == model_id) {
+                if !model.supports_fast && meta.fast == Some(true) {
+                    meta.fast = Some(false);
+                }
+                if let Some(effort) = &meta.effort_id {
+                    if !model.efforts.iter().any(|e| e == effort) {
+                        meta.effort_id = offered.default_effort.clone();
+                    }
+                }
+            }
             meta.updated_at_ms = now_ms();
             self.store.save_meta(&meta)?;
         }
@@ -3442,6 +3473,7 @@ impl SessionManager {
             && source_meta.model_id == target.model_id
             && source_meta.mode_id == target.mode_id
             && source_meta.effort_id == target.effort_id
+            && source_meta.fast == target.fast
             && source_meta.runtime_values == target.runtime_values;
         if same_runtime {
             if source_meta.tag_routing == tag_routing
@@ -3465,6 +3497,7 @@ impl SessionManager {
                 model_id: next.model_id.clone(),
                 mode_id: next.mode_id.clone(),
                 effort_id: next.effort_id.clone(),
+                fast: next.fast,
                 runtime_values: next.runtime_values.clone(),
                 routing_tags: next.routing_tags.clone(),
                 media_tags: next.media_tags.clone(),
@@ -3488,6 +3521,7 @@ impl SessionManager {
         next.model_id = target.model_id.clone();
         next.mode_id = target.mode_id.clone();
         next.effort_id = target.effort_id.clone();
+        next.fast = target.fast;
         next.runtime_values = target.runtime_values.clone();
         next.tag_routing = tag_routing;
         next.routing_tags = routing_tags;
@@ -3496,6 +3530,7 @@ impl SessionManager {
             next.model_id.clone(),
             next.mode_id.clone(),
             next.effort_id.clone(),
+            next.fast,
             next.runtime_values.clone(),
         );
         if normalize_runtime_selection(&mut next, &catalog)
@@ -3504,6 +3539,7 @@ impl SessionManager {
                     next.model_id.clone(),
                     next.mode_id.clone(),
                     next.effort_id.clone(),
+                    next.fast,
                     next.runtime_values.clone(),
                 )
         {
@@ -3584,6 +3620,7 @@ impl SessionManager {
             model_id: next.model_id.clone(),
             mode_id: next.mode_id.clone(),
             effort_id: next.effort_id.clone(),
+            fast: next.fast,
             runtime_values: next.runtime_values.clone(),
             routing_tags: next.routing_tags.clone(),
             media_tags: next.media_tags.clone(),
@@ -3600,19 +3637,34 @@ impl SessionManager {
         providers: &ProviderMap,
     ) -> Result<()> {
         let live = self.live(session_id).await?;
-        match live.agent().await {
-            Some(agent) => agent.set_effort(effort_id).await?,
-            None => {
-                let offered = self.offered(&live, providers).await?;
-                listed(
-                    "effort level",
-                    effort_id,
-                    offered
-                        .models
-                        .iter()
-                        .flat_map(|model| model.efforts.iter().map(String::as_str)),
-                )?;
+        let offered = self.offered(&live, providers).await?;
+        let current_model_id = live.meta.lock().await.model_id.clone();
+        let model = current_model_id
+            .as_deref()
+            .and_then(|id| offered.models.iter().find(|m| m.id == id));
+        let efforts = model
+            .map(|m| m.efforts.as_slice())
+            .unwrap_or(&[]);
+        listed(
+            "effort level",
+            effort_id,
+            efforts.iter().map(String::as_str),
+        )?;
+        let is_cursor = live.meta.lock().await.agent_id == "cursor";
+        if is_cursor {
+            if live.execution.lock().await.is_none() {
+                if let Some(agent) = live.agent().await {
+                    if let Some(handle) = agent.persistence() {
+                        let mut meta = live.meta.lock().await;
+                        meta.persist = Some(handle);
+                        let _ = self.store.save_meta(&meta);
+                    }
+                }
+                let _ = live.stop_pump().await;
+                let _ = close_current_agent(&live).await;
             }
+        } else if let Some(agent) = live.agent().await {
+            agent.set_effort(effort_id).await?;
         }
         {
             let mut meta = live.meta.lock().await;
@@ -3624,6 +3676,54 @@ impl SessionManager {
             effort_id: effort_id.to_string(),
         })
         .await;
+        Ok(())
+    }
+
+    pub async fn set_fast(
+        &self,
+        session_id: &str,
+        fast: bool,
+        providers: &ProviderMap,
+    ) -> Result<()> {
+        let live = self.live(session_id).await?;
+        let offered = self.offered(&live, providers).await?;
+        let agent_id = live.meta.lock().await.agent_id.clone();
+        let adapter = self.registry.require(&agent_id)?;
+        if fast && !adapter.capabilities().set_fast {
+            bail!("the {} agent does not support fast mode", adapter.label());
+        }
+        let current_model_id = live.meta.lock().await.model_id.clone();
+        let model = current_model_id
+            .as_deref()
+            .and_then(|id| offered.models.iter().find(|m| m.id == id));
+        if let Some(model) = model {
+            if fast && !model.supports_fast {
+                bail!("the selected model '{}' does not support fast mode", model.id);
+            }
+        }
+        let is_cursor = live.meta.lock().await.agent_id == "cursor";
+        if is_cursor {
+            if live.execution.lock().await.is_none() {
+                if let Some(agent) = live.agent().await {
+                    if let Some(handle) = agent.persistence() {
+                        let mut meta = live.meta.lock().await;
+                        meta.persist = Some(handle);
+                        let _ = self.store.save_meta(&meta);
+                    }
+                }
+                let _ = live.stop_pump().await;
+                let _ = close_current_agent(&live).await;
+            }
+        } else if let Some(agent) = live.agent().await {
+            agent.set_fast(fast).await?;
+        }
+        {
+            let mut meta = live.meta.lock().await;
+            meta.fast = Some(fast);
+            meta.updated_at_ms = now_ms();
+            self.store.save_meta(&meta)?;
+        }
+        live.publish(SessionEvent::FastChanged { fast }).await;
         Ok(())
     }
 
@@ -6751,6 +6851,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
             model_id,
             mode_id,
             effort_id,
+            fast,
             runtime_values,
             routing_tags,
             media_tags,
@@ -6760,6 +6861,7 @@ async fn apply(live: &Live, event: &SessionEvent) {
             meta.model_id = model_id.clone();
             meta.mode_id = mode_id.clone();
             meta.effort_id = effort_id.clone();
+            meta.fast = *fast;
             meta.runtime_values = runtime_values.clone();
             meta.routing_tags = routing_tags.clone();
             meta.media_tags = media_tags.clone();
@@ -6771,6 +6873,10 @@ async fn apply(live: &Live, event: &SessionEvent) {
         SessionEvent::EffortChanged { effort_id } => {
             let mut meta = live.meta.lock().await;
             meta.effort_id = Some(effort_id.clone());
+        }
+        SessionEvent::FastChanged { fast } => {
+            let mut meta = live.meta.lock().await;
+            meta.fast = Some(*fast);
         }
         SessionEvent::RuntimeAxisChanged { axis_id, value_id } => {
             let mut meta = live.meta.lock().await;
@@ -6959,6 +7065,7 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
         meta.model_id.clone(),
         meta.mode_id.clone(),
         meta.effort_id.clone(),
+        meta.fast,
         meta.runtime_values.clone(),
     );
 
@@ -6968,12 +7075,26 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
             .as_ref()
             .is_some_and(|id| !catalog.models.iter().any(|model| &model.id == id))
     {
-        meta.model_id = catalog
-            .default_model
-            .as_ref()
-            .filter(|id| catalog.models.iter().any(|model| &model.id == *id))
-            .cloned()
-            .or_else(|| catalog.models.first().map(|model| model.id.clone()));
+        let migrated = meta
+            .model_id
+            .as_deref()
+            .and_then(|id| crate::adapter::acp::resolve_legacy_cursor_model(id, catalog));
+        if let Some((migrated_model, migrated_effort, migrated_fast)) = migrated {
+            meta.model_id = Some(migrated_model);
+            if meta.effort_id.is_none() && migrated_effort.is_some() {
+                meta.effort_id = migrated_effort;
+            }
+            if meta.fast.is_none() && migrated_fast.is_some() {
+                meta.fast = migrated_fast;
+            }
+        } else {
+            meta.model_id = catalog
+                .default_model
+                .as_ref()
+                .filter(|id| catalog.models.iter().any(|model| &model.id == *id))
+                .cloned()
+                .or_else(|| catalog.models.first().map(|model| model.id.clone()));
+        }
     }
     if !catalog.modes.is_empty()
         && meta
@@ -6990,10 +7111,11 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
     }
 
     if !catalog.models.is_empty() {
-        let efforts = meta
+        let model = meta
             .model_id
             .as_ref()
-            .and_then(|id| catalog.models.iter().find(|model| &model.id == id))
+            .and_then(|id| catalog.models.iter().find(|model| &model.id == id));
+        let efforts = model
             .map(|model| model.efforts.as_slice())
             .unwrap_or(&[]);
         if meta
@@ -7006,6 +7128,11 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
                 .as_ref()
                 .filter(|id| efforts.contains(id))
                 .cloned();
+        }
+        if let Some(model) = model {
+            if !model.supports_fast && meta.fast == Some(true) {
+                meta.fast = Some(false);
+            }
         }
     }
 
@@ -7022,6 +7149,7 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
             meta.model_id.clone(),
             meta.mode_id.clone(),
             meta.effort_id.clone(),
+            meta.fast,
             meta.runtime_values.clone(),
         )
 }
@@ -7041,6 +7169,7 @@ mod tests {
             latest_reply: None,
             drafts: vec![],
             effort_id: None,
+            fast: None,
             id: "s1".into(),
             workspace_id: "w1".into(),
             format: SESSION_FORMAT,
@@ -7325,6 +7454,7 @@ mod tests {
                 interrupt: false,
                 set_model: false,
                 set_effort: false,
+                set_fast: false,
                 set_mode: false,
                 permissions: false,
                 resume: true,
@@ -7452,6 +7582,7 @@ mod tests {
                         reasoning: true,
                         efforts: Vec::new(),
                         input_modalities: None,
+                        supports_fast: false,
                     })
                     .collect(),
                 modes: Vec::new(),
@@ -7572,6 +7703,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
                 vec!["Flush".into()],
@@ -7589,6 +7721,7 @@ mod tests {
                     model_id: Some("model".into()),
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -7641,6 +7774,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
                 vec!["Flush".into()],
@@ -7664,6 +7798,7 @@ mod tests {
                     model_id: Some("model".into()),
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -7743,6 +7878,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
                 vec!["Flush".into()],
@@ -7766,6 +7902,7 @@ mod tests {
                     model_id: Some("model-alt".into()),
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -7869,6 +8006,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -7969,6 +8107,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -8018,6 +8157,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Default::default(),
                 Some("Deploy".into()),
             )
@@ -8061,6 +8201,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8183,6 +8324,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Default::default(),
                 Some("Portable".into()),
             )
@@ -8238,6 +8380,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -8258,6 +8401,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 },
                 &ProviderMap::new(),
@@ -8317,6 +8461,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8335,6 +8480,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8367,6 +8513,7 @@ mod tests {
                 dir.path().to_path_buf(),
                 "source",
                 Some("model".into()),
+                None,
                 None,
                 None,
                 Default::default(),
@@ -8430,6 +8577,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8448,6 +8596,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8490,6 +8639,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8508,6 +8658,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8552,6 +8703,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8571,6 +8723,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -8616,6 +8769,7 @@ mod tests {
                 Some("model".into()),
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -8646,6 +8800,7 @@ mod tests {
                     model_id: None,
                     mode_id: None,
                     effort_id: None,
+                    fast: None,
                     runtime_values: Default::default(),
                 }),
                 &ProviderMap::new(),
@@ -12245,6 +12400,7 @@ mod tests {
                 reasoning: true,
                 efforts: vec!["medium".into(), "high".into()],
                 input_modalities: None,
+                supports_fast: true,
             }],
             modes: vec![genehub_proto::ModeInfo {
                 id: "agent".into(),
@@ -12306,6 +12462,121 @@ mod tests {
         assert_eq!(session.model_id, before.model_id);
         assert_eq!(session.effort_id, before.effort_id);
         assert_eq!(session.runtime_values, before.runtime_values);
+    }
+
+    #[test]
+    fn legacy_cursor_model_ids_are_migrated_without_resetting_to_default_model() {
+        let mut session = meta();
+        session.model_id = Some("cursor-grok-4.6-high-fast".into());
+        session.effort_id = None;
+        session.fast = None;
+
+        let catalog = Catalog {
+            models: vec![
+                genehub_proto::ModelInfo {
+                    id: "cursor-grok-4.6".into(),
+                    label: "Cursor Grok 4.6".into(),
+                    context_window: None,
+                    reasoning: true,
+                    efforts: vec!["high".into()],
+                    supports_fast: true,
+                    input_modalities: None,
+                },
+                genehub_proto::ModelInfo {
+                    id: "auto".into(),
+                    label: "Auto".into(),
+                    context_window: None,
+                    reasoning: false,
+                    efforts: vec![],
+                    supports_fast: false,
+                    input_modalities: None,
+                },
+            ],
+            modes: vec![],
+            commands: vec![],
+            runtime_axes: None,
+            default_model: Some("auto".into()),
+            default_mode: None,
+            default_effort: None,
+        };
+
+        assert!(normalize_runtime_selection(&mut session, &catalog));
+        assert_eq!(session.model_id.as_deref(), Some("cursor-grok-4.6"));
+        assert_eq!(session.effort_id.as_deref(), Some("high"));
+        assert_eq!(session.fast, Some(true));
+    }
+
+    #[test]
+    fn legacy_opaque_cursor_model_ids_are_migrated_without_resetting() {
+        let mut session = meta();
+        session.model_id = Some("grok-4.7[effort=high,fast=true]".into());
+        session.effort_id = None;
+        session.fast = None;
+
+        let catalog = Catalog {
+            models: vec![
+                genehub_proto::ModelInfo {
+                    id: "grok-4.7".into(),
+                    label: "Grok 4.7".into(),
+                    context_window: None,
+                    reasoning: true,
+                    efforts: vec!["low".into(), "medium".into(), "high".into()],
+                    supports_fast: true,
+                    input_modalities: None,
+                },
+                genehub_proto::ModelInfo {
+                    id: "auto".into(),
+                    label: "Auto".into(),
+                    context_window: None,
+                    reasoning: false,
+                    efforts: vec![],
+                    supports_fast: false,
+                    input_modalities: None,
+                },
+            ],
+            modes: vec![],
+            commands: vec![],
+            runtime_axes: None,
+            default_model: Some("auto".into()),
+            default_mode: None,
+            default_effort: Some("medium".into()),
+        };
+
+        assert!(normalize_runtime_selection(&mut session, &catalog));
+        assert_eq!(session.model_id.as_deref(), Some("grok-4.7"));
+        assert_eq!(session.effort_id.as_deref(), Some("high"));
+        assert_eq!(session.fast, Some(true));
+    }
+
+    #[tokio::test]
+    async fn set_fast_validates_adapter_and_model_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionManager::new(
+            test_store(dir.path()),
+            Arc::new(Registry::of(vec![Arc::new(Amnesiac)])),
+            16,
+        );
+        let summary = sessions
+            .create(
+                "w1",
+                dir.path().to_path_buf(),
+                "amnesiac",
+                None,
+                None,
+                None,
+                None,
+                Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Amnesiac does not have set_fast capability
+        let err = sessions
+            .set_fast(&summary.id, true, &ProviderMap::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("does not support fast mode"));
     }
 
     #[tokio::test]

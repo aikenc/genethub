@@ -19,6 +19,7 @@ function agent(id: string, label: string, fork: boolean, ready = true): AgentInf
       interrupt: false,
       setModel: false,
       setEffort: false,
+      setFast: false,
       setMode: false,
       permissions: false,
       resume: false,
@@ -26,7 +27,7 @@ function agent(id: string, label: string, fork: boolean, ready = true): AgentInf
       attachments: false,
     },
     catalog: {
-      models: [{ id: "model", label: "Model", contextWindow: 100_000, reasoning: true, efforts: [] }],
+      models: [{ id: "model", label: "Model", contextWindow: 100_000, reasoning: true, efforts: [], supportsFast: false }],
       modes: [],
       commands: [],
     },

@@ -343,6 +343,9 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         effort_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        fast: Option<bool>,
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         runtime_values: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -356,6 +359,8 @@ pub enum SessionEvent {
     ModeChanged { mode_id: String },
     #[serde(rename_all = "camelCase")]
     EffortChanged { effort_id: String },
+    #[serde(rename_all = "camelCase")]
+    FastChanged { fast: bool },
     #[serde(rename_all = "camelCase")]
     RuntimeAxisChanged { axis_id: String, value_id: String },
     #[serde(rename_all = "camelCase")]

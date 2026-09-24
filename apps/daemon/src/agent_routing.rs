@@ -27,6 +27,7 @@ pub(crate) struct ResolvedAgentRoute {
     pub agent_id: String,
     pub model_id: Option<String>,
     pub effort_id: Option<String>,
+    pub fast: Option<bool>,
     pub mode_id: Option<String>,
     pub runtime_values: BTreeMap<String, String>,
 }
@@ -365,6 +366,7 @@ pub(crate) async fn route_session(
                 model_id: route.model_id,
                 mode_id: route.mode_id,
                 effort_id: route.effort_id,
+                fast: None,
                 runtime_values: route.runtime_values,
             },
             &providers,
@@ -401,6 +403,9 @@ fn candidate_for(
         .filter(|effort| efforts.contains(effort))
         .cloned()
         .or_else(|| default_effort(efforts));
+    let fast = remembered
+        .and_then(|runtime| runtime.fast)
+        .filter(|fast| *fast && model.is_some_and(|m| m.supports_fast));
     let mode_id = remembered
         .and_then(|runtime| runtime.mode_id.as_ref())
         .filter(|mode| {
@@ -455,6 +460,7 @@ fn candidate_for(
             agent_id: agent.id.clone(),
             model_id: model.map(|model| model.id.clone()),
             effort_id,
+            fast,
             mode_id,
             runtime_values,
         },
@@ -596,6 +602,7 @@ mod tests {
                     efforts: vec!["medium".into(), "high".into()],
                     input_modalities: modalities
                         .map(|items| items.into_iter().map(str::to_string).collect()),
+                    supports_fast: false,
                 }],
                 ..Default::default()
             },
@@ -646,6 +653,7 @@ mod tests {
             reasoning: true,
             efforts: vec!["medium".into(), "high".into()],
             input_modalities: None,
+            supports_fast: false,
         });
         let preferences = AgentSelectionPreferences {
             model_profiles: vec![
@@ -697,6 +705,7 @@ mod tests {
                 reasoning: true,
                 efforts: Vec::new(),
                 input_modalities: None,
+                supports_fast: false,
             })
             .collect();
         let registry = Registry::of(Vec::new());

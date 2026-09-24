@@ -40,6 +40,7 @@ pub struct SessionConfig {
     /// the same reason the model is: the process only starts on the first prompt,
     /// so a level chosen before that would otherwise be recorded and dropped.
     pub effort_id: Option<String>,
+    pub fast: Option<bool>,
     /// Agent-declared runtime dimensions. Keys and values are opaque and have
     /// already been checked against the current catalog by the session layer.
     pub runtime_values: std::collections::BTreeMap<String, String>,
@@ -211,6 +212,13 @@ pub trait AgentSession: Send + Sync {
         Err(anyhow::anyhow!(
             "this agent has no effort levels to set ({effort_id})"
         ))
+    }
+    async fn set_fast(&self, fast: bool) -> Result<()> {
+        if fast {
+            Err(anyhow::anyhow!("this agent does not support fast mode"))
+        } else {
+            Ok(())
+        }
     }
     async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
         Err(anyhow::anyhow!(
@@ -698,6 +706,7 @@ mod tests {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
             additional_system_prompt: None,
             skills_dir: None,

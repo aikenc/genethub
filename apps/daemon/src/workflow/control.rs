@@ -985,6 +985,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                         model_id: route.model_id.clone(),
                         mode_id: route.mode_id.clone(),
                         effort_id: route.effort_id.clone(),
+                        fast: None,
                         runtime_values: route.runtime_values.clone(),
                     };
                     match state

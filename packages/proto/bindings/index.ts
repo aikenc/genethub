@@ -55,7 +55,7 @@ displayName?: string, tags: Array<string>, cost?: AgentCostLevel, };
  * Last runtime choices for one Agent. Values are checked against the live
  * catalog by the client before they are used; stale ids remain harmless.
  */
-export type AgentRuntimePreference = { effortId?: string, modeId?: string, runtimeValues: { [key in string]?: string }, };
+export type AgentRuntimePreference = { effortId?: string, fast?: boolean, modeId?: string, runtimeValues: { [key in string]?: string }, };
 
 /**
  * Machine-global configured models, tag/cost metadata and compact runtime
@@ -294,7 +294,11 @@ export type Capabilities = { interrupt: boolean, setModel: boolean,
  * because it is a separate axis: the same model runs at any of its levels,
  * and which levels exist is the model's own business (`ModelInfo::efforts`).
  */
-setEffort: boolean, setMode: boolean, permissions: boolean, 
+setEffort: boolean, 
+/**
+ * The agent supports fast / turbo accelerated execution mode.
+ */
+setFast: boolean, setMode: boolean, permissions: boolean, 
 /**
  * The agent can rehydrate a past session itself. When false the daemon
  * falls back to read-only replay from its own log.
@@ -528,7 +532,7 @@ export type ForkTarget = { agentId: string,
  * Required destination workspace for a directed fork. Older clients omit
  * it and keep the source workspace on the current machine.
  */
-workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, 
+workspaceId?: string, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, 
 /**
  * Runtime axes selected for this exact Agent. Routed forks fill these
  * from the machine-global remembered choices at execution time.
@@ -789,7 +793,11 @@ efforts: Array<string>,
  * Media this model accepts as a native input. `None` means an external
  * Agent did not report this field; the built-in Agent always reports it.
  */
-inputModalities?: Array<string>, };
+inputModalities?: Array<string>, 
+/**
+ * Supports fast / turbo / accelerated execution variant.
+ */
+supportsFast: boolean, };
 
 export type NoticeLevel = "info" | "warning" | "error";
 
@@ -942,7 +950,7 @@ expandLastRound: boolean,
 /**
  * Optional UI history window. Does not alter Agent context or replay semantics.
  */
-recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, effortId?: string, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
+recentRounds?: number, } } | { "type": "unsubscribe", "payload": { sessionId: string, } } | { "type": "agent.list" } | { "type": "agent.refresh" } | { "type": "session.create", "payload": { workspaceId: string, agentId: string, modelId: string | null, effortId?: string, fast?: boolean, modeId: string | null, runtimeValues?: { [key in string]?: string }, title: string | null, 
 /**
  * Where the agent starts, inside the workspace. Absent means the
  * workspace root, which is what every client sent before this field
@@ -1050,7 +1058,7 @@ continuesRound: string | null, } } | { "type": "session.artifact.begin", "payloa
  * explicit target to opt into provider-agnostic reconstruction when
  * any destination dimension changes or a native checkpoint cannot be used.
  */
-target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
+target?: ForkTarget, } } | { "type": "session.forkRouted", "payload": { sessionId: string, turnId: string, workspaceId: string, tags: Array<string>, } } | { "type": "session.forkExport", "payload": { sessionId: string, turnId: string, } } | { "type": "session.forkImport", "payload": { transfer: ForkTransfer, target: ForkTarget, } } | { "type": "session.forkImportRouted", "payload": { transfer: ForkTransfer, workspaceId: string, tags: Array<string>, } } | { "type": "session.importList", "payload": { workspaceId: string, limit: number | null, } } | { "type": "session.import", "payload": { workspaceId: string, candidateId: string, } } | { "type": "session.interrupt", "payload": { sessionId: string, } } | { "type": "session.close", "payload": { sessionId: string, } } | { "type": "session.archive", "payload": { sessionId: string, archived: boolean, } } | { "type": "session.rename", "payload": { sessionId: string, title: string, } } | { "type": "session.delete", "payload": { sessionId: string, } } | { "type": "session.setModel", "payload": { sessionId: string, modelId: string, } } | { "type": "session.switchAgent", "payload": { sessionId: string, target: SessionAgentTarget, } } | { "type": "session.route", "payload": { sessionId: string, tags: Array<string>, mediaTags: Array<string>, } } | { "type": "session.setMode", "payload": { sessionId: string, modeId: string, } } | { "type": "session.setEffort", "payload": { sessionId: string, effortId: string, } } | { "type": "session.setFast", "payload": { sessionId: string, fast: boolean, } } | { "type": "session.setRuntimeAxis", "payload": { sessionId: string, axisId: string, valueId: string, } } | { "type": "session.respondPermission", "payload": { sessionId: string, requestId: string, outcome: PermissionOutcome, } } | { "type": "settings.get" } | { "type": "settings.setProvider", "payload": { providerId: string, 
 /**
  * `None` leaves the stored key alone; an empty string clears it.
  */
@@ -1210,7 +1218,7 @@ export type ServerFrame = { "type": "event", topic: string, payload: SequencedEv
  * GeneHub Session. Unlike a Fork target it cannot change workspace identity:
  * the conversation stays put while its Agent-native context is reconstructed.
  */
-export type SessionAgentTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, runtimeValues: { [key in string]?: string }, };
+export type SessionAgentTarget = { agentId: string, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues: { [key in string]?: string }, };
 
 /**
  * A complete daemon-owned artifact bundle. Chat needs only these locators and
@@ -1265,7 +1273,7 @@ export type SessionEvent = { "type": "turnStarted", turnId: string,
  * Zero is accepted from adapters; the session boundary replaces it
  * with its own wall clock before the event reaches a client.
  */
-startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "agentChanged", agentId: string, modelId?: string, modeId?: string, effortId?: string, runtimeValues: { [key in string]?: string }, routingTags?: Array<string>, mediaTags?: Array<string>, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
+startedAtMs: number, } | { "type": "item", turnId: string, item: TimelineItem, } | { "type": "itemDelta", turnId: string, itemId: string, delta: ItemDelta, } | { "type": "turnProgress", turnId: string, usage: Usage, } | { "type": "turnCompleted", turnId: string, usage: Usage, forkCheckpoint?: string, } | { "type": "turnFailed", turnId: string, error: TurnError, } | { "type": "turnCanceled", turnId: string, } | { "type": "permissionRequested", request: PermissionRequest, } | { "type": "permissionResolved", requestId: string, outcome: PermissionOutcome, } | { "type": "modelChanged", modelId: string, } | { "type": "agentChanged", agentId: string, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues: { [key in string]?: string }, routingTags?: Array<string>, mediaTags?: Array<string>, } | { "type": "modeChanged", modeId: string, } | { "type": "effortChanged", effortId: string, } | { "type": "fastChanged", fast: boolean, } | { "type": "runtimeAxisChanged", axisId: string, valueId: string, } | { "type": "draftsChanged", count: number, } | { "type": "titleChanged", title: string, } | { "type": "sessionStatusChanged", status: SessionStatus, };
 
 /**
  * Immutable evidence access granted to a managed analysis session.
@@ -1432,7 +1440,7 @@ managed?: ManagedSessionInfo,
  * from the first thing they said. Clients supply their own placeholder;
  * the daemon has no business picking a word in the user's language.
  */
-title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, runtimeValues?: { [key in string]?: string }, createdAtMs: number, updatedAtMs: number, archived: boolean, 
+title?: string, status: SessionStatus, modelId?: string, modeId?: string, effortId?: string, fast?: boolean, runtimeValues?: { [key in string]?: string }, createdAtMs: number, updatedAtMs: number, archived: boolean, 
 /**
  * Set when this session cannot be opened here. It is still listed: the
  * conversation is in the user's own project folder, and an unexplained
