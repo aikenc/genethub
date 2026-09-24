@@ -8,6 +8,7 @@
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod genet;
 pub mod opencode;
 pub mod registry;
@@ -151,6 +152,13 @@ pub trait AgentAdapter: Send + Sync {
     async fn invalidate_catalog(&self) {}
 
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>>;
+
+    /// Whether `start` can continue from this saved handle. A handle written
+    /// by an earlier implementation of the same Agent may name a store this
+    /// one cannot read; the session layer then seeds from its own log.
+    fn accepts_resume(&self, _handle: &PersistHandle) -> bool {
+        true
+    }
 
     /// `None` means this Agent does not publish an import surface. Listing is
     /// deliberately lightweight; full history belongs only in `import_history`.
