@@ -1741,7 +1741,7 @@ workflowPatrolLagMs?: number,
 /**
  * Queued and running Workflow patrol jobs on this daemon.
  */
-workflowPatrolActiveJobs: number, 
+workflowPatrolActiveJobs?: number, 
 /**
  * Age of the oldest queued or running patrol job.
  */

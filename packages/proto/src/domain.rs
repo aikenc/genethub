@@ -2316,8 +2316,9 @@ pub struct SupportDiagnostics {
     #[ts(optional, type = "number")]
     pub workflow_patrol_lag_ms: Option<u64>,
     /// Queued and running Workflow patrol jobs on this daemon.
-    #[serde(default)]
-    pub workflow_patrol_active_jobs: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_patrol_active_jobs: Option<u32>,
     /// Age of the oldest queued or running patrol job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]

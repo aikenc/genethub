@@ -132,9 +132,13 @@ fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<S
         validate_id(&id, "request id")?;
         let record = match read_record(runtime, &id) {
             Ok(record) => record,
-            Err(error) if error.downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
-                && !run_path(runtime, &id, false)?.exists() => continue,
+            Err(error) if !run_path(runtime, &id, false)?.exists() => {
+                // A dispatch reserves its request directory before committing
+                // the root Run locator. An unreadable reservation has no
+                // committed request to associate with this PM message.
+                tracing::warn!(request_id = %id, %error, "ignoring uncommitted Workflow request reservation");
+                continue;
+            }
             Err(error) => return Err(error).with_context(|| format!("读取 Workflow 请求 {id}")),
         };
         if record.original_message_id == message_id {

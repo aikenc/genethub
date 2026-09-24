@@ -103,7 +103,7 @@ impl Diagnostics {
             hub_state: hub_state(hub).to_string(),
             remote_state: remote_state(remote).to_string(),
             workflow_patrol_lag_ms: crate::workflow::patrol_lag_ms(),
-            workflow_patrol_active_jobs,
+            workflow_patrol_active_jobs: Some(workflow_patrol_active_jobs),
             workflow_patrol_oldest_job_ms,
             events: record.events.iter().cloned().collect(),
             dropped_events: record.dropped,
