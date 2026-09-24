@@ -393,6 +393,76 @@ async function measureRawTwoLegs(
 
 defineSpecialty(
   neteffMeta({
+    id: "specialty.neteff.preview-size-ladder",
+    title: "Preview first-byte and body costs across file sizes",
+    oracle: "one established real product connection previews exact 1, 8 and 32 MiB files twice; first-byte, body, CPU and independent unshaped TCP times expose fixed versus size-dependent costs",
+    catches: [
+      "a full-file scan is hidden inside first-byte latency",
+      "per-byte processing is mistaken for connection setup",
+      "a one-off host load spike is mistaken for a stable throughput limit",
+    ],
+  }),
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    t.env.env.GENEHUB_LOCAL_LOG = "warn,genet_daemon::dataplane::preview=debug";
+    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    const probe = new PreviewProbe();
+    const daemonPid = daemonEndpoint(opened.daemon).localServerProof.pid;
+    const lines: string[] = [];
+    let client: ProductClient | null = null;
+    try {
+      client = await connectLinkedDaemon(opened, { urlFor: (url) => url }, "preview-size-ladder", probe);
+      for (const sizeMiB of [1, 8, 32]) {
+        const file = seedImage(t, `neteff-ladder-${sizeMiB}m.png`, sizeMiB * MIB);
+        const rawServer = await startTcpPayloadServer(file.sizeBytes);
+        try {
+          const tcp = await measureTcpTransfer({
+            url: rawServer.url,
+            expectedBytes: rawServer.sizeBytes,
+            expectedSha256: rawServer.sha256,
+          });
+          for (let repeat = 1; repeat <= 2; repeat++) {
+            const daemonBefore = linuxCpuTicks(daemonPid);
+            const clientBefore = process.cpuUsage();
+            const loopBefore = performance.eventLoopUtilization();
+            const product = await measurePreview(t, { client, opened, file, probe });
+            const daemonAfter = linuxCpuTicks(daemonPid);
+            const clientCpu = process.cpuUsage(clientBefore);
+            const loop = performance.eventLoopUtilization(loopBefore);
+            lines.push(
+              `size=${sizeMiB}MiB repeat=${repeat}` +
+              ` tcpMs=${tcp.elapsedMs.toFixed(0)}` +
+              ` productMs=${product.elapsedMs.toFixed(0)}` +
+              ` firstByteMs=${product.firstByteMs?.toFixed(0) ?? "unknown"}` +
+              ` bodyMs=${product.transferMs.toFixed(0)}` +
+              ` chunks=${product.chunkCount}` +
+              ` daemonCpuTicks=${daemonBefore === null || daemonAfter === null ? "unknown" : daemonAfter - daemonBefore}` +
+              ` clientCpuMs=${((clientCpu.user + clientCpu.system) / 1000).toFixed(0)}` +
+              ` clientLoopBusy=${(loop.utilization * 100).toFixed(0)}%`,
+            );
+          }
+        } finally {
+          await rawServer.stop();
+        }
+      }
+    } finally {
+      client?.close();
+      opened.client.close();
+      opened.daemon.stop();
+      await opened.mock.stop();
+    }
+    let previewStages: string[] = [];
+    try {
+      previewStages = readFileSync(path.join(t.env.data, "logs", "daemon.log"), "utf8")
+        .split("\n")
+        .filter((line) => line.includes("preview_stage_timing"));
+    } catch { /* The product timings above remain valid without a local log. */ }
+    t.note(`preview size ladder (real Wasm-backed product, unshaped loopback)\n${lines.join("\n")}\npreview stage log lines=${previewStages.length}\n${previewStages.join("\n")}`);
+  },
+);
+
+defineSpecialty(
+  neteffMeta({
     id: "specialty.neteff.interactive-under-bulk-and-high-bdp",
     title: "Interactive requests remain responsive beside bulk transfer on high-delay, high-capacity links",
     oracle:

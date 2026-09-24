@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{
@@ -72,22 +73,54 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     };
     let root = resolved.root;
     let path = resolved.relative.to_string_lossy().replace('\\', "/");
+    let scan_started = Instant::now();
     let read = crate::files::preview(&root, &path);
     let file = match tokio::time::timeout(PREVIEW_IO_TIMEOUT, read).await {
         Ok(Ok(file)) => file,
         Ok(Err(failure)) => return failure_response(stream, failure).await,
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
+    let scan_us = scan_started.elapsed().as_micros() as u64;
     // The bounded worker permit covers both the metadata scan and the actual
     // source read; streaming must not turn one retained Vec into hundreds of
     // concurrent disk readers.
     let _slot = slot;
-    send_file(stream, file).await
+    let send_started = Instant::now();
+    let stats = send_file(stream, file).await?;
+    tracing::debug!(
+        event = "preview_stage_timing",
+        source_bytes = stats.source_bytes,
+        scan_us,
+        send_us = send_started.elapsed().as_micros() as u64,
+        read_us = stats.read_us,
+        hash_us = stats.hash_us,
+        write_us = stats.write_us,
+        yield_us = stats.yield_us,
+        finish_us = stats.finish_us,
+        chunks = stats.chunks,
+        "preview completed"
+    );
+    Ok(())
 }
 
-async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<()> {
+#[derive(Default)]
+struct PreviewSendStats {
+    source_bytes: u64,
+    read_us: u64,
+    hash_us: u64,
+    write_us: u64,
+    yield_us: u64,
+    finish_us: u64,
+    chunks: u64,
+}
+
+async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<PreviewSendStats> {
     let (metadata, mut source, expected_digest) = file.into_parts();
     let expected_bytes = metadata.source_bytes;
+    let mut stats = PreviewSendStats {
+        source_bytes: expected_bytes,
+        ..Default::default()
+    };
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
@@ -100,27 +133,39 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<()> {
     let mut sent = 0u64;
     let mut step = vec![0u8; crate::files::PREVIEW_STEP_BYTES];
     loop {
+        let began = Instant::now();
         let read = source
             .read(&mut step)
             .map_err(|error| anyhow!("preview source read failed: {error}"))?;
+        stats.read_us += began.elapsed().as_micros() as u64;
         if read == 0 {
             break;
         }
+        stats.chunks += 1;
         sent = sent
             .checked_add(read as u64)
             .ok_or_else(|| anyhow!("preview source length overflow"))?;
         if sent > expected_bytes {
             return Err(anyhow!("preview source changed while it was streamed"));
         }
+        let began = Instant::now();
         hasher.update(&step[..read]);
+        stats.hash_us += began.elapsed().as_micros() as u64;
+        let began = Instant::now();
         stream.write(&step[..read]).await?;
+        stats.write_us += began.elapsed().as_micros() as u64;
+        let began = Instant::now();
         crate::blocking::breathe().await;
+        stats.yield_us += began.elapsed().as_micros() as u64;
     }
     let streamed_digest: [u8; 32] = hasher.finalize().into();
     if sent != expected_bytes || streamed_digest != expected_digest {
         return Err(anyhow!("preview source changed while it was streamed"));
     }
-    stream.finish().await
+    let began = Instant::now();
+    stream.finish().await?;
+    stats.finish_us = began.elapsed().as_micros() as u64;
+    Ok(stats)
 }
 
 async fn failure_response(stream: &mut ServerStream, failure: PreviewFailure) -> Result<()> {
