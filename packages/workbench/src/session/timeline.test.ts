@@ -132,6 +132,37 @@ describe("the session timeline", () => {
     expect(state.runtimeValues).toEqual({ fast: "max" });
   });
 
+  it("snapshots activeTurnModelId at turn start and preserves it across in-flight model changes", () => {
+    let state = run([
+      { type: "modelChanged", modelId: "deepseek/v4" },
+      { type: "turnStarted", turnId: "t1", startedAtMs: 1 },
+    ]);
+    expect(state.activeTurnModelId).toBe("deepseek/v4");
+
+    // Model changes while turn is in flight
+    state = apply(state, { type: "modelChanged", modelId: "codex-sol" });
+    expect(state.modelId).toBe("codex-sol");
+    expect(state.activeTurnModelId).toBe("deepseek/v4");
+
+    // Turn completes, clearing activeTurnModelId
+    state = apply(state, {
+      type: "turnCompleted",
+      turnId: "t1",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        llmRounds: 1,
+        toolOutputTokens: 0,
+        compactionCount: 0,
+        outputRateEstimated: false,
+      },
+    });
+    expect(state.activeTurnModelId).toBeUndefined();
+    expect(state.modelId).toBe("codex-sol");
+  });
+
   it("updates token totals while a turn is still running", () => {
     const state = run([
       { type: "turnStarted", turnId: "t1", startedAtMs: 1 },

@@ -304,10 +304,12 @@ export function TimelineView({
   const settings = useWorkbench((workbench) => workbench.settings);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
   const activeModelId = state.modelId ?? activeSession?.modelId ?? null;
-  const liveRuntimeLabels = runtimeLabels(
+  const liveTurnModelId =
+    state.activeTurnModelId !== undefined ? state.activeTurnModelId : activeModelId;
+  const liveTurnRuntimeLabels = runtimeLabels(
     agents,
     activeSession?.agentId ?? null,
-    activeModelId,
+    liveTurnModelId,
   );
   const forkMediaTags = forkRequest
     ? normalizeTags([
@@ -559,7 +561,7 @@ export function TimelineView({
                   turn.stats.agentId ?? activeSession?.agentId ?? null,
                   turn.stats.agentId ? (turn.stats.modelId ?? null) : activeModelId,
                 )
-              : liveRuntimeLabels;
+              : liveTurnRuntimeLabels;
             const renderItem = (item: TimelineItem) => {
               if (state.historyExcerptIds?.includes(item.id)) return <div key={item.id}><Item item={item} /><button type="button" disabled={state.status === "running"} className="min-h-11 text-sm text-accent disabled:text-muted" onClick={() => void useWorkbench.getState().loadNarrativeItem(item.id).catch(error => setHistoryError(String(error)))}>长消息仅显示摘要 · 加载完整内容与附件</button></div>;
               if (!selection || !selectableSet.has(item.id)) {
@@ -698,8 +700,8 @@ export function TimelineView({
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
                     hideElapsed={provisional}
-                    agentLabel={liveRuntimeLabels.agent}
-                    modelLabel={liveRuntimeLabels.model}
+                    agentLabel={liveTurnRuntimeLabels.agent}
+                    modelLabel={liveTurnRuntimeLabels.model}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({

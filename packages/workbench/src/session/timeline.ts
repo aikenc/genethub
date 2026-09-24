@@ -51,6 +51,7 @@ export interface TimelineState {
   /** The turn currently in flight, if any. */
   activeTurn: string | null;
   activeTurnStartedAtMs?: number | null;
+  activeTurnModelId?: string | null;
   pendingPermission: PermissionRequest | null;
   /** Human-visible acknowledgement between answering a card and turn end. */
   permissionProgress: PermissionProgress | null;
@@ -83,6 +84,7 @@ export function emptyTimeline(): TimelineState {
     status: "idle",
     activeTurn: null,
     activeTurnStartedAtMs: null,
+    activeTurnModelId: undefined,
     pendingPermission: null,
     permissionProgress: null,
     pending: null,
@@ -206,6 +208,8 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: event.turnId,
         activeTurnStartedAtMs: event.startedAtMs || Date.now(),
+        activeTurnModelId:
+          state.activeTurnModelId !== undefined ? state.activeTurnModelId : (state.modelId ?? null),
         status: "running",
         lastError: null,
         usage: null,
@@ -219,6 +223,10 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         inputOutbox: event.item.type === "userMessage" ? state.inputOutbox?.filter(input => input.messageId !== event.item.id) : state.inputOutbox,
         // A durable admission is a session item, with no adapter turn yet.
         status: event.item.type === "userMessage" && event.turnId && state.status === "idle" ? "running" : state.status,
+        activeTurnModelId:
+          event.item.type === "userMessage" && event.turnId && state.activeTurnModelId === undefined
+            ? (state.modelId ?? null)
+            : state.activeTurnModelId,
         permissionProgress: state.permissionProgress,
       };
 
@@ -234,6 +242,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: null,
         activeTurnStartedAtMs: null,
+        activeTurnModelId: undefined,
         status: "idle",
         usage: event.usage,
         permissionProgress: null,
@@ -244,6 +253,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: null,
         activeTurnStartedAtMs: null,
+        activeTurnModelId: undefined,
         status: "failed",
         lastError: event.error,
         permissionProgress: null,
@@ -254,6 +264,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: null,
         activeTurnStartedAtMs: null,
+        activeTurnModelId: undefined,
         status: "idle",
         permissionProgress: null,
       };

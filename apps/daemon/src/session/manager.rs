@@ -5807,6 +5807,13 @@ async fn flush_blob_writer(sender: &mpsc::UnboundedSender<BlobWrite>) {
 /// the payload that sentence summarizes. Shedding it here — the one place
 /// every agent's events converge — lightens the wire, the replay buffer, the
 /// snapshot and the on-disk log in a single move.
+struct TrackedTurn {
+    started_at_ms: i64,
+    tools: HashSet<String>,
+    agent_id: String,
+    model_id: Option<String>,
+}
+
 async fn pump_events(
     live: Arc<Live>,
     mut receiver: broadcast::Receiver<SessionEvent>,
@@ -5877,7 +5884,7 @@ async fn pump_events(
     let mut thinking: HashMap<String, String> = HashMap::new();
     let mut raw_thinking: HashMap<String, String> = HashMap::new();
     let mut raw_tools: HashMap<String, TimelineItem> = HashMap::new();
-    let mut turns: HashMap<String, (i64, HashSet<String>)> = HashMap::new();
+    let mut turns: HashMap<String, TrackedTurn> = HashMap::new();
     let mut live_usage: HashMap<String, Usage> = HashMap::new();
     let mut counted_tools: HashSet<String> = HashSet::new();
     let mut channel_closed = false;
@@ -6075,13 +6082,32 @@ async fn pump_events(
             if *started_at_ms <= 0 {
                 *started_at_ms = now_ms();
             }
-            turns.insert(turn_id.clone(), (*started_at_ms, HashSet::new()));
+            let (agent_id, model_id) = {
+                let meta = live.meta.lock().await;
+                (meta.agent_id.clone(), meta.model_id.clone())
+            };
+            turns
+                .entry(turn_id.clone())
+                .and_modify(|turn| turn.started_at_ms = *started_at_ms)
+                .or_insert_with(|| TrackedTurn {
+                    started_at_ms: *started_at_ms,
+                    tools: HashSet::new(),
+                    agent_id,
+                    model_id,
+                });
         }
         if let SessionEvent::Item { turn_id, item } = &event {
-            let entry = turns
-                .entry(turn_id.clone())
-                .or_insert_with(|| (now_ms(), HashSet::new()));
-            collect_tool_ids(item, &mut entry.1);
+            let (agent_id, model_id) = {
+                let meta = live.meta.lock().await;
+                (meta.agent_id.clone(), meta.model_id.clone())
+            };
+            let entry = turns.entry(turn_id.clone()).or_insert_with(|| TrackedTurn {
+                started_at_ms: now_ms(),
+                tools: HashSet::new(),
+                agent_id,
+                model_id,
+            });
+            collect_tool_ids(item, &mut entry.tools);
         }
 
         let updates_reasoning = match &event {
@@ -6273,7 +6299,18 @@ async fn pump_events(
             if let Some(turn_id) = turns.keys().next().cloned() {
                 let canceled = SessionEvent::TurnCanceled { turn_id };
                 let items = live.items.lock().await;
-                let stats = turn_summary(&canceled, &mut turns, &mut live_usage, &items);
+                let (fallback_agent_id, fallback_model_id) = {
+                    let meta = live.meta.lock().await;
+                    (Some(meta.agent_id.clone()), meta.model_id.clone())
+                };
+                let stats = turn_summary(
+                    &canceled,
+                    &mut turns,
+                    &mut live_usage,
+                    &items,
+                    fallback_agent_id,
+                    fallback_model_id,
+                );
                 drop(items);
                 if let Some(stats) = stats {
                     let summary_event = SessionEvent::Item {
@@ -6326,13 +6363,20 @@ async fn pump_events(
         }
         let summary = {
             let items = live.items.lock().await;
-            turn_summary(&event, &mut turns, &mut live_usage, &items)
+            let (fallback_agent_id, fallback_model_id) = {
+                let meta = live.meta.lock().await;
+                (Some(meta.agent_id.clone()), meta.model_id.clone())
+            };
+            turn_summary(
+                &event,
+                &mut turns,
+                &mut live_usage,
+                &items,
+                fallback_agent_id,
+                fallback_model_id,
+            )
         };
-        if let Some(mut stats) = summary {
-            let meta = live.meta.lock().await;
-            stats.agent_id = Some(meta.agent_id.clone());
-            stats.model_id = meta.model_id.clone();
-            drop(meta);
+        if let Some(stats) = summary {
             let summary_event = SessionEvent::Item {
                 turn_id: stats.turn_id.clone(),
                 item: TimelineItem::TurnSummary {
@@ -6459,9 +6503,11 @@ fn collect_tool_ids(item: &TimelineItem, ids: &mut HashSet<String>) {
 
 fn turn_summary(
     event: &SessionEvent,
-    turns: &mut HashMap<String, (i64, HashSet<String>)>,
+    turns: &mut HashMap<String, TrackedTurn>,
     live_usage: &mut HashMap<String, Usage>,
     items: &[TimelineItem],
+    fallback_agent_id: Option<String>,
+    fallback_model_id: Option<String>,
 ) -> Option<TurnStats> {
     let (turn_id, outcome, mut usage, fork_checkpoint) = match event {
         SessionEvent::TurnCompleted {
@@ -6527,9 +6573,20 @@ fn turn_summary(
         .map_or(0, |index| index + 1);
     token_usage::fill_usage_from_items(&mut usage, &items[start..]);
     let finished_at_ms = now_ms();
-    let (started_at_ms, tools) = turns
-        .remove(turn_id)
-        .unwrap_or_else(|| (finished_at_ms, HashSet::new()));
+    let (started_at_ms, tools, agent_id, model_id) = match turns.remove(turn_id) {
+        Some(tracked) => (
+            tracked.started_at_ms,
+            tracked.tools,
+            Some(tracked.agent_id),
+            tracked.model_id,
+        ),
+        None => (
+            finished_at_ms,
+            HashSet::new(),
+            fallback_agent_id,
+            fallback_model_id,
+        ),
+    };
     Some(TurnStats {
         turn_id: turn_id.clone(),
         outcome,
@@ -6538,8 +6595,8 @@ fn turn_summary(
         duration_ms: finished_at_ms.saturating_sub(started_at_ms) as u64,
         usage,
         tool_calls: tools.len() as u64,
-        agent_id: None,
-        model_id: None,
+        agent_id,
+        model_id,
         fork_checkpoint,
     })
 }
@@ -12316,6 +12373,90 @@ mod tests {
                 && event.code.as_deref() == Some("rateLimited")
         }));
         assert!(!encoded.contains("secret prompt"));
+        pump.abort();
+    }
+
+    #[tokio::test]
+    async fn turn_summary_records_starting_runtime_across_in_flight_model_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = test_store(dir.path());
+        let mut session_meta = meta();
+        session_meta.agent_id = "codex".into();
+        session_meta.model_id = Some("model-a".into());
+        let live = Arc::new(Live::new(session_meta, store.clone()));
+        live.begin_round(None, "t1", "u0").await;
+        let mut execution = live.claim_execution(false).await.unwrap();
+        execution.turn_id = Some("t1".into());
+        execution.phase = ExecutionPhase::Running;
+        execution.ready.send_replace(true);
+        *live.execution.lock().await = Some(execution);
+
+        let (agent_events, _) = broadcast::channel(64);
+        let mut seen = live.events.subscribe();
+        let diagnostics = Arc::new(Diagnostics::new());
+
+        let pump = tokio::spawn(pump_events(
+            live.clone(),
+            agent_events.subscribe(),
+            store,
+            64,
+            crate::processes::Processes::new(),
+            diagnostics.clone(),
+            None,
+        ));
+
+        // Start turn with model-a
+        agent_events
+            .send(SessionEvent::TurnStarted {
+                turn_id: "t1".into(),
+                started_at_ms: now_ms(),
+            })
+            .unwrap();
+
+        // Wait until pump_events has processed TurnStarted
+        loop {
+            if matches!(
+                seen.recv().await.unwrap().event,
+                SessionEvent::TurnStarted { .. }
+            ) {
+                break;
+            }
+        }
+
+        // While turn is running, model changes to model-b in live meta
+        {
+            let mut meta = live.meta.lock().await;
+            meta.model_id = Some("model-b".into());
+        }
+
+        // Turn completes
+        agent_events
+            .send(SessionEvent::TurnCompleted {
+                turn_id: "t1".into(),
+                usage: Usage::default(),
+                fork_checkpoint: None,
+            })
+            .unwrap();
+
+        let turn_summary_stats;
+        loop {
+            let event = seen.recv().await.unwrap().event;
+            if let SessionEvent::Item {
+                item: TimelineItem::TurnSummary { stats, .. },
+                ..
+            } = event
+            {
+                turn_summary_stats = stats;
+                break;
+            }
+        }
+
+        let stats = turn_summary_stats;
+        assert_eq!(stats.turn_id, "t1");
+        assert_eq!(stats.agent_id.as_deref(), Some("codex"));
+        // Must be model-a from when the turn started, NOT model-b
+        assert_eq!(stats.model_id.as_deref(), Some("model-a"));
+
         pump.abort();
     }
 }

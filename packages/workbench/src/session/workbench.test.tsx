@@ -3139,6 +3139,67 @@ describe("a whole turn as the timeline sees it", () => {
     expect(state.status).toBe("idle");
   });
 
+  it("keeps the starting model in the live TurnFooter when model changes mid-turn", async () => {
+    useWorkbench.setState({
+      sessions: [
+        {
+          id: "s1",
+          workspaceId: "w1",
+          agentId: "codex",
+          modelId: "deepseek/v4",
+          title: undefined,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          archived: false,
+          status: "running",
+        },
+      ],
+      activeSessionId: "s1",
+      agents: [
+        agent({
+          id: "codex",
+          label: "Codex",
+          catalog: {
+            ...agent().catalog,
+            models: [
+              {
+                id: "deepseek/v4",
+                label: "DeepSeek V4",
+                contextWindow: 128000,
+                reasoning: true,
+                efforts: ["low", "high"],
+              },
+              {
+                id: "codex-sol",
+                label: "Codex Sol",
+                contextWindow: 128000,
+                reasoning: true,
+                efforts: ["low", "high"],
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    let state = emptyTimeline();
+    state = apply(state, {
+      type: "item",
+      turnId: "t1",
+      item: { type: "userMessage", id: "u1", text: "运行中的任务", attachments: [] },
+    });
+    state = apply(state, { type: "turnStarted", turnId: "t1", startedAtMs: Date.now() - 5000 });
+
+    // Mid-turn, user switches model to codex-sol
+    state = apply(state, { type: "modelChanged", modelId: "codex-sol" });
+
+    render(<TimelineView state={state} />);
+    // The live TurnFooter must still show DeepSeek V4 (not Codex Sol)
+    expect(screen.getByTestId("turn-footer")).toHaveTextContent("Codex");
+    expect(screen.getByTestId("turn-footer")).toHaveTextContent("DeepSeek V4");
+    expect(screen.getByTestId("turn-footer")).not.toHaveTextContent("Codex Sol");
+  });
+
   it("opens tag selection for a completed turn without a native checkpoint", async () => {
     useWorkbench.setState({
       sessions: [
