@@ -269,6 +269,29 @@ function headline(label: string, samples: UtilizationSample[], target: number): 
   );
 }
 
+function percentile(samples: number[], fraction: number): number {
+  const ordered = [...samples].sort((a, b) => a - b);
+  return ordered[Math.ceil(ordered.length * fraction) - 1]!;
+}
+
+async function measureRepeatedRpc(
+  t: CaseContext,
+  client: ProductClient,
+  count: number,
+  spacingMs: number,
+): Promise<number[]> {
+  const pending: Array<Promise<number>> = [];
+  for (let index = 0; index < count; index += 1) {
+    const began = performance.now();
+    pending.push(client.call({ type: "workspace.list" }).then((reply) => {
+      t.assertions.assert(reply?.type === "workspaces", `workspace.list ${index} returned ${reply?.type}`);
+      return performance.now() - began;
+    }));
+    await new Promise<void>((resolve) => setTimeout(resolve, spacingMs));
+  }
+  return Promise.all(pending);
+}
+
 async function connectLinkedDaemon(
   opened: Opened,
   proxy: { urlFor(url: string): string },
@@ -344,6 +367,78 @@ async function measureRawTwoLegs(
     await daemonLink.stop();
   }
 }
+
+defineSpecialty(
+  neteffMeta({
+    id: "specialty.neteff.interactive-under-bulk-and-high-bdp",
+    title: "Interactive requests remain responsive beside bulk transfer on high-delay, high-capacity links",
+    oracle:
+      "real Wasm-backed preview bytes match an independent SHA-256 source; repeated public workspace requests complete on the same shaped carrier while 32 MiB is in flight; useful throughput is compared with an independent same-shaper TCP control",
+    catches: [
+      "small requests starve behind finite Preview traffic",
+      "application receive credit caps throughput below the shaped link capacity",
+      "a bulk response is truncated or silently bypasses the shaped carrier",
+    ],
+  }),
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    const file = seedImage(t, "neteff-interactive-32m.png", 32 * MIB);
+    const rawServer = await startTcpPayloadServer(file.sizeBytes);
+    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    const lines: string[] = [];
+    try {
+      const endpoint = daemonEndpoint(opened.daemon);
+      for (const bandwidthMbps of [100, 300, 1000]) {
+        const profile = { rttMs: 200, bandwidthMbps };
+        const tcp = await measureRawOneLeg(t, rawServer, profile, `high-bdp tcp ${bandwidthMbps}Mbps`);
+        const productLink = await startShapedTcpProxy({ targetUrl: endpoint.url, profile });
+        const probe = new PreviewProbe();
+        let client: ProductClient | null = null;
+        try {
+          client = await connectLinkedDaemon(opened, productLink, `high-bdp-${bandwidthMbps}`, probe);
+          const idle = await measureRepeatedRpc(t, client, 60, 20);
+          productLink.resetStats();
+          let previewFinished = false;
+          const preview = measurePreview(t, { client, opened, file, probe }).then((result) => {
+            previewFinished = true;
+            return result;
+          });
+          void preview.catch(() => {});
+          await t.tools.waitUntil(() => productLink.stats().targetToClientBytes >= 64 * 1024, 10000);
+          t.assertions.assert(!previewFinished, `${bandwidthMbps}Mbps bulk ended before interactive probe`);
+          const busy = await measureRepeatedRpc(t, client, 60, 20);
+          const product = await preview;
+          const sample = recordUtilization(t, {
+            label: `high-bdp rtt=200ms bandwidth=${bandwidthMbps}Mbps`,
+            file,
+            clientRttMs: 200,
+            daemonRttMs: 0,
+            tcp,
+            product,
+            productLinkStats: [productLink.stats()],
+            target: 0.8,
+          });
+          lines.push(
+            `${sample.line} idleP50=${percentile(idle, 0.5).toFixed(0)}ms` +
+            ` idleP95=${percentile(idle, 0.95).toFixed(0)}ms` +
+            ` busyP50=${percentile(busy, 0.5).toFixed(0)}ms` +
+            ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms` +
+            ` busyP99=${percentile(busy, 0.99).toFixed(0)}ms`,
+          );
+        } finally {
+          client?.close();
+          await productLink.stop();
+        }
+      }
+    } finally {
+      opened.client.close();
+      opened.daemon.stop();
+      await opened.mock.stop();
+      await rawServer.stop();
+    }
+    t.note(`high-bdp interactive and bulk (same-host shaper, not kernel TCP WAN)\n${lines.join("\n")}`);
+  },
+);
 
 defineSpecialty(
   neteffMeta({
