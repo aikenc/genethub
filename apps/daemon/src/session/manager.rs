@@ -2975,6 +2975,63 @@ impl SessionManager {
         self.ensure_started_in_mode(live, providers, None).await
     }
 
+    /// The saved handle names a store the current adapter cannot read (Cursor
+    /// ACP session ids after the move to print mode). The conversation goes on
+    /// from GeneHub's own log, handed over once like an Agent switch.
+    async fn seed_unresumable_history(
+        &self,
+        live: &Arc<Live>,
+        meta: &mut SessionMeta,
+        catalog: &Catalog,
+    ) -> Result<()> {
+        let items = migration_seed_history(meta, &live.items.lock().await);
+        if !items.is_empty() {
+            let last_turn = items.iter().rev().find_map(|item| match item {
+                TimelineItem::TurnSummary { stats, .. } => Some(stats.turn_id.clone()),
+                _ => None,
+            });
+            let source_round_id = {
+                let rounds = live.rounds.lock().await;
+                last_turn.as_deref().and_then(|turn_id| {
+                    rounds
+                        .iter()
+                        .find(|round| round.adapter_turn_ids.iter().any(|id| id == turn_id))
+                        .map(|round| round.round_id.clone())
+                })
+            };
+            let context_window = meta
+                .model_id
+                .as_deref()
+                .or(catalog.default_model.as_deref())
+                .and_then(|id| catalog.models.iter().find(|model| model.id == id))
+                .and_then(|model| model.context_window);
+            let mut seed = build_context_seed(
+                &meta.id,
+                last_turn.as_deref().unwrap_or("latest"),
+                source_round_id.as_deref(),
+                &meta.agent_id,
+                &items,
+                seed_token_budget(context_window),
+                coverage_for_meta(meta, items.len()),
+            )
+            .seed;
+            seed.target_agent_id = Some(meta.agent_id.clone());
+            seed.target_model_id = meta.model_id.clone();
+            self.store.save_seed(&meta.workspace_id, &meta.id, &seed)?;
+        }
+        tracing::info!(
+            agent = %meta.agent_id,
+            session = %meta.id,
+            items = items.len(),
+            "saved resume handle is not readable by this adapter; continuing from GeneHub history"
+        );
+        meta.persist = None;
+        meta.agent_pid = None;
+        self.store.save_meta(meta)?;
+        *live.meta.lock().await = meta.clone();
+        Ok(())
+    }
+
     /// Starts a stopped native session with an optional one-turn mode override.
     /// Permission recovery uses the Agent's default (highest) mode without
     /// rewriting the user's explicit lower-mode choice in session metadata.
@@ -3006,6 +3063,14 @@ impl SessionManager {
             );
             self.store.save_meta(&meta)?;
             *live.meta.lock().await = meta.clone();
+        }
+        if meta
+            .persist
+            .as_ref()
+            .is_some_and(|handle| !adapter.accepts_resume(handle))
+        {
+            self.seed_unresumable_history(live, &mut meta, &offered)
+                .await?;
         }
 
         // One start of this kind of agent at a time.
@@ -3298,20 +3363,7 @@ impl SessionManager {
             model_id,
             offered.models.iter().map(|model| model.id.as_str()),
         )?;
-        let is_cursor = live.meta.lock().await.agent_id == "cursor";
-        if is_cursor {
-            if live.execution.lock().await.is_none() {
-                if let Some(agent) = live.agent().await {
-                    if let Some(handle) = agent.persistence() {
-                        let mut meta = live.meta.lock().await;
-                        meta.persist = Some(handle);
-                        let _ = self.store.save_meta(&meta);
-                    }
-                }
-                let _ = live.stop_pump().await;
-                let _ = close_current_agent(&live).await;
-            }
-        } else if let Some(agent) = live.agent().await {
+        if let Some(agent) = live.agent().await {
             agent.set_model(model_id).await?;
         }
         {
@@ -3641,29 +3693,24 @@ impl SessionManager {
         let current_model_id = live.meta.lock().await.model_id.clone();
         let model = current_model_id
             .as_deref()
+            .or(offered.default_model.as_deref())
             .and_then(|id| offered.models.iter().find(|m| m.id == id));
-        let efforts = model
-            .map(|m| m.efforts.as_slice())
-            .unwrap_or(&[]);
-        listed(
-            "effort level",
-            effort_id,
-            efforts.iter().map(String::as_str),
-        )?;
-        let is_cursor = live.meta.lock().await.agent_id == "cursor";
-        if is_cursor {
-            if live.execution.lock().await.is_none() {
-                if let Some(agent) = live.agent().await {
-                    if let Some(handle) = agent.persistence() {
-                        let mut meta = live.meta.lock().await;
-                        meta.persist = Some(handle);
-                        let _ = self.store.save_meta(&meta);
-                    }
-                }
-                let _ = live.stop_pump().await;
-                let _ = close_current_agent(&live).await;
-            }
-        } else if let Some(agent) = live.agent().await {
+        match model {
+            Some(model) => listed(
+                "effort level",
+                effort_id,
+                model.efforts.iter().map(String::as_str),
+            )?,
+            None => listed(
+                "effort level",
+                effort_id,
+                offered
+                    .models
+                    .iter()
+                    .flat_map(|model| model.efforts.iter().map(String::as_str)),
+            )?,
+        }
+        if let Some(agent) = live.agent().await {
             agent.set_effort(effort_id).await?;
         }
         {
@@ -3698,23 +3745,13 @@ impl SessionManager {
             .and_then(|id| offered.models.iter().find(|m| m.id == id));
         if let Some(model) = model {
             if fast && !model.supports_fast {
-                bail!("the selected model '{}' does not support fast mode", model.id);
+                bail!(
+                    "the selected model '{}' does not support fast mode",
+                    model.id
+                );
             }
         }
-        let is_cursor = live.meta.lock().await.agent_id == "cursor";
-        if is_cursor {
-            if live.execution.lock().await.is_none() {
-                if let Some(agent) = live.agent().await {
-                    if let Some(handle) = agent.persistence() {
-                        let mut meta = live.meta.lock().await;
-                        meta.persist = Some(handle);
-                        let _ = self.store.save_meta(&meta);
-                    }
-                }
-                let _ = live.stop_pump().await;
-                let _ = close_current_agent(&live).await;
-            }
-        } else if let Some(agent) = live.agent().await {
+        if let Some(agent) = live.agent().await {
             agent.set_fast(fast).await?;
         }
         {
@@ -7078,7 +7115,8 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
         let migrated = meta
             .model_id
             .as_deref()
-            .and_then(|id| crate::adapter::acp::resolve_legacy_cursor_model(id, catalog));
+            .filter(|_| meta.agent_id == "cursor")
+            .and_then(|id| crate::adapter::cursor::resolve_legacy_cursor_model(id, catalog));
         if let Some((migrated_model, migrated_effort, migrated_fast)) = migrated {
             meta.model_id = Some(migrated_model);
             if meta.effort_id.is_none() && migrated_effort.is_some() {
@@ -7114,10 +7152,9 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
         let model = meta
             .model_id
             .as_ref()
+            .or(catalog.default_model.as_ref())
             .and_then(|id| catalog.models.iter().find(|model| &model.id == id));
-        let efforts = model
-            .map(|model| model.efforts.as_slice())
-            .unwrap_or(&[]);
+        let efforts = model.map(|model| model.efforts.as_slice()).unwrap_or(&[]);
         if meta
             .effort_id
             .as_ref()
@@ -7850,6 +7887,119 @@ mod tests {
                 .load_seed("w1", &created.id)
                 .unwrap()
                 .expect("applied migration seed remains auditable")
+                .state,
+            ContextSeedState::Applied
+        );
+    }
+
+    /// Reads only `chatId` handles, as Cursor print mode does after ACP.
+    struct ChatIdOnly(ForkHarness);
+
+    #[async_trait::async_trait]
+    impl crate::adapter::AgentAdapter for ChatIdOnly {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+
+        fn label(&self) -> &str {
+            self.0.label()
+        }
+
+        fn capabilities(&self) -> genehub_proto::Capabilities {
+            self.0.capabilities()
+        }
+
+        fn accepts_resume(&self, handle: &PersistHandle) -> bool {
+            handle.value.get("chatId").is_some()
+        }
+
+        async fn probe(&self) -> genehub_proto::ProbeState {
+            self.0.probe().await
+        }
+
+        async fn catalog(&self, providers: &ProviderMap) -> genehub_proto::Catalog {
+            self.0.catalog(providers).await
+        }
+
+        async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
+            self.0.start(config).await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_resume_handle_continues_from_genehub_history_once() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sessions = SessionManager::new(
+            test_store(workspace.path()),
+            Arc::new(Registry::of(vec![Arc::new(ChatIdOnly(ForkHarness {
+                id: "cursor",
+                native_fork: false,
+                prompts: prompts.clone(),
+                starts: starts.clone(),
+            }))])),
+            16,
+        );
+        let created = sessions
+            .create_routed(
+                "w1",
+                workspace.path().to_path_buf(),
+                "cursor",
+                Some("model".into()),
+                None,
+                None,
+                None,
+                Default::default(),
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        {
+            let live = sessions.live(&created.id).await.unwrap();
+            *live.items.lock().await = completed_turn(None);
+            let mut meta = live.meta.lock().await;
+            meta.persist = Some(PersistHandle {
+                agent_id: "cursor".into(),
+                value: serde_json::json!({ "sessionId": "acp-session-1" }),
+            });
+            meta.inbox.has_delivered = true;
+            sessions.store.save_meta(&meta).unwrap();
+        }
+
+        sessions
+            .send(
+                &created.id,
+                "Continue the investigation".into(),
+                Vec::new(),
+                &ProviderMap::new(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *starts.lock().unwrap(),
+            vec![None],
+            "the ACP handle is not passed on"
+        );
+        let sent = prompts.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].text.contains("Investigate the failing deploy"));
+        assert!(sent[0].text.contains("The health check path is stale"));
+        assert!(sent[0].text.contains("Continue the investigation"));
+        drop(sent);
+        let live = sessions.live(&created.id).await.unwrap();
+        assert!(live.meta.lock().await.persist.is_none());
+        assert_eq!(
+            sessions
+                .store
+                .load_seed("w1", &created.id)
+                .unwrap()
+                .expect("the handover seed stays auditable")
                 .state,
             ContextSeedState::Applied
         );
@@ -12467,6 +12617,7 @@ mod tests {
     #[test]
     fn legacy_cursor_model_ids_are_migrated_without_resetting_to_default_model() {
         let mut session = meta();
+        session.agent_id = "cursor".into();
         session.model_id = Some("cursor-grok-4.6-high-fast".into());
         session.effort_id = None;
         session.fast = None;
@@ -12509,6 +12660,7 @@ mod tests {
     #[test]
     fn legacy_opaque_cursor_model_ids_are_migrated_without_resetting() {
         let mut session = meta();
+        session.agent_id = "cursor".into();
         session.model_id = Some("grok-4.7[effort=high,fast=true]".into());
         session.effort_id = None;
         session.fast = None;

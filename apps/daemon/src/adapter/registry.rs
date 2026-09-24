@@ -1,4 +1,5 @@
 //! Which agents exist on this machine, and what they can do.
+#![allow(deprecated)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use tokio::sync::RwLock;
 use super::acp::AcpAdapter;
 use super::claude::ClaudeAdapter;
 use super::codex::CodexAdapter;
+use super::cursor::CursorAdapter;
 use super::genet::GenetAdapter;
 use super::opencode::OpenCodeAdapter;
 use super::{ImportCandidate, ImportedHistory, ProviderMap, SharedAdapter};
@@ -78,15 +80,16 @@ impl Registry {
             // nobody could guess at — this entry used to report "not
             // installed" to anyone who had `codex` but not the bridge.
             Arc::new(CodexAdapter::default()),
-            // Cursor, spoken as ACP (`cursor-agent acp`): the protocol its CLI
-            // publishes for exactly this kind of embedding. Launch flags give
-            // the CLI maximum authority; any residual ACP permission request
-            // becomes a durable stopped interaction in the session manager.
-            Arc::new(
-                AcpAdapter::new("cursor", "Cursor", cursor_command())
-                    .with_extra_dirs(cursor_install_dirs())
-                    .checking_login(),
-            ),
+            // Cursor runs in print mode (`adapter::cursor`), one process per
+            // turn pinned to the exact model slug; its ACP server cannot pin
+            // effort or Fast (fb_eVSh3fuuyrv6). The ACP command is kept only
+            // for importing Cursor's own session history.
+            Arc::new(CursorAdapter::new(
+                "cursor",
+                "Cursor",
+                cursor_command(),
+                cursor_install_dirs(),
+            )),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(
@@ -279,18 +282,20 @@ mod tests {
     }
 
     /// Cursor ships in the default set too (`docs/desktop-client.md` promises
-    /// the picker detects a locally installed Cursor CLI), spoken as ACP rather
-    /// than through a hand-written config entry.
+    /// the picker detects a locally installed Cursor CLI), spoken in print mode
+    /// rather than through a hand-written config entry.
     #[tokio::test]
     async fn cursor_is_registered_out_of_the_box() {
         let registry = Registry::new(&BTreeMap::new());
         let cursor = registry.get("cursor").expect("cursor is registered");
         assert!(!cursor.builtin());
         assert_eq!(cursor.label(), "Cursor");
-        // Mode switching and pasted images both come through ACP. Residual
-        // permission requests are supported as durable stopped interactions.
-        assert!(cursor.capabilities().permissions);
+        // Print mode pins model, effort and Fast per turn and runs with
+        // `--force`, so there are no permission prompts to relay.
+        assert!(!cursor.capabilities().permissions);
         assert!(cursor.capabilities().set_model);
+        assert!(cursor.capabilities().set_effort);
+        assert!(cursor.capabilities().set_fast);
         assert!(cursor.capabilities().set_mode);
         assert!(cursor.capabilities().attachments);
         // Probing is honest either way: ready when `cursor-agent` is on PATH
