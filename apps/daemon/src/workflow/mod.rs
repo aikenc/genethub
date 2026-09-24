@@ -31,6 +31,7 @@ mod journal;
 mod output;
 mod package;
 mod request;
+mod recovery;
 mod script;
 mod structured;
 mod supervision;
@@ -152,6 +153,7 @@ struct PackageSnapshot {
     /// the `diagnostic` component. Absent simply disables that capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     diagnostic_role: Option<String>,
+    recovery: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -175,6 +177,10 @@ struct WorkflowDefinition {
     include: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     structure: Option<workflow_engine::Definition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget: Option<recovery::RecoveryBudget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pm_answer_seconds: Option<u64>,
     nodes: Vec<NodeDefinition>,
 }
 
@@ -1746,6 +1752,9 @@ pub(crate) async fn dispatch(
         Some(digest) => capture_candidate(&workspace.root, &runtime, digest)?,
         None => active.clone(),
     };
+    if candidate.package.recovery == format!("flows/{workflow_id}.yaml") {
+        bail!("恢复流程不能作为普通或试验 Workflow 派发");
+    }
     let (executor_workspace, execution_root) = resolve_execution_binding(
         state,
         root_workspace_id,
@@ -3069,10 +3078,17 @@ fn package_snapshot(package: &package::Package) -> Result<PackageSnapshot> {
             package.id
         );
     }
+    if let Some(flow) = package.manifest.recovery.strip_prefix("flows/") {
+        let id = flow.strip_suffix(".yaml").ok_or_else(|| anyhow!("recovery 文件名无效"))?;
+        if !package.flow_ids.iter().any(|existing| existing == id) {
+            bail!("Workflow 包 {} 声明的恢复流程不存在：{}", package.id, package.manifest.recovery);
+        }
+    }
     Ok(PackageSnapshot {
         id: package.id.clone(),
         executor_path: package.executor_relative()?,
         diagnostic_role: package.diagnostic_role()?,
+        recovery: package.manifest.recovery.clone(),
     })
 }
 
@@ -3172,12 +3188,15 @@ fn compile_candidate(package: &package::Package) -> Result<DcgCandidateRecord> {
         snapshot_bytes,
         MAX_CANDIDATE_SNAPSHOT_BYTES,
     )?;
-    // The manifest's prose never reaches the Candidate; only `dev` and
-    // `description` have consumers, and both are read live by `list`. Pinning
-    // untrusted text into an execution snapshot would give it a durability it
-    // has no reason to have.
+    // Pin the recovery selector, which changes execution. `dev` and
+    // `description` remain live list facts; prose is untrusted input and does
+    // not enter the Candidate snapshot.
     for flow_id in &package.flow_ids {
         let mut bundle = load_bundle_from(source, flow_id)?;
+        let is_recovery = package.manifest.recovery == format!("flows/{flow_id}.yaml");
+        if !is_recovery && (bundle.definition.budget.is_some() || bundle.definition.pm_answer_seconds.is_some()) {
+            bail!("只有 workflow.md 指定的恢复流程可以声明 budget 或 pmAnswerSeconds");
+        }
         for (path, bytes) in &bundle.source_files {
             insert_candidate_source(
                 &mut source_files,
@@ -3691,6 +3710,12 @@ fn outcome_success(definition: &WorkflowDefinition, name: &str) -> Option<bool> 
 
 fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
     validate_id(&definition.id, "workflow id")?;
+    if let Some(budget) = &definition.budget { budget.validate()?; }
+    if let Some(seconds) = definition.pm_answer_seconds {
+        if !(1..=recovery::MAX_PM_ANSWER_SECONDS).contains(&seconds) {
+            bail!("recovery pmAnswerSeconds 必须在 1..={} 之间", recovery::MAX_PM_ANSWER_SECONDS);
+        }
+    }
     if definition.version == 0 {
         bail!("Workflow version 必须大于 0");
     }
@@ -4970,6 +4995,46 @@ mod tests {
         package
     }
 
+    #[test]
+    fn recovery_selector_is_pinned_and_requires_a_package_flow() {
+        let root = tempfile::tempdir().unwrap();
+        let package = seed_package(root.path());
+        let ordinary = compile_package(root.path(), TEST_PACKAGE).unwrap();
+        assert_eq!(ordinary.package.recovery, "builtin");
+        write(&package.join(package::MANIFEST_FILE),
+            "---\ndescription: 测试包\nrecovery: flows/direct-change.yaml\n---\n");
+        let custom = compile_package(root.path(), TEST_PACKAGE).unwrap();
+        assert_eq!(custom.package.recovery, "flows/direct-change.yaml");
+        assert_ne!(ordinary.digest, custom.digest);
+        write(&package.join(package::MANIFEST_FILE),
+            "---\ndescription: 测试包\nrecovery: flows/missing.yaml\n---\n");
+        assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("恢复流程不存在"));
+    }
+
+    #[test]
+    fn recovery_flow_limits_are_checked_before_candidate_activation() {
+        let root = tempfile::tempdir().unwrap();
+        let package = seed_package(root.path());
+        write(&package.join(package::MANIFEST_FILE),
+            "---\ndescription: 测试包\nrecovery: flows/direct-change.yaml\n---\n");
+        let path = package.join("flows/direct-change.yaml");
+        let source = fs::read_to_string(&path).unwrap();
+        write(&path, &source.replace("version: 1\n",
+            "version: 1\nbudget: {maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600}\npmAnswerSeconds: 1800\n"));
+        let valid = compile_package(root.path(), TEST_PACKAGE).unwrap();
+        assert_eq!(valid.workflows["direct-change"].definition.budget.as_ref().unwrap().max_runs, 3);
+        write(&path, &source.replace("version: 1\n",
+            "version: 1\nbudget: {maxRuns: 11, maxLlmRounds: 200, deadlineSeconds: 3600}\n"));
+        assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("maxRuns"));
+        write(&path, &source.replace("version: 1\n",
+            "version: 1\npmAnswerSeconds: 86401\n"));
+        assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("pmAnswerSeconds"));
+        write(&package.join(package::MANIFEST_FILE), "---\ndescription: 测试包\n---\n");
+        write(&path, &source.replace("version: 1\n",
+            "version: 1\nbudget: {maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600}\n"));
+        assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("只有 workflow.md"));
+    }
+
     /// The de-Git boundary, asserted on the source rather than trusted to a
     /// review: the kernel may not reach for Git to decide anything it could
     /// have decided for a project that has no repository.
@@ -6097,6 +6162,8 @@ mod tests {
         let definition = WorkflowDefinition {
             structure: None,
             include: Vec::new(),
+            budget: None,
+            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "anything".into(),
             version: 1,
@@ -6130,6 +6197,8 @@ mod tests {
         let definition = WorkflowDefinition {
             structure: None,
             include: Vec::new(),
+            budget: None,
+            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "unsafe".into(),
             version: 1,
@@ -6154,6 +6223,8 @@ mod tests {
         let definition = WorkflowDefinition {
             structure: None,
             include: Vec::new(),
+            budget: None,
+            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "fanout".into(),
             version: 1,
@@ -6199,6 +6270,8 @@ mod tests {
         WorkflowDefinition {
             structure: None,
             include: Vec::new(),
+            budget: None,
+            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "custom-outcomes".into(),
             version: 1,
@@ -6367,6 +6440,8 @@ mod tests {
         let publish = |inputs: NodeInputs, completion: CompletionDefinition| WorkflowDefinition {
             structure: None,
             include: Vec::new(),
+            budget: None,
+            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "publish-only".into(),
             version: 1,
@@ -6417,6 +6492,8 @@ mod tests {
         let definition = WorkflowDefinition {
             structure: None,
             include: Vec::new(),
+            budget: None,
+            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "publish-only".into(),
             version: 1,
@@ -6526,6 +6603,8 @@ mod tests {
             definition: WorkflowDefinition {
                 structure: None,
                 include: Vec::new(),
+                budget: None,
+                pm_answer_seconds: None,
                 schema: DEFINITION_SCHEMA.into(),
                 id: "direct".into(),
                 version: 1,

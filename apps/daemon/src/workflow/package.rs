@@ -55,17 +55,25 @@ const REF_WORKFLOW: &str = "$workflow";
 const REF_COLLECTION: &str = "$collection";
 const REF_PROJECT: &str = "$project";
 
-/// `workflow.md` frontmatter: two optional fields, both of which have a
+/// `workflow.md` frontmatter: three optional fields, all with a
 /// mechanical consumer. Everything an author might otherwise declare belongs
 /// in the prose body, where it can inform a reader without pretending to be a
 /// gate the platform never checks.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     /// Machine-readable summary for `workflow list` and PM routing.
     pub(crate) description: String,
     /// Author's "this is still an experiment" marker. It changes no mechanical
     /// behaviour; it tells PM to look harder at the health facts.
     pub(crate) dev: bool,
+    /// The recovery flow used by newly started recovery Runs.
+    pub(crate) recovery: String,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self { description: String::new(), dev: false, recovery: "builtin".into() }
+    }
 }
 
 /// One Space the package asks the project to materialize.
@@ -456,8 +464,18 @@ pub(crate) fn parse_manifest(raw: &str, id: &str) -> Result<Manifest> {
                         ),
                     }
                 }
+                "recovery" => {
+                    if value != "builtin" {
+                        let Some(flow_id) = value.strip_prefix("flows/").and_then(|path| path.strip_suffix(".yaml")) else {
+                            bail!("Workflow 包 {id} 的 recovery 必须是 builtin 或 flows/<id>.yaml");
+                        };
+                        validate_id(flow_id, "recovery flow id")?;
+                        if flow_id.contains('/') { bail!("recovery flow id 不能包含子目录"); }
+                    }
+                    manifest.recovery = value.to_string();
+                }
                 other => bail!(
-                    "Workflow 包 {id} 的 {MANIFEST_FILE} frontmatter 只接受 description 与 dev，出现了 {other}"
+                    "Workflow 包 {id} 的 {MANIFEST_FILE} frontmatter 只接受 description、dev 与 recovery，出现了 {other}"
                 ),
             }
         }
@@ -834,14 +852,17 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_accepts_only_description_and_dev() {
+    fn frontmatter_accepts_only_description_dev_and_recovery() {
         assert_eq!(
-            parse_manifest("---\ndescription: a\ndev: true\n---\nbody\n", "x").unwrap(),
+            parse_manifest("---\ndescription: a\ndev: true\nrecovery: flows/repair.yaml\n---\nbody\n", "x").unwrap(),
             Manifest {
                 description: "a".into(),
-                dev: true
+                dev: true,
+                recovery: "flows/repair.yaml".into(),
             }
         );
+        assert_eq!(parse_manifest("---\nrecovery: builtin\n---\n", "x").unwrap().recovery, "builtin");
+        assert!(parse_manifest("---\nrecovery: ../escape.yaml\n---\n", "x").is_err());
         let error = parse_manifest("---\ncategory: game\n---\n", "x")
             .unwrap_err()
             .to_string();
