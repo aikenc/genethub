@@ -413,10 +413,7 @@ pub(super) async fn observe(
         "{}。静默只触发诊断，不自动终止长工具。",
         stalled.join("；")
     ));
-    let group = all_runs(runtime)?
-        .into_iter()
-        .filter(|other| request::group_id(other) == request::group_id(run))
-        .collect::<Vec<_>>();
+    let group = request_runs(runtime, request::group_id(run))?;
     let group_diagnostics: usize = group
         .iter()
         .map(|run| run.supervision.diagnostics.len())

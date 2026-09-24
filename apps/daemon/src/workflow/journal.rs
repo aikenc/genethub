@@ -1,6 +1,5 @@
 //! Committed Run event references, rolled by UTC day and segment size.
 use super::*;
-use std::collections::BTreeSet;
 use std::io::{Seek, SeekFrom};
 
 const MAX_LINE_BYTES: usize = 4 * 1024;
@@ -132,7 +131,7 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
         return Ok(AppendOutcome { seq: 0, bytes: 0, segment: String::new() });
     };
     let snapshot = directory.join("run.json");
-    let (mut seq, mut bytes, mut current, revision, status, previous_messages) =
+    let (mut seq, mut bytes, mut current, revision, status, previous_message_total) =
         match crate::config::sensitive_metadata(&snapshot) {
             Ok(metadata) => {
                 crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
@@ -143,10 +142,10 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
                 let previous = decode_run_record(&fs::read(&snapshot)?)?;
                 (previous.journal_seq, previous.journal_bytes, previous.journal_segment,
                     previous.revision, Some(previous.status),
-                    previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>())
+                    previous.flow_message_total)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound =>
-                (0, 0, String::new(), 0, None, BTreeSet::new()),
+                (0, 0, String::new(), 0, None, 0),
             Err(error) => return Err(error.into()),
         };
     if run.revision < revision {
@@ -176,15 +175,19 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
     }
     prune_directory(&directory, at_ms)?;
     let mut events = Vec::new();
-    for message in &run.flow_messages {
-        if !previous_messages.contains(&message.message_id) {
+    let new_messages = run.flow_message_total.checked_sub(previous_message_total)
+        .ok_or_else(|| anyhow!("Workflow flow message count 不得回退"))?;
+    let new_messages = usize::try_from(new_messages).unwrap_or(usize::MAX);
+    if new_messages > run.flow_messages.len() {
+        bail!("Workflow flow message receipts 缺少未提交事件");
+    }
+    for message in run.flow_messages.iter().skip(run.flow_messages.len() - new_messages) {
             events.push(JournalEvent {
                 seq: 0, revision: run.revision, at_ms: message.created_at_ms,
                 event_type: message.kind.clone(), actor: "event".into(), rule: "flow-message".into(),
                 run_id: run.id.clone(), session_id: Some(message.sender_session_id.clone()),
                 node_id: message.node_id.clone(), message_id: Some(message.message_id.clone()),
             });
-        }
     }
     if run.revision != revision || status.as_deref() != Some(run.status.as_str()) {
         events.push(JournalEvent {
@@ -351,5 +354,32 @@ mod tests {
         assert_ne!(first.journal_segment, second.journal_segment);
         assert_eq!(second.status, "running");
         assert_eq!(read_at(&runtime, &second, 0, 10, at).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn run_snapshot_keeps_bounded_message_receipts_after_journaling() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run = run(&runtime, "wr_receipts");
+        run.executor_session_id = Some("s_executor".into());
+        for index in 0..(MAX_FLOW_MESSAGES + 6) {
+            let mut message = flow_message(
+                &run, "node.assigned", None, "s_pm", "s_executor", None,
+                serde_json::json!({"index": index}),
+            ).unwrap();
+            message.message_id = format!("fm_{index}");
+            push_flow_message(&mut run, message);
+        }
+        save_run(&runtime, &run).unwrap();
+        let committed = load_run(&runtime, &run.id).unwrap();
+        assert_eq!(committed.journal_seq, (MAX_FLOW_MESSAGES + 7) as u64);
+        assert_eq!(committed.flow_messages.len(), MAX_FLOW_MESSAGES);
+        assert_eq!(committed.flow_messages[0].message_id, "fm_6");
+        let events = read(&runtime, &committed, MAX_FLOW_MESSAGES as u64, 20).unwrap();
+        assert_eq!(events.len(), 7);
+        assert_eq!(events.last().unwrap().seq, committed.journal_seq);
+        save_run(&runtime, &run).unwrap();
+        assert_eq!(load_run(&runtime, &run.id).unwrap().journal_seq, committed.journal_seq);
     }
 }

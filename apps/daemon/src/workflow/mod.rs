@@ -57,6 +57,9 @@ const LEGACY_RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
 const RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v5";
 const PREVIOUS_RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v2";
 const FLOW_MESSAGE_SCHEMA: &str = "genehub.flow-message.v1";
+/// Introspection keeps only recent delivery receipts. The journal owns the
+/// durable event history, so Run snapshots cannot grow with task duration.
+const MAX_FLOW_MESSAGES: usize = 1024;
 const MAX_LEASE_RECORD_BYTES: u64 = 64 * 1024;
 const DEFAULT_LEASE_SECONDS: u64 = 60 * 60;
 const MAX_LEASE_SECONDS: u64 = 24 * 60 * 60;
@@ -883,6 +886,8 @@ struct RunRecord {
     failed_routes: Vec<FailedAgentRoute>,
     nodes: BTreeMap<String, NodeRecord>,
     leases: BTreeMap<String, LeaseRecord>,
+    #[serde(default)]
+    flow_message_total: u64,
     #[serde(default)]
     flow_messages: Vec<FlowMessage>,
     created_at_ms: i64,
@@ -1869,6 +1874,7 @@ pub(crate) async fn dispatch(
         failed_routes: Vec::new(),
         nodes: BTreeMap::new(),
         leases: BTreeMap::new(),
+        flow_message_total: 0,
         flow_messages: Vec::new(),
         created_at_ms: now,
         updated_at_ms: now,
@@ -2077,31 +2083,65 @@ fn all_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
     Ok(runs)
 }
 
-/// A damaged locator must not stop supervision of every other Run. Keep the
-/// strict reader above for user-facing history and authorization decisions.
+/// Patrol reads authoritative PM request directories, never the project-wide
+/// locator cache. Damage to one request is reported without hiding its peers.
 fn maintenance_runs(runtime: &RuntimeStore) -> Result<Vec<RunRecord>> {
-    let directory = runtime.directory(Path::new("runs"), false)?;
+    let directory = runtime.directory(Path::new("requests"), false)?;
     let listing = match fs::read_dir(&directory) {
         Ok(listing) => listing,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).context("读取 Workflow Run maintenance index"),
+        Err(error) => return Err(error).context("读取 Workflow PM request 目录"),
     };
     let mut runs = Vec::new();
     for item in listing {
-        let path = item?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        let item = item?;
+        let Some(request_id) = item.file_name().to_str().map(str::to_string) else {
             continue;
         };
-        match load_run(runtime, run_id) {
-            Ok(run) => runs.push(run),
-            Err(error) => tracing::error!(%run_id, %error,
-                "Workflow Run index is unreadable; other Runs remain supervised, this Run requires repair"),
+        match request_runs(runtime, &request_id) {
+            Ok(group) => runs.extend(group),
+            Err(error) => tracing::error!(%request_id, %error,
+                "Workflow PM request is unreadable; other requests remain supervised"),
         }
     }
     Ok(runs)
+}
+
+/// A strict, request-local read for admission and takeover. An unrelated
+/// damaged request cannot make this request's budget or fence unavailable.
+fn request_runs(runtime: &RuntimeStore, request_id: &str) -> Result<Vec<RunRecord>> {
+    validate_id(request_id, "request id")?;
+    let runs_dir = runtime.directory(
+        &Path::new("requests").join(request_id).join("runs"), false)?;
+    let mut group = Vec::new();
+    for entry in fs::read_dir(&runs_dir)? {
+        let entry = entry?;
+        let Some(run_id) = entry.file_name().to_str().map(str::to_string) else {
+            bail!("Workflow Run 目录名不是 UTF-8");
+        };
+        validate_id(&run_id, "run id")?;
+        let relative = Path::new(".genethub/components/pm/requests")
+            .join(request_id).join("runs").join(&run_id).join("run.json");
+        let snapshot = runtime.project_file(relative.to_str().ok_or_else(|| anyhow!("Run 路径不是 UTF-8"))?)?;
+        let metadata = crate::config::sensitive_metadata(&snapshot)?;
+        crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
+        if !metadata.is_file() { bail!("Workflow Run snapshot 不是普通文件"); }
+        ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+        let mut run = decode_run_record(&fs::read(&snapshot)?)?;
+        if run.id != run_id || request::group_id(&run) != request_id {
+            bail!("Workflow Run snapshot identity mismatch");
+        }
+        run.snapshot_relative = Some(relative.to_string_lossy().to_string());
+        request::load_record(runtime, &mut run)?;
+        group.push(run);
+    }
+    if !group.iter().any(|run| run.id == request_id) {
+        bail!("Workflow PM request 缺少根 Run");
+    }
+    if group.iter().find(|run| run.id == request_id).is_some_and(|run| run.request.is_none()) {
+        bail!("Workflow PM request 根 Run 缺少请求记录");
+    }
+    Ok(group)
 }
 
 pub async fn executor_flow(
@@ -2120,7 +2160,7 @@ pub async fn executor_flow(
     let project_id = state.workspaces.project_root(&workspace_id).await?;
     let project = state.workspaces.project_entry(&project_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, &project_id, &project.root)?;
-    let mut runs = all_runs(&runtime)?
+    let mut runs = maintenance_runs(&runtime)?
         .into_iter()
         .filter(|run| run.executor_session_id.as_deref() == Some(executor_session_id))
         .collect::<Vec<_>>();
@@ -4272,6 +4312,9 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
         stored.journal_bytes = outcome.bytes;
         stored.journal_segment = outcome.segment;
     }
+    if stored.flow_messages.len() > MAX_FLOW_MESSAGES {
+        stored.flow_messages.drain(..stored.flow_messages.len() - MAX_FLOW_MESSAGES);
+    }
     let run = &stored;
     // The envelope deliberately lacks the legacy top-level Run fields. An
     // older daemon must refuse it, rather than discard durable stop obligations.
@@ -4288,6 +4331,7 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
         },
         MAX_RUN_RECORD_BYTES,
     )?;
+    request::save_record(runtime, run)?;
     let Some(snapshot_relative) = run.snapshot_relative.as_deref() else {
         let path = run_path(runtime, &run.id, true)?;
         crate::config::save_private(&path, &body)?;
@@ -4317,6 +4361,53 @@ fn save_run_with_journal_options(runtime: &RuntimeStore, run: &RunRecord, journa
 }
 
 fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
+    match load_run_indexed(runtime, run_id) {
+        Ok(run) => Ok(run),
+        Err(index_error) => match resolve_run_from_requests(runtime, run_id) {
+            Ok(run) => {
+                tracing::warn!(%run_id, %index_error, "resolved Workflow Run from PM request snapshot");
+                Ok(run)
+            }
+            Err(rebuild_error) => Err(index_error).with_context(||
+                format!("无法从 PM request 重建 Run {run_id}：{rebuild_error:#}")),
+        },
+    }
+}
+
+fn resolve_run_from_requests(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
+    validate_id(run_id, "run id")?;
+    let requests = runtime.directory(Path::new("requests"), false)?;
+    let mut found: Option<RunRecord> = None;
+    for entry in fs::read_dir(&requests)? {
+        let entry = entry?;
+        let Some(request_id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+        if validate_id(&request_id, "request id").is_err() { continue; }
+        let relative = Path::new(".genethub/components/pm/requests")
+            .join(&request_id).join("runs").join(run_id).join("run.json");
+        let relative_text = relative.to_str().ok_or_else(|| anyhow!("Run 路径不是 UTF-8"))?;
+        let snapshot = runtime.project_file(relative_text)?;
+        let metadata = match crate::config::sensitive_metadata(&snapshot) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
+        if !metadata.is_file() { bail!("Workflow Run snapshot 不是普通文件"); }
+        ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+        let mut run = decode_run_record(&fs::read(&snapshot)?)?;
+        if run.id != run_id || request::group_id(&run) != request_id {
+            bail!("Workflow Run snapshot identity mismatch");
+        }
+        run.snapshot_relative = Some(relative_text.to_string());
+        request::load_record(runtime, &mut run)?;
+        if found.replace(run).is_some() {
+            bail!("多个 PM request 声称同一个 Workflow Run ID");
+        }
+    }
+    found.ok_or_else(|| anyhow!("PM request 中未找到 Run {run_id}"))
+}
+
+fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
     let path = run_path(runtime, run_id, false)?;
     let metadata = crate::config::sensitive_metadata(&path)
         .with_context(|| format!("Workflow Run 不存在：{run_id}"))?;
@@ -4335,6 +4426,7 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
         let mut run = decode_run_record(&bytes)
             .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
         run.snapshot_relative = None;
+        request::load_record(runtime, &mut run)?;
         return Ok(run);
     }
     let index: RunIndex = serde_json::from_value(value)
@@ -4379,6 +4471,7 @@ fn load_run(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
         )?;
     }
     run.snapshot_relative = Some(index.snapshot_relative);
+    request::load_record(runtime, &mut run)?;
     Ok(run)
 }
 
@@ -4406,6 +4499,7 @@ fn push_flow_message(run: &mut RunRecord, message: FlowMessage) {
         .all(|existing| existing.message_id != message.message_id)
     {
         run.flow_messages.push(message);
+        run.flow_message_total = run.flow_message_total.saturating_add(1);
     }
 }
 
@@ -5099,7 +5193,7 @@ mod tests {
     }
 
     #[test]
-    fn tag_route_failure_is_human_actionable() {
+    fn tag_route_failure_hands_to_pm() {
         let registry = crate::adapter::registry::Registry::new(&BTreeMap::new());
         let error = crate::agent_routing::select_tag_route(
             &AgentSelectionPreferences::default(),
@@ -5111,7 +5205,7 @@ mod tests {
         .unwrap_err();
         let message = format!("{error:#}");
         assert!(message.contains("视频理解"), "{message}");
-        assert!(message.contains("人类"), "{message}");
+        assert!(message.contains("交给 PM"), "{message}");
     }
 
     #[test]
@@ -5758,6 +5852,63 @@ mod tests {
     }
 
     #[test]
+    fn request_record_owns_budget_across_run_snapshot_reads() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "workspace", project.path()).unwrap();
+        let run: RunRecord = serde_json::from_value(serde_json::json!({
+            "request": {"originalMessageId": "m_1", "rootRunId": "wr_root",
+                "budget": {"revision": 2, "maxRuns": 5}},
+            "id": "wr_root", "workspaceId": "workspace", "parentSessionId": "s_pm",
+            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "deliver", "status": "running", "revision": 1,
+            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
+        })).unwrap();
+        assert!(claim_request_writer(&runtime, &run).unwrap());
+        save_run(&runtime, &run).unwrap();
+        let request_path = project.path().join(".genethub/components/pm/requests/wr_root/request.json");
+        assert!(request_path.is_file());
+        let snapshot_path = run_path(&runtime, &run.id, false).unwrap();
+        let mut stale: serde_json::Value = serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
+        stale["run"]["request"]["budget"]["maxRuns"] = serde_json::json!(1);
+        crate::config::save_private(&snapshot_path, &serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert_eq!(request::budget(&load_run(&runtime, &run.id).unwrap()).max_runs, 5);
+        release_request_writer(&runtime, &run).unwrap();
+    }
+
+    #[test]
+    fn patrol_reads_each_request_without_project_locator_dependency() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "workspace", project.path()).unwrap();
+        for id in ["wr_bad", "wr_good"] {
+            let mut run: RunRecord = serde_json::from_value(serde_json::json!({
+                "request": {"originalMessageId": format!("m_{id}"), "rootRunId": id},
+                "id": id, "workspaceId": "workspace", "parentSessionId": "s_pm",
+                "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": id,
+                "taskPrompt": "deliver", "status": "running", "revision": 1,
+                "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+                "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
+            })).unwrap();
+            run.snapshot_relative = Some(pm_snapshot_relative(&runtime, id, id).unwrap());
+            assert!(claim_request_writer(&runtime, &run).unwrap());
+            save_run(&runtime, &run).unwrap();
+            release_request_writer(&runtime, &run).unwrap();
+        }
+        fs::write(run_path(&runtime, "wr_good", false).unwrap(), b"broken locator").unwrap();
+        let damaged = project.path().join(
+            ".genethub/components/pm/requests/wr_bad/runs/wr_bad/run.json");
+        fs::write(damaged, b"broken snapshot").unwrap();
+        let runs = maintenance_runs(&runtime).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "wr_good");
+        assert_eq!(load_run(&runtime, "wr_good").unwrap().id, "wr_good");
+        assert_eq!(fs::read(run_path(&runtime, "wr_good", false).unwrap()).unwrap(), b"broken locator");
+        assert_eq!(request::snapshot(&runtime, &runs[0], now_ms()).unwrap().used_runs, 1);
+    }
+
+    #[test]
     fn request_writer_is_exclusive_across_channel_data_roots() {
         let project = tempfile::tempdir().unwrap();
         let first_data = tempfile::tempdir().unwrap();
@@ -6330,6 +6481,7 @@ mod tests {
                 },
             )]),
             leases: BTreeMap::new(),
+            flow_message_total: 0,
             flow_messages: Vec::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -6385,6 +6537,7 @@ mod tests {
             failed_routes: Vec::new(),
             nodes: BTreeMap::new(),
             leases: BTreeMap::new(),
+            flow_message_total: 0,
             flow_messages: Vec::new(),
             created_at_ms: 1,
             updated_at_ms: 1,

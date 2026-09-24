@@ -356,10 +356,7 @@ pub(crate) async fn cancel(
     if run.revision != expected_revision {
         bail!("Workflow revision 冲突：先重新读取 workflow get");
     }
-    let group = all_runs(&runtime)?
-        .into_iter()
-        .filter(|other| request::group_id(other) == root.id)
-        .collect::<Vec<_>>();
+    let group = request_runs(&runtime, &root.id)?;
     if group
         .iter()
         .all(|run| matches!(run.status.as_str(), "completed" | "cancelled"))
@@ -814,11 +811,9 @@ pub(crate) async fn maintain(state: &Shared) {
 /// stop decision for each unfinished Run. The next patrol performs cleanup.
 async fn verify_request_takeover(state: &Shared, runtime: &RuntimeStore, seed: &RunRecord) -> Result<()> {
     let group_id = request::group_id(seed).to_string();
-    // A corrupt locator may hide an executing sibling; takeover must fail
-    // closed instead of declaring the visible subset safe.
-    let group = all_runs(runtime)?.into_iter()
-        .filter(|run| request::group_id(run) == group_id)
-        .collect::<Vec<_>>();
+    // A corrupt request snapshot may hide an executing sibling; takeover must
+    // fail closed instead of declaring the visible subset safe.
+    let group = request_runs(runtime, &group_id)?;
     if group.is_empty() { bail!("请求接管时未找到 Run"); }
     let mut sessions = BTreeSet::new();
     for run in &group {

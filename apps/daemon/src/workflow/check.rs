@@ -26,11 +26,15 @@ pub(crate) async fn check(
         });
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
-    let all = all_runs(&runtime)?;
     let runs = if let Some(id) = run_id {
         vec![load_run(&runtime, id)?]
     } else {
-        all.clone()
+        all_runs(&runtime)?
+    };
+    let all = if run_id.is_some() {
+        request_runs(&runtime, request::group_id(&runs[0]))?
+    } else {
+        runs.clone()
     };
     let mut report = WorkflowCheckReport {
         checked_at_ms: now_ms(),

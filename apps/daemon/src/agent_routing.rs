@@ -252,7 +252,7 @@ pub(crate) fn select_tag_route_excluding(
                 required.join(" + ")
             };
             anyhow!(
-                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；请由人类检查安装、登录或机器全局 Agent 配置"
+                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
             )
         })
 }
