@@ -1263,7 +1263,6 @@ fn cursor_launch_model(
         .find(|(key, _)| key == "fast")
         .map(|(_, value)| value == "true");
 
-    let effective_effort = effort_id.or(opaque_effort);
     let effective_fast = fast.or(opaque_fast).unwrap_or(false);
 
     let mut base_variants = vec![base.to_string()];
@@ -1273,12 +1272,44 @@ fn cursor_launch_model(
         base_variants.push(format!("cursor-{base}"));
     }
 
+    // Discover what efforts are actually available for this base model in `listed`.
+    let mut available_efforts = Vec::new();
+    for model in listed {
+        let (cli_base, cli_effort, _) = parse_cli_model_id(&model.id);
+        if base_variants.iter().any(|b| b == &cli_base) {
+            if let Some(e) = cli_effort {
+                if !available_efforts.contains(&e) {
+                    available_efforts.push(e);
+                }
+            }
+        }
+    }
+    available_efforts.sort_by_key(|e| effort_rank(e));
+
+    // Determine the desired effort:
+    // If not explicitly provided, choose a safe default from available efforts
+    // (medium -> high -> low -> first available) instead of dropping the model flag.
+    let chosen_effort: Option<String> = effort_id
+        .map(str::to_string)
+        .or_else(|| opaque_effort.map(str::to_string))
+        .or_else(|| {
+            if available_efforts.iter().any(|e| e == "medium") {
+                Some("medium".to_string())
+            } else if available_efforts.iter().any(|e| e == "high") {
+                Some("high".to_string())
+            } else if available_efforts.iter().any(|e| e == "low") {
+                Some("low".to_string())
+            } else {
+                available_efforts.first().cloned()
+            }
+        });
+
     let mut candidate_slugs = Vec::new();
 
     for p in &base_variants {
         let mut effort_variants = Vec::new();
-        if let Some(e) = effective_effort {
-            effort_variants.push(e.to_string());
+        if let Some(ref e) = chosen_effort {
+            effort_variants.push(e.clone());
             if e == "xhigh" {
                 effort_variants.push("extra-high".to_string());
             } else if e == "extra-high" {
@@ -1313,6 +1344,29 @@ fn cursor_launch_model(
         }
     }
 
+    // Fallback: if chosen effort is not present in listed, try other available efforts
+    // for this base model so --model is never dropped for a known model family.
+    for e in &available_efforts {
+        for p in &base_variants {
+            if effective_fast {
+                let fast_slug = format!("{p}-{e}-fast");
+                if listed.iter().any(|m| m.id == fast_slug) {
+                    return Some(fast_slug);
+                }
+            }
+            let standard_slug = format!("{p}-{e}");
+            if listed.iter().any(|m| m.id == standard_slug) {
+                return Some(standard_slug);
+            }
+            if !effective_fast {
+                let fast_slug = format!("{p}-{e}-fast");
+                if listed.iter().any(|m| m.id == fast_slug) {
+                    return Some(fast_slug);
+                }
+            }
+        }
+    }
+
     if listed.iter().any(|model| model.id == id) {
         return Some(id.to_string());
     }
@@ -1320,13 +1374,19 @@ fn cursor_launch_model(
     None
 }
 
-fn parse_cli_model_id(id: &str) -> (String, Option<String>, bool) {
+pub(crate) fn parse_cli_model_id(id: &str) -> (String, Option<String>, bool) {
     let mut s = id.trim();
     let mut is_fast = false;
     if let Some(rest) = s.strip_suffix("-fast") {
         is_fast = true;
         s = rest;
     }
+    let has_trailing_thinking = if let Some(rest) = s.strip_suffix("-thinking") {
+        s = rest;
+        true
+    } else {
+        false
+    };
     const KNOWN_EFFORTS: &[&str] = &[
         "extra-high", "xhigh", "minimal", "medium", "high", "none", "low", "max",
     ];
@@ -1340,7 +1400,71 @@ fn parse_cli_model_id(id: &str) -> (String, Option<String>, bool) {
             break;
         }
     }
-    (s.to_string(), effort, is_fast)
+    let mut base = s.to_string();
+    if has_trailing_thinking {
+        base.push_str("-thinking");
+    }
+    (base, effort, is_fast)
+}
+
+pub(crate) fn resolve_legacy_cursor_model(
+    raw_id: &str,
+    catalog: &genehub_proto::Catalog,
+) -> Option<(String, Option<String>, Option<bool>)> {
+    let id = raw_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    if let Some(m) = catalog.models.iter().find(|m| m.id == id) {
+        return Some((m.id.clone(), None, None));
+    }
+
+    let (opaque_base, params) = parse_opaque_model_id(id);
+    let opaque_effort = params
+        .iter()
+        .find(|(k, _)| k == "effort")
+        .map(|(_, v)| v.clone());
+    let opaque_fast = params
+        .iter()
+        .find(|(k, _)| k == "fast")
+        .map(|(_, v)| v == "true");
+
+    let mut base_candidates = vec![opaque_base.to_string()];
+    if let Some(stripped) = opaque_base.strip_prefix("cursor-") {
+        base_candidates.push(stripped.to_string());
+    } else {
+        base_candidates.push(format!("cursor-{opaque_base}"));
+    }
+
+    for b in &base_candidates {
+        if let Some(m) = catalog.models.iter().find(|m| &m.id == b) {
+            let effort = opaque_effort.filter(|e| m.efforts.contains(e));
+            let fast = opaque_fast.filter(|f| !*f || m.supports_fast);
+            return Some((m.id.clone(), effort, fast));
+        }
+    }
+
+    let (cli_base, cli_effort, is_fast) = parse_cli_model_id(opaque_base);
+    let mut cli_candidates = vec![cli_base.clone()];
+    if let Some(stripped) = cli_base.strip_prefix("cursor-") {
+        cli_candidates.push(stripped.to_string());
+    } else {
+        cli_candidates.push(format!("cursor-{cli_base}"));
+    }
+
+    for b in &cli_candidates {
+        if let Some(m) = catalog.models.iter().find(|m| &m.id == b) {
+            let effort = opaque_effort
+                .or(cli_effort.clone())
+                .filter(|e| m.efforts.contains(e));
+            let fast = opaque_fast
+                .or(if is_fast { Some(true) } else { None })
+                .filter(|f| !*f || m.supports_fast);
+            return Some((m.id.clone(), effort, fast));
+        }
+    }
+
+    None
 }
 
 fn effort_rank(effort: &str) -> usize {
@@ -3464,6 +3588,15 @@ mod tests {
             cursor_launch_model("grok-4.7", Some("medium"), Some(false), &listed).as_deref(),
             Some("grok-4.7-medium")
         );
+        // When no effort is specified, it must infer a reasonable default effort instead of returning None
+        assert_eq!(
+            cursor_launch_model("grok-4.7", None, None, &listed).as_deref(),
+            Some("grok-4.7-medium")
+        );
+        assert_eq!(
+            cursor_launch_model("grok-4.7", None, Some(true), &listed).as_deref(),
+            Some("grok-4.7-medium-fast")
+        );
         assert_eq!(
             cursor_launch_model("composer-2.5", None, Some(true), &listed).as_deref(),
             Some("composer-2.5-fast")
@@ -3504,6 +3637,79 @@ mod tests {
         assert!(composer.supports_fast);
         assert!(!composer.reasoning);
         assert!(composer.efforts.is_empty());
+    }
+
+    #[test]
+    fn parse_cli_model_id_handles_thinking_and_fast() {
+        assert_eq!(
+            parse_cli_model_id("grok-4.7-medium-fast"),
+            ("grok-4.7".into(), Some("medium".into()), true)
+        );
+        assert_eq!(
+            parse_cli_model_id("cursor-grok-4.6-high"),
+            ("cursor-grok-4.6".into(), Some("high".into()), false)
+        );
+        assert_eq!(
+            parse_cli_model_id("claude-4.6-sonnet-medium-thinking-fast"),
+            ("claude-4.6-sonnet-thinking".into(), Some("medium".into()), true)
+        );
+        assert_eq!(
+            parse_cli_model_id("composer-2.5-fast"),
+            ("composer-2.5".into(), None, true)
+        );
+    }
+
+    #[test]
+    fn resolve_legacy_cursor_model_maps_both_opaque_and_raw_ids() {
+        let catalog = genehub_proto::Catalog {
+            models: vec![
+                genehub_proto::ModelInfo {
+                    id: "grok-4.7".into(),
+                    label: "Grok 4.7".into(),
+                    context_window: None,
+                    reasoning: true,
+                    efforts: vec!["low".into(), "medium".into(), "high".into()],
+                    supports_fast: true,
+                    input_modalities: None,
+                },
+                genehub_proto::ModelInfo {
+                    id: "cursor-grok-4.6".into(),
+                    label: "Cursor Grok 4.6".into(),
+                    context_window: None,
+                    reasoning: true,
+                    efforts: vec!["high".into()],
+                    supports_fast: true,
+                    input_modalities: None,
+                },
+            ],
+            modes: vec![],
+            commands: vec![],
+            runtime_axes: None,
+            default_model: Some("auto".into()),
+            default_mode: None,
+            default_effort: Some("medium".into()),
+        };
+
+        // Exact match
+        assert_eq!(
+            resolve_legacy_cursor_model("grok-4.7", &catalog),
+            Some(("grok-4.7".into(), None, None))
+        );
+        // Opaque format from ACP
+        assert_eq!(
+            resolve_legacy_cursor_model("grok-4.7[effort=high,fast=true]", &catalog),
+            Some(("grok-4.7".into(), Some("high".into()), Some(true)))
+        );
+        // Old raw CLI ID
+        assert_eq!(
+            resolve_legacy_cursor_model("cursor-grok-4.6-high-fast", &catalog),
+            Some(("cursor-grok-4.6".into(), Some("high".into()), Some(true)))
+        );
+        // Unmatched model returns None
+        assert_eq!(
+            resolve_legacy_cursor_model("nonexistent-model", &catalog),
+            None
+        );
     }
 
     #[test]

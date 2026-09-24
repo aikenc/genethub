@@ -1517,7 +1517,7 @@ async fn dispatch(
             };
             match state
                 .sessions
-                .create_with_fast(
+                .create(
                     &workspace_id,
                     start_in,
                     &agent_id,
@@ -1591,6 +1591,7 @@ async fn dispatch(
                     &route.agent_id,
                     route.model_id,
                     route.effort_id,
+                    route.fast,
                     route.mode_id,
                     route.runtime_values,
                     title,
@@ -1992,7 +1993,7 @@ async fn dispatch(
                 model_id: route.model_id,
                 mode_id: route.mode_id,
                 effort_id: route.effort_id,
-                fast: None,
+                fast: route.fast,
                 runtime_values: route.runtime_values,
             };
             let result = if same_workspace {
@@ -2096,7 +2097,7 @@ async fn dispatch(
                 model_id: route.model_id,
                 mode_id: route.mode_id,
                 effort_id: route.effort_id,
-                fast: None,
+                fast: route.fast,
                 runtime_values: route.runtime_values,
             };
             match state
@@ -3751,6 +3752,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -3770,6 +3772,7 @@ mod tests {
                 &workspace.id,
                 project.clone(),
                 "genet",
+                None,
                 None,
                 None,
                 None,
@@ -3839,6 +3842,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
                         Default::default(),
                         None,
                     )
@@ -3887,6 +3891,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Default::default(),
                 None,
             )
@@ -3898,6 +3903,7 @@ mod tests {
                 &workspace.id,
                 project,
                 "genet",
+                None,
                 None,
                 None,
                 None,
@@ -3941,6 +3947,7 @@ mod tests {
                 &workspace.id,
                 project,
                 "genet",
+                None,
                 None,
                 None,
                 None,

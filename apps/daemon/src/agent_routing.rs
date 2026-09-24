@@ -27,6 +27,7 @@ pub(crate) struct ResolvedAgentRoute {
     pub agent_id: String,
     pub model_id: Option<String>,
     pub effort_id: Option<String>,
+    pub fast: Option<bool>,
     pub mode_id: Option<String>,
     pub runtime_values: BTreeMap<String, String>,
 }
@@ -402,6 +403,9 @@ fn candidate_for(
         .filter(|effort| efforts.contains(effort))
         .cloned()
         .or_else(|| default_effort(efforts));
+    let fast = remembered
+        .and_then(|runtime| runtime.fast)
+        .filter(|fast| *fast && model.is_some_and(|m| m.supports_fast));
     let mode_id = remembered
         .and_then(|runtime| runtime.mode_id.as_ref())
         .filter(|mode| {
@@ -456,6 +460,7 @@ fn candidate_for(
             agent_id: agent.id.clone(),
             model_id: model.map(|model| model.id.clone()),
             effort_id,
+            fast,
             mode_id,
             runtime_values,
         },

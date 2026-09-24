@@ -213,8 +213,12 @@ pub trait AgentSession: Send + Sync {
             "this agent has no effort levels to set ({effort_id})"
         ))
     }
-    async fn set_fast(&self, _fast: bool) -> Result<()> {
-        Ok(())
+    async fn set_fast(&self, fast: bool) -> Result<()> {
+        if fast {
+            Err(anyhow::anyhow!("this agent does not support fast mode"))
+        } else {
+            Ok(())
+        }
     }
     async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
         Err(anyhow::anyhow!(
