@@ -2,7 +2,7 @@
 
 上位事实来源是 [architecture.md](./architecture.md)。本文只管一件事：会话在磁盘上怎么放，以及为什么这么放能让「打开一个跑了三天的会话」和「打开一个刚建的会话」花一样的力气。
 
-三层寻址模型（session / round / blob）的动机、trunk 与 batch 的切分规则见 `docs/agent-analysis-substrate-proposal.md`。本文承接它，只回答**物理布局**。
+三层寻址模型（session / round / blob）的动机、trunk 与 batch 的切分规则见 `docs/agent-analysis-substrate-proposal.md`。本文承接它，只回答**物理布局**。`.genethub/` 的全貌、会话之外的数据放哪，见 [storage-layout.md](./storage-layout.md)。
 
 ---
 
@@ -58,7 +58,9 @@
   rounds/r-001/…
   blobs/b-9f.jsonl                 blob 正文，按内容 id 前两位合批
   state/                           adapter 私有 scratch
+  images/<id>.<ext>                会话内的图片附件
   artifacts/YYMMDD-hhmmss-<hash4>/ 浏览器运行产物；manifest + 图片/视频/文本
+  components/<组件>/               组件实例的会话级存储（storage-layout.md §3）
 <workspace>/.genethub/tombstones/<session-id>.json  持锁写入的逻辑删除标记
 ```
 
