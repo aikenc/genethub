@@ -447,6 +447,12 @@ async fn resolve_role_route(state: &Shared, role: &RoleSnapshot) -> Result<Resol
         .map(|(route, _)| route)
 }
 
+fn is_route_unavailable(error: &anyhow::Error) -> bool {
+    let detail = format!("{error:#}");
+    detail.contains("workflowTagRouteUnavailable")
+        || detail.contains("agentTagRouteUnavailable")
+}
+
 async fn resolve_role_route_excluding(
     state: &Shared,
     role: &RoleSnapshot,
@@ -912,6 +918,10 @@ struct RunRecord {
     /// dead route again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     failed_routes: Vec<FailedAgentRoute>,
+    /// Assignments held by a missing live Agent route. Their predecessor
+    /// results and any parallel Workers remain committed while patrol retries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    route_wait: Vec<String>,
     nodes: BTreeMap<String, NodeRecord>,
     leases: BTreeMap<String, LeaseRecord>,
     #[serde(default)]
@@ -1816,7 +1826,7 @@ pub(crate) async fn start_recovery(
         target = load_run(&project_runtime, run_id)?;
         if target.status == "running" {
             request::ensure_open(&project_runtime, &target)?;
-            control::request_stop(&mut target, "blocked", format!("PM recovery: {reason}"));
+            control::request_stop_with_cause(&mut target, "blocked", format!("PM recovery: {reason}"), "pmRecovery");
             target.journal_actor = "pm".into();
             target.revision = target.revision.saturating_add(1);
             target.updated_at_ms = now_ms();
@@ -2125,6 +2135,7 @@ pub(crate) async fn dispatch(
         definition: bundle.definition,
         roles: bundle.roles,
         failed_routes: Vec::new(),
+        route_wait: Vec::new(),
         nodes: BTreeMap::new(),
         leases: BTreeMap::new(),
         delivery_total: 0,
@@ -2184,31 +2195,9 @@ pub(crate) async fn dispatch(
         Ok(sessions) => sessions,
         Err(error) => {
             let reason = format!("{error:#}");
-            if reason.contains("workflowTagRouteUnavailable")
-                || reason.contains("agentTagRouteUnavailable")
-            {
+            if is_route_unavailable(&error) {
                 let blocked_at = now_ms();
-                for (node_id, node) in &mut run.nodes {
-                    if node.status != "pending" {
-                        continue;
-                    }
-                    if node_id == &entry {
-                        node.status = "blocked".into();
-                        node.reason = Some(reason.clone());
-                        node.assigned_at_ms = blocked_at;
-                        node.settled_at_ms = blocked_at;
-                    } else {
-                        node.status = "unreached".into();
-                    }
-                }
-                run.status = "blocked".into();
-                run.stop = Some(control::StopRequest {
-                    target: "blocked".into(),
-                    reason,
-                    cause_code: "routeUnavailable".into(),
-                    actor: String::new(),
-                    cleanup_error: None,
-                });
+                control::defer_unavailable_route(&mut run, &[entry], reason);
                 run.revision = 1;
                 run.updated_at_ms = blocked_at;
                 record_flow_start(&mut run, &[])?;
@@ -2763,6 +2752,9 @@ async fn activate(
     let leases_before = run.leases.clone();
     let mut queue: VecDeque<String> = initial.into();
     let mut sessions = Vec::new();
+    let mut inline_completed = BTreeMap::new();
+    let mut assigned_agents = Vec::new();
+    let mut missing_route_node = None;
     let result: Result<()> = async {
         while let Some(node_id) = queue.pop_front() {
             let node = runtime_node(run, &node_id)?;
@@ -2788,6 +2780,7 @@ async fn activate(
                     record.status = outcome.status;
                     record.assigned_at_ms = now_ms();
                     record.settled_at_ms = record.assigned_at_ms;
+                    inline_completed.insert(node_id.clone(), record.clone());
                     if let Some(next) = node.on.get(outcome.outcome.0.as_str()) {
                         queue.extend(next.clone());
                     }
@@ -2808,6 +2801,7 @@ async fn activate(
                     record.status = "completed".into();
                     record.assigned_at_ms = now_ms();
                     record.settled_at_ms = record.assigned_at_ms;
+                    inline_completed.insert(node_id.clone(), record.clone());
                     queue.extend(node.on.get("completed").cloned().unwrap_or_default());
                 }
                 "agent.session" => {
@@ -2824,7 +2818,15 @@ async fn activate(
                     // Resolve at the instant this activity is dispatched. A
                     // Candidate pins tag intent, never a machine's
                     // transient Agent/model availability.
-                    let route = resolve_role_route(state, &role).await?;
+                    let route = match resolve_role_route(state, &role).await {
+                        Ok(route) => route,
+                        Err(error) => {
+                            if is_route_unavailable(&error) {
+                                missing_route_node = Some(node_id.clone());
+                            }
+                            return Err(error);
+                        }
+                    };
                     // A structured node resolved its directory when the activity
                     // was created, from that instance's own input. A DAG node has
                     // no such input and may only name a fixed directory.
@@ -2928,6 +2930,7 @@ async fn activate(
                     record.status = "running".into();
                     record.session_id = Some(summary.id.clone());
                     record.assigned_at_ms = now_ms();
+                    assigned_agents.push(node_id.clone());
                     sessions.push((summary, task_message(run, &node)));
                 }
                 other => bail!("未注册的 Workflow capability：{other}"),
@@ -2957,6 +2960,20 @@ async fn activate(
         run.nodes = nodes_before;
         run.leases = leases_before;
         if cleanup_errors.is_empty() {
+            if let Some(missing) = missing_route_node {
+                // A package script may already have changed the project. Its
+                // submitted result is committed once; the route wait contains
+                // only assignments that have not started after rollback.
+                run.nodes.extend(inline_completed);
+                let pending = run.nodes.iter().filter(|(_, node)| node.status == "pending")
+                    .map(|(id, _)| id.clone()).collect::<BTreeSet<_>>();
+                run.route_wait.retain(|id| pending.contains(id));
+                for id in assigned_agents.into_iter().chain(std::iter::once(missing)).chain(queue) {
+                    if pending.contains(&id) && !run.route_wait.contains(&id) {
+                        run.route_wait.push(id);
+                    }
+                }
+            }
             return Err(error);
         }
         bail!("{error:#}；激活回滚失败：{}", cleanup_errors.join("；"));
@@ -3139,6 +3156,7 @@ fn settle_if_terminal(run: &mut RunRecord) {
         .filter(|(_, node)| matches!(node.status.as_str(), "running" | "finishing"))
         .map(|(id, _)| id.clone())
         .collect();
+    queue.extend(run.route_wait.iter().filter(|id| run.nodes.get(*id).is_some_and(|node| node.status == "pending")).cloned());
     while let Some(id) = queue.pop_front() {
         if !reachable.insert(id.clone()) {
             continue;
@@ -7042,6 +7060,7 @@ mod tests {
             definition,
             roles: BTreeMap::new(),
             failed_routes: Vec::new(),
+            route_wait: Vec::new(),
             nodes: BTreeMap::from([(
                 "publish".into(),
                 NodeRecord {
@@ -7123,6 +7142,7 @@ mod tests {
             },
             roles: BTreeMap::new(),
             failed_routes: Vec::new(),
+            route_wait: Vec::new(),
             nodes: BTreeMap::new(),
             leases: BTreeMap::new(),
             delivery_total: 0,

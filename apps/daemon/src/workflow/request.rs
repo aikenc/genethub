@@ -136,9 +136,9 @@ pub(super) fn apply_human_budget(runtime: &RuntimeStore, root_run_id: &str, requ
             record.budget.revision = record.budget.revision.saturating_add(1);
         }
         "c" => {
-            record.recovery_extra.max_runs = record.recovery_extra.max_runs.saturating_add(1).min(10);
-            record.recovery_extra.max_llm_rounds = record.recovery_extra.max_llm_rounds.saturating_add(100).min(1000);
-            record.recovery_extra.deadline_seconds = record.recovery_extra.deadline_seconds.saturating_add(1800).min(86400);
+            record.recovery_extra.max_runs = record.recovery_extra.max_runs.saturating_add(1).min(recovery::MAX_RECOVERY_RUNS);
+            record.recovery_extra.max_llm_rounds = record.recovery_extra.max_llm_rounds.saturating_add(100).min(recovery::MAX_RECOVERY_LLM_ROUNDS);
+            record.recovery_extra.deadline_seconds = record.recovery_extra.deadline_seconds.saturating_add(1800).min(recovery::MAX_RECOVERY_DEADLINE_SECONDS);
         }
         _ => bail!("Human exit {kind} does not adjust a budget"),
     }

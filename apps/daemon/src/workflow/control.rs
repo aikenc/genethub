@@ -270,6 +270,32 @@ pub(super) fn request_stop_with_cause(
     });
 }
 
+/// A missing live route is a dispatch wait, not evidence that a Worker failed.
+/// Keep completed predecessors and parallel Workers intact. Once there is no
+/// active Worker, expose the wait as a blocked Run without aborting its graph.
+pub(super) fn defer_unavailable_route(run: &mut RunRecord, targets: &[String], reason: String) {
+    for id in targets {
+        if let Some(node) = run.nodes.get_mut(id).filter(|node| node.status == "pending") {
+            node.reason = Some(reason.clone());
+            if !run.route_wait.contains(id) {
+                run.route_wait.push(id.clone());
+            }
+        }
+    }
+    if run.route_wait.is_empty() {
+        request_stop_with_cause(run, "blocked", reason, "routeUnavailable");
+        return;
+    }
+    if !run.nodes.values().any(|node| matches!(node.status.as_str(), "running" | "finishing")) {
+        run.status = "blocked".into();
+        run.stop = Some(StopRequest {
+            target: "blocked".into(), reason,
+            cause_code: "routeUnavailable".into(), actor: String::new(), cleanup_error: None,
+        });
+    }
+    supervision::prepare_notice(run, "routeUnavailable");
+}
+
 /// Starting a saved assignment and recording cancellation share the Run lock.
 /// A delayed launch cannot resurrect a Run after its stop decision was saved.
 pub(crate) async fn start_assigned(
@@ -829,7 +855,7 @@ pub(crate) async fn maintain(state: &Shared) {
                     if let Err(error) = maybe_resolve_recovery_successor(&runtime, &run.id) {
                         tracing::warn!(run = %run.id, %error, "workflow recovery successor remains pending");
                     }
-                    if let Err(error) = maybe_resume_initial_route(&owner, &runtime, &run.id).await {
+                    if let Err(error) = maybe_resume_route(&owner, &runtime, &run.id).await {
                         tracing::warn!(run = %run.id, %error, "workflow route resumption remains pending");
                     }
                     match maybe_start_recovery(&owner, &runtime, &run.id).await {
@@ -901,38 +927,77 @@ pub(super) fn maybe_resolve_recovery_successor(runtime: &RuntimeStore, run_id: &
     Ok(true)
 }
 
-/// A blocked first node has produced no Worker side effects. Once its role
-/// route is available, the patrol can restart that initial assignment without
-/// guessing how to replay a partially executed graph.
-async fn maybe_resume_initial_route(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<bool> {
+/// Retry only assignments that never started. In particular, a completed
+/// predecessor or an active sibling is never replayed after a route outage.
+async fn maybe_resume_route(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Result<bool> {
     let (workspace_id, sessions) = {
         let _guard = lock_run(runtime, run_id)?;
         let mut run = load_run(runtime, run_id)?;
-        let entry = run.definition.entry.clone();
-        if run.status != "blocked" || !run.handles.is_empty() || run.engine.is_some()
-            || !run.stop.as_ref().is_some_and(|stop| stop.cause_code == "routeUnavailable")
-            || run.nodes.get(&entry).is_none_or(|node| node.status != "blocked" || node.session_id.is_some())
-            || run.nodes.iter().any(|(id, node)| id != &entry && node.status != "unreached")
-            || recovery::read_human_exit(runtime, &run)?.is_some()
-        {
+        if !matches!(run.status.as_str(), "running" | "blocked") || run.route_wait.is_empty()
+            || (run.status == "blocked" && !run.stop.as_ref().is_some_and(|stop| stop.cause_code == "routeUnavailable"))
+            || recovery::read_human_exit(runtime, &run)?.is_some() {
             return Ok(false);
         }
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         request::ensure_open(runtime, &run)?;
-        let definition = runtime_node(&run, &entry)?;
-        let role = run.roles.get(definition.inputs.role.as_deref().unwrap_or_default())
-            .ok_or_else(|| anyhow!("Workflow entry role is missing"))?;
-        if resolve_role_route(state, role).await.is_err() { return Ok(false); }
-        for node in run.nodes.values_mut() {
-            node.status = "pending".into();
-            node.reason = None;
-            node.assigned_at_ms = 0;
-            node.settled_at_ms = 0;
+        if request::budget_exhausted(runtime, &run, now_ms())? { return Ok(false); }
+        let targets = run.route_wait.clone();
+        if run.engine.is_some() {
+            if run.status != "blocked" { return Ok(false); } // structured::drive retries a live graph
+            structured::validate_snapshot(&run)?;
+            for id in &targets {
+                let node = runtime_node(&run, id)?;
+                let role = run.roles.get(node.inputs.role.as_deref().unwrap_or_default())
+                    .ok_or_else(|| anyhow!("Workflow route-wait role is missing"))?;
+                if resolve_role_route(state, role).await.is_err() { return Ok(false); }
+            }
+            run.status = "running".into();
+            run.stop = None;
+            run.route_wait.clear();
+            for id in &targets {
+                if let Some(node) = run.nodes.get_mut(id) { node.reason = None; }
+            }
+            run.revision = run.revision.saturating_add(1);
+            run.updated_at_ms = now_ms();
+            run.journal_actor = "patrol".into();
+            save_run(runtime, &run)?;
+            return Ok(true);
         }
+        if targets.iter().any(|id| run.nodes.get(id).is_none_or(|node| node.status != "pending")) {
+            bail!("Workflow route-wait target is no longer pending");
+        }
+        let was_blocked = run.status == "blocked";
+        let statuses_before = run.nodes.iter().map(|(id, node)| (id.clone(), node.status.clone()))
+            .collect::<BTreeMap<_, _>>();
         run.status = "running".into();
         run.stop = None;
         let leases_before = run.leases.clone();
-        let sessions = activate(state, &runtime.project_root, runtime, &mut run, vec![entry]).await?;
+        let sessions = match activate(state, &runtime.project_root, runtime, &mut run, targets.clone()).await {
+            Ok(sessions) => sessions,
+            Err(error) if is_route_unavailable(&error) => {
+                let progressed = run.route_wait != targets || run.nodes.iter().any(|(id, node)| {
+                    statuses_before.get(id) != Some(&node.status)
+                });
+                if !progressed && (was_blocked || run.nodes.values().any(|node| {
+                    matches!(node.status.as_str(), "running" | "finishing")
+                })) {
+                    return Ok(false);
+                }
+                // A sibling may have finished after the route was first lost.
+                // Persist the blocked projection before retrying another tick.
+                let reason = format!("待派发节点路由仍不可用：{error:#}");
+                defer_unavailable_route(&mut run, &targets, reason);
+                run.revision = run.revision.saturating_add(1);
+                run.updated_at_ms = now_ms();
+                save_run(runtime, &run)?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        run.route_wait.retain(|id| !targets.contains(id));
+        for id in &targets {
+            if let Some(node) = run.nodes.get_mut(id) { node.reason = None; }
+        }
         settle_if_terminal(&mut run);
         run.revision = run.revision.saturating_add(1);
         run.updated_at_ms = now_ms();
@@ -1039,7 +1104,7 @@ async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &s
         ).await?;
         return Ok(true);
     }
-    let actor = if reason.starts_with("PM recovery: ") { "pm" } else { "patrol" };
+    let actor = if run.stop.as_ref().is_some_and(|stop| stop.cause_code == "pmRecovery") { "pm" } else { "patrol" };
     let transition = super::start_recovery(state, &run.workspace_id, &parent, &run.id, reason, actor).await?;
     for (session, message) in transition.sessions {
         if let Err(error) = start_assigned(state, &run.workspace_id, &transition.status.id, &session, message).await {
@@ -1217,14 +1282,15 @@ async fn finish_nodes(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> R
                 .unwrap_or_default();
             let leases_before = run.leases.clone();
             let sessions =
-                match activate(state, &runtime.project_root, runtime, &mut run, targets).await {
+                match activate(state, &runtime.project_root, runtime, &mut run, targets.clone()).await {
                     Ok(sessions) => sessions,
                     Err(error) => {
-                        request_stop(
-                            &mut run,
-                            "blocked",
-                            format!("节点 {node_id} 后续派发失败：{error:#}"),
-                        );
+                        let reason = format!("节点 {node_id} 后续派发失败：{error:#}");
+                        if is_route_unavailable(&error) {
+                            defer_unavailable_route(&mut run, &targets, reason);
+                        } else {
+                            request_stop(&mut run, "blocked", reason);
+                        }
                         Vec::new()
                     }
                 };

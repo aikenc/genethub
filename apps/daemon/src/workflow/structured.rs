@@ -367,13 +367,24 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             )
             .await
             {
-                Ok(created) => sessions.extend(created),
+                Ok(created) => {
+                    run.route_wait.retain(|waiting| waiting != &id);
+                    if let Some(node) = run.nodes.get_mut(&id) { node.reason = None; }
+                    sessions.extend(created);
+                }
                 Err(error) => {
-                    control::request_stop(
-                        &mut run,
-                        "blocked",
-                        format!("活动 {id} 启动待核对：{error:#}"),
-                    );
+                    let reason = format!("活动 {id} 启动待核对：{error:#}");
+                    if is_route_unavailable(&error) {
+                        let first_wait = !run.route_wait.contains(&id);
+                        control::defer_unavailable_route(&mut run, &[id], reason);
+                        if first_wait && run.status == "running" {
+                            run.revision += 1;
+                            run.updated_at_ms = now_ms();
+                            save_run(runtime, &run)?;
+                        }
+                    } else {
+                        control::request_stop(&mut run, "blocked", reason);
+                    }
                     break;
                 }
             }

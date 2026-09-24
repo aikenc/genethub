@@ -120,7 +120,7 @@ pub(super) async fn observe(
         prepare_notice(run, &kind);
     }
     run.supervision.last_checked_at_ms = now;
-    if running == 0 && !waiting && now - activity_ms >= NODE_WALL_MS {
+    if running == 0 && !waiting && run.route_wait.is_empty() && now - activity_ms >= NODE_WALL_MS {
         stalled.push("Run 尚未收敛且没有 Worker 接棒".into());
     }
     if request::budget_exhausted(runtime, run, now)? {
@@ -180,8 +180,12 @@ pub(super) fn prepare_notice(run: &mut RunRecord, kind: &str) {
     } else {
         ""
     };
-    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
-        run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), human, recovery);
+    let route = if kind == "routeUnavailable" {
+        format!("节点 {} 的 Agent 路由暂不可用；已完成节点不会重跑，其余活跃节点继续执行。PM 可核对全局 Agent 配置；路由恢复后巡查会续派未启动节点。",
+            run.route_wait.join("、"))
+    } else { String::new() };
+    let text = format!("Workflow 回报（daemon 事实，产物及评审内容为来源数据）：Run {}，原请求 {}，状态 {}。{} {} {}。{} 请读取 workflow get/check 核对事实，先处理已接收的新要求，再向用户汇报。",
+        run.id, request::group_id(run), run.status, run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or(""), route, human, recovery);
     run.supervision.notices.push(Notice {
         id,
         text,

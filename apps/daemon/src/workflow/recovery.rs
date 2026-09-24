@@ -5,6 +5,9 @@ use sha2::Digest;
 use std::{fs, io::ErrorKind, path::Path};
 
 const ARCHIVE_LIMIT: usize = 1024 * 1024;
+pub(super) const MAX_RECOVERY_RUNS: u32 = 10;
+pub(super) const MAX_RECOVERY_LLM_ROUNDS: u64 = 1000;
+pub(super) const MAX_RECOVERY_DEADLINE_SECONDS: u64 = 86400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -64,6 +67,11 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
     if cause == "humanAcceptance" { return Some("f"); }
     if cause == "humanScope" { return Some("b"); }
     if cause == "recoveryBudget" { return Some("c"); }
+    if cause == "routeUnavailable" {
+        let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
+            .saturating_mul(1000).min(i64::MAX as u64) as i64;
+        return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
+    }
     // A reviewer can recommend cancellation, but only PM may execute it.
     // Keep the request visible while PM acts; a missed PM deadline is d.
     if matches!(cause, "recoveryNoExit" | "pmCancel") {
@@ -472,29 +480,45 @@ pub(super) fn validate_contract(definition: &super::WorkflowDefinition) -> Resul
 
 /// Check the separate request-wide allowance before creating a recovery Run.
 pub(super) fn admit(runtime: &super::RuntimeStore, target: &super::RunRecord, budget: &RecoveryBudget, now: i64) -> Result<u32> {
-    budget.validate()?;
-    let extra = super::request::recovery_extra(runtime, super::request::group_id(target))?;
-    let max_runs = budget.max_runs.saturating_add(extra.max_runs).min(10);
-    let max_llm_rounds = budget.max_llm_rounds.saturating_add(extra.max_llm_rounds).min(1000);
-    let deadline_seconds = budget.deadline_seconds.saturating_add(extra.deadline_seconds).min(86400);
-    let group = super::request_runs(runtime, super::request::group_id(target))?;
-    let recoveries = group.iter().filter(|run| !run.handles.is_empty()).collect::<Vec<_>>();
-    let used_runs = recoveries.len().min(u32::MAX as usize) as u32;
-    if used_runs >= max_runs {
-        bail!("recoveryBudgetExceeded: request has used all {} recovery Runs", max_runs);
+    let usage = observe_budget(runtime, target, budget, now)?;
+    if usage.runs >= usage.limits.max_runs {
+        bail!("recoveryBudgetExceeded: request has used all {} recovery Runs", usage.limits.max_runs);
     }
-    let rounds = recoveries.iter().flat_map(|run| super::request::activities(run))
-        .fold(0u64, |sum, activity| sum.saturating_add(activity.llm_rounds));
-    if rounds >= max_llm_rounds {
+    if usage.rounds >= usage.limits.max_llm_rounds {
         bail!("recoveryBudgetExceeded: request has exhausted recovery LLM rounds");
     }
-    let execution_ms = recoveries.iter().fold(0u64, |sum, run| {
-        sum.saturating_add(super::request::execution_ms(run, now) as u64)
-    });
-    if execution_ms >= deadline_seconds.saturating_mul(1000) {
+    if usage.execution_ms >= usage.limits.deadline_seconds.saturating_mul(1000) {
         bail!("recoveryBudgetExceeded: request has exhausted recovery execution time");
     }
-    Ok(used_runs.saturating_add(1))
+    Ok(usage.runs.saturating_add(1))
+}
+
+struct BudgetObservation {
+    limits: RecoveryBudget,
+    runs: u32,
+    rounds: u64,
+    execution_ms: u64,
+}
+
+fn observe_budget(runtime: &super::RuntimeStore, target: &super::RunRecord, budget: &RecoveryBudget, now: i64) -> Result<BudgetObservation> {
+    budget.validate()?;
+    let extra = super::request::recovery_extra(runtime, super::request::group_id(target))?;
+    let limits = RecoveryBudget {
+        max_runs: budget.max_runs.saturating_add(extra.max_runs).min(MAX_RECOVERY_RUNS),
+        max_llm_rounds: budget.max_llm_rounds.saturating_add(extra.max_llm_rounds).min(MAX_RECOVERY_LLM_ROUNDS),
+        deadline_seconds: budget.deadline_seconds.saturating_add(extra.deadline_seconds).min(MAX_RECOVERY_DEADLINE_SECONDS),
+    };
+    let group = super::request_runs(runtime, super::request::group_id(target))?;
+    let recoveries = group.iter().filter(|run| !run.handles.is_empty()).collect::<Vec<_>>();
+    Ok(BudgetObservation {
+        limits,
+        runs: recoveries.len().min(u32::MAX as usize) as u32,
+        rounds: recoveries.iter().flat_map(|run| super::request::activities(run))
+            .fold(0u64, |sum, activity| sum.saturating_add(activity.llm_rounds)),
+        execution_ms: recoveries.iter().fold(0u64, |sum, run| {
+            sum.saturating_add(super::request::execution_ms(run, now) as u64)
+        }),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,20 +531,9 @@ pub(crate) struct Handle {
 
 pub(super) fn budget_exhausted(runtime: &super::RuntimeStore, run: &super::RunRecord, now: i64) -> Result<bool> {
     let budget = run.definition.budget.clone().unwrap_or_default();
-    budget.validate()?;
-    let extra = super::request::recovery_extra(runtime, super::request::group_id(run))?;
-    let max_llm_rounds = budget.max_llm_rounds.saturating_add(extra.max_llm_rounds).min(1000);
-    let deadline_seconds = budget.deadline_seconds.saturating_add(extra.deadline_seconds).min(86400);
-    let group = super::request_runs(runtime, super::request::group_id(run))?;
-    let mut rounds = 0u64;
-    let mut execution_ms = 0u64;
-    for recovery in group.iter().filter(|other| !other.handles.is_empty()) {
-        rounds = rounds.saturating_add(super::request::activities(recovery)
-            .fold(0u64, |sum, activity| sum.saturating_add(activity.llm_rounds)));
-        execution_ms = execution_ms.saturating_add(super::request::execution_ms(recovery, now) as u64);
-    }
-    Ok(rounds >= max_llm_rounds
-        || execution_ms >= deadline_seconds.saturating_mul(1000))
+    let usage = observe_budget(runtime, run, &budget, now)?;
+    Ok(usage.rounds >= usage.limits.max_llm_rounds
+        || usage.execution_ms >= usage.limits.deadline_seconds.saturating_mul(1000))
 }
 
 pub(super) const DEFAULT_PM_ANSWER_SECONDS: u64 = 1800;
@@ -542,13 +555,13 @@ impl Default for RecoveryBudget {
 
 impl RecoveryBudget {
     pub(super) fn validate(&self) -> Result<()> {
-        if !(1..=10).contains(&self.max_runs) {
+        if !(1..=MAX_RECOVERY_RUNS).contains(&self.max_runs) {
             bail!("recovery budget.maxRuns 必须在 1..=10 之间");
         }
-        if !(1..=1000).contains(&self.max_llm_rounds) {
+        if !(1..=MAX_RECOVERY_LLM_ROUNDS).contains(&self.max_llm_rounds) {
             bail!("recovery budget.maxLlmRounds 必须在 1..=1000 之间");
         }
-        if !(1..=86400).contains(&self.deadline_seconds) {
+        if !(1..=MAX_RECOVERY_DEADLINE_SECONDS).contains(&self.deadline_seconds) {
             bail!("recovery budget.deadlineSeconds 必须在 1..=86400 之间");
         }
         Ok(())
