@@ -358,6 +358,7 @@ async fn concurrent_user_journey_matches_profile() -> Result<()> {
                     agent_id: "genet".to_string(),
                     model_id: Some(model_id),
                     effort_id: None,
+                    fast: None,
                     mode_id: None,
                     runtime_values: None,
                     title: Some(spec.label.clone()),

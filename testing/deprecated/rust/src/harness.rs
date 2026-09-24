@@ -321,6 +321,7 @@ impl Journey {
                 agent_id: agent_id.to_string(),
                 model_id: Some(model_id.to_string()),
                 effort_id: None,
+                fast: None,
                 mode_id: None,
                 runtime_values: None,
                 title: None,
