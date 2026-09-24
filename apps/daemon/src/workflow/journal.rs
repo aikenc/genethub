@@ -1,5 +1,6 @@
 //! Bounded, append-only references for committed Workflow Run revisions.
 use super::*;
+use std::collections::BTreeSet;
 use std::io::{Seek, SeekFrom};
 
 const MAX_LINE_BYTES: usize = 4 * 1024;
@@ -18,6 +19,10 @@ pub(super) struct JournalEvent {
     pub run_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 fn path(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
@@ -36,7 +41,7 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
         return Ok((0, 0));
     };
     let snapshot = path.with_file_name("run.json");
-    let (committed_seq, committed_bytes, committed_revision) =
+    let (committed_seq, committed_bytes, committed_revision, previous_messages) =
         match crate::config::sensitive_metadata(&snapshot) {
             Ok(metadata) => {
                 crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
@@ -45,9 +50,10 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
                 }
                 ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
                 let previous = decode_run_record(&fs::read(&snapshot)?)?;
-                (previous.journal_seq, previous.journal_bytes, previous.revision)
+                (previous.journal_seq, previous.journal_bytes, previous.revision,
+                    previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>())
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0, BTreeSet::new()),
             Err(error) => return Err(error.into()),
         };
     if run.revision < committed_revision {
@@ -77,11 +83,26 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
     }
     file.set_len(committed_bytes)?;
     file.seek(SeekFrom::Start(committed_bytes))?;
-    let seq = committed_seq
-        .checked_add(1)
-        .ok_or_else(|| anyhow!("Workflow journal seq 已耗尽"))?;
-    let event = JournalEvent {
-        seq,
+    let mut events = Vec::new();
+    for message in &run.flow_messages {
+        if previous_messages.contains(&message.message_id) {
+            continue;
+        }
+        events.push(JournalEvent {
+            seq: 0,
+            revision: run.revision,
+            at_ms: message.created_at_ms,
+            event_type: message.kind.clone(),
+            actor: "event".into(),
+            rule: "flow-message".into(),
+            run_id: run.id.clone(),
+            session_id: Some(message.sender_session_id.clone()),
+            node_id: message.node_id.clone(),
+            message_id: Some(message.message_id.clone()),
+        });
+    }
+    events.push(JournalEvent {
+        seq: 0,
         revision: run.revision,
         at_ms: now_ms(),
         event_type: format!("run.{}", run.status),
@@ -89,19 +110,28 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
         rule: "save-run".into(),
         run_id: run.id.clone(),
         session_id: run.executor_session_id.clone(),
-    };
-    let mut line = serde_json::to_vec(&event)?;
-    line.push(b'\n');
-    if line.len() > MAX_LINE_BYTES {
-        bail!("Workflow journal 单行超过 4 KiB");
+        node_id: None,
+        message_id: None,
+    });
+    let mut lines = Vec::new();
+    let mut next_bytes = committed_bytes;
+    let mut seq = committed_seq;
+    for mut event in events {
+        seq = seq.checked_add(1).ok_or_else(|| anyhow!("Workflow journal seq 已耗尽"))?;
+        event.seq = seq;
+        let mut line = serde_json::to_vec(&event)?;
+        line.push(b'\n');
+        if line.len() > MAX_LINE_BYTES {
+            bail!("Workflow journal 单行超过 4 KiB");
+        }
+        next_bytes = next_bytes.checked_add(line.len() as u64)
+            .ok_or_else(|| anyhow!("Workflow journal 大小溢出"))?;
+        if next_bytes > MAX_JOURNAL_BYTES - FINAL_EVENT_RESERVE {
+            bail!("journalFull: Workflow journal 已达到 16 MiB 上限");
+        }
+        lines.extend_from_slice(&line);
     }
-    let next_bytes = committed_bytes
-        .checked_add(line.len() as u64)
-        .ok_or_else(|| anyhow!("Workflow journal 大小溢出"))?;
-    if next_bytes > MAX_JOURNAL_BYTES - FINAL_EVENT_RESERVE {
-        bail!("journalFull: Workflow journal 已达到 16 MiB 上限");
-    }
-    file.write_all(&line)?;
+    file.write_all(&lines)?;
     file.sync_data()?;
     Ok((seq, next_bytes))
 }
@@ -173,12 +203,22 @@ mod tests {
         OpenOptions::new().append(true).open(&journal).unwrap().write_all(b"orphan\n").unwrap();
         run.revision = 2;
         run.status = "completed".into();
+        run.flow_messages.push(serde_json::from_value(serde_json::json!({
+            "schema": "test", "messageId": "fm_first", "kind": "node.completed",
+            "projectWorkspaceId": "w_project", "executorSessionId": "s_executor",
+            "runId": "wr_root", "nodeId": "review", "senderSessionId": "s_worker",
+            "recipientSessionId": "s_executor", "payload": {"private": "body"},
+            "createdAtMs": 2
+        })).unwrap());
         save_run(&runtime, &run).unwrap();
         let second = load_run(&runtime, &run.id).unwrap();
-        assert_eq!(second.journal_seq, 2);
+        assert_eq!(second.journal_seq, 3);
         assert_eq!(fs::metadata(&journal).unwrap().len(), second.journal_bytes);
         let events = read(&runtime, &second, 0, 10).unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].event_type, "run.completed");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].event_type, "node.completed");
+        assert_eq!(events[1].node_id.as_deref(), Some("review"));
+        assert!(!serde_json::to_string(&events).unwrap().contains("body"));
+        assert_eq!(events[2].event_type, "run.completed");
     }
 }
