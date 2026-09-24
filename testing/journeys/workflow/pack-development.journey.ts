@@ -127,8 +127,9 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("missing history");
-      t.assertions.assert(reply.data.length <= 1, "PM split the business flow into multiple Runs");
-      run = reply.data[0]; return !!run && ["completed", "blocked", "failed", "cancelled"].includes(run.status);
+      const businessRuns = reply.data.filter(item => item.handles.length === 0);
+      t.assertions.assert(businessRuns.length <= 1, "PM split the business flow into multiple Runs");
+      run = businessRuns[0]; return !!run && ["completed", "blocked", "failed", "cancelled"].includes(run.status);
     }, 180_000).catch(async error => { throw new Error(`${scenario}: ${error}; events=${JSON.stringify(events)}; run=${JSON.stringify(run)}; pm=${JSON.stringify((await snapshot()).items).slice(-6000)}`); });
     t.assertions.assert(run!.workflowId === "game-dev" && !!run!.executorSessionId, "installed development bypassed the Executor");
     t.assertions.assert(run!.status === (scenario === "exhausted" ? "blocked" : "completed"), `unexpected terminal facts: ${JSON.stringify(run)}`);
