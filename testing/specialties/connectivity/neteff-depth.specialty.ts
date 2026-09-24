@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -44,6 +44,9 @@ interface ProductSample {
   elapsedMs: number;
   mibPerSec: number;
   productMs: number | null;
+  firstByteMs: number | null;
+  transferMs: number;
+  chunkCount: number;
 }
 
 interface UtilizationSample {
@@ -173,6 +176,9 @@ async function measurePreview(
     elapsedMs,
     mibPerSec: body.bytes.byteLength / MIB / (elapsedMs / 1000),
     productMs,
+    firstByteMs: body.transfer.firstByteMs,
+    transferMs: body.transfer.transferMs,
+    chunkCount: body.transfer.chunkCount,
   };
 }
 
@@ -277,6 +283,18 @@ function headline(label: string, samples: UtilizationSample[], target: number): 
 function percentile(samples: number[], fraction: number): number {
   const ordered = [...samples].sort((a, b) => a - b);
   return ordered[Math.ceil(ordered.length * fraction) - 1]!;
+}
+
+function linuxCpuTicks(pid: number): number | null {
+  if (process.platform !== "linux" || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const ticks = Number(fields[11]) + Number(fields[12]);
+    return Number.isSafeInteger(ticks) ? ticks : null;
+  } catch {
+    return null;
+  }
 }
 
 async function measureRepeatedRpc(
@@ -406,16 +424,28 @@ defineSpecialty(
         const client = await connectLinkedDaemon(opened, { urlFor: (url) => url }, "unshaped-loopback", probe);
         try {
           const idle = await measureRepeatedRpc(t, client, 30, 0);
+          const daemonTicksBefore = linuxCpuTicks(endpoint.localServerProof.pid);
+          const clientCpuBefore = process.cpuUsage();
+          const loopBefore = performance.eventLoopUtilization();
           const preview = measurePreview(t, { client, opened, file, probe });
           const busy = await measureRepeatedRpc(t, client, 30, 0);
           const product = await preview;
+          const loop = performance.eventLoopUtilization(loopBefore);
+          const clientCpu = process.cpuUsage(clientCpuBefore);
+          const daemonTicksAfter = linuxCpuTicks(endpoint.localServerProof.pid);
           lines.push(
             `unshaped loopback size=32MiB tcpMs=${tcp.elapsedMs.toFixed(0)}` +
             ` tcpMiBps=${tcp.mibPerSec.toFixed(2)} genehubMs=${product.elapsedMs.toFixed(0)}` +
             ` genehubMiBps=${product.mibPerSec.toFixed(2)}` +
+            ` firstByteMs=${product.firstByteMs?.toFixed(0) ?? "unknown"}` +
+            ` transferMs=${product.transferMs.toFixed(0)}` +
+            ` chunks=${product.chunkCount}` +
             ` negotiatedWindow=${probe.latestBulkWindow() ?? "unknown"}` +
             ` idleP95=${percentile(idle, 0.95).toFixed(0)}ms` +
-            ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms`,
+            ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms` +
+            ` daemonCpuTicks=${daemonTicksBefore === null || daemonTicksAfter === null ? "unknown" : daemonTicksAfter - daemonTicksBefore}` +
+            ` clientCpuMs=${((clientCpu.user + clientCpu.system) / 1000).toFixed(0)}` +
+            ` clientLoopBusy=${(loop.utilization * 100).toFixed(0)}%`,
           );
         } finally {
           client.close();
