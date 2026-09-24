@@ -47,7 +47,7 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
         return Ok(AppendOutcome { seq: 0, bytes: 0, full: false });
     };
     let snapshot = path.with_file_name("run.json");
-    let (committed_seq, committed_bytes, committed_revision, previous_messages, previously_full) =
+    let (committed_seq, committed_bytes, committed_revision, previous_status, previous_messages, previously_full) =
         match crate::config::sensitive_metadata(&snapshot) {
             Ok(metadata) => {
                 crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
@@ -56,10 +56,10 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
                 }
                 ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
                 let previous = decode_run_record(&fs::read(&snapshot)?)?;
-                (previous.journal_seq, previous.journal_bytes, previous.revision,
+                (previous.journal_seq, previous.journal_bytes, previous.revision, Some(previous.status),
                     previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>(), previous.journal_full)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0, BTreeSet::new(), false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0, None, BTreeSet::new(), false),
             Err(error) => return Err(error.into()),
         };
     if run.revision < committed_revision {
@@ -67,6 +67,12 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
     }
     if previously_full {
         return Ok(AppendOutcome { seq: committed_seq, bytes: committed_bytes, full: true });
+    }
+    if run.revision == committed_revision
+        && previous_status.as_deref() == Some(run.status.as_str())
+        && run.flow_messages.iter().all(|message| previous_messages.contains(&message.message_id))
+    {
+        return Ok(AppendOutcome { seq: committed_seq, bytes: committed_bytes, full: false });
     }
     match crate::config::sensitive_metadata(&path) {
         Ok(metadata) => {
@@ -115,7 +121,7 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
         revision: run.revision,
         at_ms: now_ms(),
         event_type: format!("run.{}", run.status),
-        actor: "event".into(),
+        actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
         rule: "save-run".into(),
         run_id: run.id.clone(),
         session_id: run.executor_session_id.clone(),
@@ -150,7 +156,7 @@ pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum
             revision: run.revision,
             at_ms: now_ms(),
             event_type: "journalFull".into(),
-            actor: "event".into(),
+            actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
             rule: "capacity".into(),
             run_id: run.id.clone(),
             session_id: run.executor_session_id.clone(),
@@ -232,10 +238,13 @@ mod tests {
         save_run(&runtime, &run).unwrap();
         let first = load_run(&runtime, &run.id).unwrap();
         assert_eq!(first.journal_seq, 1);
+        save_run(&runtime, &run).unwrap();
+        assert_eq!(load_run(&runtime, &run.id).unwrap().journal_seq, 1);
         let journal = path(&runtime, &first).unwrap().unwrap();
         OpenOptions::new().append(true).open(&journal).unwrap().write_all(b"orphan\n").unwrap();
         run.revision = 2;
         run.status = "completed".into();
+        run.journal_actor = "patrol".into();
         run.flow_messages.push(serde_json::from_value(serde_json::json!({
             "schema": "test", "messageId": "fm_first", "kind": "node.completed",
             "projectWorkspaceId": "w_project", "executorSessionId": "s_executor",
@@ -253,6 +262,7 @@ mod tests {
         assert_eq!(events[1].node_id.as_deref(), Some("review"));
         assert!(!serde_json::to_string(&events).unwrap().contains("body"));
         assert_eq!(events[2].event_type, "run.completed");
+        assert_eq!(events[2].actor, "patrol");
     }
 
     #[test]

@@ -754,27 +754,32 @@ pub(crate) async fn maintain(state: &Shared) {
             let owner = state.clone();
             state.workflow_tasks.spawn(async move {
                 let _job = job;
-                let execution = async {
-                    finish_nodes(&owner, &runtime, &run.id).await?;
-                    structured::drive(&owner, &runtime, &run.id).await?;
-                    reconcile(&owner, &runtime, &run.id).await
-                }.await;
-                if let Err(error) = execution {
-                    tracing::warn!(run = %run.id, %error, "workflow execution reconciliation remains pending");
-                }
-                // A failed business or cleanup step must not suppress its
-                // independent read-only diagnosis and durable PM handoff.
-                if let Err(error) = supervision::advance_triage(&runtime, &run.id) {
-                    tracing::warn!(run = %run.id, %error, "workflow triage remains pending");
-                }
-                if let Err(error) = supervision::diagnostics(&owner, &runtime, &run.id).await {
-                    tracing::warn!(run = %run.id, %error, "workflow diagnosis remains pending");
-                }
-                if let Err(error) = supervision::advance_triage(&runtime, &run.id) {
-                    tracing::warn!(run = %run.id, %error, "workflow triage result remains pending");
-                }
-                if let Err(error) = supervision::deliver_notice(&owner, &runtime, &run.id).await {
-                    tracing::warn!(run = %run.id, %error, "workflow PM handoff remains pending");
+                let patrol = async {
+                    let execution = async {
+                        finish_nodes(&owner, &runtime, &run.id).await?;
+                        structured::drive(&owner, &runtime, &run.id).await?;
+                        reconcile(&owner, &runtime, &run.id).await
+                    }.await;
+                    if let Err(error) = execution {
+                        tracing::warn!(run = %run.id, %error, "workflow execution reconciliation remains pending");
+                    }
+                    // A failed business or cleanup step must not suppress its
+                    // independent read-only diagnosis and durable PM handoff.
+                    if let Err(error) = supervision::advance_triage(&runtime, &run.id) {
+                        tracing::warn!(run = %run.id, %error, "workflow triage remains pending");
+                    }
+                    if let Err(error) = supervision::diagnostics(&owner, &runtime, &run.id).await {
+                        tracing::warn!(run = %run.id, %error, "workflow diagnosis remains pending");
+                    }
+                    if let Err(error) = supervision::advance_triage(&runtime, &run.id) {
+                        tracing::warn!(run = %run.id, %error, "workflow triage result remains pending");
+                    }
+                    if let Err(error) = supervision::deliver_notice(&owner, &runtime, &run.id).await {
+                        tracing::warn!(run = %run.id, %error, "workflow PM handoff remains pending");
+                    }
+                };
+                if tokio::time::timeout(Duration::from_secs(300), patrol).await.is_err() {
+                    tracing::error!(run = %run.id, "workflow patrol job timed out; next tick will retry");
                 }
             });
         }
@@ -1191,6 +1196,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
         if previous_status != run.status {
             run.revision += 1;
             run.updated_at_ms = now_ms();
+            run.journal_actor = "patrol".into();
         }
         save_run(runtime, &run)?;
         run

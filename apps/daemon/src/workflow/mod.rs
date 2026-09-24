@@ -869,6 +869,8 @@ struct RunRecord {
     journal_bytes: u64,
     #[serde(default)]
     journal_full: bool,
+    #[serde(skip)]
+    journal_actor: String,
     #[serde(default)]
     executor_turns: u32,
     definition: WorkflowDefinition,
@@ -1860,6 +1862,7 @@ pub(crate) async fn dispatch(
         journal_seq: 0,
         journal_bytes: 0,
         journal_full: false,
+        journal_actor: String::new(),
         executor_turns: 0,
         definition: bundle.definition,
         roles: bundle.roles,
@@ -6273,6 +6276,7 @@ mod tests {
             journal_seq: 0,
             journal_bytes: 0,
             journal_full: false,
+            journal_actor: String::new(),
             executor_turns: 0,
             definition,
             roles: BTreeMap::new(),
@@ -6338,6 +6342,7 @@ mod tests {
             journal_seq: 0,
             journal_bytes: 0,
             journal_full: false,
+            journal_actor: String::new(),
             executor_turns: 0,
             definition: WorkflowDefinition {
                 structure: None,
