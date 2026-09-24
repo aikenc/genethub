@@ -43,7 +43,7 @@ defineSpecialty({
       schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
       budget: { maxRuns: 1, maxLlmRounds: 200, deadlineSeconds: 1 },
       outcomes: { resume: { success: true }, human: { success: false } },
-      nodes: [{ id: "review", uses: "agent.session", with: { role: "recovery-worker" }, on: { resume: ["publish"] } },
+      nodes: [{ id: "review", uses: "agent.session", with: { role: "recovery-worker" }, on: { resume: ["publish"], human: [] } },
         { id: "publish", uses: "result.publish" }],
     }));
     const activation = await runGenetAsync(opened.daemon.genet, ["workflow", "activate", "--revision", "0"],

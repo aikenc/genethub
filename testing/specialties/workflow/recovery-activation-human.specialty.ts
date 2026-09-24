@@ -38,7 +38,7 @@ defineSpecialty({
     writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({
       schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
       outcomes: { resume: { success: true }, human: { success: false } },
-      nodes: [{ id: "review", uses: "agent.session", with: { role: "worker" }, on: { resume: ["publish"] } },
+      nodes: [{ id: "review", uses: "agent.session", with: { role: "worker" }, on: { resume: ["publish"], human: [] } },
         { id: "publish", uses: "result.publish" }],
     }));
     let attempts = 0, firstSent = false, retrySent = false, dispatched = false;

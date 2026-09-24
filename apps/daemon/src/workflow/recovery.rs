@@ -53,26 +53,20 @@ fn exit_options(kind: &str) -> &'static [(&'static str, &'static str)] {
 
 pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str> {
     if run.status != "blocked" { return None; }
-    let reason = run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or("");
+    let cause = run.stop.as_ref().map(|stop| stop.cause_code.as_str()).unwrap_or("");
     if run.handles.is_empty() {
-        if reason.contains("预算") || reason.contains("Budget")
-            || reason.contains("RouteUnavailable") || reason.contains("routeUnavailable")
-            || reason.contains("workflowTagRouteExhausted") {
+        if matches!(cause, "requestBudget" | "routeUnavailable") {
             let answer_ms = DEFAULT_PM_ANSWER_SECONDS.saturating_mul(1000).min(i64::MAX as u64) as i64;
             return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
         }
         return None;
     }
-    if run.nodes.iter().any(|(id, node)| id.contains("accept")
-        && node.outcome.as_ref().is_some_and(|outcome| outcome.name() == "human")) { return Some("f"); }
-    if run.nodes.values().any(|node| node.outcome.as_ref().is_some_and(|outcome| outcome.name() == "human")) {
-        return Some("b");
-    }
-    if reason.contains("recoveryBudgetExceeded") { return Some("c"); }
+    if cause == "humanAcceptance" { return Some("f"); }
+    if cause == "humanScope" { return Some("b"); }
+    if cause == "recoveryBudget" { return Some("c"); }
     // A reviewer can recommend cancellation, but only PM may execute it.
     // Keep the request visible while PM acts; a missed PM deadline is d.
-    if reason == "recovery flow ended without a controlled exit"
-        || run.nodes.values().any(|node| node.outcome.as_ref().is_some_and(|outcome| outcome.name() == "cancel")) {
+    if matches!(cause, "recoveryNoExit" | "pmCancel") {
         let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
             .saturating_mul(1000).min(i64::MAX as u64) as i64;
         return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
@@ -369,18 +363,21 @@ mod tests {
             "taskPrompt": "deliver", "status": "blocked", "revision": 1,
             "definition": {"schema": "genehub.workflow.definition.v1", "id": "direct", "version": 1, "nodes": []},
             "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 2,
-            "stop": {"target": "blocked", "reason": "requestBudgetExceeded"}
+            "stop": {"target": "blocked", "reason": "budget display may change", "causeCode": "requestBudget"}
         })).unwrap();
         run.updated_at_ms = super::super::now_ms();
         assert_eq!(classify_human_exit(&run), None); // PM has the first 30 minutes.
         run.updated_at_ms -= (DEFAULT_PM_ANSWER_SECONDS as i64 * 1000) + 1;
         assert_eq!(classify_human_exit(&run), Some("d"));
-        run.stop.as_mut().unwrap().reason = "RouteUnavailable".into();
+        run.stop.as_mut().unwrap().reason = "new route message".into();
+        run.stop.as_mut().unwrap().cause_code = "routeUnavailable".into();
         assert_eq!(classify_human_exit(&run), Some("d"));
         run.handles.push(Handle { run_id: "wr_business".into(), trigger_seq: 1, reason: "failed".into() });
-        run.stop.as_mut().unwrap().reason = "recoveryBudgetExceeded".into();
+        run.stop.as_mut().unwrap().reason = "new recovery message".into();
+        run.stop.as_mut().unwrap().cause_code = "recoveryBudget".into();
         assert_eq!(classify_human_exit(&run), Some("c"));
         run.stop.as_mut().unwrap().reason = "execution failed".into();
+        run.stop.as_mut().unwrap().cause_code = "executionException".into();
         assert_eq!(classify_human_exit(&run), Some("d"));
     }
 }
@@ -392,7 +389,7 @@ pub(super) fn builtin_bundle() -> Result<super::Bundle> {
     validate_contract(&definition)?;
     let mut roles = std::collections::BTreeMap::new();
     for (id, prompt, evidence_only) in [
-        ("recovery-reviewer", "只读复查被处理的 Run。先用 workflow journal 读取事件，再核对 Session 历史和最近的恢复总结。完成报告后，必须向控制者 PM 提出带 repair、resume、successor、human、cancel 五个选项的暂停点并等待答复；按答复用同名 outcome 提交。repair 需写明修复标准；resume/successor 需给出 PM 在恢复流程结束后执行受控业务动作的具体建议；human/cancel 必须带具体原因，不得自行宣告请求完成。", true),
+        ("recovery-reviewer", "只读复查被处理的 Run。先用 workflow journal 读取事件，再核对 Session 历史和最近的恢复总结。完成报告后，必须向控制者 PM 提出带 repair、resume、successor、human、cancel 五个选项的暂停点并等待答复；按答复用同名 outcome 提交。repair 需写明修复标准；被处理 Run 仍为 recoverable 时可用 workflow recover 原 Session 续办，已 blocked 时 resume 应由 PM 用 workflow dispatch --retry-of <被处理 Run ID> 以当前定义建立同目标后继；successor 可在激活新定义后使用同一后继命令。human/cancel 必须带具体原因，不得自行宣告请求完成。", true),
         ("recovery-manager", "依据 PM 对复查建议的决定修复 Workflow。记录修复前后 Candidate digest，执行相关验证；缺少授权时提出暂停点，不能自行激活恢复流程变更。", false),
         ("recovery-acceptor", "只读验收 WM 的修复。读取执行日志、变更和测试证据；通过时给 PM 明确的 successor 建议并提交 verdict；不通过时用 changesRequested 和原因提出返工。", true),
     ] {
@@ -434,6 +431,28 @@ pub(super) fn validate_contract(definition: &super::WorkflowDefinition) -> Resul
     if !definition.nodes.iter().any(|node| node.uses == "agent.session") {
         bail!("recovery flow must have an agent.session able to hand off to a Human");
     }
+    let mut role_outcomes = std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+    let mut human_exit = false;
+    for node in &definition.nodes {
+        if node.uses != "agent.session" { continue; }
+        if node.on.is_empty() {
+            bail!("recovery node {} must declare successors or explicit terminal outcomes", node.id);
+        }
+        human_exit |= node.on.contains_key("human");
+        for (outcome, targets) in &node.on {
+            if targets.is_empty() && super::outcome_success(definition, outcome) == Some(true) {
+                bail!("recovery node {} cannot silently terminate successful outcome {outcome}", node.id);
+            }
+        }
+        let role = node.inputs.role.as_deref().unwrap_or_default();
+        let outcomes = node.on.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        if let Some(previous) = role_outcomes.insert(role, outcomes.clone()) {
+            if previous != outcomes {
+                bail!("recovery role {role} has inconsistent outcomes; declare an empty successor list for an explicit terminal");
+            }
+        }
+    }
+    if !human_exit { bail!("recovery flow must expose an explicit human terminal"); }
     let mut queue = std::collections::VecDeque::from([(definition.entry.clone(), false)]);
     let mut seen = std::collections::BTreeSet::new();
     while let Some((id, controlled)) = queue.pop_front() {

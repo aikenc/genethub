@@ -3881,7 +3881,7 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
 
-        if request.kind == PermissionRequestKind::PlanApproval
+        if matches!(request.kind, PermissionRequestKind::PlanApproval | PermissionRequestKind::Question)
             || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
@@ -4141,6 +4141,30 @@ impl SessionManager {
             .filter(|decision| decision.request.id == request_id)
             .map(|decision| decision.outcome.clone());
         Ok(outcome)
+    }
+
+    /// The built-in recovery reviewer may only submit the choice recorded by
+    /// its controller through the durable Session question path.
+    pub(crate) async fn workflow_recovery_choice(&self, session_id: &str) -> Result<Option<String>> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        let Some(decision) = &meta.human_continuation else { return Ok(None); };
+        if decision.request.kind != PermissionRequestKind::Question { return Ok(None); }
+        let Some([question]) = decision.request.questions.as_deref() else { return Ok(None); };
+        let expected = ["repair", "resume", "successor", "human", "cancel"];
+        if question.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() != expected {
+            return Ok(None);
+        }
+        let selected = match &decision.outcome {
+            PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
+            PermissionOutcome::Answered { answers } => answers.iter()
+                .find(|answer| answer.question_id == question.id)
+                .and_then(|answer| answer.selected_option_ids.as_slice().first())
+                .map(String::as_str),
+            _ => None,
+        };
+        Ok(selected.and_then(|id| question.options.iter().find(|option| option.id == id || option.label == id))
+            .map(|option| option.label.clone()))
     }
 
     pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {

@@ -156,5 +156,18 @@ for (const scenario of ["milestones", "replan", "exhausted", "no-go", "budget-ga
     const pmSource = readFileSync(path.join(t.env.data, "builtin-skills/project-manager/SKILL.md"), "utf8");
     t.assertions.assert(pmSource === readFileSync(path.join(t.openRoot, "apps/daemon/builtin-skills/project-manager/SKILL.md"), "utf8"), "materialized PM methods differ from the shipped source");
     t.note(`one Executor Run; ${plans.length} plans, ${writes.length} real committed edits, ${reviews.length} commit-bound criterion checks; this proves scripted mechanics, not autonomous PM judgment`);
+    if (scenario === "exhausted") {
+      const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
+      if (reply?.type !== "workflowRuns") throw new Error("missing history during recovery cleanup");
+      const original = reply.data.find(item => item.id === run!.id)!;
+      await opened.client.call({ type: "workflow.cancel", payload: {
+        workspaceId: opened.workspaceId, runId: original.id, expectedRevision: original.revision,
+      } });
+      await t.tools.waitUntil(async () => {
+        const current = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
+        return current?.type === "workflowRuns" && current.data.every(item =>
+          ["completed", "cancelled"].includes(item.status));
+      }, 30_000);
+    }
   } finally { opened.client.close(); opened.daemon.stop(); await opened.mock.stop(); }
 });

@@ -147,11 +147,6 @@ pub(crate) async fn check(
                                 "error",
                                 "Worker 无执行归属，节点仍 running；需要状态对账".into(),
                             );
-                        } else if now_ms()
-                            - record.assigned_at_ms.max(run.created_at_ms)
-                            >= supervision::NODE_WALL_MS
-                        {
-                            finding(Some(node.id.clone()), "nodeWallDeadline", "error", "节点超过 180 秒墙钟期限；巡查会冻结并启动恢复".into());
                         }
                     }
                 }

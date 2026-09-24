@@ -164,11 +164,16 @@ export function locateWasm(openRoot: string): string {
 
 export function genetEnv(openRoot: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const wasm = tryLocateWasm(openRoot);
-  return {
+  const env = {
     ...process.env,
     ...extra,
     ...(wasm ? { GENET_APP_WASM: wasm } : {}),
   };
+  // A test lease is a fresh local user, even when testctl itself runs inside
+  // an Agent Session. Never send the outer controller identity to its daemon.
+  delete env.GENEHUB_SESSION_ID;
+  delete env.GENEHUB_CONTROLLER_TOKEN;
+  return env;
 }
 
 export function runGenet(

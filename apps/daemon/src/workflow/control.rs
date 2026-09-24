@@ -160,6 +160,8 @@ pub(super) struct StopRequest {
     pub target: String,
     pub reason: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cause_code: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub actor: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup_error: Option<String>,
@@ -251,7 +253,7 @@ pub(super) fn request_stop_with_cause(
     run: &mut RunRecord,
     target: &str,
     reason: String,
-    _cause_code: &str,
+    cause_code: &str,
 ) {
     run.status = if target == "cancelled" {
         "cancelling"
@@ -262,6 +264,7 @@ pub(super) fn request_stop_with_cause(
     run.stop = Some(StopRequest {
         target: target.into(),
         reason,
+        cause_code: cause_code.into(),
         actor: String::new(),
         cleanup_error: None,
     });
@@ -867,7 +870,7 @@ pub(super) fn maybe_resolve_recovery_successor(runtime: &RuntimeStore, run_id: &
     let _guard = lock_run(runtime, run_id)?;
     let mut run = load_run(runtime, run_id)?;
     if run.handles.is_empty() || run.status != "blocked"
-        || !run.stop.as_ref().is_some_and(|stop| stop.reason == "recovery flow ended without a controlled exit")
+        || !run.stop.as_ref().is_some_and(|stop| stop.cause_code == "recoveryNoExit")
     {
         return Ok(false);
     }
@@ -904,7 +907,7 @@ async fn maybe_resume_initial_route(state: &Shared, runtime: &RuntimeStore, run_
         let mut run = load_run(runtime, run_id)?;
         let entry = run.definition.entry.clone();
         if run.status != "blocked" || !run.handles.is_empty() || run.engine.is_some()
-            || !run.stop.as_ref().is_some_and(|stop| stop.reason.contains("RouteUnavailable"))
+            || !run.stop.as_ref().is_some_and(|stop| stop.cause_code == "routeUnavailable")
             || run.nodes.get(&entry).is_none_or(|node| node.status != "blocked" || node.session_id.is_some())
             || run.nodes.iter().any(|(id, node)| id != &entry && node.status != "unreached")
             || recovery::read_human_exit(runtime, &run)?.is_some()
@@ -1021,9 +1024,8 @@ async fn maybe_start_recovery(state: &Shared, runtime: &RuntimeStore, run_id: &s
         }
     }
     let reason = run.stop.as_ref().map(|stop| stop.reason.as_str()).unwrap_or("execution blocked");
-    if reason.contains("RouteUnavailable") || reason.contains("routeUnavailable")
-        || reason.contains("workflowTagRouteExhausted")
-        || reason.contains("requestBudgetExceeded") || request::budget_exhausted(runtime, &run, now_ms())?
+    if run.stop.as_ref().is_some_and(|stop| matches!(stop.cause_code.as_str(), "routeUnavailable" | "requestBudget"))
+        || request::budget_exhausted(runtime, &run, now_ms())?
     {
         return Ok(false);
     }
@@ -1057,10 +1059,15 @@ pub(super) async fn verify_request_takeover(state: &Shared, runtime: &RuntimeSto
     let mut sessions = BTreeSet::new();
     let mut preserved_runs = BTreeSet::new();
     let mut preserved_sessions = BTreeSet::new();
+    let mut invalid_snapshots = BTreeMap::new();
     for run in &group {
         if matches!(run.status.as_str(), "completed" | "cancelled") { continue; }
         sessions.extend(run.executor_session_id.iter().cloned());
         sessions.extend(run.nodes.values().filter_map(|node| node.session_id.clone()));
+        if let Err(error) = structured::validate_snapshot(run) {
+            invalid_snapshots.insert(run.id.clone(), format!("结构化执行快照无法恢复：{error:#}"));
+            continue;
+        }
         // An old Agent process that has stopped cannot write after the OS
         // lock changes hands. Keep its durable Session so the next patrol can
         // either retain a pending question or mark its Worker recoverable for
@@ -1068,6 +1075,19 @@ pub(super) async fn verify_request_takeover(state: &Shared, runtime: &RuntimeSto
         // Session, or partially missing assignment still gets fenced below.
         if run.status == "running" {
             let running_nodes = run.nodes.values().filter(|node| node.status == "running").collect::<Vec<_>>();
+            // A submitted result is durable before its Worker is retired.
+            // Fence the old process, then finish_nodes settles that saved
+            // outcome without replaying the operation.
+            if running_nodes.is_empty() && run.nodes.values().any(|node| node.status == "finishing") {
+                preserved_runs.insert(run.id.clone());
+                if let Some(executor) = &run.executor_session_id {
+                    if matches!(state.sessions.worker_continuation(executor).await,
+                            crate::session::manager::WorkerContinuation::Ready) {
+                        preserved_sessions.insert(executor.clone());
+                    }
+                }
+                continue;
+            }
             let active = running_nodes.iter().filter_map(|node| node.session_id.as_deref()).collect::<Vec<_>>();
             if !active.is_empty() && active.len() == running_nodes.len() {
                 let mut continuable = true;
@@ -1113,7 +1133,9 @@ pub(super) async fn verify_request_takeover(state: &Shared, runtime: &RuntimeSto
             let _guard = lock_run(runtime, &original.id)?;
             let mut run = load_run(runtime, &original.id)?;
             if !matches!(run.status.as_str(), "running" | "recoverable") { continue; }
-            request_stop(&mut run, "blocked", "请求锁接管：旧执行已冻结，等待核对副作用后恢复".into());
+            let reason = invalid_snapshots.get(&original.id).cloned().unwrap_or_else(||
+                "请求锁接管：旧执行已冻结，等待核对副作用后恢复".into());
+            request_stop(&mut run, "blocked", reason);
             run.journal_actor = "patrol".into();
             run.revision = run.revision.saturating_add(1);
             run.updated_at_ms = now_ms();
@@ -1375,7 +1397,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                                 .as_deref()
                                 .map(|detail| format!("；后续候选启动失败：{detail}"))
                                 .unwrap_or_default();
-                            request_stop(
+                            request_stop_with_cause(
                                 &mut run,
                                 "blocked",
                                 format!(
@@ -1383,6 +1405,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                                     previous_agent_id,
                                     previous_model_id.as_deref().unwrap_or("default")
                                 ),
+                                "routeUnavailable",
                             );
                             break None;
                         }
@@ -1522,6 +1545,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 run.stop = Some(StopRequest {
                     target: "recoverable".into(),
                     reason,
+                    cause_code: "workerLost".into(),
                     actor: "patrol".into(),
                     cleanup_error: None,
                 });

@@ -29,6 +29,13 @@ fn program(run: &RunRecord) -> Result<engine::Program> {
     )
     .map_err(Into::into)
 }
+
+pub(super) fn validate_snapshot(run: &RunRecord) -> Result<()> {
+    if let Some(snapshot) = &run.engine {
+        engine::inspect(&program(run)?, snapshot)?;
+    }
+    Ok(())
+}
 pub(super) fn initialize(run: &mut RunRecord) -> Result<()> {
     let program = program(run)?;
     let transition = engine::start(

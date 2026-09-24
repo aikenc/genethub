@@ -4,7 +4,9 @@ import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
 
 import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 
-for (const mode of ["normal", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+for (const mode of ["normal", "resume", "bypass", "corrupt", "proactive", "human-b", "human-f", "cancel", "queue"] as const) {
+const resume = mode === "resume";
+const bypass = mode === "bypass";
 const corrupt = mode === "corrupt";
 const proactive = mode === "proactive";
 const humanB = mode === "human-b";
@@ -12,8 +14,8 @@ const humanF = mode === "human-f";
 const cancelExit = mode === "cancel";
 const queue = mode === "queue";
 defineSpecialty({
-  id: `specialty.workflow.${corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
-  title: corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
+  id: `specialty.workflow.${resume ? "recovery-resume" : bypass ? "recovery-pm-gate" : corrupt ? "recovery-corrupt-fallback" : proactive ? "recovery-proactive" : humanB ? "recovery-human-b" : humanF ? "recovery-human-f" : cancelExit ? "recovery-cancel" : queue ? "recovery-package-queue" : "recovery-lifecycle"}`,
+  title: bypass ? "WR cannot choose a PM recovery decision without a durable answer" : resume ? "PM-selected resume continues a blocked goal through a same-definition successor" : corrupt ? "A damaged custom Candidate falls back to built-in recovery" : proactive ? "PM can proactively start recovery for unhealthy execution" : humanB ? "Recovery can hand a reduced-scope decision to a Human" : humanF ? "Human acceptance closes a business request" : cancelExit ? "A recovery cancellation recommendation waits for PM to cancel the request" : queue ? "Failed requests enter package recovery one at a time" : "A blocked request completes through the built-in recovery graph",
   oracle: corrupt
     ? "A damaged active Candidate cannot silence a blocked request: the patrol starts the built-in WR and commits a fallback journal event"
     : proactive
@@ -61,7 +63,7 @@ defineSpecialty({
         schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
         outcomes: { resume: { success: true }, human: { success: false } },
         nodes: [
-          { id: "review", uses: "agent.session", with: { role: "worker" }, on: { resume: ["publish"] } },
+          { id: "review", uses: "agent.session", with: { role: "worker" }, on: { resume: ["publish"], human: [] } },
           { id: "publish", uses: "result.publish" },
         ],
       }));
@@ -100,6 +102,7 @@ defineSpecialty({
           if (!handled) throw new Error("reviewer prompt omitted handled Run reference");
           return { tool: { name: "genet", arguments: { args: ["workflow", "journal", "--run", handled] } } };
         }
+        if (reviewerCalls === 2 && bypass) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", "repair", "--evidence", "report=claimed-without-PM"] } } };
         if (reviewerCalls === 2) return { tool: { name: "request_user_input", arguments: { questions: [{
           id: "decision", header: "恢复", question: "选择受控恢复动作", options: [
             { label: "repair", description: "修复流程" }, { label: "resume", description: "续办" },
@@ -107,7 +110,7 @@ defineSpecialty({
             { label: "cancel", description: "取消" },
           ],
         }] } } };
-        if (reviewerCalls === 3) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", humanB ? "human" : cancelExit ? "cancel" : "repair", ...((humanB || cancelExit) ? ["--reason", humanB ? "The scope needs a Human decision" : "PM should cancel the request"] : []), "--evidence", "report=repair-approved"] } } };
+        if (reviewerCalls === 3) return { tool: { name: "genet", arguments: { args: ["workflow", "complete", "--outcome", humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair", ...((humanB || cancelExit) ? ["--reason", humanB ? "The scope needs a Human decision" : "PM should cancel the request"] : []), "--evidence", "report=repair-approved"] } } };
         return { text: "PM decision was applied." };
       }
       if (body.includes("依据 PM 对复查建议的决定修复 Workflow")) {
@@ -125,7 +128,7 @@ defineSpecialty({
       if (!decisionSent && body.includes("APPROVE_RECOVERY_REPAIR")) {
         decisionSent = true;
         return { tool: { name: "bash", arguments: {
-          command: `"$GENEHUB_CLI" session respond ${reviewerId} --request ${questionId} --choose ${humanB ? "human" : cancelExit ? "cancel" : "repair"}`,
+          command: `"$GENEHUB_CLI" session respond ${reviewerId} --request ${questionId} --choose ${humanB ? "human" : cancelExit ? "cancel" : resume ? "resume" : "repair"}`,
         } } };
       }
       if (proactive && body.includes("START_PROACTIVE_RECOVERY")) {
@@ -214,6 +217,15 @@ defineSpecialty({
     }, 45_000);
     const reviewer = recovery!.nodes.find(node => node.id === "review")!.sessionId!;
     reviewerId = reviewer;
+    if (bypass) {
+      stage = "reject a reviewer decision with no PM answer";
+      await t.tools.waitUntil(async () => (await snapshot(reviewer)).summary.status === "closed", 25_000);
+      const current = (await history()).find(run => run.id === recovery!.id)!;
+      t.assertions.assert(current.nodes.find(node => node.id === "repair")?.status === "unreached"
+        && current.nodes.find(node => node.id === "review")?.status !== "completed",
+      "WR bypassed the durable PM choice and started repair");
+      return;
+    }
     if (queue) {
       stage = "queue second failed request under the same package";
       const damagedRequest = path.join(opened.workspaceRoot, ".genethub/components/pm/requests/wr_damaged_fixture");
@@ -330,9 +342,12 @@ defineSpecialty({
         `Human exit ${kind} skipped or added an unselected recovery stage`);
       return;
     }
-    t.assertions.assert(reviewerCalls >= 3 && managerCalls >= 1 && acceptorCalls >= 1, "recovery skipped a required role");
-    t.assertions.assert(recovery!.nodes.find(node => node.id === "repair")?.status === "completed", "WM repair was not retained");
-    t.assertions.assert(recovery!.nodes.find(node => node.id === "accept")?.status === "completed", "WR acceptance was not retained");
+    t.assertions.assert(reviewerCalls >= 3 && (resume ? managerCalls === 0 && acceptorCalls === 0 : managerCalls >= 1 && acceptorCalls >= 1),
+      "recovery ran roles outside the PM-selected branch");
+    if (!resume) {
+      t.assertions.assert(recovery!.nodes.find(node => node.id === "repair")?.status === "completed", "WM repair was not retained");
+      t.assertions.assert(recovery!.nodes.find(node => node.id === "accept")?.status === "completed", "WR acceptance was not retained");
+    }
     t.assertions.assert((await journal(recovery!.id)).filter(event =>
       event.eventType === "pause.answered" && event.messageId === questionId).length === 1,
     "PM answer was missing or repeated in the committed journal");
@@ -350,7 +365,10 @@ defineSpecialty({
     t.assertions.assert(new Set(executorSessions).size === executorSessions.length,
       "one Executor Session was reused for multiple Runs in the same project request");
     t.assertions.assert(successor.requestRunId === originalId, "successor changed the original request");
-    t.assertions.assert(successor.dcgDigest !== runs.find(run => run.id === originalId)!.dcgDigest, "WM activation did not change Candidate identity");
+    t.assertions.assert(resume
+      ? successor.dcgDigest === runs.find(run => run.id === originalId)!.dcgDigest
+      : successor.dcgDigest !== runs.find(run => run.id === originalId)!.dcgDigest,
+    "PM-selected recovery branch used the wrong Candidate identity");
     const archive = path.join(opened.workspaceRoot, ".genethub/components/executor/recoveries.jsonl");
     t.assertions.assert(existsSync(archive), "recovery summary was not written");
     const summaries = readFileSync(archive, "utf8").trim().split("\n").map(line => JSON.parse(line) as { runId: string; handledRunId: string; result: string });

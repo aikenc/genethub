@@ -21,6 +21,8 @@ nodes:
       repair: [repair]
       resume: [publish-resume]
       successor: [publish-successor]
+      human: []
+      cancel: []
   - id: repair
     uses: agent.session
     with: {role: recovery-manager}
@@ -29,6 +31,7 @@ nodes:
         - {key: changes, verify: value.nonEmpty}
     on:
       completed: [accept]
+      failed: []
   - id: accept
     uses: agent.session
     with: {role: recovery-acceptor}
@@ -38,6 +41,8 @@ nodes:
     on:
       completed: [publish-accept]
       changesRequested: [repair-again]
+      human: []
+      failed: []
   - id: repair-again
     uses: agent.session
     with: {role: recovery-manager}
@@ -46,6 +51,7 @@ nodes:
         - {key: changes, verify: value.nonEmpty}
     on:
       completed: [accept-again]
+      failed: []
   - id: accept-again
     uses: agent.session
     with: {role: recovery-acceptor}
@@ -54,6 +60,9 @@ nodes:
         - {key: verdict, verify: value.nonEmpty}
     on:
       completed: [publish-accept-again]
+      changesRequested: []
+      human: []
+      failed: []
   - id: publish-resume
     uses: result.publish
   - id: publish-successor

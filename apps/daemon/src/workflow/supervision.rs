@@ -84,13 +84,9 @@ pub(super) async fn observe(
                     }
                     continue;
                 }
-                let baseline = node.assigned_at_ms.max(run.created_at_ms);
-                if now - baseline >= NODE_WALL_MS {
-                    stalled.push(format!(
-                        "{id}: 节点运行超过 {} 秒墙钟期限",
-                        (now - baseline) / 1000
-                    ));
-                }
+                // A live Agent can legitimately spend several minutes in a
+                // tool call. Its request budget and any declared activity
+                // deadline still apply; wall time alone is not a failure.
             }
         } else if node.status == "running" {
             running += 1;

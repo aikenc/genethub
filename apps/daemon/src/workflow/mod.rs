@@ -2205,6 +2205,7 @@ pub(crate) async fn dispatch(
                 run.stop = Some(control::StopRequest {
                     target: "blocked".into(),
                     reason,
+                    cause_code: "routeUnavailable".into(),
                     actor: String::new(),
                     cleanup_error: None,
                 });
@@ -2514,6 +2515,16 @@ pub(crate) async fn complete(
         )
     })?;
     let event = outcome.name().to_string();
+    if !run.handles.is_empty() && !node.on.contains_key(&event) {
+        bail!("recovery node {node_id} has no declared successor or explicit terminal for {event}");
+    }
+    if !run.handles.is_empty() && run.workflow_id == "builtin-recovery" && node.id == "review"
+        && matches!(event.as_str(), "repair" | "resume" | "successor" | "human" | "cancel") {
+        let chosen = state.sessions.workflow_recovery_choice(caller_session_id).await?;
+        if chosen.as_deref() != Some(event.as_str()) {
+            bail!("recovery review outcome requires the matching durable PM question answer");
+        }
+    }
     if let Some(value) = &output {
         output::bounded(value)?;
         if let Some(shape) = &node.completion.output {
@@ -2546,10 +2557,18 @@ pub(crate) async fn complete(
     let targets = node.on.get(&event).cloned().unwrap_or_default();
     if run.engine.is_none() && !success && targets.is_empty() {
         run.nodes.get_mut(node_id).expect("node").status = "completed".into();
-        control::request_stop(
+        let cause = if !run.handles.is_empty() && event == "human" {
+            if node.inputs.role.as_deref() == Some("recovery-acceptor") { "humanAcceptance" } else { "humanScope" }
+        } else if !run.handles.is_empty() && event == "cancel" {
+            "pmCancel"
+        } else {
+            "executionException"
+        };
+        control::request_stop_with_cause(
             &mut run,
             "blocked",
             format!("{node_id}: {}", reason.as_deref().unwrap_or(event.as_str())),
+            cause,
         );
     }
     run.revision = run.revision.saturating_add(1);
@@ -3152,6 +3171,7 @@ fn settle_if_terminal(run: &mut RunRecord) {
             run.stop = Some(control::StopRequest {
                 target: "blocked".into(),
                 reason: "recovery flow ended without a controlled exit".into(),
+                cause_code: "recoveryNoExit".into(),
                 actor: String::new(),
                 cleanup_error: None,
             });
@@ -5270,7 +5290,7 @@ mod tests {
     fn seed_custom_recovery(package: &Path) -> PathBuf {
         let path = package.join("flows/recovery.yaml");
         write(&path,
-            "schema: genehub.workflow.definition.v1\nid: recovery\nversion: 1\nentry: review\noutcomes:\n  resume: {success: true}\n  human: {success: false}\n  cancel: {success: false}\nnodes:\n  - id: review\n    uses: agent.session\n    with: {role: worker}\n    on:\n      resume: [publish]\n  - id: publish\n    uses: result.publish\n");
+            "schema: genehub.workflow.definition.v1\nid: recovery\nversion: 1\nentry: review\noutcomes:\n  resume: {success: true}\n  human: {success: false}\n  cancel: {success: false}\nnodes:\n  - id: review\n    uses: agent.session\n    with: {role: worker}\n    on:\n      resume: [publish]\n      human: []\n  - id: publish\n    uses: result.publish\n");
         path
     }
 
@@ -5384,7 +5404,7 @@ mod tests {
         let source = fs::read_to_string(&path).unwrap();
         compile_package(root.path(), TEST_PACKAGE).unwrap();
 
-        write(&path, &source.replace("  human: {success: false}\n", ""));
+        write(&path, &source.replace("  human: {success: false}\n", "").replace("      human: []\n", ""));
         assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("declare human"));
 
         write(&path, &source.replace("  resume: {success: true}", "  resume: {success: false}")
@@ -5427,6 +5447,11 @@ mod tests {
         assert_eq!(bundle.definition.budget.as_ref().unwrap().max_runs, 3);
         assert!(bundle.roles.contains_key("recovery-reviewer"));
         assert!(bundle.roles.contains_key("recovery-manager"));
+        let mut missing_rework = bundle.definition.clone();
+        missing_rework.nodes.iter_mut().find(|node| node.id == "accept-again")
+            .unwrap().on.remove("changesRequested");
+        assert!(recovery::validate_contract(&missing_rework).unwrap_err().to_string()
+            .contains("inconsistent outcomes"));
     }
 
     /// The de-Git boundary, asserted on the source rather than trusted to a
@@ -6363,7 +6388,7 @@ mod tests {
         recovery.id = "wr_recovery".into();
         recovery.status = "blocked".into();
         recovery.stop = Some(control::StopRequest {
-            target: "blocked".into(), reason: "recovery flow ended without a controlled exit".into(), actor: String::new(), cleanup_error: None,
+            target: "blocked".into(), reason: "recovery flow ended without a controlled exit".into(), cause_code: "recoveryNoExit".into(), actor: String::new(), cleanup_error: None,
         });
         recovery.handles.push(recovery::Handle { run_id: root.id.clone(), trigger_seq: 1, reason: "failed".into() });
         recovery.request.as_mut().unwrap().retry_of = Some(root.id.clone());

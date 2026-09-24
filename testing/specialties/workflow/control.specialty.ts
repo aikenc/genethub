@@ -183,13 +183,15 @@ for (const structured of [false,true]) for (const scenario of ["negative", "orph
             "self-recovery opened a fresh request budget");
           await t.tools.waitUntil(async () => !(await snapshot()).summary.inputSummary?.pendingMessageIds.includes("u_self_cancel"), 30_000);
           if (scenario === "self-cancel-report") {
+            stage = "wait for blocked retry handoff";
             await t.tools.waitUntil(async () => (await get(resumed.id)).status === "blocked", 35_000);
             await t.tools.waitUntil(async () => (await snapshot()).items.some(item => item.type === "userMessage"
-              && item.id.startsWith("flow_") && item.text.includes(resumed.id) && item.text.includes("状态 blocked")), 35_000);
+              && item.id.startsWith("flow_") && item.text.includes(`原请求 ${original}`) && item.text.includes("状态 blocked")), 35_000);
             const reports = (await snapshot()).items.filter(item => item.type === "userMessage"
-              && item.id.startsWith("flow_") && item.text.includes(resumed.id) && item.text.includes("状态 blocked"));
-            t.assertions.assert(reports.length === 1, "blocked retry notice was dropped or duplicated before reaching PM");
-            t.note(`scenario=${scenario}; retry=${resumed.id}; PM received one blocked notice`);
+              && item.id.startsWith("flow_") && item.text.includes(`原请求 ${original}`) && item.text.includes("状态 blocked"));
+            t.assertions.assert(reports.length > 0 && new Set(reports.map(item => item.id)).size === reports.length,
+              "blocked retry or its recovery was dropped or delivered twice to PM");
+            t.note(`scenario=${scenario}; retry=${resumed.id}; PM received the blocked request handoff`);
             return;
           }
           await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: resumed.id, expectedRevision: (await get(resumed.id)).revision } });

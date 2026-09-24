@@ -23,7 +23,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
   id: `specialty.workflow.budget-parallel.${scenario}`,
   title: `Budget observations and deterministic parallel data: ${scenario}`,
   oracle: "Public Run output preserves budget observations across amendments/restart and request retries; independently overlapping Workers reduce by stable keys, while host failures clean up and only a wholly waiting Run pauses execution time",
-  catches: ["budget read mutates limits", "restart refreshes a committed observation", "retry resets shared usage", "a fourth Run bypasses the shared limit", "stale budget revision overwrites PM", "entries depends on completion order", "entries accepts wrong types or unbounded data", "parallel work is serialized", "one Human wait exempts working siblings", "failure leaves live siblings", "one unrecoverable sibling strands the Workers that can still continue"],
+  catches: ["budget read mutates limits", "restart refreshes a committed observation", "retry resets shared usage", "a fourth Run bypasses the shared limit", "stale budget revision overwrites PM", "entries depends on completion order", "entries accepts wrong types or unbounded data", "parallel work is serialized", "one Human wait exempts working siblings", "failure leaves live siblings", "one lost sibling silently continues a partially failed Run or replays a side effect"],
   tags: ["core", "workflow", "structured-workflow", "budget-parallel"],
   llm: { default: "mock" }, expectedDurationMs: 20_000, timeoutMs: 150_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
@@ -71,7 +71,6 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
     const waitFile = (file: string) => `for i in $(seq 1 400); do test -f ${q(file)} && break; sleep 0.05; done; test -f ${q(file)}`;
     let nextCommand: string | undefined = '"$GENEHUB_CLI" workflow activate --revision 0 && "$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-1 --no-wait --message "Process the bounded record batch within the existing request budget"';
     const seen = new Set<string>();
-    let continuationAllowed = false;
     opened.mock.script(...Array.from({ length: 90 }, () => ({ respond: (request: unknown) => {
       const text = JSON.stringify(request);
       if (scenario === "parallel-double-failure" && text.includes("只读复查被处理的 Run")) return { hang: true as const };
@@ -87,9 +86,7 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       // A continued Worker submits from its original Session without repeating
       // the side effect its own predecessor turn already recorded.
       if (seen.has(identity)) {
-        if (!continuationAllowed) return { text: "Result submitted." };
-        continuationAllowed = false;
-        return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow complete --output ${q(JSON.stringify({ passed: true }))}` } } };
+        return { text: "Result submitted." };
       }
       seen.add(identity);
       if (scenario === "parallel-human-wait" && data.key === "a") return { tool: { name: "request_user_input", arguments: { questions: [{ id: "scope", header: "Scope", question: "Confirm this acceptance scope", options: [{ label: "yes", description: "Approve" }, { label: "no", description: "Decline" }] }] } } };
@@ -115,7 +112,8 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       if (reply?.type !== "workflowRuns") throw new Error("missing history"); return reply.data;
     };
     let run: WorkflowRunStatus | undefined;
-    const current = async () => { run = (await history())[0]; return run; };
+    const current = async () => { const runs = await history(); run = scenario === "parallel-sibling-lost"
+      ? runs.find(item => item.taskId === "observed-1") : runs[0]; return run; };
     const restart = async () => { opened.client.close(); await cli(["daemon", "stop"]); await cli(["daemon", "start"]); opened.client = await connectProductClient(daemonEndpoint(opened.daemon)); };
     await send("Execute the configured Workflow and retain its facts.");
     let before: WorkflowRequestBudgetSnapshot | undefined;
@@ -142,9 +140,9 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       const [stranded, survivor] = run!.nodes.filter(n => n.uses === "agent.session");
       opened.client.close();
       await cli(["daemon", "stop"]);
-      // One Worker loses its durable Session while the daemon is down, so its
-      // node can never continue. The sibling that can continue must not
-      // inherit that verdict: `blocked` retires the whole program.
+      // One Worker loses its durable Session while the daemon is down. The
+      // affected structured Run must freeze both branches and enter one
+      // recovery attempt without replaying either disk side effect.
       const spaces = path.join(opened.workspaceRoot, "spaces");
       const homes = [opened.workspaceRoot, ...(existsSync(spaces) ? readdirSync(spaces).map(space => path.join(spaces, space)) : [])];
       const removed = homes.filter(home => {
@@ -155,19 +153,16 @@ for (const scenario of ["observation", "retry", "entries", "entries-empty", "ent
       t.assertions.assert(removed.length === 1, `Worker Session record was not where the product stores it: ${stranded!.sessionId}`);
       await cli(["daemon", "start"]);
       opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
-      await t.tools.waitUntil(async () => (await current())?.status === "recoverable", 45_000);
-      const offered = run!.nodes.find(n => n.id === survivor!.id)!;
-      t.assertions.assert(offered.status === "interrupted" && offered.sessionId === survivor!.sessionId,
-        `the continuable sibling was not offered for recovery: ${JSON.stringify(run!.nodes)}`);
-      continuationAllowed = true;
-      await cli(["workflow", "recover", "--run", run!.id, "--revision", String(run!.revision)]);
-      await t.tools.waitUntil(async () => (await current())!.nodes.find(n => n.id === survivor!.id)?.status === "completed", 45_000);
-      const continued = run!.nodes.find(n => n.id === survivor!.id)!;
-      t.assertions.assert(continued.sessionId === survivor!.sessionId && run!.nodes.filter(n => n.uses === "agent.session").length === 2,
-        "recovery opened a second Worker identity instead of continuing the original Session");
+      await t.tools.waitUntil(async () => (await current())?.status === "blocked", 45_000);
+      t.assertions.assert(run!.nodes.find(n => n.id === survivor!.id)?.sessionId === survivor!.sessionId
+        && run!.nodes.find(n => n.id === stranded!.id)?.sessionId === stranded!.sessionId
+        && !run!.nodes.some(n => n.status === "running"),
+      "the lost sibling did not freeze the original structured Run and preserve both identities");
+      await t.tools.waitUntil(async () => (await history()).filter(item =>
+        item.handles.some(handle => handle.runId === run!.id)).length === 1, 45_000);
       t.assertions.assert(["a", "z"].every(key => readFileSync(effect(key), "utf8").trim().split("\n").length === 1),
         "recovery replayed a Worker side effect");
-      await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: run!.id, expectedRevision: (await current())!.revision } });
+      await opened.client.call({ type: "workflow.cancel", payload: { workspaceId: opened.workspaceId, runId: run!.id, expectedRevision: run!.revision } });
     } else if (scenario === "parallel-human-wait") {
       await t.tools.waitUntil(async () => {
         await current(); const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
