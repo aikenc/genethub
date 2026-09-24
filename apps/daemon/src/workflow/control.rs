@@ -757,6 +757,12 @@ pub(crate) async fn maintain(state: &Shared) {
                     continue;
                 }
             }
+            if !request_writer_verified(&runtime, &run).unwrap_or(false) {
+                if let Err(error) = verify_request_takeover(state, &runtime, &run).await {
+                    tracing::warn!(run = %run.id, %error, "workflow request takeover remains pending");
+                    continue;
+                }
+            }
             let key = runtime.root.join(&run.id);
             let inserted = RECONCILING
                 .lock()
@@ -801,6 +807,52 @@ pub(crate) async fn maintain(state: &Shared) {
             });
         }
     }
+}
+
+/// A newly acquired request writer never inherits an old Worker implicitly.
+/// Fence every recorded Session before allowing writes, then persist a
+/// stop decision for each unfinished Run. The next patrol performs cleanup.
+async fn verify_request_takeover(state: &Shared, runtime: &RuntimeStore, seed: &RunRecord) -> Result<()> {
+    let group_id = request::group_id(seed).to_string();
+    // A corrupt locator may hide an executing sibling; takeover must fail
+    // closed instead of declaring the visible subset safe.
+    let group = all_runs(runtime)?.into_iter()
+        .filter(|run| request::group_id(run) == group_id)
+        .collect::<Vec<_>>();
+    if group.is_empty() { bail!("请求接管时未找到 Run"); }
+    let mut sessions = BTreeSet::new();
+    for run in &group {
+        if matches!(run.status.as_str(), "completed" | "cancelled") { continue; }
+        sessions.extend(run.executor_session_id.iter().cloned());
+        sessions.extend(run.nodes.values().filter_map(|node| node.session_id.clone()));
+        sessions.extend(run.supervision.diagnostics.iter().map(|item| item.session_id.clone()));
+    }
+    for session_id in sessions {
+        match state.sessions.fence_execution(&session_id).await {
+            Ok(()) => {}
+            Err(error) if error.is::<crate::session::manager::SessionMissing>() => {}
+            Err(error) => return Err(error).with_context(|| format!("请求接管无法冻结 Session {session_id}")),
+        }
+    }
+    set_request_writer_verified(runtime, seed, true)?;
+    let persist = (|| -> Result<()> {
+        for original in &group {
+            if !matches!(original.status.as_str(), "running" | "recoverable") { continue; }
+            let _guard = lock_run(runtime, &original.id)?;
+            let mut run = load_run(runtime, &original.id)?;
+            if !matches!(run.status.as_str(), "running" | "recoverable") { continue; }
+            request_stop(&mut run, "blocked", "请求锁接管：旧执行已冻结，等待核对副作用后恢复".into());
+            run.journal_actor = "patrol".into();
+            run.revision = run.revision.saturating_add(1);
+            run.updated_at_ms = now_ms();
+            save_run(runtime, &run)?;
+        }
+        Ok(())
+    })();
+    if persist.is_err() {
+        set_request_writer_verified(runtime, seed, false)?;
+    }
+    persist
 }
 
 /// Result acceptance and process retirement are separate durable steps. Never

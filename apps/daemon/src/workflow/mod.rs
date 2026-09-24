@@ -4588,6 +4588,7 @@ fn lock_run(runtime: &RuntimeStore, run_id: &str) -> Result<ExclusiveFileLock> {
 
 struct RequestWriter {
     owner_identity: PathBuf,
+    verified: bool,
     _lock: ExclusiveFileLock,
 }
 
@@ -4622,6 +4623,9 @@ fn claim_request_writer(runtime: &RuntimeStore, run: &RunRecord) -> Result<bool>
         path,
         RequestWriter {
             owner_identity: runtime.owner_identity.clone(),
+            // A new request has no prior execution to fence. An existing
+            // request must pass the async takeover check before any write.
+            verified: !run_path(runtime, request::group_id(run), false)?.exists(),
             _lock: guard,
         },
     );
@@ -4632,6 +4636,26 @@ fn require_request_writer(runtime: &RuntimeStore, run: &RunRecord) -> Result<()>
     if !claim_request_writer(runtime, run)? {
         bail!("Workflow 请求由另一个 daemon 执行；当前实例不能改写或巡查")
     }
+    if !request_writer_verified(runtime, run)? {
+        bail!("Workflow 请求接管仍需核对旧执行；等待巡检完成冻结")
+    }
+    Ok(())
+}
+
+fn request_writer_verified(runtime: &RuntimeStore, run: &RunRecord) -> Result<bool> {
+    if run.request.is_none() { return Ok(true); }
+    let path = request_writer_path(runtime, run)?;
+    let writers = REQUEST_WRITERS.lock().map_err(|_| anyhow!("Workflow 请求归属锁注册表已损坏"))?;
+    Ok(writers.get(&path).is_some_and(|writer|
+        writer.owner_identity == runtime.owner_identity && writer.verified))
+}
+
+fn set_request_writer_verified(runtime: &RuntimeStore, run: &RunRecord, verified: bool) -> Result<()> {
+    let path = request_writer_path(runtime, run)?;
+    let mut writers = REQUEST_WRITERS.lock().map_err(|_| anyhow!("Workflow 请求归属锁注册表已损坏"))?;
+    let writer = writers.get_mut(&path).ok_or_else(|| anyhow!("Workflow 请求锁未持有"))?;
+    if writer.owner_identity != runtime.owner_identity { bail!("Workflow 请求锁归属不符"); }
+    writer.verified = verified;
     Ok(())
 }
 
@@ -5749,9 +5773,15 @@ mod tests {
             "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
         })).unwrap();
         assert!(claim_request_writer(&first, &run).unwrap());
+        assert!(request_writer_verified(&first, &run).unwrap());
         assert!(!claim_request_writer(&second, &run).unwrap());
         release_request_writer(&first, &run).unwrap();
+        fs::write(run_path(&first, "wr_root", true).unwrap(), b"persisted").unwrap();
         assert!(claim_request_writer(&second, &run).unwrap());
+        assert!(!request_writer_verified(&second, &run).unwrap());
+        assert!(require_request_writer(&second, &run).is_err());
+        set_request_writer_verified(&second, &run, true).unwrap();
+        require_request_writer(&second, &run).unwrap();
         release_request_writer(&second, &run).unwrap();
     }
 
