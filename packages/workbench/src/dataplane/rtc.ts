@@ -359,9 +359,22 @@ export function watchPeer(
   peer.addEventListener("iceconnectionstatechange", () =>
     emit({ iceConnectionState: peer.iceConnectionState }),
   );
-  peer.addEventListener("connectionstatechange", () =>
-    emit({ connectionState: peer.connectionState }),
-  );
+  let summaries = 0;
+  peer.addEventListener("connectionstatechange", () => {
+    const state = peer.connectionState;
+    emit({ connectionState: state });
+    // One bounded summary per meaningful transition. Never retain the raw
+    // stats report: candidate reports also contain addresses and ports.
+    if ((state === "connected" || state === "failed" || state === "disconnected") &&
+      summaries < 6) {
+      summaries += 1;
+      void candidatePairSummary(peer).then((summary) => emit({
+        milestone: "candidatePair",
+        connectionState: state,
+        ...summary,
+      }));
+    }
+  });
   peer.addEventListener("signalingstatechange", () =>
     emit({ signalingState: peer.signalingState }),
   );
@@ -385,6 +398,55 @@ export function watchPeer(
       });
     }
   });
+}
+
+/** A fixed allowlist from getStats; no candidate IDs, addresses, ports or SDP. */
+async function candidatePairSummary(peer: RTCPeerConnection): Promise<RtcDiagnostic> {
+  try {
+    const report = await peer.getStats();
+    const pairs: RTCIceCandidatePairStats[] = [];
+    let selectedId: string | undefined;
+    report.forEach((entry) => {
+      if (entry.type === "transport" && "selectedCandidatePairId" in entry &&
+        typeof entry.selectedCandidatePairId === "string") selectedId = entry.selectedCandidatePairId;
+      if (entry.type === "candidate-pair") pairs.push(entry as RTCIceCandidatePairStats);
+    });
+    const selected = pairs.find((pair) => pair.id === selectedId) ??
+      pairs.find((pair) => pair.nominated && pair.state === "succeeded");
+    const local = selected && report.get(selected.localCandidateId);
+    const remote = selected && report.get(selected.remoteCandidateId);
+    const candidateType = (entry: RTCStats | undefined): string | null => {
+      if (!entry || !("candidateType" in entry)) return null;
+      const value = entry.candidateType;
+      return value === "host" || value === "srflx" || value === "prflx" || value === "relay"
+        ? value : null;
+    };
+    const protocol = (entry: RTCStats | undefined): string | null => {
+      if (!entry || !("protocol" in entry)) return null;
+      const value = entry.protocol;
+      return value === "udp" || value === "tcp" ? value : null;
+    };
+    const bounded = (value: unknown, scale = 1): number | null =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0
+        ? Math.min(1_000_000_000, Math.round(value * scale)) : null;
+    return {
+      statsAvailable: true,
+      pairWaiting: pairs.filter((pair) => pair.state === "waiting").length,
+      pairInProgress: pairs.filter((pair) => pair.state === "in-progress").length,
+      pairSucceeded: pairs.filter((pair) => pair.state === "succeeded").length,
+      pairFailed: pairs.filter((pair) => pair.state === "failed").length,
+      selectedPair: Boolean(selected),
+      selectedLocalType: candidateType(local),
+      selectedRemoteType: candidateType(remote),
+      selectedProtocol: protocol(local) ?? protocol(remote),
+      pairRttMs: bounded(selected?.currentRoundTripTime, 1000),
+      pairRequestsSent: bounded(selected?.requestsSent),
+      pairResponsesReceived: bounded(selected?.responsesReceived),
+      pairConsentRequestsSent: bounded(selected?.consentRequestsSent),
+    };
+  } catch {
+    return { statsAvailable: false };
+  }
 }
 
 function dataChannelOpened(  channel: RTCDataChannel,

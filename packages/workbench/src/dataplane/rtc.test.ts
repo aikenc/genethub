@@ -77,6 +77,36 @@ describe("watchPeer", () => {
       }
     }
   });
+
+  it("reports the selected ICE path and failed checks without leaking candidate addresses", async () => {
+    const peer = fakePeer();
+    const raw = new Map<string, Record<string, unknown>>([
+      ["transport-secret", { type: "transport", selectedCandidatePairId: "pair-secret" }],
+      ["pair-secret", { type: "candidate-pair", id: "pair-secret", state: "succeeded",
+        nominated: true, localCandidateId: "local-secret", remoteCandidateId: "remote-secret",
+        currentRoundTripTime: 0.012, requestsSent: 4, responsesReceived: 3,
+        consentRequestsSent: 1 }],
+      ["failed-secret", { type: "candidate-pair", id: "failed-secret", state: "failed" }],
+      ["local-secret", { type: "local-candidate", candidateType: "host", protocol: "udp",
+        address: "192.0.2.11", port: 54321 }],
+      ["remote-secret", { type: "remote-candidate", candidateType: "srflx", protocol: "udp",
+        address: "203.0.113.21", port: 3478 }],
+    ]);
+    const observed = peer as unknown as RTCPeerConnection & { getStats: () => Promise<RTCStatsReport> };
+    observed.getStats = async () => raw as unknown as RTCStatsReport;
+    const seen: RtcDiagnostic[] = [];
+    watchPeer(observed, "rtc_2", (detail) => seen.push(detail));
+    peer.connectionState = "failed";
+    peer.fire("connectionstatechange");
+    await vi.waitFor(() => expect(seen.some((detail) => detail.milestone === "candidatePair")).toBe(true));
+
+    const summary = seen.find((detail) => detail.milestone === "candidatePair");
+    expect(summary).toMatchObject({ diagnosticId: "rtc_2", connectionState: "failed",
+      pairSucceeded: 1, pairFailed: 1, selectedPair: true,
+      selectedLocalType: "host", selectedRemoteType: "srflx", selectedProtocol: "udp",
+      pairRttMs: 12, pairRequestsSent: 4, pairResponsesReceived: 3 });
+    expect(JSON.stringify(seen)).not.toMatch(/192\.0\.2|203\.0\.113|54321|3478|secret/);
+  });
 });
 
 describe("iceGathered", () => {

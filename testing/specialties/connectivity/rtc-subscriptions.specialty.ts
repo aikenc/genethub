@@ -80,7 +80,7 @@ defineSpecialty(
       await writeFile(join(root, "consumer.ts"), `
 import { Client } from '@genehub/workbench/client';
 const input = await window.connectionInput();
-const operations = [], events = [], repairs = [], states = [], errors = [], rtcCandidates = [];
+const operations = [], events = [], repairs = [], states = [], errors = [], rtcCandidates = [], rtcPairs = [];
 const client = new Client({...input, rtcEnabled:false, heartbeatMs:1000, heartbeatTimeoutMs:1500, onDiagnostic(e) {
   if(e.kind==='error') { errors.push(e.detail.message); if(errors.length>8) errors.shift(); }
   if(e.kind==='operation' && e.detail.phase==='finish') operations.push({operation:e.detail.operation,transport:e.detail.transport,outcome:e.detail.outcome});
@@ -88,13 +88,14 @@ const client = new Client({...input, rtcEnabled:false, heartbeatMs:1000, heartbe
     host:e.detail.remoteCandidateHost, srflx:e.detail.remoteCandidateSrflx,
     prflx:e.detail.remoteCandidatePrflx, relay:e.detail.remoteCandidateRelay,
   });
+  if(e.kind==='rtc' && e.detail.milestone==='candidatePair') rtcPairs.push(e.detail);
 }});
 const handlers = {
   onEvent(e) { events.push(e); document.querySelector('#events').textContent=events.map(e=>e.event.type).join(' '); },
   onResync(snapshot,replayed,reset) { repairs.push({snapshot,replayed,reset}); }
 };
 client.onStateChange(state => states.push(state));
-window.probe = { client, events, repairs, operations, states, errors, rtcCandidates, attach: id=>client.subscribe(id,handlers) };
+window.probe = { client, events, repairs, operations, states, errors, rtcCandidates, rtcPairs, attach: id=>client.subscribe(id,handlers) };
 client.connect();
 `);
       await page.exposeFunction("connectionInput", () => ({ url, credential }));
@@ -140,6 +141,16 @@ client.connect();
           counts.host + counts.srflx + counts.prflx + counts.relay > 0),
         "RTC answer candidate type diagnostics were missing or invalid",
       );
+      await page.waitForFunction(() => (window as any).probe.rtcPairs.some((pair: any) =>
+        pair.connectionState === "connected"), null, { timeout: 5_000 }).catch(diagnosticFailure);
+      const pairEvidence = await page.evaluate(() => (window as any).probe.rtcPairs);
+      t.assertions.assert(pairEvidence.some((pair: any) => pair.statsAvailable &&
+        pair.selectedPair && ["host", "srflx", "prflx", "relay"].includes(pair.selectedLocalType) &&
+        ["host", "srflx", "prflx", "relay"].includes(pair.selectedRemoteType) &&
+        Number.isInteger(pair.pairSucceeded) && pair.pairSucceeded > 0),
+      "native RTC connected without a usable selected candidate-pair diagnostic");
+      t.assertions.assert(!/(?:\d{1,3}\.){3}\d{1,3}|candidate:|\.local/.test(JSON.stringify(pairEvidence)),
+        "candidate-pair diagnostic included an address-bearing value");
 
       // Feedback described an upgrade that appears connected briefly and then
       // cycles. Keep using the native RTC path long enough to expose that case.

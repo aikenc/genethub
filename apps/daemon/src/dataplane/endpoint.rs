@@ -39,7 +39,7 @@ pub enum CarrierKind {
 }
 
 impl CarrierKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::WebSocket => "websocket",
             Self::Fabric => "fabric",
@@ -163,8 +163,23 @@ struct Writer {
     count: Arc<Semaphore>,
 }
 
+/// Optional per-request timings. Only callers investigating a slow transfer
+/// pay for per-frame clocks; ordinary business streams use `write` unchanged.
+#[derive(Default)]
+pub(crate) struct WriteTimings {
+    pub(crate) credit_us: u64,
+    pub(crate) budget_us: u64,
+    pub(crate) enqueue_us: u64,
+    pub(crate) completion_us: u64,
+    pub(crate) frames: u64,
+}
+
 impl Writer {
     async fn send(&self, frame: Frame) -> Result<()> {
+        self.send_inner(frame, None).await
+    }
+
+    async fn send_inner(&self, frame: Frame, mut timings: Option<&mut WriteTimings>) -> Result<()> {
         let stream_id = frame.stream_id;
         let (complete, answer) = oneshot::channel();
         let budget = if frame.kind as u8 >= 4 {
@@ -172,10 +187,15 @@ impl Writer {
         } else {
             &self.budget
         };
+        let began = timings.as_ref().map(|_| Instant::now());
         let budget = budget
             .clone()
             .acquire_many_owned((frame.payload.len() + 36) as u32)
             .await?;
+        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            timings.budget_us += began.elapsed().as_micros() as u64;
+        }
+        let began = timings.as_ref().map(|_| Instant::now());
         let count = self.count.clone().acquire_owned().await?;
         self.commands
             .send(WriterCommand {
@@ -187,9 +207,16 @@ impl Writer {
             })
             .await
             .map_err(|_| anyhow!("the data-plane writer stopped"))?;
+        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            timings.enqueue_us += began.elapsed().as_micros() as u64;
+        }
+        let began = timings.as_ref().map(|_| Instant::now());
         answer
             .await
             .map_err(|_| anyhow!("the data-plane writer dropped a frame"))??;
+        if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+            timings.completion_us += began.elapsed().as_micros() as u64;
+        }
         Ok(())
     }
 
@@ -335,12 +362,32 @@ impl ServerStream {
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        self.write_inner(bytes, None).await
+    }
+
+    pub(crate) async fn write_measured(
+        &mut self,
+        bytes: &[u8],
+        timings: &mut WriteTimings,
+    ) -> Result<()> {
+        self.write_inner(bytes, Some(timings)).await
+    }
+
+    async fn write_inner(
+        &mut self,
+        bytes: &[u8],
+        mut timings: Option<&mut WriteTimings>,
+    ) -> Result<()> {
         if !self.local_head_sent || self.local_finished {
             anyhow::bail!("response body cannot be written in this stream state");
         }
         let mut offset = 0;
         while offset < bytes.len() {
+            let began = timings.as_ref().map(|_| Instant::now());
             let length = self.credit.take(bytes.len() - offset).await?;
+            if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
+                timings.credit_us += began.elapsed().as_micros() as u64;
+            }
             let next = self
                 .local_bytes
                 .checked_add(length as u64)
@@ -356,13 +403,19 @@ impl ServerStream {
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("stream sequence exhausted"))?;
             self.writer
-                .send(Frame {
-                    kind: Kind::Data,
-                    stream_id: self.id,
-                    value: self.local_sequence,
-                    payload: bytes[offset..offset + length].to_vec(),
-                })
+                .send_inner(
+                    Frame {
+                        kind: Kind::Data,
+                        stream_id: self.id,
+                        value: self.local_sequence,
+                        payload: bytes[offset..offset + length].to_vec(),
+                    },
+                    timings.as_deref_mut(),
+                )
                 .await?;
+            if let Some(timings) = timings.as_deref_mut() {
+                timings.frames += 1;
+            }
             self.local_bytes = next;
             offset += length;
         }
@@ -1243,7 +1296,7 @@ async fn handle_rpc(stream: &mut ServerStream, services: &PeerServices) -> Resul
     }
 }
 
-fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
+pub(super) fn diagnostic_id(metadata: &serde_json::Value) -> Option<String> {
     metadata
         .get("diagnosticId")
         .and_then(serde_json::Value::as_str)

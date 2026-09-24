@@ -9,7 +9,7 @@ use genehub_proto::{
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
-use super::endpoint::{PeerServices, ServerStream};
+use super::endpoint::{PeerServices, ServerStream, WriteTimings};
 use crate::files::{PreviewFailure, PreviewFile};
 
 static PREVIEW_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -59,6 +59,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         Err(_) => return preview_error(stream, 403, AssetPreviewError::Forbidden, None).await,
     };
 
+    let worker_started = Instant::now();
     let slot = match tokio::time::timeout(
         PREVIEW_IO_TIMEOUT,
         PREVIEW_SLOTS
@@ -72,6 +73,7 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
         Ok(Err(_)) => return Err(anyhow!("preview worker pool stopped")),
         Err(_) => return preview_error(stream, 408, AssetPreviewError::SourceChanged, None).await,
     };
+    let worker_wait_us = worker_started.elapsed().as_micros() as u64;
     let root = resolved.root;
     let path = resolved.relative.to_string_lossy().replace('\\', "/");
     let scan_started = Instant::now();
@@ -90,12 +92,21 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
     let stats = send_file(stream, file).await?;
     tracing::debug!(
         event = "preview_stage_timing",
+        request_id = super::endpoint::diagnostic_id(&stream.head.metadata),
+        transport = services.carrier_kind.as_str(),
+        source_mode = if stats.snapshot { "snapshot" } else { "file" },
         source_bytes = stats.source_bytes,
+        worker_wait_us,
         scan_us,
         send_us = send_started.elapsed().as_micros() as u64,
         read_us = stats.read_us,
         hash_us = stats.hash_us,
         write_us = stats.write_us,
+        write_credit_us = stats.write_timings.credit_us,
+        write_budget_us = stats.write_timings.budget_us,
+        write_enqueue_us = stats.write_timings.enqueue_us,
+        write_completion_us = stats.write_timings.completion_us,
+        write_frames = stats.write_timings.frames,
         yield_us = stats.yield_us,
         finish_us = stats.finish_us,
         chunks = stats.chunks,
@@ -107,12 +118,14 @@ pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -
 #[derive(Default)]
 struct PreviewSendStats {
     source_bytes: u64,
+    snapshot: bool,
     read_us: u64,
     hash_us: u64,
     write_us: u64,
     yield_us: u64,
     finish_us: u64,
     chunks: u64,
+    write_timings: WriteTimings,
 }
 
 async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<PreviewSendStats> {
@@ -121,8 +134,10 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
     let expected_bytes = metadata.source_bytes;
     let mut stats = PreviewSendStats {
         source_bytes: expected_bytes,
+        snapshot,
         ..Default::default()
     };
+    let measure_write = tracing::enabled!(tracing::Level::DEBUG);
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
@@ -156,7 +171,13 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
         }
         stats.hash_us += began.elapsed().as_micros() as u64;
         let began = Instant::now();
-        stream.write(&step[..read]).await?;
+        if measure_write {
+            stream
+                .write_measured(&step[..read], &mut stats.write_timings)
+                .await?;
+        } else {
+            stream.write(&step[..read]).await?;
+        }
         stats.write_us += began.elapsed().as_micros() as u64;
         let began = Instant::now();
         crate::blocking::breathe().await;
