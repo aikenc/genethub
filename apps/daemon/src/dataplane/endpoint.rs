@@ -150,9 +150,17 @@ impl Credit {
 struct WriterCommand {
     stream_id: u32,
     frame: Frame,
-    complete: oneshot::Sender<Result<()>>,
+    complete: oneshot::Sender<Result<WriterCompletion>>,
+    measured_enqueued_at: Option<Instant>,
     _budget: OwnedSemaphorePermit,
     _count: OwnedSemaphorePermit,
+}
+
+#[derive(Default)]
+struct WriterCompletion {
+    actor_queue_us: u64,
+    actor_send_us: u64,
+    acknowledged_at: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -171,6 +179,9 @@ pub(crate) struct WriteTimings {
     pub(crate) budget_us: u64,
     pub(crate) enqueue_us: u64,
     pub(crate) completion_us: u64,
+    pub(crate) actor_queue_us: u64,
+    pub(crate) actor_send_us: u64,
+    pub(crate) wake_us: u64,
     pub(crate) frames: u64,
 }
 
@@ -202,6 +213,7 @@ impl Writer {
                 stream_id,
                 frame,
                 complete,
+                measured_enqueued_at: timings.as_ref().map(|_| Instant::now()),
                 _budget: budget,
                 _count: count,
             })
@@ -211,11 +223,16 @@ impl Writer {
             timings.enqueue_us += began.elapsed().as_micros() as u64;
         }
         let began = timings.as_ref().map(|_| Instant::now());
-        answer
+        let completion = answer
             .await
             .map_err(|_| anyhow!("the data-plane writer dropped a frame"))??;
         if let (Some(timings), Some(began)) = (timings.as_deref_mut(), began) {
             timings.completion_us += began.elapsed().as_micros() as u64;
+            timings.actor_queue_us += completion.actor_queue_us;
+            timings.actor_send_us += completion.actor_send_us;
+            if let Some(acknowledged_at) = completion.acknowledged_at {
+                timings.wake_us += acknowledged_at.elapsed().as_micros() as u64;
+            }
         }
         Ok(())
     }
@@ -237,6 +254,7 @@ impl Writer {
                 stream_id,
                 frame,
                 complete,
+                measured_enqueued_at: None,
                 _budget: budget,
                 _count: count,
             })
@@ -1555,9 +1573,21 @@ async fn run_writer(
             } else {
                 queues.remove(&stream_id);
             }
+            let actor_started = command.measured_enqueued_at.map(|_| Instant::now());
+            let actor_queue_us = command
+                .measured_enqueued_at
+                .zip(actor_started)
+                .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
+                .unwrap_or_default();
             match channel.send(command.frame).await {
                 Ok(()) => {
-                    let _ = command.complete.send(Ok(()));
+                    let _ = command.complete.send(Ok(WriterCompletion {
+                        actor_queue_us,
+                        actor_send_us: actor_started
+                            .map(|started| started.elapsed().as_micros() as u64)
+                            .unwrap_or_default(),
+                        acknowledged_at: actor_started.map(|_| Instant::now()),
+                    }));
                 }
                 Err(_) => {
                     let error = anyhow!("the peer carrier writer stopped");
@@ -1616,10 +1646,22 @@ async fn run_logical_writer(
                 active.insert(id);
                 let mut writer = writer.clone();
                 tasks.spawn(async move {
+                    let actor_started = command.measured_enqueued_at.map(|_| Instant::now());
+                    let actor_queue_us = command
+                        .measured_enqueued_at
+                        .zip(actor_started)
+                        .map(|(queued, started)| started.duration_since(queued).as_micros() as u64)
+                        .unwrap_or_default();
                     let result = writer.send(command.frame).await;
                     let report = result
                         .as_ref()
-                        .map(|_| ())
+                        .map(|_| WriterCompletion {
+                            actor_queue_us,
+                            actor_send_us: actor_started
+                                .map(|started| started.elapsed().as_micros() as u64)
+                                .unwrap_or_default(),
+                            acknowledged_at: actor_started.map(|_| Instant::now()),
+                        })
                         .map_err(|e| anyhow!(e.to_string()));
                     let _ = command.complete.send(report);
                     drop(command._budget);
@@ -1675,6 +1717,7 @@ mod tests {
                 payload: vec![1],
             },
             complete: oneshot::channel().0,
+            measured_enqueued_at: None,
             _budget: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
             _count: Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap(),
         };

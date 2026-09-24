@@ -534,7 +534,8 @@ defineSpecialty(
     t.assertions.assert(previewStages.length >= 6 && previewStages.every((line) =>
       ["request_id=", "transport=", "source_mode=", "worker_wait_us=",
         "write_credit_us=", "write_budget_us=", "write_enqueue_us=",
-        "write_completion_us=", "write_frames="].every((field) => line.includes(field))),
+        "write_completion_us=", "write_actor_queue_us=", "write_actor_send_us=", "write_wake_us=",
+        "write_frames="].every((field) => line.includes(field))),
     "real preview transfers did not emit complete stage diagnostics");
     t.note(`preview size ladder (real Wasm-backed product, unshaped loopback)\n${lines.join("\n")}\npreview stage log lines=${previewStages.length}\n${previewStages.join("\n")}`);
   },
