@@ -70,6 +70,14 @@ export async function openRtcDataLink(
   if (typeof RTCPeerConnection !== "function") {
     throw new Error("this browser does not support WebRTC");
   }
+  const startedAt = performance.now();
+  let stageStartedAt = startedAt;
+  const timing: Record<string, number> = {};
+  const finishStage = (name: string) => {
+    const now = performance.now();
+    timing[`${name}Ms`] = Math.round(now - stageStartedAt);
+    stageStartedAt = now;
+  };
   let iceServers: RTCIceServer[] = [];
   const configStream=base.open({version:DATA_PLANE_VERSION,method:"rtc.config",metadata:null,bodyLength:0,timeoutMs:5000});
   try {
@@ -81,6 +89,7 @@ export async function openRtcDataLink(
     }
   } catch { /* Old daemons have no rtc.config: host candidates remain usable. */ }
   finally {configStream.reset(DataReset.Cancelled);}
+  finishStage("config");
   const peer = new RTCPeerConnection({ iceServers });
   if (onDiagnostic) watchPeer(peer, diagnosticId ?? null, onDiagnostic);
   const channel = peer.createDataChannel("genehub-data-v4", { ordered: true });
@@ -98,6 +107,7 @@ export async function openRtcDataLink(
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
     await iceGathered(peer, GATHER_WAIT_MS);
+    finishStage("gather");
     const offerSdp = peer.localDescription?.sdp;
     if (!offerSdp) {
       throw new RtcUpgradeError(
@@ -135,6 +145,19 @@ export async function openRtcDataLink(
         if (response.status !== 200) {
           throw new Error(`RTC negotiation failed (${response.status})`);
         }
+        const serverTiming = response.metadata && typeof response.metadata === "object" &&
+          !Array.isArray(response.metadata) ? response.metadata.rtcTiming : null;
+        if (serverTiming && typeof serverTiming === "object" && !Array.isArray(serverTiming)) {
+          const bounded = (value: unknown) => typeof value === "number" &&
+            Number.isInteger(value) && value >= 0 && value <= 120_000 ? value : null;
+          onDiagnostic?.({
+            diagnosticId: diagnosticId ?? null,
+            milestone: "serverTiming",
+            serverConfigMs: bounded(serverTiming.configMs),
+            serverGatherMs: bounded(serverTiming.gatherMs),
+            serverAnswerMs: bounded(serverTiming.answerMs),
+          });
+        }
         return JSON.parse(
           new TextDecoder("utf-8", { fatal: true }).decode(
             await collectBody(stream.body(), SIGNAL_LIMIT),
@@ -145,6 +168,7 @@ export async function openRtcDataLink(
       "RTC signaling timed out",
       () => stream.reset(DataReset.Timeout),
     ).catch(fail);
+    finishStage("signal");
     if (
       !answer.sdp ||
       !answer.capabilityId ||
@@ -156,6 +180,7 @@ export async function openRtcDataLink(
     await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp }).catch(fail);
     phase = "channel";
     await withDeadline(opened, CONNECT_TIMEOUT_MS, "RTC DataChannel did not open").catch(fail);
+    finishStage("channel");
 
     phase = "handshake";
     const prepared = await preparePeerHandshake({
@@ -171,6 +196,13 @@ export async function openRtcDataLink(
       ),
     ) as PeerWelcome;
     const handshake = await prepared.complete(welcomeValue);
+    finishStage("handshake");
+    onDiagnostic?.({
+      diagnosticId: diagnosticId ?? null,
+      milestone: "transportReady",
+      ...timing,
+      totalMs: Math.round(performance.now() - startedAt),
+    });
     const carrier = new RtcRecordCarrier(peer, channel);
     const endpoint = options.endpoint ?? new DataEndpoint({
       path: "rtc",

@@ -366,7 +366,14 @@ defineSpecialty({
         maxAwayMs: Math.round(Math.max(watch.maxAwayMs, watch.awaySince ? now - watch.awaySince : 0)),
         transitions: watch.transitions, connectionStates: m.states.slice(watch.initialConnectionStates),
         upgrades: m.rtcUpgrades, candidates: m.diagnostics.filter((e: any) => e.kind === "rtc" && "candidateHost" in e.detail)
-          .map((e: any) => ({ host: e.detail.candidateHost, srflx: e.detail.candidateSrflx })) };
+          .map((e: any) => ({ host: e.detail.candidateHost, srflx: e.detail.candidateSrflx })),
+        rtcTimings: m.diagnostics.filter((e: any) => e.kind === "rtc" && e.detail.milestone === "transportReady")
+          .map((e: any) => ({ role: e.detail.channelRole, configMs: e.detail.configMs,
+            gatherMs: e.detail.gatherMs, signalMs: e.detail.signalMs, channelMs: e.detail.channelMs,
+            handshakeMs: e.detail.handshakeMs, totalMs: e.detail.totalMs })),
+        serverTimings: m.diagnostics.filter((e: any) => e.kind === "rtc" && e.detail.milestone === "serverTiming")
+          .map((e: any) => ({ role: e.detail.channelRole, configMs: e.detail.serverConfigMs,
+            gatherMs: e.detail.serverGatherMs, answerMs: e.detail.serverAnswerMs })) };
     });
     const renewals = stack.issued() - initialIssued;
     const rtcProbes = probes.filter(probe => probe.ok && probe.transport === "rtc").length;
@@ -378,7 +385,8 @@ defineSpecialty({
       `rtcResidentMs=${measured.rtcMs}/${measured.totalMs} rtcRpc=${rtcProbes}/${probes.length} ` +
       `maxAwayMs=${measured.maxAwayMs} maxRpcMs=${maxRpcMs} upgradeStarts=${upgradeStarts} ` +
       `renewalAtMs=${JSON.stringify(renewalAtMs)} ` +
-      `transitions=${JSON.stringify(measured.transitions.slice(0, 12))} candidates=${JSON.stringify(measured.candidates.slice(0, 4))}`;
+      `transitions=${JSON.stringify(measured.transitions.slice(0, 12))} candidates=${JSON.stringify(measured.candidates.slice(0, 4))} ` +
+      `rtcTimings=${JSON.stringify(measured.rtcTimings)} serverTimings=${JSON.stringify(measured.serverTimings)}`;
     t.note(summary);
     t.assertions.assert(stunRequests > 0 && firstUpgradeMs !== null, `STUN fault or real RTC upgrade was not exercised: ${summary}`);
     t.assertions.assert(firstUpgradeMs < 25_000, `blackholed STUN serialized RTC channel setup: ${summary}`);

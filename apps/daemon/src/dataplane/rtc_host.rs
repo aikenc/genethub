@@ -97,11 +97,14 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     };
     let state = services.state.clone();
 
+    let config_started = Instant::now();
+    let ice_servers = super::stun_urls(&super::ice_config(&services.state).await);
+    let config_ms = config_started.elapsed().as_millis() as u64;
     let api = APIBuilder::new().build();
     let connection = Arc::new(
         api.new_peer_connection(RTCConfiguration {
             ice_servers: vec![RTCIceServer {
-                urls: super::stun_urls(&super::ice_config(&services.state).await),
+                urls: ice_servers,
                 ..Default::default()
             }],
             ..Default::default()
@@ -163,9 +166,11 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
         .set_remote_description(RTCSessionDescription::offer(request.sdp)?)
         .await?;
     let answer = connection.create_answer(None).await?;
+    let gather_started = Instant::now();
     let mut gathering = connection.gathering_complete_promise().await;
     connection.set_local_description(answer).await?;
     let _ = tokio::time::timeout(RTC_GATHER_TIMEOUT, gathering.recv()).await;
+    let gather_ms = gather_started.elapsed().as_millis() as u64;
     let local = connection
         .local_description()
         .await
@@ -195,7 +200,7 @@ async fn negotiate(stream: &mut ServerStream, services: &PeerServices) -> Result
     stream
         .respond(&ExchangeResponseHead {
             status: 200,
-            metadata: serde_json::Value::Null,
+            metadata: serde_json::json!({"rtcTiming": {"configMs": config_ms, "gatherMs": gather_ms}}),
             body_length: Some(response.len() as u64),
             error: None,
         })
