@@ -29,6 +29,7 @@ export function ModelPicker({
   automaticTags = [],
   selected,
   disabled,
+  pinnedAgentId = null,
   onFilterTags,
   onSelect,
 }: {
@@ -38,6 +39,12 @@ export function ModelPicker({
   automaticTags?: string[];
   selected?: ModelIdentity;
   disabled?: boolean;
+  /**
+   * When set, only this Agent's routes are selectable — used while a turn is
+   * running, where the daemon can retarget the current Agent's runtime for the
+   * next turn but cannot rebind the conversation to another Agent mid-turn.
+   */
+  pinnedAgentId?: string | null;
   onFilterTags(tags: string[]): void;
   onSelect(route: ConfiguredModelRoute): void;
 }) {
@@ -105,6 +112,8 @@ export function ModelPicker({
           const chosen =
             selected?.agentId === route.agent.id &&
             selected.modelId === route.modelId;
+          const pinned =
+            pinnedAgentId !== null && route.agent.id !== pinnedAgentId;
           const agent = resolveAgentPresentation(route.agent);
           const model = route.profile.displayName?.trim() || (route.modelId
             ? resolveModelPresentation({
@@ -120,9 +129,11 @@ export function ModelPicker({
               type="button"
               role="option"
               aria-selected={chosen}
-              disabled={disabled}
+              aria-disabled={disabled || pinned}
+              disabled={disabled || pinned}
+              title={pinned ? "会话进行中，本轮结束后才能切换 Agent" : undefined}
               onClick={() => onSelect(route)}
-              className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left ${
+              className={`flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left disabled:opacity-50 ${
                 chosen
                   ? "bg-accent/10 text-fg"
                   : "text-muted hover:bg-raised hover:text-fg"

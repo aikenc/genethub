@@ -2042,6 +2042,34 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     }
     const sessionId = state.activeSessionId;
     if (!sessionId) return;
+    const session = state.sessions.find((entry) => entry.id === sessionId);
+    if (
+      session &&
+      session.agentId === target.agentId &&
+      (target.modelId != null || session.modelId == null)
+    ) {
+      // Same Agent on a live session: the daemon retargets model, mode,
+      // effort and runtime axes without rebinding the Agent-native context,
+      // so these are safe while a turn runs and land on the next turn. A
+      // cross-Agent pick — or clearing a model the session still has — has to
+      // keep waiting for the turn to finish, which is the switchAgent path.
+      if (target.modelId != null && target.modelId !== session.modelId) {
+        await get().setModel(target.modelId);
+      }
+      if (target.modeId != null && target.modeId !== session.modeId) {
+        await get().setMode(target.modeId);
+      }
+      if (target.effortId != null && target.effortId !== session.effortId) {
+        await get().setEffort(target.effortId);
+      }
+      for (const [axisId, valueId] of Object.entries(runtimeValues)) {
+        if (session.runtimeValues?.[axisId] !== valueId) {
+          await get().setRuntimeAxis(axisId, valueId);
+        }
+      }
+      await get().setAgentPreferences(remembered);
+      return;
+    }
     const reply = await asked(set, () =>
       require_(state.client).call({
         type: "session.switchAgent",

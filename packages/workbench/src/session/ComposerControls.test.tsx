@@ -353,6 +353,56 @@ describe("the exact model composer control", () => {
     expect(screen.queryByText("Inactive Agent")).not.toBeInTheDocument();
   });
 
+  it("keeps same-Agent runtime picks live while a turn runs", async () => {
+    const callbacks = controls({ busy: true });
+    const { dialog } = await openSettings();
+
+    expect(within(dialog).getByRole("option", { name: /Genet · Vision/ })).toBeEnabled();
+    expect(within(dialog).getByText("会话进行中：修改将在下一轮生效")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("option", { name: /Genet · Vision/ }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "使用此模型" }));
+    expect(callbacks.onPickTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "genet", modelId: "vision" }),
+      ["Pro"],
+    );
+  });
+
+  it("locks cross-Agent routes while a turn runs and explains why", async () => {
+    controls({
+      busy: true,
+      preferences: {
+        ...PREFERENCES,
+        modelProfiles: [
+          ...PREFERENCES.modelProfiles!,
+          { agentId: "claude", tags: ["Pro"], cost: "low" },
+        ],
+      },
+    });
+    const { dialog } = await openSettings();
+
+    const claudeRoute = within(dialog).getByRole("option", { name: /Claude · Agent 默认/ });
+    expect(claudeRoute).toBeDisabled();
+    expect(claudeRoute).toHaveAttribute("title", "会话进行中，本轮结束后才能切换 Agent");
+    expect(within(dialog).getByRole("option", { name: /Genet · DeepSeek/ })).toBeEnabled();
+  });
+
+  it("offers every Agent again once the turn has finished", async () => {
+    controls({
+      busy: false,
+      preferences: {
+        ...PREFERENCES,
+        modelProfiles: [
+          ...PREFERENCES.modelProfiles!,
+          { agentId: "claude", tags: ["Pro"], cost: "low" },
+        ],
+      },
+    });
+    const { dialog } = await openSettings();
+
+    expect(within(dialog).getByRole("option", { name: /Claude · Agent 默认/ })).toBeEnabled();
+    expect(within(dialog).queryByText(/会话进行中/)).not.toBeInTheDocument();
+  });
+
   it("restores focus and closes on Escape", async () => {
     controls();
     const { trigger } = await openSettings();

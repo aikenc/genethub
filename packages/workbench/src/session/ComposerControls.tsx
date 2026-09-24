@@ -26,6 +26,7 @@ export function ComposerControls({
   effortId,
   runtimeValues,
   disabled,
+  busy,
   onOpenChange,
   onPickTarget,
   onSavePreferences,
@@ -41,6 +42,8 @@ export function ComposerControls({
   effortId: string | null;
   runtimeValues?: Record<string, string> | null;
   disabled?: boolean;
+  /** A turn is in flight: same-Agent runtime picks stay live, cross-Agent ones wait. */
+  busy?: boolean;
   onOpenChange?(open: boolean): void;
   onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
   onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
@@ -161,6 +164,7 @@ export function ComposerControls({
           tags={selectedTags}
           mediaTags={automaticTags}
           disabled={disabled}
+          busy={busy}
           returnFocusRef={trigger}
           onClose={closePanel}
           onPickTarget={async (target, filters) => {

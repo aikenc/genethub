@@ -1011,7 +1011,8 @@ export function Composer({
               modeId={modeId}
               effortId={effortId ?? null}
               runtimeValues={runtimeValues}
-              disabled={disabled || phase !== "idle"}
+              disabled={disabled}
+              busy={phase !== "idle"}
               onOpenChange={setSettingsOpen}
               onPickTarget={onPickTarget}
               onSavePreferences={onSavePreferences}

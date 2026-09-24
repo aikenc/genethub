@@ -21,6 +21,7 @@ export function RuntimeSettingsPanel({
   tags,
   mediaTags = [],
   disabled,
+  busy,
   returnFocusRef,
   onClose,
   onPickTarget,
@@ -34,6 +35,8 @@ export function RuntimeSettingsPanel({
   tags: string[];
   mediaTags?: string[];
   disabled?: boolean;
+  /** A turn is in flight. Same-Agent runtime picks apply to the next turn; a cross-Agent rebind has to wait. */
+  busy?: boolean;
   returnFocusRef: RefObject<HTMLButtonElement>;
   onClose(): void;
   onPickTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
@@ -46,6 +49,13 @@ export function RuntimeSettingsPanel({
   const [filters, setFilters] = useState(() => normalizeGroupedTags(tags, preferences));
   const [target, setTarget] = useState<SessionAgentTarget | null>(() => targetFrom(selection));
   const [saving, setSaving] = useState(false);
+  // While a turn runs, the daemon can retarget everything the current Agent
+  // already owns — model, mode, effort, runtime axes — and each lands on the
+  // next turn. Rebinding to a different Agent rebuilds the Agent-native
+  // context, so that one genuinely has to wait for the turn to end.
+  const currentAgentId = selection.current?.id ?? null;
+  const crossAgent = target ? target.agentId !== currentAgentId : false;
+  const runtimeLocked = Boolean(busy) && crossAgent;
   const targetSelection = target
     ? resolveRuntimeSelection({
         agents,
@@ -131,6 +141,7 @@ export function RuntimeSettingsPanel({
                   modelId: target?.modelId ?? null,
                 }}
                 disabled={disabled || saving}
+                pinnedAgentId={busy && currentAgentId ? currentAgentId : null}
                 onFilterTags={setFilters}
                 onSelect={(route) => setTarget(routeTarget(route))}
               />
@@ -139,7 +150,7 @@ export function RuntimeSettingsPanel({
                 <div className="rounded-xl border border-line bg-raised/35 p-2.5">
                   <CompactRuntimeControls
                     selection={targetSelection}
-                    disabled={disabled || saving}
+                    disabled={disabled || saving || runtimeLocked}
                     onPickMode={(modeId) => setTarget((current) => current ? { ...current, modeId } : current)}
                     onPickEffort={(effortId) => setTarget((current) => current ? { ...current, effortId } : current)}
                     onPickRuntimeAxis={(axisId, valueId) =>
@@ -152,6 +163,13 @@ export function RuntimeSettingsPanel({
                 </div>
               ) : null}
 
+              {busy ? (
+                <p className="text-[11px] leading-4 text-faint" role="note">
+                  {crossAgent
+                    ? "会话进行中：切换 Agent 需要重建对话上下文，本轮结束后可用"
+                    : "会话进行中：修改将在下一轮生效"}
+                </p>
+              ) : null}
               <div className="flex items-center justify-between border-t border-line pt-2">
                 <button
                   type="button"
@@ -165,7 +183,7 @@ export function RuntimeSettingsPanel({
                 </button>
                 <button
                   type="button"
-                  disabled={disabled || saving || !target}
+                  disabled={disabled || saving || !target || runtimeLocked}
                   className="h-9 rounded-lg bg-accent px-4 text-xs font-medium text-on-accent disabled:opacity-50"
                   onClick={() => {
                     if (!target) return;

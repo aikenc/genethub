@@ -1729,6 +1729,83 @@ describe("machine-global model selection", () => {
     ]);
   });
 
+  it("retargets the same Agent in place instead of switching while a turn runs", async () => {
+    const calls: Array<{ type: string; payload?: unknown }> = [];
+    const client = {
+      call: async (request: { type: string; payload?: unknown }) => {
+        calls.push(request);
+        if (request.type === "settings.setAgentPreferences") {
+          return {
+            type: "settings",
+            data: {
+              providers: [],
+              lanEnabled: false,
+              agentPreferences: (request.payload as { preferences: AgentSelectionPreferences })
+                .preferences,
+            },
+          };
+        }
+        return undefined;
+      },
+    } as unknown as Client;
+    useWorkbench.setState({
+      client,
+      sessions: [
+        {
+          ...SESSION,
+          agentId: "codex",
+          modelId: "gpt-5.6-sol",
+          effortId: "medium",
+          runtimeValues: { verbosity: "normal" },
+        },
+      ],
+      activeSessionId: "s1",
+      activeWorkspaceId: "w1",
+      draft: null,
+      settings: {
+        providers: [],
+        lanEnabled: false,
+        agentPreferences: { selectedTags: [], runtimes: {} },
+      },
+    });
+
+    await useWorkbench.getState().setAgentTarget(
+      {
+        agentId: "codex",
+        modelId: "gpt-5.7",
+        effortId: "high",
+        runtimeValues: { verbosity: "brief" },
+      },
+      ["Pro"],
+    );
+
+    // The daemon retargets model, effort and runtime axes on a live session
+    // without rebinding the Agent-native context, so no switchAgent is issued.
+    expect(calls.find((request) => request.type === "session.switchAgent")).toBeUndefined();
+    expect(calls.find((request) => request.type === "session.setModel")?.payload).toEqual({
+      sessionId: "s1",
+      modelId: "gpt-5.7",
+    });
+    expect(calls.find((request) => request.type === "session.setEffort")?.payload).toEqual({
+      sessionId: "s1",
+      effortId: "high",
+    });
+    expect(calls.find((request) => request.type === "session.setRuntimeAxis")?.payload).toEqual({
+      sessionId: "s1",
+      axisId: "verbosity",
+      valueId: "brief",
+    });
+    const preferencesWrite = [...calls]
+      .filter((request) => request.type === "settings.setAgentPreferences")
+      .at(-1)?.payload as { preferences: AgentSelectionPreferences };
+    expect(preferencesWrite.preferences.selectedTags).toEqual(["Pro"]);
+    expect(useWorkbench.getState().timeline).toMatchObject({
+      modelId: "gpt-5.7",
+      effortId: "high",
+      runtimeValues: { verbosity: "brief" },
+    });
+  });
+
   it("migrates an existing non-image conversation before its next image", async () => {
     const calls: Array<{ type: string; payload?: Record<string, unknown> }> = [];
     const client = {
