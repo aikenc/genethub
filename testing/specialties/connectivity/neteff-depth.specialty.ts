@@ -116,9 +116,13 @@ function seedImage(t: CaseContext, name: string, sizeBytes: number): FileFixture
 
 class PreviewProbe {
   private readonly errors: string[] = [];
+  private readonly bulkWindows: number[] = [];
   summary(): string { return this.errors.join("; "); }
   private readonly durationsMs: number[] = [];
   readonly onDiagnostic = (event: ClientDiagnosticEvent): void => {
+    if (event.kind === "connection" && event.detail.milestone === "peerHandshake") {
+      this.bulkWindows.push(Number(event.detail.negotiatedBulkWindowBytes));
+    }
     if (event.kind === "error") { this.errors.push(`${event.detail.name}: ${event.detail.message}`); if (this.errors.length > 8) this.errors.shift(); }
     if (
       event.kind === "operation" &&
@@ -131,6 +135,7 @@ class PreviewProbe {
   latestMs(): number | null {
     return this.durationsMs.at(-1) ?? null;
   }
+  latestBulkWindow(): number | null { return this.bulkWindows.at(-1) ?? null; }
 }
 
 async function measurePreview(
@@ -378,6 +383,7 @@ defineSpecialty(
       "small requests starve behind finite Preview traffic",
       "application receive credit caps throughput below the shaped link capacity",
       "a bulk response is truncated or silently bypasses the shaped carrier",
+      "a per-record timer artifact is mistaken for a high-bandwidth product ceiling",
     ],
   }),
   async (t) => {
@@ -388,8 +394,40 @@ defineSpecialty(
     const lines: string[] = [];
     try {
       const endpoint = daemonEndpoint(opened.daemon);
-      for (const bandwidthMbps of [100, 300, 1000]) {
-        const profile = { rttMs: 200, bandwidthMbps };
+      // A real loopback control exposes scheduling/timer artifacts in the
+      // JavaScript shaper at rates where a 16 KiB record takes <1 ms on wire.
+      {
+        const tcp = await measureTcpTransfer({
+          url: rawServer.url,
+          expectedBytes: rawServer.sizeBytes,
+          expectedSha256: rawServer.sha256,
+        });
+        const probe = new PreviewProbe();
+        const client = await connectLinkedDaemon(opened, { urlFor: (url) => url }, "unshaped-loopback", probe);
+        try {
+          const idle = await measureRepeatedRpc(t, client, 30, 0);
+          const preview = measurePreview(t, { client, opened, file, probe });
+          const busy = await measureRepeatedRpc(t, client, 30, 0);
+          const product = await preview;
+          lines.push(
+            `unshaped loopback size=32MiB tcpMs=${tcp.elapsedMs.toFixed(0)}` +
+            ` tcpMiBps=${tcp.mibPerSec.toFixed(2)} genehubMs=${product.elapsedMs.toFixed(0)}` +
+            ` genehubMiBps=${product.mibPerSec.toFixed(2)}` +
+            ` negotiatedWindow=${probe.latestBulkWindow() ?? "unknown"}` +
+            ` idleP95=${percentile(idle, 0.95).toFixed(0)}ms` +
+            ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms`,
+          );
+        } finally {
+          client.close();
+        }
+      }
+      for (const profile of [
+        { rttMs: 200, bandwidthMbps: 100 },
+        { rttMs: 200, bandwidthMbps: 300 },
+        { rttMs: 200, bandwidthMbps: 1000 },
+        { rttMs: 0, bandwidthMbps: 1000 },
+      ]) {
+        const { bandwidthMbps, rttMs } = profile;
         const tcp = await measureRawOneLeg(t, rawServer, profile, `high-bdp tcp ${bandwidthMbps}Mbps`);
         const productLink = await startShapedTcpProxy({ targetUrl: endpoint.url, profile });
         const probe = new PreviewProbe();
@@ -409,9 +447,9 @@ defineSpecialty(
           const busy = await measureRepeatedRpc(t, client, 60, 20);
           const product = await preview;
           const sample = recordUtilization(t, {
-            label: `high-bdp rtt=200ms bandwidth=${bandwidthMbps}Mbps`,
+            label: `high-bdp rtt=${rttMs}ms bandwidth=${bandwidthMbps}Mbps`,
             file,
-            clientRttMs: 200,
+            clientRttMs: rttMs,
             daemonRttMs: 0,
             tcp,
             product,
@@ -419,7 +457,7 @@ defineSpecialty(
             target: 0.8,
           });
           lines.push(
-            `${sample.line} idleP50=${percentile(idle, 0.5).toFixed(0)}ms` +
+            `${sample.line} negotiatedWindow=${probe.latestBulkWindow() === null ? "unknown" : `${probe.latestBulkWindow()! / MIB}MiB`} idleP50=${percentile(idle, 0.5).toFixed(0)}ms` +
             ` idleP95=${percentile(idle, 0.95).toFixed(0)}ms` +
             ` busyP50=${percentile(busy, 0.5).toFixed(0)}ms` +
             ` busyP95=${percentile(busy, 0.95).toFixed(0)}ms` +
