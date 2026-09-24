@@ -41,6 +41,7 @@ interface FileFixture {
 }
 
 interface ProductSample {
+  kind: string;
   elapsedMs: number;
   mibPerSec: number;
   productMs: number | null;
@@ -173,6 +174,7 @@ async function measurePreview(
     );
   }
   return {
+    kind: body.metadata.kind,
     elapsedMs,
     mibPerSec: body.bytes.byteLength / MIB / (elapsedMs / 1000),
     productMs,
@@ -180,6 +182,19 @@ async function measurePreview(
     transferMs: body.transfer.transferMs,
     chunkCount: body.transfer.chunkCount,
   };
+}
+
+function seedTypedPreview(t: CaseContext, kind: "markdown" | "video", sizeBytes: number): FileFixture {
+  const name = kind === "markdown" ? "neteff-kind-document.md" : "neteff-kind-movie.mp4";
+  const markdownLine = "# Benchmark document\nA paragraph of UTF-8 text.\n";
+  const payload = kind === "markdown"
+    ? Buffer.from(markdownLine.repeat(Math.ceil(sizeBytes / markdownLine.length)).slice(0, sizeBytes))
+    : Buffer.concat([
+      Buffer.from([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d]),
+      randomBytes(sizeBytes - 12),
+    ]);
+  writeFileSync(path.join(t.env.workspace, name), payload);
+  return { name, sizeBytes: payload.byteLength, sha256: createHash("sha256").update(payload).digest("hex") };
 }
 
 function expectedTcpElapsedMs(sizeBytes: number, profile: NetworkLinkProfile): number {
@@ -390,6 +405,57 @@ async function measureRawTwoLegs(
     await daemonLink.stop();
   }
 }
+
+defineSpecialty(
+  neteffMeta({
+    id: "specialty.neteff.preview-kind-comparison",
+    title: "Equal-size image, Markdown and video Preview transfer comparison",
+    oracle: "one established product connection transfers three 8 MiB files twice with exact SHA checks; type and network timings show whether the shared Preview path has type-specific transfer cost",
+    catches: [
+      "file kind is mistaken for a separate transport pipeline",
+      "a transfer result is confused with browser decode or video playback time",
+    ],
+  }),
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    const probe = new PreviewProbe();
+    const image = seedImage(t, "neteff-kind-picture.png", 8 * MIB);
+    const markdown = seedTypedPreview(t, "markdown", 8 * MIB);
+    const video = seedTypedPreview(t, "video", 8 * MIB);
+    const rawServer = await startTcpPayloadServer(8 * MIB);
+    const lines: string[] = [];
+    let client: ProductClient | null = null;
+    try {
+      client = await connectLinkedDaemon(opened, { urlFor: (url) => url }, "preview-kind-comparison", probe);
+      const tcp = await measureTcpTransfer({
+        url: rawServer.url,
+        expectedBytes: rawServer.sizeBytes,
+        expectedSha256: rawServer.sha256,
+      });
+      lines.push(`rawTcpMs=${tcp.elapsedMs.toFixed(0)}`);
+      for (let repeat = 1; repeat <= 2; repeat++) {
+        for (const [kind, file] of [["image", image], ["markdown", markdown], ["video", video]] as const) {
+          const sample = await measurePreview(t, { client, opened, file, probe });
+          t.assertions.assert(sample.kind === kind, `${file.name}: kind ${sample.kind} != ${kind}`);
+          lines.push(
+            `kind=${kind} repeat=${repeat} sizeBytes=${file.sizeBytes}` +
+            ` productMs=${sample.elapsedMs.toFixed(0)}` +
+            ` firstByteMs=${sample.firstByteMs?.toFixed(0) ?? "unknown"}` +
+            ` bodyMs=${sample.transferMs.toFixed(0)} chunks=${sample.chunkCount}`,
+          );
+        }
+      }
+    } finally {
+      client?.close();
+      opened.client.close();
+      opened.daemon.stop();
+      await opened.mock.stop();
+      await rawServer.stop();
+    }
+    t.note(`8 MiB transport comparison (synthetic image/video headers; no browser decoding or playback)\n${lines.join("\n")}`);
+  },
+);
 
 defineSpecialty(
   neteffMeta({
