@@ -18,13 +18,13 @@ defineSpecialty({
   surfaces: ["daemon", "filesystem"],
   productInterfaces: ["Workflow Run snapshot and journal"],
 }, async t => {
-  const test = "workflow::journal::tests::crash_tail_is_discarded_before_the_next_commit";
+  const test = "workflow::journal::tests";
   const { stdout } = await promisify(execFile)("cargo", [
     "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,
-    "--", "--exact", "--nocapture",
+    "--", "--nocapture",
   ], { cwd: t.openRoot, timeout: 160_000, maxBuffer: 4 * 1024 * 1024 });
-  t.assertions.assert(stdout.includes("test result: ok. 1 passed; 0 failed"),
-    `journal crash boundary test did not pass: ${stdout.slice(-2000)}`);
+  t.assertions.assert(stdout.includes("test result: ok. 2 passed; 0 failed"),
+    `journal crash and capacity tests did not pass: ${stdout.slice(-2000)}`);
   const generated = await mkdtemp(join(t.env.root, "workflow-journal-proto-"));
   const binding = await promisify(execFile)("cargo", [
     "test", "--profile", "iterate", "-p", "genehub-proto", "--lib", "export_bindings",

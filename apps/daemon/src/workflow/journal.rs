@@ -4,8 +4,14 @@ use std::collections::BTreeSet;
 use std::io::{Seek, SeekFrom};
 
 const MAX_LINE_BYTES: usize = 4 * 1024;
-const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
+pub(super) const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const FINAL_EVENT_RESERVE: u64 = MAX_LINE_BYTES as u64;
+
+pub(super) struct AppendOutcome {
+    pub seq: u64,
+    pub bytes: u64,
+    pub full: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,12 +42,12 @@ fn path(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
 /// Returns the committed high-water marks to store in the same Run snapshot.
 /// The old snapshot commits the journal length, so an uncommitted crash tail
 /// can be truncated before retrying without interpreting its contents.
-pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u64)> {
+pub(super) fn append_with_limit(runtime: &RuntimeStore, run: &RunRecord, maximum: u64) -> Result<AppendOutcome> {
     let Some(path) = path(runtime, run)? else {
-        return Ok((0, 0));
+        return Ok(AppendOutcome { seq: 0, bytes: 0, full: false });
     };
     let snapshot = path.with_file_name("run.json");
-    let (committed_seq, committed_bytes, committed_revision, previous_messages) =
+    let (committed_seq, committed_bytes, committed_revision, previous_messages, previously_full) =
         match crate::config::sensitive_metadata(&snapshot) {
             Ok(metadata) => {
                 crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
@@ -51,13 +57,16 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
                 ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
                 let previous = decode_run_record(&fs::read(&snapshot)?)?;
                 (previous.journal_seq, previous.journal_bytes, previous.revision,
-                    previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>())
+                    previous.flow_messages.into_iter().map(|message| message.message_id).collect::<BTreeSet<_>>(), previous.journal_full)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0, BTreeSet::new()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (0, 0, 0, BTreeSet::new(), false),
             Err(error) => return Err(error.into()),
         };
     if run.revision < committed_revision {
         bail!("Workflow Run revision 不得回退");
+    }
+    if previously_full {
+        return Ok(AppendOutcome { seq: committed_seq, bytes: committed_bytes, full: true });
     }
     match crate::config::sensitive_metadata(&path) {
         Ok(metadata) => {
@@ -116,6 +125,7 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
     let mut lines = Vec::new();
     let mut next_bytes = committed_bytes;
     let mut seq = committed_seq;
+    let mut full = false;
     for mut event in events {
         seq = seq.checked_add(1).ok_or_else(|| anyhow!("Workflow journal seq 已耗尽"))?;
         event.seq = seq;
@@ -126,14 +136,37 @@ pub(super) fn append(runtime: &RuntimeStore, run: &RunRecord) -> Result<(u64, u6
         }
         next_bytes = next_bytes.checked_add(line.len() as u64)
             .ok_or_else(|| anyhow!("Workflow journal 大小溢出"))?;
-        if next_bytes > MAX_JOURNAL_BYTES - FINAL_EVENT_RESERVE {
-            bail!("journalFull: Workflow journal 已达到 16 MiB 上限");
+        if next_bytes > maximum.saturating_sub(FINAL_EVENT_RESERVE) {
+            full = true;
+            break;
         }
         lines.extend_from_slice(&line);
     }
+    if full {
+        lines.clear();
+        seq = committed_seq.checked_add(1).ok_or_else(|| anyhow!("Workflow journal seq 已耗尽"))?;
+        let event = JournalEvent {
+            seq,
+            revision: run.revision,
+            at_ms: now_ms(),
+            event_type: "journalFull".into(),
+            actor: "event".into(),
+            rule: "capacity".into(),
+            run_id: run.id.clone(),
+            session_id: run.executor_session_id.clone(),
+            node_id: None,
+            message_id: None,
+        };
+        lines = serde_json::to_vec(&event)?;
+        lines.push(b'\n');
+        next_bytes = committed_bytes + lines.len() as u64;
+        if next_bytes > maximum {
+            bail!("journalFull 预留空间不足");
+        }
+    }
     file.write_all(&lines)?;
     file.sync_data()?;
-    Ok((seq, next_bytes))
+    Ok(AppendOutcome { seq, bytes: next_bytes, full })
 }
 
 pub(super) fn read(
@@ -220,5 +253,31 @@ mod tests {
         assert_eq!(events[1].node_id.as_deref(), Some("review"));
         assert!(!serde_json::to_string(&events).unwrap().contains("body"));
         assert_eq!(events[2].event_type, "run.completed");
+    }
+
+    #[test]
+    fn capacity_reserve_records_journal_full() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run: RunRecord = serde_json::from_value(serde_json::json!({
+            "id": "wr_full", "workspaceId": "w_project", "parentSessionId": "s_pm",
+            "workflowId": "direct", "bundleDigest": "sha256:test", "taskId": "task",
+            "taskPrompt": "work", "status": "running", "revision": 1,
+            "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
+            "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
+        })).unwrap();
+        run.snapshot_relative = Some(pm_snapshot_relative(&runtime, "wr_full", "wr_full").unwrap());
+        save_run(&runtime, &run).unwrap();
+        let first = load_run(&runtime, &run.id).unwrap();
+        run.revision = 2;
+        save_run_with_journal_limit(&runtime, &run, first.journal_bytes + FINAL_EVENT_RESERVE + 1).unwrap();
+        let stopped = load_run(&runtime, &run.id).unwrap();
+        assert!(stopped.journal_full);
+        assert_eq!(stopped.status, "stopping");
+        assert_eq!(stopped.stop.as_ref().unwrap().target, "blocked");
+        assert_eq!(stopped.journal_seq, first.journal_seq + 1);
+        assert_eq!(read(&runtime, &stopped, 0, 10).unwrap().last().unwrap().event_type, "journalFull");
+        assert!(stopped.journal_bytes <= first.journal_bytes + FINAL_EVENT_RESERVE + 1);
     }
 }

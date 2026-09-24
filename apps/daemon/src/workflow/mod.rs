@@ -868,6 +868,8 @@ struct RunRecord {
     #[serde(default)]
     journal_bytes: u64,
     #[serde(default)]
+    journal_full: bool,
+    #[serde(default)]
     executor_turns: u32,
     definition: WorkflowDefinition,
     roles: BTreeMap<String, RoleSnapshot>,
@@ -1857,6 +1859,7 @@ pub(crate) async fn dispatch(
         revision: 0,
         journal_seq: 0,
         journal_bytes: 0,
+        journal_full: false,
         executor_turns: 0,
         definition: bundle.definition,
         roles: bundle.roles,
@@ -4224,6 +4227,10 @@ fn active_run_records(
 }
 
 fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
+    save_run_with_journal_limit(runtime, run, journal::MAX_JOURNAL_BYTES)
+}
+
+fn save_run_with_journal_limit(runtime: &RuntimeStore, run: &RunRecord, journal_limit: u64) -> Result<()> {
     require_request_writer(runtime, run)?;
     let mut stored = run.clone();
     if stored.status == "completed"
@@ -4252,10 +4259,18 @@ fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
         let kind = stored.status.clone();
         supervision::prepare_notice(&mut stored, &kind);
     }
-    if stored.snapshot_relative.is_some() {
-        let (seq, bytes) = journal::append(runtime, &stored)?;
-        stored.journal_seq = seq;
-        stored.journal_bytes = bytes;
+    if stored.snapshot_relative.is_some() && !stored.journal_full {
+        let outcome = journal::append_with_limit(runtime, &stored, journal_limit)?;
+        stored.journal_seq = outcome.seq;
+        stored.journal_bytes = outcome.bytes;
+        if outcome.full {
+            stored.journal_full = true;
+            if !matches!(stored.status.as_str(), "stopping" | "cancelling" | "cancelled") {
+                control::request_stop(&mut stored, "blocked", "Workflow journal 已达到 16 MiB 上限".into());
+                stored.revision = stored.revision.saturating_add(1);
+                stored.updated_at_ms = now_ms();
+            }
+        }
     }
     let run = &stored;
     // The envelope deliberately lacks the legacy top-level Run fields. An
@@ -6257,6 +6272,7 @@ mod tests {
             revision: 0,
             journal_seq: 0,
             journal_bytes: 0,
+            journal_full: false,
             executor_turns: 0,
             definition,
             roles: BTreeMap::new(),
@@ -6321,6 +6337,7 @@ mod tests {
             revision: 0,
             journal_seq: 0,
             journal_bytes: 0,
+            journal_full: false,
             executor_turns: 0,
             definition: WorkflowDefinition {
                 structure: None,
