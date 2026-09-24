@@ -690,6 +690,20 @@ pub(crate) async fn maintain(state: &Shared) {
                 continue;
             }
         };
+        let mut latest = BTreeMap::<&str, &RunRecord>::new();
+        for run in &runs {
+            let id = request::group_id(run);
+            if latest.get(id).is_none_or(|previous| previous.created_at_ms <= run.created_at_ms) {
+                latest.insert(id, run);
+            }
+        }
+        for run in latest.values() {
+            if matches!(run.status.as_str(), "completed" | "cancelled") {
+                if let Err(error) = release_request_writer(&runtime, run) {
+                    tracing::warn!(run = %run.id, %error, "workflow request writer release remains pending");
+                }
+            }
+        }
         let cancelled = runs
             .iter()
             .filter(|run| {
@@ -717,6 +731,14 @@ pub(crate) async fn maintain(state: &Shared) {
                 });
             if !unfinished {
                 continue;
+            }
+            match claim_request_writer(&runtime, &run) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    tracing::warn!(run = %run.id, %error, "workflow request writer unavailable");
+                    continue;
+                }
             }
             let key = runtime.root.join(&run.id);
             let inserted = RECONCILING

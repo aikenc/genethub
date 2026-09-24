@@ -59,13 +59,12 @@ agent CLI 自己的线程库（`~/.codex/` 之类）不归我们管，只在会�
 "只由 daemon 写"是**纪律，不是强制**：任何有项目写权限的 Agent 技术上都能写，放进 `<data>` 也挡不住。
 越权写入会在会话记录里留痕，由复查发现。不要为此设计额外的防篡改机制。
 
-## 5. 已知偏离
+## 5. Workflow 布局
 
-下列数据尚未符合本规范，新代码不得扩大它们：
+| 数据 | 位置 |
+| --- | --- |
+| Candidate、激活指针 | 包的 Executor Space 级 `components/executor/`；无独立载体的定义包使用项目根的同名目录 |
+| Run 快照（按请求归档） | 项目 PM Space 级 `components/pm/requests/<请求 id>/runs/<Run id>/run.json` |
+| Run ID 定位记录、请求写锁与引用租约 | 项目 PM Space 级 `components/pm/`；定位记录可从请求目录重建 |
 
-| 数据 | 当前位置 | 目标位置 |
-| --- | --- | --- |
-| Workflow Candidate、激活指针、Run 索引与旧式完整 Run | `<data>/workflow-runtime/<本机 workspace id>/` | Candidate 与激活归 Executor 的 Space 级 `components/executor/` |
-| Workflow Run 快照 | Executor 会话级 `components/executor/snapshots/` | 请求及其全部 Run 归发起它的 PM 会话级 `components/pm/requests/<请求 id>/` |
-
-新布局启用时删除本节对应行和旧路径代码，不保留第二种读取路径；本次不导入旧记录。
+旧版 `<data>/workflow-runtime/` 与 Executor 会话快照不自动导入，新版不从那里读取。

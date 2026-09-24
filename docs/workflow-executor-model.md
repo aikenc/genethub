@@ -23,13 +23,14 @@ Workflow 是被创建、验证和采用的执行方案。Executor 是使这个�
 | --- | --- |
 | 可编辑 Workflow 源 | 包目录 `.genethub/workflows/<id>/`；它自带 git 检出，WM 在其中维护版本 |
 | 执行绑定 | 由包推导：声明顶层 `executor` 组件的 Space 对应产物目录即该包的 Executor；任务目录默认项目根，由 Run 输入覆盖 |
-| Candidate、激活指针及 Run 索引 | daemon 管理，当前在 `<data>/workflow-runtime/<本机 workspace id>/`；激活指针按包分文件，一个包的重建不会改写另一个包的指向 |
-| Executor 所属 Run 快照 | Executor 会话的 executor 组件实例 `snapshots`；由 daemon 更新 |
+| Candidate、激活指针 | daemon 管理，位于包的 Executor Space 级 `components/executor/`；激活指针按包分文件 |
+| Run ID 定位记录 | 项目 PM Space 级 `components/pm/runs/`；供现有直达命令使用，可从请求目录重建 |
+| Run 快照 | 项目 PM Space 级 `components/pm/requests/<请求 id>/runs/<Run id>/run.json`；由 daemon 更新，与单个对话的删除无关 |
 | Space 的 Skill 与配置 | 各 AgentSpace 的 Builder 源及其验证身份；不能假设一个 Candidate digest 已覆盖全部 Skill 内容 |
 
-上表中的 Candidate、激活指针、Run 索引及快照是已知偏离。前者违反 `L13`，后者让一个请求的多个 Run 分散在不同会话里。目标位置见 [storage-layout.md](./storage-layout.md) §5；新代码不得扩大这些偏离。
+目录规则见 [storage-layout.md](./storage-layout.md) §5。旧版 `<data>/workflow-runtime/` 记录不自动导入。
 
-相关实现见 [Workflow 宿主](../apps/daemon/src/workflow/mod.rs)的 `compile_candidate`、`resolve_execution_binding`、`executor_snapshot_relative` 与 `save_run`，[包发现与物化](../apps/daemon/src/workflow/package.rs)、[构建与授权](../apps/daemon/src/workflow/build.rs)，以及随产品发布的[内置包](../apps/daemon/workflow-packages/game-delivery/workflow.md)。
+相关实现见 [Workflow 宿主](../apps/daemon/src/workflow/mod.rs)的 `compile_candidate`、`resolve_execution_binding`、`pm_snapshot_relative` 与 `save_run`，[包发现与物化](../apps/daemon/src/workflow/package.rs)、[构建与授权](../apps/daemon/src/workflow/build.rs)，以及随产品发布的[内置包](../apps/daemon/workflow-packages/game-delivery/workflow.md)。
 
 项目、Executor 和目录有三种不同关系。
 
