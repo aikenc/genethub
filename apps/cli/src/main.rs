@@ -211,6 +211,8 @@ pub fn usage() -> i32 {
                                     share the original request bounds; recovery needs new user input
   genet workflow history [--limit <n>]
                                     list recent Runs for Workflow analysis
+  genet workflow journal --run <id> [--since <seq>] [--limit <n>]
+                                    read committed Run events and references
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
                               [--outcome <name> --reason <text>]

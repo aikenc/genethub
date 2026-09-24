@@ -63,6 +63,12 @@ enum Command {
         workspace_id: Option<String>,
         limit: Option<u32>,
     },
+    Journal {
+        workspace_id: Option<String>,
+        run_id: String,
+        since: u64,
+        limit: u32,
+    },
     Complete {
         workspace_id: Option<String>,
         run_id: Option<String>,
@@ -348,6 +354,16 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 "workflow.history",
                 json!({"workspaceId": workspace_id, "runs": runs}),
             );
+            Ok(EXIT_OK)
+        }
+        Command::Journal { workspace_id, run_id, since, limit } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowJournal(events) = rpc.call(Request::WorkflowJournal {
+                workspace_id: workspace_id.clone(), run_id: run_id.clone(), since, limit,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.journal with the wrong reply"));
+            };
+            output::succeed("workflow.journal", json!({"workspaceId": workspace_id, "runId": run_id, "events": events}));
             Ok(EXIT_OK)
         }
         Command::Complete {
@@ -856,6 +872,12 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             workspace_id: values.workspace.take(),
             limit: values.limit,
         }),
+        "journal" => Ok(Command::Journal {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow journal 需要 --run <id>"))?,
+            since: values.since.unwrap_or(0),
+            limit: values.limit.unwrap_or(100).min(1024),
+        }),
         "complete" => Ok(Command::Complete {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -899,7 +921,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 }
 
 const USAGE: &str =
-    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|check|complete|cancel|recover|continue|budget ...";
+    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|journal|check|complete|cancel|recover|continue|budget ...";
 
 #[derive(Default)]
 struct Values {
@@ -923,6 +945,7 @@ struct Values {
     revision: Option<u64>,
     timeout: Option<u64>,
     limit: Option<u32>,
+    since: Option<u64>,
     max_runs: Option<u32>,
     deadline_seconds: Option<u64>,
     max_llm_rounds: Option<u64>,
@@ -995,6 +1018,11 @@ impl Values {
                     if values.limit == Some(0) {
                         return Err(CliFailure::invalid_args("--limit 需要正整数"));
                     }
+                }
+                "--since" => {
+                    values.since = Some(next(&mut index)?.parse::<u64>().map_err(|_| {
+                        CliFailure::invalid_args("--since 需要非负日志序号")
+                    })?);
                 }
                 "--max-runs" => {
                     let value = next(&mut index)?;

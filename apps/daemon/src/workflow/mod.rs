@@ -27,6 +27,7 @@ mod authoring;
 mod build;
 mod check;
 mod control;
+mod journal;
 mod output;
 mod package;
 mod request;
@@ -862,6 +863,10 @@ struct RunRecord {
     task_prompt: String,
     status: String,
     revision: u64,
+    #[serde(default)]
+    journal_seq: u64,
+    #[serde(default)]
+    journal_bytes: u64,
     #[serde(default)]
     executor_turns: u32,
     definition: WorkflowDefinition,
@@ -1850,6 +1855,8 @@ pub(crate) async fn dispatch(
         task_prompt: task_prompt.to_string(),
         status: "running".into(),
         revision: 0,
+        journal_seq: 0,
+        journal_bytes: 0,
         executor_turns: 0,
         definition: bundle.definition,
         roles: bundle.roles,
@@ -2014,6 +2021,20 @@ pub async fn abort_launch(state: &Shared, root_workspace_id: &str, run_id: &str)
 pub(crate) fn get(runtime: &RuntimeStore, run_id: &str) -> Result<WorkflowRunStatus> {
     validate_id(run_id, "runId")?;
     run_status(runtime, &load_run(runtime, run_id)?)
+}
+
+pub(crate) fn journal(
+    runtime: &RuntimeStore,
+    run_id: &str,
+    since: u64,
+    limit: u32,
+) -> Result<Vec<serde_json::Value>> {
+    validate_id(run_id, "runId")?;
+    journal::read(runtime, &load_run(runtime, run_id)?, since, limit.clamp(1, 1024) as usize)?
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
 pub(crate) fn history(runtime: &RuntimeStore, limit: u32) -> Result<Vec<WorkflowRunStatus>> {
@@ -4231,6 +4252,11 @@ fn save_run(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
         let kind = stored.status.clone();
         supervision::prepare_notice(&mut stored, &kind);
     }
+    if stored.snapshot_relative.is_some() {
+        let (seq, bytes) = journal::append(runtime, &stored)?;
+        stored.journal_seq = seq;
+        stored.journal_bytes = bytes;
+    }
     let run = &stored;
     // The envelope deliberately lacks the legacy top-level Run fields. An
     // older daemon must refuse it, rather than discard durable stop obligations.
@@ -6229,6 +6255,8 @@ mod tests {
             task_prompt: "publish".into(),
             status: "running".into(),
             revision: 0,
+            journal_seq: 0,
+            journal_bytes: 0,
             executor_turns: 0,
             definition,
             roles: BTreeMap::new(),
@@ -6291,6 +6319,8 @@ mod tests {
             task_prompt: "work".into(),
             status: status.into(),
             revision: 0,
+            journal_seq: 0,
+            journal_bytes: 0,
             executor_turns: 0,
             definition: WorkflowDefinition {
                 structure: None,

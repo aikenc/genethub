@@ -1460,6 +1460,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::WorkflowList { workspace_id }
         | Request::WorkflowBuild { workspace_id, .. }
         | Request::WorkflowHistory { workspace_id, .. }
+        | Request::WorkflowJournal { workspace_id, .. }
         | Request::AgentSpaceChildren { workspace_id }
         | Request::WorkspaceAddRoot { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }

@@ -1333,6 +1333,23 @@ async fn dispatch(
             }
         }
 
+        Request::WorkflowJournal { workspace_id, run_id, since, limit } => {
+            let workspace = match state.workspaces.get(&workspace_id).await {
+                Ok(workspace) => workspace,
+                Err(error) => return failed(error),
+            };
+            let runtime = match crate::workflow::RuntimeStore::new(
+                &state.paths.root, &workspace_id, &workspace.root,
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => return failed(error),
+            };
+            match crate::workflow::journal(&runtime, &run_id, since, limit) {
+                Ok(events) => Handled::ok(Reply::WorkflowJournal(events)),
+                Err(error) => failed(error),
+            }
+        }
+
         Request::WorkflowHistory {
             workspace_id,
             limit,

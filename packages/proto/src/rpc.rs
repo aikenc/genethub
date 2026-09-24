@@ -210,6 +210,13 @@ pub enum Request {
         workspace_id: String,
         run_id: String,
     },
+    #[serde(rename = "workflow.journal", rename_all = "camelCase")]
+    WorkflowJournal {
+        workspace_id: String,
+        run_id: String,
+        since: u64,
+        limit: u32,
+    },
     /// Lists recent Runs for project-side Workflow analysis. This is a
     /// read-only projection; detailed structured messages remain Session-owned.
     #[serde(rename = "workflow.history", rename_all = "camelCase")]
@@ -1074,6 +1081,7 @@ pub enum Reply {
     WorkflowPackages(WorkflowPackageList),
     WorkflowBuild(WorkflowBuildReport),
     WorkflowRun(WorkflowRunStatus),
+    WorkflowJournal(Vec<serde_json::Value>),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),
