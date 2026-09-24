@@ -54,9 +54,7 @@ const MAX_ACTIVATION_HISTORY: usize = 4_096;
 const MAX_ACTIVATION_RECORD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 const RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v2";
-const LEGACY_RUN_INDEX_SCHEMA: &str = "genehub.workflow.run-index.v1";
 const RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v5";
-const PREVIOUS_RUN_RECORD_SCHEMA: &str = "genehub.workflow.run-record.v2";
 const FLOW_MESSAGE_SCHEMA: &str = "genehub.flow-message.v1";
 /// Introspection keeps only recent delivery receipts. The journal owns the
 /// durable event history, so Run snapshots cannot grow with task duration.
@@ -4445,20 +4443,11 @@ fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
     }
     ensure_record_size("Workflow Run", metadata.len(), MAX_RUN_RECORD_BYTES)?;
     let bytes = fs::read(&path)?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
-    if !matches!(
-        value.get("schema").and_then(serde_json::Value::as_str),
-        Some(RUN_INDEX_SCHEMA | LEGACY_RUN_INDEX_SCHEMA)
-    ) {
-        let mut run = decode_run_record(&bytes)
-            .with_context(|| format!("读取 Workflow Run：{}", path.display()))?;
-        run.snapshot_relative = None;
-        request::load_record(runtime, &mut run)?;
-        return Ok(run);
-    }
-    let index: RunIndex = serde_json::from_value(value)
+    let index: RunIndex = serde_json::from_slice(&bytes)
         .with_context(|| format!("读取 Workflow Run index：{}", path.display()))?;
+    if index.schema != RUN_INDEX_SCHEMA {
+        bail!("unsupported Workflow Run index format {}", index.schema);
+    }
     if index.run_id != run_id {
         bail!("Workflow Run index identity mismatch");
     }
@@ -4506,9 +4495,9 @@ fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
 fn decode_run_record(bytes: &[u8]) -> Result<RunRecord> {
     let mut value: serde_json::Value = serde_json::from_slice(bytes)?;
     match value.get("schema").and_then(serde_json::Value::as_str) {
-        Some(RUN_RECORD_SCHEMA | PREVIOUS_RUN_RECORD_SCHEMA | "genehub.workflow.run-record.v3" | "genehub.workflow.run-record.v4") => serde_json::from_value(value.get_mut("run").ok_or_else(|| anyhow!("Workflow Run record has no payload"))?.take()).context("读取 Workflow Run record"),
-        None => serde_json::from_value(value).context("读取 legacy Workflow Run"),
-        Some(schema) => bail!("unsupported Workflow Run storage format {schema}; upgrade the daemon before writing this project"),
+        Some(RUN_RECORD_SCHEMA) => serde_json::from_value(value.get_mut("run").ok_or_else(|| anyhow!("Workflow Run record has no payload"))?.take()).context("读取 Workflow Run record"),
+        Some(schema) => bail!("unsupported Workflow Run storage format {schema}"),
+        None => bail!("Workflow Run storage format is missing"),
     }
 }
 
@@ -5945,7 +5934,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let runtime = RuntimeStore::new(data.path(), "workspace", project.path()).unwrap();
-        let run: RunRecord = serde_json::from_value(serde_json::json!({
+        let mut run: RunRecord = serde_json::from_value(serde_json::json!({
             "request": {"originalMessageId": "m_1", "rootRunId": "wr_root",
                 "budget": {"revision": 2, "maxRuns": 5}},
             "id": "wr_root", "workspaceId": "workspace", "parentSessionId": "s_pm",
@@ -5954,11 +5943,12 @@ mod tests {
             "definition": {"schema": DEFINITION_SCHEMA, "id": "direct", "version": 1, "nodes": []},
             "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 1
         })).unwrap();
+        run.snapshot_relative = Some(pm_snapshot_relative(&runtime, &run.id, &run.id).unwrap());
         assert!(claim_request_writer(&runtime, &run).unwrap());
         save_run(&runtime, &run).unwrap();
         let request_path = project.path().join(".genethub/components/pm/requests/wr_root/request.json");
         assert!(request_path.is_file());
-        let snapshot_path = run_path(&runtime, &run.id, false).unwrap();
+        let snapshot_path = runtime.project_file(run.snapshot_relative.as_deref().unwrap()).unwrap();
         let mut stale: serde_json::Value = serde_json::from_slice(&fs::read(&snapshot_path).unwrap()).unwrap();
         stale["run"]["request"]["budget"]["maxRuns"] = serde_json::json!(1);
         crate::config::save_private(&snapshot_path, &serde_json::to_vec(&stale).unwrap()).unwrap();
