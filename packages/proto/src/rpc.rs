@@ -270,6 +270,34 @@ pub enum Request {
         #[ts(type = "number")]
         expected_revision: u64,
     },
+    /// Start a new recovery Run for one blocked business Run. The actor is
+    /// bound to the authenticated ordinary PM Session by the daemon.
+    #[serde(rename = "workflow.recovery.start", rename_all = "camelCase")]
+    WorkflowRecoveryStart {
+        workspace_id: String,
+        run_id: String,
+        reason: String,
+    },
+    /// Ask the Human to decide one classified exit for a blocked Run.
+    #[serde(rename = "workflow.human", rename_all = "camelCase")]
+    WorkflowHuman {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        kind: String,
+        reason: String,
+    },
+    /// Override only future recovery Runs to use the built-in flow.
+    #[serde(rename = "workflow.recovery.reset", rename_all = "camelCase")]
+    WorkflowRecoveryReset {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
     /// Changes the finite budget shared by an original request and every
     /// retry. `expectedRevision` is the budget revision exposed by
     /// `workflow.get`, independent of a Run's graph revision.

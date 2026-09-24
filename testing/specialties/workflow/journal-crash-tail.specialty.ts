@@ -23,7 +23,7 @@ defineSpecialty({
     "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,
     "--", "--nocapture",
   ], { cwd: t.openRoot, timeout: 160_000, maxBuffer: 4 * 1024 * 1024 });
-  t.assertions.assert(stdout.includes("test result: ok. 5 passed; 0 failed"),
+  t.assertions.assert(stdout.includes("test result: ok. 6 passed; 0 failed"),
     `journal crash and retention tests did not pass: ${stdout.slice(-2000)}`);
   const generated = await mkdtemp(join(t.env.root, "workflow-journal-proto-"));
   const binding = await promisify(execFile)("cargo", [

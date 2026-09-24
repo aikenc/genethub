@@ -19,6 +19,8 @@ defineSpecialty({
   for (const test of [
     "workflow::tests::request_writer_is_exclusive_across_channel_data_roots",
     "workflow::tests::request_record_owns_budget_across_run_snapshot_reads",
+    "workflow::tests::recovery_completion_keeps_request_writer_until_business_success",
+    "workflow::tests::human_acceptance_settles_business_and_recovery_once",
     "workflow::tests::patrol_reads_each_request_without_project_locator_dependency",
   ]) {
     const { stdout } = await promisify(execFile)("cargo", [

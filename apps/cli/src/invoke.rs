@@ -69,16 +69,16 @@ pub async fn hub_status() -> Option<Value> {
     })
 }
 
-/// Actual guest version from the running daemon's context, never from the CLI build.
-pub async fn daemon_version() -> Option<Value> {
+/// Runtime facts from the running daemon, never from the CLI build.
+pub async fn daemon_context() -> Option<Value> {
     let records = tokio::time::timeout(Duration::from_secs(2), collect(vec!["context".into()]))
         .await
         .ok()?
         .ok()?;
-    running_version(records)
+    running_context(records)
 }
 
-fn running_version(records: Vec<CliRecord>) -> Option<Value> {
+fn running_context(records: Vec<CliRecord>) -> Option<Value> {
     if records.last()?.exit != Some(0) {
         return None;
     }
@@ -88,8 +88,9 @@ fn running_version(records: Vec<CliRecord>) -> Option<Value> {
         }
         let line = record.line?;
         let envelope: Value = serde_json::from_str(&line).ok()?;
-        let version = envelope.pointer("/data/daemon/version")?.as_str()?;
-        Some(Value::String(version.to_owned()))
+        let daemon = envelope.pointer("/data/daemon")?.as_object()?;
+        daemon.get("version")?.as_str()?;
+        Some(Value::Object(daemon.clone()))
     })
 }
 
@@ -107,17 +108,15 @@ mod version_tests {
             record(serde_json::json!({"stream":"stdout", "line":
             r#"{"data":{"daemon":{"version":"0.14.1-beta.2"}}}"#}))
         };
+        assert_eq!(running_context(vec![response(), record(serde_json::json!({"exit":0}))])
+            .unwrap()["version"], "0.14.1-beta.2");
+        assert_eq!(running_context(vec![response()]), None);
         assert_eq!(
-            running_version(vec![response(), record(serde_json::json!({"exit":0}))]),
-            Some(Value::String("0.14.1-beta.2".into()))
-        );
-        assert_eq!(running_version(vec![response()]), None);
-        assert_eq!(
-            running_version(vec![response(), record(serde_json::json!({"exit":1}))]),
+            running_context(vec![response(), record(serde_json::json!({"exit":1}))]),
             None
         );
         assert_eq!(
-            running_version(vec![
+            running_context(vec![
                 record(serde_json::json!({"stream":"stdout", "line":
             r#"{"data":{"version":"0.13.0-beta.2"}}"#})),
                 record(serde_json::json!({"exit":0}))

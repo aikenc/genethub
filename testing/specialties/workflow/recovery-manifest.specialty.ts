@@ -6,8 +6,8 @@ import { defineSpecialty } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.workflow.recovery-manifest",
   title: "Workflow recovery selection is validated and pinned",
-  oracle: "frontmatter accepts builtin or a package flow, rejects unsafe paths, and changes Candidate identity when the recovery selector changes",
-  catches: ["recovery selector escapes the package", "custom recovery is absent from Candidate identity", "missing recovery flow activates"],
+  oracle: "frontmatter selects a validated recovery flow with controlled exits and a Human exit; Candidate identity changes with the selector, and recovery summaries remain bounded",
+  catches: ["recovery selector escapes the package", "custom recovery is absent from Candidate identity", "missing recovery flow activates", "invalid built-in recovery graph", "recovery archive grows without bound or duplicates a replay"],
   tags: ["contract", "workflow", "recovery", "native-intrinsic"],
   llm: { default: "none" },
   expectedDurationMs: 30_000,
@@ -19,8 +19,16 @@ defineSpecialty({
   for (const test of [
     "workflow::package::tests::frontmatter_accepts_only_description_dev_and_recovery",
     "workflow::tests::recovery_selector_is_pinned_and_requires_a_package_flow",
+    "workflow::tests::recovery_reset_uses_activation_override_without_editing_source",
+    "workflow::tests::recovery_activation_question_binds_candidate_and_revision",
     "workflow::tests::recovery_flow_limits_are_checked_before_candidate_activation",
+    "workflow::tests::custom_recovery_requires_a_human_and_only_controlled_exits",
     "workflow::tests::recovery_runs_do_not_spend_business_run_allowance",
+    "workflow::tests::builtin_recovery_flow_is_valid_and_budgeted",
+    "workflow::recovery::tests::archive_rotates_at_one_mib_and_replay_does_not_duplicate",
+    "workflow::recovery::tests::invalid_archived_line_is_ignored_as_untrusted_data",
+    "workflow::recovery::tests::human_exit_classifier_covers_budget_route_failure_and_acceptance",
+    "session::manager::tests::workflow_human_question_is_durable_and_idempotent",
   ]) {
     const { stdout } = await promisify(execFile)("cargo", [
       "test", "--profile", "iterate", "-p", "genet-daemon", "--lib", test,

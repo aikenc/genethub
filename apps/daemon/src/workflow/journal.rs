@@ -29,6 +29,8 @@ pub(super) struct JournalEvent {
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handled_run_id: Option<String>,
 }
 
 fn directory(runtime: &RuntimeStore, run: &RunRecord) -> Result<Option<PathBuf>> {
@@ -131,7 +133,7 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
         return Ok(AppendOutcome { seq: 0, bytes: 0, segment: String::new() });
     };
     let snapshot = directory.join("run.json");
-    let (mut seq, mut bytes, mut current, revision, status, previous_message_total) =
+    let (mut seq, mut bytes, mut current, revision, status, previous_delivery_total, previous_waiting) =
         match crate::config::sensitive_metadata(&snapshot) {
             Ok(metadata) => {
                 crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
@@ -145,10 +147,10 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
                 }
                 (previous.journal_seq, previous.journal_bytes, previous.journal_segment,
                     previous.revision, Some(previous.status),
-                    previous.flow_message_total)
+                    previous.delivery_total, previous.supervision.waiting_requests)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound =>
-                (0, 0, String::new(), 0, None, 0),
+                (0, 0, String::new(), 0, None, 0, Vec::new()),
             Err(error) => return Err(error.into()),
         };
     if run.revision < revision {
@@ -178,19 +180,67 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
     }
     prune_directory(&directory, at_ms)?;
     let mut events = Vec::new();
-    let new_messages = run.flow_message_total.checked_sub(previous_message_total)
-        .ok_or_else(|| anyhow!("Workflow flow message count 不得回退"))?;
+    let new_messages = run.delivery_total.checked_sub(previous_delivery_total)
+        .ok_or_else(|| anyhow!("Workflow delivery count 不得回退"))?;
     let new_messages = usize::try_from(new_messages).unwrap_or(usize::MAX);
-    if new_messages > run.flow_messages.len() {
-        bail!("Workflow flow message receipts 缺少未提交事件");
+    if new_messages > run.delivery_queue.len() {
+        bail!("Workflow delivery queue 缺少未提交事件");
     }
-    for message in run.flow_messages.iter().skip(run.flow_messages.len() - new_messages) {
+    for message in run.delivery_queue.iter().skip(run.delivery_queue.len() - new_messages) {
             events.push(JournalEvent {
                 seq: 0, revision: run.revision, at_ms: message.created_at_ms,
                 event_type: message.kind.clone(), actor: "event".into(), rule: "flow-message".into(),
                 run_id: run.id.clone(), session_id: Some(message.sender_session_id.clone()),
                 node_id: message.node_id.clone(), message_id: Some(message.message_id.clone()),
+                handled_run_id: None,
             });
+    }
+    for waiting in &run.supervision.waiting_requests {
+        if previous_waiting.iter().any(|previous| previous.session_id == waiting.session_id
+            && previous.request_id == waiting.request_id) { continue; }
+        events.push(JournalEvent {
+            seq: 0, revision: run.revision, at_ms,
+            event_type: "pause.requested".into(), actor: "event".into(), rule: "native-question".into(),
+            run_id: run.id.clone(), session_id: Some(waiting.session_id.clone()),
+            node_id: Some(waiting.node_id.clone()), message_id: Some(waiting.request_id.clone()),
+            handled_run_id: None,
+        });
+    }
+    for waiting in &previous_waiting {
+        if run.supervision.waiting_requests.iter().any(|current| current.session_id == waiting.session_id
+            && current.request_id == waiting.request_id) { continue; }
+        let answered = run.status == "running" && run.nodes.get(&waiting.node_id)
+            .is_some_and(|node| node.status == "running" || node.status == "finishing");
+        events.push(JournalEvent {
+            seq: 0, revision: run.revision, at_ms,
+            event_type: if answered { "pause.answered" } else { "pause.resolved" }.into(),
+            actor: if answered && !run.handles.is_empty() { "pm" } else { "human" }.into(),
+            rule: "native-question".into(), run_id: run.id.clone(),
+            session_id: Some(waiting.session_id.clone()), node_id: Some(waiting.node_id.clone()),
+            message_id: Some(waiting.request_id.clone()), handled_run_id: None,
+        });
+    }
+    if status.is_none() {
+        for handle in &run.handles {
+            events.push(JournalEvent {
+                seq: 0, revision: run.revision, at_ms,
+                event_type: "recovery.started".into(),
+                actor: if run.journal_actor.is_empty() { "pm".into() } else { run.journal_actor.clone() },
+                rule: "recovery-entry".into(), run_id: run.id.clone(),
+                session_id: Some(run.parent_session_id.clone()), node_id: None,
+                message_id: None, handled_run_id: Some(handle.run_id.clone()),
+            });
+        }
+        if run.recovery_fallback {
+            events.push(JournalEvent {
+                seq: 0, revision: run.revision, at_ms,
+                event_type: "recovery.fallback".into(),
+                actor: if run.journal_actor.is_empty() { "patrol".into() } else { run.journal_actor.clone() },
+                rule: "builtin-recovery-selected".into(), run_id: run.id.clone(),
+                session_id: None, node_id: None, message_id: None,
+                handled_run_id: run.handles.first().map(|handle| handle.run_id.clone()),
+            });
+        }
     }
     if run.revision != revision || status.as_deref() != Some(run.status.as_str()) {
         events.push(JournalEvent {
@@ -199,6 +249,7 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
             actor: if run.journal_actor.is_empty() { "event".into() } else { run.journal_actor.clone() },
             rule: "save-run".into(), run_id: run.id.clone(),
             session_id: run.executor_session_id.clone(), node_id: None, message_id: None,
+            handled_run_id: None,
         });
     }
     let today = day_key(at_ms)?;
@@ -323,6 +374,32 @@ mod tests {
     }
 
     #[test]
+    fn recovery_entry_records_target_and_patrol_actor_once() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run = run(&runtime, "wr_recovery");
+        run.handles.push(recovery::Handle {
+            run_id: "wr_business".into(), trigger_seq: 7, reason: "worker lost".into(),
+        });
+        run.journal_actor = "patrol".into();
+        save_run(&runtime, &run).unwrap();
+        let stored = load_run(&runtime, &run.id).unwrap();
+        assert!(stored.journal_actor.is_empty());
+        let events = read(&runtime, &stored, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "recovery.started");
+        assert_eq!(events[0].handled_run_id.as_deref(), Some("wr_business"));
+        assert_eq!(events[0].actor, "patrol");
+        let mut next = stored.clone();
+        next.revision += 1;
+        next.status = "blocked".into();
+        save_run(&runtime, &next).unwrap();
+        let later = read(&runtime, &load_run(&runtime, &run.id).unwrap(), 0, 10).unwrap();
+        assert_eq!(later[2].actor, "event");
+    }
+
+    #[test]
     fn seven_day_rotation_prunes_old_segments() {
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -377,8 +454,8 @@ mod tests {
         save_run(&runtime, &run).unwrap();
         let committed = load_run(&runtime, &run.id).unwrap();
         assert_eq!(committed.journal_seq, (MAX_FLOW_MESSAGES + 7) as u64);
-        assert_eq!(committed.flow_messages.len(), MAX_FLOW_MESSAGES);
-        assert_eq!(committed.flow_messages[0].message_id, "fm_6");
+        assert_eq!(committed.delivery_queue.len(), MAX_FLOW_MESSAGES);
+        assert_eq!(committed.delivery_queue[0].message_id, "fm_6");
         let events = read(&runtime, &committed, MAX_FLOW_MESSAGES as u64, 20).unwrap();
         assert_eq!(events.len(), 7);
         assert_eq!(events.last().unwrap().seq, committed.journal_seq);

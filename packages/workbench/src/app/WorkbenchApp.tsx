@@ -167,7 +167,7 @@ export function App({
   /** Opens the embedding product's feedback flow with content-free speech metadata. */
   onReportSpeechProblem?(problem: SpeechInputProblem): void;
   /** Opens the embedding product feedback flow for this exact conversation. */
-  onReportSession?(sessionId: string): void;
+  onReportSession?(sessionId: string, initialDescription?: string): void;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -936,7 +936,7 @@ export function App({
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
-              {showChat && session && !session.managed ? <TaskProgress key={`${workbench.client?.identity?.machineId}:${session.id}`} session={session} /> : null}
+              {showChat && session && !session.managed ? <TaskProgress key={`${workbench.client?.identity?.machineId}:${session.id}`} session={session} onReportSession={onReportSession} /> : null}
               {showChat ? (
                 composing ? (
                   <>

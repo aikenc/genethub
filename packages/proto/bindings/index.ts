@@ -1009,7 +1009,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1733,7 +1733,11 @@ count: number, };
  * local paths, URLs, identifiers, prompts, terminal output and Agent output do
  * not have a field in the schema.
  */
-export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
+export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, 
+/**
+ * Milliseconds since the Workflow scheduler last completed a patrol pass.
+ */
+workflowPatrolLagMs?: number, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.
@@ -2001,11 +2005,6 @@ file: string, path: string, message: string, hint: string, expected: string | nu
  */
 line: number | null, column: number | null, };
 
-/**
- * Finishing a review is distinct from approving its subject.
- */
-export type WorkflowDiagnosticStatus = { sessionId: string, status: string, createdAtMs: number, error?: string, };
-
 export type WorkflowDraftEntry = { id: string, path: string, roles: Array<string>, };
 
 /**
@@ -2022,6 +2021,8 @@ packageId?: string,
 executorPath?: string, workflows: Array<WorkflowDraftEntry>, };
 
 export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
+
+export type WorkflowHumanExitStatus = { kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
 
 export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
 
@@ -2178,7 +2179,11 @@ candidateError?: string,
  * Candidate used for new Runs. Absent only for a V1 directory project
  * that has not entered the activation lifecycle yet.
  */
-activeDigest?: string, activationRevision: number, 
+activeDigest?: string, 
+/**
+ * This executor uses the built-in recovery flow for new recovery Runs.
+ */
+recoveryBuiltinOverride: boolean, activationRevision: number, 
 /**
  * True when package source has changed since the active Candidate.
  */
@@ -2188,6 +2193,8 @@ sourceChanged: boolean,
  * is a no-op and therefore does not append an entry.
  */
 activationHistory: Array<WorkflowActivationStatus>, };
+
+export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, reason: string, };
 
 /**
  * Read-only observation returned by the request.budget Workflow capability.
@@ -2208,15 +2215,15 @@ export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, d
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { 
+export type WorkflowRunStatus = { humanExit?: WorkflowHumanExitStatus, 
+/**
+ * Immutable business Run references owned by a recovery Run.
+ */
+handles: Array<WorkflowRecoveryHandleStatus>, 
 /**
  * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
  */
-structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, 
-/**
- * Request follow-up for a Run that stopped before the original goal was resolved.
- */
-triage?: WorkflowTriageStatus, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
+structure?: unknown, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
 /**
  * Why execution is blocked, stopping or cancelled.
  */
@@ -2264,11 +2271,9 @@ humanWaitMs: number,
 /**
  * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
  */
-recoveryWaitMs: number, waiting: boolean, silenceThresholdMs: number, };
+recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
 
-export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, triage?: WorkflowTriageStatus, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
-
-export type WorkflowTriageStatus = { episodeId: string, causeCode: string, source: string, phase: string, owner: string, nextAction: string, createdAtMs: number, updatedAtMs: number, attempts: number, };
+export type WorkflowTaskSummary = { humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

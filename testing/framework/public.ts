@@ -49,6 +49,7 @@ export { clonePackage, seedWorkflowPackage, seedDirectChangePackage, BUILTIN_PAC
 export { compareQueueTails } from "./queue.ts";
 export { qualificationReasons } from "../policies/gates.ts";
 export { BlockedError, UnstableError, parseSummaryLanguage, renderRunSummary } from "../infrastructure/public.ts";
+export { createLease, releaseLease } from "../infrastructure/public.ts";
 export type { RunManifest, UnitResult } from "../infrastructure/public.ts";
 
 function callerFile(): string {

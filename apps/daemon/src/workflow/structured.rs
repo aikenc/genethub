@@ -65,7 +65,7 @@ fn apply(run: &mut RunRecord, transition: engine::Transition) -> Result<()> {
                 event.message_id,
                 run.engine.as_ref().unwrap().revision,
                 entry.frame,
-                run.flow_messages.len()
+                run.delivery_queue.len()
             );
             push_flow_message(run, event);
         }
@@ -78,7 +78,13 @@ fn sync_status(run: &mut RunRecord) {
         return;
     };
     match snapshot.status {
-        engine::Status::Completed => run.status = "completed".into(),
+        engine::Status::Completed => {
+            if run.handles.is_empty() {
+                run.status = "completed".into();
+            } else {
+                control::request_stop(run, "blocked", "recovery flow ended without a controlled exit".into());
+            }
+        }
         engine::Status::Blocked | engine::Status::Stopping => {
             let reason = snapshot
                 .outcome

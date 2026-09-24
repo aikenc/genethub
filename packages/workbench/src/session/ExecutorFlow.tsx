@@ -57,9 +57,8 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
         }
         setSnapshot({ owner: client, data: reply.data });
         setError(null);
-        completed = ["completed", "cancelled", "blocked", "failed"].includes(reply.data.run.status)
-          && (!reply.data.run.triage || reply.data.run.triage.phase === "closed");
-        if (["pendingPm", "pendingHuman"].includes(reply.data.run.triage?.phase ?? "")) delay = 15_000;
+        completed = ["completed", "cancelled"].includes(reply.data.run.status);
+        if (reply.data.run.humanExit && !reply.data.run.humanExit.answer) delay = 15_000;
       } catch (cause) {
         if (disposed) return;
         setError(cause instanceof Error ? cause.message : String(cause));
@@ -85,9 +84,10 @@ export function ExecutorFlow({ sessionId }: { sessionId: string }) {
           <p className="mt-1 text-sm">{flow.run.workflowId} · {labelStatus(flow.run.status)}</p>
           {flow.run.reason ? <p className="mt-1 text-sm">{flow.run.reason}</p> : null}
           {flow.run.cleanupError ? <p role="alert" className="mt-1 text-sm text-danger">收尾待处理：{flow.run.cleanupError}</p> : null}
-          {flow.run.triage && flow.run.triage.phase !== "closed" ? <div role="status" className="mt-2 rounded-lg border border-line px-3 py-2 text-sm">
-            <p>受阻处置：{flow.run.triage.phase === "reviewing" ? "WR 分析中" : flow.run.triage.phase === "pendingWr" ? "待 WR 分析" : flow.run.triage.phase === "pendingHuman" ? "待人处理" : "待 PM 处理"} · 负责人 {flow.run.triage.owner.toUpperCase()}</p>
-            <p className="mt-1 break-words">{flow.run.triage.nextAction}</p>
+          {flow.run.humanExit ? <div role="status" className="mt-2 rounded-lg border border-line px-3 py-2 text-sm">
+            <p>人工决定 · 出口 {flow.run.humanExit.kind}{flow.run.humanExit.answer ? ` · 已选择 ${flow.run.humanExit.answer}` : " · 待答复"}</p>
+            <p className="mt-1 break-words">{flow.run.humanExit.reason}</p>
+            {!flow.run.humanExit.answer ? <button type="button" className="mt-1 min-h-11 text-accent md:min-h-0" onClick={() => void selectSession(flow.run.humanExit!.pmSessionId)}>前往问题卡</button> : null}
           </div> : null}
           <p className="mt-1 text-xs text-muted">最后更新：{new Date(flow.run.updatedAtMs).toLocaleString()}</p>
           <button type="button" className="mt-2 min-h-11 text-xs text-accent md:min-h-0"

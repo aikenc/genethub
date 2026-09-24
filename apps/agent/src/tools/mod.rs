@@ -229,7 +229,7 @@ pub fn definitions() -> Vec<Value> {
                                 "options": {
                                     "type": "array",
                                     "minItems": 1,
-                                    "maxItems": 3,
+                                    "maxItems": 5,
                                     "items": {
                                         "type": "object",
                                         "properties": {
@@ -250,7 +250,7 @@ pub fn definitions() -> Vec<Value> {
     ];
     if evidence::enabled() {
         definitions
-            .retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls" | "read_media")));
+            .retain(|tool| matches!(tool["name"].as_str(), Some("read" | "ls" | "read_media" | "request_user_input")));
         definitions.push(evidence::definition());
     }
     definitions
@@ -313,7 +313,7 @@ pub fn user_input(args: &Value) -> Result<Value, String> {
             .get("options")
             .and_then(Value::as_array)
             .ok_or_else(|| "request_user_input: question.options is required".to_string())?;
-        if !(1..=3).contains(&options.len())
+        if !(1..=5).contains(&options.len())
             || options.iter().any(|option| {
                 option
                     .get("label")
@@ -323,7 +323,7 @@ pub fn user_input(args: &Value) -> Result<Value, String> {
             })
         {
             return Err(
-                "request_user_input: each question needs one to three labeled options".into(),
+                "request_user_input: each question needs one to five labeled options".into(),
             );
         }
     }

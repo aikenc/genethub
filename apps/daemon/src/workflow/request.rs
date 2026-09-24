@@ -89,6 +89,61 @@ pub(super) struct RequestRecord {
     cancelled_at_ms: i64,
     cancelled_by_agent: bool,
     resume_message_id: Option<String>,
+    #[serde(default)]
+    recovery_extra: RecoveryExtra,
+    #[serde(default)]
+    approved_human_exits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RecoveryExtra {
+    pub max_runs: u32,
+    pub max_llm_rounds: u64,
+    pub deadline_seconds: u64,
+}
+
+fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
+    let path = record_path(runtime, root_run_id, false)?;
+    let metadata = crate::config::sensitive_metadata(&path)?;
+    crate::config::reject_link_or_reparse(&path, &metadata)?;
+    if !metadata.is_file() { bail!("Workflow request 不是普通文件"); }
+    ensure_record_size("Workflow request", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+    let record: RequestRecord = serde_json::from_slice(&fs::read(&path)?)?;
+    if record.schema != "genehub.workflow.request.v1" || record.root_run_id != root_run_id {
+        bail!("Workflow request identity mismatch");
+    }
+    Ok(record)
+}
+
+pub(super) fn recovery_extra(runtime: &RuntimeStore, root_run_id: &str) -> Result<RecoveryExtra> {
+    Ok(read_record(runtime, root_run_id)?.recovery_extra)
+}
+
+/// Called only after a daemon-authored Human question receives its answer.
+/// The request ID is the idempotency key, so a crash between this write and
+/// the Human exit receipt cannot spend approval twice.
+pub(super) fn apply_human_budget(runtime: &RuntimeStore, root_run_id: &str, request_id: &str, kind: &str) -> Result<()> {
+    let mut record = read_record(runtime, root_run_id)?;
+    if record.approved_human_exits.iter().any(|id| id == request_id) { return Ok(()); }
+    if record.approved_human_exits.len() >= 64 { bail!("Workflow Human approval history is full"); }
+    match kind {
+        "a" => {
+            record.budget.max_runs = record.budget.max_runs.saturating_add(1).min(MAX_CONFIGURED_REQUEST_RUNS);
+            record.budget.max_llm_rounds = record.budget.max_llm_rounds.saturating_add(128).min(MAX_CONFIGURED_LLM_ROUNDS);
+            record.budget.deadline_ms = record.budget.deadline_ms.saturating_add(3_600_000)
+                .min(MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS.saturating_mul(1000));
+            record.budget.revision = record.budget.revision.saturating_add(1);
+        }
+        "c" => {
+            record.recovery_extra.max_runs = record.recovery_extra.max_runs.saturating_add(1).min(10);
+            record.recovery_extra.max_llm_rounds = record.recovery_extra.max_llm_rounds.saturating_add(100).min(1000);
+            record.recovery_extra.deadline_seconds = record.recovery_extra.deadline_seconds.saturating_add(1800).min(86400);
+        }
+        _ => bail!("Human exit {kind} does not adjust a budget"),
+    }
+    record.approved_human_exits.push(request_id.into());
+    crate::config::save_private(&record_path(runtime, root_run_id, true)?, &encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?)
 }
 
 fn record_path(runtime: &RuntimeStore, root_run_id: &str, create: bool) -> Result<PathBuf> {
@@ -99,16 +154,24 @@ fn record_path(runtime: &RuntimeStore, root_run_id: &str, create: bool) -> Resul
 pub(super) fn save_record(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
     if group_id(run) != run.id { return Ok(()); }
     let Some(link) = run.request.as_ref() else { return Ok(()); };
+    let existing = match crate::config::sensitive_metadata(&record_path(runtime, &run.id, false)?) {
+        Ok(_) => Some(read_record(runtime, &run.id)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let record = RequestRecord {
         schema: "genehub.workflow.request.v1".into(),
         root_run_id: run.id.clone(),
         original_message_id: link.original_message_id.clone(),
         goal: run.task_prompt.clone(),
-        budget: link.budget.clone(),
+        budget: existing.as_ref().filter(|record| record.budget.revision > link.budget.revision)
+            .map(|record| record.budget.clone()).unwrap_or_else(|| link.budget.clone()),
         cancelled: link.cancelled,
         cancelled_at_ms: link.cancelled_at_ms,
         cancelled_by_agent: link.cancelled_by_agent,
         resume_message_id: link.resume_message_id.clone(),
+        recovery_extra: existing.as_ref().map(|record| record.recovery_extra.clone()).unwrap_or_default(),
+        approved_human_exits: existing.map(|record| record.approved_human_exits).unwrap_or_default(),
     };
     let body = encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?;
     crate::config::save_private(&record_path(runtime, &run.id, true)?, &body)
@@ -116,16 +179,8 @@ pub(super) fn save_record(runtime: &RuntimeStore, run: &RunRecord) -> Result<()>
 
 pub(super) fn load_record(runtime: &RuntimeStore, run: &mut RunRecord) -> Result<()> {
     if group_id(run) != run.id || run.request.is_none() { return Ok(()); }
-    let path = record_path(runtime, &run.id, false)?;
-    let metadata = crate::config::sensitive_metadata(&path)
-        .with_context(|| format!("Workflow request 不存在：{}", run.id))?;
-    crate::config::reject_link_or_reparse(&path, &metadata)?;
-    if !metadata.is_file() { bail!("Workflow request 不是普通文件"); }
-    ensure_record_size("Workflow request", metadata.len(), MAX_RUN_RECORD_BYTES)?;
-    let record: RequestRecord = serde_json::from_slice(&fs::read(&path)?)?;
-    if record.schema != "genehub.workflow.request.v1"
-        || record.root_run_id != run.id
-        || record.goal != run.task_prompt {
+    let record = read_record(runtime, &run.id)?;
+    if record.goal != run.task_prompt {
         bail!("Workflow request identity mismatch");
     }
     let link = run.request.as_mut().ok_or_else(|| anyhow!("request root has no link"))?;

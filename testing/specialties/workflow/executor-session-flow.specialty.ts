@@ -305,7 +305,7 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         const stopped = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
         t.assertions.assert(stopped.code === 0, `daemon stop failed: ${stopped.stderr}`);
         if (outcome === "corrupt-frontier") {
-          const snapshotPath = path.join(projectRoot,"spaces","game-delivery--executor",".genethub","sessions",accepted!.executorSessionId!,"components","executor","snapshots",`run-${accepted!.id}.json`);
+          const snapshotPath = path.join(projectRoot,".genethub","components","pm","requests",accepted!.id,"runs",accepted!.id,"run.json");
           const saved = JSON.parse(readFileSync(snapshotPath,"utf8"));
           t.assertions.assert(!!saved.run.engine,"fault fixture lacks a structured snapshot");
           saved.run.engine.frames[saved.run.engine.root].cursor = {phase:"selected",child:999999};
@@ -325,10 +325,9 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
             return session?.type === "snapshot" && session.data.summary.status === "closed";
           },35_000);
           await t.tools.waitUntil(async()=>{
-            const reply=await opened.client.call({type:"workflow.get",payload:{workspaceId:projectId,runId:accepted!.id}});
-            return reply?.type === "workflowRun" && reply.data.triage?.causeCode === "executionException"
-              && reply.data.triage.attempts >= 1 && reply.data.triage.attempts <= 3
-              && (reply.data.diagnostics?.length ?? 0) >= reply.data.triage.attempts;
+            const reply=await opened.client.call({type:"workflow.history",payload:{workspaceId:projectId,limit:10}});
+            return reply?.type === "workflowRuns" && reply.data.some(candidate =>
+              candidate.handles.some(handle => handle.runId === accepted!.id));
           },35_000);
           return;
         }
@@ -372,16 +371,14 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
       );
       if (outcome === "exhausted") {
         await t.tools.waitUntil(async () => {
-          const reply = await opened.client.call({ type: "workflow.get", payload: { workspaceId: projectId, runId } });
-          return reply?.type === "workflowRun" && reply.data.triage?.phase === "pendingPm"
-            && reply.data.triage.source === "wr" && reply.data.triage.attempts === 1
-            && reply.data.diagnostics?.some(diagnostic => diagnostic.status === "finished") === true;
+          const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: projectId, limit: 10 } });
+          return reply?.type === "workflowRuns" && reply.data.some(candidate =>
+            candidate.handles.some(handle => handle.runId === runId));
         }, 45_000);
         const pmSnapshot = await opened.client.call({ type: "session.get", payload: { sessionId: pmSessionId } });
         t.assertions.assert(pmSnapshot?.type === "snapshot"
-          && pmSnapshot.data.summary.workSummary?.tasks.some(task => task.runId === runId
-            && task.triage?.phase === "pendingPm" && task.triage.owner === "pm") === true,
-          "PM task card did not carry the WR handoff after the notice was handled");
+          && pmSnapshot.data.summary.workSummary?.tasks.some(task => task.requestRunId === runId) === true,
+          "PM task card lost the blocked original request while recovery runs");
       }
       t.assertions.assert(run?.executorTurns === 0, "deterministic Executor used an LLM turn");
       t.assertions.assert(Boolean(run?.executorSessionId), "Run has no Executor Session");
@@ -475,8 +472,9 @@ for (const outcome of ["approved", "repaired", "exhausted", "cancel-handoff", "r
         "components",
         "executor",
       );
-      const snapshot = JSON.parse(readFileSync(path.join(flowRoot, "snapshots", `run-${runId}.json`), "utf8"));
-      t.assertions.assert(snapshot.run.flowMessages.some((message: {kind: string}) => message.kind === terminal), "the durable Run is missing its terminal flow message");
+      const snapshot = JSON.parse(readFileSync(path.join(projectRoot,".genethub","components","pm","requests",runId,"runs",runId,"run.json"), "utf8"));
+      t.assertions.assert(snapshot.run.deliveryQueue.some((message: {kind: string}) => message.kind === terminal), "the durable Run is missing its terminal delivery message");
+      t.assertions.assert(!existsSync(path.join(flowRoot, "snapshots", `run-${runId}.json`)), "Run snapshot remained in the Executor Session");
       for (const obsolete of ["manifest.json", "inbox.jsonl", "journal.jsonl", "outbox.jsonl"]) {
         t.assertions.assert(!existsSync(path.join(flowRoot, obsolete)), "Run writes redundant flow projections");
       }

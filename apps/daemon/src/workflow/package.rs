@@ -158,44 +158,6 @@ impl Package {
         Ok(first)
     }
 
-    /// The Space that hosts bounded automatic diagnosis. Absent is normal and
-    /// not an error: the kernel already has a "not configured" branch that
-    /// notifies PM instead of failing a Run.
-    pub(crate) fn diagnostic_space(&self) -> Result<Option<&SpaceSource>> {
-        self.single_component_space(crate::agent_space::COMPONENT_DIAGNOSTIC)
-    }
-
-    fn single_component_space(&self, component_id: &str) -> Result<Option<&SpaceSource>> {
-        let mut matches = self.spaces.iter().filter(|space| {
-            space
-                .components
-                .iter()
-                .any(|(id, _)| id == component_id)
-        });
-        let first = matches.next();
-        if let Some(extra) = matches.next() {
-            bail!(
-                "Workflow 包 {} 声明了多个 {component_id} 载体：{} 与 {}",
-                self.id,
-                first.expect("checked above").name,
-                extra.name
-            );
-        }
-        Ok(first)
-    }
-
-    /// The worker role the diagnostic carrier runs as. The platform owns every
-    /// diagnosis policy; a package only chooses the carrier and its role.
-    pub(crate) fn diagnostic_role(&self) -> Result<Option<String>> {
-        Ok(self.diagnostic_space()?.and_then(|space| {
-            space
-                .components
-                .iter()
-                .find(|(id, _)| id == crate::agent_space::COMPONENT_WORKER)
-                .and_then(|(_, role)| role.clone())
-        }))
-    }
-
     /// Product directory name for one of this package's Spaces. Flattening `/`
     /// keeps every artifact inside the existing `<project>/spaces/<name>`
     /// allowlist instead of relaxing the Builder's path rule.
@@ -913,32 +875,6 @@ mod tests {
         let package = load(root.path(), "pkg").unwrap();
         let error = package.executor_space().unwrap_err().to_string();
         assert!(error.contains("executor"), "{error}");
-    }
-
-    #[test]
-    fn the_diagnostic_role_comes_from_the_carrier_worker_component() {
-        let root = tempfile::tempdir().unwrap();
-        seed_package(root.path(), "pkg");
-        let space = root.path().join(PACKAGES_DIR).join("pkg/spaces/wr");
-        write(
-            &space.join(SPACE_FILE),
-            r#"{"lifecycle":"pooled","components":[{"componentId":"worker","role":"workflow-reviewer"},{"componentId":"diagnostic"}]}"#,
-        );
-        write(&space.join(PIPESPACE_FILE), r#"{"schema":"pipespace.v1"}"#);
-        let package = load(root.path(), "pkg").unwrap();
-        assert_eq!(
-            package.diagnostic_role().unwrap().as_deref(),
-            Some("workflow-reviewer")
-        );
-    }
-
-    #[test]
-    fn no_diagnostic_carrier_is_not_an_error() {
-        let root = tempfile::tempdir().unwrap();
-        seed_package(root.path(), "pkg");
-        let package = load(root.path(), "pkg").unwrap();
-        assert!(package.diagnostic_space().unwrap().is_none());
-        assert!(package.diagnostic_role().unwrap().is_none());
     }
 
     #[test]

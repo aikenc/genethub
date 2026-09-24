@@ -101,6 +101,7 @@ impl Diagnostics {
             uptime_seconds: self.started.elapsed().as_secs(),
             hub_state: hub_state(hub).to_string(),
             remote_state: remote_state(remote).to_string(),
+            workflow_patrol_lag_ms: crate::workflow::patrol_lag_ms(),
             events: record.events.iter().cloned().collect(),
             dropped_events: record.dropped,
         }

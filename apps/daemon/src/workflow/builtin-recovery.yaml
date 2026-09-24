@@ -1,0 +1,64 @@
+schema: genehub.workflow.definition.v1
+id: builtin-recovery
+version: 1
+entry: review
+budget: {maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600}
+pmAnswerSeconds: 1800
+outcomes:
+  repair: {success: true}
+  resume: {success: true}
+  successor: {success: true}
+  human: {success: false}
+  cancel: {success: false}
+nodes:
+  - id: review
+    uses: agent.session
+    with: {role: recovery-reviewer}
+    completion:
+      all:
+        - {key: report, verify: value.nonEmpty}
+    on:
+      repair: [repair]
+      resume: [publish-resume]
+      successor: [publish-successor]
+  - id: repair
+    uses: agent.session
+    with: {role: recovery-manager}
+    completion:
+      all:
+        - {key: changes, verify: value.nonEmpty}
+    on:
+      completed: [accept]
+  - id: accept
+    uses: agent.session
+    with: {role: recovery-acceptor}
+    completion:
+      all:
+        - {key: verdict, verify: value.nonEmpty}
+    on:
+      completed: [publish-accept]
+      changesRequested: [repair-again]
+  - id: repair-again
+    uses: agent.session
+    with: {role: recovery-manager}
+    completion:
+      all:
+        - {key: changes, verify: value.nonEmpty}
+    on:
+      completed: [accept-again]
+  - id: accept-again
+    uses: agent.session
+    with: {role: recovery-acceptor}
+    completion:
+      all:
+        - {key: verdict, verify: value.nonEmpty}
+    on:
+      completed: [publish-accept-again]
+  - id: publish-resume
+    uses: result.publish
+  - id: publish-successor
+    uses: result.publish
+  - id: publish-accept
+    uses: result.publish
+  - id: publish-accept-again
+    uses: result.publish
