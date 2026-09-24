@@ -17,6 +17,7 @@ const PREVIEW_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6
 /// On-demand preview loading fetches many small sub-resources in parallel;
 /// two slots serialized whole sites behind each other.
 const PREVIEW_WORKERS: usize = 8;
+const PREVIEW_SEND_STEP_BYTES: usize = 64 * 1024;
 
 pub(super) async fn handle(stream: &mut ServerStream, services: &PeerServices) -> Result<()> {
     if !stream.read_body(0).await?.is_empty() {
@@ -116,6 +117,7 @@ struct PreviewSendStats {
 
 async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<PreviewSendStats> {
     let (metadata, mut source, expected_digest) = file.into_parts();
+    let snapshot = source.is_snapshot();
     let expected_bytes = metadata.source_bytes;
     let mut stats = PreviewSendStats {
         source_bytes: expected_bytes,
@@ -131,7 +133,7 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
         .await?;
     let mut hasher = Sha256::new();
     let mut sent = 0u64;
-    let mut step = vec![0u8; crate::files::PREVIEW_STEP_BYTES];
+    let mut step = vec![0u8; PREVIEW_SEND_STEP_BYTES];
     loop {
         let began = Instant::now();
         let read = source
@@ -149,7 +151,9 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
             return Err(anyhow!("preview source changed while it was streamed"));
         }
         let began = Instant::now();
-        hasher.update(&step[..read]);
+        if !snapshot {
+            hasher.update(&step[..read]);
+        }
         stats.hash_us += began.elapsed().as_micros() as u64;
         let began = Instant::now();
         stream.write(&step[..read]).await?;
@@ -159,7 +163,7 @@ async fn send_file(stream: &mut ServerStream, file: PreviewFile) -> Result<Previ
         stats.yield_us += began.elapsed().as_micros() as u64;
     }
     let streamed_digest: [u8; 32] = hasher.finalize().into();
-    if sent != expected_bytes || streamed_digest != expected_digest {
+    if sent != expected_bytes || (!snapshot && streamed_digest != expected_digest) {
         return Err(anyhow!("preview source changed while it was streamed"));
     }
     let began = Instant::now();

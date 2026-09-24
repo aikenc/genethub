@@ -178,6 +178,11 @@ export async function openRtcDataLink(
       fail("the daemon returned an invalid RTC answer");
     }
     await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp }).catch(fail);
+    onDiagnostic?.({
+      diagnosticId: diagnosticId ?? null,
+      milestone: "remoteCandidates",
+      ...remoteCandidateCounts(peer),
+    });
     phase = "channel";
     await withDeadline(opened, CONNECT_TIMEOUT_MS, "RTC DataChannel did not open").catch(fail);
     finishStage("channel");
@@ -436,7 +441,25 @@ function snapshotPeer(peer: RTCPeerConnection, diagnosticId?: string): RtcDiagno
     iceConnectionState: peer.iceConnectionState,
     connectionState: peer.connectionState,
     signalingState: peer.signalingState,
+    ...remoteCandidateCounts(peer),
   };
+}
+
+/** Only candidate types are retained. SDP addresses and ports must not enter diagnostics. */
+function remoteCandidateCounts(peer: RTCPeerConnection): RtcDiagnostic {
+  const counts = { remoteCandidateHost: 0, remoteCandidateSrflx: 0,
+    remoteCandidatePrflx: 0, remoteCandidateRelay: 0 };
+  const sdp = peer.remoteDescription?.sdp;
+  if (!sdp) return counts;
+  for (const line of sdp.split(/\r?\n/)) {
+    if (!line.startsWith("a=candidate:")) continue;
+    const type = / typ (host|srflx|prflx|relay)(?: |$)/.exec(line)?.[1];
+    if (type === "host") counts.remoteCandidateHost++;
+    else if (type === "srflx") counts.remoteCandidateSrflx++;
+    else if (type === "prflx") counts.remoteCandidatePrflx++;
+    else if (type === "relay") counts.remoteCandidateRelay++;
+  }
+  return counts;
 }
 
 function withDeadline<T>(
