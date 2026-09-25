@@ -96,7 +96,12 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         : pure || budgetCase ? "true" : waitFile(effect(data.key === "a" ? "z" : "a"));
       const pause = scenario === "parallel-sibling-lost" ? "sleep 45 && "
         : scenario === "parallel-failure" && data.key === "z" ? "sleep 30 && " : data.key === "z" ? "sleep 0.3 && " : "";
-      const after = scenario === "observation" || (scenario === "parallel-restart" && data.key === "z") ? " && sleep 5" : "";
+      // Hold the submitted branch in `finishing` until the daemon restarts.
+      // A five-second window can close before the gate observes both branches.
+      const after = scenario === "observation" ? " && sleep 5"
+        : scenario === "parallel-restart" && data.key === "z"
+          ? ` && for i in $(seq 1 2400); do test -f ${q(release)} && break; sleep 0.05; done`
+          : "";
       return { tool: { name: "bash", arguments: { command: `printf '%s\\n' ${q(identity)} >> ${q(effect(data.key))} && ${barrier} && ${pause}"$GENEHUB_CLI" workflow complete ${finish}${after}` } } };
     } })));
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
