@@ -37,13 +37,12 @@ impl Mode {
     }
 }
 
-/// The model used in real mode, and the key it needs.
+/// The deterministic model advertised by the mock endpoint.
 ///
-/// Public because the mock reports having this same model when the daemon asks
-/// it for a list: the picker a journey chooses from is built from that answer,
-/// so the two have to agree.
+/// Real-model cases select a configured Flush profile at runtime. The mock
+/// reports this fixed model when the daemon asks it for a list, so picker
+/// assertions can remain deterministic.
 pub const REAL_MODEL: &str = "deepseek/deepseek-v4-flash";
-const REAL_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 /// Where the model actually lives for this run.
 ///
@@ -56,6 +55,7 @@ pub struct ModelBackend {
     pub api_key: String,
     /// Provider-qualified, as the daemon reports it: `provider/model`.
     pub model_id: String,
+    pub dialect: Option<String>,
 }
 
 impl ModelBackend {
@@ -185,24 +185,26 @@ impl Journey {
         };
 
         let mut config = Config::default();
-        let model = ModelBackend {
-            base_url: match &mock {
-                Some(mock) => mock.base_url.clone(),
-                None => REAL_BASE_URL.to_string(),
+        let model = match &mock {
+            Some(mock) => ModelBackend {
+                base_url: mock.base_url.clone(),
+                api_key: "sk-mock".to_string(),
+                model_id: REAL_MODEL.to_string(),
+                dialect: None,
             },
-            api_key: match &mock {
-                Some(_) => "sk-mock".to_string(),
-                None => real_api_key()?,
-            },
-            // The mock accepts any id; using the real one keeps the two modes
-            // as close as possible.
-            model_id: REAL_MODEL.to_string(),
+            None => configured_flush_backend()?,
         };
+        let provider_id = model
+            .model_id
+            .split_once('/')
+            .expect("qualified model id")
+            .0;
         config.agents.providers.insert(
-            "deepseek".to_string(),
+            provider_id.to_string(),
             ProviderConfig {
                 api_key: Some(model.api_key.clone()),
                 base_url: Some(model.base_url.clone()),
+                dialect: model.dialect.clone(),
                 // Left empty on purpose: the daemon asks the address for its
                 // models, and in mock mode that address is the mock. Writing the
                 // list here instead would leave discovery — the thing every real
@@ -557,47 +559,73 @@ fn agent_binary(name: &str) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-/// Reads the real key from the environment or the repository `.env`.
-///
-/// The file is gitignored and must stay that way; this only reads it.
-fn real_api_key() -> Result<String> {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.is_empty() {
-            return Ok(key);
+/// Selects an actual configured Flush model, without copying all host keys
+/// into the isolated journey. Profiles, not vendor spellings, own this choice.
+fn configured_flush_backend() -> Result<ModelBackend> {
+    let home = std::env::var("TESTCTL_HOST_HOME")
+        .context("real journey needs the test runner's host configuration path")?;
+    let config = PathBuf::from(home).join(".local/share/GeneHub-beta/config.json");
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config).with_context(|| {
+            format!(
+                "reading configured model profiles from {}",
+                config.display()
+            )
+        })?)?;
+    let profiles = value
+        .pointer("/agentPreferences/modelProfiles")
+        .and_then(serde_json::Value::as_array)
+        .context("host config has no model profiles")?;
+    let providers = value
+        .pointer("/agents/providers")
+        .and_then(serde_json::Value::as_object)
+        .context("host config has no providers")?;
+    for profile in profiles {
+        if profile.get("agentId").and_then(serde_json::Value::as_str) != Some("genet")
+            || !profile
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("Flush")))
+        {
+            continue;
         }
-    }
-    // Same existing host provider configuration used by TS fixtures; never emit its contents.
-    if let Ok(home) = std::env::var("TESTCTL_HOST_HOME") {
-        let config = PathBuf::from(home).join(".local/share/GeneHub-beta/config.json");
-        if let Ok(bytes) = std::fs::read(config) {
-            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(key) = value
-                    .pointer("/agents/providers/deepseek/apiKey")
-                    .and_then(|v| v.as_str())
-                    .filter(|key| !key.is_empty())
-                {
-                    return Ok(key.to_owned());
-                }
-            }
+        let Some(model_id) = profile.get("modelId").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some((provider_id, bare_id)) = model_id.split_once('/') else {
+            continue;
+        };
+        if provider_id.is_empty() || bare_id.is_empty() {
+            continue;
         }
+        let Some(provider) = providers.get(provider_id) else {
+            continue;
+        };
+        let Some(api_key) = provider
+            .get("apiKey")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+        else {
+            continue;
+        };
+        let Some(base_url) = provider
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+        else {
+            continue;
+        };
+        return Ok(ModelBackend {
+            base_url: base_url.trim().to_string(),
+            api_key: api_key.to_string(),
+            model_id: model_id.to_string(),
+            dialect: provider
+                .get("dialect")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        });
     }
-    let env_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../.env");
-    let contents = std::fs::read_to_string(&env_file).with_context(|| {
-        format!(
-            "JOURNEY_LLM=real needs DEEPSEEK_API_KEY, and {} could not be read",
-            env_file.display()
-        )
-    })?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if let Some(value) = line.strip_prefix("DEEPSEEK_API_KEY=") {
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                return Ok(value.to_string());
-            }
-        }
-    }
-    anyhow::bail!("DEEPSEEK_API_KEY is not set and was not found in .env")
+    anyhow::bail!("no configured genet Flush model has both a credential and an endpoint")
 }
 
 /// Skips a case that needs a real provider when the mock is standing in.

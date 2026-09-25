@@ -796,18 +796,23 @@ async fn a_key_the_provider_will_not_accept_says_that_and_not_add_a_key() {
 async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
+    let provider_id = journey
+        .model
+        .model_id
+        .split_once('/')
+        .expect("qualified model")
+        .0;
 
     let saved = match journey
         .client
         .call(Request::SettingsSetProvider {
-            provider_id: "deepseek".into(),
+            provider_id: provider_id.into(),
             api_key: Some("sk-0000000000000000000000000000000000000000".into()),
-            // No address on purpose. DeepSeek is a provider we ship an address
-            // for, and this is the case that used to send the key to
-            // `api.openai.com` and blame the user for it.
-            base_url: None,
+            // Keep the real provider's endpoint, replacing only its key. This
+            // samples the configured Flush backend rather than one vendor.
+            base_url: Some(journey.model.base_url.clone()),
             label: None,
-            dialect: None,
+            dialect: journey.model.dialect.clone(),
             models: None,
             model_inputs: None,
         })
@@ -819,12 +824,12 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
     let provider = saved
         .providers
         .iter()
-        .find(|provider| provider.id == "deepseek")
+        .find(|provider| provider.id == provider_id)
         .expect("configured providers are listed");
     assert_eq!(
         provider.base_url.as_deref(),
-        Some("https://api.deepseek.com/v1"),
-        "a key saved for DeepSeek must be pointed at DeepSeek"
+        Some(journey.model.base_url.as_str()),
+        "a key must stay pointed at its configured provider"
     );
     // The provider's own refusal, on the screen where the key was typed. This is
     // now where a revoked key shows up first: the picker stays empty because the
@@ -834,7 +839,7 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
         .as_deref()
         .expect("a rejected key has to say so somewhere");
     assert!(
-        problem.contains("deepseek"),
+        problem.contains(provider_id),
         "the complaint does not name the provider: {problem}"
     );
     assert!(provider.models.is_empty());
@@ -863,7 +868,7 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
         failure
     );
     assert!(
-        failure.message.contains("deepseek"),
+        failure.message.contains(provider_id),
         "the message should name the provider the user configured: {}",
         failure.message
     );
