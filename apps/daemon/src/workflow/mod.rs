@@ -907,6 +907,10 @@ struct RunRecord {
     journal_segment: String,
     #[serde(skip)]
     journal_actor: String,
+    /// A compact commit marker for Human question references in the journal.
+    /// The HumanExit file and Session remain authoritative for the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    human_exit_journal: Option<HumanExitJournal>,
     #[serde(default)]
     recovery_fallback: bool,
     #[serde(default)]
@@ -936,6 +940,15 @@ struct RunRecord {
     /// snapshot itself; the private run index is only a recoverable locator.
     #[serde(skip)]
     snapshot_relative: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HumanExitJournal {
+    request_id: String,
+    pm_session_id: String,
+    kind: String,
+    answer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2133,6 +2146,7 @@ pub(crate) async fn dispatch(
         journal_bytes: 0,
         journal_segment: String::new(),
         journal_actor: journal_actor.into(),
+        human_exit_journal: None,
         recovery_fallback,
         executor_turns: 0,
         definition: bundle.definition,
@@ -7302,6 +7316,7 @@ mod tests {
             journal_bytes: 0,
             journal_segment: String::new(),
             journal_actor: String::new(),
+            human_exit_journal: None,
             recovery_fallback: false,
             executor_turns: 0,
             definition,
@@ -7373,6 +7388,7 @@ mod tests {
             journal_bytes: 0,
             journal_segment: String::new(),
             journal_actor: String::new(),
+            human_exit_journal: None,
             recovery_fallback: false,
             executor_turns: 0,
             definition: WorkflowDefinition {

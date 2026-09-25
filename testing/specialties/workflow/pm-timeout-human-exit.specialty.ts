@@ -96,6 +96,19 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
           : run.status === "cancelled");
       }, 25_000);
       t.assertions.assert((await history()).length === 1, `Human exit ${exit} changed request lineage`);
+      await t.tools.waitUntil(async () => {
+        const result = await runGenetAsync(opened.daemon.genet,
+          ["workflow", "journal", "--run", original!.id, "--since", "0", "--limit", "100"],
+          opened.daemon.env, { cwd: opened.workspaceRoot });
+        if (result.code !== 0) return false;
+        const events = (JSON.parse(result.stdout) as { data: { events: Array<{
+          eventType: string; actor: string; messageId?: string;
+        }> } }).data.events;
+        const has = (type: string, actor: string) => events.some(event =>
+          event.eventType === type && event.actor === actor && event.messageId === cardId);
+        return has("pause.requested", "event") && has("pause.answered", "human")
+          && (exit !== "a" || has("run.budgetUpdated", "human"));
+      }, 15_000);
       return;
     }
     const deleted = await opened.client.call({ type: "session.delete", payload: { sessionId: pm } });

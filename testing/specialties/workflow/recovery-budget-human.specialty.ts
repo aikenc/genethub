@@ -115,6 +115,16 @@ defineSpecialty({
       && request.recoveryExtra.deadlineSeconds === 1800
       && request.approvedHumanExits.filter(id => id === card!.id).length === 1,
     "Human c approval was not applied once to this PM request");
+    const journal = await runGenetAsync(opened.daemon.genet,
+      ["workflow", "journal", "--run", recovery!.id, "--since", "0", "--limit", "100"],
+      opened.daemon.env, { cwd: opened.workspaceRoot });
+    t.assertions.assert(journal.code === 0, `recovery journal unavailable: ${journal.stderr || journal.stdout}`);
+    const events = (JSON.parse(journal.stdout) as { data: { events: Array<{
+      eventType: string; actor: string; messageId?: string;
+    }> } }).data.events;
+    t.assertions.assert(events.some(event => event.eventType === "recovery.budgetUpdated"
+      && event.actor === "human" && event.messageId === card!.id),
+    "Human c approval omitted its committed journal reference");
   } catch (error) {
     throw new Error(`${stage}: ${error}`);
   } finally {

@@ -83,10 +83,24 @@ fn segments(directory: &Path) -> Result<Vec<(String, PathBuf)>> {
 
 fn prune_directory(directory: &Path, at_ms: i64) -> Result<()> {
     let cutoff = day_key(at_ms.saturating_sub((RETAIN_DAYS - 1) * DAY_MS))?;
-    for (name, path) in segments(directory)? {
-        let (day, _) = segment_parts(&name).expect("listed segment");
-        if day < cutoff.as_str() {
+    for entry in fs::read_dir(directory)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => { tracing::warn!(%error, "skipping unreadable Workflow journal entry during pruning"); continue; }
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some((day, _)) = segment_parts(&name) else { continue; };
+        if day >= cutoff.as_str() { continue; }
+        let path = entry.path();
+        let result = (|| -> Result<()> {
+            let metadata = crate::config::sensitive_metadata(&path)?;
+            crate::config::reject_link_or_reparse(&path, &metadata)?;
+            if !metadata.is_file() { bail!("Workflow journal segment is not a regular file"); }
             fs::remove_file(&path)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(%name, %error, "skipping damaged Workflow journal segment during pruning");
         }
     }
     Ok(())
@@ -102,30 +116,49 @@ pub(super) fn prune_project(runtime: &RuntimeStore, at_ms: i64) -> Result<()> {
         Err(error) => return Err(error.into()),
     };
     for request in listing {
-        let request = request?;
-        let metadata = crate::config::sensitive_metadata(&request.path())?;
-        crate::config::reject_link_or_reparse(&request.path(), &metadata)?;
-        if !metadata.is_dir() { continue; }
-        let request_id = request.file_name().to_string_lossy().to_string();
-        validate_id(&request_id, "request id")?;
-        let runs = runtime.directory(&Path::new("requests").join(&request_id).join("runs"), false)?;
-        let run_listing = match fs::read_dir(&runs) {
-            Ok(listing) => listing,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+        let request = match request {
+            Ok(request) => request,
+            Err(error) => { tracing::warn!(%error, "skipping unreadable Workflow request while pruning journals"); continue; }
         };
-        for run in run_listing {
-            let run = run?;
-            let metadata = crate::config::sensitive_metadata(&run.path())?;
-            crate::config::reject_link_or_reparse(&run.path(), &metadata)?;
-            if !metadata.is_dir() { continue; }
-            let run_id = run.file_name().to_string_lossy().to_string();
-            validate_id(&run_id, "run id")?;
-            let run_path = runtime.directory(&Path::new("requests").join(&request_id).join("runs").join(&run_id), false)?;
-            prune_directory(&run_path, at_ms)?;
+        let request_id = request.file_name().to_string_lossy().to_string();
+        if let Err(error) = prune_request(runtime, &request.path(), &request_id, at_ms) {
+            tracing::warn!(%request_id, %error, "skipping damaged Workflow request while pruning journals");
         }
     }
     Ok(())
+}
+
+fn prune_request(runtime: &RuntimeStore, path: &Path, request_id: &str, at_ms: i64) -> Result<()> {
+    validate_id(request_id, "request id")?;
+    let metadata = crate::config::sensitive_metadata(path)?;
+    crate::config::reject_link_or_reparse(path, &metadata)?;
+    if !metadata.is_dir() { return Ok(()); }
+    let runs = runtime.directory(&Path::new("requests").join(request_id).join("runs"), false)?;
+    let listing = match fs::read_dir(&runs) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for run in listing {
+        let run = match run {
+            Ok(run) => run,
+            Err(error) => { tracing::warn!(%request_id, %error, "skipping unreadable Workflow Run while pruning journals"); continue; }
+        };
+        let run_id = run.file_name().to_string_lossy().to_string();
+        if let Err(error) = prune_run(runtime, &run.path(), request_id, &run_id, at_ms) {
+            tracing::warn!(%request_id, %run_id, %error, "skipping damaged Workflow Run while pruning journals");
+        }
+    }
+    Ok(())
+}
+
+fn prune_run(runtime: &RuntimeStore, path: &Path, request_id: &str, run_id: &str, at_ms: i64) -> Result<()> {
+    validate_id(run_id, "run id")?;
+    let metadata = crate::config::sensitive_metadata(path)?;
+    crate::config::reject_link_or_reparse(path, &metadata)?;
+    if !metadata.is_dir() { return Ok(()); }
+    let run_path = runtime.directory(&Path::new("requests").join(request_id).join("runs").join(run_id), false)?;
+    prune_directory(&run_path, at_ms)
 }
 
 fn append_line(directory: &Path, name: &str, committed_bytes: u64, line: &[u8]) -> Result<u64> {
@@ -162,7 +195,7 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
         return Ok(AppendOutcome { seq: 0, bytes: 0, segment: String::new() });
     };
     let snapshot = directory.join("run.json");
-    let (mut seq, mut bytes, mut current, revision, status, previous_delivery_total, previous_waiting) =
+    let (mut seq, mut bytes, mut current, revision, status, previous_delivery_total, previous_waiting, previous_human) =
         match crate::config::sensitive_metadata(&snapshot) {
             Ok(metadata) => {
                 crate::config::reject_link_or_reparse(&snapshot, &metadata)?;
@@ -176,10 +209,11 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
                 }
                 (previous.journal_seq, previous.journal_bytes, previous.journal_segment,
                     previous.revision, Some(previous.status),
-                    previous.delivery_total, previous.supervision.waiting_requests)
+                    previous.delivery_total, previous.supervision.waiting_requests,
+                    previous.human_exit_journal)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound =>
-                (0, 0, String::new(), 0, None, 0, Vec::new()),
+                (0, 0, String::new(), 0, None, 0, Vec::new(), None),
             Err(error) => return Err(error.into()),
         };
     if run.revision < revision {
@@ -218,7 +252,9 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
     for message in run.delivery_queue.iter().skip(run.delivery_queue.len() - new_messages) {
             events.push(JournalEvent {
                 seq: 0, revision: run.revision, at_ms: message.created_at_ms,
-                event_type: message.kind.clone(), actor: "event".into(), rule: "flow-message".into(),
+                event_type: message.kind.clone(),
+                actor: if message.kind == "run.budgetUpdated" { "pm" } else { "event" }.into(),
+                rule: "flow-message".into(),
                 run_id: run.id.clone(), session_id: Some(message.sender_session_id.clone()),
                 node_id: message.node_id.clone(), message_id: Some(message.message_id.clone()),
                 handled_run_id: None,
@@ -248,6 +284,38 @@ pub(super) fn append_at_with_limit(runtime: &RuntimeStore, run: &RunRecord, at_m
             session_id: Some(waiting.session_id.clone()), node_id: Some(waiting.node_id.clone()),
             message_id: Some(waiting.request_id.clone()), handled_run_id: None,
         });
+    }
+    if let Some(previous) = &previous_human {
+        let current = run.human_exit_journal.as_ref()
+            .ok_or_else(|| anyhow!("Workflow Human journal marker cannot disappear"))?;
+        if current.request_id != previous.request_id || current.kind != previous.kind
+            || previous.answer.is_some() && current.answer != previous.answer {
+            bail!("Workflow Human journal marker cannot change its decision");
+        }
+    }
+    if let Some(human) = &run.human_exit_journal {
+        if human.request_id != format!("workflow-human-{}", run.id)
+            || !matches!(human.kind.as_str(), "a" | "b" | "c" | "d" | "e" | "f") {
+            bail!("Workflow Human journal marker has invalid identity");
+        }
+        let mut add_human_event = |event_type: &str, actor: &str, rule: &str| {
+            events.push(JournalEvent {
+                seq: 0, revision: run.revision, at_ms,
+                event_type: event_type.into(), actor: actor.into(), rule: rule.into(),
+                run_id: run.id.clone(), session_id: Some(human.pm_session_id.clone()),
+                node_id: None, message_id: Some(human.request_id.clone()), handled_run_id: None,
+            });
+        };
+        if previous_human.is_none() {
+            add_human_event("pause.requested", "event", "human-exit");
+        }
+        if human.answer.is_some() && previous_human.as_ref().is_none_or(|previous| previous.answer.is_none()) {
+            add_human_event("pause.answered", "human", "human-exit");
+            if human.answer.as_deref() == Some("approve") {
+                if human.kind == "a" { add_human_event("run.budgetUpdated", "human", "human-budget-approved"); }
+                if human.kind == "c" { add_human_event("recovery.budgetUpdated", "human", "human-budget-approved"); }
+            }
+        }
     }
     if status.is_none() {
         for handle in &run.handles {
@@ -429,6 +497,31 @@ mod tests {
     }
 
     #[test]
+    fn human_budget_refs_commit_once_without_an_executor_session() {
+        let project = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let runtime = RuntimeStore::new(data.path(), "w_project", project.path()).unwrap();
+        let mut run = run(&runtime, "wr_no_executor");
+        run.status = "blocked".into();
+        save_run(&runtime, &run).unwrap();
+        run.human_exit_journal = Some(HumanExitJournal {
+            request_id: format!("workflow-human-{}", run.id),
+            pm_session_id: "s_pm".into(), kind: "a".into(), answer: None,
+        });
+        save_run(&runtime, &run).unwrap();
+        run.human_exit_journal.as_mut().unwrap().answer = Some("approve".into());
+        save_run(&runtime, &run).unwrap();
+        let committed = load_run(&runtime, &run.id).unwrap();
+        let events = read(&runtime, &committed, 0, 20).unwrap();
+        assert_eq!(events.iter().map(|event| event.event_type.as_str()).collect::<Vec<_>>(),
+            ["run.blocked", "pause.requested", "pause.answered", "run.budgetUpdated"]);
+        assert_eq!(events[2].actor, "human");
+        assert_eq!(events[3].message_id.as_deref(), Some("workflow-human-wr_no_executor"));
+        save_run(&runtime, &run).unwrap();
+        assert_eq!(load_run(&runtime, &run.id).unwrap().journal_seq, committed.journal_seq);
+    }
+
+    #[test]
     fn seven_day_rotation_prunes_old_segments() {
         let project = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
@@ -471,6 +564,10 @@ mod tests {
         let stored = load_run(&runtime, &run.id).unwrap();
         let segment = directory(&runtime, &stored).unwrap().unwrap().join(&stored.journal_segment);
         assert!(segment.exists());
+        let requests = runtime.directory(Path::new("requests"), false).unwrap();
+        fs::create_dir(requests.join("bad!request")).unwrap();
+        fs::create_dir(requests.join(&run.id).join("runs").join("bad!run")).unwrap();
+        fs::create_dir(segment.with_file_name("journal-20260831-0000.jsonl")).unwrap();
         prune_project(&runtime, first_day + 7 * DAY_MS).unwrap();
         assert!(!segment.exists());
     }
@@ -517,6 +614,16 @@ mod tests {
         assert_eq!(events.last().unwrap().seq, committed.journal_seq);
         save_run(&runtime, &run).unwrap();
         assert_eq!(load_run(&runtime, &run.id).unwrap().journal_seq, committed.journal_seq);
+        let mut budget = flow_message(&run, "run.budgetUpdated", None,
+            "s_pm", "s_executor", None, serde_json::json!({"revision": 2})).unwrap();
+        budget.message_id = "fm_pm_budget".into();
+        push_flow_message(&mut run, budget);
+        save_run(&runtime, &run).unwrap();
+        let latest = load_run(&runtime, &run.id).unwrap();
+        let update = read(&runtime, &latest, committed.journal_seq, 10).unwrap();
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0].event_type, "run.budgetUpdated");
+        assert_eq!(update[0].actor, "pm");
     }
 
     #[test]

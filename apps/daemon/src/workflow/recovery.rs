@@ -42,6 +42,25 @@ pub(super) fn read_human_exit(runtime: &super::RuntimeStore, run: &super::RunRec
     Ok(Some(exit))
 }
 
+/// Reconcile the Human card's compact journal marker after its own file is
+/// durable. Retrying after a crash commits each reference at most once.
+fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord,
+    exit: &HumanExit) -> Result<()> {
+    let marker = super::HumanExitJournal {
+        request_id: exit.request_id.clone(),
+        pm_session_id: exit.pm_session_id.clone(),
+        kind: exit.kind.clone(),
+        answer: exit.answer.clone(),
+    };
+    if run.human_exit_journal.as_ref() == Some(&marker) { return Ok(()); }
+    let _run = super::lock_run(runtime, &run.id)?;
+    let _request = super::request::request_lock(runtime, super::request::group_id(run))?;
+    let mut current = super::load_run(runtime, &run.id)?;
+    if current.human_exit_journal.as_ref() == Some(&marker) { return Ok(()); }
+    current.human_exit_journal = Some(marker);
+    super::save_run(runtime, &current)
+}
+
 fn exit_options(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
         "a" => &[("approve", "批准增加 1 次业务 Run、128 轮 LLM 和 1 小时"), ("reject", "拒绝，保留受阻请求")],
@@ -116,6 +135,7 @@ pub(super) async fn ensure_human_exit(
             (exit, true)
         }
     };
+    sync_human_exit_journal(runtime, run, &exit)?;
     if exit.answer.is_some() {
         apply_answer_action(state, runtime, run, &exit).await?;
         archive_human_resolution(runtime, run, &exit)?;
@@ -159,6 +179,7 @@ pub(super) async fn ensure_human_exit(
                 exit.answer = Some(selected);
                 crate::config::save_private(&exit_path(runtime, run, true)?, &serde_json::to_vec(&exit)?)?;
             }
+            sync_human_exit_journal(runtime, run, &exit)?;
             apply_answer_action(state, runtime, run, &exit).await?;
             archive_human_resolution(runtime, run, &exit)?;
         }
