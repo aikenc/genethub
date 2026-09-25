@@ -16,7 +16,7 @@ use super::output::{self, CliFailure, CLI_SCHEMA};
 use super::rpc::{ConnectError, Refusal, Rpc, RpcError};
 use super::target::{self, Routing, Selection};
 
-const COMMAND_NAMES: [&str; 60] = [
+const COMMAND_NAMES: [&str; 67] = [
     "schema",
     "context",
     "capabilities",
@@ -50,10 +50,17 @@ const COMMAND_NAMES: [&str; 60] = [
     "workflow.dispatch",
     "workflow.get",
     "workflow.history",
+    "workflow.journal",
     "workflow.check",
     "workflow.complete",
     "workflow.cancel",
     "workflow.recover",
+    "workflow.recovery.start",
+    "workflow.recovery.status",
+    "workflow.recovery.check",
+    "workflow.recovery.activate",
+    "workflow.recovery.reset",
+    "workflow.human",
     "workflow.budget",
     "machine.list",
     "machine.show",
@@ -114,6 +121,10 @@ fn mutates(name: &str) -> bool {
             | "workflow.complete"
             | "workflow.cancel"
             | "workflow.recover"
+            | "workflow.recovery.start"
+            | "workflow.recovery.activate"
+            | "workflow.recovery.reset"
+            | "workflow.human"
             | "workflow.budget"
             | "machine.pair"
             | "machine.forget"
@@ -917,6 +928,7 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         Some(id) => (id.to_string(), String::new()),
         None => (hello.machine_id.clone(), hello.machine_name.clone()),
     };
+    let (workflow_patrol_active_jobs, workflow_patrol_oldest_job_ms) = crate::workflow::patrol_jobs();
     json!({
         "source": if machine.is_some() { "remoteDaemon" } else { "localDaemon" },
         "principal": {"type": if machine.is_some() { "pairedDevice" } else { "localUser" }},
@@ -937,6 +949,9 @@ fn context_data(hello: &HelloResult, machine: Option<&str>) -> Value {
         "workingDirectory": {"selector": "--cwd", "value": null, "inferred": false},
         "daemon": {
             "version": hello.daemon_version,
+            "workflowPatrolLagMs": crate::workflow::patrol_lag_ms(),
+            "workflowPatrolActiveJobs": workflow_patrol_active_jobs,
+            "workflowPatrolOldestJobMs": workflow_patrol_oldest_job_ms,
             "webProtocol": hello.web_protocol,
             "machineId": hello.machine_id,
             "machineName": hello.machine_name,
@@ -1277,6 +1292,10 @@ fn command_schema(name: &str) -> Value {
             "genet workflow history [--workspace <id>] [--limit <n>]",
             json!({"limit": {"type": "integer", "minimum": 1}}), &[],
         ),
+        "workflow.journal" => workflow_schema(
+            "genet workflow journal --run <id> [--since <seq>] [--limit <n>]",
+            json!({"runId": {"type": "string", "minLength": 1}, "since": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 1024}}), &["runId"],
+        ),
         "workflow.check" => workflow_schema(
             "genet workflow check [--workspace <id>] [--run <id> | --draft]",
             json!({"runId": {"type": "string", "description": "--run; omitted checks all project Runs"}, "draft": {"type":"boolean", "description":"Read-only source validation; invalid draft exits nonzero with error.details.draft.diagnostics. Definition schema: schema workflow.definition"}}), &[],
@@ -1301,6 +1320,30 @@ fn command_schema(name: &str) -> Value {
             "genet workflow recover [--workspace <id>] --run <id> --revision <current>",
             json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0, "description": "Run revision from workflow get. After a daemon restart this continues the original unfinished Worker Session and keeps any write lease; it does not replay completed nodes. If the previous Worker process is still running, continuation is refused. Inspect git status and side effects first."}}),
             &["runId", "revision"],
+        ),
+        "workflow.recovery.start" => workflow_schema(
+            "genet workflow recovery start --run <id> --reason <text>",
+            json!({"runId": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}), &["runId", "reason"],
+        ),
+        "workflow.recovery.status" => workflow_schema(
+            "genet workflow recovery status --run <id>",
+            json!({"runId": {"type": "string", "minLength": 1}}), &["runId"],
+        ),
+        "workflow.recovery.check" => workflow_schema(
+            "genet workflow recovery check [--package <id>]",
+            json!({"packageId": {"type": "string"}}), &[],
+        ),
+        "workflow.recovery.activate" => workflow_schema(
+            "genet workflow recovery activate [--package <id>] [--candidate <digest>] --revision <n>",
+            json!({"packageId": {"type": "string"}, "candidateDigest": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
+        ),
+        "workflow.recovery.reset" => workflow_schema(
+            "genet workflow recovery reset [--package <id>] --revision <n>",
+            json!({"packageId": {"type": "string"}, "revision": {"type": "integer", "minimum": 0}}), &["revision"],
+        ),
+        "workflow.human" => workflow_schema(
+            "genet workflow human --run <id> --revision <current> --kind <a|b|c|d|e|f> --reason <text>",
+            json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}, "kind": {"enum": ["a", "b", "c", "d", "e", "f"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 4096}}), &["runId", "revision", "kind", "reason"],
         ),
         "workflow.budget" => workflow_schema(
             "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--deadline-seconds <n>] [--max-llm-rounds <n>]",
@@ -1469,6 +1512,12 @@ fn command_schema(name: &str) -> Value {
             "workflow.complete" => single_output("workflow.completed"),
             "workflow.cancel" => single_output("workflow.cancelling"),
             "workflow.recover" => single_output("workflow.recovered"),
+            "workflow.recovery.start" => single_output("workflow.recovery.started"),
+            "workflow.recovery.status" => single_output("workflow.recovery.status"),
+            "workflow.recovery.check" => single_output("workflow.check"),
+            "workflow.recovery.activate" => single_output("workflow.activated"),
+            "workflow.recovery.reset" => single_output("workflow.recovery.reset"),
+            "workflow.human" => single_output("workflow.human.requested"),
             "workflow.budget" => single_output("workflow.budgetUpdated"),
             "workflow.dispatch" => json!({
                 "type": "object",
@@ -1804,6 +1853,7 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
         Reply::WorkflowCheck(_) => "workflow check",
         Reply::WorkflowProject(_) => "workflow project",
         Reply::WorkflowRun(_) => "workflow run",
+        Reply::WorkflowJournal(_) => "workflow journal",
         Reply::WorkflowRuns(_) => "workflow runs",
         Reply::AgentSpaceBuilder(_) => "agent space builder",
         Reply::AgentSpaceChangePlan(_) => "agent space change plan",

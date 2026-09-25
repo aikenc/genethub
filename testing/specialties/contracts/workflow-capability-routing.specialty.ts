@@ -19,14 +19,14 @@ const TESTS = [
   "session::manager::tests::delivered_worker_without_matching_pending_migration_stays_blocked",
   "workflow::tests::role_v3_declares_only_builtin_tags",
   "workflow::tests::tag_routes_use_live_cost_and_and_matching",
-  "workflow::tests::tag_route_failure_is_human_actionable",
+  "workflow::tests::tag_route_failure_hands_to_pm",
 ] as const;
 
 defineSpecialty({
   id: "specialty.contracts.workflow-capability-routing",
   title: "Workflow roles resolve machine-global tag routes at dispatch",
   oracle:
-    "Role v3 accepts only built-in tags; dispatch selects the lowest-cost all-tag match and fails human-actionably when none is usable",
+    "Role v3 accepts only built-in tags; dispatch selects the lowest-cost all-tag match and hands an unusable route to PM",
   catches: [
     "workflow package pins a concrete Agent or model",
     "route selection treats tags as OR rather than AND",

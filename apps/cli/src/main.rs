@@ -211,6 +211,16 @@ pub fn usage() -> i32 {
                                     share the original request bounds; recovery needs new user input
   genet workflow history [--limit <n>]
                                     list recent Runs for Workflow analysis
+  genet workflow journal --run <id> [--since <seq>] [--limit <n>]
+                                    read committed Run events and references
+  genet workflow recovery start --run <id> --reason <text>
+                                    PM starts the package's recovery flow
+  genet workflow recovery status --run <id>
+                                    inspect one recovery Run
+  genet workflow recovery check|activate|reset ...
+                                    validate, authorize or reset recovery configuration
+  genet workflow human --run <id> --revision <n> --kind <a|b|c|d|e|f> --reason <text>
+                                    PM asks for a classified Human decision
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
                               [--outcome <name> --reason <text>]

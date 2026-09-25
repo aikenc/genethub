@@ -1,4 +1,8 @@
-GeneHub 的 Workflow 能力从人的意图出发：PM 理解目标，交给 Workflow Manager（WM）创建或改进 Workflow，由 Executor 承载运行，再用代表任务验证，最后根据 Workflow Reviewer（WR）的证据决定采用或继续调整。
+> **Workflow 要让目标一路有人负责：Executor 推进工作，异常由 WR 查明并交回 PM 解决；只有必须由人授权、提供信息或亲自验收时，才停下来等人。**
+>
+> 这是产品目标，不表示当前实现已覆盖所有异常和故障恢复。执行状态仍须如实显示；一次 Run 的 `blocked` 不能自动等同于用户请求无人负责或已经结束。
+
+GeneHub 的 Workflow 能力从人的意图出发：PM 理解目标，交给 Workflow Manager（WM）创建或改进 Workflow，由 Executor 承载运行，再用代表任务验证，最后根据 Workflow Reviewer（WR）的证据决定采用或继续调整。目标态中，原始目标的后续责任由 PM 承担；平台保存执行事实和交接义务，让异常不会因通知已读、进程重启或单次 Run 结束而消失。
 
 Workflow 是被创建、验证和采用的执行方案。Executor 是使这个方案能够运行的载体。测试项目提供输入、仓库、数据和产物，用来观察方案的行为。一个测试项目完成，只能提供本次运行的证据；Workflow 的有效性还要对照原始意图、验收范围和成本判断。
 
@@ -19,11 +23,14 @@ Workflow 是被创建、验证和采用的执行方案。Executor 是使这个�
 | --- | --- |
 | 可编辑 Workflow 源 | 包目录 `.genethub/workflows/<id>/`；它自带 git 检出，WM 在其中维护版本 |
 | 执行绑定 | 由包推导：声明顶层 `executor` 组件的 Space 对应产物目录即该包的 Executor；任务目录默认项目根，由 Run 输入覆盖 |
-| Candidate、激活指针及 Run 索引 | daemon 管理的持久记录；激活指针按包分文件，一个包的重建不会改写另一个包的指向 |
-| Executor 所属 Run 快照 | Executor 会话的 executor 组件实例 `snapshots`；由 daemon 更新 |
+| Candidate、激活指针 | daemon 管理，位于包的 Executor Space 级 `components/executor/`；激活指针按包分文件 |
+| Run ID 定位记录 | 项目 PM Space 级 `components/pm/runs/`；供现有直达命令使用，可从请求目录重建 |
+| Run 快照 | 项目 PM Space 级 `components/pm/requests/<请求 id>/runs/<Run id>/run.json`；由 daemon 更新，与单个对话的删除无关 |
 | Space 的 Skill 与配置 | 各 AgentSpace 的 Builder 源及其验证身份；不能假设一个 Candidate digest 已覆盖全部 Skill 内容 |
 
-相关实现见 [Workflow 宿主](../apps/daemon/src/workflow/mod.rs)的 `compile_candidate`、`resolve_execution_binding`、`executor_snapshot_relative` 与 `save_run`，[包发现与物化](../apps/daemon/src/workflow/package.rs)、[构建与授权](../apps/daemon/src/workflow/build.rs)，以及随产品发布的[内置包](../apps/daemon/workflow-packages/game-delivery/workflow.md)。
+目录规则见 [storage-layout.md](./storage-layout.md) §5。旧版 `<data>/workflow-runtime/` 记录不自动导入。
+
+相关实现见 [Workflow 宿主](../apps/daemon/src/workflow/mod.rs)的 `compile_candidate`、`resolve_execution_binding`、`pm_snapshot_relative` 与 `save_run`，[包发现与物化](../apps/daemon/src/workflow/package.rs)、[构建与授权](../apps/daemon/src/workflow/build.rs)，以及随产品发布的[内置包](../apps/daemon/workflow-packages/game-delivery/workflow.md)。
 
 项目、Executor 和目录有三种不同关系。
 
@@ -48,7 +55,7 @@ Workflow 是被创建、验证和采用的执行方案。Executor 是使这个�
 
 普通业务请求可直接复用已有 Workflow；不必每次调用 WM。受管 WM 返回候选和准备方案，PM 负责管理及派发。WR 维持只读评估。新 Workflow 的实验不需要独立的内核实验注册中心或专用生命周期，现有 [结构化流程引擎](../packages/workflow-engine/README.md)提供控制流，技能包负责实验方法。
 
-测试材料的默认约定是 `spaces/<候选 executor>/.genethub/temp/exp/<testname>/`。这只是材料位置，不构成 Workflow 身份，也不规定必须采用 Git。需要 Git 时，案例可以准备独立于正式仓库的一个或多个仓库，并保留工作流依赖的分支、历史和标签；实验仓库可以使用自己的 worktree。Git 节点要明确绑定实际实验仓库，不能让 Git 从普通子目录向上找到正式仓库。Worker 只挂载需要的材料目录，不挂载整个 Executor 私有会话目录。
+测试材料的默认约定是 `spaces/<候选 executor>/.genethub/temp/exp/<testname>/`（`temp/` 是登记在 [storage-layout.md](./storage-layout.md) 的普通可编辑目录）。这只是材料位置，不构成 Workflow 身份，也不规定必须采用 Git。需要 Git 时，案例可以准备独立于正式仓库的一个或多个仓库，并保留工作流依赖的分支、历史和标签；实验仓库可以使用自己的 worktree。Git 节点要明确绑定实际实验仓库，不能让 Git 从普通子目录向上找到正式仓库。Worker 只挂载需要的材料目录，不挂载整个 Executor 私有会话目录。
 
 同一 Workflow 可以在多个案例上验证。比较旧、新方案时应从等价的初始材料分别运行，记录流程内容、执行配置、案例与 Run 的对应关系。运行完成、逐项报告完整和检查实际执行是不同证据；`value.nonEmpty` 并不能证明报告中每项检查都真实通过。缺少真人样本或可靠输出时，结果保持未验证。
 

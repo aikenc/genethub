@@ -346,6 +346,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowInspect { .. }
         | Request::WorkflowCheck { .. }
         | Request::WorkflowGet { .. }
+        | Request::WorkflowJournal { .. }
         | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
@@ -390,6 +391,9 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowComplete { .. }
         | Request::WorkflowCancel { .. }
         | Request::WorkflowRecover { .. }
+        | Request::WorkflowRecoveryStart { .. }
+        | Request::WorkflowHuman { .. }
+        | Request::WorkflowRecoveryReset { .. }
         | Request::WorkflowBudget { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }

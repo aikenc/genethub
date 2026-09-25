@@ -29,6 +29,13 @@ fn program(run: &RunRecord) -> Result<engine::Program> {
     )
     .map_err(Into::into)
 }
+
+pub(super) fn validate_snapshot(run: &RunRecord) -> Result<()> {
+    if let Some(snapshot) = &run.engine {
+        engine::inspect(&program(run)?, snapshot)?;
+    }
+    Ok(())
+}
 pub(super) fn initialize(run: &mut RunRecord) -> Result<()> {
     let program = program(run)?;
     let transition = engine::start(
@@ -65,7 +72,7 @@ fn apply(run: &mut RunRecord, transition: engine::Transition) -> Result<()> {
                 event.message_id,
                 run.engine.as_ref().unwrap().revision,
                 entry.frame,
-                run.flow_messages.len()
+                run.delivery_queue.len()
             );
             push_flow_message(run, event);
         }
@@ -78,7 +85,13 @@ fn sync_status(run: &mut RunRecord) {
         return;
     };
     match snapshot.status {
-        engine::Status::Completed => run.status = "completed".into(),
+        engine::Status::Completed => {
+            if run.handles.is_empty() {
+                run.status = "completed".into();
+            } else {
+                control::request_stop(run, "blocked", "recovery flow ended without a controlled exit".into());
+            }
+        }
         engine::Status::Blocked | engine::Status::Stopping => {
             let reason = snapshot
                 .outcome
@@ -105,7 +118,12 @@ pub(super) fn settled(run: &mut RunRecord, id: &str) -> Result<()> {
     }) {
         Ok(p) => p,
         Err(error) => {
-            control::request_stop(run, "blocked", format!("结构化执行快照无法恢复：{error:#}"));
+            control::request_stop_with_cause(
+                run,
+                "blocked",
+                format!("结构化执行快照无法恢复：{error:#}"),
+                "structuredSnapshotCorrupt",
+            );
             return Ok(());
         }
     };
@@ -165,10 +183,16 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
         let _request = request::request_lock(runtime, request::group_id(&run))?;
         request::ensure_open(runtime, &run)?;
         if request::budget_exhausted(runtime, &run, now_ms())? {
-            control::request_stop(
+            let (reason, cause) = if run.handles.is_empty() {
+                ("原始请求达到执行期限或 LLM 调用上限", "requestBudget")
+            } else {
+                ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
+            };
+            control::request_stop_with_cause(
                 &mut run,
                 "blocked",
-                "原始请求达到执行期限或 LLM 调用上限".into(),
+                reason.into(),
+                cause,
             );
             run.revision += 1;
             save_run(runtime, &run)?;
@@ -180,10 +204,11 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
         }) {
             Ok(p) => p,
             Err(error) => {
-                control::request_stop(
+                control::request_stop_with_cause(
                     &mut run,
                     "blocked",
                     format!("结构化执行快照无法恢复：{error:#}"),
+                    "structuredSnapshotCorrupt",
                 );
                 run.revision += 1;
                 save_run(runtime, &run)?;
@@ -342,13 +367,24 @@ pub(super) async fn drive(state: &Shared, runtime: &RuntimeStore, run_id: &str) 
             )
             .await
             {
-                Ok(created) => sessions.extend(created),
+                Ok(created) => {
+                    run.route_wait.retain(|waiting| waiting != &id);
+                    if let Some(node) = run.nodes.get_mut(&id) { node.reason = None; }
+                    sessions.extend(created);
+                }
                 Err(error) => {
-                    control::request_stop(
-                        &mut run,
-                        "blocked",
-                        format!("活动 {id} 启动待核对：{error:#}"),
-                    );
+                    let reason = format!("活动 {id} 启动待核对：{error:#}");
+                    if is_route_unavailable(&error) {
+                        let first_wait = !run.route_wait.contains(&id);
+                        control::defer_unavailable_route(&mut run, &[id], reason);
+                        if first_wait && run.status == "running" {
+                            run.revision += 1;
+                            run.updated_at_ms = now_ms();
+                            save_run(runtime, &run)?;
+                        }
+                    } else {
+                        control::request_stop(&mut run, "blocked", reason);
+                    }
                     break;
                 }
             }

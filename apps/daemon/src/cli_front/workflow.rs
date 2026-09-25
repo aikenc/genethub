@@ -63,6 +63,12 @@ enum Command {
         workspace_id: Option<String>,
         limit: Option<u32>,
     },
+    Journal {
+        workspace_id: Option<String>,
+        run_id: String,
+        since: u64,
+        limit: u32,
+    },
     Complete {
         workspace_id: Option<String>,
         run_id: Option<String>,
@@ -81,6 +87,27 @@ enum Command {
     Recover {
         workspace_id: Option<String>,
         run_id: String,
+        revision: u64,
+    },
+    RecoveryStart {
+        workspace_id: Option<String>,
+        run_id: String,
+        reason: String,
+    },
+    Human {
+        workspace_id: Option<String>,
+        run_id: String,
+        revision: u64,
+        kind: String,
+        reason: String,
+    },
+    RecoveryStatus {
+        workspace_id: Option<String>,
+        run_id: String,
+    },
+    RecoveryReset {
+        workspace_id: Option<String>,
+        package_id: Option<String>,
         revision: u64,
     },
     Budget {
@@ -350,6 +377,16 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             );
             Ok(EXIT_OK)
         }
+        Command::Journal { workspace_id, run_id, since, limit } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowJournal(events) = rpc.call(Request::WorkflowJournal {
+                workspace_id: workspace_id.clone(), run_id: run_id.clone(), since, limit,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.journal with the wrong reply"));
+            };
+            output::succeed("workflow.journal", json!({"workspaceId": workspace_id, "runId": run_id, "events": events}));
+            Ok(EXIT_OK)
+        }
         Command::Complete {
             workspace_id,
             run_id,
@@ -473,6 +510,46 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 ));
             };
             output::succeed("workflow.recovered", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::RecoveryStart { workspace_id, run_id, reason } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowRecoveryStart {
+                workspace_id, run_id, reason,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.recovery.start with the wrong reply"));
+            };
+            output::succeed("workflow.recovery.started", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Human { workspace_id, run_id, revision, kind, reason } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowHuman {
+                workspace_id, run_id, expected_revision: revision, kind, reason,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.human with the wrong reply"));
+            };
+            output::succeed("workflow.human.requested", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::RecoveryStatus { workspace_id, run_id } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowGet {
+                workspace_id, run_id,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.recovery.status with the wrong reply"));
+            };
+            output::succeed("workflow.recovery.status", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::RecoveryReset { workspace_id, package_id, revision } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowProject(project) = rpc.call(Request::WorkflowRecoveryReset {
+                workspace_id, package_id, expected_revision: revision,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.recovery.reset with the wrong reply"));
+            };
+            output::succeed("workflow.recovery.reset", serde_json::to_value(project).unwrap());
             Ok(EXIT_OK)
         }
         Command::Budget {
@@ -792,7 +869,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
     let Some(verb) = args.first().map(String::as_str) else {
         return Err(CliFailure::invalid_args(USAGE));
     };
-    let mut values = Values::parse(&args[1..])?;
+    let mut values = Values::parse(if verb == "recovery" { args.get(2..).unwrap_or(&[]) } else { &args[1..] })?;
     if values.draft && (verb != "check" || values.run.is_some()) {
         return Err(CliFailure::invalid_args(
             "--draft 只用于 workflow check，不能与 --run 同用",
@@ -856,6 +933,12 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             workspace_id: values.workspace.take(),
             limit: values.limit,
         }),
+        "journal" => Ok(Command::Journal {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow journal 需要 --run <id>"))?,
+            since: values.since.unwrap_or(0),
+            limit: values.limit.unwrap_or(100).min(1024),
+        }),
         "complete" => Ok(Command::Complete {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -876,6 +959,44 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --revision <current>"))?,
         }),
+        "human" => Ok(Command::Human {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --run <id>"))?,
+            revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --revision <current>"))?,
+            kind: values.kind.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --kind <a|b|c|d|e|f>"))?,
+            reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
+                .ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --reason <text>"))?,
+        }),
+        "recovery" => match args.get(1).map(String::as_str) {
+            Some("start") => Ok(Command::RecoveryStart {
+                workspace_id: values.workspace.take(),
+                run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recovery start 需要 --run <id>"))?,
+                reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args("workflow recovery start 需要 --reason <text>"))?,
+            }),
+            Some("status") => Ok(Command::RecoveryStatus {
+                workspace_id: values.workspace.take(),
+                run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recovery status 需要 --run <id>"))?,
+            }),
+            Some("check") => Ok(Command::Check {
+                workspace_id: values.workspace.take(),
+                run_id: None,
+                package_id: values.package.take(),
+                draft: true,
+            }),
+            Some("activate") => Ok(Command::Activate {
+                workspace_id: values.workspace.take(),
+                package_id: values.package.take(),
+                candidate_digest: values.candidate.take(),
+                revision: values.revision,
+            }),
+            Some("reset") => Ok(Command::RecoveryReset {
+                workspace_id: values.workspace.take(),
+                package_id: values.package.take(),
+                revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recovery reset 需要 --revision <current>"))?,
+            }),
+            _ => Err(CliFailure::invalid_args("usage: workflow recovery start|status|check|activate|reset ...")),
+        },
         "budget" => {
             if values.max_runs.is_none()
                 && values.deadline_seconds.is_none()
@@ -899,7 +1020,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 }
 
 const USAGE: &str =
-    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|check|complete|cancel|recover|continue|budget ...";
+    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|journal|check|complete|cancel|recover|continue|recovery|human|budget ...";
 
 #[derive(Default)]
 struct Values {
@@ -908,6 +1029,7 @@ struct Values {
     resume_cancelled: bool,
     outcome: Option<genehub_proto::WorkflowNodeOutcome>,
     reason: Option<String>,
+    kind: Option<String>,
     positionals: Vec<String>,
     workspace: Option<String>,
     package: Option<String>,
@@ -923,6 +1045,7 @@ struct Values {
     revision: Option<u64>,
     timeout: Option<u64>,
     limit: Option<u32>,
+    since: Option<u64>,
     max_runs: Option<u32>,
     deadline_seconds: Option<u64>,
     max_llm_rounds: Option<u64>,
@@ -956,6 +1079,7 @@ impl Values {
                     values.outcome = Some(genehub_proto::WorkflowNodeOutcome(value));
                 }
                 "--reason" => values.reason = Some(next(&mut index)?),
+                "--kind" => values.kind = Some(next(&mut index)?),
 
                 "--workspace" => values.workspace = Some(next(&mut index)?),
                 "--workflow" => values.workflow = Some(next(&mut index)?),
@@ -995,6 +1119,11 @@ impl Values {
                     if values.limit == Some(0) {
                         return Err(CliFailure::invalid_args("--limit 需要正整数"));
                     }
+                }
+                "--since" => {
+                    values.since = Some(next(&mut index)?.parse::<u64>().map_err(|_| {
+                        CliFailure::invalid_args("--since 需要非负日志序号")
+                    })?);
                 }
                 "--max-runs" => {
                     let value = next(&mut index)?;

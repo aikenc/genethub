@@ -112,7 +112,7 @@ impl Daemon {
         let workflow_control = tokio::spawn({
             let state = state.clone();
             async move {
-                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(5));
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     ticks.tick().await;

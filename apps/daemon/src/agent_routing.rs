@@ -5,6 +5,7 @@
 //! cost edit affects the very next turn or Workflow activity.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use anyhow::{anyhow, Result};
 use genehub_proto::{
@@ -17,10 +18,19 @@ use crate::state::Shared;
 
 pub const TAG_MAX: &str = "Max";
 pub const TAG_PRO: &str = "Pro";
-pub const TAG_FLUSH: &str = "Flush";
+pub const TAG_FLASH: &str = "Flash";
 pub const TAG_VIDEO: &str = "视频理解";
 pub const TAG_IMAGE: &str = "图片理解";
-pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLUSH, TAG_VIDEO, TAG_IMAGE];
+pub const BUILTIN_TAGS: [&str; 5] = [TAG_MAX, TAG_PRO, TAG_FLASH, TAG_VIDEO, TAG_IMAGE];
+
+#[derive(Debug)]
+pub(crate) struct RouteUnavailable(pub String);
+
+impl fmt::Display for RouteUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
+
+impl std::error::Error for RouteUnavailable {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedAgentRoute {
@@ -39,17 +49,27 @@ struct Candidate {
     cost: AgentCostLevel,
 }
 
+/// `Flush` was the previous spelling of the Flash intelligence tier.
+fn canonical_tag(tag: &str) -> &str {
+    let trimmed = tag.trim();
+    if trimmed.eq_ignore_ascii_case("flush") {
+        TAG_FLASH
+    } else {
+        trimmed
+    }
+}
+
 pub(crate) fn is_builtin_tag(tag: &str) -> bool {
     BUILTIN_TAGS
         .iter()
-        .any(|candidate| tags_equal(candidate, tag))
+        .any(|candidate| tags_equal(candidate, canonical_tag(tag)))
 }
 
 pub(crate) fn normalize_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
     for tag in tags {
-        let trimmed = tag.trim();
+        let trimmed = canonical_tag(&tag);
         if trimmed.is_empty() {
             continue;
         }
@@ -251,9 +271,9 @@ pub(crate) fn select_tag_route_excluding(
             } else {
                 required.join(" + ")
             };
-            anyhow!(
-                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；请由人类检查安装、登录或机器全局 Agent 配置"
-            )
+            anyhow!(RouteUnavailable(format!(
+                "agentTagRouteUnavailable: 没有可用的 Agent 与模型同时匹配「{label}」；交给 PM 核对替代路由或机器全局配置，需要安装、登录时再向人提出暂停点"
+            )))
         })
 }
 
@@ -314,7 +334,7 @@ fn validate_exclusive_tags(tags: &[String], preferences: &AgentSelectionPreferen
     let mut claimed = BTreeSet::new();
     for tag in normalize_tags(tags.iter().cloned()) {
         let key = tag_key(&tag);
-        let group = if [tag_key(TAG_MAX), tag_key(TAG_PRO), tag_key(TAG_FLUSH)].contains(&key) {
+        let group = if [tag_key(TAG_MAX), tag_key(TAG_PRO), tag_key(TAG_FLASH)].contains(&key) {
             Some("builtin-intelligence")
         } else {
             preferences.tag_groups.iter().find_map(|group| {
@@ -484,7 +504,7 @@ pub(crate) fn inferred_profile(agent: &AgentInfo, model: Option<&ModelInfo>) -> 
     } else if identity.contains("pro") {
         TAG_PRO.to_string()
     } else {
-        TAG_FLUSH.to_string()
+        TAG_FLASH.to_string()
     }];
     if agent.capabilities.attachments {
         let modalities = model.and_then(|model| model.input_modalities.as_deref());
@@ -661,14 +681,14 @@ mod tests {
                     agent_id: "genet".into(),
                     model_id: Some("provider/cheap".into()),
                     display_name: None,
-                    tags: vec![TAG_FLUSH.into()],
+                    tags: vec![TAG_FLASH.into()],
                     cost: Some(AgentCostLevel::Low),
                 },
                 AgentModelProfile {
                     agent_id: "genet".into(),
                     model_id: Some("provider/backup".into()),
                     display_name: None,
-                    tags: vec![TAG_FLUSH.into()],
+                    tags: vec![TAG_FLASH.into()],
                     cost: Some(AgentCostLevel::High),
                 },
             ],
@@ -678,7 +698,7 @@ mod tests {
         let excluded = BTreeSet::from([("genet".to_string(), Some("provider/cheap".to_string()))]);
         let route = select_tag_route_excluding(
             &preferences,
-            &[TAG_FLUSH.into()],
+            &[TAG_FLASH.into()],
             &[candidate],
             &registry,
             false,
@@ -746,7 +766,7 @@ mod tests {
         assert!(
             select_tag_route(
                 &preferences,
-                &[TAG_FLUSH.into()],
+                &[TAG_FLASH.into()],
                 &[candidate],
                 &registry,
                 false,
@@ -763,7 +783,9 @@ mod tests {
             vec![TAG_MAX.to_string(), "私有".to_string()]
         );
         assert!(validate_selected_tags(Vec::new()).is_err());
-        assert!(validate_selected_tags(vec!["Flush".into(), "flush".into()]).is_err());
+        assert!(validate_selected_tags(vec!["Flash".into(), "flash".into()]).is_err());
+        assert_eq!(normalize_tags(["Flush".into(), "flash".into()]), vec!["Flash".to_string()]);
+        assert!(is_builtin_tag("Flush"));
         assert!(validate_selected_tags(vec!["x".repeat(41)]).is_err());
         assert_eq!(
             validate_media_tags(vec![TAG_VIDEO.into(), TAG_IMAGE.into()]).unwrap(),

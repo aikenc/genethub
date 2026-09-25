@@ -103,7 +103,6 @@ pub(crate) fn plan(project_root: &Path, package: &Package) -> Result<Plan> {
     // Refuse ambiguity before writing anything: these two both mean the
     // package cannot say which carrier the platform should bind.
     package.executor_space()?;
-    package.diagnostic_space()?;
 
     let mut spaces = Vec::new();
     let mut total_files = 0usize;

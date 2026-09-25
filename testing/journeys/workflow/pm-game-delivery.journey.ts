@@ -947,17 +947,17 @@ async function assertDelivery(
     "Run did not use the team's Executor AgentSpace",
   );
 
-  const flowRoot = path.join(
+  const requestRoot = path.join(
     fixture.projectRoot,
-    "spaces",
-    `${PACKAGE_ID}--executor`,
     ".genethub",
-    "sessions",
-    completed.executorSessionId ?? "missing",
     "components",
-    "executor",
+    "pm",
+    "requests",
+    completed.requestRunId ?? completed.id,
+    "runs",
+    completed.id,
   );
-  t.assertions.assert(existsSync(path.join(flowRoot, "snapshots", `run-${completed.id}.json`)), "Executor Run snapshot is missing");
+  t.assertions.assert(existsSync(path.join(requestRoot, "run.json")), "PM request Run snapshot is missing");
   return { flow, run: completed, sessions, spaces, implementationMs };
 }
 

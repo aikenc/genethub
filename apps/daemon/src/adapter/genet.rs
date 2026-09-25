@@ -567,7 +567,7 @@ fn builtin_questions(frame: &Value) -> Option<Vec<InteractionQuestion>> {
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            if !(1..=3).contains(&options.len()) {
+            if !(1..=5).contains(&options.len()) {
                 return None;
             }
             Some(InteractionQuestion {

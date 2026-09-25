@@ -173,7 +173,7 @@ health?: AgentSpaceHealth, };
 export type AgentSpaceOperation = { "kind": "setComponent", componentId: string, enabled: boolean, role: string | null, } | { "kind": "removeComponent", componentId: string, } | { "kind": "setParent", parentWorkspaceId: string | null, } | { "kind": "setLifecycle", lifecycle: string, };
 
 /**
- * One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flush
+ * One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flash
  * membership is fixed by the product; these rows describe Human-created
  * groups for custom tags only.
  */
@@ -939,7 +939,7 @@ export type Reply = { "type": "client.debug", "data": ClientDebugResponse } | { 
  * True when the requested `sinceSeq` fell outside the retained window
  * and the snapshot is a full reset rather than a continuation.
  */
-reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
+reset: boolean, } } | { "type": "agents", "data": Array<AgentInfo> } | { "type": "hubStatus", "data": HubStatus } | { "type": "hubClaim", "data": { status: HubStatus, claim: HubClaim, } } | { "type": "hubMachines", "data": Array<HubMachine> } | { "type": "hubTicket", "data": HubTicket } | { "type": "devices", "data": { devices: Array<DeviceInfo>, remote: RemoteAccess, } } | { "type": "invite", "data": DeviceInvite } | { "type": "claimed", "data": DeviceCredential } | { "type": "remoteAccess", "data": RemoteAccess } | { "type": "settings", "data": Settings } | { "type": "speechCapabilities", "data": SpeechCapabilities } | { "type": "speechRuntimeStatus", "data": SpeechRuntimeStatus } | { "type": "speechContext", "data": SpeechContextPack } | { "type": "speechFeedbackReceipt", "data": SpeechFeedbackReceipt } | { "type": "log", "data": LogTail } | { "type": "diagnostics", "data": SupportDiagnostics } | { "type": "update", "data": UpdateStatus } | { "type": "updateDownload", "data": UpdateDownload } | { "type": "session", "data": SessionSummary } | { "type": "forkTransfer", "data": ForkTransfer } | { "type": "sessions", "data": Array<SessionSummary> } | { "type": "sessionDrafts", "data": Array<SessionDraft> } | { "type": "sessionComponents", "data": Array<ComponentInstanceInfo> } | { "type": "sessionFlow", "data": ExecutorFlowStatus } | { "type": "sessionImports", "data": SessionImportListing } | { "type": "snapshot", "data": SessionSnapshot } | { "type": "sessionInspection", "data": SessionInspection } | { "type": "sessionNarrative", "data": SessionNarrativePage } | { "type": "sessionRounds", "data": SessionRoundPage } | { "type": "sessionContext", "data": SessionContext } | { "type": "roundLayer", "data": RoundLayer } | { "type": "roundTrunk", "data": RoundTrunk } | { "type": "roundTrunks", "data": Array<RoundTrunk> } | { "type": "blob", "data": BlobPayload } | { "type": "blobs", "data": Array<BlobPayload> } | { "type": "sessionArtifactUpload", "data": SessionArtifactUpload } | { "type": "sessionArtifact", "data": SessionArtifactBundle } | { "type": "workflowProject", "data": WorkflowProjectStatus } | { "type": "workflowPackages", "data": WorkflowPackageList } | { "type": "workflowBuild", "data": WorkflowBuildReport } | { "type": "workflowRun", "data": WorkflowRunStatus } | { "type": "workflowJournal", "data": Array<JsonValue> } | { "type": "workflowCheck", "data": WorkflowCheckReport } | { "type": "workflowRuns", "data": Array<WorkflowRunStatus> } | { "type": "agentSpaceBuilder", "data": AgentSpaceBuilderReport } | { "type": "agentSpaceChangePlan", "data": AgentSpaceChangePlan } | { "type": "workspace", "data": WorkspaceInfo } | { "type": "workspaces", "data": Array<WorkspaceInfo> } | { "type": "directory", "data": DirectoryListing } | { "type": "fileTree", "data": FileNode } | { "type": "gitStatus", "data": GitStatus } | { "type": "gitDiff", "data": { diff: string, } } | { "type": "gitCommit", "data": { commit: string, } } | { "type": "pty", "data": { ptyId: string, } } | { "type": "processes", "data": Array<BackgroundProcess> } | { "type": "ack" };
 
 export type Request = { "type": "client.debug", "payload": ClientDebugRequest } | { "type": "connection.identity" } | { "type": "subscribe", "payload": { sessionId: string, sinceSeq: number, 
 /**
@@ -1001,7 +1001,7 @@ packageId?: string,
 /**
  * Validate current source without creating a Candidate, Run or Worker.
  */
-draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
+draft?: boolean, } } | { "type": "workflow.get", "payload": { workspaceId: string, runId: string, } } | { "type": "workflow.journal", "payload": { workspaceId: string, runId: string, since: bigint, limit: number, } } | { "type": "workflow.history", "payload": { workspaceId: string, limit: number | null, } } | { "type": "workflow.complete", "payload": { workspaceId: string, runId: string, nodeId: string, expectedRevision: number, evidence: { [key in string]?: string }, 
 /**
  * Bounded business data, checked against the node's declared output shape.
  */
@@ -1009,7 +1009,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -1733,7 +1733,19 @@ count: number, };
  * local paths, URLs, identifiers, prompts, terminal output and Agent output do
  * not have a field in the schema.
  */
-export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
+export type SupportDiagnostics = { version: number, capturedAt: string, daemonVersion: string, os: string, arch: string, uptimeSeconds: number, hubState: string, remoteState: string, 
+/**
+ * Milliseconds since the Workflow scheduler last completed a scan.
+ */
+workflowPatrolLagMs?: number, 
+/**
+ * Queued and running Workflow patrol jobs on this daemon.
+ */
+workflowPatrolActiveJobs?: number, 
+/**
+ * Age of the oldest queued or running patrol job.
+ */
+workflowPatrolOldestJobMs?: number, events: Array<SupportDiagnosticEvent>, droppedEvents: number, };
 
 /**
  * One entry in a session's timeline.
@@ -2001,11 +2013,6 @@ file: string, path: string, message: string, hint: string, expected: string | nu
  */
 line: number | null, column: number | null, };
 
-/**
- * Finishing a review is distinct from approving its subject.
- */
-export type WorkflowDiagnosticStatus = { sessionId: string, status: string, createdAtMs: number, error?: string, };
-
 export type WorkflowDraftEntry = { id: string, path: string, roles: Array<string>, };
 
 /**
@@ -2022,6 +2029,8 @@ packageId?: string,
 executorPath?: string, workflows: Array<WorkflowDraftEntry>, };
 
 export type WorkflowFinding = { runId: string, nodeId: string | null, code: string, severity: string, detail: string, };
+
+export type WorkflowHumanExitStatus = { kind: string, requestId: string, pmSessionId: string, reason: string, createdAtMs: number, answer?: string, };
 
 export type WorkflowHumanWait = { nodeId: string, sessionId: string, requestId: string, title: string, };
 
@@ -2178,7 +2187,11 @@ candidateError?: string,
  * Candidate used for new Runs. Absent only for a V1 directory project
  * that has not entered the activation lifecycle yet.
  */
-activeDigest?: string, activationRevision: number, 
+activeDigest?: string, 
+/**
+ * This executor uses the built-in recovery flow for new recovery Runs.
+ */
+recoveryBuiltinOverride: boolean, activationRevision: number, 
 /**
  * True when package source has changed since the active Candidate.
  */
@@ -2188,6 +2201,8 @@ sourceChanged: boolean,
  * is a no-op and therefore does not append an entry.
  */
 activationHistory: Array<WorkflowActivationStatus>, };
+
+export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, reason: string, };
 
 /**
  * Read-only observation returned by the request.budget Workflow capability.
@@ -2208,11 +2223,15 @@ export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, d
  * from the pinned project definition; the daemon reports only generic graph
  * and evidence facts here.
  */
-export type WorkflowRunStatus = { 
+export type WorkflowRunStatus = { humanExit?: WorkflowHumanExitStatus, 
+/**
+ * Immutable business Run references owned by a recovery Run.
+ */
+handles: Array<WorkflowRecoveryHandleStatus>, 
 /**
  * Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
  */
-structure?: unknown, diagnostics?: Array<WorkflowDiagnosticStatus>, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
+structure?: unknown, requestRunId?: string, reportPending?: boolean, supervision?: WorkflowSupervisionStatus, requestBudget: WorkflowRequestBudgetStatus, 
 /**
  * Why execution is blocked, stopping or cancelled.
  */
@@ -2260,9 +2279,9 @@ humanWaitMs: number,
 /**
  * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
  */
-recoveryWaitMs: number, waiting: boolean, silenceThresholdMs: number, };
+recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
 
-export type WorkflowTaskSummary = { executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
+export type WorkflowTaskSummary = { humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 
 export type WorkspaceFileSource = { kind: WorkspaceFileSourceKind, workspaceHandle: string, path: string, };
 

@@ -210,6 +210,13 @@ pub enum Request {
         workspace_id: String,
         run_id: String,
     },
+    #[serde(rename = "workflow.journal", rename_all = "camelCase")]
+    WorkflowJournal {
+        workspace_id: String,
+        run_id: String,
+        since: u64,
+        limit: u32,
+    },
     /// Lists recent Runs for project-side Workflow analysis. This is a
     /// read-only projection; detailed structured messages remain Session-owned.
     #[serde(rename = "workflow.history", rename_all = "camelCase")]
@@ -260,6 +267,34 @@ pub enum Request {
     WorkflowRecover {
         workspace_id: String,
         run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
+    /// Start a new recovery Run for one blocked business Run. The actor is
+    /// bound to the authenticated ordinary PM Session by the daemon.
+    #[serde(rename = "workflow.recovery.start", rename_all = "camelCase")]
+    WorkflowRecoveryStart {
+        workspace_id: String,
+        run_id: String,
+        reason: String,
+    },
+    /// Ask the Human to decide one classified exit for a blocked Run.
+    #[serde(rename = "workflow.human", rename_all = "camelCase")]
+    WorkflowHuman {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        kind: String,
+        reason: String,
+    },
+    /// Override only future recovery Runs to use the built-in flow.
+    #[serde(rename = "workflow.recovery.reset", rename_all = "camelCase")]
+    WorkflowRecoveryReset {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         #[ts(type = "number")]
         expected_revision: u64,
     },
@@ -1074,6 +1109,7 @@ pub enum Reply {
     WorkflowPackages(WorkflowPackageList),
     WorkflowBuild(WorkflowBuildReport),
     WorkflowRun(WorkflowRunStatus),
+    WorkflowJournal(Vec<serde_json::Value>),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),

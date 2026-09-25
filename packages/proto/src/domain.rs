@@ -967,6 +967,9 @@ pub struct SessionInputSummary {
 pub struct WorkflowTaskSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub human_exit: Option<WorkflowHumanExitStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub executing: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -1289,6 +1292,8 @@ pub struct WorkflowProjectStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub active_digest: Option<String>,
+    /// This executor uses the built-in recovery flow for new recovery Runs.
+    pub recovery_builtin_override: bool,
     #[ts(type = "number")]
     pub activation_revision: u64,
     /// True when package source has changed since the active Candidate.
@@ -1328,13 +1333,16 @@ pub struct WorkflowCatalogEntryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub human_exit: Option<WorkflowHumanExitStatus>,
+    /// Immutable business Run references owned by a recovery Run.
+    #[serde(default)]
+    pub handles: Vec<WorkflowRecoveryHandleStatus>,
     /// Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "unknown")]
     pub structure: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub diagnostics: Option<Vec<WorkflowDiagnosticStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub request_run_id: Option<String>,
@@ -1397,6 +1405,30 @@ pub struct WorkflowRunStatus {
     pub created_at_ms: i64,
     #[ts(type = "number")]
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowHumanExitStatus {
+    pub kind: String,
+    pub request_id: String,
+    pub pm_session_id: String,
+    pub reason: String,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+    #[ts(optional)]
+    pub answer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowRecoveryHandleStatus {
+    pub run_id: String,
+    #[ts(type = "number")]
+    pub trigger_seq: u64,
+    pub reason: String,
 }
 
 /// One structured, replayable control-plane message owned by an Executor
@@ -1519,21 +1551,7 @@ pub struct WorkflowSupervisionStatus {
     pub recovery_wait_ms: i64,
     pub waiting: bool,
     #[ts(type = "number")]
-    pub silence_threshold_ms: i64,
-}
-
-/// Finishing a review is distinct from approving its subject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct WorkflowDiagnosticStatus {
-    pub session_id: String,
-    pub status: String,
-    #[ts(type = "number")]
-    pub created_at_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub error: Option<String>,
+    pub node_wall_ms: i64,
 }
 
 /// A node's settled outcome, as a bare string on the wire and on disk.
@@ -2125,7 +2143,7 @@ pub struct AgentModelProfile {
     pub cost: Option<AgentCostLevel>,
 }
 
-/// One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flush
+/// One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flash
 /// membership is fixed by the product; these rows describe Human-created
 /// groups for custom tags only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -2293,6 +2311,18 @@ pub struct SupportDiagnostics {
     pub uptime_seconds: u64,
     pub hub_state: String,
     pub remote_state: String,
+    /// Milliseconds since the Workflow scheduler last completed a scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub workflow_patrol_lag_ms: Option<u64>,
+    /// Queued and running Workflow patrol jobs on this daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_patrol_active_jobs: Option<u32>,
+    /// Age of the oldest queued or running patrol job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub workflow_patrol_oldest_job_ms: Option<u64>,
     pub events: Vec<SupportDiagnosticEvent>,
     #[ts(type = "number")]
     pub dropped_events: u64,

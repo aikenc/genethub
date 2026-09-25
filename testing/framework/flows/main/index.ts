@@ -499,12 +499,12 @@ export async function configureMockProvider(
     payload: {
       preferences: {
         runtimes: {},
-        selectedTags: ["Flush"],
+        selectedTags: ["Flash"],
         modelProfiles: [
           {
             agentId: "genet",
             modelId: "deepseek/deepseek-v4-flash",
-            tags: ["Flush", "图片理解", "视频理解"],
+            tags: ["Flash", "图片理解", "视频理解"],
             cost: "low",
           },
           {

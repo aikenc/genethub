@@ -55,17 +55,25 @@ const REF_WORKFLOW: &str = "$workflow";
 const REF_COLLECTION: &str = "$collection";
 const REF_PROJECT: &str = "$project";
 
-/// `workflow.md` frontmatter: two optional fields, both of which have a
+/// `workflow.md` frontmatter: three optional fields, all with a
 /// mechanical consumer. Everything an author might otherwise declare belongs
 /// in the prose body, where it can inform a reader without pretending to be a
 /// gate the platform never checks.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     /// Machine-readable summary for `workflow list` and PM routing.
     pub(crate) description: String,
     /// Author's "this is still an experiment" marker. It changes no mechanical
     /// behaviour; it tells PM to look harder at the health facts.
     pub(crate) dev: bool,
+    /// The recovery flow used by newly started recovery Runs.
+    pub(crate) recovery: String,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self { description: String::new(), dev: false, recovery: "builtin".into() }
+    }
 }
 
 /// One Space the package asks the project to materialize.
@@ -148,44 +156,6 @@ impl Package {
             );
         }
         Ok(first)
-    }
-
-    /// The Space that hosts bounded automatic diagnosis. Absent is normal and
-    /// not an error: the kernel already has a "not configured" branch that
-    /// notifies PM instead of failing a Run.
-    pub(crate) fn diagnostic_space(&self) -> Result<Option<&SpaceSource>> {
-        self.single_component_space(crate::agent_space::COMPONENT_DIAGNOSTIC)
-    }
-
-    fn single_component_space(&self, component_id: &str) -> Result<Option<&SpaceSource>> {
-        let mut matches = self.spaces.iter().filter(|space| {
-            space
-                .components
-                .iter()
-                .any(|(id, _)| id == component_id)
-        });
-        let first = matches.next();
-        if let Some(extra) = matches.next() {
-            bail!(
-                "Workflow 包 {} 声明了多个 {component_id} 载体：{} 与 {}",
-                self.id,
-                first.expect("checked above").name,
-                extra.name
-            );
-        }
-        Ok(first)
-    }
-
-    /// The worker role the diagnostic carrier runs as. The platform owns every
-    /// diagnosis policy; a package only chooses the carrier and its role.
-    pub(crate) fn diagnostic_role(&self) -> Result<Option<String>> {
-        Ok(self.diagnostic_space()?.and_then(|space| {
-            space
-                .components
-                .iter()
-                .find(|(id, _)| id == crate::agent_space::COMPONENT_WORKER)
-                .and_then(|(_, role)| role.clone())
-        }))
     }
 
     /// Product directory name for one of this package's Spaces. Flattening `/`
@@ -456,8 +426,18 @@ pub(crate) fn parse_manifest(raw: &str, id: &str) -> Result<Manifest> {
                         ),
                     }
                 }
+                "recovery" => {
+                    if value != "builtin" {
+                        let Some(flow_id) = value.strip_prefix("flows/").and_then(|path| path.strip_suffix(".yaml")) else {
+                            bail!("Workflow 包 {id} 的 recovery 必须是 builtin 或 flows/<id>.yaml");
+                        };
+                        validate_id(flow_id, "recovery flow id")?;
+                        if flow_id.contains('/') { bail!("recovery flow id 不能包含子目录"); }
+                    }
+                    manifest.recovery = value.to_string();
+                }
                 other => bail!(
-                    "Workflow 包 {id} 的 {MANIFEST_FILE} frontmatter 只接受 description 与 dev，出现了 {other}"
+                    "Workflow 包 {id} 的 {MANIFEST_FILE} frontmatter 只接受 description、dev 与 recovery，出现了 {other}"
                 ),
             }
         }
@@ -834,14 +814,17 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_accepts_only_description_and_dev() {
+    fn frontmatter_accepts_only_description_dev_and_recovery() {
         assert_eq!(
-            parse_manifest("---\ndescription: a\ndev: true\n---\nbody\n", "x").unwrap(),
+            parse_manifest("---\ndescription: a\ndev: true\nrecovery: flows/repair.yaml\n---\nbody\n", "x").unwrap(),
             Manifest {
                 description: "a".into(),
-                dev: true
+                dev: true,
+                recovery: "flows/repair.yaml".into(),
             }
         );
+        assert_eq!(parse_manifest("---\nrecovery: builtin\n---\n", "x").unwrap().recovery, "builtin");
+        assert!(parse_manifest("---\nrecovery: ../escape.yaml\n---\n", "x").is_err());
         let error = parse_manifest("---\ncategory: game\n---\n", "x")
             .unwrap_err()
             .to_string();
@@ -892,32 +875,6 @@ mod tests {
         let package = load(root.path(), "pkg").unwrap();
         let error = package.executor_space().unwrap_err().to_string();
         assert!(error.contains("executor"), "{error}");
-    }
-
-    #[test]
-    fn the_diagnostic_role_comes_from_the_carrier_worker_component() {
-        let root = tempfile::tempdir().unwrap();
-        seed_package(root.path(), "pkg");
-        let space = root.path().join(PACKAGES_DIR).join("pkg/spaces/wr");
-        write(
-            &space.join(SPACE_FILE),
-            r#"{"lifecycle":"pooled","components":[{"componentId":"worker","role":"workflow-reviewer"},{"componentId":"diagnostic"}]}"#,
-        );
-        write(&space.join(PIPESPACE_FILE), r#"{"schema":"pipespace.v1"}"#);
-        let package = load(root.path(), "pkg").unwrap();
-        assert_eq!(
-            package.diagnostic_role().unwrap().as_deref(),
-            Some("workflow-reviewer")
-        );
-    }
-
-    #[test]
-    fn no_diagnostic_carrier_is_not_an_error() {
-        let root = tempfile::tempdir().unwrap();
-        seed_package(root.path(), "pkg");
-        let package = load(root.path(), "pkg").unwrap();
-        assert!(package.diagnostic_space().unwrap().is_none());
-        assert!(package.diagnostic_role().unwrap().is_none());
     }
 
     #[test]

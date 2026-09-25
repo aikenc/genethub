@@ -26,11 +26,16 @@ pub(crate) async fn check(
         });
     }
     let runtime = RuntimeStore::new(&state.paths.root, workspace_id, &workspace.root)?;
-    let all = all_runs(&runtime)?;
-    let runs = if let Some(id) = run_id {
-        vec![load_run(&runtime, id)?]
+    let scan = if let Some(id) = run_id {
+        RunScan { runs: vec![load_run(&runtime, id)?], unreadable: Vec::new() }
     } else {
-        all.clone()
+        scan_runs(&runtime)?
+    };
+    let runs = scan.runs;
+    let all = if run_id.is_some() {
+        request_runs(&runtime, request::group_id(&runs[0]))?
+    } else {
+        runs.clone()
     };
     let mut report = WorkflowCheckReport {
         checked_at_ms: now_ms(),
@@ -38,6 +43,15 @@ pub(crate) async fn check(
         runs: Vec::new(),
         draft: None,
     };
+    for (id, detail) in scan.unreadable {
+        report.findings.push(WorkflowFinding {
+            run_id: id,
+            node_id: None,
+            code: "runUnreadable".into(),
+            severity: "error".into(),
+            detail: detail.chars().take(2048).collect(),
+        });
+    }
     for run in runs {
         let mut finding = |node_id: Option<String>, code: &str, severity: &str, detail: String| {
             report.findings.push(WorkflowFinding {
@@ -143,15 +157,6 @@ pub(crate) async fn check(
                                 "error",
                                 "Worker 无执行归属，节点仍 running；需要状态对账".into(),
                             );
-                        } else if now_ms()
-                            - record
-                                .activity
-                                .last_at_ms
-                                .max(record.assigned_at_ms)
-                                .max(run.created_at_ms)
-                            >= supervision::SILENCE_MS
-                        {
-                            finding(Some(node.id.clone()), "silentAttempt", "warning", "至少 180 秒无可观测 LLM／工具活动；需诊断，在途长工具不能据此判失败".into());
                         }
                     }
                 }
@@ -187,7 +192,13 @@ pub(crate) async fn check(
             .iter()
             .filter(|other| request::group_id(other) == request::group_id(&run))
             .collect::<Vec<_>>();
-        let snapshot = request::observation(&all, &run, now_ms())?;
+        let snapshot = match request::observation(&all, &run, now_ms()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                finding(None, "requestUnreadable", "error", format!("请求预算无法读取：{error:#}"));
+                continue;
+            }
+        };
         let tokens = group
             .iter()
             .flat_map(|run| request::activities(run))
@@ -196,9 +207,6 @@ pub(crate) async fn check(
             });
         let budget = &snapshot.budget;
         finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；执行耗时 {}/{} 毫秒；预算 revision {}（仅全 Run Human 等待免计时；观测不代表额度预留）", snapshot.request_run_id, snapshot.used_runs, budget.max_runs, snapshot.observed_llm_rounds, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), snapshot.execution_ms, budget.deadline_ms, budget.revision));
-        if let Some(problem) = &run.supervision.finding {
-            finding(None, "diagnosis", "warning", problem.clone());
-        }
         if let Some(stop) = &run.stop {
             finding(
                 None,
@@ -218,7 +226,10 @@ pub(crate) async fn check(
                 ),
             );
         }
-        report.runs.push(run_status(&runtime, &run)?);
+        match run_status(&runtime, &run) {
+            Ok(status) => report.runs.push(status),
+            Err(error) => finding(None, "requestUnreadable", "error", format!("Run 状态无法读取：{error:#}")),
+        }
     }
     Ok(report)
 }

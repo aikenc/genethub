@@ -100,7 +100,7 @@ const PREFERENCES: AgentSelectionPreferences = {
       tags: ["Pro", "图片理解", "视频理解"],
       cost: "veryHigh",
     },
-    { agentId: "claude", tags: ["Flush"], cost: "low" },
+    { agentId: "claude", tags: ["Flash"], cost: "low" },
   ],
   runtimes: {
     genet: { effortId: "high", runtimeValues: {} },
@@ -146,7 +146,7 @@ describe("the exact model composer control", () => {
     expect(trigger).toHaveTextContent(/Genet · DeepSeek/);
   });
 
-  it("keeps Max, Pro and Flush mutually exclusive while filtering", async () => {
+  it("keeps Max, Pro and Flash mutually exclusive while filtering", async () => {
     controls();
     const { dialog } = await openSettings();
     expect(within(dialog).getByRole("button", { name: "Pro" })).toHaveAttribute(
@@ -183,7 +183,7 @@ describe("the exact model composer control", () => {
     );
 
     const coding = controls({
-      tags: ["Flush"],
+      tags: ["Flash"],
       agentId: "claude",
       modelId: null,
       modeId: "bypassPermissions",
@@ -195,7 +195,7 @@ describe("the exact model composer control", () => {
     await userEvent.click(within(opened.dialog).getByRole("button", { name: "使用此模型" }));
     expect(coding.onPickTarget).toHaveBeenCalledWith(
       expect.objectContaining({ agentId: "claude", modeId: "default" }),
-      ["Flush"],
+      ["Flash"],
     );
   });
 
@@ -311,7 +311,7 @@ describe("the exact model composer control", () => {
     const group = screen.getAllByRole("group", { name: "智能档位" })[0]!;
     expect(within(group).getByText("Max")).toBeInTheDocument();
     expect(within(group).getByText("Pro")).toBeInTheDocument();
-    expect(within(group).getByText("Flush")).toBeInTheDocument();
+    expect(within(group).getByText("Flash")).toBeInTheDocument();
   });
 
   it("allows removing the last model to disable an Agent", async () => {

@@ -3250,7 +3250,7 @@ describe("a whole turn as the timeline sees it", () => {
             {
               agentId: "claude",
               modelId: "deepseek/v4",
-              tags: ["Flush"],
+              tags: ["Flash"],
               cost: "medium",
             },
           ],
@@ -3339,11 +3339,11 @@ describe("a whole turn as the timeline sees it", () => {
         providers: [],
         lanEnabled: false,
         agentPreferences: {
-          selectedTags: ["Flush"],
+          selectedTags: ["Flash"],
           modelProfiles: [{
             agentId: "cursor",
             modelId: "deepseek/v4",
-            tags: ["Flush"],
+            tags: ["Flash"],
             cost: "medium",
           }],
           runtimes: {},

@@ -65,7 +65,7 @@ export function ComposerControls({
     runtimeValues,
   });
   const selectedTags = normalizeTags(
-    tags?.length ? tags : preferences.selectedTags?.length ? preferences.selectedTags : ["Flush"],
+    tags?.length ? tags : preferences.selectedTags?.length ? preferences.selectedTags : ["Flash"],
   );
   const automaticTags = normalizeTags(mediaTags ?? []);
   const agentProfile = selection.current ? resolveAgentProfile(selection.current.id) : null;

@@ -1027,7 +1027,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         ? options.tags
         : cachedDraft?.tags?.length
           ? cachedDraft.tags
-          : normalizedPreferences.selectedTags ?? ["Flush"],
+          : normalizedPreferences.selectedTags ?? ["Flash"],
       normalizedPreferences,
     );
     const explicitTarget = options?.target;
@@ -2939,7 +2939,7 @@ async function ensureWorkbenchTagRoute(
   );
   if (requiredMedia.every((medium) => support[medium])) return;
   const tags = normalizeGroupedTags(
-    preferences.selectedTags?.length ? preferences.selectedTags : ["Flush"],
+    preferences.selectedTags?.length ? preferences.selectedTags : ["Flash"],
     preferences,
   );
   const mediaTags = requiredMedia.map((medium) =>

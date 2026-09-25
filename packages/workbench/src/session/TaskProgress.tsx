@@ -52,7 +52,7 @@ async function cancelTask(client: Client, workspaceId: string, runId: string, re
 
 /** Shares the existing session-summary source with the lists. PM turn state
  * stays independent, and task cancellation never waits for an LLM answer. */
-export function TaskProgress({ session }: { session: SessionSummary }) {
+export function TaskProgress({ session, onReportSession }: { session: SessionSummary; onReportSession?(sessionId: string, initialDescription?: string): void }) {
   const client = useWorkbench((state) => state.client);
   const connection = useWorkbench((state) => state.connection);
   const selectSession = useWorkbench((state) => state.selectSession);
@@ -106,6 +106,17 @@ export function TaskProgress({ session }: { session: SessionSummary }) {
               }}>{busy === task.runId ? "正在提交终止…" : task.status === "cancelling" ? "停止中" : "终止任务"}</button>}
           </div>
           {task.reportPending && <p className="mt-1 text-xs text-muted">{task.status === "running" ? "任务有新情况，待 PM 处理。" : "执行结果待 PM 核对新消息并汇报。"}</p>}
+          {task.humanExit && <div role="status" className="mt-2 rounded-lg border border-line px-2 py-2 text-xs">
+            <p className="font-medium">人工决定 · 出口 {task.humanExit.kind}{task.humanExit.answer ? ` · 已选择 ${task.humanExit.answer}` : " · 待答复"}</p>
+            <p className="mt-1 break-words">{task.humanExit.reason}</p>
+            {!task.humanExit.answer && <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => void selectSession(task.humanExit!.pmSessionId)}>前往问题卡</button>}
+            {((task.humanExit.kind === "d" && task.humanExit.answer === "confirmFeedback")
+              || (task.humanExit.kind === "c" && task.humanExit.answer === "reject")) && onReportSession &&
+              <button type="button" className="mt-1 min-h-9 text-accent" onClick={() => onReportSession(
+                task.humanExit!.pmSessionId,
+                `Workflow 恢复失败\nRun: ${task.runId}\n请求: ${task.requestRunId ?? task.runId}\n原因: ${task.humanExit!.reason}\n日志引用: workflow journal --run ${task.runId}`,
+              )}>打开预填反馈</button>}
+          </div>}
           {task.activeNodes.length > 0 && <p className="mt-1 text-xs text-muted">当前步骤：{task.activeNodes.join("、")}</p>}
           {task.reason && <details className="mt-1 text-xs"><summary className="cursor-pointer truncate">{task.reason.split("\n")[0]}</summary><p className="mt-2 whitespace-pre-wrap break-words">{task.reason}</p></details>}
           {task.waiting?.map(waiting => {

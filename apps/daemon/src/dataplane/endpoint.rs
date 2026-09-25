@@ -1460,6 +1460,7 @@ fn request_workspace(request: &Request) -> Option<&str> {
         | Request::WorkflowList { workspace_id }
         | Request::WorkflowBuild { workspace_id, .. }
         | Request::WorkflowHistory { workspace_id, .. }
+        | Request::WorkflowJournal { workspace_id, .. }
         | Request::AgentSpaceChildren { workspace_id }
         | Request::WorkspaceAddRoot { workspace_id, .. }
         | Request::WorkspaceRename { workspace_id, .. }
@@ -1693,7 +1694,7 @@ mod tests {
         assert_eq!(
             request_workspace(&Request::SessionCreateRouted {
                 workspace_id: "created-workspace".into(),
-                tags: vec!["Flush".into()],
+                tags: vec!["Flash".into()],
                 media_tags: Vec::new(),
                 title: None,
                 cwd: None,
@@ -1713,7 +1714,7 @@ mod tests {
             request_workspace(&Request::SessionForkImportRouted {
                 transfer,
                 workspace_id: "remote-workspace".into(),
-                tags: vec!["Flush".into()],
+                tags: vec!["Flash".into()],
             }),
             Some("remote-workspace")
         );

@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkflowRunStatus } from "@genehub/proto";
-import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } from "../../framework/public.ts";
+import { connectProductClient, createLease, daemonEndpoint, defineSpecialty, releaseLease, runGenetAsync } from "../../framework/public.ts";
 
-defineSpecialty({
-  id: "specialty.workflow.operation-recovery.restart",
+for (const takeover of [false, true]) defineSpecialty({
+  id: `specialty.workflow.operation-recovery.${takeover ? "cross-daemon" : "restart"}`,
   title: "A lost Worker continues its original Session in the pinned Run",
-  oracle: "A real daemon restart keeps the unfinished Worker Session; explicit recovery continues that Session without replaying the accepted predecessor or opening a second Run",
+  oracle: "After a daemon stops, the next owner keeps the unfinished Worker Session; explicit recovery continues it without replaying the accepted predecessor or opening a second Run",
   catches: ["restart fences a resumable Worker", "recovery opens a second Worker identity", "accepted predecessor is replayed", "stale Run revision silently resumes"],
   tags: ["core", "workflow", "structured-workflow", "workflow-recovery"],
   llm: { default: "mock" }, expectedDurationMs: 45_000, timeoutMs: 150_000,
@@ -16,8 +16,14 @@ defineSpecialty({
 }, async t => {
   t.data.git.init(t.env.workspace);
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+  const secondLease = takeover ? createLease("genehub-workflow-takeover-") : undefined;
+  const secondEnv = secondLease ? { ...opened.daemon.env, ...secondLease.env } : undefined;
+  let secondClient: Awaited<ReturnType<typeof connectProductClient>> | undefined;
+  let secondStarted = false;
+  let activeEnv = opened.daemon.env;
+  let activeWorkspaceId = opened.workspaceId;
   const cli = async (args: string[]) => {
-    const result = await runGenetAsync(opened.daemon.genet, args, opened.daemon.env, { cwd: opened.workspaceRoot });
+    const result = await runGenetAsync(opened.daemon.genet, args, activeEnv, { cwd: opened.workspaceRoot });
     t.assertions.assert(result.code === 0, `CLI failed: ${result.stderr || result.stdout}`);
     return result.stdout;
   };
@@ -64,7 +70,7 @@ defineSpecialty({
     const pm = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     await t.flows.main.sendPrompt(opened.client, pm, "Execute the two-operation Workflow.");
     const history = async (): Promise<WorkflowRunStatus[]> => {
-      const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: opened.workspaceId, limit: 10 } });
+      const reply = await opened.client.call({ type: "workflow.history", payload: { workspaceId: activeWorkspaceId, limit: 10 } });
       if (reply?.type !== "workflowRuns") throw new Error("workflow history unavailable");
       return reply.data;
     };
@@ -77,10 +83,27 @@ defineSpecialty({
     }, 45_000);
     const firstId = before!.nodes.find(n => n.status === "completed")!.sessionId;
     const interruptedId = before!.nodes.find(n => n.status === "running")!.sessionId;
+    if (takeover) {
+      const started = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], secondEnv!);
+      t.assertions.assert(started.code === 0, `second daemon failed: ${started.stderr || started.stdout}`);
+      secondStarted = true;
+      secondClient = await connectProductClient(daemonEndpoint({ genet: opened.daemon.genet, env: secondEnv!, stop() {} }));
+      const openedAgain = await secondClient.call({ type: "workspace.open", payload: { root: opened.workspaceRoot } });
+      if (openedAgain?.type !== "workspace") throw new Error("second daemon could not open the project");
+      activeWorkspaceId = openedAgain.data.id;
+      t.assertions.assert(activeWorkspaceId !== opened.workspaceId, "takeover fixture reused the first daemon's local workspace ID");
+      await t.flows.main.configureMockProvider(secondClient, opened.mock);
+    }
     opened.client.close();
-    await cli(["daemon", "stop"]);
-    await cli(["daemon", "start"]);
-    opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+    const stopped = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
+    t.assertions.assert(stopped.code === 0, `first daemon stop failed: ${stopped.stderr || stopped.stdout}`);
+    if (takeover) {
+      activeEnv = secondEnv!;
+      opened.client = secondClient!;
+    } else {
+      await cli(["daemon", "start"]);
+      opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
+    }
     let recoverable: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       recoverable = (await history())[0];
@@ -88,9 +111,11 @@ defineSpecialty({
     }, 45_000);
     t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor changed during restart");
     t.assertions.assert(recoverable!.nodes.find(n => n.sessionId === interruptedId)?.status === "interrupted", "unfinished Worker was not marked for continuation");
-    const check = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: recoverable!.id } });
+    t.assertions.assert(recoverable!.reason?.includes("原 Session") && recoverable!.handles.length === 0,
+      "interrupted Worker lost its same-Session recovery reference");
+    const check = await opened.client.call({ type: "workflow.check", payload: { workspaceId: activeWorkspaceId, runId: recoverable!.id } });
     t.assertions.assert(check?.type === "workflowCheck" && check.data.findings.some(f => f.code === "recoverableOperation" && f.detail.includes("仍保留")), "PM did not receive a same-session recovery finding");
-    const stale = await runGenetAsync(opened.daemon.genet, ["workflow", "recover", "--run", recoverable!.id, "--revision", String(recoverable!.revision - 1)], opened.daemon.env, { cwd: opened.workspaceRoot });
+    const stale = await runGenetAsync(opened.daemon.genet, ["workflow", "recover", "--run", recoverable!.id, "--revision", String(recoverable!.revision - 1)], activeEnv, { cwd: opened.workspaceRoot });
     t.assertions.assert(stale.code !== 0, "stale recovery revision was accepted");
     retryReady = true;
     await cli(["workflow", "recover", "--run", recoverable!.id, "--revision", String(recoverable!.revision)]);
@@ -102,6 +127,8 @@ defineSpecialty({
       return completed?.status === "completed";
     }, 45_000);
     t.assertions.assert(completed!.id === before!.id, "recovery replaced the pinned Run");
+    t.assertions.assert(!completed!.reason && completed!.handles.length === 0,
+      "successful same-Session recovery left a blocked handoff");
     t.assertions.assert(completed!.nodes.find(n => n.sessionId === firstId)?.status === "completed", "accepted predecessor was replayed");
     const recovered = completed!.nodes.find(n => n.id === recoverable!.nodes.find(n => n.sessionId === interruptedId)!.id)!;
     t.assertions.assert(recovered.sessionId === interruptedId && recovered.status === "completed", "recovery replaced the original Worker Session");
@@ -111,6 +138,8 @@ defineSpecialty({
   } finally {
     opened.client.close();
     await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
+    if (secondStarted) await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], secondEnv!);
     await opened.mock.stop();
+    if (secondLease) releaseLease(secondLease);
   }
 });

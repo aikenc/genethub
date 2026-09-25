@@ -80,7 +80,7 @@ export function useMachineCatalog({
   );
   const [tags, setTags] = useState<string[]>(
     normalizeGroupedTags(
-      sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flush"],
+      sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flash"],
       sourcePreferences,
     ),
   );
@@ -123,7 +123,7 @@ export function useMachineCatalog({
       setWorkspaceId(sourceWorkspaceId);
       setTags(
         normalizeGroupedTags(
-          sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flush"],
+          sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flash"],
           sourcePreferences,
         ),
       );
@@ -144,7 +144,7 @@ export function useMachineCatalog({
             : (loaded.workspaces[0]?.id ?? ""),
         );
         setTags(
-          normalizeAgentPreferences(loaded.agentPreferences, loaded.agents).selectedTags ?? ["Flush"],
+          normalizeAgentPreferences(loaded.agentPreferences, loaded.agents).selectedTags ?? ["Flash"],
         );
         setSelectedRouteKey(null);
       })

@@ -1,4 +1,4 @@
-//! Request lineage and finite shared bounds live on the existing Run records.
+//! PM-owned request state, Run lineage and finite shared bounds.
 use super::*;
 
 pub(super) const DEFAULT_MAX_REQUEST_RUNS: u32 = 3;
@@ -74,6 +74,180 @@ pub(super) struct RequestLink {
     pub resume_message_id: Option<String>,
 }
 
+/// The request is owned by PM, independently of any one execution Session.
+/// Run snapshots retain a link for routing; this record owns the mutable goal
+/// and limits shared by all Runs in the request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RequestRecord {
+    schema: String,
+    root_run_id: String,
+    original_message_id: String,
+    goal: String,
+    budget: RequestBudget,
+    cancelled: bool,
+    cancelled_at_ms: i64,
+    cancelled_by_agent: bool,
+    resume_message_id: Option<String>,
+    #[serde(default)]
+    recovery_extra: RecoveryExtra,
+    #[serde(default)]
+    approved_human_exits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RecoveryExtra {
+    pub max_runs: u32,
+    pub max_llm_rounds: u64,
+    pub deadline_seconds: u64,
+}
+
+fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
+    let path = record_path(runtime, root_run_id, false)?;
+    let metadata = crate::config::sensitive_metadata(&path)?;
+    crate::config::reject_link_or_reparse(&path, &metadata)?;
+    if !metadata.is_file() { bail!("Workflow request 不是普通文件"); }
+    ensure_record_size("Workflow request", metadata.len(), MAX_RUN_RECORD_BYTES)?;
+    let record: RequestRecord = serde_json::from_slice(&fs::read(&path)?)?;
+    if record.schema != "genehub.workflow.request.v1" || record.root_run_id != root_run_id {
+        bail!("Workflow request identity mismatch");
+    }
+    Ok(record)
+}
+
+/// Resolve an implicit retry from PM's request record. Parsing every Run in
+/// the project would let one unrelated damaged snapshot block a new request.
+fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<String>> {
+    let directory = runtime.directory(Path::new("requests"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("读取 Workflow PM request 目录"),
+    };
+    let mut found = None;
+    for entry in listing {
+        let entry = entry?;
+        let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
+        if let Err(error) = validate_id(&id, "request id") {
+            // An invalid directory name cannot identify a committed request.
+            tracing::warn!(request_id = %id, %error, "ignoring invalid Workflow request directory");
+            continue;
+        }
+        let record = match read_record(runtime, &id) {
+            Ok(record) => record,
+            Err(error) if !run_path(runtime, &id, false)?.exists() => {
+                // A dispatch reserves its request directory before committing
+                // the root Run locator. An unreadable reservation has no
+                // committed request to associate with this PM message.
+                tracing::warn!(request_id = %id, %error, "ignoring uncommitted Workflow request reservation");
+                continue;
+            }
+            Err(error) => {
+                // The immutable root snapshot can prove that a damaged
+                // request record belongs to another PM message. If it cannot
+                // prove that, fail closed: silently making a second root for
+                // the same message would duplicate work and side effects.
+                match load_run_indexed_raw(runtime, &id) {
+                    Ok(root) if group_id(&root) == id && root.request.as_ref()
+                        .is_some_and(|link| link.original_message_id != message_id) => {
+                        tracing::warn!(request_id = %id, %error,
+                            "ignoring unrelated damaged Workflow request record");
+                        continue;
+                    }
+                    Ok(_) => {},
+                    Err(snapshot_error) => tracing::warn!(request_id = %id, %snapshot_error,
+                        "cannot establish ownership of damaged Workflow request"),
+                }
+                return Err(error).with_context(|| format!("读取 Workflow 请求 {id}"));
+            }
+        };
+        if record.original_message_id == message_id {
+            if found.replace(record.root_run_id).is_some() {
+                bail!("多个 Workflow 请求绑定同一 PM 消息");
+            }
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn recovery_extra(runtime: &RuntimeStore, root_run_id: &str) -> Result<RecoveryExtra> {
+    Ok(read_record(runtime, root_run_id)?.recovery_extra)
+}
+
+/// Called only after a daemon-authored Human question receives its answer.
+/// The request ID is the idempotency key, so a crash between this write and
+/// the Human exit receipt cannot spend approval twice.
+pub(super) fn apply_human_budget(runtime: &RuntimeStore, root_run_id: &str, request_id: &str, kind: &str) -> Result<()> {
+    let mut record = read_record(runtime, root_run_id)?;
+    if record.approved_human_exits.iter().any(|id| id == request_id) { return Ok(()); }
+    if record.approved_human_exits.len() >= 64 { bail!("Workflow Human approval history is full"); }
+    match kind {
+        "a" => {
+            record.budget.max_runs = record.budget.max_runs.saturating_add(1).min(MAX_CONFIGURED_REQUEST_RUNS);
+            record.budget.max_llm_rounds = record.budget.max_llm_rounds.saturating_add(128).min(MAX_CONFIGURED_LLM_ROUNDS);
+            record.budget.deadline_ms = record.budget.deadline_ms.saturating_add(3_600_000)
+                .min(MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS.saturating_mul(1000));
+            record.budget.revision = record.budget.revision.saturating_add(1);
+        }
+        "c" => {
+            record.recovery_extra.max_runs = record.recovery_extra.max_runs.saturating_add(1).min(recovery::MAX_RECOVERY_RUNS);
+            record.recovery_extra.max_llm_rounds = record.recovery_extra.max_llm_rounds.saturating_add(100).min(recovery::MAX_RECOVERY_LLM_ROUNDS);
+            record.recovery_extra.deadline_seconds = record.recovery_extra.deadline_seconds.saturating_add(1800).min(recovery::MAX_RECOVERY_DEADLINE_SECONDS);
+        }
+        _ => bail!("Human exit {kind} does not adjust a budget"),
+    }
+    record.approved_human_exits.push(request_id.into());
+    crate::config::save_private(&record_path(runtime, root_run_id, true)?, &encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?)
+}
+
+fn record_path(runtime: &RuntimeStore, root_run_id: &str, create: bool) -> Result<PathBuf> {
+    validate_id(root_run_id, "request id")?;
+    Ok(runtime.directory(&Path::new("requests").join(root_run_id), create)?.join("request.json"))
+}
+
+pub(super) fn save_record(runtime: &RuntimeStore, run: &RunRecord) -> Result<()> {
+    if group_id(run) != run.id { return Ok(()); }
+    let Some(link) = run.request.as_ref() else { return Ok(()); };
+    let existing = match crate::config::sensitive_metadata(&record_path(runtime, &run.id, false)?) {
+        Ok(_) => Some(read_record(runtime, &run.id)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let record = RequestRecord {
+        schema: "genehub.workflow.request.v1".into(),
+        root_run_id: run.id.clone(),
+        original_message_id: link.original_message_id.clone(),
+        goal: run.task_prompt.clone(),
+        budget: existing.as_ref().filter(|record| record.budget.revision > link.budget.revision)
+            .map(|record| record.budget.clone()).unwrap_or_else(|| link.budget.clone()),
+        cancelled: link.cancelled,
+        cancelled_at_ms: link.cancelled_at_ms,
+        cancelled_by_agent: link.cancelled_by_agent,
+        resume_message_id: link.resume_message_id.clone(),
+        recovery_extra: existing.as_ref().map(|record| record.recovery_extra.clone()).unwrap_or_default(),
+        approved_human_exits: existing.map(|record| record.approved_human_exits).unwrap_or_default(),
+    };
+    let body = encode_private_record("Workflow request", &record, MAX_RUN_RECORD_BYTES)?;
+    crate::config::save_private(&record_path(runtime, &run.id, true)?, &body)
+}
+
+pub(super) fn load_record(runtime: &RuntimeStore, run: &mut RunRecord) -> Result<()> {
+    if group_id(run) != run.id || run.request.is_none() { return Ok(()); }
+    let record = read_record(runtime, &run.id)?;
+    if record.goal != run.task_prompt {
+        bail!("Workflow request identity mismatch");
+    }
+    let link = run.request.as_mut().ok_or_else(|| anyhow!("request root has no link"))?;
+    link.original_message_id = record.original_message_id;
+    link.budget = record.budget;
+    link.cancelled = record.cancelled;
+    link.cancelled_at_ms = record.cancelled_at_ms;
+    link.cancelled_by_agent = record.cancelled_by_agent;
+    link.resume_message_id = record.resume_message_id;
+    Ok(())
+}
+
 pub(super) fn budget(run: &RunRecord) -> RequestBudget {
     run.request
         .as_ref()
@@ -122,12 +296,6 @@ pub(super) fn activities(
                 .iter()
                 .chain(std::iter::once(&node.activity))
         })
-        .chain(
-            run.supervision
-                .diagnostics
-                .iter()
-                .map(|diagnostic| &diagnostic.activity),
-        )
 }
 
 /// One accounting projection for graph queries, check and admission. Replace
@@ -139,8 +307,8 @@ pub(super) fn observation(
 ) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
     let group = runs
         .iter()
-        .filter(|other| group_id(other) == group_id(run) && other.id != run.id)
-        .chain(std::iter::once(run))
+        .filter(|other| group_id(other) == group_id(run) && other.id != run.id && other.handles.is_empty())
+        .chain(std::iter::once(run).filter(|run| run.handles.is_empty()))
         .collect::<Vec<_>>();
     let root = group
         .iter()
@@ -175,10 +343,11 @@ pub(super) fn snapshot(
     run: &RunRecord,
     now: i64,
 ) -> Result<genehub_proto::WorkflowRequestBudgetSnapshot> {
-    observation(&all_runs(runtime)?, run, now)
+    observation(&request_runs(runtime, group_id(run))?, run, now)
 }
 
 pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
+    if !run.handles.is_empty() { return recovery::budget_exhausted(runtime, run, now); }
     let snapshot = snapshot(runtime, run, now)?;
     Ok(snapshot.remaining_llm_rounds == 0
         || (!run.supervision.waiting && snapshot.remaining_execution_ms == 0))
@@ -216,7 +385,6 @@ pub(super) async fn association(
     retry_of: Option<&str>,
 ) -> Result<RequestLink> {
     let (message_id, task_run, _) = state.sessions.current_request(parent).await?;
-    let runs = all_runs(runtime)?;
     let previous = match retry_of.or(task_run.as_deref()) {
         Some(id) => {
             let run = load_run(runtime, id)?;
@@ -227,18 +395,19 @@ pub(super) async fn association(
             }
             Some(run)
         }
-        None => message_id
-            .as_ref()
-            .and_then(|message| {
-                runs.iter().find(|run| {
-                    run.parent_session_id == parent
-                        && run
-                            .request
-                            .as_ref()
-                            .is_some_and(|request| &request.original_message_id == message)
-                })
-            })
-            .cloned(),
+        None => match message_id.as_deref() {
+            Some(message) => match root_for_message(runtime, message)? {
+                Some(id) => {
+                    let run = load_run(runtime, &id)?;
+                    if run.parent_session_id != parent {
+                        bail!("request target belongs to another PM session");
+                    }
+                    Some(run)
+                }
+                None => None,
+            },
+            None => None,
+        },
     };
     if let Some(previous) = previous {
         let root = load_run(runtime, group_id(&previous))?;
@@ -276,10 +445,7 @@ pub(super) async fn admit(
         return Ok(());
     }
     let mut root = load_run(runtime, &link.root_run_id)?;
-    let group = all_runs(runtime)?
-        .into_iter()
-        .filter(|run| group_id(run) == link.root_run_id)
-        .collect::<Vec<_>>();
+    let group = request_runs(runtime, &link.root_run_id)?;
     let snapshot = observation(&group, &root, now_ms())?;
     if snapshot.remaining_runs == 0 {
         bail!(

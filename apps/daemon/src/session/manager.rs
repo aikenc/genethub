@@ -3881,7 +3881,8 @@ impl SessionManager {
             .cloned()
             .ok_or_else(|| anyhow!("no pending interaction called '{request_id}'"))?;
 
-        if request.kind == PermissionRequestKind::PlanApproval
+        if matches!(request.kind, PermissionRequestKind::PlanApproval | PermissionRequestKind::Question)
+            || request.id.starts_with("workflow-human-")
             || !live.meta.lock().await.inbox.entries.is_empty()
         {
             let mut project_approval = live.meta.lock().await.pending_project_approval;
@@ -4088,6 +4089,96 @@ impl SessionManager {
             false,
         )
         .await?;
+        Ok(())
+    }
+
+    /// Daemon-authored Workflow handoffs use the same durable native question
+    /// path as Agent questions. The normal PM Session is controlled by Human.
+    pub(crate) async fn request_workflow_question(
+        &self,
+        session_id: &str,
+        request: PermissionRequest,
+    ) -> Result<()> {
+        if request.kind != PermissionRequestKind::Question {
+            bail!("expected a Workflow question");
+        }
+        let live = self.live(session_id).await?;
+        let _interaction = live.interaction_lock.lock().await;
+        {
+            let pending = live.pending_permissions.lock().await;
+            if pending.iter().any(|item| item.id == request.id) {
+                return Ok(());
+            }
+            if !pending.is_empty() {
+                bail!("answer the current Human interaction before this Workflow question");
+            }
+        }
+        if live.meta.lock().await.human_continuation.as_ref()
+            .is_some_and(|decision| decision.request.id == request.id) {
+            return Ok(());
+        }
+        if let Err(error) = stop_agent_for_interaction(&live, &self.store, &request, false).await {
+            let message = format!("{error:#}");
+            fail_human_pause(&live, &self.store, error).await;
+            return Err(anyhow!(message));
+        }
+        live.stop_pump().await?;
+        let mut owner = live.execution.lock().await;
+        if let Some(turn_id) = owner.as_ref().and_then(|execution| execution.turn_id.clone()) {
+            live.publish(SessionEvent::TurnCanceled { turn_id }).await;
+        }
+        live.finish_execution(&mut owner, SessionEvent::PermissionRequested { request }, false).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn workflow_question_outcome(
+        &self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<Option<PermissionOutcome>> {
+        let live = self.live(session_id).await?;
+        let outcome = live.meta.lock().await.human_continuation.as_ref()
+            .filter(|decision| decision.request.id == request_id)
+            .map(|decision| decision.outcome.clone());
+        Ok(outcome)
+    }
+
+    /// The built-in recovery reviewer may only submit the choice recorded by
+    /// its controller through the durable Session question path.
+    pub(crate) async fn workflow_recovery_choice(&self, session_id: &str) -> Result<Option<String>> {
+        let live = self.live(session_id).await?;
+        let meta = live.meta.lock().await;
+        let Some(decision) = &meta.human_continuation else { return Ok(None); };
+        if decision.request.kind != PermissionRequestKind::Question { return Ok(None); }
+        let Some([question]) = decision.request.questions.as_deref() else { return Ok(None); };
+        let expected = ["repair", "resume", "successor", "human", "cancel"];
+        if question.options.iter().map(|option| option.label.as_str()).collect::<Vec<_>>() != expected {
+            return Ok(None);
+        }
+        let selected = match &decision.outcome {
+            PermissionOutcome::Selected { option_id } => Some(option_id.as_str()),
+            PermissionOutcome::Answered { answers } => answers.iter()
+                .find(|answer| answer.question_id == question.id)
+                .and_then(|answer| answer.selected_option_ids.as_slice().first())
+                .map(String::as_str),
+            _ => None,
+        };
+        Ok(selected.and_then(|id| question.options.iter().find(|option| option.id == id || option.label == id))
+            .map(|option| option.label.clone()))
+    }
+
+    pub(crate) async fn cancel_workflow_question(&self, session_id: &str, request_id: &str) -> Result<()> {
+        let live = match self.live(session_id).await {
+            Ok(live) => live,
+            Err(error) if error.is::<SessionMissing>() => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let _interaction = live.interaction_lock.lock().await;
+        if live.meta.lock().await.pending_permission.as_ref()
+            .is_some_and(|pending| pending.id == request_id)
+        {
+            cancel_human_continuation(&live, &self.store).await?;
+        }
         Ok(())
     }
 
@@ -5579,6 +5670,20 @@ fn question_answer(
     request: &PermissionRequest,
     outcome: &PermissionOutcome,
 ) -> Result<Option<String>> {
+    if let PermissionOutcome::Selected { option_id } = outcome {
+        if request.options.is_empty() {
+            let questions = request.questions.as_deref().unwrap_or_default();
+            if let [question] = questions {
+                let matches = question.options.iter()
+                    .filter(|option| option.id == *option_id || option.label == *option_id)
+                    .collect::<Vec<_>>();
+                if let [option] = matches.as_slice() {
+                    return Ok(Some(format!("- {}: {}", question.prompt, option.label)));
+                }
+            }
+            bail!("'{option_id}' is not a unique option for this question");
+        }
+    }
     if let Some(option) = selected_option(request, outcome)? {
         return Ok(Some(format!("- {}: {}", request.title, option.label)));
     }
@@ -7743,7 +7848,7 @@ mod tests {
                 None,
                 Default::default(),
                 None,
-                vec!["Flush".into()],
+                vec!["Flash".into()],
                 Vec::new(),
             )
             .await
@@ -7814,7 +7919,7 @@ mod tests {
                 None,
                 Default::default(),
                 None,
-                vec!["Flush".into()],
+                vec!["Flash".into()],
                 Vec::new(),
             )
             .await
@@ -8031,7 +8136,7 @@ mod tests {
                 None,
                 Default::default(),
                 None,
-                vec!["Flush".into()],
+                vec!["Flash".into()],
                 Vec::new(),
             )
             .await
@@ -9867,6 +9972,25 @@ mod tests {
             .unwrap()
             .outcome
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn workflow_human_question_is_durable_and_idempotent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let sessions = manager(workspace.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        let mut request = interaction(PermissionRequestKind::Question);
+        request.id = "workflow-human-s1".into();
+        sessions.request_workflow_question("s1", request.clone()).await.unwrap();
+        sessions.request_workflow_question("s1", request.clone()).await.unwrap();
+        let live = sessions.live("s1").await.unwrap();
+        assert_eq!(live.snapshot().await.unwrap().pending_permissions.len(), 1);
+        assert_eq!(sessions.store.load_meta("w1", "s1").unwrap().pending_permission.unwrap().id, request.id);
+        let outcome = PermissionOutcome::Selected { option_id: "yes".into() };
+        sessions.respond_permission("s1", &request.id, outcome.clone(), &ProviderMap::new()).await.unwrap();
+        assert_eq!(sessions.workflow_question_outcome("s1", &request.id).await.unwrap(), Some(outcome));
+        sessions.request_workflow_question("s1", request).await.unwrap();
+        assert!(live.snapshot().await.unwrap().pending_permissions.is_empty());
     }
 
     /// Regression for the detached CLI: delivery is driven by the persisted

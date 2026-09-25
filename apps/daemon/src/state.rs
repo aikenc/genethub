@@ -676,7 +676,7 @@ fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
     if preferences.tag_groups.len() > 32 {
         anyhow::bail!("最多配置 32 个标签组");
     }
-    let builtins = ["max", "pro", "flush", "视频理解", "图片理解"];
+    let builtins = ["max", "pro", "flash", "视频理解", "图片理解"];
     let mut ids = std::collections::BTreeSet::new();
     let mut grouped_tags = std::collections::BTreeSet::new();
     for group in &preferences.tag_groups {
@@ -694,6 +694,7 @@ fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
         validate_tags(&group.tags, false)?;
         for tag in &group.tags {
             let key = tag.trim().to_lowercase();
+            let key = if key == "flush" { "flash".to_string() } else { key };
             if builtins.contains(&key.as_str()) {
                 anyhow::bail!("内置标签不能加入自定义标签组");
             }
@@ -712,7 +713,8 @@ fn validate_tag_group_selection(
     let mut claimed = std::collections::BTreeSet::new();
     for tag in tags {
         let key = tag.trim().to_lowercase();
-        let group = if ["max", "pro", "flush"].contains(&key.as_str()) {
+        let key = if key == "flush" { "flash" } else { key.as_str() };
+        let group = if ["max", "pro", "flash"].contains(&key) {
             Some("builtin-intelligence")
         } else {
             preferences.tag_groups.iter().find_map(|group| {
@@ -789,7 +791,7 @@ mod machine_state_tests {
         assert!(too_many.contains("最多选择 4"), "{too_many}");
 
         preferences.model_profiles = vec![
-            profile("codex", "model", vec!["Flush"]),
+            profile("codex", "model", vec!["Flash"]),
             profile("codex", "model", vec!["Pro"]),
         ];
         let duplicate = validate_agent_preferences(&preferences)
@@ -797,7 +799,7 @@ mod machine_state_tests {
             .to_string();
         assert!(duplicate.contains("不能重复"), "{duplicate}");
 
-        preferences.model_profiles = vec![profile("codex", "model", vec!["Flush"])];
+        preferences.model_profiles = vec![profile("codex", "model", vec!["Flash"])];
         preferences.disabled_agent_ids = vec!["codex".into()];
         let disabled = validate_agent_preferences(&preferences)
             .expect_err("a disabled Agent cannot retain a route")
@@ -835,7 +837,7 @@ mod machine_state_tests {
             label: "质量".into(),
             tags: vec!["审慎".into(), "快速".into()],
         }];
-        preferences.model_profiles = vec![profile(vec!["Flush", "审慎", "快速"])];
+        preferences.model_profiles = vec![profile(vec!["Flash", "审慎", "快速"])];
         let custom = validate_agent_preferences(&preferences)
             .expect_err("a custom group is exclusive too")
             .to_string();

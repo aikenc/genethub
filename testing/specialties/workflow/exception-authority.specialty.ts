@@ -1,5 +1,5 @@
 import type { SessionSnapshot, WorkflowRunStatus } from "@genehub/proto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { defineSpecialty } from "../../framework/public.ts";
@@ -120,6 +120,9 @@ defineSpecialty({
     const other = owner;
     owner = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     t.assertions.assert(other !== owner, "test did not create a second PM Session");
+    const bindingPath = path.join(t.env.data, "project-control", "bindings", `${opened.workspaceId}.json`);
+    const boundController = () => (JSON.parse(readFileSync(bindingPath, "utf8")) as { controllerSessionId: string }).controllerSessionId;
+    t.assertions.assert(boundController() === owner, "new PM did not receive the project binding");
     const dispatch = (task: string) => `"$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${task} --message recover --no-wait`;
     // Management belongs to the taken-over project, not to whichever Session
     // happens to hold its binding, so the earlier PM conversation is still a
@@ -160,6 +163,10 @@ defineSpecialty({
     t.assertions.assert(!applied.includes("caller lacks") && !applied.includes("approvalRequired") && !applied.includes("forbidden"), "outer capability gate blocked exceptional project management");
     const updatedSpaces = await opened.client.call({ type: "workspace.list" });
     t.assertions.assert(updatedSpaces?.type === "workspaces" && updatedSpaces.data.find(space => space.id === coder.id)?.agentSpace?.revision === coder.agentSpace!.revision + 1, "exception management did not change the real expert");
+    // The failed business Run automatically starts recovery. A second
+    // business Run may only begin after that recovery execution settles.
+    await t.tools.waitUntil(async () => (await history()).some(run =>
+      run.handles.some(handle => handle.runId === original.id) && ["blocked", "completed", "cancelled"].includes(run.status)), 40_000);
     const recovered = await runCommand(other, "u_exception_recover", `${dispatch("recovered")} --retry-of ${original.id}`, original.id);
     t.assertions.assert(!recovered.includes("retry target belongs to another PM"), "exception did not cross the original PM ownership boundary");
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "recovered" && run.status === "completed"), 40_000)
@@ -192,9 +199,7 @@ defineSpecialty({
     t.assertions.assert(closedControl.includes("forbidden"), "exception retained control of another PM's managed Session");
     const normalBuilder = await runCommand(other, "u_settled_builder_denied", '"$GENEHUB_CLI" space builder build --name game-delivery--coder --require-no-post-commands');
     t.assertions.assert(normalBuilder.includes("forbidden"), "normal PM gained direct Builder write permission");
-    const ownerAgain = await runCommand(owner, "u_owner_unchanged", dispatch("owner-unchanged"));
-    t.assertions.assert(!ownerAgain.includes("ProjectControlBinding"), "recovery transferred normal project control");
-    await t.tools.waitUntil(async () => (await history()).length === 5, 20_000);
+    t.assertions.assert(boundController() === owner, "recovery transferred the project binding");
     t.note("project-level management -> exception recovery -> business assessment and review in original PM -> escalation withdrawn while ordinary management remains; binding unchanged");
   } finally {
     opened.client.close(); opened.daemon.stop(); await opened.mock.stop();
