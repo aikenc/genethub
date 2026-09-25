@@ -14,10 +14,6 @@
 use genehub_proto::{PermissionOutcome, Reply, Request, TimelineItem, ToolCallDetail, ToolStatus};
 use genehub_testing::{assert_normalized_reply, binary_on_path, real_only, EventsExt, Journey};
 
-/// Claude Code's own Anthropic-compatible base URL for DeepSeek, per
-/// DeepSeek's Agent Integrations guide. Not ours to define or version.
-const DEEPSEEK_ANTHROPIC_BASE_URL: &str = "https://api.deepseek.com/anthropic";
-
 macro_rules! needs_claude {
     ($journey:expr) => {
         if !binary_on_path("claude") {
@@ -37,7 +33,7 @@ async fn claude_code_reaches_the_same_timeline_as_the_built_in_agent() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend(&journey);
+    configure_claude_backend();
 
     const PROMPT: &str = "Reply with exactly one word: pong";
     let session = journey
@@ -64,7 +60,7 @@ async fn accept_edits_mode_lets_a_real_tool_call_through_without_a_prompt() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend(&journey);
+    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -123,7 +119,7 @@ async fn the_model_and_mode_pickers_offer_what_this_cli_actually_accepts() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend(&journey);
+    configure_claude_backend();
 
     let Reply::Agents(agents) = journey
         .client
@@ -279,7 +275,7 @@ async fn interrupting_claude_code_ends_the_turn_as_canceled() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend(&journey);
+    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -341,7 +337,7 @@ async fn denying_a_permission_request_stops_the_tool_without_touching_disk() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend(&journey);
+    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -461,7 +457,7 @@ async fn a_sub_agents_work_stays_inside_the_call_that_dispatched_it() {
     let journey = Journey::start().await.expect("journey starts");
     real_only!(journey);
     needs_claude!(journey);
-    configure_claude_backend(&journey);
+    configure_claude_backend();
 
     let session = journey
         .session_with_model("claude", "default")
@@ -615,9 +611,9 @@ async fn a_sub_agents_work_stays_inside_the_call_that_dispatched_it() {
 }
 
 /// Reuses existing host backend configuration in the isolated test process.
-/// The fallback retains the original DeepSeek setup when no Claude settings
-/// exist. Neither host configuration nor run artifacts receive credentials.
-fn configure_claude_backend(journey: &Journey) {
+/// Without a host override, Claude Code uses its own backend configuration.
+/// Neither host configuration nor run artifacts receive credentials.
+fn configure_claude_backend() {
     // Reuse an already configured backend without changing host settings or
     // copying credentials into run artifacts. Each case has its own process.
     if let Ok(home) = std::env::var("TESTCTL_HOST_HOME") {
@@ -643,16 +639,7 @@ fn configure_claude_backend(journey: &Journey) {
             }
         }
     }
-    std::env::set_var("ANTHROPIC_BASE_URL", DEEPSEEK_ANTHROPIC_BASE_URL);
-    std::env::set_var("ANTHROPIC_AUTH_TOKEN", &journey.model.api_key);
-    std::env::set_var("ANTHROPIC_API_KEY", &journey.model.api_key);
-    for var in [
-        "ANTHROPIC_MODEL",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-    ] {
-        std::env::set_var(var, journey.model.bare_id());
-    }
+    // Without host overrides, let Claude Code use its own configured
+    // backend. A Flush profile for the built-in Agent may speak a different
+    // protocol, so sending its key to a fixed vendor endpoint is invalid.
 }
