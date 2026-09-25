@@ -2372,16 +2372,7 @@ fn package_has_active_recovery(runtime: &RuntimeStore, package_id: &str) -> Resu
             continue;
         }
         let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else { continue; };
-        validate_id(run_id, "run id")?;
-        let metadata = crate::config::sensitive_metadata(&path)?;
-        crate::config::reject_link_or_reparse(&path, &metadata)?;
-        if !metadata.is_file() { bail!("Workflow Run locator 不是普通文件：{}", path.display()); }
-        ensure_record_size("Workflow Run locator", metadata.len(), MAX_RUN_RECORD_BYTES)?;
-        let index: RunIndex = serde_json::from_slice(&fs::read(&path)?)
-            .with_context(|| format!("读取 Workflow Run locator：{}", path.display()))?;
-        if index.schema != RUN_INDEX_SCHEMA || index.run_id != run_id {
-            bail!("Workflow Run locator identity mismatch：{}", path.display());
-        }
+        let index = read_run_index(runtime, run_id)?;
         if !index.package_id.is_empty() && index.package_id != package_id { continue; }
         // A terminal Run never reopens under the same id. The locator commits
         // after the snapshot, so a terminal locator cannot hide active work.
@@ -2563,12 +2554,10 @@ pub async fn executor_flow(
     let project_id = state.workspaces.project_root(&workspace_id).await?;
     let project = state.workspaces.project_entry(&project_id).await?;
     let runtime = RuntimeStore::new(&state.paths.root, &project_id, &project.root)?;
-    // A completed Executor Session still has a queryable flow. Patrol skips
-    // settled requests, but this explicit session query must include them.
-    let mut runs = all_runs(&runtime)?
-        .into_iter()
-        .filter(|run| run.executor_session_id.as_deref() == Some(executor_session_id))
-        .collect::<Vec<_>>();
+    // A completed Executor Session still has a queryable flow. Consult the
+    // small Run locators first; panel polling must not parse every historical
+    // request snapshot merely to find this Session's one Run.
+    let mut runs = runs_for_executor_session(&runtime, executor_session_id)?;
     if runs.len() != 1 {
         bail!("Executor Session must be bound to exactly one Workflow Run; found {}", runs.len());
     }
@@ -2583,6 +2572,37 @@ pub async fn executor_flow(
         run: run_status(&runtime, &run)?,
         messages,
     })
+}
+
+fn runs_for_executor_session(runtime: &RuntimeStore, executor_session_id: &str) -> Result<Vec<RunRecord>> {
+    let directory = runtime.directory(Path::new("runs"), false)?;
+    let listing = match fs::read_dir(&directory) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("读取 Workflow Run locator 目录"),
+    };
+    let mut runs = Vec::new();
+    for entry in listing {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") { continue; }
+        let Some(run_id) = path.file_stem().and_then(|stem| stem.to_str()) else { continue; };
+        let candidate = match read_run_index(runtime, run_id) {
+            Ok(index) => index.executor_session_id.as_deref() == Some(executor_session_id),
+            Err(error) => {
+                // A damaged locator may still have an authoritative PM
+                // snapshot. Only this exceptional path searches for it.
+                tracing::warn!(%run_id, %error, "Workflow Run locator is unreadable during Executor lookup");
+                true
+            }
+        };
+        if !candidate { continue; }
+        match load_run(runtime, run_id) {
+            Ok(run) if run.executor_session_id.as_deref() == Some(executor_session_id) => runs.push(run),
+            Ok(_) => {},
+            Err(error) => tracing::warn!(%run_id, %error, "Workflow Run is unreadable during Executor lookup"),
+        }
+    }
+    Ok(runs)
 }
 
 pub(crate) struct Completion {
@@ -4915,7 +4935,8 @@ fn resolve_run_from_requests(runtime: &RuntimeStore, run_id: &str) -> Result<Run
     found.ok_or_else(|| anyhow!("PM request 中未找到 Run {run_id}"))
 }
 
-fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
+fn read_run_index(runtime: &RuntimeStore, run_id: &str) -> Result<RunIndex> {
+    validate_id(run_id, "run id")?;
     let path = run_path(runtime, run_id, false)?;
     let metadata = crate::config::sensitive_metadata(&path)
         .with_context(|| format!("Workflow Run 不存在：{run_id}"))?;
@@ -4933,6 +4954,11 @@ fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
     if index.run_id != run_id {
         bail!("Workflow Run index identity mismatch");
     }
+    Ok(index)
+}
+
+fn load_run_indexed_raw(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
+    let index = read_run_index(runtime, run_id)?;
     let snapshot = runtime.project_file(&index.snapshot_relative)?;
     let metadata = crate::config::sensitive_metadata(&snapshot)
         .with_context(|| format!("Executor Session Run snapshot 不存在：{run_id}"))?;
@@ -4960,6 +4986,11 @@ fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
     // daemon's index while it owns the request writer.
     run.snapshot_relative = Some(index.snapshot_relative);
     run.workspace_id = runtime.workspace_id.clone();
+    Ok(run)
+}
+
+fn load_run_indexed(runtime: &RuntimeStore, run_id: &str) -> Result<RunRecord> {
+    let mut run = load_run_indexed_raw(runtime, run_id)?;
     request::load_record(runtime, &mut run)?;
     Ok(run)
 }

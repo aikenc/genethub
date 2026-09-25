@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkflowRunStatus } from "@genehub/proto";
 
@@ -6,11 +6,11 @@ import { defineSpecialty } from "../../framework/public.ts";
 
 defineSpecialty({
   id: "specialty.workflow.damaged-request-isolation",
-  title: "One damaged historical Run does not stop healthy requests or recovery",
-  oracle: "After a completed Run snapshot is corrupted, project history still serves healthy Runs, check names the damaged Run, a new PM request dispatches, and package recovery starts for a later blocked request",
-  catches: ["one damaged snapshot breaks project history", "implicit request association parses unrelated Run snapshots", "package recovery admission treats damaged terminal history as an active recovery"],
+  title: "Damaged request history does not stop unrelated dispatch or recovery",
+  oracle: "An invalid request directory and a damaged unrelated request record do not block new PM messages; a damaged Run snapshot leaves healthy history queryable and recovery available",
+  catches: ["invalid request directory blocks all dispatch", "unrelated damaged request record blocks all dispatch", "one damaged snapshot breaks project history", "package recovery admission treats damaged terminal history as an active recovery"],
   tags: ["core", "workflow", "storage", "workflow-recovery"],
-  llm: { default: "mock" }, expectedDurationMs: 55_000, timeoutMs: 150_000,
+  llm: { default: "mock" }, expectedDurationMs: 75_000, timeoutMs: 180_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   requiredArtifacts: ["genet", "genehub-host-local", "genehub_guest.wasm"],
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "filesystem"],
@@ -40,7 +40,7 @@ defineSpecialty({
       const body = JSON.stringify(request);
       if (body.includes("只读复查被处理的 Run")) return { text: "Waiting for the PM recovery decision." };
       if (body.includes("DAMAGED_REQUEST_WORKER")) {
-        const task = ["isolation-one", "isolation-two", "isolation-broken"].find(id => body.includes(id));
+        const task = ["isolation-one", "isolation-two", "isolation-three", "isolation-broken"].find(id => body.includes(id));
         if (!task || submitted.has(task)) return { text: "Result was already submitted." };
         submitted.add(task);
         const command = task === "isolation-broken"
@@ -48,7 +48,7 @@ defineSpecialty({
           : '"$GENEHUB_CLI" workflow complete --evidence result=done';
         return { tool: { name: "bash", arguments: { command } } };
       }
-      for (const task of ["isolation-one", "isolation-two", "isolation-broken"]) {
+      for (const task of ["isolation-one", "isolation-two", "isolation-three", "isolation-broken"]) {
         if (body.includes(`START_${task}`) && !dispatched.has(task)) {
           dispatched.add(task);
           const activate = task === "isolation-one" ? '"$GENEHUB_CLI" workflow activate --revision 0 && ' : "";
@@ -75,11 +75,22 @@ defineSpecialty({
       first = (await history()).find(run => run.taskId === "isolation-one");
       return first?.status === "completed";
     }, 45_000);
-    const snapshot = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", first!.id, "runs", first!.id, "run.json");
-    writeFileSync(snapshot, "damaged snapshot\n");
-
+    const requests = path.join(opened.workspaceRoot, ".genethub/components/pm/requests");
+    const invalidDirectory = path.join(requests, "invalid!request");
+    mkdirSync(invalidDirectory);
     await dispatch("isolation-two");
     await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "isolation-two" && run.status === "completed"), 45_000);
+    rmdirSync(invalidDirectory);
+
+    const requestRecord = path.join(requests, first!.id, "request.json");
+    const savedRequest = readFileSync(requestRecord);
+    writeFileSync(requestRecord, "damaged request record\n");
+    await dispatch("isolation-three");
+    await t.tools.waitUntil(async () => (await history()).some(run => run.taskId === "isolation-three" && run.status === "completed"), 45_000);
+    writeFileSync(requestRecord, savedRequest);
+
+    const snapshot = path.join(requests, first!.id, "runs", first!.id, "run.json");
+    writeFileSync(snapshot, "damaged snapshot\n");
     t.assertions.assert(!(await history()).some(run => run.id === first!.id), "corrupt Run was reported as healthy");
     const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId } });
     t.assertions.assert(report?.type === "workflowCheck"

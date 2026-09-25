@@ -129,7 +129,11 @@ fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<S
     for entry in listing {
         let entry = entry?;
         let Some(id) = entry.file_name().to_str().map(str::to_string) else { continue; };
-        validate_id(&id, "request id")?;
+        if let Err(error) = validate_id(&id, "request id") {
+            // An invalid directory name cannot identify a committed request.
+            tracing::warn!(request_id = %id, %error, "ignoring invalid Workflow request directory");
+            continue;
+        }
         let record = match read_record(runtime, &id) {
             Ok(record) => record,
             Err(error) if !run_path(runtime, &id, false)?.exists() => {
@@ -139,7 +143,24 @@ fn root_for_message(runtime: &RuntimeStore, message_id: &str) -> Result<Option<S
                 tracing::warn!(request_id = %id, %error, "ignoring uncommitted Workflow request reservation");
                 continue;
             }
-            Err(error) => return Err(error).with_context(|| format!("读取 Workflow 请求 {id}")),
+            Err(error) => {
+                // The immutable root snapshot can prove that a damaged
+                // request record belongs to another PM message. If it cannot
+                // prove that, fail closed: silently making a second root for
+                // the same message would duplicate work and side effects.
+                match load_run_indexed_raw(runtime, &id) {
+                    Ok(root) if group_id(&root) == id && root.request.as_ref()
+                        .is_some_and(|link| link.original_message_id != message_id) => {
+                        tracing::warn!(request_id = %id, %error,
+                            "ignoring unrelated damaged Workflow request record");
+                        continue;
+                    }
+                    Ok(_) => {},
+                    Err(snapshot_error) => tracing::warn!(request_id = %id, %snapshot_error,
+                        "cannot establish ownership of damaged Workflow request"),
+                }
+                return Err(error).with_context(|| format!("读取 Workflow 请求 {id}"));
+            }
         };
         if record.original_message_id == message_id {
             if found.replace(record.root_run_id).is_some() {
