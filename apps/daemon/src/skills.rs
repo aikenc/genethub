@@ -360,6 +360,38 @@ mod tests {
     }
 
     #[test]
+    fn project_manager_treats_flush_as_an_intelligence_tier() {
+        let root = temp_dir("pm-tiers");
+        let skills = load(&root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "project-manager")
+            .expect("PM built-in");
+        let body = std::fs::read_to_string(&skill.file_path).unwrap();
+        assert!(body.contains("Platform model tiers"));
+        assert!(body.contains("routing tags, not model ids"));
+        assert!(body.contains("workflowTagRouteUnavailable"));
+        assert!(body.contains("The tag is spelled Flash"));
+        assert!(body.contains("Flush is not accepted"));
+        assert!(body.contains("--workflow workflow-improvement"));
+        assert!(body.contains("preserving existing media tags"));
+    }
+
+    #[test]
+    fn workflow_manager_keeps_intelligence_tiers_on_role_tags() {
+        let body = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "workflow-packages/game-delivery/spaces/workflow-manager/skills/workflow-manager/SKILL.md",
+            ),
+        )
+        .unwrap();
+        assert!(body.contains("platform intelligence-tier tags"));
+        assert!(body.contains("change only the intelligence tag"));
+        assert!(body.contains("Do not pin `agentId` or `modelId`"));
+        assert!(body.contains("`Flush` is not a tag"));
+    }
+
+    #[test]
     fn unknown_data_dir_skill_is_not_in_the_genehub_catalog() {
         let root = temp_dir("unknown");
         write_skill(

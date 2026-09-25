@@ -16,14 +16,14 @@ import {
   resolveModeBadge,
 } from "../presentation/catalog/resolve";
 
-export const BUILTIN_TAGS = ["Max", "Pro", "Flush", "视频理解", "图片理解"] as const;
+export const BUILTIN_TAGS = ["Max", "Pro", "Flash", "视频理解", "图片理解"] as const;
 export type BuiltinAgentTag = (typeof BUILTIN_TAGS)[number];
 export const IMAGE_TAG: BuiltinAgentTag = "图片理解";
 export const VIDEO_TAG: BuiltinAgentTag = "视频理解";
 export const BUILTIN_TAG_GROUP: AgentTagGroup = {
   id: "builtin-intelligence",
   label: "智能档位",
-  tags: ["Max", "Pro", "Flush"],
+  tags: ["Max", "Pro", "Flash"],
 };
 
 export const COST_LEVELS: ReadonlyArray<{ id: AgentCostLevel; label: string }> = [
@@ -97,7 +97,7 @@ export function normalizeAgentPreferences(
     ...(disabledAgentIds.length > 0 ? { disabledAgentIds } : {}),
     tagGroups: groups,
     selectedTags: normalizeGroupedTags(
-      stored?.selectedTags?.length ? stored.selectedTags : ["Flush"],
+      stored?.selectedTags?.length ? stored.selectedTags : ["Flash"],
       groups,
     ),
   };
@@ -119,7 +119,7 @@ export function inferredModelProfile(
 ): AgentModelProfile {
   const identity = `${agent.id} ${agent.label} ${model?.id ?? ""} ${model?.label ?? ""}`.toLowerCase();
   const tags: string[] = [
-    identity.includes("max") ? "Max" : identity.includes("pro") ? "Pro" : "Flush",
+    identity.includes("max") ? "Max" : identity.includes("pro") ? "Pro" : "Flash",
   ];
   if (agent.capabilities?.attachments && model?.inputModalities?.includes("image")) {
     tags.push(IMAGE_TAG);
@@ -135,10 +135,16 @@ export function inferredModelProfile(
   };
 }
 
+/** `Flush` was the previous spelling of the Flash intelligence tier. */
+export function canonicalTag(tag: string): string {
+  const trimmed = tag.trim();
+  return trimmed.toLocaleLowerCase() === "flush" ? "Flash" : trimmed;
+}
+
 export function normalizeTags(tags: readonly string[]): string[] {
   const seen = new Set<string>();
   return tags.flatMap((raw) => {
-    const trimmed = raw.trim();
+    const trimmed = canonicalTag(raw);
     if (!trimmed) return [];
     const builtin = BUILTIN_TAGS.find(
       (candidate) => candidate.toLocaleLowerCase() === trimmed.toLocaleLowerCase(),

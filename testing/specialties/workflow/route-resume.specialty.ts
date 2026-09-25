@@ -23,7 +23,7 @@ defineSpecialty({
     const profiles = (available: boolean) => ({
       runtimes: {}, selectedTags: ["Max"], modelProfiles: [{
         agentId: "genet", modelId: "deepseek/deepseek-v4-flash",
-        tags: available ? ["Max"] : ["Flush"], cost: "low",
+        tags: available ? ["Max"] : ["Flash"], cost: "low",
       }],
     });
     await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: profiles(false) } });

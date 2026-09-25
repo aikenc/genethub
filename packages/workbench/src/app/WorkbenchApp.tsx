@@ -260,7 +260,7 @@ export function App({
       ? session.routingTags
       : draft?.tags?.length
         ? draft.tags
-        : agentPreferences.selectedTags ?? ["Flush"],
+        : agentPreferences.selectedTags ?? ["Flash"],
   );
   const automaticMediaTags = normalizeTags([
     ...(session?.mediaTags ?? []),
@@ -1286,7 +1286,7 @@ function FirstRun({
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
   const preferences = normalizeAgentPreferences(settings?.agentPreferences, agents);
-  const route = resolveTagRoute(preferences, preferences.selectedTags ?? ["Flush"], agents);
+  const route = resolveTagRoute(preferences, preferences.selectedTags ?? ["Flash"], agents);
   const hasUsableAgent = agents.some(canStartAgent);
 
   // An empty catalog while the socket is still coming up (or already dead) is
@@ -1361,7 +1361,7 @@ function FirstRun({
       <button
         type="button"
         className="min-h-11 rounded-xl bg-accent px-4 text-sm text-white md:min-h-0 md:rounded-md md:px-3 md:py-1.5 md:text-xs"
-        onClick={() => newSession(workspace.id, null, { tags: preferences.selectedTags ?? ["Flush"] })}
+        onClick={() => newSession(workspace.id, null, { tags: preferences.selectedTags ?? ["Flash"] })}
       >
         {route ? "新建会话" : "配置 Agent 并新建会话"}
       </button>

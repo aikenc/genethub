@@ -25,7 +25,7 @@ pub(crate) fn schema() -> Value {
         "role": {
             "schema": ROLE_SCHEMA,
             "binding": "built-in tags only",
-            "tags": ["Max", "Pro", "Flush", "视频理解", "图片理解"],
+            "tags": ["Max", "Pro", "Flash", "视频理解", "图片理解"],
             "resolution": "At each dispatch, freshly read machine-global costs and choose the lowest-cost available Agent + model matching every tag; block for human action when none are usable.",
             "forbiddenExactFields": ["agentId", "modelId", "modeId", "runtimeValues"],
             "legacyReadOnlySchema": LEGACY_ROLE_SCHEMA,

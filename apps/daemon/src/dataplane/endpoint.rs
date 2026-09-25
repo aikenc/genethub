@@ -1694,7 +1694,7 @@ mod tests {
         assert_eq!(
             request_workspace(&Request::SessionCreateRouted {
                 workspace_id: "created-workspace".into(),
-                tags: vec!["Flush".into()],
+                tags: vec!["Flash".into()],
                 media_tags: Vec::new(),
                 title: None,
                 cwd: None,
@@ -1714,7 +1714,7 @@ mod tests {
             request_workspace(&Request::SessionForkImportRouted {
                 transfer,
                 workspace_id: "remote-workspace".into(),
-                tags: vec!["Flush".into()],
+                tags: vec!["Flash".into()],
             }),
             Some("remote-workspace")
         );

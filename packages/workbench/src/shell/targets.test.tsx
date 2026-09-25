@@ -31,8 +31,8 @@ const REMOTE =
   "wss://relay.example.com/fabric/v2?ticket=client%3Aabc&route=abc";
 
 const preferencesFor = (agentId: string): AgentSelectionPreferences => ({
-  selectedTags: ["Flush"],
-  modelProfiles: [{ agentId, tags: ["Flush"], cost: "medium" }],
+  selectedTags: ["Flash"],
+  modelProfiles: [{ agentId, tags: ["Flash"], cost: "medium" }],
   runtimes: {},
 });
 

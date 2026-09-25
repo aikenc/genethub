@@ -640,6 +640,6 @@ fn configure_claude_backend() {
         }
     }
     // Without host overrides, let Claude Code use its own configured
-    // backend. A Flush profile for the built-in Agent may speak a different
+    // backend. A Flash profile for the built-in Agent may speak a different
     // protocol, so sending its key to a fixed vendor endpoint is invalid.
 }

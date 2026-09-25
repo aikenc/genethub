@@ -1,5 +1,5 @@
 schema: genehub.workflow.role.v3
 id: coder
-tags: [Flush]
+tags: [Flash]
 userInteraction: readOnly
 prompt: prompts/coder.md

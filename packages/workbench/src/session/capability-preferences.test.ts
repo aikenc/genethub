@@ -56,7 +56,7 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
         },
         {
           id: "video-flush",
-          label: "Video Flush",
+          label: "Video Flash",
           reasoning: true,
           efforts: ["medium", "high"],
           inputModalities: ["video"],
@@ -79,9 +79,9 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
 describe("machine-global Agent tag routing", () => {
   it("materializes the first three exact Agent + model rows and infers deterministic defaults", () => {
     const preferences = normalizeAgentPreferences(undefined, [agent()]);
-    expect(preferences.selectedTags).toEqual(["Flush"]);
+    expect(preferences.selectedTags).toEqual(["Flash"]);
     expect(preferences.modelProfiles).toEqual([
-      { agentId: "codex", modelId: "text", tags: ["Flush"], cost: "medium" },
+      { agentId: "codex", modelId: "text", tags: ["Flash"], cost: "medium" },
       {
         agentId: "codex",
         modelId: "vision-pro",
@@ -91,7 +91,7 @@ describe("machine-global Agent tag routing", () => {
       {
         agentId: "codex",
         modelId: "video-flush",
-        tags: ["Flush", VIDEO_TAG],
+        tags: ["Flash", VIDEO_TAG],
         cost: "low",
       },
     ]);
@@ -157,9 +157,9 @@ describe("machine-global Agent tag routing", () => {
       probe: { state: "notInstalled" },
     });
     const stored: AgentSelectionPreferences = {
-      selectedTags: ["Flush"],
+      selectedTags: ["Flash"],
       modelProfiles: [
-        { agentId: "inactive", modelId: "text", tags: ["Flush"], cost: "medium" },
+        { agentId: "inactive", modelId: "text", tags: ["Flash"], cost: "medium" },
       ],
       runtimes: {},
     };
@@ -184,8 +184,26 @@ describe("machine-global Agent tag routing", () => {
     expect(preferences.modelProfiles?.find((profile) => profile.modelId === "text")?.tags)
       .toEqual(["Max", "快"]);
     expect(toggleGroupedTag(["Pro", "稳"], "Max", preferences)).toEqual(["稳", "Max"]);
-    expect(normalizeGroupedTags(["Max", "Flush", "快", "稳"], preferences))
+    expect(normalizeGroupedTags(["Max", "Flash", "快", "稳"], preferences))
       .toEqual(["Max", "快"]);
+  });
+
+  it("treats a saved Flush tier as Flash so the picker still lists those models", () => {
+    const stored: AgentSelectionPreferences = {
+      selectedTags: ["Flush"],
+      modelProfiles: [
+        { agentId: "codex", modelId: "text", tags: ["Flush"], cost: "medium" },
+        { agentId: "codex", modelId: "video-flush", tags: ["Flush", VIDEO_TAG], cost: "low" },
+      ],
+      runtimes: {},
+    };
+    const preferences = normalizeAgentPreferences(stored, [agent()]);
+    expect(preferences.selectedTags).toEqual(["Flash"]);
+    expect(preferences.modelProfiles?.map((profile) => profile.tags)).toEqual([
+      ["Flash"],
+      ["Flash", VIDEO_TAG],
+    ]);
+    expect(resolveTagRoute(preferences, ["Flash"], [agent()])?.modelId).toBe("video-flush");
   });
 
   it("matches every requested tag and picks the available route with the lowest live cost", () => {
@@ -193,23 +211,23 @@ describe("machine-global Agent tag routing", () => {
     preferences = withModelProfile(preferences, {
       agentId: "codex",
       modelId: "text",
-      tags: ["Flush", "我的标签"],
+      tags: ["Flash", "我的标签"],
       cost: "high",
     });
     preferences = withModelProfile(preferences, {
       agentId: "codex",
       modelId: "video-flush",
-      tags: ["Flush", "我的标签", VIDEO_TAG],
+      tags: ["Flash", "我的标签", VIDEO_TAG],
       cost: "veryLow",
     });
 
-    expect(resolveTagRoute(preferences, ["Flush", "我的标签"], [agent()])?.modelId).toBe(
+    expect(resolveTagRoute(preferences, ["Flash", "我的标签"], [agent()])?.modelId).toBe(
       "video-flush",
     );
-    expect(resolveTagRoute(preferences, ["Flush", "不存在"], [agent()])).toBeNull();
+    expect(resolveTagRoute(preferences, ["Flash", "不存在"], [agent()])).toBeNull();
 
     const unavailable = agent({ probe: { state: "unavailable", reason: "offline" } });
-    expect(resolveTagRoute(preferences, ["Flush"], [unavailable])).toBeNull();
+    expect(resolveTagRoute(preferences, ["Flash"], [unavailable])).toBeNull();
   });
 
   it("re-evaluates changed costs instead of preserving a previous route", () => {
@@ -217,28 +235,28 @@ describe("machine-global Agent tag routing", () => {
     preferences = withModelProfile(preferences, {
       agentId: "codex",
       modelId: "text",
-      tags: ["Flush"],
+      tags: ["Flash"],
       cost: "veryLow",
     });
-    expect(resolveTagRoute(preferences, ["Flush"], [agent()])?.modelId).toBe("text");
+    expect(resolveTagRoute(preferences, ["Flash"], [agent()])?.modelId).toBe("text");
 
     preferences = withModelProfile(preferences, {
       agentId: "codex",
       modelId: "text",
-      tags: ["Flush"],
+      tags: ["Flash"],
       cost: "veryHigh",
     });
-    expect(resolveTagRoute(preferences, ["Flush"], [agent()])?.modelId).toBe("video-flush");
+    expect(resolveTagRoute(preferences, ["Flash"], [agent()])?.modelId).toBe("video-flush");
   });
 
   it("defaults runtime controls high and unrestricted, then remembers the last valid choice", () => {
     const initial = withModelProfile(normalizeAgentPreferences(undefined, [agent()]), {
       agentId: "codex",
       modelId: "text",
-      tags: ["Flush"],
+      tags: ["Flash"],
       cost: "veryLow",
     });
-    expect(resolveTagRoute(initial, ["Flush"], [agent()])).toMatchObject({
+    expect(resolveTagRoute(initial, ["Flash"], [agent()])).toMatchObject({
       effortId: "high",
       modeId: "full-access",
     });
@@ -246,7 +264,7 @@ describe("machine-global Agent tag routing", () => {
       effortId: "xhigh",
       modeId: "read-only",
     });
-    expect(resolveTagRoute(remembered, ["Flush"], [agent()])).toMatchObject({
+    expect(resolveTagRoute(remembered, ["Flash"], [agent()])).toMatchObject({
       effortId: "xhigh",
       modeId: "read-only",
     });
@@ -268,7 +286,7 @@ describe("machine-global Agent tag routing", () => {
       },
     });
     expect(
-      resolveTagRoute(normalizeAgentPreferences(undefined, [custom]), ["Flush"], [custom])
+      resolveTagRoute(normalizeAgentPreferences(undefined, [custom]), ["Flash"], [custom])
         ?.effortId,
     ).toBe("xhigh");
   });
@@ -278,14 +296,14 @@ describe("machine-global Agent tag routing", () => {
     preferences = withModelProfile(preferences, {
       agentId: "codex",
       modelId: "vision-pro",
-      tags: ["Flush", IMAGE_TAG],
+      tags: ["Flash", IMAGE_TAG],
       cost: "high",
     });
-    expect(tagMediaInputSupport(preferences, ["Flush"], [agent()])).toEqual({
+    expect(tagMediaInputSupport(preferences, ["Flash"], [agent()])).toEqual({
       image: true,
       video: true,
     });
-    expect(resolveTagRoute(preferences, ["Flush", IMAGE_TAG], [agent()])?.modelId).toBe(
+    expect(resolveTagRoute(preferences, ["Flash", IMAGE_TAG], [agent()])?.modelId).toBe(
       "vision-pro",
     );
   });
@@ -304,10 +322,10 @@ describe("machine-global Agent tag routing", () => {
     const configured = withModelProfile(normalizeAgentPreferences(undefined, [external]), {
       agentId: "third-party",
       modelId: "opaque",
-      tags: ["Flush", IMAGE_TAG],
+      tags: ["Flash", IMAGE_TAG],
       cost: "medium",
     });
-    expect(resolveTagRoute(configured, ["Flush", IMAGE_TAG], [external])?.agent.id).toBe(
+    expect(resolveTagRoute(configured, ["Flash", IMAGE_TAG], [external])?.agent.id).toBe(
       "third-party",
     );
   });

@@ -173,7 +173,7 @@ health?: AgentSpaceHealth, };
 export type AgentSpaceOperation = { "kind": "setComponent", componentId: string, enabled: boolean, role: string | null, } | { "kind": "removeComponent", componentId: string, } | { "kind": "setParent", parentWorkspaceId: string | null, } | { "kind": "setLifecycle", lifecycle: string, };
 
 /**
- * One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flush
+ * One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flash
  * membership is fixed by the product; these rows describe Human-created
  * groups for custom tags only.
  */

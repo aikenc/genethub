@@ -146,7 +146,7 @@ root, including isolated trial material. The Worker's own directory remains its
 Session cwd; the project evidence root and bounded Session references do not
 change. Do not mount the whole formal project merely to work around a diagnostic
 startup error. A `genehub.workflow.role.v3` role declares one to four built-in
-`tags` (`Max`, `Pro`, `Flush`, `视频理解`, `图片理解`); it cannot pin `agentId`, `modelId`,
+`tags` (`Max`, `Pro`, `Flash`, `视频理解`, `图片理解`); it cannot pin `agentId`, `modelId`,
 permission mode or runtime values. Each dispatch resolves the currently
 available Agent/model whose machine-global tags contain every requested tag,
 choosing the current lowest cost at dispatch time. No resolved cost or route is

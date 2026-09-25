@@ -2143,7 +2143,7 @@ pub struct AgentModelProfile {
     pub cost: Option<AgentCostLevel>,
 }
 
-/// One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flush
+/// One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flash
 /// membership is fixed by the product; these rows describe Human-created
 /// groups for custom tags only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]

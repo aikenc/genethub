@@ -36,7 +36,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     }));
     await opened.client.call({ type: "settings.setAgentPreferences", payload: { preferences: {
       runtimes: {}, selectedTags: ["Max"], modelProfiles: [{ agentId: "genet",
-        modelId: "deepseek/deepseek-v4-flash", tags: ["Flush"], cost: "low" }],
+        modelId: "deepseek/deepseek-v4-flash", tags: ["Flash"], cost: "low" }],
     } } });
     let dispatched = false;
     let original: WorkflowRunStatus | undefined;

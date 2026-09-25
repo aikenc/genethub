@@ -1271,8 +1271,8 @@ describe("opening a new conversation", () => {
         providers: [],
         lanEnabled: false,
         agentPreferences: {
-          selectedTags: ["Flush"],
-          modelProfiles: [{ agentId: "claude", tags: ["Flush"], cost: "medium" }],
+          selectedTags: ["Flash"],
+          modelProfiles: [{ agentId: "claude", tags: ["Flash"], cost: "medium" }],
           runtimes: {},
         },
       },
@@ -1484,10 +1484,10 @@ describe("machine-global model selection", () => {
     useWorkbench.setState({ client });
     useWorkbench.getState().newSession("w1");
 
-    await useWorkbench.getState().setTags(["Flush"]);
+    await useWorkbench.getState().setTags(["Flash"]);
 
     expect(useWorkbench.getState().draft).toMatchObject({
-      tags: ["Flush"],
+      tags: ["Flash"],
       agentId: "claude",
       modelId: "opus",
     });
@@ -1661,7 +1661,7 @@ describe("machine-global model selection", () => {
       draft: null,
     });
 
-    await useWorkbench.getState().setTags(["Flush"]);
+    await useWorkbench.getState().setTags(["Flash"]);
 
     expect(useWorkbench.getState().activeSessionId).toBe("s1");
     expect(useWorkbench.getState().draft).toBeNull();

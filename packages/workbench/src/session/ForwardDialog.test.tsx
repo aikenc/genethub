@@ -44,7 +44,7 @@ function workspace(id: string, name: string): WorkspaceInfo {
 
 function preferences(
   agentId: string,
-  selectedTags: string[] = ["Flush"],
+  selectedTags: string[] = ["Flash"],
 ): AgentSelectionPreferences {
   return {
     selectedTags,
@@ -325,7 +325,7 @@ describe("ForwardDialog", () => {
       loadCatalog: async () => ({
         agents: [agent("claude", "Claude Code")],
         workspaces: [workspace("rw", "远程项目")],
-        agentPreferences: preferences("claude", ["Flush"]),
+        agentPreferences: preferences("claude", ["Flash"]),
       }),
       loadSessions: async () => [],
       deliver,

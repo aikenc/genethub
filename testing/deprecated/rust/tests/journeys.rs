@@ -809,7 +809,7 @@ async fn a_real_provider_that_rejects_our_key_says_so_instead_of_hanging() {
             provider_id: provider_id.into(),
             api_key: Some("sk-0000000000000000000000000000000000000000".into()),
             // Keep the real provider's endpoint, replacing only its key. This
-            // samples the configured Flush backend rather than one vendor.
+            // samples the configured Flash backend rather than one vendor.
             base_url: Some(journey.model.base_url.clone()),
             label: None,
             dialect: journey.model.dialect.clone(),

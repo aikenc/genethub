@@ -7848,7 +7848,7 @@ mod tests {
                 None,
                 Default::default(),
                 None,
-                vec!["Flush".into()],
+                vec!["Flash".into()],
                 Vec::new(),
             )
             .await
@@ -7919,7 +7919,7 @@ mod tests {
                 None,
                 Default::default(),
                 None,
-                vec!["Flush".into()],
+                vec!["Flash".into()],
                 Vec::new(),
             )
             .await
@@ -8136,7 +8136,7 @@ mod tests {
                 None,
                 Default::default(),
                 None,
-                vec!["Flush".into()],
+                vec!["Flash".into()],
                 Vec::new(),
             )
             .await

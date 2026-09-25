@@ -425,7 +425,7 @@ type ResolvedRoleRoute = crate::agent_routing::ResolvedAgentRoute;
 fn legacy_capability_tags(capability: AgentCapability) -> Vec<String> {
     vec![match capability {
         AgentCapability::Planning => crate::agent_routing::TAG_PRO,
-        AgentCapability::Coding => crate::agent_routing::TAG_FLUSH,
+        AgentCapability::Coding => crate::agent_routing::TAG_FLASH,
         AgentCapability::Multimodal => crate::agent_routing::TAG_IMAGE,
     }
     .to_string()]
@@ -6292,7 +6292,7 @@ mod tests {
         write(
             &source.join("roles/worker.yaml"),
             &format!(
-                "schema: {ROLE_SCHEMA}\nid: worker\ntags: [Flush]\nuserInteraction: readOnly\nprompt: prompts/shared.md\n"
+                "schema: {ROLE_SCHEMA}\nid: worker\ntags: [Flash]\nuserInteraction: readOnly\nprompt: prompts/shared.md\n"
             ),
         );
         fs::create_dir_all(source.join("prompts")).unwrap();

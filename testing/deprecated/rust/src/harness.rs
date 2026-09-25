@@ -39,7 +39,7 @@ impl Mode {
 
 /// The deterministic model advertised by the mock endpoint.
 ///
-/// Real-model cases select a configured Flush profile at runtime. The mock
+/// Real-model cases select a configured Flash profile at runtime. The mock
 /// reports this fixed model when the daemon asks it for a list, so picker
 /// assertions can remain deterministic.
 pub const REAL_MODEL: &str = "deepseek/deepseek-v4-flash";
@@ -559,7 +559,7 @@ fn agent_binary(name: &str) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-/// Selects an actual configured Flush model, without copying all host keys
+/// Selects an actual configured Flash model, without copying all host keys
 /// into the isolated journey. Profiles, not vendor spellings, own this choice.
 fn configured_flush_backend() -> Result<ModelBackend> {
     let home = std::env::var("TESTCTL_HOST_HOME")
@@ -585,7 +585,7 @@ fn configured_flush_backend() -> Result<ModelBackend> {
             || !profile
                 .get("tags")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("Flush")))
+                .is_some_and(|tags| tags.iter().any(|tag| tag.as_str() == Some("Flash")))
         {
             continue;
         }
@@ -625,7 +625,7 @@ fn configured_flush_backend() -> Result<ModelBackend> {
                 .map(str::to_string),
         });
     }
-    anyhow::bail!("no configured genet Flush model has both a credential and an endpoint")
+    anyhow::bail!("no configured genet Flash model has both a credential and an endpoint")
 }
 
 /// Skips a case that needs a real provider when the mock is standing in.
