@@ -229,6 +229,20 @@ fn plain_text(value: &str, limit: usize) -> String {
 
 /// Fold a pre-`human_wait` meta into the single record. Existing fields stay
 /// so current readers keep working until they move over.
+/// Rebuild `human_wait` from the fields current writers still update.
+/// A completed continuation with no pending card is a finished wait.
+pub fn sync_human_wait(meta: &mut SessionMeta) {
+    let settled = meta
+        .human_continuation
+        .as_ref()
+        .is_some_and(|continuation| continuation.completed)
+        && meta.pending_permission.is_none();
+    meta.human_wait = None;
+    if !settled {
+        adopt_human_wait(meta);
+    }
+}
+
 pub fn adopt_human_wait(meta: &mut SessionMeta) {
     if meta.human_wait.is_some() {
         return;
@@ -2455,10 +2469,20 @@ mod project_home_tests {
             questions: None,
         });
         adopt_human_wait(&mut session);
-        let wait = session.human_wait.expect("migrated");
+        let wait = session.human_wait.as_ref().expect("migrated");
         assert_eq!(wait.kind, WaitKind::Question);
         assert!(matches!(wait.origin, WaitOrigin::Workflow { ref run_id } if run_id == "wr_1"));
         assert!(wait.decision.is_none());
         assert!(wait.options[0].elevate);
+        session.human_continuation = Some(HumanContinuation {
+            request: session.pending_permission.take().unwrap(),
+            outcome: genehub_proto::PermissionOutcome::Canceled,
+            decided_at_ms: 3,
+            project_approval: false,
+            grant_recorded: true,
+            completed: true,
+        });
+        sync_human_wait(&mut session);
+        assert!(session.human_wait.is_none());
     }
 }

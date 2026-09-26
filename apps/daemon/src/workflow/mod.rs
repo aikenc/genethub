@@ -33,6 +33,14 @@ mod output;
 mod package;
 mod request;
 mod recovery;
+
+pub(crate) fn record_human_exit_answer(
+    project_root: &std::path::Path,
+    request_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    recovery::record_human_exit_answer(project_root, request_id, option_id)
+}
 mod script;
 mod structured;
 mod supervision;

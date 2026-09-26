@@ -87,6 +87,48 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
     Some("d")
 }
 
+pub(crate) fn record_human_exit_answer(
+    project_root: &Path,
+    request_id: &str,
+    option_id: &str,
+) -> Result<()> {
+    let Some(run_id) = request_id.strip_prefix("workflow-human-") else {
+        return Ok(());
+    };
+    let requests = project_root.join(".genethub/components/pm/requests");
+    let entries = match fs::read_dir(&requests) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let path = entry?.path().join("human-exits").join(format!("{run_id}.json"));
+        if !path.is_file() {
+            continue;
+        }
+        let mut exit: HumanExit = serde_json::from_slice(&fs::read(&path)?)?;
+        if exit.request_id != request_id || exit.run_id != run_id {
+            continue;
+        }
+        if exit.answer.as_deref() == Some(option_id) {
+            return Ok(());
+        }
+        if exit.answer.is_some() {
+            bail!("Workflow Human exit already has a different answer");
+        }
+        if !exit_options(&exit.kind)
+            .iter()
+            .any(|(id, _)| *id == option_id)
+        {
+            bail!("Workflow Human selected an unknown option");
+        }
+        exit.answer = Some(option_id.to_string());
+        crate::config::save_private(&path, &serde_json::to_vec(&exit)?)?;
+        return Ok(());
+    }
+    Ok(())
+}
+
 /// Materialize one native Human question per blocked Run. The file is the
 /// durable Workflow reference; Session storage owns the actual answer card.
 pub(super) async fn ensure_human_exit(
@@ -411,6 +453,30 @@ mod tests {
         assert_eq!(classify_human_exit(&run), None);
         run.stop.as_mut().unwrap().cause_code = "executionException".into();
         assert_eq!(classify_human_exit(&run), Some("d"));
+    }
+
+    #[test]
+    fn a_selected_exit_answer_is_written_once() {
+        let root = tempfile::tempdir().unwrap();
+        let run_id = "wr_1";
+        let path = root.path().join(".genethub/components/pm/requests/wr_1/human-exits/wr_1.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let exit = HumanExit {
+            run_id: run_id.into(),
+            request_id: format!("workflow-human-{run_id}"),
+            pm_session_id: "s_pm".into(),
+            kind: "a".into(),
+            reason: "budget".into(),
+            created_at_ms: 1,
+            answer: None,
+        };
+        fs::write(&path, serde_json::to_vec(&exit).unwrap()).unwrap();
+        record_human_exit_answer(root.path(), &exit.request_id, "approve").unwrap();
+        record_human_exit_answer(root.path(), &exit.request_id, "approve").unwrap();
+        let stored: HumanExit = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored.answer.as_deref(), Some("approve"));
+        let conflict = record_human_exit_answer(root.path(), &exit.request_id, "reject").unwrap_err();
+        assert!(conflict.to_string().contains("different answer"));
     }
 }
 

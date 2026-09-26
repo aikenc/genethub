@@ -2361,12 +2361,35 @@ async fn dispatch(
                 return Handled::err(ErrorCode::Forbidden, "Agent/CLI 不能替用户响应 Workflow 人工出口或计划确认");
             }
             let providers = state.providers().await;
+            let selected = match &outcome {
+                genehub_proto::PermissionOutcome::Selected { option_id }
+                    if request_id.starts_with("workflow-human-") =>
+                {
+                    Some(option_id.clone())
+                }
+                _ => None,
+            };
             match state
                 .sessions
                 .respond_permission(&session_id, &request_id, outcome, &providers)
                 .await
             {
-                Ok(()) => Handled::ok(Reply::Ack),
+                Ok(()) => {
+                    if let Some(option_id) = selected {
+                        if let Ok(summary) = state.sessions.summary(&session_id).await {
+                            if let Ok(workspace) = state.workspaces.get(&summary.workspace_id).await {
+                                if let Err(error) = crate::workflow::record_human_exit_answer(
+                                    &workspace.root,
+                                    &request_id,
+                                    &option_id,
+                                ) {
+                                    return failed(error);
+                                }
+                            }
+                        }
+                    }
+                    Handled::ok(Reply::Ack)
+                }
                 Err(error) => failed(error),
             }
         }

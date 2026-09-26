@@ -2783,18 +2783,7 @@ impl SessionManager {
                 .is_some_and(|continuation| continuation.elevated),
             None => false,
         };
-        let mode_override = if elevated {
-            let agent_id = live.meta.lock().await.agent_id.clone();
-            self.registry
-                .require(&agent_id)?
-                .catalog(providers)
-                .await
-                .default_mode
-        } else {
-            None
-        };
-        self.ensure_started_in_mode(live, providers, mode_override)
-            .await?;
+        self.persist_elevation(live, providers, elevated).await?;
 
         let seed_owner = {
             let meta = live.meta.lock().await;
@@ -3037,9 +3026,49 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Starts a stopped native session with an optional one-turn mode override.
-    /// Permission recovery uses the Agent's default (highest) mode without
-    /// rewriting the user's explicit lower-mode choice in session metadata.
+    /// An approved elevation becomes the session mode. A later mode choice can
+    /// lower it again. The override is not limited to the resumed turn.
+    async fn persist_elevation(
+        &self,
+        live: &Arc<Live>,
+        providers: &ProviderMap,
+        elevated: bool,
+    ) -> Result<()> {
+        if elevated {
+            let agent_id = live.meta.lock().await.agent_id.clone();
+            if let Some(mode_id) = self
+                .registry
+                .require(&agent_id)?
+                .catalog(providers)
+                .await
+                .default_mode
+            {
+                let changed = {
+                    let mut meta = live.meta.lock().await;
+                    if meta.mode_id.as_deref() == Some(mode_id.as_str()) {
+                        false
+                    } else {
+                        meta.mode_id = Some(mode_id.clone());
+                        meta.updated_at_ms = now_ms();
+                        self.store.save_meta(&meta)?;
+                        true
+                    }
+                };
+                if changed {
+                    live.publish(SessionEvent::ModeChanged {
+                        mode_id: mode_id.clone(),
+                    })
+                    .await;
+                }
+                if let Some(agent) = live.agent().await {
+                    agent.set_mode(&mode_id).await?;
+                }
+            }
+        }
+        self.ensure_started_in_mode(live, providers, None).await
+    }
+
+    /// Starts a stopped native session in the mode stored on the session.
     async fn ensure_started_in_mode(
         &self,
         live: &Arc<Live>,
@@ -3878,6 +3907,7 @@ impl SessionManager {
             });
             next.pending_permission = None;
             next.pending_project_approval = false;
+            crate::session::store::sync_human_wait(&mut next);
             self.store.save_meta(&next)?;
             *meta = next;
             drop(meta);
@@ -3927,6 +3957,7 @@ impl SessionManager {
             let mut meta = live.meta.lock().await;
             meta.pending_permission = None;
             meta.updated_at_ms = now_ms();
+            crate::session::store::sync_human_wait(&mut meta);
             self.store.save_meta(&meta)?;
         }
         let resolved = SessionEvent::PermissionResolved {
@@ -3963,17 +3994,7 @@ impl SessionManager {
         };
         let mut cancel = execution.cancel.subscribe();
         let handover = async {
-            let mode_override = if continuation.elevated {
-                let agent_id = live.meta.lock().await.agent_id.clone();
-                self.registry
-                    .require(&agent_id)?
-                    .catalog(providers)
-                    .await
-                    .default_mode
-            } else {
-                None
-            };
-            self.ensure_started_in_mode(live, providers, mode_override)
+            self.persist_elevation(live, providers, continuation.elevated)
                 .await?;
             let agent = live
                 .agent()
@@ -4184,6 +4205,7 @@ impl SessionManager {
             let mut meta = live.meta.lock().await;
             let mut next = meta.clone();
             next.human_continuation = Some(decision.clone());
+            crate::session::store::sync_human_wait(&mut next);
             self.store.save_meta(&next)?;
             *meta = next;
         }
@@ -5836,6 +5858,7 @@ async fn stop_agent_for_interaction(
         next.pending_project_approval = project_approval;
         next.human_continuation = None;
         next.updated_at_ms = now_ms();
+        crate::session::store::sync_human_wait(&mut next);
         store
             .save_meta(&next)
             .context("persisting Human pause before stopping Agent")?;
@@ -5869,6 +5892,7 @@ async fn cancel_human_continuation(live: &Arc<Live>, store: &Store) -> Result<()
     if let Some(decision) = &mut next.human_continuation {
         decision.completed = true;
     }
+    crate::session::store::sync_human_wait(&mut next);
     store.save_meta(&next)?;
     *meta = next;
     drop(meta);
@@ -5919,6 +5943,7 @@ async fn finish_human_continuation(live: &Live, store: &Store, request_id: &str)
     {
         decision.completed = true;
     }
+    crate::session::store::sync_human_wait(&mut next);
     store.save_meta(&next)?;
     *meta = next;
     Ok(())
