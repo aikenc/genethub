@@ -1521,6 +1521,9 @@ impl SessionManager {
             .into_iter()
             .find(|meta| meta.id == session_id)
             .ok_or_else(|| SessionMissing(session_id.to_string()))?;
+        if self.store.is_tombstoned(&meta.workspace_id, session_id) {
+            return Err(SessionMissing(session_id.to_string()).into());
+        }
         // Reading a layout this build predates would not give a partial view,
         // it would give a wrong one, and any reply written back would corrupt
         // the session for the build that can read it.
@@ -4376,8 +4379,8 @@ impl SessionManager {
     /// to exist, and it does not — reporting that as a failure would only make
     /// two clients deleting the same row look broken.
     pub async fn delete(&self, session_id: &str) -> Result<()> {
-        let live = self.sessions.write().await.remove(session_id);
-        let workspace_id = match &live {
+        let resident = self.sessions.read().await.get(session_id).cloned();
+        let workspace_id = match &resident {
             Some(live) => Some(live.meta.lock().await.workspace_id.clone()),
             None => self
                 .store
@@ -4386,9 +4389,14 @@ impl SessionManager {
                 .find(|meta| meta.id == session_id)
                 .map(|meta| meta.workspace_id),
         };
+        if let Some(workspace_id) = &workspace_id {
+            self.store.mark_deleted(workspace_id, session_id)?;
+        }
+        let live = self.sessions.write().await.remove(session_id);
         // Stopped before the files go. An agent still running would keep
         // appending to a timeline we just removed, and the session would
-        // reappear a moment after being deleted.
+        // reappear a moment after being deleted. The tombstone is already
+        // on disk, so a concurrent load cannot rebuild it.
         if let Some(live) = live {
             let _interaction = live.interaction_lock.lock().await;
             cancel_human_continuation(&live, &self.store).await?;
@@ -9512,6 +9520,18 @@ mod tests {
             sessions.delete("s1").await.is_ok(),
             "two windows deleting the same row would show the second one an error"
         );
+    }
+
+    #[tokio::test]
+    async fn a_tombstone_blocks_reload_while_the_session_files_remain() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = manager(dir.path());
+        sessions.store.save_meta(&meta()).unwrap();
+        sessions.live("s1").await.unwrap();
+        sessions.store.mark_deleted("w1", "s1").unwrap();
+        sessions.sessions.write().await.remove("s1");
+        assert!(dir.path().join(".genethub/sessions/s1/meta.json").is_file());
+        assert!(sessions.live("s1").await.is_err());
     }
 
     #[tokio::test]

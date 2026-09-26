@@ -1096,6 +1096,38 @@ impl Store {
             .join(format!("{session_id}.json")))
     }
 
+    pub(crate) fn is_tombstoned(&self, workspace_id: &str, session_id: &str) -> bool {
+        self.tombstone_path(workspace_id, session_id)
+            .is_ok_and(|path| path.is_file())
+    }
+
+    /// Logical deletion. Later loads must fail even if the session directory
+    /// has not been removed yet.
+    pub(crate) fn mark_deleted(&self, workspace_id: &str, session_id: &str) -> Result<()> {
+        let tombstone = self.tombstone_path(workspace_id, session_id)?;
+        if tombstone.is_file() {
+            return Ok(());
+        }
+        let tombstones = tombstone
+            .parent()
+            .expect("a tombstone path always has a parent");
+        fs::create_dir_all(tombstones)
+            .with_context(|| format!("creating {}", tombstones.display()))?;
+        crate::config::restrict_dir_to_owner(tombstones)?;
+        let marker = serde_json::json!({
+            "sessionId": session_id,
+            "deletedAtMs": now_ms(),
+        });
+        crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
+        tracing::info!(
+            event = "session_tombstoned",
+            workspace = %workspace_id,
+            session = %session_id,
+            "session was logically deleted"
+        );
+        Ok(())
+    }
+
     fn is_deleted(&self, workspace_id: &str, session_id: &str) -> Result<bool> {
         Ok(self.tombstone_path(workspace_id, session_id)?.exists())
     }
@@ -2031,23 +2063,7 @@ impl Store {
         if !self.homes.holds(workspace_id, session_id) {
             self.homes.claim(workspace_id, session_id, &dir)?;
         }
-        let tombstones = tombstone
-            .parent()
-            .expect("a tombstone path always has a parent");
-        fs::create_dir_all(tombstones)
-            .with_context(|| format!("creating {}", tombstones.display()))?;
-        crate::config::restrict_dir_to_owner(tombstones)?;
-        let marker = serde_json::json!({
-            "sessionId": session_id,
-            "deletedAtMs": now_ms(),
-        });
-        crate::config::save_private(&tombstone, serde_json::to_vec_pretty(&marker)?.as_slice())?;
-        tracing::info!(
-            event = "session_tombstoned",
-            workspace = %workspace_id,
-            session = %session_id,
-            "session was logically deleted"
-        );
+        self.mark_deleted(workspace_id, session_id)?;
 
         // The durable marker is the atomic logical deletion. Releasing the
         // Windows lock before unlinking is now safe: every future claimant
