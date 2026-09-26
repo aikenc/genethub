@@ -6099,22 +6099,18 @@ async fn pump_events(
             _ = checkpoint.tick() => {
                 let _owner = live.execution.lock().await;
                 live.persist_open_turn_if_due().await;
-                // Some adapters learn their native thread id only after the
-                // first event. Persist it during active work, not only when a
-                // Human pause happens or the next Session start occurs.
+                // Pid is recorded once at start. A resume handle is written
+                // only when it changes; an unchanged meta is not fsynced.
                 let handle = live.agent().await.and_then(|agent| agent.persistence());
-                let pid = match live.agent().await {
-                    Some(agent) => agent.pid().await,
-                    None => None,
-                };
-                let mut meta = live.meta.lock().await;
                 if let Some(handle) = handle {
-                    meta.persist = Some(handle);
+                    let mut meta = live.meta.lock().await;
+                    if meta.persist.as_ref() != Some(&handle) {
+                        meta.persist = Some(handle);
+                        if let Err(error) = store.save_meta(&meta) {
+                            tracing::error!(%error, "persisting execution checkpoint");
+                        }
+                    }
                 }
-                if let Some(pid) = pid {
-                    meta.agent_pid = Some(pid);
-                }
-                if let Err(error) = store.save_meta(&meta) { tracing::error!(%error, "persisting execution checkpoint"); }
                 continue;
             }
         };
