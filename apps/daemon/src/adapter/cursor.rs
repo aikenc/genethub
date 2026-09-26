@@ -160,6 +160,14 @@ impl AgentAdapter for CursorAdapter {
         }
     }
 
+    fn migrate_selection(
+        &self,
+        model_id: &str,
+        catalog: &Catalog,
+    ) -> Option<(String, Option<String>, Option<bool>)> {
+        resolve_legacy_cursor_model(model_id, catalog)
+    }
+
     fn accepts_resume(&self, handle: &PersistHandle) -> bool {
         handle
             .value

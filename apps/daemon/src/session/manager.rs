@@ -3145,7 +3145,9 @@ impl SessionManager {
             self.registry.require(&meta.agent_id)?
         };
         let offered = adapter.catalog(providers).await;
-        if normalize_runtime_selection(&mut meta, &offered) {
+        if normalize_runtime_selection(&mut meta, &offered, |model_id, catalog| {
+            adapter.migrate_selection(model_id, catalog)
+        }) {
             tracing::warn!(
                 agent = %meta.agent_id,
                 session = %meta.id,
@@ -3645,7 +3647,9 @@ impl SessionManager {
             next.fast,
             next.runtime_values.clone(),
         );
-        if normalize_runtime_selection(&mut next, &catalog)
+        if normalize_runtime_selection(&mut next, &catalog, |model_id, catalog| {
+            adapter.migrate_selection(model_id, catalog)
+        })
             || requested
                 != (
                     next.model_id.clone(),
@@ -7231,7 +7235,11 @@ fn listed<'a>(axis: &str, value: &str, offered: impl Iterator<Item = &'a str>) -
 
 /// Reconcile durable choices with what this Agent offers *now*.
 /// Catalog-less Agents remain opaque; declared catalogs are authoritative.
-fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> bool {
+fn normalize_runtime_selection(
+    meta: &mut SessionMeta,
+    catalog: &Catalog,
+    migrate: impl Fn(&str, &Catalog) -> Option<(String, Option<String>, Option<bool>)>,
+) -> bool {
     let before = (
         meta.model_id.clone(),
         meta.mode_id.clone(),
@@ -7249,8 +7257,7 @@ fn normalize_runtime_selection(meta: &mut SessionMeta, catalog: &Catalog) -> boo
         let migrated = meta
             .model_id
             .as_deref()
-            .filter(|_| meta.agent_id == "cursor")
-            .and_then(|id| crate::adapter::cursor::resolve_legacy_cursor_model(id, catalog));
+            .and_then(|id| migrate(id, catalog));
         if let Some((migrated_model, migrated_effort, migrated_fast)) = migrated {
             meta.model_id = Some(migrated_model);
             if meta.effort_id.is_none() && migrated_effort.is_some() {
@@ -12677,7 +12684,9 @@ mod tests {
             default_effort: Some("medium".into()),
         };
 
-        assert!(normalize_runtime_selection(&mut session, &catalog));
+        assert!(normalize_runtime_selection(&mut session, &catalog, |_, _| {
+            None
+        }));
         assert_eq!(session.model_id.as_deref(), Some("grok-4.6"));
         assert_eq!(session.mode_id.as_deref(), Some("agent"));
         assert_eq!(session.effort_id.as_deref(), Some("medium"));
@@ -12696,10 +12705,9 @@ mod tests {
         session.runtime_values.insert("fast".into(), "max".into());
         let before = session.clone();
 
-        assert!(!normalize_runtime_selection(
-            &mut session,
-            &Catalog::default()
-        ));
+        assert!(!normalize_runtime_selection(&mut session, &Catalog::default(), |_, _| {
+            None
+        }));
         assert_eq!(session.model_id, before.model_id);
         assert_eq!(session.effort_id, before.effort_id);
         assert_eq!(session.runtime_values, before.runtime_values);
@@ -12742,7 +12750,11 @@ mod tests {
             default_effort: None,
         };
 
-        assert!(normalize_runtime_selection(&mut session, &catalog));
+        assert!(normalize_runtime_selection(
+            &mut session,
+            &catalog,
+            crate::adapter::cursor::resolve_legacy_cursor_model
+        ));
         assert_eq!(session.model_id.as_deref(), Some("cursor-grok-4.6"));
         assert_eq!(session.effort_id.as_deref(), Some("high"));
         assert_eq!(session.fast, Some(true));
@@ -12785,7 +12797,11 @@ mod tests {
             default_effort: Some("medium".into()),
         };
 
-        assert!(normalize_runtime_selection(&mut session, &catalog));
+        assert!(normalize_runtime_selection(
+            &mut session,
+            &catalog,
+            crate::adapter::cursor::resolve_legacy_cursor_model
+        ));
         assert_eq!(session.model_id.as_deref(), Some("grok-4.7"));
         assert_eq!(session.effort_id.as_deref(), Some("high"));
         assert_eq!(session.fast, Some(true));

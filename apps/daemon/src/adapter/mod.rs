@@ -160,6 +160,24 @@ pub trait AgentAdapter: Send + Sync {
         true
     }
 
+    /// Map a saved model id this catalog no longer lists onto a current model,
+    /// plus the effort and Fast that id implied. `None` falls back to the
+    /// catalog default. The kernel does not know adapter-specific encodings.
+    fn migrate_selection(
+        &self,
+        _model_id: &str,
+        _catalog: &Catalog,
+    ) -> Option<(String, Option<String>, Option<bool>)> {
+        None
+    }
+
+    /// Tag routing may offer this agent when its catalog lists no models.
+    /// The built-in agent always publishes models, so an empty list is a
+    /// failed probe rather than a startable route.
+    fn starts_without_model_catalog(&self) -> bool {
+        true
+    }
+
     /// `None` means this Agent does not publish an import surface. Listing is
     /// deliberately lightweight; full history belongs only in `import_history`.
     async fn list_import_candidates(

@@ -114,6 +114,10 @@ impl AgentAdapter for GenetAdapter {
         true
     }
 
+    fn starts_without_model_catalog(&self) -> bool {
+        false
+    }
+
     fn supports_evidence_scope(&self) -> bool {
         true
     }
