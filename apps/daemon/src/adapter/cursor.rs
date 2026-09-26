@@ -634,6 +634,9 @@ fn print_args(slug: Option<&str>, chat_id: Option<&str>, mode_id: Option<&str>) 
     let mut args: Vec<String> = [
         "--print",
         "--single-turn",
+        // An embedded execution must not upgrade its CLI or leave a detached
+        // updater running after the owned turn has exited.
+        "--disable-auto-update",
         "--output-format",
         "stream-json",
         "--stream-partial-output",
