@@ -1536,12 +1536,12 @@ async fn read_loop(
         };
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
         if method == "session/request_permission" {
-            let Some(id) = frame.get("id").and_then(Value::as_i64) else {
-                tracing::warn!("ACP permission request had no numeric id");
+            let Some(id) = jsonrpc_id(&frame) else {
+                tracing::warn!("ACP permission request had no id");
                 continue;
             };
-            interactions.lock().await.push(json!(id));
-            translate_permission(id, &params, &events);
+            interactions.lock().await.push(id.clone());
+            translate_permission(&id, &params, &events);
             continue;
         }
         let mut state = turn.lock().await;
@@ -1738,13 +1738,26 @@ fn permission_detail(tool_call: &Value) -> Option<String> {
     None
 }
 
-fn translate_permission(id: i64, params: &Value, events: &crate::adapter::EventTx) {
+fn jsonrpc_id(frame: &Value) -> Option<Value> {
+    match frame.get("id")? {
+        Value::String(text) if !text.is_empty() => Some(Value::String(text.clone())),
+        Value::Number(number) if number.as_i64().is_some() => Some(Value::Number(number.clone())),
+        _ => None,
+    }
+}
+
+fn translate_permission(id: &Value, params: &Value, events: &crate::adapter::EventTx) {
+    let request_id = match id {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        _ => return,
+    };
     let options = permission_options(params);
 
     let tool_call = params.get("toolCall");
     let _ = events.send(SessionEvent::PermissionRequested {
         request: PermissionRequest {
-            id: id.to_string(),
+            id: request_id,
             kind: PermissionRequestKind::Permission,
             title: tool_call
                 .and_then(|call| call.get("title"))
@@ -2419,7 +2432,7 @@ mod tests {
     fn permission_requests_carry_their_options_and_reply_id() {
         let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         translate_permission(
-            42,
+            &json!(42),
             &json!({
                 "toolCall": {"toolCallId": "c1", "title": "Write file"},
                 "options": [
@@ -2436,6 +2449,21 @@ mod tests {
                 assert_eq!(request.tool_call_id.as_deref(), Some("c1"));
                 assert_eq!(request.options.len(), 2);
                 assert_eq!(request.options[1].kind, PermissionOptionKind::Reject);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_string_permission_id_is_kept_for_the_reply() {
+        assert_eq!(jsonrpc_id(&json!({"id": "perm-1"})), Some(json!("perm-1")));
+        assert_eq!(jsonrpc_id(&json!({"id": 7})), Some(json!(7)));
+        assert_eq!(jsonrpc_id(&json!({"id": ""})), None);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
+        translate_permission(&json!("perm-1"), &json!({}), &tx);
+        match &drain(&mut rx)[0] {
+            SessionEvent::PermissionRequested { request } => {
+                assert_eq!(request.id, "perm-1");
             }
             other => panic!("unexpected {other:?}"),
         }
