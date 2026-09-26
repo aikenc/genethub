@@ -36,6 +36,36 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// Matches the browser half of this wire (`packages/workbench/src/fabric/frame.ts`).
 const MAX_ROUTE_TICKET_BYTES: usize = 4096;
 const BACKOFF: [u64; 6] = [1, 2, 5, 10, 30, 60];
+/// Two missed relay pings. Any inbound frame restarts this clock.
+const READ_IDLE: Duration = Duration::from_secs(75);
+/// A link that stayed up this long has recovered; the next retry starts over.
+const STABLE_FOR_RESET: Duration = Duration::from_secs(30);
+
+struct UplinkAttempt {
+    connected_for: Duration,
+    result: Result<()>,
+}
+
+fn plan_retry(attempt: usize, stable: bool) -> (usize, u64) {
+    let attempt = if stable { 0 } else { attempt };
+    let base = BACKOFF[attempt.min(BACKOFF.len() - 1)];
+    let next = (attempt + 1).min(BACKOFF.len() - 1);
+    (next, base)
+}
+
+/// 0.75× to 1.25× the base delay. `per_mille` outside that range is clamped.
+fn scale_backoff(base_secs: u64, per_mille: u64) -> Duration {
+    let per_mille = per_mille.clamp(750, 1250);
+    Duration::from_millis(base_secs.saturating_mul(per_mille))
+}
+
+fn jittered_backoff(base_secs: u64) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
+    scale_backoff(base_secs, 750 + u64::from(nanos % 501))
+}
 
 /// The same bounds on both ends of every Fabric socket. One outer stream
 /// carries every peer link this node has, so a frame limit that differed
@@ -209,86 +239,31 @@ pub struct FabricUplink {
     online: Arc<AtomicBool>,
 }
 
+enum UplinkSpec {
+    Hosted(Enrollment),
+    Rendezvous(String),
+}
+
+impl UplinkSpec {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Hosted(_) => "managed.uplink",
+            Self::Rendezvous(_) => "rendezvous.uplink",
+        }
+    }
+}
+
 impl FabricUplink {
     /// Managed Hub: refresh the one-use endpoint admission before every dial
     /// and redeem every incoming peer capability directly with Control.
     pub fn start(state: Shared, enrollment: Enrollment) -> Self {
-        let online = Arc::new(AtomicBool::new(false));
-        let task_online = online.clone();
-        let task = tokio::spawn(async move {
-            let client = crate::hub::Client::new(&enrollment.hub_url);
-            let mut attempt = 0usize;
-            loop {
-                let result = async {
-                    let admission = client.fabric_admission(&enrollment).await?;
-                    run_once(
-                        state.clone(),
-                        &admission.url,
-                        PeerAdmissionSource::Hosted(enrollment.clone()),
-                        &task_online,
-                        "managed.uplink",
-                    )
-                    .await
-                }
-                .await;
-                task_online.store(false, Ordering::Relaxed);
-                state.diagnostics.record(
-                    "fabric",
-                    "managed.uplink",
-                    "offline",
-                    Some(if result.is_err() {
-                        "connection"
-                    } else {
-                        "closed"
-                    }),
-                );
-                if let Err(error) = result {
-                    tracing::warn!(%error, "Fabric uplink disconnected");
-                }
-                let delay = BACKOFF[attempt.min(BACKOFF.len() - 1)];
-                attempt = (attempt + 1).min(BACKOFF.len() - 1);
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-        });
-        Self { task, online }
+        spawn_uplink(state, UplinkSpec::Hosted(enrollment))
     }
 
     /// Self-hosted rendezvous: the endpoint admission is reusable routing
     /// material, while authority remains the daemon's paired-device list.
     pub fn start_rendezvous(state: Shared, url: String) -> Self {
-        let online = Arc::new(AtomicBool::new(false));
-        let task_online = online.clone();
-        let task = tokio::spawn(async move {
-            let mut attempt = 0usize;
-            loop {
-                let result = run_once(
-                    state.clone(),
-                    &url,
-                    PeerAdmissionSource::DeviceRequired,
-                    &task_online,
-                    "rendezvous.uplink",
-                )
-                .await;
-                task_online.store(false, Ordering::Relaxed);
-                state.diagnostics.record(
-                    "fabric",
-                    "rendezvous.uplink",
-                    "offline",
-                    Some(if result.is_err() {
-                        "connection"
-                    } else {
-                        "closed"
-                    }),
-                );
-                if let Err(error) = result {
-                    tracing::warn!(%error, "rendezvous Fabric uplink disconnected");
-                }
-                let delay = BACKOFF[attempt.min(BACKOFF.len() - 1)];
-                attempt = (attempt + 1).min(BACKOFF.len() - 1);
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-        });
-        Self { task, online }
+        spawn_uplink(state, UplinkSpec::Rendezvous(url))
     }
 
     pub fn is_online(&self) -> bool {
@@ -301,81 +276,189 @@ impl FabricUplink {
     }
 }
 
+fn spawn_uplink(state: Shared, spec: UplinkSpec) -> FabricUplink {
+    let online = Arc::new(AtomicBool::new(false));
+    let task_online = online.clone();
+    let task = tokio::spawn(async move {
+        let hosted = match &spec {
+            UplinkSpec::Hosted(enrollment) => {
+                Some(crate::hub::Client::new(&enrollment.hub_url))
+            }
+            UplinkSpec::Rendezvous(_) => None,
+        };
+        let mut attempt = 0usize;
+        loop {
+            let run = match &spec {
+                UplinkSpec::Hosted(enrollment) => {
+                    match hosted
+                        .as_ref()
+                        .expect("a hosted uplink has its Hub client")
+                        .fabric_admission(enrollment)
+                        .await
+                    {
+                        Ok(admission) => {
+                            run_once(
+                                state.clone(),
+                                &admission.url,
+                                PeerAdmissionSource::Hosted(enrollment.clone()),
+                                &task_online,
+                                spec.operation(),
+                            )
+                            .await
+                        }
+                        Err(error) => UplinkAttempt {
+                            connected_for: Duration::ZERO,
+                            result: Err(error),
+                        },
+                    }
+                }
+                UplinkSpec::Rendezvous(url) => {
+                    run_once(
+                        state.clone(),
+                        url,
+                        PeerAdmissionSource::DeviceRequired,
+                        &task_online,
+                        spec.operation(),
+                    )
+                    .await
+                }
+            };
+            task_online.store(false, Ordering::Relaxed);
+            state.diagnostics.record(
+                "fabric",
+                spec.operation(),
+                "offline",
+                Some(if run.result.is_err() {
+                    "connection"
+                } else {
+                    "closed"
+                }),
+            );
+            if let Err(error) = &run.result {
+                match &spec {
+                    UplinkSpec::Hosted(_) => {
+                        tracing::warn!(%error, "Fabric uplink disconnected")
+                    }
+                    UplinkSpec::Rendezvous(_) => {
+                        tracing::warn!(%error, "rendezvous Fabric uplink disconnected")
+                    }
+                }
+            }
+            let stable = run.connected_for >= STABLE_FOR_RESET;
+            let (next, base) = plan_retry(attempt, stable);
+            attempt = next;
+            tokio::time::sleep(jittered_backoff(base)).await;
+        }
+    });
+    FabricUplink { task, online }
+}
+
 async fn run_once(
     state: Shared,
     url: &str,
     admission_source: PeerAdmissionSource,
     online: &AtomicBool,
     diagnostic_operation: &'static str,
-) -> Result<()> {
-    let endpoint_url = transport_flow_url(url)?;
-    validate_fabric_url(&endpoint_url)?;
-    tracing::debug!(url = %endpoint_url, "dialing the Fabric relay");
-    let socket = tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
-        .await
-        .context("Fabric WebSocket handshake timed out")??;
-    online.store(true, Ordering::Relaxed);
-    state
-        .diagnostics
-        .record("fabric", diagnostic_operation, "online", None);
-    tracing::info!("Fabric v2 uplink established");
+) -> UplinkAttempt {
+    let mut connected_at = None;
+    let result = async {
+        let endpoint_url = transport_flow_url(url)?;
+        validate_fabric_url(&endpoint_url)?;
+        tracing::debug!(url = %endpoint_url, "dialing the Fabric relay");
+        let socket =
+            tokio::time::timeout(CONNECT_TIMEOUT, ws::connect(&endpoint_url, socket_config()))
+                .await
+                .context("Fabric WebSocket handshake timed out")??;
+        online.store(true, Ordering::Relaxed);
+        connected_at = Some(Instant::now());
+        state
+            .diagnostics
+            .record("fabric", diagnostic_operation, "online", None);
+        tracing::info!("Fabric v2 uplink established");
 
-    let (mut sink, mut source) = socket.split();
-    let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
-    let writer = Writer {
-        messages: messages_tx.clone(),
-    };
-    let socket_writer = tokio::spawn(async move {
-        while let Some(message) = messages_rx.recv().await {
-            sink.send(message).await?;
-        }
-        Result::<()>::Ok(())
-    });
-    let peers: Peers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
-    let generation = Arc::new(AtomicU64::new(0));
-    let tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-
-    let read_result = async {
-        while let Some(message) = source.next().await {
-            match message? {
-                Message::Binary(bytes) => {
-                    let frame = decode(&bytes).ok_or_else(|| anyhow!("malformed Fabric frame"))?;
-                    receive(
-                        frame,
-                        &state,
-                        &admission_source,
-                        &writer,
-                        &peers,
-                        &pending,
-                        &generation,
-                        &tasks,
-                    )
-                    .await?;
-                }
-                Message::Ping(payload) => {
-                    messages_tx
-                        .send(Message::Pong(payload))
-                        .await
-                        .map_err(|_| anyhow!("Fabric writer stopped"))?;
-                }
-                Message::Close(_) => break,
-                Message::Text(_) => anyhow::bail!("Fabric sent a text WebSocket message"),
-                _ => {}
+        let (mut sink, mut source) = socket.split();
+        let (messages_tx, mut messages_rx) = mpsc::channel::<Message>(WRITER_QUEUE);
+        let writer = Writer {
+            messages: messages_tx.clone(),
+        };
+        let mut socket_writer = tokio::spawn(async move {
+            while let Some(message) = messages_rx.recv().await {
+                sink.send(message).await?;
             }
+            Result::<()>::Ok(())
+        });
+        let peers: Peers = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(tokio::sync::Mutex::new(HashSet::new()));
+        let generation = Arc::new(AtomicU64::new(0));
+        let tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let read_result = loop {
+            tokio::select! {
+                biased;
+                finished = &mut socket_writer => {
+                    break match finished {
+                        Ok(result) => result.context("Fabric socket writer stopped"),
+                        Err(error) => Err(anyhow!("Fabric socket writer stopped: {error}")),
+                    };
+                }
+                incoming = tokio::time::timeout(READ_IDLE, source.next()) => {
+                    let message = match incoming {
+                        Err(_) => break Err(anyhow!("Fabric relay went silent")),
+                        Ok(None) => break Ok(()),
+                        Ok(Some(message)) => message,
+                    };
+                    match message {
+                        Ok(Message::Binary(bytes)) => {
+                            let Some(frame) = decode(&bytes) else {
+                                break Err(anyhow!("malformed Fabric frame"));
+                            };
+                            if let Err(error) = receive(
+                                frame,
+                                &state,
+                                &admission_source,
+                                &writer,
+                                &peers,
+                                &pending,
+                                &generation,
+                                &tasks,
+                            )
+                            .await
+                            {
+                                break Err(error);
+                            }
+                        }
+                        Ok(Message::Ping(payload)) => {
+                            if messages_tx.send(Message::Pong(payload)).await.is_err() {
+                                break Err(anyhow!("Fabric writer stopped"));
+                            }
+                        }
+                        Ok(Message::Close(_)) => break Ok(()),
+                        Ok(Message::Text(_)) => {
+                            break Err(anyhow!("Fabric sent a text WebSocket message"));
+                        }
+                        Ok(_) => {}
+                        Err(error) => break Err(error.into()),
+                    }
+                }
+            }
+        };
+
+        online.store(false, Ordering::Relaxed);
+        peers.lock().await.clear();
+        for task in tasks.lock().await.drain(..) {
+            task.abort();
         }
-        Result::<()>::Ok(())
+        socket_writer.abort();
+        read_result?;
+        anyhow::bail!("Fabric WebSocket ended")
     }
     .await;
-
-    online.store(false, Ordering::Relaxed);
-    peers.lock().await.clear();
-    for task in tasks.lock().await.drain(..) {
-        task.abort();
+    UplinkAttempt {
+        connected_for: connected_at
+            .map(|at| at.elapsed())
+            .unwrap_or(Duration::ZERO),
+        result,
     }
-    socket_writer.abort();
-    read_result?;
-    anyhow::bail!("Fabric WebSocket ended")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1245,6 +1328,25 @@ mod tests {
             transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
         );
+    }
+
+    #[test]
+    fn a_stable_uplink_restarts_the_backoff_and_a_short_one_climbs() {
+        assert_eq!(plan_retry(0, false), (1, 1));
+        assert_eq!(plan_retry(4, false), (5, 30));
+        assert_eq!(plan_retry(5, false), (5, 60));
+        assert_eq!(plan_retry(5, true), (1, 1));
+        assert_eq!(READ_IDLE, Duration::from_secs(75));
+        assert_eq!(STABLE_FOR_RESET, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn backoff_jitter_stays_between_three_quarters_and_five_quarters() {
+        assert_eq!(scale_backoff(1, 750), Duration::from_millis(750));
+        assert_eq!(scale_backoff(1, 1250), Duration::from_millis(1250));
+        assert_eq!(scale_backoff(60, 1000), Duration::from_secs(60));
+        assert_eq!(scale_backoff(2, 0), Duration::from_millis(1500));
+        assert_eq!(scale_backoff(2, 9_000), Duration::from_millis(2500));
     }
 
     fn hex(bytes: &[u8]) -> String {
