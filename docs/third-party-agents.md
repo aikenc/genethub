@@ -30,7 +30,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | `claude` | 子进程 + 原生 `stream-json` stdio | 探测 `claude` 二进制本身（`@anthropic-ai/claude-code`），daemon 直接说它的原生协议，见 §3 |
 | `tclaude` | 子进程 + 原生 `stream-json` stdio | 探测 `tclaude`（腾讯内部 Claude Code 包装器）。协议与 `claude` 相同，历史在 `~/.tclaude`，见 §3.2 |
 | `codex` | 子进程 + 原生 `app-server` JSON-RPC | 探测 `codex` 二进制本身，daemon 直接说它的 `app-server` 协议，见 §4 |
-| `cursor` | 子进程 + ACP over stdio | 探测 PATH 与官方安装目录上的 `cursor-agent`（Windows 走 `PATHEXT`，不写死后缀），再用 `cursor-agent status` 看登录；说它自己发布的 ACP（`cursor-agent acp`），见 §5 |
+| `cursor` | 子进程 + print `stream-json` | 探测 PATH 与官方安装目录上的 `cursor-agent`（Windows 走 `PATHEXT`，不写死后缀），再用 `cursor-agent status` 看登录；每个回合一条 `cursor-agent --print`，见 §5 |
 | `acp` | 子进程 + ACP over stdio | 兜底条目，探测一个叫 `acp-agent` 的二进制；真正常用的是下面的自定义声明 |
 
 `claude` 在代码里是 `adapter::claude::ClaudeAdapter`——直接拉起 `claude` 二进制，说它自己的 `stream-json` stdio 协议（不经过任何 wrapper）。原生协议让我们保留模型、思考档位、模式、真实提问与权限请求的完整语义；协议细节（没有公开 spec，是对着 Claude Code 2.1.220 实测出来的）见 `apps/daemon/src/adapter/claude.rs` 顶部的模块文档。
@@ -44,7 +44,7 @@ daemon **不会**帮任何第三方 agent 写配置文件、注入密钥、或�
 | Claude Code | `bypassPermissions` + `--allow-dangerously-skip-permissions`，并关闭 CLI sandbox。子进程始终带 `IS_SANDBOX=1`（Claude CLI 的容器/CI 开关）：线上 daemon 是 WASI guest，看不到宿主 uid，uid-0 才注入会在 Linux root 上变成空操作，CLI 会因该 flag 直接 exit 1 |
 | TClaude | 与 Claude Code 相同的启动旗标和 `IS_SANDBOX=1`；包装器把它们原样转给上游 CLI |
 | Codex | `approval_policy="never"` + `sandbox_mode="danger-full-access"`，新会话默认 `full-access` |
-| Cursor | `--force --sandbox disabled --trust --approve-mcps acp` |
+| Cursor | `--print --force --sandbox disabled --trust --approve-mcps` |
 | 自定义 ACP | command 原样启动；GeneHub 不能猜某个未知 CLI 的私有放权参数，接入声明应自行带上 |
 
 用户显式选择只读、plan 等较低模式时仍尊重选择；这里只规定“未选择时”的产品默认值。
@@ -186,11 +186,11 @@ TClaude 是腾讯内部对 Claude Code 的包装器（OA 登录 + 内部网关�
 
 ---
 
-## 5. Cursor：走它自己发布的 ACP
+## 5. Cursor：print 模式
 
-`cursor` 在代码里是 `adapter::acp::AcpAdapter` 的一个默认条目——拉起 `cursor-agent acp`，说 [ACP](https://agentclientprotocol.com/)，这个 CLI 自己发布的嵌入协议。没有像 Claude 和 Codex 那样写原生适配器，因为 Cursor 没有一份公开的、值得跟进维护的原生协议，而 ACP 已经把我们需要的暴露出来了：权限请求（`session/request_permission`）、模式切换和图片附件都在协议里。
+`cursor` 在代码里是 `adapter::cursor::CursorAdapter`。每个回合拉起一次 `cursor-agent --print --output-format stream-json`，用 `--model` 钉住模型 slug，用 `--resume` 续上一次的 chat id。Cursor 的 ACP 服务忽略启动 `--model`，每个模型只给一个固定变体，所以推理档位和 Fast 选不出来（fb_eVSh3fuuyrv6）。通用 ACP 适配器不再为 Cursor 做启动钉选、CLI 模型合并或嵌入式 guidance。
 
-实际启动命令会附带 `--force --sandbox disabled --trust --approve-mcps`，因此 Cursor 自己的 CLI 层也默认放权；若仍收到 ACP 权限请求，就进入 §2.2 的持久化暂停/恢复流程。
+实际启动参数包含 `--force --sandbox disabled --trust --approve-mcps`，因此 Cursor 自己的 CLI 层默认放权，回合中途不再弹出权限请求。导入 Cursor 自己的历史会话时仍读取它的 ACP 会话库；那条导入路径不是在线回合。
 
 ```bash
 # Linux / macOS
@@ -206,7 +206,7 @@ cursor-agent login
 
 探测先在 PATH 上找 `cursor-agent`，没有再到官方安装目录（Windows 的 `%LOCALAPPDATA%\cursor-agent`，以及 `~/.local/bin`）。Windows 先按系统 `PATHEXT` 找 `.exe` / `.cmd` / `.bat`，再认无后缀文件——Agent 若按 Linux 脚本装到 `~/.local/bin/cursor-agent`，重探后也能看见。找到后再跑 `cursor-agent status`（优先 `--format json`）；明确未登录才标不可用。装完打开选择器或等该回合结束就会重探，不必重启桌面。登录态仍是这个 CLI 自己的事（§1）：它没有一个可以把模型后端指走的配置项，所以 mock 模式下没有它的专项测试——`testing/tests/cursor.rs` 只在真实模式、且机器上装着登录过的 `cursor-agent` 时跑，其余情况跳过并打印原因，与 Codex 的处境相同（§4）。
 
-模型和模式列表来自 ACP 的 `session/new` 握手（`availableModels`、`availableModes` 或 `configOptions`）。其余 `configOptions` 会成为 Agent 声明的通用运行轴，例如 Fast；select 可以有两档或更多档，boolean 在界面里显示为开/关，切换时仍原样回传协议声明的 value ID。GeneHub 绝不解析或拼接模型 ID，也不把模型标签里的参数伪装成可切换能力；凭证和账号仍由 Cursor CLI 自己管理，不在 GeneHub 配置里出现。
+模型列表来自 `cursor-agent --list-models`。`--model` 只接受这份列表里的 slug；凭证和账号仍由 Cursor CLI 自己管理，不在 GeneHub 配置里出现。
 
 ---
 

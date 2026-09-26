@@ -32,7 +32,6 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
-use super::cursor::list_raw_models_from_cli as list_models_from_cli;
 use super::stdio::write_json_line;
 use super::usage;
 use super::{
@@ -61,8 +60,6 @@ pub struct AcpAdapter {
     label: String,
     command: Vec<String>,
     extra_dirs: Vec<PathBuf>,
-    /// When set, probe also asks this CLI whether it is logged in.
-    login_status: bool,
     /// What `session/new` told us about models and modes. Remembered so the
     /// picker can be drawn before anyone opens a session; `agent.refresh`
     /// clears it so a later Cursor catalog (new models) can appear.
@@ -100,18 +97,12 @@ impl AcpAdapter {
             label: label.into(),
             command,
             extra_dirs: Vec::new(),
-            login_status: false,
             hello: tokio::sync::RwLock::new(None),
         }
     }
 
     pub fn with_extra_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.extra_dirs = dirs;
-        self
-    }
-
-    pub fn checking_login(mut self) -> Self {
-        self.login_status = true;
         self
     }
 
@@ -149,9 +140,6 @@ impl AgentAdapter for AcpAdapter {
             set_effort: false,
             set_fast: false,
             interrupt: true,
-            // Cursor exposes models through `session/new`,
-            // `session/set_config_option`, and — when those come back empty —
-            // `cursor-agent --list-models` plus a launch `--model` pin.
             set_model: true,
             set_mode: true,
             permissions: true,
@@ -162,29 +150,14 @@ impl AgentAdapter for AcpAdapter {
     }
 
     async fn probe(&self) -> ProbeState {
-        let Some(program) = self.program() else {
+        if self.program().is_none() {
             // Every entry on this adapter now names the program it runs, so a
             // missing one is simply not installed. The one case that needed
             // more explaining than that — `codex` present but a bridge package
             // missing — went away when Codex got its own adapter.
             return ProbeState::NotInstalled;
-        };
-        if !self.login_status {
-            return ProbeState::Ready;
         }
-        // An API key is a documented alternative to `cursor-agent login`.
-        if std::env::var_os("CURSOR_API_KEY").is_some() {
-            return ProbeState::Ready;
-        }
-        match logged_in(&program).await {
-            Some(false) => ProbeState::Unavailable {
-                reason: "找到了 Cursor，但它还没登录：先跑 cursor-agent login".into(),
-            },
-            // Logged in, or the question could not be asked at all. A slow or
-            // unusual `cursor-agent status` is not a reason to hide a CLI that
-            // is sitting right there.
-            _ => ProbeState::Ready,
-        }
+        ProbeState::Ready
     }
 
     async fn invalidate_catalog(&self) {
@@ -217,21 +190,9 @@ impl AgentAdapter for AcpAdapter {
             .ok_or_else(|| anyhow!("{} is not installed", self.command[0]))?;
         let hello = self.hello(&program).await.unwrap_or_default();
 
-        let launch_model = if speaks_cursor_acp(&self.command) {
-            let listed = list_models_from_cli(&program)
-                .await
-                .map(|(models, _)| models)
-                .unwrap_or_default();
-            config
-                .model_id
-                .as_deref()
-                .and_then(|id| cursor_launch_model(id, &listed))
-        } else {
-            config.model_id.clone()
-        };
         let mut command = Command::new(&program);
         command
-            .args(spawn_args(&self.command, launch_model.as_deref()))
+            .args(spawn_args(&self.command))
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -712,15 +673,7 @@ impl AcpSession {
 
         if let Some(model_id) = config.model_id.as_ref() {
             if let Err(error) = self.set_model(model_id).await {
-                // Cursor's published workaround when ACP cannot switch
-                // models at runtime is `--model` on the launch line, which
-                // `start` already passed. Failing the session here would
-                // throw away a pin that is already in force.
-                if self.agent_id == "cursor" || self.agent_id.contains("cursor") {
-                    tracing::warn!("ACP runtime model switch failed after launch pin: {error}");
-                } else {
-                    return Err(error);
-                }
+                return Err(error);
             }
         }
         if let Some(mode_id) = config.mode_id.as_ref() {
@@ -786,7 +739,6 @@ impl AgentSession for AcpSession {
             "prompt": prompt_blocks_with_context(
                 &input,
                 self.additional_system_prompt.as_deref(),
-                guidance_placement(&self.agent_id),
             ),
         });
 
@@ -1131,17 +1083,7 @@ async fn discover(program: &Path, command: &[String]) -> Option<Hello> {
             None
         }
     };
-    let mut hello = handshake.clone().unwrap_or_default();
-    if hello.models.is_empty() && speaks_cursor_acp(command) {
-        if let Some(listed) = list_models_from_cli(program).await {
-            merge_cli_models(&mut hello, listed);
-        }
-    }
-    if handshake.is_some() || !hello.models.is_empty() {
-        Some(hello)
-    } else {
-        None
-    }
+    handshake
 }
 
 fn hello_from_setup(setup: Setup) -> Hello {
@@ -1189,100 +1131,8 @@ fn first_auth_method(initialized: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn speaks_cursor_acp(command: &[String]) -> bool {
-    command.first().is_some_and(|name| {
-        let base = Path::new(name)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(name);
-        base == "cursor-agent" || base == "agent"
-    }) && command.iter().any(|arg| arg == "acp")
-}
-
-/// Cursor's ACP catalog uses opaque ids such as `grok-4.6[effort=high,fast=true]`.
-/// The launch `--model` pin only accepts the CLI ids from `--list-models`,
-/// e.g. `cursor-grok-4.6-high-fast`. A pin the CLI rejects kills the process
-/// before `session/new`.
-fn cursor_launch_model(acp_id: &str, listed: &[ModelInfo]) -> Option<String> {
-    let id = acp_id.trim();
-    if id.is_empty() {
-        return None;
-    }
-    if listed.iter().any(|model| model.id == id) {
-        return Some(id.to_string());
-    }
-    let (base, params) = parse_opaque_model_id(id);
-    if base.is_empty() {
-        return None;
-    }
-    let effort = params
-        .iter()
-        .find(|(key, _)| key == "effort")
-        .map(|(_, value)| value.as_str());
-    let fast = params
-        .iter()
-        .find(|(key, _)| key == "fast")
-        .is_some_and(|(_, value)| value == "true");
-    let mut suffixes = Vec::new();
-    if let Some(effort) = effort {
-        suffixes.push(effort.to_string());
-    }
-    if fast {
-        suffixes.push("fast".into());
-    }
-    let slug = if suffixes.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base}-{}", suffixes.join("-"))
-    };
-    [slug.clone(), format!("cursor-{slug}")]
-        .into_iter()
-        .find(|candidate| listed.iter().any(|model| model.id == *candidate))
-}
-
-fn parse_opaque_model_id(id: &str) -> (&str, Vec<(String, String)>) {
-    let Some((base, rest)) = id.split_once('[') else {
-        return (id, Vec::new());
-    };
-    let params = rest
-        .strip_suffix(']')
-        .unwrap_or(rest)
-        .split(',')
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            Some((key.trim().to_string(), value.trim().to_string()))
-        })
-        .collect();
-    (base.trim(), params)
-}
-
-/// Launch flags Cursor documents when ACP will not switch models at runtime.
-fn spawn_args(command: &[String], model_id: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = command.get(1..).unwrap_or(&[]).to_vec();
-    let Some(model) = model_id.map(str::trim).filter(|id| !id.is_empty()) else {
-        return args;
-    };
-    if !speaks_cursor_acp(command) {
-        return args;
-    }
-    if args.windows(2).any(|pair| pair[0] == "--model") {
-        return args;
-    }
-    let Some(idx) = args.iter().position(|arg| arg == "acp") else {
-        return args;
-    };
-    args.splice(idx..idx, ["--model".to_string(), model.to_string()]);
-    args
-}
-
-fn merge_cli_models(hello: &mut Hello, listed: (Vec<ModelInfo>, Option<String>)) {
-    if !hello.models.is_empty() {
-        return;
-    }
-    hello.models = listed.0;
-    if hello.default_model.is_none() {
-        hello.default_model = listed.1;
-    }
+fn spawn_args(command: &[String]) -> Vec<String> {
+    command.get(1..).unwrap_or(&[]).to_vec()
 }
 
 fn resume_method_in(initialized: &Value) -> Option<ResumeMethod> {
@@ -1763,28 +1613,6 @@ fn prompt_blocks(input: &PromptInput) -> Vec<Value> {
     blocks
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GuidancePlacement {
-    /// Default ACP: a leading `text` block. Agents that do not auto-name
-    /// from every text block still read this as ordinary prompt context.
-    LeadingText,
-    /// Cursor concatenates every `text` block into `nameAgent`. An embedded
-    /// `resource` still reaches the model as additional ACP context.
-    EmbeddedResource,
-}
-
-fn is_cursor_agent(agent_id: &str) -> bool {
-    agent_id == "cursor" || agent_id.contains("cursor")
-}
-
-fn guidance_placement(agent_id: &str) -> GuidancePlacement {
-    if is_cursor_agent(agent_id) {
-        GuidancePlacement::EmbeddedResource
-    } else {
-        GuidancePlacement::LeadingText
-    }
-}
-
 fn wrap_system_guidance(context: &str) -> String {
     format!(
         "<genehub_system_guidance>\n{context}\n</genehub_system_guidance>\n\nThe next block is the user's request."
@@ -1801,28 +1629,13 @@ fn session_new_params(cwd: &Path, prompt: Option<&str>) -> Value {
     params
 }
 
-fn prompt_blocks_with_context(
-    input: &PromptInput,
-    context: Option<&str>,
-    placement: GuidancePlacement,
-) -> Vec<Value> {
+fn prompt_blocks_with_context(input: &PromptInput, context: Option<&str>) -> Vec<Value> {
     let mut blocks = Vec::new();
     if let Some(context) = context.filter(|value| !value.trim().is_empty()) {
-        let wrapped = wrap_system_guidance(context);
-        blocks.push(match placement {
-            GuidancePlacement::LeadingText => json!({
-                "type": "text",
-                "text": wrapped,
-            }),
-            GuidancePlacement::EmbeddedResource => json!({
-                "type": "resource",
-                "resource": {
-                    "uri": "genehub://system-guidance",
-                    "mimeType": "text/plain",
-                    "text": wrapped,
-                },
-            }),
-        });
+        blocks.push(json!({
+            "type": "text",
+            "text": wrap_system_guidance(context),
+        }));
     }
     blocks.extend(prompt_blocks(input));
     blocks
@@ -2318,7 +2131,6 @@ mod tests {
     use genehub_proto::{Attachment, ToolKind};
 
     use super::*;
-    use crate::adapter::cursor::models_from_cli_list;
 
     fn state() -> TurnState {
         TurnState {
@@ -2398,7 +2210,6 @@ mod tests {
         let blocks = prompt_blocks_with_context(
             &input,
             Some("Use https://app.example/assets/preview/v2/device/workspace/r_root/"),
-            GuidancePlacement::LeadingText,
         );
         assert_eq!(blocks.len(), 2);
         assert!(blocks[0]["text"]
@@ -2410,34 +2221,6 @@ mod tests {
             .unwrap()
             .contains("https://app.example/assets/preview/v2/device/workspace/r_root/"));
         assert_eq!(blocks[1], json!({ "type": "text", "text": "生成报告" }));
-    }
-
-    #[test]
-    fn cursor_guidance_is_an_embedded_resource_not_a_text_block() {
-        let input = PromptInput {
-            text: "生成报告".into(),
-            attachments: vec![],
-        };
-        let blocks = prompt_blocks_with_context(
-            &input,
-            Some("read genehub-session-history when inspecting a past chat"),
-            GuidancePlacement::EmbeddedResource,
-        );
-        assert_eq!(blocks[0]["type"], "resource");
-        assert_eq!(blocks[0]["resource"]["uri"], "genehub://system-guidance");
-        assert!(blocks[0]["resource"]["text"]
-            .as_str()
-            .unwrap()
-            .contains("<genehub_system_guidance>"));
-        assert_eq!(blocks[1], json!({ "type": "text", "text": "生成报告" }));
-        assert_eq!(
-            guidance_placement("cursor"),
-            GuidancePlacement::EmbeddedResource
-        );
-        assert_eq!(
-            guidance_placement("acp:goose"),
-            GuidancePlacement::LeadingText
-        );
     }
 
     #[test]
@@ -2903,96 +2686,6 @@ mod tests {
             &tx,
         );
         assert!(drain(&mut rx).is_empty());
-    }
-
-    #[test]
-    fn cursor_launch_model_maps_opaque_acp_ids_to_cli_ids() {
-        let listed = models_from_cli_list(
-            "auto - Auto (default)\n\
-             cursor-grok-4.6-high-fast - Cursor Grok 4.6 Fast\n\
-             cursor-grok-4.6-high - Cursor Grok 4.6\n\
-             composer-2.5 - Composer 2.5\n\
-             composer-2.5-fast - Composer 2.5 Fast\n",
-        )
-        .0;
-        assert_eq!(
-            cursor_launch_model("grok-4.6[effort=high,fast=true]", &listed).as_deref(),
-            Some("cursor-grok-4.6-high-fast")
-        );
-        assert_eq!(
-            cursor_launch_model("grok-4.6[effort=high,fast=false]", &listed).as_deref(),
-            Some("cursor-grok-4.6-high")
-        );
-        assert_eq!(
-            cursor_launch_model("composer-2.5[fast=true]", &listed).as_deref(),
-            Some("composer-2.5-fast")
-        );
-        assert_eq!(
-            cursor_launch_model("cursor-grok-4.6-high", &listed).as_deref(),
-            Some("cursor-grok-4.6-high")
-        );
-        assert_eq!(
-            cursor_launch_model("grok-4.6[effort=high,fast=true]", &[]),
-            None,
-            "an unmapped pin must not be passed through"
-        );
-    }
-
-    #[test]
-    fn spawn_args_pins_the_model_before_the_acp_subcommand() {
-        let command = vec!["cursor-agent".into(), "--force".into(), "acp".into()];
-        assert_eq!(
-            spawn_args(&command, Some("composer-2.5")),
-            vec!["--force", "--model", "composer-2.5", "acp"]
-        );
-        assert_eq!(
-            spawn_args(&command, None),
-            vec!["--force", "acp"],
-            "no model, no extra flag"
-        );
-        assert_eq!(
-            spawn_args(&["acp-agent".into(), "acp".into()], Some("sonnet")),
-            vec!["acp"],
-            "only Cursor's binary gets --model"
-        );
-        assert_eq!(
-            spawn_args(
-                &[
-                    "cursor-agent".into(),
-                    "--model".into(),
-                    "auto".into(),
-                    "acp".into()
-                ],
-                Some("composer-2.5")
-            ),
-            vec!["--model", "auto", "acp"],
-            "an existing pin is left alone"
-        );
-    }
-
-    #[test]
-    fn cli_models_fill_an_empty_acp_catalog_only() {
-        let listed = models_from_cli_list("auto - Auto (default)\ncomposer-2.5 - Composer 2.5\n");
-        let mut empty = Hello::default();
-        merge_cli_models(&mut empty, listed.clone());
-        assert_eq!(empty.models.len(), 2);
-        assert_eq!(empty.default_model.as_deref(), Some("auto"));
-
-        let mut present = Hello {
-            models: vec![ModelInfo {
-                id: "composer-2.5[fast=true]".into(),
-                label: "Composer 2.5 Fast".into(),
-                context_window: None,
-                reasoning: false,
-                efforts: Vec::new(),
-                input_modalities: None,
-                supports_fast: false,
-            }],
-            default_model: Some("composer-2.5[fast=true]".into()),
-            ..Hello::default()
-        };
-        merge_cli_models(&mut present, listed);
-        assert_eq!(present.models[0].id, "composer-2.5[fast=true]");
     }
 
     #[test]
