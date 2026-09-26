@@ -742,6 +742,36 @@ describe("Fabric protocol violations stay scoped", () => {
     assert.deepEqual(target.closeCodes, [4400]);
   });
 
+  it("names the rule behind every strike so an eviction can be attributed", async () => {
+    const authority = new TestAuthority();
+    const reasons: Array<[string, string]> = [];
+    const core = new FabricCore(authority, {
+      streamId: () => id(907),
+      maxLateFramesPerClosedStream: 1,
+      onStrike: (connection, reason) => {
+        reasons.push([connection.context.endpointHandle, reason]);
+      },
+    });
+    const source = new TestConnection("endpoint:source");
+    const target = new TestConnection("endpoint:target");
+    core.register(source);
+    core.register(target);
+    const targetStream = await establish(core, authority, source, target, id(28), "attributed");
+    await core.handle(source, frame(FabricKind.Reset, id(28), 1n));
+
+    await core.handle(target, frame(FabricKind.Data, targetStream, 1n, Buffer.from("tail")));
+    await core.handle(target, frame(FabricKind.Data, targetStream, 2n, Buffer.from("late")));
+    await core.handle(target, frame(FabricKind.Data, id(999), 1n, Buffer.from("stray")));
+    await core.handle(source, frame(FabricKind.Ping, id(0), 1n, Buffer.from("payload")));
+
+    assert.deepEqual(reasons, [
+      ["endpoint:target", "lateFrameOverflow"],
+      ["endpoint:target", "unknownStream"],
+      ["endpoint:source", "controlPayload"],
+    ]);
+    assert.equal(target.strikes, 2);
+  });
+
   it("does not let control frames bypass DATA payload limits", async () => {
     const authority = new TestAuthority();
     const core = new FabricCore(authority, { maxStrikes: 3 });

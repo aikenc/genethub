@@ -58,6 +58,22 @@ export interface FabricPeerBinding {
   transportFlow: boolean;
 }
 
+/** Which rule charged an endpoint; logged so an eviction can be attributed. */
+export type FabricStrikeReason =
+  | "unknownStream"
+  | "lateFrameOverflow"
+  | "openRace"
+  | "duplicateStream"
+  | "malformedOpen"
+  | "openLimit"
+  | "routeConflict"
+  | "accept"
+  | "data"
+  | "windowUpdate"
+  | "fin"
+  | "reset"
+  | "controlPayload";
+
 export interface FabricCoreOptions {
   now?: () => number;
   streamId?: () => string;
@@ -72,6 +88,10 @@ export interface FabricCoreOptions {
   maxPendingGlobal?: number;
   maxStreamsPerEndpoint?: number;
   maxStreamsGlobal?: number;
+  onStrike?: (
+    connection: FabricEndpointConnection,
+    reason: FabricStrikeReason,
+  ) => void;
 }
 
 interface RevocationFence {
@@ -122,6 +142,7 @@ export class FabricCore {
   private readonly maxPendingGlobal: number;
   private readonly maxStreamsPerEndpoint: number;
   private readonly maxStreamsGlobal: number;
+  private readonly onStrike: FabricCoreOptions["onStrike"];
   private pendingCount = 0;
 
   constructor(
@@ -131,6 +152,7 @@ export class FabricCore {
     this.now = options.now ?? Date.now;
     this.nextStreamId = options.streamId ?? newFabricStreamId;
     this.maxStrikes = options.maxStrikes ?? 8;
+    this.onStrike = options.onStrike;
     this.tombstoneMs = options.tombstoneMs ?? 60_000;
     this.maxTombstones = options.maxTombstonesPerEndpoint ?? 512;
     this.maxLateFramesPerClosedStream =
@@ -245,7 +267,12 @@ export class FabricCore {
       if (frame.kind === FabricKind.Reset) {
         this.remember(connection, frame.streamId);
       } else {
-        this.reject(connection, frame.streamId, FabricReset.ProtocolViolation);
+        this.reject(
+          connection,
+          frame.streamId,
+          FabricReset.ProtocolViolation,
+          "openRace",
+        );
       }
       return;
     }
@@ -271,7 +298,7 @@ export class FabricCore {
         return;
       case FabricKind.Ping:
         if (frame.payload.length !== 0) {
-          this.strike(connection);
+          this.strike(connection, "controlPayload");
           return;
         }
         connection.send({
@@ -282,7 +309,7 @@ export class FabricCore {
         });
         return;
       case FabricKind.Pong:
-        if (frame.payload.length !== 0) this.strike(connection);
+        if (frame.payload.length !== 0) this.strike(connection, "controlPayload");
         return;
       case FabricKind.Incoming:
         this.unknownOrViolation(connection, frame.streamId);
@@ -347,14 +374,19 @@ export class FabricCore {
         // would let the first asynchronous result create a binding after we
         // had told the endpoint that the id was rejected.
         this.cancelPending(source, frame.streamId);
-        this.reject(source, frame.streamId, FabricReset.DuplicateStream);
+        this.reject(
+          source,
+          frame.streamId,
+          FabricReset.DuplicateStream,
+          "duplicateStream",
+        );
       }
       return;
     }
 
     const opening = decodeFabricOpenPayload(frame.payload);
     if (!opening || !validInitialCredit(frame.value)) {
-      this.reject(source, frame.streamId, FabricReset.MalformedOpen);
+      this.reject(source, frame.streamId, FabricReset.MalformedOpen, "malformedOpen");
       return;
     }
 
@@ -364,7 +396,7 @@ export class FabricCore {
       source.streams.size >= this.maxStreamsPerEndpoint ||
       this.routes.size >= this.maxStreamsGlobal
     ) {
-      this.reject(source, frame.streamId, FabricReset.TooSlow);
+      this.reject(source, frame.streamId, FabricReset.TooSlow, "openLimit");
       return;
     }
 
@@ -386,7 +418,7 @@ export class FabricCore {
         this.cancelPending(source, frame.streamId);
         // Control unavailability is transient, unlike an authoritative null.
         // TooSlow is the existing retryable stream-local reset reason.
-        this.reject(source, frame.streamId, FabricReset.TooSlow, false);
+        this.reject(source, frame.streamId, FabricReset.TooSlow, null);
       }
       return;
     }
@@ -401,7 +433,7 @@ export class FabricCore {
     this.cancelPending(source, frame.streamId);
 
     if (!grant) {
-      this.reject(source, frame.streamId, FabricReset.RouteDenied, false);
+      this.reject(source, frame.streamId, FabricReset.RouteDenied, null);
       return;
     }
     this.pruneRevocations();
@@ -412,31 +444,36 @@ export class FabricCore {
         revocationCheckpoint,
       )
     ) {
-      this.reject(source, frame.streamId, FabricReset.Revoked, false);
+      this.reject(source, frame.streamId, FabricReset.Revoked, null);
       return;
     }
     if (this.routes.has(grant.routeHandle)) {
-      this.reject(source, frame.streamId, FabricReset.ProtocolViolation);
+      this.reject(
+        source,
+        frame.streamId,
+        FabricReset.ProtocolViolation,
+        "routeConflict",
+      );
       return;
     }
     const expiresAt = parseExpiry(grant.expiresAt);
     if (expiresAt === null || expiresAt <= this.now()) {
-      this.reject(source, frame.streamId, FabricReset.Expired, false);
+      this.reject(source, frame.streamId, FabricReset.Expired, null);
       return;
     }
 
     const target = this.endpoints.get(grant.targetEndpointHandle);
     if (!target || target.closed || this.expireEndpoint(target)) {
-      this.reject(source, frame.streamId, FabricReset.TargetOffline, false);
+      this.reject(source, frame.streamId, FabricReset.TargetOffline, null);
       return;
     }
     if (target.streams.size >= this.maxStreamsPerEndpoint) {
-      this.reject(source, frame.streamId, FabricReset.TooSlow, false);
+      this.reject(source, frame.streamId, FabricReset.TooSlow, null);
       return;
     }
     const targetStreamId = this.allocateStreamId(target);
     if (!targetStreamId) {
-      this.reject(source, frame.streamId, FabricReset.TargetOffline, false);
+      this.reject(source, frame.streamId, FabricReset.TargetOffline, null);
       return;
     }
 
@@ -498,7 +535,7 @@ export class FabricCore {
       frame.payload.length > MAX_OPERATION_METADATA_BYTES
     ) {
       this.closeBinding(binding, FabricReset.ProtocolViolation);
-      this.strike(connection);
+      this.strike(connection, "accept");
       return;
     }
     binding.phase = "active";
@@ -528,7 +565,7 @@ export class FabricCore {
         cost <= 0n
       ) {
         this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
-        this.strike(connection);
+        this.strike(connection, "data");
         return;
       }
       leg.lastDataSeq = frame.value;
@@ -561,7 +598,7 @@ export class FabricCore {
       cost > leg.sendCredit
     ) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
-      this.strike(connection);
+      this.strike(connection, "data");
       return;
     }
     leg.sendCredit -= cost;
@@ -577,7 +614,7 @@ export class FabricCore {
     if (!leg) return this.unknownOrViolation(connection, frame.streamId);
     if (leg.binding.transportFlow) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
-      this.strike(connection);
+      this.strike(connection, "windowUpdate");
       return;
     }
     const peer = this.peerOf(leg);
@@ -588,7 +625,7 @@ export class FabricCore {
       peer.sendCredit + frame.value > peer.sendWindow
     ) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
-      this.strike(connection);
+      this.strike(connection, "windowUpdate");
       return;
     }
     peer.sendCredit += frame.value;
@@ -605,7 +642,7 @@ export class FabricCore {
       frame.payload.length !== 0
     ) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
-      this.strike(connection);
+      this.strike(connection, "fin");
       return;
     }
     leg.sentFin = true;
@@ -619,7 +656,7 @@ export class FabricCore {
     if (!leg) return;
     if (frame.value === 0n || frame.payload.length !== 0) {
       this.closeBinding(leg.binding, FabricReset.ProtocolViolation);
-      this.strike(connection);
+      this.strike(connection, "reset");
       return;
     }
     const peer = this.peerOf(leg);
@@ -684,7 +721,7 @@ export class FabricCore {
     streamId: string,
   ): void {
     if (!connection.tombstones.has(streamId)) {
-      this.reject(connection, streamId, FabricReset.UnknownStream);
+      this.reject(connection, streamId, FabricReset.UnknownStream, "unknownStream");
       return;
     }
     const remaining = connection.lateFrameBudgets.get(streamId) ?? 0;
@@ -693,14 +730,14 @@ export class FabricCore {
       else connection.lateFrameBudgets.set(streamId, remaining - 1);
       return;
     }
-    this.strike(connection);
+    this.strike(connection, "lateFrameOverflow");
   }
 
   private reject(
     connection: FabricEndpointConnection,
     streamId: string,
     reason: FabricReset,
-    countStrike = true,
+    strike: FabricStrikeReason | null,
   ): void {
     if (this.isCurrent(connection)) {
       connection.send({
@@ -711,11 +748,15 @@ export class FabricCore {
       });
     }
     this.remember(connection, streamId);
-    if (countStrike) this.strike(connection);
+    if (strike) this.strike(connection, strike);
   }
 
-  private strike(connection: FabricEndpointConnection): void {
+  private strike(
+    connection: FabricEndpointConnection,
+    reason: FabricStrikeReason,
+  ): void {
     connection.strikes += 1;
+    this.onStrike?.(connection, reason);
     if (connection.strikes < this.maxStrikes) return;
     this.unregister(connection, FabricReset.ProtocolViolation);
     connection.close(4400);

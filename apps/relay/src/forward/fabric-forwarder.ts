@@ -122,6 +122,14 @@ export class FabricForwarder {
       maxPendingGlobal: config.limits.maxFabricPendingOpens,
       maxStreamsPerEndpoint: config.limits.maxFabricStreamsPerEndpoint,
       maxStreamsGlobal: config.limits.maxFabricStreams,
+      onStrike: (connection, reason) => {
+        log.warn("fabric: endpoint strike", {
+          ...this.diagnosticFields(connection.socketIdentity as WebSocket),
+          reasonCode: reason,
+          strikes: connection.strikes,
+          maxStrikes: config.limits.maxFabricStrikes,
+        });
+      },
     });
     this.authorityReady = options.authorityReady ?? true;
     this.outboundBudget =
