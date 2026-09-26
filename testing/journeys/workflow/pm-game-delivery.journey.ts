@@ -576,6 +576,15 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
     }
 
     const stage = pmStages.get(delivery.task) ?? 0;
+    // Inbox consultation turns can run while the approval is still pending.
+    // They do not consume the approved mutation stage of this deterministic PM.
+    const approvalText = typeof latestContent === "string" ? latestContent : "";
+    const approvalAction = /^(?:Recorded Human response:\n)?The user approved the interrupted plan /.test(approvalText)
+      ? approvalText.match(/Durable GeneHub interaction ([^\s.]+)/)?.[1]
+      : undefined;
+    if (delivery.bootstrap && stage === 4 && !approvalAction) {
+      return { text: "建队计划等待正式 Human 决定，当前咨询不执行变更。" };
+    }
     pmStages.set(delivery.task, stage + 1);
     if (delivery.bootstrap && stage === 0) {
       return {
@@ -639,7 +648,7 @@ if(result.status===0)throw Error('stale Builder plan applied');`;
           arguments: {
             command: `"$GENEHUB_CLI" workflow build --package ${PACKAGE_ID} --apply --plan-digest ${shellArg(
               planDigest,
-            )} --revision ${expectedRevision} --action-id bootstrap-${delivery.task} && cd ${root} && git add -A && git commit -m "commit the built workflow team" && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
+            )} --revision ${expectedRevision} --action-id ${shellArg(approvalAction!)} && cd ${root} && git add -A && git commit -m "commit the built workflow team" && "$GENEHUB_CLI" workflow dispatch --workflow game-dev --task ${shellArg(
               delivery.task,
             )} --no-wait --message ${shellArg(delivery.message)}`,
           },
@@ -788,6 +797,23 @@ async function runPmDelivery(
         ).slice(-12000)}`,
       );
     }
+    if (verifyActiveRunGuard) {
+      const completedBeforeConsultation = events.filter(event => event.type === "turnCompleted").length;
+      await send("先解释建队计划；等待我在授权卡正式确认后再执行。");
+      await t.tools.waitUntil(
+        () => events.filter(event => event.type === "turnCompleted").length > completedBeforeConsultation,
+        30_000,
+      );
+      const consulted = await fixture.opened.client.call({ type: "session.get", payload: { sessionId } });
+      t.assertions.assert(
+        consulted?.type === "snapshot" && consulted.data.pendingPermissions.some(permission => permission.id === requestId),
+        "consultation consumed the pending build approval",
+      );
+      t.assertions.assert(
+        !existsSync(path.join(fixture.projectRoot, "pipespace.json")) && !existsSync(path.join(fixture.projectRoot, "spaces")),
+        "consultation materialized the team before approval",
+      );
+    }
     const humanStartedAt = Date.now();
     const reply = await fixture.opened.client.call({
       type: "session.respondPermission",
@@ -802,7 +828,11 @@ async function runPmDelivery(
   }
 
   if (verifyActiveRunGuard) {
-    await assertActiveRunGuardsTeam(t, fixture, taskId);
+    await assertActiveRunGuardsTeam(t, fixture, taskId).catch(async error => {
+      const history = await fixture.opened.client.call({ type: "workflow.history", payload: { workspaceId: fixture.projectId, limit: 20 } });
+      const pending = await fixture.opened.client.call({ type: "session.get", payload: { sessionId } });
+      throw new Error(`${error}; guardingTask=${taskId}; runs=${JSON.stringify(history)}; PM=${JSON.stringify(pending).slice(-10000)}; modelRequests=${fixture.opened.mock.requests.length}; tail=${JSON.stringify(fixture.opened.mock.requests.slice(-2)).slice(-10000)}`);
+    });
   }
 
   await t.tools.waitUntil(async () => {
