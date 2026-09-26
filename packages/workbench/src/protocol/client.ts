@@ -52,6 +52,14 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 /** A carrier that dies before this point is flapping, not a healthy recovery. */
 const STABLE_AFTER_MS = 30_000;
 /**
+ * The daemon forgets a suspended logical peer 60s after it notices the loss,
+ * and the Relay needs up to two 30s heartbeats to notice. Past this much
+ * silence an ATTACH can only be refused.
+ */
+const RESUME_STALE_MS = 180_000;
+/** A carrier lost this soon after the page returns ended with the suspension. */
+const REVIVE_GRACE_MS = 10_000;
+/**
  * How often an idle ready connection is asked to prove it is still alive.
  * Mobile browsers — iOS Safari above all — suspend the page and let the
  * carrier die without ever firing close, so without this the workbench only
@@ -287,7 +295,11 @@ export class Client {
   private attempt = 0;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private stableTimer: ReturnType<typeof setTimeout> | null = null;
+  private readyAt: number | null = null;
+  private lastHeardAt: number | null = null;
+  private revivedAt: number | null = null;
+  private sessionLost = false;
+  private sessionLostRedialSpent = false;
   private authorizationExpiresAt: string | undefined;
   private authorizationTimer: ReturnType<typeof setTimeout> | null = null;
   private renewalAbort: AbortController | null = null;
@@ -760,6 +772,20 @@ export class Client {
   }
 
   private dial(dial: ProtocolDial): void {
+    if (
+      this.endpoint?.state === "open" &&
+      this.endpoint.logicalId !== null &&
+      this.lastHeardAt !== null &&
+      this.now() - this.lastHeardAt > RESUME_STALE_MS
+    ) {
+      this.diagnostic("connection", {
+        state: this.state,
+        phase: "resume-skipped",
+        cause: "stale",
+        silentMs: Math.round(this.now() - this.lastHeardAt),
+      });
+      this.discardLogicalPeer("the logical peer outlived its resume window");
+    }
     // Sequence numbers are scoped to a daemon lifetime. A reconnect cannot
     // infer that lifetime from numeric ordering, even if the ranges overlap.
     const resuming = this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
@@ -960,6 +986,9 @@ export class Client {
     });
     const stopClose = endpoint.onClose((reason) => {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
+      // The daemon answered an ATTACH, so its carrier works; only the old
+      // logical peer is gone.
+      if (reason instanceof Error && reason.message === "SessionLost") this.sessionLost = true;
       this.report(reason);
       this.droppedTransport(epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
     });
@@ -976,11 +1005,11 @@ export class Client {
   }
 
   private markStableAfterGrace(): void {
-    this.clearStableTimer();
-    this.stableTimer = setTimeout(() => {
-      this.stableTimer = null;
-      this.attempt = 0;
-    }, STABLE_AFTER_MS);
+    // Suspended pages run no timers, so the grace period is judged from the
+    // wall clock when the next loss is scheduled.
+    this.readyAt = this.now();
+    this.lastHeardAt = this.readyAt;
+    this.sessionLostRedialSpent = false;
   }
 
   private resumedEndpoint(endpoint: DataEndpoint, epoch: symbol): void {
@@ -1148,6 +1177,7 @@ export class Client {
       if (body.byteLength > 0) await stream.write(body);
       await stream.finish();
       const head = await stream.responseHead;
+      this.lastHeardAt = this.now();
       if (head.error) throw new ProtocolError_(head.error);
       if (head.status !== 200) {
         throw new ProtocolError_({ code: "internal", message: `RPC failed (${head.status})` });
@@ -1234,6 +1264,7 @@ export class Client {
     let buffered = new Uint8Array();
     for await (const chunk of stream.body()) {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
+      this.lastHeardAt = this.now();
       const joined = new Uint8Array(buffered.byteLength + chunk.byteLength);
       joined.set(buffered);
       joined.set(chunk, buffered.byteLength);
@@ -1410,7 +1441,6 @@ export class Client {
       return;
     }
     this.clearConnectTimer();
-    this.clearStableTimer();
     this.clearHeartbeat();
     const resumable = !abandonLogical && this.endpoint?.state === "open" && this.endpoint.logicalId !== null;
     const socket = this.socket, fabric = this.fabricLink?.fabric;
@@ -1419,16 +1449,18 @@ export class Client {
     this.fabricLink = null;
     socket?.close();
     fabric?.close();
-    if (!resumable) {
-      this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
-      this.endpoint?.close("logical admission or session ended");
-      this.endpoint = null;
-      this.epoch = null;
-      this.closeRtc();
-      if (this.rtcEnabled) this.setRtcState("standby");
-    }
+    if (!resumable) this.discardLogicalPeer("logical admission or session ended");
     this.setState("reconnecting");
     this.scheduleReconnect();
+  }
+
+  private discardLogicalPeer(reason: string): void {
+    this.endpointLifecycleCleanup?.(); this.endpointLifecycleCleanup = null;
+    this.endpoint?.close(reason);
+    this.endpoint = null;
+    this.epoch = null;
+    this.closeRtc();
+    if (this.rtcEnabled) this.setRtcState("standby");
   }
 
   private dropSocket(socket: WebSocketLike, epoch: symbol, abandonLogical = false): void {
@@ -1499,6 +1531,35 @@ export class Client {
       this.redialing
     ) return;
     if (!this.endpoint || this.endpoint.recovering) this.setState("reconnecting");
+    const now = this.now();
+    if (
+      (this.readyAt !== null && now - this.readyAt >= STABLE_AFTER_MS) ||
+      (this.revivedAt !== null && now - this.revivedAt <= REVIVE_GRACE_MS)
+    ) {
+      this.attempt = 0;
+    }
+    this.readyAt = null;
+    this.revivedAt = null;
+    if (this.sessionLost) {
+      this.sessionLost = false;
+      // Once per healthy connection, so a daemon that keeps refusing cannot
+      // turn this into a loop without backoff.
+      if (!this.sessionLostRedialSpent) {
+        this.sessionLostRedialSpent = true;
+        this.diagnostic("connection", {
+          state: "reconnecting",
+          phase: "retry-scheduled",
+          delayMs: 0,
+          attempt: this.attempt,
+          cause: "session-lost",
+        });
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          this.connect();
+        }, 0);
+        return;
+      }
+    }
     const backoff =
       this.options.backoffMs ?? ((attempt: number) => Math.min(1000 * 2 ** attempt, 15_000));
     const base = backoff(this.attempt++);
@@ -1588,7 +1649,11 @@ export class Client {
     if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
       const onOnline = () => this.revive();
       window.addEventListener("online", onOnline);
-      cleanups.push(() => window.removeEventListener("online", onOnline));
+      window.addEventListener("pageshow", onOnline);
+      cleanups.push(() => {
+        window.removeEventListener("online", onOnline);
+        window.removeEventListener("pageshow", onOnline);
+      });
     }
     this.lifecycleCleanup = () => {
       for (const cleanup of cleanups) cleanup();
@@ -1602,7 +1667,9 @@ export class Client {
 
   private revive(): void {
     if (this.stopped) return;
+    this.revivedAt = this.now();
     if (this.state === "reconnecting") {
+      this.attempt = 0;
       this.clearRetryTimer();
       this.connect();
       return;
@@ -1994,15 +2061,10 @@ export class Client {
     this.retryTimer = null;
   }
 
-  private clearStableTimer(): void {
-    if (this.stableTimer !== null) clearTimeout(this.stableTimer);
-    this.stableTimer = null;
-  }
-
   private clearTimers(): void {
     this.clearConnectTimer();
     this.clearRetryTimer();
-    this.clearStableTimer();
+    this.readyAt = null;
     if (this.redialTimer !== null) clearTimeout(this.redialTimer);
     this.redialTimer = null;
   }

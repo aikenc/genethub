@@ -255,6 +255,9 @@ pub(crate) async fn serve(
             } else {
                 "AdmissionRejected"
             };
+            // The browser only sees the code; this is what explains a reconnect
+            // that had to start a fresh logical peer.
+            tracing::info!(code, ?path, "logical attach refused");
             let _ = writer
                 .send(&Message::Error { code: code.into() }.encode()?)
                 .await;

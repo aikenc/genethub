@@ -7,6 +7,10 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 static LAST_JOURNAL_PRUNE_DAYS: LazyLock<Mutex<BTreeMap<PathBuf, i64>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
+/// Projects whose runtime store failed on the last patrol. A broken project
+/// fails every tick; the log should say when it breaks, not every few seconds.
+static UNAVAILABLE_RUNTIMES: LazyLock<Mutex<BTreeMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static LAST_PATROL_FINISHED_MS: AtomicI64 = AtomicI64::new(0);
 
 pub(crate) fn patrol_lag_ms() -> Option<u64> {
@@ -748,9 +752,26 @@ pub(crate) async fn maintain(state: &Shared) {
             continue;
         };
         let runtime = match RuntimeStore::new(&state.paths.root, &workspace.id, &workspace.root) {
-            Ok(runtime) => runtime,
+            Ok(runtime) => {
+                if let Ok(mut unavailable) = UNAVAILABLE_RUNTIMES.lock() {
+                    if unavailable.remove(&workspace.root).is_some() {
+                        tracing::info!("workflow runtime available again");
+                    }
+                }
+                runtime
+            }
             Err(error) => {
-                tracing::warn!(%error, "workflow runtime unavailable");
+                let message = error.to_string();
+                let changed = UNAVAILABLE_RUNTIMES
+                    .lock()
+                    .map(|mut unavailable| {
+                        unavailable.insert(workspace.root.clone(), message.clone()).as_ref()
+                            != Some(&message)
+                    })
+                    .unwrap_or(true);
+                if changed {
+                    tracing::warn!(%error, "workflow runtime unavailable");
+                }
                 continue;
             }
         };

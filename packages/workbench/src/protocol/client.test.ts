@@ -8,6 +8,7 @@ import {
   ClientRequestTimeoutError,
   ConnectionOutcomeUnknownError,
   type ClientDiagnosticDetail,
+  type ClientDiagnosticEvent,
   type ClientOptions,
   type LocalServerProof,
 } from "./client";
@@ -300,6 +301,108 @@ describe("the logical peer connection", () => {
     await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
     queue.latest().acceptHandshake();
     await waitFor(() => client.connectionState === "ready");
+    client.close();
+  });
+
+  it("resets backoff after a stable interval even when the page ran no timers", async () => {
+    let clock = 1_000_000;
+    const attempts: number[] = [];
+    const { client, queue } = await connected({
+      now: () => clock,
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+    });
+
+    queue.latest().close(1006, "lost");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    // iOS froze the page right after it reconnected: the 30s grace elapsed on
+    // the wall clock while no timer could fire.
+    clock += 31_000;
+    queue.latest().close(1006, "lost after suspension");
+    await waitFor(() => queue.sockets.length === 3);
+
+    expect(attempts).toEqual([0, 0]);
+    client.close();
+  });
+
+  it("starts a fresh logical peer instead of resuming one silent past the daemon's window", async () => {
+    let clock = 1_000_000;
+    const events: ClientDiagnosticEvent[] = [];
+    const { client, queue } = await connected({
+      now: () => clock,
+      onDiagnostic: (event) => events.push(event),
+    });
+
+    clock += 10 * 60_000;
+    queue.latest().forgetSession();
+    queue.latest().close(1006, "suspended for ten minutes");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    expect(queue.sockets.length).toBe(2);
+    expect(events.some((event) => event.detail.phase === "resume-skipped")).toBe(true);
+    client.close();
+  });
+
+  it("redials at once without escalating backoff when the daemon lost the session", async () => {
+    const attempts: number[] = [];
+    const events: ClientDiagnosticEvent[] = [];
+    const { client, queue } = await connected({
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+      onDiagnostic: (event) => events.push(event),
+    });
+
+    queue.latest().forgetSession();
+    queue.latest().close(1006, "lost");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+
+    await waitFor(() => queue.sockets.length === 3);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    expect(attempts).toEqual([0]);
+    expect(events.some((event) => event.detail.cause === "session-lost")).toBe(true);
+    client.close();
+  });
+
+  it("restarts backoff when the page returns shortly before the carrier drops", async () => {
+    const attempts: number[] = [];
+    const { client, queue } = await connected({
+      backoffMs: (attempt) => {
+        attempts.push(attempt);
+        return 0;
+      },
+    });
+    queue.latest().close(1012, "restart");
+    await waitFor(() => queue.sockets.length === 2);
+    queue.latest().open();
+    await waitFor(() => queue.latest().sent.some((message) => message.type === "hello"));
+    queue.latest().acceptHandshake();
+    await waitFor(() => client.connectionState === "ready");
+
+    document.dispatchEvent(new Event("visibilitychange"));
+    queue.latest().close(1006, "carrier died while the page was frozen");
+    await waitFor(() => queue.sockets.length === 3);
+
+    expect(attempts).toEqual([0, 0]);
     client.close();
   });
 

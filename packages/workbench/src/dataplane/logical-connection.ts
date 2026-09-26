@@ -285,6 +285,10 @@ export class LogicalConnection {
       if (this.owns(channel)) await this.control(channel, { op: "attached", epoch: String(epoch), proof });
       return;
     }
+    if (m.op === "attach" && channel.phase === "created" && !this.credentials) {
+      // Same answer as the daemon registry for an id it no longer holds.
+      await this.control(channel, { op: "error", code: "SessionLost" }); return;
+    }
     if (m.op === "activate" && channel.phase === "activated" && m.attempt === channel.attempt && counter(m.expected) === this.epoch) {
       const epoch = this.epoch + 1n;
       this.activate(channel, epoch, watermark(m.position));
