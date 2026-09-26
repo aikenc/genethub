@@ -68,6 +68,19 @@ const REVIVE_GRACE_MS = 10_000;
 const HEARTBEAT_MS = 25_000;
 /** A heartbeat that takes this long is a dead carrier, not a slow peer. */
 const HEARTBEAT_TIMEOUT_MS = 10_000;
+/** Renewal must still finish on the old grant, including a redial on a slow network. */
+const RENEW_BEFORE_EXPIRY_MS = 15_000;
+
+/**
+ * Every renewal replaces the fabric carrier and renegotiates RTC, so it runs
+ * once half the remaining grant has elapsed instead of on a fixed cadence:
+ * a 60s grant renews every 30s, a 24h grant after 12h.
+ */
+export function authorizationRenewalDelay(expiresAt: string | undefined, now = Date.now()): number {
+  const remaining = Date.parse(expiresAt ?? "") - now;
+  if (!Number.isFinite(remaining)) return 30_000;
+  return Math.max(1000, Math.min(remaining / 2, remaining - RENEW_BEFORE_EXPIRY_MS));
+}
 
 export interface HostedChannelCredential {
   capabilityId: string;
@@ -1910,9 +1923,7 @@ export class Client {
     if (this.authorizationTimer !== null) clearTimeout(this.authorizationTimer);
     this.authorizationTimer = null;
     if (this.stopped || this.state !== "ready" || !this.activeChannelCredential || !this.options.redial) return;
-    const expiry = Date.parse(this.authorizationExpiresAt ?? "");
-    const delay = retryMs ?? (Number.isFinite(expiry)
-      ? Math.max(1000, Math.min(30_000, expiry - Date.now() - 15_000)) : 30_000);
+    const delay = retryMs ?? authorizationRenewalDelay(this.authorizationExpiresAt);
     this.authorizationTimer = setTimeout(() => {
       this.authorizationTimer = null;
       void this.renewAuthorization();

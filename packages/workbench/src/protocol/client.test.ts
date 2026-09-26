@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AssetPreviewError_,
+  authorizationRenewalDelay,
   Client,
   ClientQueueFullError,
   ClientRequestTimeoutError,
@@ -404,6 +405,16 @@ describe("the logical peer connection", () => {
 
     expect(attempts).toEqual([0, 0]);
     client.close();
+  });
+
+  it("renews Hosted authorization by remaining grant, not on a fixed 30s cadence", () => {
+    const now = Date.parse("2026-09-26T00:00:00Z");
+    const at = (ms: number) => new Date(now + ms).toISOString();
+    expect(authorizationRenewalDelay(at(86_400_000), now)).toBe(43_200_000);
+    expect(authorizationRenewalDelay(at(60_000), now)).toBe(30_000);
+    expect(authorizationRenewalDelay(at(20_000), now)).toBe(5_000);
+    expect(authorizationRenewalDelay(at(-5_000), now)).toBe(1000);
+    expect(authorizationRenewalDelay(undefined, now)).toBe(30_000);
   });
 
   it("settles a fake peer reply that races with closing the carrier", async () => {
