@@ -5,6 +5,23 @@ use crate::state::Shared;
 
 const MAX_PENDING: usize = 32;
 const MAX_RECEIPTS: usize = 4096;
+const RECEIPT_WINDOW: usize = 256;
+
+fn retain_receipt_window(inbox: &mut SessionInbox) {
+    let overflow = inbox.entries.len().saturating_sub(RECEIPT_WINDOW);
+    if overflow == 0 {
+        return;
+    }
+    let mut dropped = 0;
+    inbox.entries.retain(|entry| {
+        if dropped < overflow && entry.state == "handled" {
+            dropped += 1;
+            false
+        } else {
+            true
+        }
+    });
+}
 
 /// Which delivery lane an inbox entry belongs to.
 ///
@@ -149,6 +166,7 @@ impl SessionManager {
                 if source == "user" {
                     retire_failed_human_inputs(&mut next.inbox);
                 }
+                retain_receipt_window(&mut next.inbox);
                 if next.inbox.entries.len() >= MAX_RECEIPTS
                     || next
                         .inbox
@@ -620,6 +638,23 @@ mod tests {
             state: "queued".into(),
             turn_id: None,
         }
+    }
+
+    #[test]
+    fn handled_receipts_outside_the_window_are_dropped() {
+        let mut inbox = SessionInbox::default();
+        let mut pending = entry("pending", "user");
+        pending.state = "queued".into();
+        inbox.entries.push(pending);
+        for index in 0..300 {
+            let mut handled = entry(&format!("m{index}"), "user");
+            handled.state = "handled".into();
+            inbox.entries.push(handled);
+        }
+        retain_receipt_window(&mut inbox);
+        assert_eq!(inbox.entries.len(), RECEIPT_WINDOW);
+        assert_eq!(inbox.entries[0].message_id, "pending");
+        assert!(inbox.entries.iter().all(|entry| entry.message_id != "m0"));
     }
 
     /// The property lanes exist for: a person's new requirement and a Run's
