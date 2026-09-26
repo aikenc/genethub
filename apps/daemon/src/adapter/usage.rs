@@ -8,7 +8,6 @@ use std::collections::HashSet;
 
 use genehub_proto::{ItemDelta, SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, Usage};
 use serde_json::Value;
-use tokio::sync::broadcast;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -157,7 +156,7 @@ pub fn estimate_tokens(text: &str) -> u64 {
     text.chars().count().div_ceil(4) as u64
 }
 
-pub fn emit_progress(events: &broadcast::Sender<SessionEvent>, turn_id: &str, usage: &Usage) {
+pub fn emit_progress(events: &crate::adapter::EventTx, turn_id: &str, usage: &Usage) {
     if turn_id.is_empty() {
         return;
     }

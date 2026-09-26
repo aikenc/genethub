@@ -30,7 +30,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 
 use super::stdio::write_json_line;
 use super::usage;
@@ -209,7 +209,8 @@ impl AgentAdapter for AcpAdapter {
         let stdin = child.stdin.take().expect("stdin was piped");
 
         let child = Arc::new(Mutex::new(Some(child)));
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
+        let (settled, _) = watch::channel(false);
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let turn = Arc::new(Mutex::new(TurnState::default()));
         let interactions = Arc::new(Mutex::new(Vec::new()));
@@ -224,6 +225,8 @@ impl AgentAdapter for AcpAdapter {
             tasks: super::SessionTasks::default(),
             stdin: stdin.clone(),
             events: events.clone(),
+            events_rx: std::sync::Mutex::new(Some(events_rx)),
+            settled,
             pending: pending.clone(),
             interactions: interactions.clone(),
             turn: turn.clone(),
@@ -550,7 +553,9 @@ impl TurnState {
 struct AcpSession {
     tasks: super::SessionTasks,
     stdin: Arc<Mutex<ChildStdin>>,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
+    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
+    settled: watch::Sender<bool>,
     pending: PendingMap,
     interactions: Arc<Mutex<Vec<Value>>>,
 
@@ -710,8 +715,12 @@ impl AcpSession {
 
 #[async_trait]
 impl AgentSession for AcpSession {
-    fn events(&self) -> broadcast::Receiver<SessionEvent> {
-        self.events.subscribe()
+    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+        self.events_rx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .expect("the session event stream is single-consumer")
     }
 
     async fn send(&self, input: PromptInput) -> Result<String> {
@@ -759,6 +768,7 @@ impl AgentSession for AcpSession {
         let child = self.child.clone();
         let said = self.said.clone();
         let label = self.label.clone();
+        let settled = self.settled.clone();
         self.tasks.spawn(async move {
             let outcome = rx.await;
             let mut state = turn_state.lock().await;
@@ -819,6 +829,7 @@ impl AgentSession for AcpSession {
                     },
                 },
             };
+            let _ = settled.send(true);
             let _ = events.send(event);
         });
 
@@ -829,7 +840,10 @@ impl AgentSession for AcpSession {
         // ACP cancellation must also resolve each outstanding server request;
         // the future Human answer belongs to GeneHub's durable interaction.
         let requests = std::mem::take(&mut *self.interactions.lock().await);
-        let mut terminal = (!requests.is_empty()).then(|| self.events.subscribe());
+        let wait_for_terminal = !requests.is_empty();
+        if wait_for_terminal {
+            self.settled.send_replace(false);
+        }
         for id in requests {
             self.write(json!({ "jsonrpc": "2.0", "id": id,
                 "result": { "outcome": { "outcome": "cancelled" } } }))
@@ -842,19 +856,13 @@ impl AgentSession for AcpSession {
             "params": { "sessionId": session_id },
         }))
         .await?;
-        if let Some(events) = &mut terminal {
+        if wait_for_terminal {
             // Let the peer persist cancellation before closing its process.
             // This bounded protocol drain never waits for the Human.
+            let mut settled = self.settled.subscribe();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while let Ok(event) = events.recv().await {
-                    if matches!(
-                        event,
-                        SessionEvent::TurnCanceled { .. }
-                            | SessionEvent::TurnCompleted { .. }
-                            | SessionEvent::TurnFailed { .. }
-                    ) {
-                        break;
-                    }
+                if !*settled.borrow() {
+                    let _ = settled.wait_for(|done| *done).await;
                 }
             })
             .await;
@@ -1470,7 +1478,7 @@ where
 async fn read_loop(
     stdout: crate::os_process::ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
     pending: PendingMap,
     turn: Arc<Mutex<TurnState>>,
     interactions: Arc<Mutex<Vec<Value>>>,
@@ -1710,7 +1718,7 @@ fn permission_detail(tool_call: &Value) -> Option<String> {
     None
 }
 
-fn translate_permission(id: i64, params: &Value, events: &broadcast::Sender<SessionEvent>) {
+fn translate_permission(id: i64, params: &Value, events: &crate::adapter::EventTx) {
     let options = permission_options(params);
 
     let tool_call = params.get("toolCall");
@@ -1749,7 +1757,7 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
 fn translate_update(
     params: &Value,
     state: &mut TurnState,
-    events: &broadcast::Sender<SessionEvent>,
+    events: &crate::adapter::EventTx,
 ) {
     let update = params.get("update").unwrap_or(&Value::Null);
     let Some(kind) = update.get("sessionUpdate").and_then(Value::as_str) else {
@@ -1936,7 +1944,7 @@ fn translate_update(
 /// an existing name — the manager only applies a non-empty title.
 /// Titles that just repeat the Skill catalog / prompt heading are dropped
 /// so a polluted `nameAgent` pass cannot overwrite the first-prompt label.
-fn emit_session_title(update: &Value, events: &broadcast::Sender<SessionEvent>) {
+fn emit_session_title(update: &Value, events: &crate::adapter::EventTx) {
     let Some(title) = update.get("title").and_then(Value::as_str) else {
         return;
     };
@@ -2139,7 +2147,7 @@ mod tests {
         }
     }
 
-    fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if matches!(event, SessionEvent::TurnProgress { .. }) {
@@ -2255,7 +2263,7 @@ mod tests {
     /// must land on the same event shape, which is the point of the layer.
     #[test]
     fn the_first_chunk_opens_an_item_and_later_chunks_are_deltas() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut turn = state();
         for text in ["he", "llo"] {
             translate_update(
@@ -2284,7 +2292,7 @@ mod tests {
 
     #[test]
     fn a_tool_call_closes_the_open_text_run() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut turn = state();
         translate_update(
             &json!({"update": {"sessionUpdate": "agent_message_chunk",
@@ -2389,7 +2397,7 @@ mod tests {
 
     #[test]
     fn permission_requests_carry_their_options_and_reply_id() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         translate_permission(
             42,
             &json!({
@@ -2571,7 +2579,7 @@ mod tests {
 
     #[test]
     fn plan_updates_become_todo_items() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = state();
         translate_update(
             &json!({"update": {"sessionUpdate": "plan", "entries": [
@@ -2595,7 +2603,7 @@ mod tests {
 
     #[test]
     fn a_session_info_update_becomes_a_title_change() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = state();
         translate_update(
             &json!({"update": {
@@ -2613,7 +2621,7 @@ mod tests {
 
     #[test]
     fn a_session_info_update_reaches_us_before_a_turn() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = TurnState::default();
         translate_update(
             &json!({"update": {
@@ -2631,7 +2639,7 @@ mod tests {
 
     #[test]
     fn an_empty_session_info_title_is_ignored() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = state();
         translate_update(
             &json!({"update": {"sessionUpdate": "session_info_update", "title": "   "}}),
@@ -2648,7 +2656,7 @@ mod tests {
 
     #[test]
     fn a_skill_catalog_title_is_not_a_session_name() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = state();
         translate_update(
             &json!({"update": {
@@ -2677,7 +2685,7 @@ mod tests {
 
     #[test]
     fn updates_outside_a_turn_are_ignored() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = TurnState::default();
         translate_update(
             &json!({"update": {"sessionUpdate": "agent_message_chunk",

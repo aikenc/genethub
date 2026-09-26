@@ -19,7 +19,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, Notify};
 
 use super::stdio::write_json_line;
 use super::usage;
@@ -307,8 +307,9 @@ impl AgentAdapter for GenetAdapter {
         let stdin = child.stdin.take().expect("stdin was piped");
 
         let child = Arc::new(Mutex::new(Some(child)));
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
+        let turn_ended = Arc::new(Notify::new());
 
         // stderr is kept as well as drained: a full pipe would block the process,
         // and what it wrote on the way out is the only account of why it left.
@@ -319,7 +320,9 @@ impl AgentAdapter for GenetAdapter {
             tasks: super::SessionTasks::default(),
             stdin: Mutex::new(stdin),
             events: events.clone(),
+            events_rx: std::sync::Mutex::new(Some(events_rx)),
             turn: turn.clone(),
+            turn_ended: turn_ended.clone(),
             child: child.clone(),
             said: said.clone(),
             session_file,
@@ -327,7 +330,14 @@ impl AgentAdapter for GenetAdapter {
 
         session
             .tasks
-            .spawn(translate_stream(stdout, events, turn, child, said));
+            .spawn(translate_stream(
+                stdout,
+                events,
+                turn,
+                turn_ended,
+                child,
+                said,
+            ));
 
         Ok(Box::new(session))
     }
@@ -360,8 +370,10 @@ impl TurnState {
 struct GenetSession {
     tasks: super::SessionTasks,
     stdin: Mutex<ChildStdin>,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
+    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
     turn: Arc<Mutex<TurnState>>,
+    turn_ended: Arc<Notify>,
     /// Shared with the stream reader, which needs the exit code to explain a crash.
     child: Arc<Mutex<Option<Child>>>,
     /// What the agent said, for a prompt that cannot be written because it is gone.
@@ -378,8 +390,12 @@ impl GenetSession {
 
 #[async_trait]
 impl AgentSession for GenetSession {
-    fn events(&self) -> broadcast::Receiver<SessionEvent> {
-        self.events.subscribe()
+    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+        self.events_rx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .expect("the session event stream is single-consumer")
     }
 
     async fn send(&self, input: PromptInput) -> Result<String> {
@@ -427,21 +443,18 @@ impl AgentSession for GenetSession {
         // Tools own separate process groups. Killing only the Agent's group
         // first can orphan them; its abort protocol drops those tool futures
         // before agent_end. Keep ownership if that acknowledgement is missing.
-        let mut events = self.events.subscribe();
         if self.turn.lock().await.id.is_some() {
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 self.interrupt().await?;
-                while self.turn.lock().await.id.is_some() {
-                    match events.recv().await {
-                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => {
-                            return Err(anyhow!(
-                                "agent stopped before confirming tool cancellation"
-                            ));
-                        }
+                loop {
+                    let notified = self.turn_ended.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if self.turn.lock().await.id.is_none() {
+                        return Ok::<(), anyhow::Error>(());
                     }
+                    notified.await;
                 }
-                Ok::<_, anyhow::Error>(())
             })
             .await
             .context("agent tool cancellation is unconfirmed; cleanup can be retried")??;
@@ -489,8 +502,9 @@ impl AgentSession for GenetSession {
 
 async fn translate_stream(
     stdout: crate::os_process::ChildStdout,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
     turn: Arc<Mutex<TurnState>>,
+    turn_ended: Arc<Notify>,
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
 ) {
@@ -504,7 +518,11 @@ async fn translate_stream(
                 match serde_json::from_str::<Value>(&line) {
                     Ok(frame) => {
                         let mut state = turn.lock().await;
+                        let open = state.id.is_some();
                         translate_frame(&frame, &mut state, &events);
+                        if open && state.id.is_none() {
+                            turn_ended.notify_waiters();
+                        }
                     }
                     Err(error) => {
                         tracing::warn!("undecodable frame from the agent: {error}");
@@ -526,6 +544,7 @@ async fn translate_stream(
     tracing::warn!("{why}");
     let mut state = turn.lock().await;
     if let Some(turn_id) = state.id.take() {
+        turn_ended.notify_waiters();
         let _ = events.send(SessionEvent::TurnFailed {
             turn_id,
             error: TurnError {
@@ -575,7 +594,7 @@ fn builtin_questions(frame: &Value) -> Option<Vec<InteractionQuestion>> {
         .collect()
 }
 
-fn translate_frame(frame: &Value, state: &mut TurnState, events: &broadcast::Sender<SessionEvent>) {
+fn translate_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter::EventTx) {
     let Some(kind) = frame.get("type").and_then(Value::as_str) else {
         return;
     };
@@ -1245,7 +1264,7 @@ mod tests {
 
     #[test]
     fn built_in_user_input_becomes_a_structured_stopped_interaction() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &json!({
@@ -1277,7 +1296,7 @@ mod tests {
         }
     }
 
-    fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if matches!(event, SessionEvent::TurnProgress { .. }) {
@@ -1299,7 +1318,7 @@ mod tests {
 
     #[test]
     fn a_streamed_reply_becomes_an_item_then_deltas_then_a_final_item() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
 
         for frame in [
@@ -1354,7 +1373,7 @@ mod tests {
 
     #[test]
     fn a_bash_call_carries_its_command_before_the_output_exists() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &update(json!({"type": "toolcall_end", "toolCall": {
@@ -1384,7 +1403,7 @@ mod tests {
 
     #[test]
     fn a_failed_command_reports_its_exit_code() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &update(json!({"type": "toolcall_end", "toolCall": {
@@ -1419,7 +1438,7 @@ mod tests {
     /// render, so an unmapped tool becomes `Unknown` rather than nothing.
     #[test]
     fn an_unmapped_tool_falls_back_to_unknown_without_losing_data() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &update(json!({"type": "toolcall_end", "toolCall": {
@@ -1455,7 +1474,7 @@ mod tests {
 
     #[test]
     fn the_echoed_user_prompt_is_not_duplicated_onto_the_timeline() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &json!({"type": "message_end", "message": {"role": "user", "content": "hi"}}),
@@ -1470,7 +1489,7 @@ mod tests {
 
     #[test]
     fn a_turn_that_errors_out_fails_with_a_classified_code() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &json!({"type": "message_end", "message": {
@@ -1491,7 +1510,7 @@ mod tests {
 
     #[test]
     fn an_aborted_turn_is_reported_as_canceled_not_completed() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &json!({"type": "message_end", "message": {"role": "assistant", "stopReason": "aborted"}}),
@@ -1507,7 +1526,7 @@ mod tests {
 
     #[test]
     fn usage_accumulates_across_the_turns_inside_one_run() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         for _ in 0..2 {
             translate_frame(
@@ -1538,7 +1557,7 @@ mod tests {
 
     #[test]
     fn builtin_reports_each_llm_round_before_its_first_process_item() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = state_with_turn();
         translate_frame(
             &json!({"type": "message_start", "message": {"role": "user"}}),
@@ -1583,7 +1602,7 @@ mod tests {
 
     #[test]
     fn frames_arriving_outside_a_turn_are_ignored() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = TurnState::default();
         translate_frame(&update(json!({"type": "text_start"})), &mut state, &tx);
         assert!(drain(&mut rx).is_empty());

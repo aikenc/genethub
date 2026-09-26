@@ -35,7 +35,7 @@ use genehub_proto::{
 };
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 use super::acp::AcpAdapter;
 use super::usage;
@@ -224,7 +224,7 @@ impl AgentAdapter for CursorAdapter {
             fast: config.fast.unwrap_or(false),
             mode_id: config.mode_id.clone(),
         };
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
         Ok(Box::new(CursorSession {
             program,
             agent_id: self.id.clone(),
@@ -238,6 +238,7 @@ impl AgentAdapter for CursorAdapter {
             child: Arc::new(Mutex::new(None)),
             canceled: Arc::new(AtomicBool::new(false)),
             events,
+            events_rx: std::sync::Mutex::new(Some(events_rx)),
             tasks: super::SessionTasks::default(),
         }))
     }
@@ -305,7 +306,8 @@ struct CursorSession {
     turn: Arc<Mutex<TurnState>>,
     child: Arc<Mutex<Option<Child>>>,
     canceled: Arc<AtomicBool>,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
+    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
     tasks: super::SessionTasks,
 }
 
@@ -364,8 +366,12 @@ impl CursorSession {
 
 #[async_trait]
 impl AgentSession for CursorSession {
-    fn events(&self) -> broadcast::Receiver<SessionEvent> {
-        self.events.subscribe()
+    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+        self.events_rx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .expect("the session event stream is single-consumer")
     }
 
     async fn send(&self, input: PromptInput) -> Result<String> {
@@ -546,7 +552,7 @@ struct RunTurn {
     child: Arc<Mutex<Option<Child>>>,
     said: Arc<Chatter>,
     label: String,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
     chat_id: Arc<std::sync::Mutex<Option<String>>>,
     interrupted: Arc<std::sync::Mutex<Option<String>>>,
     canceled: Arc<AtomicBool>,
@@ -724,7 +730,7 @@ fn extension_for(mime: &str) -> &'static str {
 fn translate_event(
     event: &Value,
     state: &mut TurnState,
-    events: &broadcast::Sender<SessionEvent>,
+    events: &crate::adapter::EventTx,
 ) -> Option<String> {
     let chat_id = event
         .get("session_id")
@@ -1775,7 +1781,7 @@ mod tests {
         assert_eq!(default.as_deref(), Some("auto"));
     }
 
-    fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             out.push(event);
@@ -1792,7 +1798,7 @@ mod tests {
 
     #[test]
     fn stream_json_deltas_become_one_item_each_and_the_recap_is_skipped() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = running_turn();
         let lines = [
             json!({"type":"system","subtype":"init","session_id":"chat-9","model":"Grok 4.7 Low Fast"}),
@@ -1824,7 +1830,7 @@ mod tests {
 
     #[test]
     fn tool_calls_map_to_typed_details_and_todos() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut state = running_turn();
         let shell_done = json!({"type":"tool_call","subtype":"completed","call_id":"call-1\nfc_1",
             "tool_call":{"shellToolCall":{"args":{"command":"ls"},
@@ -1895,7 +1901,7 @@ mod tests {
 
     #[test]
     fn an_error_result_fails_the_turn_with_cursors_message() {
-        let (tx, _rx) = broadcast::channel(8);
+        let (tx, _rx) = crate::adapter::EventTx::channel(8);
         let mut state = running_turn();
         translate_event(
             &json!({"type":"result","subtype":"error","is_error":true,"result":"model unavailable"}),

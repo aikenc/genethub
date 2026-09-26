@@ -25,7 +25,7 @@ use genehub_proto::{
     Attachment, Capabilities, Catalog, ImportContinuation, ProbeState,
     SessionEvent, TimelineItem,
 };
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::config::ProviderConfig;
 
@@ -183,10 +183,57 @@ pub trait AgentAdapter: Send + Sync {
 
 pub type ProviderMap = std::collections::BTreeMap<String, ProviderConfig>;
 
+/// The agent-to-daemon event pipe. One consumer, so a slow pump applies
+/// backpressure to the reader instead of dropping a turn boundary.
+#[derive(Clone)]
+pub struct EventTx {
+    inner: Arc<std::sync::Mutex<mpsc::Sender<SessionEvent>>>,
+    capacity: usize,
+}
+
+impl EventTx {
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<SessionEvent>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (
+            Self {
+                inner: Arc::new(std::sync::Mutex::new(tx)),
+                capacity,
+            },
+            rx,
+        )
+    }
+
+    pub fn send(&self, event: SessionEvent) -> Result<(), mpsc::error::SendError<SessionEvent>> {
+        let tx = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        match tx.try_send(event) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(event)) => Err(mpsc::error::SendError(event)),
+            Err(mpsc::error::TrySendError::Full(event)) => tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(tx.send(event))
+            }),
+        }
+    }
+
+    /// Points later sends at a fresh receiver. The previous consumer keeps
+    /// only what was already queued for it.
+    pub fn reseat(&self) -> mpsc::Receiver<SessionEvent> {
+        let (tx, rx) = mpsc::channel(self.capacity);
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = tx;
+        rx
+    }
+}
+
 #[async_trait]
 pub trait AgentSession: Send + Sync {
     /// The one and only output: already-normalized events.
-    fn events(&self) -> broadcast::Receiver<SessionEvent>;
+    fn events(&self) -> mpsc::Receiver<SessionEvent>;
 
     async fn send(&self, input: PromptInput) -> Result<String>;
     async fn interrupt(&self) -> Result<()>;

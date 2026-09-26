@@ -21,7 +21,7 @@ use genehub_proto::{
     Usage,
 };
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 use super::usage;
 use super::{
@@ -132,7 +132,7 @@ impl AgentAdapter for OpenCodeAdapter {
         // conversation on every first prompt after a restart.
         let remote_session = open_session(&http, &base, &config.cwd, &config.resume).await?;
 
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel(EVENT_CAPACITY);
         let turn = Arc::new(Mutex::new(TurnState::default()));
 
         let tasks = super::SessionTasks::default();
@@ -153,6 +153,7 @@ impl AgentAdapter for OpenCodeAdapter {
             model: Mutex::new(config.model_id.clone()),
             additional_system_prompt: config.additional_system_prompt.clone(),
             events,
+            events_rx: std::sync::Mutex::new(Some(events_rx)),
             turn,
             child: Mutex::new(Some(child)),
         }))
@@ -385,15 +386,20 @@ struct OpenCodeSession {
     remote_session: String,
     model: Mutex<Option<String>>,
     additional_system_prompt: Option<String>,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
+    events_rx: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<SessionEvent>>>,
     turn: Arc<Mutex<TurnState>>,
     child: Mutex<Option<Child>>,
 }
 
 #[async_trait]
 impl AgentSession for OpenCodeSession {
-    fn events(&self) -> broadcast::Receiver<SessionEvent> {
-        self.events.subscribe()
+    fn events(&self) -> tokio::sync::mpsc::Receiver<SessionEvent> {
+        self.events_rx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .expect("the session event stream is single-consumer")
     }
 
     async fn send(&self, input: PromptInput) -> Result<String> {
@@ -712,7 +718,7 @@ async fn stream_events(
     http: crate::http::Client,
     base: String,
     remote_session: String,
-    events: broadcast::Sender<SessionEvent>,
+    events: crate::adapter::EventTx,
     turn: Arc<Mutex<TurnState>>,
 ) {
     let response = match http.get(format!("{base}/event")).send().await {
@@ -769,7 +775,7 @@ fn translate_event(
     value: &Value,
     remote_session: &str,
     state: &mut TurnState,
-    events: &broadcast::Sender<SessionEvent>,
+    events: &crate::adapter::EventTx,
 ) {
     let Some(kind) = value.get("type").and_then(Value::as_str) else {
         return;
@@ -857,7 +863,7 @@ fn emit_part(
     part: &Value,
     turn_id: &str,
     state: &mut TurnState,
-    events: &broadcast::Sender<SessionEvent>,
+    events: &crate::adapter::EventTx,
 ) {
     let Some(part_id) = part.get("id").and_then(Value::as_str) else {
         return;
@@ -1035,7 +1041,7 @@ fn message_body(input: &PromptInput, model: Option<&str>, system: Option<&str>) 
 fn reconcile(
     settled: &Value,
     state: &mut TurnState,
-    events: &broadcast::Sender<SessionEvent>,
+    events: &crate::adapter::EventTx,
     turn_id: &str,
 ) {
     if let Some(id) = settled
@@ -1216,7 +1222,7 @@ mod tests {
         }
     }
 
-    fn drain(rx: &mut broadcast::Receiver<SessionEvent>) -> Vec<SessionEvent> {
+    fn drain(rx: &mut tokio::sync::mpsc::Receiver<SessionEvent>) -> Vec<SessionEvent> {
         let mut out = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if matches!(event, SessionEvent::TurnProgress { .. }) {
@@ -1301,7 +1307,7 @@ mod tests {
     /// duplicate the text, so the same part id must produce a replacing item.
     #[test]
     fn a_resent_text_part_replaces_rather_than_appends() {
-        let (tx, mut rx) = broadcast::channel(64);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
         let mut turn = state();
         for text in ["he", "hello"] {
             translate_event(
@@ -1342,7 +1348,7 @@ mod tests {
 
     #[test]
     fn parts_belonging_to_another_session_are_ignored() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = state();
         translate_event(
             &json!({"type": "message.part.updated", "properties": {"part": {
@@ -1360,7 +1366,7 @@ mod tests {
     /// by repeating the question.
     #[test]
     fn the_users_own_message_is_not_replayed_as_the_answer() {
-        let (tx, mut rx) = broadcast::channel(16);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(16);
         let mut turn = TurnState {
             id: Some("t1".into()),
             ..TurnState::default()
@@ -1432,7 +1438,7 @@ mod tests {
 
     #[test]
     fn session_errors_end_the_turn_with_a_classified_failure() {
-        let (tx, mut rx) = broadcast::channel(8);
+        let (tx, mut rx) = crate::adapter::EventTx::channel(8);
         let mut turn = state();
         translate_event(
             &json!({"type": "session.error", "properties": {"error": {"data": {

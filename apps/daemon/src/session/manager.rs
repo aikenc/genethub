@@ -6071,7 +6071,7 @@ struct TrackedTurn {
 
 async fn pump_events(
     live: Arc<Live>,
-    mut receiver: broadcast::Receiver<SessionEvent>,
+    mut receiver: mpsc::Receiver<SessionEvent>,
     store: Store,
     replay_window: usize,
     processes: Arc<crate::processes::Processes>,
@@ -6170,13 +6170,8 @@ async fn pump_events(
             }
         };
         let mut event = match received {
-            Ok(event) => event,
-            Err(broadcast::error::RecvError::Lagged(missed)) => {
-                diagnostics.record("agent", "event-stream", "error", Some("dropped"));
-                tracing::warn!("dropped {missed} agent events: the pump fell behind");
-                continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => {
+            Some(event) => event,
+            None => {
                 diagnostics.record("agent", "event-stream", "error", Some("closed"));
                 flush_reasoning_blobs(&blob_sender, &mut raw_thinking);
                 // No `TurnFailed`, no `TurnCanceled` — the adapter's own sender
@@ -7527,7 +7522,7 @@ mod tests {
 
     struct ContextRecorder(Arc<std::sync::Mutex<Option<String>>>);
 
-    struct Blank(tokio::sync::broadcast::Sender<SessionEvent>);
+    struct Blank;
 
     struct ForkHarness {
         id: &'static str,
@@ -7540,7 +7535,6 @@ mod tests {
         id: &'static str,
         native_fork: bool,
         prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
-        events: tokio::sync::broadcast::Sender<SessionEvent>,
     }
 
     struct ImportHarness;
@@ -7660,7 +7654,7 @@ mod tests {
             if config.resume.is_some() {
                 return Err(anyhow!("no such thread"));
             }
-            Ok(Box::new(Blank(tokio::sync::broadcast::channel(8).0)))
+            Ok(Box::new(Blank))
         }
     }
 
@@ -7688,14 +7682,14 @@ mod tests {
 
         async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>> {
             *self.0.lock().unwrap() = config.additional_system_prompt;
-            Ok(Box::new(Blank(tokio::sync::broadcast::channel(8).0)))
+            Ok(Box::new(Blank))
         }
     }
 
     #[async_trait::async_trait]
     impl AgentSession for Blank {
-        fn events(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
-            self.0.subscribe()
+        fn events(&self) -> mpsc::Receiver<SessionEvent> {
+            mpsc::channel(1).1
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
@@ -7769,15 +7763,14 @@ mod tests {
                 id: self.id,
                 native_fork: self.native_fork,
                 prompts: self.prompts.clone(),
-                events: tokio::sync::broadcast::channel(8).0,
             }))
         }
     }
 
     #[async_trait::async_trait]
     impl AgentSession for ForkHarnessSession {
-        fn events(&self) -> tokio::sync::broadcast::Receiver<SessionEvent> {
-            self.events.subscribe()
+        fn events(&self) -> mpsc::Receiver<SessionEvent> {
+            mpsc::channel(1).1
         }
 
         async fn send(&self, input: PromptInput) -> Result<String> {
@@ -9966,9 +9959,7 @@ mod tests {
         let live = sessions.live("s1").await.unwrap();
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (events, _) = broadcast::channel(1);
         *live.agent.lock().await = Some(Arc::new(StoppingSession {
-            events,
             interrupted: interrupted.clone(),
             closed: closed.clone(),
         }));
@@ -10038,9 +10029,7 @@ mod tests {
             .await
             .unwrap();
         let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (events, _) = broadcast::channel(4);
         *live.agent.lock().await = Some(Arc::new(RecordingSession {
-            events,
             prompts: prompts.clone(),
         }));
         let outcome = PermissionOutcome::Selected {
@@ -10136,20 +10125,18 @@ mod tests {
     }
 
     struct StoppingSession {
-        events: broadcast::Sender<SessionEvent>,
         interrupted: Arc<std::sync::atomic::AtomicBool>,
         closed: Arc<std::sync::atomic::AtomicBool>,
     }
 
     struct RecordingSession {
-        events: broadcast::Sender<SessionEvent>,
         prompts: Arc<std::sync::Mutex<Vec<PromptInput>>>,
     }
 
     #[async_trait::async_trait]
     impl AgentSession for StoppingSession {
-        fn events(&self) -> broadcast::Receiver<SessionEvent> {
-            self.events.subscribe()
+        fn events(&self) -> mpsc::Receiver<SessionEvent> {
+            mpsc::channel(1).1
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
@@ -10185,8 +10172,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for RecordingSession {
-        fn events(&self) -> broadcast::Receiver<SessionEvent> {
-            self.events.subscribe()
+        fn events(&self) -> mpsc::Receiver<SessionEvent> {
+            mpsc::channel(1).1
         }
 
         async fn send(&self, input: PromptInput) -> Result<String> {
@@ -10218,9 +10205,7 @@ mod tests {
         let (live, _store_dir) = live_session(meta());
         let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (events, _) = broadcast::channel(1);
         *live.agent.lock().await = Some(Arc::new(StoppingSession {
-            events,
             interrupted: interrupted.clone(),
             closed: closed.clone(),
         }));
@@ -10520,7 +10505,7 @@ mod tests {
         Vec<SessionEvent>,
         Vec<TimelineItem>,
         tokio::task::JoinHandle<()>,
-        broadcast::Sender<SessionEvent>,
+        crate::adapter::EventTx,
         Store,
         tempfile::TempDir,
     ) {
@@ -10535,11 +10520,11 @@ mod tests {
         execution.phase = ExecutionPhase::Running;
         execution.ready.send_replace(true);
         *live.execution.lock().await = Some(execution);
-        let (agent_events, _) = broadcast::channel(64);
+        let (agent_events, agent_rx) = crate::adapter::EventTx::channel(64);
         let mut seen = live.events.subscribe();
         let pump = tokio::spawn(pump_events(
             live.clone(),
-            agent_events.subscribe(),
+            agent_rx,
             store.clone(),
             64,
             crate::processes::Processes::new(),
@@ -11083,14 +11068,15 @@ mod tests {
     /// re-attaches a fresh fake after a simulated restart still gets turn
     /// ids that do not collide with the ones before it.
     struct FakeSession {
-        events: broadcast::Sender<SessionEvent>,
+        /// Keeps the pipe open. The pump owns the receiver.
+        events: crate::adapter::EventTx,
         next_turn: Arc<AtomicU64>,
         /// Fails the handover the way a CLI that died on startup does.
         refuses: bool,
     }
 
     impl FakeSession {
-        fn sharing(events: broadcast::Sender<SessionEvent>, next_turn: Arc<AtomicU64>) -> Self {
+        fn sharing(events: crate::adapter::EventTx, next_turn: Arc<AtomicU64>) -> Self {
             FakeSession {
                 events,
                 next_turn,
@@ -11098,7 +11084,7 @@ mod tests {
             }
         }
 
-        fn refusing(events: broadcast::Sender<SessionEvent>) -> Self {
+        fn refusing(events: crate::adapter::EventTx) -> Self {
             FakeSession {
                 events,
                 next_turn: Arc::new(AtomicU64::new(0)),
@@ -11109,8 +11095,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentSession for FakeSession {
-        fn events(&self) -> broadcast::Receiver<SessionEvent> {
-            self.events.subscribe()
+        fn events(&self) -> mpsc::Receiver<SessionEvent> {
+            let _held = &self.events;
+            mpsc::channel(1).1
         }
 
         async fn send(&self, _input: PromptInput) -> Result<String> {
@@ -11146,7 +11133,7 @@ mod tests {
         root: &std::path::Path,
     ) -> (
         SessionManager,
-        broadcast::Sender<SessionEvent>,
+        crate::adapter::EventTx,
         Arc<AtomicU64>,
     ) {
         let sessions = manager(root);
@@ -11154,7 +11141,7 @@ mod tests {
         let live = sessions.live("s1").await.unwrap();
         // Match the production adapter buffer: pagination tests deliberately
         // send more than 64 events and are not overflow tests.
-        let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let (events, events_rx) = crate::adapter::EventTx::channel(BROADCAST_CAPACITY);
         let turn_ids = Arc::new(AtomicU64::new(0));
         *live.agent.lock().await = Some(Arc::new(FakeSession::sharing(
             events.clone(),
@@ -11162,7 +11149,7 @@ mod tests {
         )));
         let pump = tokio::spawn(pump_events(
             live.clone(),
-            events.subscribe(),
+            events_rx,
             sessions.store.clone(),
             64,
             sessions.processes(),
@@ -11633,7 +11620,7 @@ mod tests {
         )));
         let pump = tokio::spawn(pump_events(
             live.clone(),
-            events.subscribe(),
+            events.reseat(),
             sessions.store.clone(),
             64,
             sessions.processes(),
@@ -12065,7 +12052,7 @@ mod tests {
         )));
         let pump = tokio::spawn(pump_events(
             live.clone(),
-            events.subscribe(),
+            events.reseat(),
             sessions.store.clone(),
             64,
             sessions.processes(),
@@ -12846,12 +12833,12 @@ mod tests {
         execution.phase = ExecutionPhase::Running;
         execution.ready.send_replace(true);
         *live.execution.lock().await = Some(execution);
-        let (agent_events, _) = broadcast::channel(64);
+        let (agent_events, agent_rx) = crate::adapter::EventTx::channel(64);
         let mut seen = live.events.subscribe();
         let diagnostics = Arc::new(Diagnostics::new());
         let pump = tokio::spawn(pump_events(
             live,
-            agent_events.subscribe(),
+            agent_rx,
             store,
             64,
             crate::processes::Processes::new(),
@@ -12918,13 +12905,13 @@ mod tests {
         execution.ready.send_replace(true);
         *live.execution.lock().await = Some(execution);
 
-        let (agent_events, _) = broadcast::channel(64);
+        let (agent_events, agent_rx) = crate::adapter::EventTx::channel(64);
         let mut seen = live.events.subscribe();
         let diagnostics = Arc::new(Diagnostics::new());
 
         let pump = tokio::spawn(pump_events(
             live.clone(),
-            agent_events.subscribe(),
+            agent_rx,
             store,
             64,
             crate::processes::Processes::new(),
