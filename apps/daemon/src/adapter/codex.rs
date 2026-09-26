@@ -419,6 +419,9 @@ impl AgentAdapter for CodexAdapter {
             scratch_dir: config.scratch_dir.clone(),
         };
 
+        session
+            .tasks
+            .spawn(watch_for_exit(child.clone(), pending.clone()));
         session.tasks.spawn(read_loop(Reader {
             stdout,
             stdin,
@@ -1522,6 +1525,43 @@ async fn read_loop(reader: Reader) {
             },
         });
     }
+    abandon_pending(&pending).await;
+}
+
+async fn abandon_pending(pending: &PendingMap) {
+    let waiting: Vec<_> = pending
+        .lock()
+        .await
+        .drain()
+        .map(|(_, sender)| sender)
+        .collect();
+    if !waiting.is_empty() {
+        tracing::warn!(
+            outstanding = waiting.len(),
+            "Codex went away with requests still open"
+        );
+    }
+}
+
+const EXIT_POLL: Duration = Duration::from_millis(500);
+
+async fn watch_for_exit(child: Arc<Mutex<Option<Child>>>, pending: PendingMap) {
+    loop {
+        tokio::time::sleep(EXIT_POLL).await;
+        let gone = {
+            let Ok(mut held) = child.try_lock() else {
+                continue;
+            };
+            match held.as_mut() {
+                None => return,
+                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            }
+        };
+        if gone {
+            abandon_pending(&pending).await;
+            return;
+        }
+    }
 }
 
 /// One request the CLI is waiting on.
@@ -2594,6 +2634,33 @@ mod tests {
         assert_eq!(request_key(&json!(7)).as_deref(), Some("7"));
         assert_eq!(request_key(&json!("7")).as_deref(), Some("string:7"));
         assert_eq!(request_key(&Value::Null), None);
+    }
+
+    #[tokio::test]
+    async fn a_dead_codex_fails_an_open_call_without_the_timeout() {
+        let pending: PendingMap = Arc::default();
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(1, tx);
+        abandon_pending(&pending).await;
+        assert!(rx.await.is_err());
+        assert!(pending.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_exited_codex_fails_an_open_call_while_the_pipe_is_still_held() {
+        let mut child = Command::new("true")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn true");
+        let _stdout = child.stdout.take();
+        let held = Arc::new(Mutex::new(Some(child)));
+        let pending: PendingMap = Arc::default();
+        let (tx, rx) = oneshot::channel();
+        pending.lock().await.insert(4, tx);
+        let started = std::time::Instant::now();
+        watch_for_exit(held, pending.clone()).await;
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(rx.await.is_err());
     }
 
     #[test]

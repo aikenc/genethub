@@ -834,6 +834,9 @@ impl AgentAdapter for ClaudeAdapter {
         };
 
         let control = ControlState { mode, stdin };
+        session
+            .tasks
+            .spawn(watch_for_exit(child.clone(), awaiting.clone()));
         session.tasks.spawn(read_loop(
             stdout,
             events,
@@ -1522,6 +1525,43 @@ async fn read_loop(
                 message: why,
             },
         });
+    }
+    abandon_awaiting(&awaiting).await;
+}
+
+async fn abandon_awaiting(awaiting: &Awaiting) {
+    let waiting: Vec<_> = awaiting
+        .lock()
+        .await
+        .drain()
+        .map(|(_, sender)| sender)
+        .collect();
+    if !waiting.is_empty() {
+        tracing::warn!(
+            outstanding = waiting.len(),
+            "Claude Code went away with control requests still open"
+        );
+    }
+}
+
+const EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+
+async fn watch_for_exit(child: Arc<Mutex<Option<Child>>>, awaiting: Awaiting) {
+    loop {
+        tokio::time::sleep(EXIT_POLL).await;
+        let gone = {
+            let Ok(mut held) = child.try_lock() else {
+                continue;
+            };
+            match held.as_mut() {
+                None => return,
+                Some(child) => matches!(child.try_wait(), Ok(Some(_)) | Err(_)),
+            }
+        };
+        if gone {
+            abandon_awaiting(&awaiting).await;
+            return;
+        }
     }
 }
 
@@ -2292,6 +2332,33 @@ mod tests {
             id: Some("t1".into()),
             ..TurnState::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_dead_claude_fails_an_open_control_request_without_the_timeout() {
+        let awaiting: Awaiting = Arc::default();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        awaiting.lock().await.insert("req".into(), tx);
+        abandon_awaiting(&awaiting).await;
+        assert!(rx.await.is_err());
+        assert!(awaiting.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_exited_claude_fails_an_open_control_request_while_the_pipe_is_held() {
+        let mut child = Command::new("true")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn true");
+        let _stdout = child.stdout.take();
+        let held = Arc::new(Mutex::new(Some(child)));
+        let awaiting: Awaiting = Arc::default();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        awaiting.lock().await.insert("req".into(), tx);
+        let started = std::time::Instant::now();
+        watch_for_exit(held, awaiting).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(rx.await.is_err());
     }
 
     /// The bug this file's `ask_mode` exists for, in both directions.
