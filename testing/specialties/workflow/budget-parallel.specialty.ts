@@ -73,7 +73,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     const seen = new Set<string>();
     opened.mock.script(...Array.from({ length: 90 }, () => ({ respond: (request: unknown) => {
       const text = JSON.stringify(request);
-      if (scenario === "parallel-double-failure" && text.includes("只读复查这条用户需求及其 Run")) return { hang: true as const };
+      if (["parallel-double-failure", "budget-expiry"].includes(scenario) && text.includes("只读复查这条用户需求及其 Run")) return { hang: true as const };
       if (!text.includes("BUDGET_PARALLEL_WORKER")) {
         if (!nextCommand) return { text: "Observed execution facts." };
         const command = nextCommand; nextCommand = undefined; return { tool: { name: "bash", arguments: { command } } };
@@ -138,15 +138,26 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         "ordinary request budget expiry started a recovery Run");
       opened.client.close();
       await cli(["daemon", "stop"]);
-      // Advance only the persisted PM answer clock; the patrol must create
-      // the same Human feedback exit it creates for other budget blocks.
+      // The decision clock belongs to the requirement, not to an arbitrary
+      // Run save. Expire both persisted facts only after daemon shutdown.
       saved.run.updatedAtMs = Date.now() - 1_805_000;
       writeFileSync(snapshotPath, JSON.stringify(saved));
+      const goalPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", original, "request.json");
+      const goal = JSON.parse(readFileSync(goalPath, "utf8"));
+      goal.requirement.pendingSinceMs = saved.run.updatedAtMs;
+      goal.nextCheckAtMs = 0;
+      writeFileSync(goalPath, JSON.stringify(goal));
       await cli(["daemon", "start"]);
       opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
-      await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.humanExit?.kind === "d", 25_000);
-      t.assertions.assert(!(await history()).some(item => item.handles.some(handle => handle.runId === original)),
-        "PM timeout created a recovery Run for a structured budget block");
+      let recovery: WorkflowRunStatus | undefined;
+      await t.tools.waitUntil(async () => {
+        recovery = (await history()).find(item => item.handles.some(handle => handle.runId === original));
+        return recovery?.status === "running" && recovery.nodes.some(node => node.status === "running");
+      }, 30_000);
+      t.assertions.assert(recovery!.requestRunId === original && (await history()).length === 2,
+        "PM timeout lost the goal or duplicated its independent recovery");
+      t.assertions.assert((await history()).find(item => item.id === original)?.requirement?.state !== "completed",
+        "Business deadline expiry silently settled the undelivered requirement");
       return;
     }
     if (scenario === "observation") {

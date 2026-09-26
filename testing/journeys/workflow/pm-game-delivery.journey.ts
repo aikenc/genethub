@@ -314,11 +314,29 @@ function scriptProductJourney(
   let reviewFirstDispatched = false;
   let repairs = 0;
   let unboundBuilderAttempted = false;
+  const recordedDeliveries = new Set<string>();
   const root = shellArg(projectRoot);
 
   const respond = (request: unknown): Omit<Parameters<JourneyMock["script"]>[number], "respond"> => {
     const body = JSON.stringify(request);
     const delivery = deliveryForRequest(request, deliveries);
+    const messages = (request as { messages?: Array<{ role: string; content?: unknown }> }).messages ?? [];
+    const instructions = JSON.stringify(messages.filter(message => ["system", "developer"].includes(message.role)));
+    const latestUser = JSON.stringify(messages.filter(message => message.role === "user").at(-1)?.content ?? "");
+    const decision = latestUser.match(/RECORD_FIXTURE_DELIVERY: (wr_[a-f0-9]+)/)?.[1];
+    if (decision && !instructions.includes("<genehub_managed_session>")  ) {
+      if (recordedDeliveries.has(decision)) return { text: "PM recorded the reviewed fixture delivery." };
+      recordedDeliveries.add(decision);
+      // The deterministic PM reviews the known fixture result and records the
+      // user goal separately from the Worker/Run completion. Later assertions
+      // independently inspect artifacts, reports and authority boundaries.
+      const script = `const cp=require('node:child_process'),cli=process.env.GENEHUB_CLI,id=${JSON.stringify(decision)};
+const run=JSON.parse(cp.execFileSync(cli,['workflow','get','--run',id],{encoding:'utf8'})).data;
+if(run.status!=='completed'||!run.requirement)throw Error('Result not ready for PM disposition');
+const result=JSON.parse(cp.execFileSync(cli,['workflow','deliver','--run',id,'--revision',String(run.requirement.revision),'--reason','Requested fixture result reviewed and delivered','--evidence','result='+id],{encoding:'utf8'}));
+process.stdout.write(JSON.stringify({state:result.data.requirement.state,revision:result.data.requirement.revision}));`;
+      return { tool: { name: "bash", arguments: { command: `node -e ${shellArg(script)}` } } };
+    }
 
     if (body.includes("UNBOUND_BUILDER_J4")) {
       if (unboundBuilderAttempted) return { text: "该 PM 没有项目管理绑定，未执行构建。" };
@@ -700,6 +718,8 @@ async function assertActiveRunGuardsTeam(
   );
 }
 
+let pmInputSequence = 0;
+
 async function runPmDelivery(
   t: CaseContext,
   fixture: ProjectFixture,
@@ -716,7 +736,14 @@ async function runPmDelivery(
   const failedBefore = events.filter((event) => event.type === "turnFailed").length;
   const startedAt = Date.now();
   let humanWaitMs = 0;
-  await t.flows.main.sendPrompt(fixture.opened.client, sessionId, prompt);
+  const send = async (text: string) => {
+    const reply = await fixture.opened.client.call({ type: "session.send", payload: {
+      sessionId, messageId: `u_journey_delivery_${++pmInputSequence}`, text,
+      attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+    } });
+    t.assertions.assert(reply?.type === "ack", "PM input was not durably accepted");
+  };
+  await send(prompt);
 
   if (expectApproval) {
     await t.tools.waitUntil(
@@ -773,7 +800,10 @@ async function runPmDelivery(
     if (current?.status === "completed") return true;
     if (current && !["blocked", "failed", "cancelled"].includes(current.status)) return false;
     const failed = events.filter((event) => event.type === "turnFailed").length > failedBefore;
-    const returned = events.filter((event) => event.type === "turnCompleted").length > completedBefore;
+    // Plan approval ends the first PM turn before its accepted continuation
+    // dispatches. That receipt is not the final result of the delivery input.
+    const returned = events.filter((event) => event.type === "turnCompleted").length >=
+      completedBefore + (expectApproval ? 2 : 1);
     if (failed || returned || current) {
       const log = path.join(fixture.projectRoot, ".genethub/temp/preparation-command.log");
       throw new Error(`PM returned without a successful Run for ${taskId}: ${existsSync(log) ? readFileSync(log, "utf8").slice(-7000) : JSON.stringify(fixture.opened.mock.requests.slice(-2)).slice(-7000)}`);
@@ -784,6 +814,13 @@ async function runPmDelivery(
     () => events.filter((event) => event.type === "turnCompleted").length >= completedBefore + 2,
     120_000,
   );
+  const executed = await completedRun(fixture, taskId);
+  if (!executed) throw new Error("Completed result disappeared before PM disposition");
+  await send(`RECORD_FIXTURE_DELIVERY: ${executed.id}`);
+  await t.tools.waitUntil(async () => {
+    const current = await completedRun(fixture, taskId);
+    return current?.requirement?.state === "completed";
+  }, 30_000);
   const wallMs = Date.now() - startedAt;
   const activeMs = wallMs - humanWaitMs;
   t.assertions.assert(
@@ -1342,7 +1379,7 @@ defineJourney(
       const stale = JSON.parse(readFileSync(path.join(fixture.projectRoot, ".genethub/temp/stale-builder.json"), "utf8"));
       t.assertions.assert(stale.code !== 0 && stale.error.includes("planStale") && stale.unchanged, "a changed Builder source was applied through its old plan");
       t.assertions.assert(stale.outsideOpenCode !== 0 && stale.outsideOpenError.includes("unauthenticated"), `PM gained machine-wide workspace registration authority: ${JSON.stringify(stale)}`);
-      t.assertions.assert(pmEvents.filter((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested").length === asksBefore, "routine preparation asked Human to repeat the project grant");
+      t.assertions.assert(pmEvents.filter((event) => t.flows.main.sessionEventOf(event)?.type === "permissionRequested").length === asksBefore, `routine preparation asked Human to repeat the project grant: ${JSON.stringify(pmEvents.filter(event => t.flows.main.sessionEventOf(event)?.type === "permissionRequested").map(event => t.flows.main.sessionEventOf(event))).slice(-6000)}`);
       // The variant's Spaces live in the trial package's product
       // directories; their manifest names stay local, so identity is the root.
       const trialSpaces = (await listSpaces(fixture)).filter((space) =>
@@ -1407,7 +1444,11 @@ for (const scenario of ["approved", "repair", "limit"] as const) defineJourney({
     const pm = await t.flows.main.createBuiltinSession(fixture.opened.client, fixture.projectId);
     await runPmDelivery(t, fixture, pm, PROJECT_DELIVERY.userMarker, PROJECT_DELIVERY.task, true);
     const before = git(fixture.projectRoot, ["rev-parse", "HEAD"]);
-    await t.flows.main.sendPrompt(fixture.opened.client, pm, "REVIEW_FIRST_J4 先评审现有成果，有问题才修复并复审。");
+    const accepted = await fixture.opened.client.call({ type: "session.send", payload: {
+      sessionId: pm, messageId: `u_review_first_${scenario}`, text: "REVIEW_FIRST_J4 先评审现有成果，有问题才修复并复审。",
+      attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+    } });
+    t.assertions.assert(accepted?.type === "ack", "Review input was not durably accepted");
     let run: WorkflowRunStatus | undefined;
     await t.tools.waitUntil(async () => {
       const history = await fixture.opened.client.call({ type: "workflow.history", payload: { workspaceId: fixture.projectId, limit: 10 } });

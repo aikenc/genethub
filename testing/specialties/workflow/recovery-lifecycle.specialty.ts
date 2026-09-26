@@ -176,7 +176,14 @@ defineSpecialty({
 
     let originalId = "";
     stage = "dispatch business Run";
-    await t.flows.main.sendPrompt(opened.client, pm, "START_RECOVERY_LIFECYCLE");
+    const send = async (sessionId: string, text: string) => {
+      const reply = await opened.client.call({ type: "session.send", payload: {
+        sessionId, messageId: `u_recovery_${mode}_${text}`, text,
+        attachments: [], continuesRound: null, artifactPreviewBaseUrl: null,
+      } });
+      t.assertions.assert(reply?.type === "ack", `Durable PM input rejected: ${text}`);
+    };
+    await send(pm, "START_RECOVERY_LIFECYCLE");
     if (proactive) {
       stage = "PM proactively starts recovery";
       await t.tools.waitUntil(async () => {
@@ -185,7 +192,7 @@ defineSpecialty({
         return original?.status === "running" && !!original.nodes.find(node => node.id === "work" && node.sessionId)
           && (await snapshot(pm)).summary.status === "idle";
       }, 30_000);
-      await t.flows.main.sendPrompt(opened.client, pm, "START_PROACTIVE_RECOVERY");
+      await send(pm, "START_PROACTIVE_RECOVERY");
     }
     if (corrupt) {
       stage = "damage active Candidate after business dispatch";
@@ -232,7 +239,7 @@ defineSpecialty({
       mkdirSync(damagedRequest, { recursive: true });
       writeFileSync(path.join(damagedRequest, "request.json"), "not a request snapshot\n");
       const pm2 = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
-      await t.flows.main.sendPrompt(opened.client, pm2, "START_SECOND_REQUEST");
+      await send(pm2, "START_SECOND_REQUEST");
       let second: WorkflowRunStatus | undefined;
       await t.tools.waitUntil(async () => {
         const runs = await history();
@@ -292,7 +299,7 @@ defineSpecialty({
       return runs.length === 2 && runs.some(run => run.id === recovery!.id)
         && pending.pendingPermissions.some(request => request.id === questionId);
     }, 30_000);
-    await t.flows.main.sendPrompt(opened.client, pm, "APPROVE_RECOVERY_REPAIR");
+    await send(pm, "APPROVE_RECOVERY_REPAIR");
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
@@ -352,7 +359,7 @@ defineSpecialty({
       event.eventType === "pause.answered" && event.messageId === questionId).length === 1,
     "PM answer was missing or repeated in the committed journal");
 
-    await t.flows.main.sendPrompt(opened.client, pm, "CONTINUE_RECOVERY_LIFECYCLE");
+    await send(pm, "CONTINUE_RECOVERY_LIFECYCLE");
     stage = "wait for business successor";
     await t.tools.waitUntil(async () => {
       const runs = await history();
