@@ -147,7 +147,13 @@ async function onPrompt(id, params) {
       pendingPrompt = null;
       respond(id, { stopReason: "end_turn" });
     } else {
-      write({ jsonrpc: "2.0", id: "native-plan-request", method: "cursor/create_plan", params: { toolCallId: "plan-tool", name: "Native Agent plan", plan: "Report completion after Human approval", todos: [] } });
+      write({ jsonrpc: "2.0", id: 7, method: "session/request_permission", params: {
+        toolCall: { toolCallId: "plan-tool", title: "Native Agent plan" },
+        options: [
+          { optionId: "accept", name: "Approve and continue", kind: "allow_once" },
+          { optionId: "reject", name: "Reject plan", kind: "reject_once" },
+        ],
+      } });
     }
     return;
   }
@@ -238,7 +244,7 @@ function onCancel() {
 async function onFrame(frame) {
   const { id, method, params } = frame;
   if (typeof method !== "string") {
-    if (id === "native-plan-request") journal("plan-cancellation", { result: frame.result });
+    if (id === 7) journal("plan-cancellation", { result: frame.result });
     return;
   }
   if (method !== "session/update") journal("rpc", { method, id: id ?? null });

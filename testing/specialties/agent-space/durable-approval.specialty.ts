@@ -180,7 +180,7 @@ for (const window of ["waiting", "approved", "applied", "rejected", "canceled"] 
 defineSpecialty({
   id: "specialty.agent-space.durable-native-plan",
   title: "Native ACP plan stops its process and resumes without a project grant",
-  oracle: "Cursor create_plan cancellation follows the external protocol, Human acceptance survives as a new native turn, and no project grant is required for an ordinary Agent plan",
+  oracle: "A standard ACP permission request stops its process and resumes without a project grant",
   catches: ["native plans are rejected as missing PM challenges", "ACP permission request stays unanswered on cancel", "Human wait retains Agent process", "acceptance resumes a fresh native session"],
   tags: ["core", "durable-approval", "agent", "native-plan"],
   // The three protocol waits allow up to 40 seconds in a healthy slow
@@ -188,7 +188,7 @@ defineSpecialty({
   // declared contract rather than force-cleaning a valid continuation.
   expectedDurationMs: 5_000, timeoutMs: 60_000,
   surfaces: ["daemon", "agent", "acp", "workbench-client"],
-  productInterfaces: ["cursor/create_plan", "session/cancel", "session/resume", "session.respondPermission"],
+  productInterfaces: ["session/request_permission", "session/cancel", "session/resume", "session.respondPermission"],
 }, async (t) => {
   const flow = await t.flows.branches.openControlledAgentSession({ openRoot: t.openRoot, lease: t.env, agent: { profile: "native-plan" } });
   try {
