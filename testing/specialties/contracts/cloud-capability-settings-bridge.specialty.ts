@@ -33,9 +33,7 @@ defineSpecialty({
   )?.[1];
   for (const operation of [
     "settings.setAgentPreferences",
-    "session.createRouted",
     "session.forkRouted",
-    "session.forkImportRouted",
     "session.route",
     "session.switchAgent",
   ]) {

@@ -382,7 +382,6 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
-        | Request::SessionCreateRouted { .. }
         | Request::AgentSpaceBuilder { .. }
         | Request::ProjectApprovalRequest { .. }
         | Request::WorkflowBuild { .. }
@@ -404,7 +403,6 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionForkRouted { .. }
         | Request::SessionForkExport { .. }
         | Request::SessionForkImport { .. }
-        | Request::SessionForkImportRouted { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }
@@ -445,7 +443,6 @@ pub fn required(request: &Request) -> Capability {
         // all, so it sits with the other configuration changes rather than with
         // reading one.
         Request::WorkspaceOpen { .. }
-        | Request::WorkspaceCreate { .. }
         | Request::WorkspaceAddRoot { .. }
         | Request::AgentSpaceConfigure { .. }
         | Request::WorkspaceRename { .. }

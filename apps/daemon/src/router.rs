@@ -268,9 +268,7 @@ async fn authorize_session_request(
         && matches!(
             request,
             Request::SessionCreate { .. }
-                | Request::SessionCreateRouted { .. }
                 | Request::SessionForkImport { .. }
-                | Request::SessionForkImportRouted { .. }
                 | Request::SessionImport { .. }
         )
     {
@@ -1654,76 +1652,6 @@ async fn dispatch(
             }
         }
 
-        Request::SessionCreateRouted {
-            workspace_id,
-            tags,
-            media_tags,
-            title,
-            cwd,
-        } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let start_in = match cwd {
-                Some(cwd) => {
-                    let candidate = std::path::Path::new(&cwd);
-                    match workspace
-                        .folders
-                        .iter()
-                        .find_map(|folder| {
-                            crate::session::store::ensure_within(&folder.root, candidate).ok()
-                        })
-                        .or_else(|| {
-                            crate::session::store::ensure_within(&workspace.root, candidate).ok()
-                        }) {
-                        Some(resolved) => resolved,
-                        None => return failed(anyhow::anyhow!("cwd {cwd} escapes the workspace")),
-                    }
-                }
-                None => workspace.root,
-            };
-            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
-                Ok(tags) => tags,
-                Err(error) => return failed(error),
-            };
-            let media_tags = match crate::agent_routing::validate_media_tags(media_tags) {
-                Ok(tags) => tags,
-                Err(error) => return failed(error),
-            };
-            let required = crate::agent_routing::normalize_tags(
-                routing_tags.iter().chain(media_tags.iter()).cloned(),
-            );
-            let (route, _) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
-                    Ok(route) => route,
-                    Err(error) => return failed(error),
-                };
-            match state
-                .sessions
-                .create_routed(
-                    &workspace_id,
-                    start_in,
-                    &route.agent_id,
-                    route.model_id,
-                    route.effort_id,
-                    route.fast,
-                    route.mode_id,
-                    route.runtime_values,
-                    title,
-                    routing_tags,
-                    media_tags,
-                )
-                .await
-            {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
-                Err(error) => failed(error),
-            }
-        }
-
         Request::SessionList {
             workspace_id,
             include_archived,
@@ -2174,59 +2102,6 @@ async fn dispatch(
                     target,
                     &providers,
                     false,
-                )
-                .await
-            {
-                Ok(summary) => match rebind_project_control_if_pm(state, &summary).await {
-                    Ok(()) => Handled::ok(Reply::Session(summary)),
-                    Err(error) => failed(error),
-                },
-                Err(error) => failed(error),
-            }
-        }
-
-        Request::SessionForkImportRouted {
-            transfer,
-            workspace_id,
-            tags,
-        } => {
-            let workspace = match state.workspaces.get(&workspace_id).await {
-                Ok(workspace) => workspace,
-                Err(error) => return failed(error),
-            };
-            let routing_tags = match crate::agent_routing::validate_selected_tags(tags) {
-                Ok(tags) => tags,
-                Err(error) => return failed(error),
-            };
-            let media_tags = crate::agent_routing::media_tags_for_timeline(&transfer.items);
-            let required = crate::agent_routing::normalize_tags(
-                routing_tags.iter().chain(media_tags.iter()).cloned(),
-            );
-            let (route, providers) =
-                match crate::agent_routing::resolve_live_route(state, &required, false).await {
-                    Ok(route) => route,
-                    Err(error) => return failed(error),
-                };
-            let target = genehub_proto::ForkTarget {
-                agent_id: route.agent_id,
-                workspace_id: Some(workspace_id.clone()),
-                model_id: route.model_id,
-                mode_id: route.mode_id,
-                effort_id: route.effort_id,
-                fast: route.fast,
-                runtime_values: route.runtime_values,
-            };
-            match state
-                .sessions
-                .fork_import_routed(
-                    &workspace_id,
-                    workspace.root,
-                    transfer,
-                    target,
-                    &providers,
-                    false,
-                    routing_tags,
-                    media_tags,
                 )
                 .await
             {
@@ -2866,20 +2741,6 @@ async fn dispatch(
                 .add_root(&workspace_id, Path::new(&root))
                 .await
             {
-                Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
-                Err(error) => failed(error),
-            }
-        }
-
-        Request::WorkspaceCreate { root, name } => {
-            let path = crate::guest_paths::guest_path(Path::new(&root));
-            if let Err(error) = std::fs::create_dir_all(&path) {
-                return Handled::err(
-                    ErrorCode::BadRequest,
-                    format!("could not create {root}: {error}"),
-                );
-            }
-            match state.workspaces.open(&path, Some(name)).await {
                 Ok(workspace) => Handled::ok(Reply::Workspace(workspace)),
                 Err(error) => failed(error),
             }
@@ -3656,9 +3517,7 @@ async fn dispatch(
 fn diagnostic_operation(request: &Request) -> Option<&'static str> {
     match request {
         Request::AgentRefresh => Some("agent.refresh"),
-        Request::SessionCreate { .. } | Request::SessionCreateRouted { .. } => {
-            Some("session.create")
-        }
+        Request::SessionCreate { .. } => Some("session.create"),
         Request::WorkflowList { .. } => Some("workflow.list"),
         Request::WorkflowBuild { .. } => Some("workflow.build"),
         Request::WorkflowActivate { .. } => Some("workflow.activate"),
@@ -3683,7 +3542,6 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::SessionForkRouted { .. } => Some("session.forkRouted"),
         Request::SessionForkExport { .. } => Some("session.forkExport"),
         Request::SessionForkImport { .. } => Some("session.forkImport"),
-        Request::SessionForkImportRouted { .. } => Some("session.forkImportRouted"),
         Request::SessionImport { .. } => Some("session.import"),
         Request::SessionInterrupt { .. } => Some("session.interrupt"),
         Request::SessionDelete { .. } => Some("session.delete"),
@@ -3705,7 +3563,6 @@ fn diagnostic_operation(request: &Request) -> Option<&'static str> {
         Request::DeviceRemoteDetach => Some("device.remoteDetach"),
         Request::WorkspaceOpen { .. } => Some("workspace.open"),
         Request::WorkspaceAddRoot { .. } => Some("workspace.addRoot"),
-        Request::WorkspaceCreate { .. } => Some("workspace.create"),
         Request::AgentSpaceConfigure { .. } => Some("agentSpace.configure"),
         Request::WorkspaceRename { .. } => Some("workspace.rename"),
         Request::WorkspaceRemove { .. } => Some("workspace.remove"),

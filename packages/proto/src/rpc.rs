@@ -93,20 +93,6 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// Creates a Session by resolving AND-match tags against live machine
-    /// configuration. No concrete route is cached by the client.
-    #[serde(rename = "session.createRouted", rename_all = "camelCase")]
-    SessionCreateRouted {
-        workspace_id: String,
-        #[serde(default)]
-        tags: Vec<String>,
-        #[serde(default)]
-        media_tags: Vec<String>,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        cwd: Option<String>,
-    },
     /// Reads and validates one Workflow package's source under
     /// `.genethub/workflows/<id>/`. The target must be a non-worker project
     /// entry; its optional PM marker is irrelevant. This is a pure projection
@@ -584,16 +570,6 @@ pub enum Request {
         transfer: ForkTransfer,
         target: ForkTarget,
     },
-    /// Cross-machine counterpart of `session.forkRouted`. The destination
-    /// daemon owns route resolution, so source-machine costs never leak into
-    /// the decision.
-    #[serde(rename = "session.forkImportRouted", rename_all = "camelCase")]
-    SessionForkImportRouted {
-        transfer: ForkTransfer,
-        workspace_id: String,
-        #[serde(default)]
-        tags: Vec<String>,
-    },
     /// Lists lightweight, workspace-scoped candidates from every installed
     /// Agent. Full histories are not read until `session.import` selects one.
     #[serde(rename = "session.importList", rename_all = "camelCase")]
@@ -915,8 +891,6 @@ pub enum Request {
     /// Append a directory to a saved code-workspace; preserves workspace identity.
     #[serde(rename = "workspace.addRoot", rename_all = "camelCase")]
     WorkspaceAddRoot { workspace_id: String, root: String },
-    #[serde(rename = "workspace.create", rename_all = "camelCase")]
-    WorkspaceCreate { root: String, name: String },
     #[serde(rename = "workspace.rename", rename_all = "camelCase")]
     WorkspaceRename { workspace_id: String, name: String },
     /// Hides a workspace registration while retaining its identity and history.

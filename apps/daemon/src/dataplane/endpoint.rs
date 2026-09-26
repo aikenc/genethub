@@ -1434,12 +1434,10 @@ fn request_workspace(request: &Request) -> Option<&str> {
             ..
         }
         | Request::SessionForkImport { target, .. } => target.workspace_id.as_deref(),
-        Request::SessionForkRouted { workspace_id, .. }
-        | Request::SessionForkImportRouted { workspace_id, .. } => Some(workspace_id),
+        Request::SessionForkRouted { workspace_id, .. } => Some(workspace_id),
         Request::ProcessWorkspaceList { workspace_id }
         | Request::ProcessServiceStop { workspace_id, .. }
         | Request::SessionCreate { workspace_id, .. }
-        | Request::SessionCreateRouted { workspace_id, .. }
         | Request::SessionImportList { workspace_id, .. }
         | Request::SessionImport { workspace_id, .. }
         | Request::FileTree { workspace_id, .. }
@@ -1692,16 +1690,6 @@ mod tests {
             Some("target-workspace")
         );
         assert_eq!(
-            request_workspace(&Request::SessionCreateRouted {
-                workspace_id: "created-workspace".into(),
-                tags: vec!["Flash".into()],
-                media_tags: Vec::new(),
-                title: None,
-                cwd: None,
-            }),
-            Some("created-workspace")
-        );
-        assert_eq!(
             request_workspace(&Request::SessionForkRouted {
                 session_id: "source".into(),
                 turn_id: "turn".into(),
@@ -1709,14 +1697,6 @@ mod tests {
                 tags: vec!["Max".into()],
             }),
             Some("routed-workspace")
-        );
-        assert_eq!(
-            request_workspace(&Request::SessionForkImportRouted {
-                transfer,
-                workspace_id: "remote-workspace".into(),
-                tags: vec!["Flash".into()],
-            }),
-            Some("remote-workspace")
         );
     }
 }

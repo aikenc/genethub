@@ -367,8 +367,8 @@ pub(crate) async fn route_session(
         state.sessions.routing_requirements(session_id).await?;
     // `session.create` remains the concrete-route compatibility API used by
     // native/controlled Agents. Do not silently retarget such a Session on an
-    // ordinary turn. `session.createRouted`, a routed Fork, or an explicit
-    // `session.route` opts the conversation into this router; media then adds
+    // ordinary turn. A routed Fork or an explicit `session.route` opts the
+    // conversation into this router; media then adds
     // mandatory tags only inside that routed conversation.
     if selected_tags.is_none() && !routing_enabled {
         return state.sessions.summary(session_id).await;

@@ -171,8 +171,8 @@ protocolCase(
     try {
       for (let index = 0; index < 8; index += 1) {
         const invalid = expectProtocolClose(opened, {
-          type: index % 2 === 0 ? "workspace.open" : "workspace.create",
-          payload: index % 2 === 0 ? { root: { invalid: index } } : { root: [], name: index },
+          type: "workspace.open",
+          payload: index % 2 === 0 ? { root: { invalid: index } } : { root: index },
         });
         const observed = observer.call({ type: "workspace.list" });
         const [, listed] = await Promise.all([invalid, observed]);
