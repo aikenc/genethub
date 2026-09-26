@@ -118,18 +118,32 @@ describe("iceGathered", () => {
     await expect(waited).resolves.toBeUndefined();
   });
 
+  it("resolves when the first server-reflexive candidate arrives", async () => {
+    vi.useFakeTimers();
+    const peer = fakePeer();
+    const waited = iceGathered(peer as unknown as RTCPeerConnection, 2_000);
+    peer.fire("icecandidate", {
+      candidate: { candidate: "candidate:2 1 udp 1 203.0.113.7 9 typ srflx" },
+    });
+    await expect(waited).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
+
   it("waits out a hung STUN gather instead of sending a host-only offer", async () => {
     vi.useFakeTimers();
     const peer = fakePeer();
-    const waited = iceGathered(peer as unknown as RTCPeerConnection, 12_000);
-    await vi.advanceTimersByTimeAsync(3_000);
+    const waited = iceGathered(peer as unknown as RTCPeerConnection, 2_000);
+    peer.fire("icecandidate", {
+      candidate: { candidate: "candidate:1 1 udp 1 192.0.2.1 9 typ host" },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
     let settled = false;
     void waited.then(() => {
       settled = true;
     });
     await Promise.resolve();
     expect(settled).toBe(false);
-    await vi.advanceTimersByTimeAsync(9_000);
+    await vi.advanceTimersByTimeAsync(1_000);
     await expect(waited).resolves.toBeUndefined();
     vi.useRealTimers();
   });

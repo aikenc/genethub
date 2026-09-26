@@ -44,6 +44,7 @@ class TestConnection implements FabricEndpointConnection {
   readonly lateFrameBudgets = new Map<string, number>();
   readonly sent: FabricFrame[] = [];
   readonly closeCodes: number[] = [];
+  readonly closeReasons: string[] = [];
   flowFailure: Error | null = null;
   closed = false;
   strikes = 0;
@@ -77,8 +78,9 @@ class TestConnection implements FabricEndpointConnection {
     this.sent.push(cloneFrame(frame));
   }
 
-  close(code: number): void {
+  close(code: number, reason = ""): void {
     this.closeCodes.push(code);
+    this.closeReasons.push(reason);
   }
 }
 
@@ -770,6 +772,34 @@ describe("Fabric protocol violations stay scoped", () => {
       ["endpoint:source", "controlPayload"],
     ]);
     assert.equal(target.strikes, 2);
+  });
+
+  it("forgets strikes that fall outside the eviction window", async () => {
+    let now = 1_000;
+    const authority = new TestAuthority();
+    const core = new FabricCore(authority, {
+      now: () => now,
+      maxStrikes: 2,
+      strikeWindowMs: 1_000,
+    });
+    const source = new TestConnection("endpoint:source");
+    core.register(source);
+
+    const ping = (payload: Buffer) =>
+      core.handle(source, frame(FabricKind.Ping, id(0), 1n, payload));
+    await ping(Buffer.from("one"));
+    assert.equal(source.strikes, 1);
+    assert.equal(source.closed, false);
+
+    now += 1_001;
+    await ping(Buffer.from("two"));
+    assert.equal(source.strikes, 1);
+    assert.equal(source.closed, false);
+
+    await ping(Buffer.from("three"));
+    assert.equal(source.closed, true);
+    assert.deepEqual(source.closeCodes, [4400]);
+    assert.deepEqual(source.closeReasons, ["controlPayload"]);
   });
 
   it("does not let control frames bypass DATA payload limits", async () => {

@@ -331,6 +331,9 @@ export class Client {
   private dataRtcLink: RtcDataLink | null = null;
   private rtcRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private rtcRetryDelay = 1000;
+  private rtcFailures = 0;
+  private rtcPaused = false;
+  private reconnectCause: "resume-rejected" | "heartbeat-timeout" | "page-resume" | "session-lost" | null = null;
   private rtcLifecycleCleanup: (() => void) | null = null;
   private rtcGeneration = 0;
   private rtcNegotiating = false;
@@ -1001,7 +1004,10 @@ export class Client {
       if (this.endpoint !== endpoint || this.epoch !== epoch) return;
       // The daemon answered an ATTACH, so its carrier works; only the old
       // logical peer is gone.
-      if (reason instanceof Error && reason.message === "SessionLost") this.sessionLost = true;
+      if (reason instanceof Error && reason.message === "SessionLost") {
+        this.sessionLost = true;
+        this.reconnectCause = "session-lost";
+      }
       this.report(reason);
       this.droppedTransport(epoch, closeReasonFromUnknown(reason) ?? this.lastClose);
     });
@@ -1430,6 +1436,7 @@ export class Client {
 
   private droppedTransport(epoch: symbol, close?: CloseReason, abandonLogical = false): void {
     if (!this.isCurrentEpoch(epoch)) return;
+    if (abandonLogical) this.reconnectCause = "resume-rejected";
     // A physical base socket can close while the logical peer is served by RTC.
     // Keep its streams and subscriptions; refresh the missing base in the background.
     if (this.endpoint?.state === "open" && !this.endpoint.recovering && this.endpoint.activePath === "rtc") {
@@ -1633,6 +1640,7 @@ export class Client {
       }
     } catch (error) {
       if (this.epoch !== epoch || this.stopped) return;
+      if (error instanceof ClientRequestTimeoutError) this.reconnectCause = "heartbeat-timeout";
       this.report(error);
       // Fail only the probed physical path. The logical owner authenticates
       // and synchronizes its standby before attempting an external redial.
@@ -1680,7 +1688,16 @@ export class Client {
 
   private revive(): void {
     if (this.stopped) return;
+    this.reconnectCause = "page-resume";
     this.revivedAt = this.now();
+    if (this.rtcPaused) {
+      this.rtcPaused = false;
+      this.rtcFailures = 0;
+      this.rtcRetryDelay = 1000;
+      if (this.state === "ready" && this.endpoint && this.epoch && !this.rtcNegotiating) {
+        this.scheduleRtcRetry();
+      }
+    }
     if (this.state === "reconnecting") {
       this.attempt = 0;
       this.clearRetryTimer();
@@ -1829,6 +1846,8 @@ export class Client {
       }
       this.dataRtcLink = dataLink;
       previousData?.close();
+      this.rtcFailures = 0;
+      this.rtcPaused = false;
       this.rtcRetryDelay = 1000;
       this.setRtcState("connected");
       this.diagnostic("operation", {
@@ -1850,7 +1869,13 @@ export class Client {
         durationMs: Math.round(this.now() - started),
       };
       this.setRtcState(base.activePath === "rtc" ? "connected" : "failed");
-      this.scheduleRtcRetry();
+      this.rtcFailures += 1;
+      if (this.rtcFailures >= 3) {
+        this.rtcPaused = true;
+        this.diagnostic("rtc", { phase: "paused", outcome: "failed" });
+      } else {
+        this.scheduleRtcRetry();
+      }
       this.diagnostic("operation", {
         operation: "rtc.negotiate",
         requestId,
@@ -1866,7 +1891,7 @@ export class Client {
   }
 
   private scheduleRtcRetry(): void {
-    if (this.rtcRetryTimer !== null || !this.rtcEnabled || this.stopped) return;
+    if (this.rtcPaused || this.rtcRetryTimer !== null || !this.rtcEnabled || this.stopped) return;
     const delay = this.rtcRetryDelay;
     this.rtcRetryDelay = Math.min(30_000, delay * 2);
     this.rtcRetryTimer = setTimeout(() => {
@@ -2003,7 +2028,7 @@ export class Client {
     this.diagnostic("connection", {
       state,
       closeCode: this.lastClose?.code ?? null,
-      closeReason: this.lastClose?.reason ?? null,
+      closeReason: this.reconnectCause,
     });
     for (const listener of this.stateListeners) this.callListener(() => listener(state));
   }

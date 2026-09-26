@@ -35,7 +35,7 @@ export interface FabricEndpointConnection {
   send(frame: FabricFrame): void;
   /** Resolves when one DATA frame has drained into this endpoint's TCP leg. */
   sendFlow(frame: FabricFrame): Promise<void>;
-  close(code: number): void;
+  close(code: number, reason?: string): void;
 }
 
 export interface FabricStreamLeg {
@@ -88,6 +88,8 @@ export interface FabricCoreOptions {
   maxPendingGlobal?: number;
   maxStreamsPerEndpoint?: number;
   maxStreamsGlobal?: number;
+  /** Strikes older than this no longer count toward eviction. */
+  strikeWindowMs?: number;
   onStrike?: (
     connection: FabricEndpointConnection,
     reason: FabricStrikeReason,
@@ -107,6 +109,24 @@ interface RevocationFence {
  * peer may use the same local id as somebody else; the relay rewrites it on
  * every forwarded frame.
  */
+function dominantStrikeReason(
+  recent: ReadonlyArray<{ reason: FabricStrikeReason }>,
+): FabricStrikeReason {
+  const counts = new Map<FabricStrikeReason, number>();
+  for (const entry of recent) {
+    counts.set(entry.reason, (counts.get(entry.reason) ?? 0) + 1);
+  }
+  let best = recent[recent.length - 1]?.reason ?? "lateFrameOverflow";
+  let bestCount = -1;
+  for (const [reason, count] of counts) {
+    if (count > bestCount) {
+      best = reason;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 export class FabricCore {
   private readonly endpoints = new Map<string, FabricEndpointConnection>();
   /**
@@ -132,6 +152,11 @@ export class FabricCore {
   private readonly now: () => number;
   private readonly nextStreamId: () => string;
   private readonly maxStrikes: number;
+  private readonly strikeWindowMs: number;
+  private readonly recentStrikes = new WeakMap<
+    FabricEndpointConnection,
+    Array<{ at: number; reason: FabricStrikeReason }>
+  >();
   private readonly tombstoneMs: number;
   private readonly maxTombstones: number;
   private readonly maxLateFramesPerClosedStream: number;
@@ -152,6 +177,7 @@ export class FabricCore {
     this.now = options.now ?? Date.now;
     this.nextStreamId = options.streamId ?? newFabricStreamId;
     this.maxStrikes = options.maxStrikes ?? 8;
+    this.strikeWindowMs = options.strikeWindowMs ?? 60_000;
     this.onStrike = options.onStrike;
     this.tombstoneMs = options.tombstoneMs ?? 60_000;
     this.maxTombstones = options.maxTombstonesPerEndpoint ?? 512;
@@ -755,11 +781,17 @@ export class FabricCore {
     connection: FabricEndpointConnection,
     reason: FabricStrikeReason,
   ): void {
-    connection.strikes += 1;
+    const now = this.now();
+    const recent = (this.recentStrikes.get(connection) ?? []).filter(
+      (entry) => now - entry.at < this.strikeWindowMs,
+    );
+    recent.push({ at: now, reason });
+    this.recentStrikes.set(connection, recent);
+    connection.strikes = recent.length;
     this.onStrike?.(connection, reason);
-    if (connection.strikes < this.maxStrikes) return;
+    if (recent.length < this.maxStrikes) return;
     this.unregister(connection, FabricReset.ProtocolViolation);
-    connection.close(4400);
+    connection.close(4400, dominantStrikeReason(recent));
   }
 
   private cancelPending(connection: FabricEndpointConnection, streamId: string): void {

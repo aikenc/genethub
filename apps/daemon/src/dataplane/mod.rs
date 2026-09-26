@@ -13,3 +13,4 @@ pub mod service_preview;
 mod logical_connection;
 pub(crate) mod logical_registry;
 mod logical_wire;
+pub(crate) mod uplink_pace;

@@ -41,6 +41,8 @@ pub struct AppState {
     pub processes: Arc<crate::processes::Processes>,
     /// Bounded categorical facts safe for explicit feedback attachment.
     pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    /// How much bulk preview data may sit on the shared relay uplink.
+    pub uplink_pace: Arc<crate::dataplane::uplink_pace::UplinkPace>,
     pub version: String,
     /// Owner-only token used to mint loopback control proofs.
     pub token: String,
@@ -184,6 +186,9 @@ impl AppState {
             terminals,
             processes,
             diagnostics,
+            uplink_pace: Arc::new(crate::dataplane::uplink_pace::UplinkPace::new(
+                genehub_proto::INITIAL_STREAM_WINDOW_BYTES as u64,
+            )),
             client_debug: crate::client_debug::Broker::default(),
             version: crate::version::product_version(),
             token: uuid::Uuid::new_v4().simple().to_string(),

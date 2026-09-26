@@ -1061,3 +1061,106 @@ defineSpecialty(
     t.assertions.assert(worst <= 1_500, `client B's workspace.list waited ${worst.toFixed(0)}ms behind client A's Preview on the shared uplink`);
   },
 );
+
+defineSpecialty(
+  {
+    ...neteffMeta({
+      id: "specialty.neteff.relay-uplink-window-vs-bandwidth",
+      title: "Interactive latency behind one bulk preview stays under a second on a slow shared uplink",
+      oracle:
+        "while a 24 MiB Preview crosses a shared daemon uplink, another client's workspace.list stays within 1200ms at 5Mbps and within 800ms at 100Mbps",
+      catches: [
+        "a fixed multi-megabyte stream window queues other clients for seconds on a slow shared uplink",
+      ],
+      relay: true,
+    }),
+    timeoutMs: 180_000,
+    expectedDurationMs: 90_000,
+  },
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    const file = seedImage(t, "neteff-window-24m.png", 24 * MIB);
+    const relay = await startRelay({ openRoot: t.openRoot });
+    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    const rows: string[] = [];
+    const worst = new Map<number, number>();
+    try {
+      for (const bandwidthMbps of [5, 100]) {
+        const daemonLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 40, bandwidthMbps } });
+        const clientLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 20, bandwidthMbps: LINK_BANDWIDTH_MBPS } });
+        const busy: number[] = [];
+        let probedUnderLoad = false;
+        let bulk = "";
+        try {
+          const attached = await opened.client.call({
+            type: "device.remoteAttach",
+            payload: { relayUrl: daemonLink.urlFor(relay.origin), joinToken: relay.joinToken },
+          });
+          if (attached?.type !== "remoteAccess" || typeof attached.data.rendezvousUrl !== "string") {
+            throw new Error(`device.remoteAttach returned ${attached?.type}`);
+          }
+          const routed = clientLink.urlFor(attached.data.rendezvousUrl);
+          await t.tools.waitUntil(async () => {
+            const devices = await opened.client.call({ type: "device.list" });
+            return devices?.type === "devices" && devices.data.remote.online === true;
+          }, 20_000);
+          const bulkCredential = await pairRelayedDevice(opened, routed, `neteff-window-bulk-${bandwidthMbps}`);
+          const interactiveCredential = await pairRelayedDevice(opened, routed, `neteff-window-b-${bandwidthMbps}`);
+          const probe = new PreviewProbe();
+          const bulkClient = await connectProductClient({
+            url: routed, credential: bulkCredential, name: `neteff-window-bulk-${bandwidthMbps}`, onDiagnostic: probe.onDiagnostic,
+            redial: async () => ({ url: routed, credential: bulkCredential }),
+          });
+          const interactive = await connectProductClient({
+            url: routed, credential: interactiveCredential, name: `neteff-window-b-${bandwidthMbps}`,
+            redial: async () => ({ url: routed, credential: interactiveCredential }),
+          });
+          try {
+            let previewFinished = false;
+            const preview = measurePreview(t, { client: bulkClient, opened, file, probe })
+              .then(result => { previewFinished = true; return result; });
+            void preview.catch(() => {});
+            await t.tools.waitUntil(() => daemonLink.stats().clientToTargetBytes >= 2 * MIB, 30_000);
+            for (let i = 0; i < 3; i++) {
+              const began = performance.now();
+              const reply = await interactive.call({ type: "workspace.list" });
+              t.assertions.assert(reply?.type === "workspaces", `workspace.list returned ${reply?.type}`);
+              busy.push(performance.now() - began);
+            }
+            probedUnderLoad = !previewFinished;
+            const sample = await preview;
+            bulk = `${(sample.elapsedMs / 1000).toFixed(1)}s ${sample.mibPerSec.toFixed(2)}MiB/s`;
+          } finally {
+            interactive.close();
+            bulkClient.close();
+          }
+        } finally {
+          await opened.client.call({ type: "device.remoteDetach" }).catch(() => undefined);
+          await clientLink.stop();
+          await daemonLink.stop();
+        }
+        const max = Math.max(...busy);
+        worst.set(bandwidthMbps, max);
+        rows.push(
+          `${bandwidthMbps}Mbps underLoad=${probedUnderLoad} B=${busy.map(ms => ms.toFixed(0)).join(",")}ms max=${max.toFixed(0)}ms A=${bulk}`,
+        );
+      }
+    } catch (error) {
+      const tail = relay.logTail().trim();
+      if (error instanceof Error && tail.length > 0) {
+        error.message = `${error.message}\n\nrelay log tail:\n${tail.slice(-3072)}`;
+      }
+      throw error;
+    } finally {
+      opened.client.close();
+      opened.daemon.stop();
+      await opened.mock.stop();
+      relay.stop();
+    }
+    const slow = worst.get(5) ?? 0;
+    const fast = worst.get(100) ?? 0;
+    t.note(`24MiB Preview on the shared daemon uplink, client B workspace.list while bytes are in flight\n${rows.join("\n")}`);
+    t.assertions.assert(slow <= 1_200, `at 5Mbps client B waited ${slow.toFixed(0)}ms behind the preview`);
+    t.assertions.assert(fast <= 800, `at 100Mbps client B waited ${fast.toFixed(0)}ms behind the preview`);
+  },
+);

@@ -239,6 +239,7 @@ impl FabricUplink {
             let mut backoff = UplinkBackoff::default();
             loop {
                 let mut connected_at = None;
+                let mut close_reason = None;
                 let result = async {
                     let admission = client.fabric_admission(&enrollment).await?;
                     run_once(
@@ -248,6 +249,7 @@ impl FabricUplink {
                         &task_online,
                         "managed.uplink",
                         &mut connected_at,
+                        &mut close_reason,
                     )
                     .await
                 }
@@ -257,11 +259,11 @@ impl FabricUplink {
                     "fabric",
                     "managed.uplink",
                     "offline",
-                    Some(if result.is_err() {
+                    Some(close_reason.unwrap_or(if result.is_err() {
                         "connection"
                     } else {
                         "closed"
-                    }),
+                    })),
                 );
                 if let Err(error) = result {
                     tracing::warn!(%error, "Fabric uplink disconnected");
@@ -282,6 +284,7 @@ impl FabricUplink {
             let mut backoff = UplinkBackoff::default();
             loop {
                 let mut connected_at = None;
+                let mut close_reason = None;
                 let result = run_once(
                     state.clone(),
                     &url,
@@ -289,6 +292,7 @@ impl FabricUplink {
                     &task_online,
                     "rendezvous.uplink",
                     &mut connected_at,
+                    &mut close_reason,
                 )
                 .await;
                 task_online.store(false, Ordering::Relaxed);
@@ -296,11 +300,11 @@ impl FabricUplink {
                     "fabric",
                     "rendezvous.uplink",
                     "offline",
-                    Some(if result.is_err() {
+                    Some(close_reason.unwrap_or(if result.is_err() {
                         "connection"
                     } else {
                         "closed"
-                    }),
+                    })),
                 );
                 if let Err(error) = result {
                     tracing::warn!(%error, "rendezvous Fabric uplink disconnected");
@@ -329,6 +333,7 @@ async fn run_once(
     online: &AtomicBool,
     diagnostic_operation: &'static str,
     connected_at: &mut Option<Instant>,
+    close_reason: &mut Option<&'static str>,
 ) -> Result<()> {
     let endpoint_url = transport_flow_url(url)?;
     validate_fabric_url(&endpoint_url)?;
@@ -382,7 +387,10 @@ async fn run_once(
                         .await
                         .map_err(|_| anyhow!("Fabric writer stopped"))?;
                 }
-                Message::Close(_) => break,
+                Message::Close(frame) => {
+                    *close_reason = Some(uplink_close_code(frame.as_ref()));
+                    break;
+                }
                 Message::Text(_) => anyhow::bail!("Fabric sent a text WebSocket message"),
                 _ => {}
             }
@@ -1213,6 +1221,44 @@ where
     }
 }
 
+/// Close codes the feedback snapshot is allowed to carry. Anything else,
+/// including a free-form close reason, collapses to a fixed label.
+fn uplink_close_code(
+    frame: Option<&tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+) -> &'static str {
+    let Some(frame) = frame else {
+        return "dropped";
+    };
+    let code = u16::from(frame.code);
+    if code == 4400 {
+        return match frame.reason.as_ref() {
+            "lateFrameOverflow" => "lateFrameOverflow",
+            "unknownStream" => "unknownStream",
+            "openRace" => "openRace",
+            "duplicateStream" => "duplicateStream",
+            "malformedOpen" => "malformedOpen",
+            "openLimit" => "openLimit",
+            "routeConflict" => "routeConflict",
+            "accept" => "accept",
+            "data" => "data",
+            "windowUpdate" => "windowUpdate",
+            "fin" => "fin",
+            "reset" => "reset",
+            "controlPayload" => "controlPayload",
+            _ => "relay-strike",
+        };
+    }
+    match code {
+        1000 => "normal",
+        1001 => "relay-shutdown",
+        1006 => "dropped",
+        1012 => "presence-lost",
+        4403 => "revoked",
+        4408 => "expired",
+        _ => "closed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,6 +1314,24 @@ mod tests {
             transport_flow_url("wss://relay.example/fabric/v2?ticket=one-use").unwrap(),
             "wss://relay.example/fabric/v2?ticket=one-use&flow=transport-v1"
         );
+    }
+
+    #[test]
+    fn uplink_close_code_names_a_relay_strike_and_stays_low_cardinality() {
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+
+        let strike = CloseFrame {
+            code: CloseCode::from(4400),
+            reason: "lateFrameOverflow".into(),
+        };
+        assert_eq!(uplink_close_code(Some(&strike)), "lateFrameOverflow");
+        let unnamed = CloseFrame {
+            code: CloseCode::from(4400),
+            reason: "freeform".into(),
+        };
+        assert_eq!(uplink_close_code(Some(&unnamed)), "relay-strike");
+        assert_eq!(uplink_close_code(None), "dropped");
     }
 
     #[test]
