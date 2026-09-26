@@ -35,6 +35,10 @@ pub struct ModelConfig {
     pub input_modalities: Vec<String>,
 }
 
+fn derived_max_tokens(window: u64) -> u64 {
+    (window / 8).min(65_536)
+}
+
 impl ModelConfig {
     pub fn api(&self) -> &str {
         self.api.as_deref().unwrap_or(&self.provider)
@@ -55,7 +59,9 @@ impl ModelConfig {
             name: self.name.clone(),
             reasoning: self.reasoning,
             context_window: self.context_window,
-            max_tokens: self.max_tokens,
+            max_tokens: self
+                .max_tokens
+                .or_else(|| self.context_window.map(derived_max_tokens)),
             api: Some(self.api().to_string()),
             base_url: self.base_url.clone(),
         }
@@ -222,6 +228,26 @@ mod tests {
         };
         assert_eq!(model.api(), "anthropic");
         assert_eq!(model.to_ref().reference(), "anthropic/claude");
+    }
+
+    #[test]
+    fn an_unset_output_budget_follows_the_context_window() {
+        let model = ModelConfig {
+            provider: "openai".into(),
+            id: "configured".into(),
+            name: None,
+            api: None,
+            base_url: None,
+            api_key: None,
+            api_key_env: None,
+            context_window: Some(262_144),
+            max_tokens: None,
+            reasoning: None,
+            input_modalities: Vec::new(),
+        };
+        let resolved = model.to_ref();
+        assert_eq!(resolved.context_window, Some(262_144));
+        assert_eq!(resolved.max_tokens, Some(32_768));
     }
 
     #[test]

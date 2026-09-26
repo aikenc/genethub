@@ -174,6 +174,9 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
     /// Explicit per-model media support; entries override provider discovery.
     pub model_inputs: std::collections::BTreeMap<String, Vec<String>>,
+    /// Per-model context window in tokens. Only 256k, 512k, 1M and 2M are
+    /// honored; anything else, including absence, is 512k.
+    pub model_context_windows: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

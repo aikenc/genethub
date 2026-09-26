@@ -1075,6 +1075,22 @@ fn parse_matches(text: &str) -> Vec<genehub_proto::SearchMatch> {
         .collect()
 }
 
+const CONTEXT_WINDOWS: [u64; 4] = [262_144, 524_288, 1_048_576, 2_097_152];
+const DEFAULT_CONTEXT_WINDOW: u64 = 524_288;
+
+fn context_window_for(config: &ProviderConfig, model_id: &str) -> u64 {
+    config
+        .model_context_windows
+        .get(model_id)
+        .copied()
+        .filter(|window| CONTEXT_WINDOWS.contains(window))
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+}
+
+fn derived_max_tokens(window: u64) -> u64 {
+    (window / 8).min(65_536)
+}
+
 struct ConfiguredModel {
     provider: String,
     id: String,
@@ -1108,6 +1124,7 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
         };
         let label = config.label.clone().unwrap_or_else(|| provider.clone());
         for id in &config.models {
+            let window = context_window_for(config, id);
             models.push(ConfiguredModel {
                 provider: provider.clone(),
                 id: id.clone(),
@@ -1122,9 +1139,8 @@ fn configured_models(providers: &ProviderMap) -> Vec<ConfiguredModel> {
                     .unwrap_or_else(|| "openai".to_string()),
                 base_url: Some(base_url.clone()),
                 api_key: config.api_key.clone(),
-                // Not in any provider's list response, so not claimed.
-                context_window: None,
-                max_tokens: None,
+                context_window: Some(window),
+                max_tokens: Some(derived_max_tokens(window)),
                 reasoning: crate::provider::reasons(id),
                 input_modalities: config.model_inputs.get(id).cloned().unwrap_or_default(),
             });
@@ -1708,5 +1724,24 @@ mod tests {
                 .unwrap();
         assert_eq!(written["models"][0]["baseUrl"], "http://127.0.0.1:9/v1");
         assert_eq!(written["models"][0]["apiKey"], "sk-test");
+        assert_eq!(written["models"][0]["contextWindow"], 524_288);
+        assert_eq!(written["models"][0]["maxTokens"], 65_536);
+    }
+
+    #[test]
+    fn a_context_window_is_one_of_the_four_sizes_or_512k() {
+        let mut config = ProviderConfig {
+            api_key: Some("sk-test".into()),
+            base_url: Some("https://example.test/v1".into()),
+            models: vec!["small".into(), "odd".into()],
+            ..Default::default()
+        };
+        config.model_context_windows.insert("small".into(), 262_144);
+        config.model_context_windows.insert("odd".into(), 123);
+        let models = configured_models(&provider_map(vec![("example", config)]));
+        assert_eq!(models[0].context_window, Some(262_144));
+        assert_eq!(models[0].max_tokens, Some(32_768));
+        assert_eq!(models[1].context_window, Some(524_288));
+        assert_eq!(models[1].max_tokens, Some(65_536));
     }
 }
