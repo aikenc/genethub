@@ -561,12 +561,9 @@ fn pick_port() -> Result<u16> {
 
 /// Opens the OpenCode session this GeneHub session should talk to.
 ///
-/// When a previous run left a `PersistHandle`, that id is asked for first —
-/// OpenCode keeps sessions on disk across `serve` restarts, which is the whole
-/// of what `capabilities.resume` promised. A missing id falls through to a
-/// fresh session rather than failing the start: the daemon still has the
-/// timeline, and a blank OpenCode context is better than a session that cannot
-/// send at all.
+/// A stored id that OpenCode no longer has is an error. The kernel then
+/// starts a fresh thread and tells the user the earlier context is gone.
+/// Creating a blank session here would look like a successful resume.
 async fn open_session(
     http: &crate::http::Client,
     base: &str,
@@ -580,20 +577,20 @@ async fn open_session(
             .send()
             .await
             .with_context(|| format!("looking up OpenCode session {session_id}"))?;
-        if response.status().is_success() {
-            let body: Value = response
-                .json()
-                .await
-                .with_context(|| format!("reading OpenCode session {session_id}"))?;
-            if let Some(found) = body.get("id").and_then(Value::as_str) {
-                return Ok(found.to_string());
-            }
-            return Ok(session_id);
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "OpenCode session {session_id} was not found ({})",
+                response.status()
+            );
         }
-        tracing::warn!(
-            "OpenCode session {session_id} was not found ({}); starting a new one",
-            response.status()
-        );
+        let body: Value = response
+            .json()
+            .await
+            .with_context(|| format!("reading OpenCode session {session_id}"))?;
+        if let Some(found) = body.get("id").and_then(Value::as_str) {
+            return Ok(found.to_string());
+        }
+        return Ok(session_id);
     }
 
     let created: Value = http
@@ -1471,8 +1468,7 @@ mod tests {
     }
 
     /// `capabilities.resume` is only honest if a stored id is actually what we
-    /// ask OpenCode for. The rest of `open_session` needs a live server; this
-    /// is the part that decides whether that path is taken at all.
+    /// ask OpenCode for.
     #[test]
     fn a_resume_handle_only_counts_when_it_is_ours_and_names_a_session() {
         assert_eq!(resume_session_id(&None), None);
@@ -1517,5 +1513,37 @@ mod tests {
         assert_eq!(images[0].path.as_deref(), Some("docs/diagram.png"));
         assert_eq!(images[0].data_base64.as_deref(), Some("aGk="));
         assert!(images_from_part("shell", &json!({"state": {"status": "completed"}})).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_missing_opencode_session_fails_instead_of_opening_a_blank_one() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await;
+        });
+        let http = crate::http::Client::builder().build().unwrap();
+        let error = open_session(
+            &http,
+            &format!("http://127.0.0.1:{port}"),
+            std::path::Path::new("."),
+            &Some(PersistHandle {
+                agent_id: "opencode".into(),
+                value: json!({ "sessionId": "gone" }),
+            }),
+        )
+        .await
+        .expect_err("a missing thread must not look like a successful resume");
+        assert!(
+            error.to_string().contains("gone"),
+            "the missing id has to stay in the error, got {error}"
+        );
     }
 }
