@@ -137,6 +137,7 @@ struct MetaHeader {
 #[serde(rename_all = "camelCase")]
 pub struct HumanContinuation {
     pub request: PermissionRequest,
+    #[serde(deserialize_with = "outcome_without_timer")]
     pub outcome: genehub_proto::PermissionOutcome,
     pub decided_at_ms: i64,
     #[serde(default)]
@@ -145,6 +146,21 @@ pub struct HumanContinuation {
     pub grant_recorded: bool,
     #[serde(default)]
     pub completed: bool,
+}
+
+fn outcome_without_timer<'de, D>(
+    deserializer: D,
+) -> Result<genehub_proto::PermissionOutcome, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let outcome = genehub_proto::PermissionOutcome::deserialize(deserializer)?;
+    Ok(match outcome {
+        genehub_proto::PermissionOutcome::TimedOut { .. } => {
+            genehub_proto::PermissionOutcome::Canceled
+        }
+        other => other,
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

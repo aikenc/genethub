@@ -407,8 +407,6 @@ pub struct BootstrapApprovalChallenge {
     pub challenge_id: String,
     pub title: String,
     pub detail: String,
-    #[ts(type = "number")]
-    pub expires_at_ms: i64,
 }
 
 /// Immutable, Human-reviewable plan for one Component/Parent/lifecycle CAS.

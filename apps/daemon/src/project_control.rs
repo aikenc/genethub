@@ -22,15 +22,8 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use crate::session::store::now_ms;
 
-const CHALLENGE_TTL_MS: i64 = 10 * 60 * 1_000;
 const APPROVE: &str = "approve-once";
 const REJECT: &str = "reject";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HumanResponseValidation {
-    Accepted,
-    ApprovalExpired,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeSpec {
@@ -54,7 +47,6 @@ struct Challenge {
     management_binding: Option<String>,
     spec: ChallengeSpec,
     id: String,
-    expires_at_ms: i64,
     request_id: Option<String>,
     approved: bool,
     rejected: bool,
@@ -171,13 +163,11 @@ impl Broker {
     }
 
     pub async fn issue(&self, spec: ChallengeSpec) -> Result<BootstrapApprovalChallenge> {
-        let now = now_ms();
         let id = format!("pm-bootstrap-{}", uuid::Uuid::new_v4().simple());
         let challenge = Challenge {
             management_binding: None,
             spec: spec.clone(),
             id: id.clone(),
-            expires_at_ms: now.saturating_add(CHALLENGE_TTL_MS),
             request_id: None,
             approved: false,
             rejected: false,
@@ -208,7 +198,6 @@ impl Broker {
             challenge_id: id,
             title: spec.title,
             detail: spec.detail,
-            expires_at_ms: now.saturating_add(CHALLENGE_TTL_MS),
         })
     }
 
@@ -230,12 +219,10 @@ impl Broker {
         };
         let mut guard = self.state.lock().await;
         let mut state = guard.clone();
-        let now = now_ms();
         let Some(challenge) = state.challenges.get_mut(challenge_id) else {
             return Ok(request.clone());
         };
-        if challenge.expires_at_ms < now
-            || challenge.spec.controller_session_id != session_id
+        if challenge.spec.controller_session_id != session_id
             || challenge.rejected
             || challenge.approved
         {
@@ -278,17 +265,13 @@ impl Broker {
         &self,
         session_id: &str,
         challenge_id: &str,
-    ) -> Result<(PermissionRequest, i64)> {
+    ) -> Result<PermissionRequest> {
         let mut guard = self.state.lock().await;
         let mut state = guard.clone();
-        let now = now_ms();
         let challenge = state
             .challenges
             .get_mut(challenge_id)
             .ok_or_else(|| anyhow!("approvalStale: this plan challenge no longer exists"))?;
-        if challenge.expires_at_ms < now {
-            bail!("approvalStale: this plan challenge expired; create a new plan");
-        }
         if challenge.spec.controller_session_id != session_id {
             bail!("approvalStale: this plan challenge belongs to another Session");
         }
@@ -296,14 +279,11 @@ impl Broker {
             bail!("approvalStale: this plan challenge was already resolved");
         }
         if let Some(id) = &challenge.request_id {
-            return Ok((
-                plan_permission_request(
-                    id.clone(),
-                    challenge.spec.title.clone(),
-                    challenge.spec.detail.clone(),
-                    None,
-                ),
-                challenge.expires_at_ms,
+            return Ok(plan_permission_request(
+                id.clone(),
+                challenge.spec.title.clone(),
+                challenge.spec.detail.clone(),
+                None,
             ));
         }
 
@@ -312,15 +292,11 @@ impl Broker {
         let challenge_key = challenge.id.clone();
         let title = challenge.spec.title.clone();
         let detail = challenge.spec.detail.clone();
-        let expires_at_ms = challenge.expires_at_ms;
         state
             .request_to_challenge
             .insert((session_id.to_string(), request_id.clone()), challenge_key);
         self.save(&mut guard, state)?;
-        Ok((
-            plan_permission_request(request_id, title, detail, None),
-            expires_at_ms,
-        ))
+        Ok(plan_permission_request(request_id, title, detail, None))
     }
 
     pub async fn is_plan_request(&self, session_id: &str, request_id: &str) -> bool {
@@ -332,8 +308,8 @@ impl Broker {
     }
 
     /// Releases a presentation that never reached a Human answer (for
-    /// example, Session persistence failed or the challenge expired). It does
-    /// not undo an approval or rejection.
+    /// example, Session persistence failed). It does not undo an approval or
+    /// rejection.
     pub async fn abandon_request(&self, session_id: &str, request_id: &str) -> Result<()> {
         let mut guard = self.state.lock().await;
         let mut state = guard.clone();
@@ -358,7 +334,7 @@ impl Broker {
         request_id: &str,
         outcome: &PermissionOutcome,
     ) -> Result<()> {
-        self.record_human_response_at(session_id, request_id, outcome, now_ms())
+        self.record_human_response_at(session_id, request_id, outcome)
             .await
     }
 
@@ -367,22 +343,14 @@ impl Broker {
         session_id: &str,
         request_id: &str,
         outcome: &PermissionOutcome,
-    ) -> Result<HumanResponseValidation> {
+    ) -> Result<()> {
         let state = self.state.lock().await;
         let challenge = state
             .request_to_challenge
             .get(&(session_id.into(), request_id.into()))
             .and_then(|id| state.challenges.get(id))
             .ok_or_else(|| anyhow!("approvalStale: this plan challenge is no longer active"))?;
-        let decided_at_ms = now_ms();
-        if !challenge.approved
-            && !challenge.rejected
-            && approval_decision_expired(challenge, outcome, decided_at_ms)
-        {
-            return Ok(HumanResponseValidation::ApprovalExpired);
-        }
-        validate_decision(challenge, outcome, decided_at_ms)?;
-        Ok(HumanResponseValidation::Accepted)
+        validate_decision(challenge, outcome)
     }
 
     pub async fn record_human_response_at(
@@ -390,7 +358,6 @@ impl Broker {
         session_id: &str,
         request_id: &str,
         outcome: &PermissionOutcome,
-        decided_at_ms: i64,
     ) -> Result<()> {
         let mut guard = self.state.lock().await;
         let mut state = guard.clone();
@@ -404,7 +371,7 @@ impl Broker {
             .challenges
             .get_mut(&challenge_id)
             .ok_or_else(|| anyhow!("approvalStale: this plan challenge no longer exists"))?;
-        validate_decision(challenge, outcome, decided_at_ms)?;
+        validate_decision(challenge, outcome)?;
         match outcome {
             PermissionOutcome::Selected { option_id } if option_id == APPROVE => {
                 challenge.approved = true;
@@ -465,8 +432,7 @@ impl Broker {
             .ok_or_else(|| {
                 anyhow!("approvalRequired: ask the user to approve the current daemon-issued plan")
             })?;
-        if challenge.expires_at_ms < now_ms()
-            || challenge.spec.expected_revision != expected_revision
+        if challenge.spec.expected_revision != expected_revision
             || challenge.spec.git_head.as_deref() != git_head
             || challenge.spec.status_digest != status_digest
         {
@@ -777,11 +743,7 @@ impl Broker {
     }
 }
 
-fn validate_decision(
-    challenge: &Challenge,
-    outcome: &PermissionOutcome,
-    decided_at_ms: i64,
-) -> Result<()> {
+fn validate_decision(challenge: &Challenge, outcome: &PermissionOutcome) -> Result<()> {
     let approved = match outcome {
         PermissionOutcome::Selected { option_id } if option_id == APPROVE => true,
         PermissionOutcome::Selected { option_id } if option_id == REJECT => false,
@@ -794,20 +756,7 @@ fn validate_decision(
         }
         bail!("approvalStale: this plan already has a different Human decision");
     }
-    if approval_decision_expired(challenge, outcome, decided_at_ms) {
-        bail!("approvalStale: this plan challenge expired; create a new plan");
-    }
     Ok(())
-}
-
-fn approval_decision_expired(
-    challenge: &Challenge,
-    outcome: &PermissionOutcome,
-    decided_at_ms: i64,
-) -> bool {
-    matches!(outcome, PermissionOutcome::Selected { option_id } if option_id == APPROVE)
-        && (decided_at_ms > challenge.expires_at_ms
-            || decided_at_ms < challenge.expires_at_ms - CHALLENGE_TTL_MS)
 }
 
 fn plan_permission_request(
@@ -965,12 +914,11 @@ mod tests {
             .request_permission("s_other", &issued.challenge_id)
             .await
             .is_err());
-        let (request, expires_at_ms) = broker
+        let request = broker
             .request_permission("s_pm", &issued.challenge_id)
             .await
             .unwrap();
 
-        assert_eq!(expires_at_ms, issued.expires_at_ms);
         assert_eq!(request.kind, PermissionRequestKind::PlanApproval);
         assert_eq!(request.title, "接管项目？");
         assert_eq!(request.options.len(), 2);
@@ -998,7 +946,6 @@ mod tests {
                 .request_permission("s_pm", &issued.challenge_id)
                 .await
                 .unwrap()
-                .0
                 .id,
             request.id
         );
@@ -1267,53 +1214,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_expired_challenge_is_retired_without_becoming_approved() {
+    async fn a_retired_expiry_on_disk_does_not_block_approval() {
         let root = tempfile::tempdir().unwrap();
         let broker = Broker::new(root.path()).unwrap();
         let issued = broker.issue(spec()).await.unwrap();
-        let normalized = broker
+        broker
             .normalize_request("s_pm", &question(&issued.challenge_id))
             .await
             .unwrap();
-        assert_eq!(normalized.kind, PermissionRequestKind::PlanApproval);
-        broker
-            .state
-            .lock()
-            .await
-            .challenges
-            .get_mut(&issued.challenge_id)
-            .unwrap()
-            .expires_at_ms = now_ms() - 1;
+        let path = root.path().join("project-control").join("approvals.json");
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved["challenges"][&issued.challenge_id]["expires_at_ms"] = serde_json::json!(1);
+        std::fs::write(&path, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
 
-        assert_eq!(
-            broker
-                .validate_human_response(
-                    "s_pm",
-                    "ask_1",
-                    &PermissionOutcome::Selected {
-                        option_id: APPROVE.into(),
-                    },
-                )
-                .await
-                .unwrap(),
-            HumanResponseValidation::ApprovalExpired
-        );
-        assert!(broker
+        let broker = Broker::new(root.path()).unwrap();
+        broker
             .record_human_response(
                 "s_pm",
                 "ask_1",
                 &PermissionOutcome::Selected {
                     option_id: APPROVE.into(),
-                },
-            )
-            .await
-            .is_err());
-        broker
-            .record_human_response(
-                "s_pm",
-                "ask_1",
-                &PermissionOutcome::TimedOut {
-                    applied_default: "refreshPlan".into(),
                 },
             )
             .await
@@ -1330,12 +1251,12 @@ mod tests {
                 0,
                 None,
                 "sha256:clean",
-                "expired_action",
+                "still_valid",
                 false,
                 false,
             )
             .await
-            .is_err());
+            .is_ok());
     }
 
     #[tokio::test]

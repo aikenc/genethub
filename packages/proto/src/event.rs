@@ -225,9 +225,9 @@ pub enum PermissionOutcome {
     Answered {
         answers: Vec<InteractionAnswer>,
     },
-    /// Legacy wire outcome retained so older peers can still decode it. The
-    /// daemon no longer creates approval timers: stopped interactions persist
-    /// until a user responds.
+    /// Older peers and session logs may still carry this outcome. A saved
+    /// Human decision translates it to `Canceled` on read; the daemon does
+    /// not create approval timers.
     #[serde(rename_all = "camelCase")]
     TimedOut {
         applied_default: String,
