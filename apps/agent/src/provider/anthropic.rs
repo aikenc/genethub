@@ -60,6 +60,8 @@ pub async fn stream(
 
     let mut usage = Usage::default();
     let mut stop_reason = StopReason::Stop;
+    let mut finished = false;
+    let mut terminal_error: Option<String> = None;
     let mut buffer = SseBuffer::new();
     let mut block = Block::None;
     let mut tool_id = String::new();
@@ -70,8 +72,15 @@ pub async fn stream(
     while let Some(chunk) = body_stream.next().await {
         let chunk = chunk?;
         for payload in buffer.push(&String::from_utf8_lossy(&chunk)) {
-            let Ok(event) = serde_json::from_str::<Value>(&payload) else {
-                continue;
+            let event = match serde_json::from_str::<Value>(&payload) {
+                Ok(event) => event,
+                Err(error) => {
+                    let sample: String = payload.chars().take(200).collect();
+                    terminal_error = Some(format!(
+                        "could not parse a stream event: {error}; payload: {sample}"
+                    ));
+                    break;
+                }
             };
             match event["type"].as_str().unwrap_or_default() {
                 "message_start" => {
@@ -142,7 +151,16 @@ pub async fn stream(
                 "message_delta" => {
                     apply_usage(&mut usage, &event["usage"]);
                     if let Some(reason) = event["delta"]["stop_reason"].as_str() {
-                        stop_reason = map_stop_reason(reason);
+                        match map_stop_reason(reason) {
+                            StopReason::Error => {
+                                terminal_error =
+                                    Some(format!("{} finish reason: {reason}", model.provider));
+                            }
+                            other => {
+                                stop_reason = other;
+                                finished = true;
+                            }
+                        }
                     }
                 }
                 "error" => {
@@ -152,6 +170,19 @@ pub async fn stream(
                 _ => {}
             }
         }
+        if terminal_error.is_some() {
+            break;
+        }
+    }
+
+    if let Some(error) = terminal_error {
+        anyhow::bail!(error);
+    }
+    if !finished {
+        anyhow::bail!(
+            "{} stream ended before a finish reason",
+            model.provider
+        );
     }
 
     usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
@@ -327,7 +358,8 @@ fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "tool_use" => StopReason::ToolUse,
         "max_tokens" => StopReason::Length,
-        _ => StopReason::Stop,
+        "end_turn" | "stop_sequence" => StopReason::Stop,
+        _ => StopReason::Error,
     }
 }
 
@@ -449,6 +481,8 @@ mod tests {
         assert_eq!(map_stop_reason("tool_use"), StopReason::ToolUse);
         assert_eq!(map_stop_reason("max_tokens"), StopReason::Length);
         assert_eq!(map_stop_reason("end_turn"), StopReason::Stop);
+        assert_eq!(map_stop_reason("refusal"), StopReason::Error);
+        assert_eq!(map_stop_reason("unexpected"), StopReason::Error);
     }
 
     #[test]

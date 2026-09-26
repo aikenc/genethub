@@ -63,6 +63,8 @@ pub async fn stream(
 
     let mut usage = Usage::default();
     let mut stop_reason = StopReason::Stop;
+    let mut finished = false;
+    let mut terminal_error: Option<String> = None;
     let mut buffer = SseBuffer::new();
     let mut text_open = false;
     let mut thinking_open = false;
@@ -72,8 +74,15 @@ pub async fn stream(
     while let Some(chunk) = body_stream.next().await {
         let chunk = chunk?;
         for payload in buffer.push(&String::from_utf8_lossy(&chunk)) {
-            let Ok(event) = serde_json::from_str::<Value>(&payload) else {
-                continue;
+            let event = match serde_json::from_str::<Value>(&payload) {
+                Ok(event) => event,
+                Err(error) => {
+                    let sample: String = payload.chars().take(200).collect();
+                    terminal_error = Some(format!(
+                        "could not parse a stream event: {error}; payload: {sample}"
+                    ));
+                    break;
+                }
             };
             if let Some(message) = event["error"]["message"].as_str() {
                 anyhow::bail!("openai: {message}");
@@ -142,8 +151,19 @@ pub async fn stream(
                     text_open = false;
                     let _ = events.send(ProviderEvent::TextEnd);
                 }
-                stop_reason = map_finish_reason(reason);
+                match map_finish_reason(reason) {
+                    StopReason::Error => {
+                        terminal_error = Some(format!("{} finish reason: {reason}", model.provider));
+                    }
+                    other => {
+                        stop_reason = other;
+                        finished = true;
+                    }
+                }
             }
+        }
+        if terminal_error.is_some() {
+            break;
         }
     }
 
@@ -161,6 +181,16 @@ pub async fn stream(
             name: call.name,
             arguments,
         });
+    }
+
+    if let Some(error) = terminal_error {
+        anyhow::bail!(error);
+    }
+    if !finished {
+        anyhow::bail!(
+            "{} stream ended before a finish reason",
+            model.provider
+        );
     }
 
     usage.total_tokens = usage.input + usage.output + usage.cache_read + usage.cache_write;
@@ -374,7 +404,8 @@ fn map_finish_reason(reason: &str) -> StopReason {
     match reason {
         "tool_calls" | "function_call" => StopReason::ToolUse,
         "length" => StopReason::Length,
-        _ => StopReason::Stop,
+        "stop" => StopReason::Stop,
+        _ => StopReason::Error,
     }
 }
 
@@ -503,6 +534,8 @@ mod tests {
         assert_eq!(map_finish_reason("tool_calls"), StopReason::ToolUse);
         assert_eq!(map_finish_reason("length"), StopReason::Length);
         assert_eq!(map_finish_reason("stop"), StopReason::Stop);
+        assert_eq!(map_finish_reason("content_filter"), StopReason::Error);
+        assert_eq!(map_finish_reason("unexpected"), StopReason::Error);
     }
 
     #[test]
