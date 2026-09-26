@@ -80,6 +80,16 @@ pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
         Ok(content) => content,
         Err(err) => return ToolResult::error(format!("Failed to read {}: {err}", path.display())),
     };
+    let bom_len = usize::from(original.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
+    let body = &original[bom_len..];
+    let crlf = body.contains("\r\n");
+    let align = |text: &str| -> String {
+        if crlf && !text.contains('\r') {
+            text.replace('\n', "\r\n")
+        } else {
+            text.to_string()
+        }
+    };
 
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
     for (index, entry) in edits.iter().enumerate() {
@@ -93,11 +103,10 @@ pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
         if old_text.is_empty() {
             return ToolResult::error(format!("edit: edits[{index}].oldText must not be empty"));
         }
+        let old_text = align(&old_text);
+        let new_text = align(&new_text);
 
-        let matches: Vec<usize> = original
-            .match_indices(&old_text)
-            .map(|(at, _)| at)
-            .collect();
+        let matches: Vec<usize> = body.match_indices(&old_text).map(|(at, _)| at).collect();
         match matches.len() {
             0 => {
                 return ToolResult::error(format!(
@@ -112,7 +121,7 @@ pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
             }
         }
 
-        let start = matches[0];
+        let start = matches[0] + bom_len;
         let end = start + old_text.len();
         if let Some((other, _, _)) = replacements
             .iter()
@@ -244,6 +253,19 @@ mod tests {
         );
         assert!(result.is_error);
         assert!(result.text.contains("matches 2 times"));
+    }
+
+    #[test]
+    fn edit_matches_lf_text_in_a_crlf_file_and_keeps_the_bom() {
+        let dir = temp_dir("edit-crlf");
+        let path = dir.join("f.txt");
+        std::fs::write(&path, "\u{feff}hello\r\nworld\r\n").unwrap();
+        let result = edit(
+            &json!({"path": "f.txt", "edits": [{"oldText": "hello\nworld", "newText": "hello\nthere"}]}),
+            &dir,
+        );
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\u{feff}hello\r\nthere\r\n");
     }
 
     #[test]
