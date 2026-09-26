@@ -44,7 +44,7 @@ defineSpecialty({
     let attempts = 0, firstSent = false, retrySent = false, dispatched = false;
     opened.mock.script(...Array.from({ length: 40 }, () => ({ respond: (request: unknown) => {
       const body = JSON.stringify(request);
-      if (body.includes("只读复查被处理的 Run")) return { hang: true as const };
+      if (body.includes("只读复查这条用户需求及其 Run")) return { hang: true as const };
       if (body.includes("START_AFTER_RESET") && !dispatched) {
         dispatched = true;
         return { tool: { name: "bash", arguments: {

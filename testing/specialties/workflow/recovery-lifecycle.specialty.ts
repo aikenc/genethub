@@ -95,7 +95,7 @@ defineSpecialty({
         initialSubmitted = true;
         return { tool: { name: "bash", arguments: { command: `${corrupt ? "sleep 8; " : ""}"$GENEHUB_CLI" workflow complete --outcome blocked --reason "business acceptance failed" --evidence result=failed` } } };
       }
-      if (body.includes("只读复查被处理的 Run")) {
+      if (body.includes("只读复查这条用户需求及其 Run")) {
         reviewerCalls++;
         if (reviewerCalls === 1) {
           const handled = body.match(/被处理 Run：(wr_[a-f0-9]+)/)?.[1];
@@ -296,7 +296,7 @@ defineSpecialty({
     stage = "wait for WM and acceptance";
     await t.tools.waitUntil(async () => {
       recovery = (await history()).find(run => run.id === recovery!.id);
-      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit"));
+      return recovery?.status === "blocked" && (humanB || humanF || cancelExit || recovery.reason?.includes("controlled exit") === true);
     }, 75_000);
     if (cancelExit) {
       t.assertions.assert(!recovery!.humanExit, "PM cancellation recommendation was incorrectly classified as Human exit d");
@@ -398,7 +398,7 @@ defineSpecialty({
       reason: run.reason, nodes: run.nodes.map(node => ({ id: node.id, status: node.status, sessionId: node.sessionId })) })) : reply;
     const reviewerState = reviewerReply?.type === "snapshot" ? { status: reviewerReply.data.summary.status,
       pending: reviewerReply.data.pendingPermissions, items: reviewerReply.data.items.slice(-15) } : reviewerReply;
-    const roleCalls = opened.mock.requests.filter(request => JSON.stringify(request).includes("只读复查被处理的 Run")).length;
+    const roleCalls = opened.mock.requests.filter(request => JSON.stringify(request).includes("只读复查这条用户需求及其 Run")).length;
     throw new Error(`${stage}: ${error}; runs=${JSON.stringify(runs).slice(0, 3500)}; reviewer=${JSON.stringify(reviewerState).slice(0, 6500)}; roleCalls=${roleCalls}`);
   } finally {
     opened.client.close();

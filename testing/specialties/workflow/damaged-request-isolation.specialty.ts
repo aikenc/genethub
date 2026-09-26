@@ -38,7 +38,7 @@ defineSpecialty({
     const dispatched = new Set<string>();
     const respond = (request: unknown) => {
       const body = JSON.stringify(request);
-      if (body.includes("只读复查被处理的 Run")) return { text: "Waiting for the PM recovery decision." };
+      if (body.includes("只读复查这条用户需求及其 Run")) return { text: "Waiting for the PM recovery decision." };
       if (body.includes("DAMAGED_REQUEST_WORKER")) {
         const task = ["isolation-one", "isolation-two", "isolation-three", "isolation-broken"].find(id => body.includes(id));
         if (!task || submitted.has(task)) return { text: "Result was already submitted." };
@@ -92,7 +92,7 @@ defineSpecialty({
     const snapshot = path.join(requests, first!.id, "runs", first!.id, "run.json");
     writeFileSync(snapshot, "damaged snapshot\n");
     t.assertions.assert(!(await history()).some(run => run.id === first!.id), "corrupt Run was reported as healthy");
-    const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId } });
+    const report = await opened.client.call({ type: "workflow.check", payload: { workspaceId: opened.workspaceId, runId: null } });
     t.assertions.assert(report?.type === "workflowCheck"
       && report.data.findings.some(f => f.runId === first!.id && f.code === "runUnreadable")
       && report.data.runs.some(run => run.taskId === "isolation-two"),

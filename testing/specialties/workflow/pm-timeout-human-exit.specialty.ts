@@ -61,7 +61,7 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     };
     await t.tools.waitUntil(async () => {
       original = (await history()).find(run => run.taskId === "overdue-route");
-      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable");
+      return original?.status === "blocked" && original.reason?.includes("RouteUnavailable") === true;
     }, 30_000);
     t.assertions.assert((await history()).length === 1 && !original!.humanExit,
       "normal route block skipped PM and entered recovery or Human exit immediately");
@@ -130,6 +130,10 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
     const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8")) as { run: { updatedAtMs: number } };
     snapshot.run.updatedAtMs = Date.now() - 1_805_000;
     writeFileSync(snapshotPath, JSON.stringify(snapshot));
+    const requirementPath = path.join(opened.workspaceRoot, ".genethub/components/pm/requests", original!.id, "request.json");
+    const requirement = JSON.parse(readFileSync(requirementPath, "utf8"));
+    requirement.requirement.pendingSinceMs = snapshot.run.updatedAtMs;
+    writeFileSync(requirementPath, JSON.stringify(requirement));
     const start = async () => {
       const result = await runGenetAsync(opened.daemon.genet, ["daemon", "start"], opened.daemon.env);
       t.assertions.assert(result.code === 0, `daemon restart failed: ${result.stderr || result.stdout}`);

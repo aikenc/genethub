@@ -73,7 +73,7 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
     const seen = new Set<string>();
     opened.mock.script(...Array.from({ length: 90 }, () => ({ respond: (request: unknown) => {
       const text = JSON.stringify(request);
-      if (scenario === "parallel-double-failure" && text.includes("只读复查被处理的 Run")) return { hang: true as const };
+      if (scenario === "parallel-double-failure" && text.includes("只读复查这条用户需求及其 Run")) return { hang: true as const };
       if (!text.includes("BUDGET_PARALLEL_WORKER")) {
         if (!nextCommand) return { text: "Observed execution facts." };
         const command = nextCommand; nextCommand = undefined; return { tool: { name: "bash", arguments: { command } } };
@@ -243,7 +243,9 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
         await t.tools.waitUntil(async () => { await current(); return run?.taskId === "observed-3" && run.status === "completed"; }, 40_000);
         const lastAuthorized = value() as typeof result;
         t.assertions.assert(lastAuthorized.before.requestRunId === original && lastAuthorized.before.usedRuns === 3
-          && lastAuthorized.before.remainingRuns === 0, "third business Run did not exhaust the shared request budget");
+          && lastAuthorized.before.remainingRuns === 0
+          && lastAuthorized.before.currentRunAdmitted && lastAuthorized.before.currentRunCanExecute,
+          "last admitted Run lost execution authority when future admission capacity reached zero");
 
         nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task forbidden-4 --retry-of ${q(original)} --no-wait --message "Attempt beyond shared limit"`;
         await send("Attempt one more Run with the old budget.");
