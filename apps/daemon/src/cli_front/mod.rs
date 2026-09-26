@@ -13,11 +13,9 @@ mod place;
 mod process;
 mod query;
 mod rpc;
-// The local CLI now calls the router in-process. Keep the loopback dialer in
-// the shared wire client for native compatibility without treating that
-// intentionally dormant entry point as a release-blocking lint.
+// Local commands call the router in-process (`rpc`). This module dials paired
+// and Hub-hosted machines only.
 mod client;
-#[allow(dead_code)]
 mod rpc_wire;
 mod shell;
 mod space;
