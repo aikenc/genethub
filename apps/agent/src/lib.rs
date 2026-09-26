@@ -643,26 +643,28 @@ async fn expand_skill_command(state: &Arc<Mutex<State>>, message: String) -> Str
         None => (rest, ""),
     };
 
-    let path = {
+    let located = {
         let guard = state.lock().await;
-        guard
-            .skills
-            .iter()
-            .find(|skill| skill.name == name)
-            .map(|skill| skill.file_path.clone())
+        guard.skills.iter().find(|skill| skill.name == name).map(|skill| {
+            (skill.file_path.clone(), skill.base_dir.clone())
+        })
     };
-    let Some(path) = path else {
+    let Some((path, base_dir)) = located else {
         return message;
     };
     let Ok(content) = std::fs::read_to_string(&path) else {
         return message;
     };
+    render_skill(&base_dir, &content, arguments)
+}
 
-    if arguments.is_empty() {
-        content
-    } else {
-        format!("{content}\n\nUser: {arguments}")
+fn render_skill(base_dir: &std::path::Path, content: &str, arguments: &str) -> String {
+    let mut text = format!("Skill base directory: {}\n\n{content}", base_dir.display());
+    if !arguments.is_empty() {
+        text.push_str("\n\nUser: ");
+        text.push_str(arguments);
     }
+    text
 }
 
 fn select_model(
@@ -714,6 +716,17 @@ mod tests {
     fn bare_model_ids_also_resolve() {
         let models = vec![model("anthropic", "claude")];
         assert_eq!(select_model(&models, Some("claude")).unwrap().id, "claude");
+    }
+
+    #[test]
+    fn a_skill_command_names_its_base_directory() {
+        let text = render_skill(
+            std::path::Path::new("/skills/demo"),
+            "Read scripts/run.sh",
+            "extra",
+        );
+        assert!(text.starts_with("Skill base directory: /skills/demo\n\nRead scripts/run.sh"));
+        assert!(text.ends_with("\n\nUser: extra"));
     }
 
     #[test]
