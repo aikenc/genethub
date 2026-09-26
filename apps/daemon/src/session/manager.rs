@@ -205,6 +205,11 @@ struct Live {
     /// paces that write rather than doing it per streamed token.
     open_turn_written_ms: AtomicI64,
     open_turn_dirty: AtomicBool,
+    /// Applied context seed or inbox binding that could not be written after
+    /// the agent had already accepted the prompt. Retried when the turn ends
+    /// so a disk error does not retire a live agent.
+    deferred_seed: Mutex<Option<ContextSeed>>,
+    deferred_meta: AtomicBool,
     /// Work item ids belonging to the trunk currently open, in order. Cleared
     /// when that trunk is written out, so this stays bounded by a soft batch
     /// boundary during tool-heavy work
@@ -2940,9 +2945,14 @@ impl SessionManager {
             Ok(turn_id) => {
                 if let Some(seed) = &mut applying_seed {
                     seed.state = ContextSeedState::Applied;
-                    self.store
-                        .save_seed(&seed_owner.0, &seed_owner.1, seed)
-                        .context("marking reconstructed history as applied")?;
+                    if let Err(error) = self.store.save_seed(&seed_owner.0, &seed_owner.1, seed) {
+                        tracing::warn!(
+                            %error,
+                            session = %session_id,
+                            "agent accepted the prompt; the applied context seed will be written when the turn settles"
+                        );
+                        *live.deferred_seed.lock().await = Some(seed.clone());
+                    }
                 }
                 turn_id
             }
@@ -2986,7 +2996,14 @@ impl SessionManager {
                     entry.turn_id = Some(turn_id.clone());
                 }
             }
-            self.store.save_meta(&next)?;
+            if let Err(error) = self.store.save_meta(&next) {
+                tracing::warn!(
+                    %error,
+                    session = %session_id,
+                    "agent accepted the prompt; the inbox turn binding will be written when the turn settles"
+                );
+                live.deferred_meta.store(true, Ordering::SeqCst);
+            }
             *meta = next;
         }
 
@@ -4988,6 +5005,8 @@ impl Live {
             turn_items: Mutex::new(Vec::new()),
             open_turn_written_ms: AtomicI64::new(0),
             open_turn_dirty: AtomicBool::new(false),
+            deferred_seed: Mutex::new(None),
+            deferred_meta: AtomicBool::new(false),
             open_trunk_items: Mutex::new(Vec::new()),
             llm_rounds: Mutex::new(LlmRounds::default()),
             pump: Mutex::new(None),
@@ -6693,6 +6712,7 @@ async fn pump_events(
             break;
         }
         if settle {
+            flush_deferred_durable(&live).await;
             thinking.clear();
             // The end of a turn is when "what is still running" starts to mean
             // something. Until then everything the agent started is running
@@ -6705,7 +6725,36 @@ async fn pump_events(
     drop(blob_sender);
     let _ = blob_writer.await;
     if channel_closed {
+        flush_deferred_durable(&live).await;
         finalize_after_channel_closed(&live, &store).await;
+    }
+}
+
+async fn flush_deferred_durable(live: &Live) {
+    if let Some(seed) = live.deferred_seed.lock().await.clone() {
+        let (workspace_id, session_id) = {
+            let meta = live.meta.lock().await;
+            (meta.workspace_id.clone(), meta.id.clone())
+        };
+        match live.store.save_seed(&workspace_id, &session_id, &seed) {
+            Ok(()) => *live.deferred_seed.lock().await = None,
+            Err(error) => tracing::warn!(
+                %error,
+                session = %session_id,
+                "still could not write the applied context seed"
+            ),
+        }
+    }
+    if live.deferred_meta.swap(false, Ordering::SeqCst) {
+        let meta = live.meta.lock().await.clone();
+        if let Err(error) = live.store.save_meta(&meta) {
+            live.deferred_meta.store(true, Ordering::SeqCst);
+            tracing::warn!(
+                %error,
+                session = %meta.id,
+                "still could not write the inbox turn binding"
+            );
+        }
     }
 }
 
