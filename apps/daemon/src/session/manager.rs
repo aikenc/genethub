@@ -7677,14 +7677,6 @@ mod tests {
         async fn set_mode(&self, _mode_id: &str) -> Result<()> {
             Ok(())
         }
-
-        async fn respond_permission(
-            &self,
-            _request_id: &str,
-            _outcome: genehub_proto::PermissionOutcome,
-        ) -> Result<()> {
-            Ok(())
-        }
     }
 
     #[async_trait::async_trait]
@@ -7777,14 +7769,6 @@ mod tests {
                 agent_id: self.id.into(),
                 value: serde_json::json!({ "checkpoint": checkpoint }),
             })
-        }
-
-        async fn respond_permission(
-            &self,
-            _request_id: &str,
-            _outcome: genehub_proto::PermissionOutcome,
-        ) -> Result<()> {
-            Ok(())
         }
     }
 
@@ -10139,14 +10123,6 @@ mod tests {
             anyhow::bail!("not used")
         }
 
-        async fn respond_permission(
-            &self,
-            _request_id: &str,
-            _outcome: PermissionOutcome,
-        ) -> Result<()> {
-            anyhow::bail!("a stopped process is never answered in place")
-        }
-
         fn persistence(&self) -> Option<crate::adapter::PersistHandle> {
             Some(crate::adapter::PersistHandle {
                 agent_id: "fake".into(),
@@ -10180,14 +10156,6 @@ mod tests {
 
         async fn set_mode(&self, _mode_id: &str) -> Result<()> {
             anyhow::bail!("not used")
-        }
-
-        async fn respond_permission(
-            &self,
-            _request_id: &str,
-            _outcome: PermissionOutcome,
-        ) -> Result<()> {
-            anyhow::bail!("CLI approval is resolved by its daemon waiter")
         }
     }
 
@@ -11142,14 +11110,6 @@ mod tests {
 
         async fn set_mode(&self, _mode_id: &str) -> Result<()> {
             anyhow::bail!("not used")
-        }
-
-        async fn respond_permission(
-            &self,
-            _request_id: &str,
-            _outcome: PermissionOutcome,
-        ) -> Result<()> {
-            anyhow::bail!("a stopped process is never answered in place")
         }
     }
 

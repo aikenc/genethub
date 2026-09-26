@@ -402,7 +402,6 @@ impl AgentAdapter for CodexAdapter {
             stdin: stdin.clone(),
             events: events.clone(),
             pending: pending.clone(),
-            asks: asks.clone(),
             turn: turn.clone(),
             next_id: AtomicI64::new(1),
             child: child.clone(),
@@ -855,24 +854,8 @@ fn default_model_in(listed: &Value) -> Option<(String, Option<String>)> {
 }
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
-type AskMap = Arc<Mutex<HashMap<String, PendingAsk>>>;
+type AskMap = Arc<Mutex<HashSet<String>>>;
 type SharedThread = Arc<std::sync::Mutex<Option<String>>>;
-
-struct PendingAsk {
-    /// JSON-RPC ids may be either integers or strings and must be echoed with
-    /// their original type in the response.
-    upstream_id: Value,
-    response: Ask,
-}
-
-/// What the CLI is waiting for us to answer, and in which shape.
-enum Ask {
-    /// An approval: answered with a `decision`.
-    Decision,
-    /// A question: answered with the label of the option that was picked, keyed
-    /// by the question's own id.
-    Questions { questions: Vec<Question> },
-}
 
 #[derive(Copy, Clone)]
 enum Kind {
@@ -922,7 +905,6 @@ struct CodexSession {
     stdin: Arc<Mutex<ChildStdin>>,
     events: broadcast::Sender<SessionEvent>,
     pending: PendingMap,
-    asks: AskMap,
     turn: Arc<Mutex<TurnState>>,
     next_id: AtomicI64,
     child: Arc<Mutex<Option<Child>>>,
@@ -1278,32 +1260,6 @@ impl AgentSession for CodexSession {
         Ok(())
     }
 
-    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
-        let pending = self
-            .asks
-            .lock()
-            .await
-            .remove(request_id)
-            .ok_or_else(|| anyhow!("Codex request '{request_id}' is no longer pending"))?;
-        let result = match pending.response {
-            Ask::Questions { questions } => {
-                json!({ "answers": codex_answers(&questions, &outcome) })
-            }
-            _ => json!({ "decision": decision(&outcome) }),
-        };
-        self.write(json!({
-            "jsonrpc": "2.0",
-            "id": pending.upstream_id,
-            "result": result,
-        }))
-        .await?;
-        let _ = self.events.send(SessionEvent::PermissionResolved {
-            request_id: request_id.to_string(),
-            outcome,
-        });
-        Ok(())
-    }
-
     fn persistence(&self) -> Option<PersistHandle> {
         let thread_id = self
             .thread
@@ -1430,19 +1386,6 @@ fn decode_base64(input: &str) -> Result<Vec<u8>> {
         }
     }
     Ok(out)
-}
-
-/// `accept` | `decline` | `cancel`, as this CLI's approvals are answered.
-///
-/// There is no "always allow" on this wire, so none is offered: the mode picker
-/// is where someone stops being asked, and that at least says what it does.
-fn decision(outcome: &PermissionOutcome) -> &'static str {
-    match outcome {
-        PermissionOutcome::Selected { option_id } if option_id == ALLOW => "accept",
-        // The turn is going away, not just this one tool call.
-        PermissionOutcome::Canceled => "cancel",
-        _ => "decline",
-    }
 }
 
 fn allow_or_deny() -> Vec<PermissionOption> {
@@ -1689,13 +1632,7 @@ async fn translate_ask(asked: Asked<'_>) {
 
     match method.as_str() {
         "item/commandExecution/requestApproval" => {
-            asks.lock().await.insert(
-                request_id.clone(),
-                PendingAsk {
-                    upstream_id: id,
-                    response: Ask::Decision,
-                },
-            );
+            asks.lock().await.insert(request_id.clone());
             let command = command_text(params.get("command"));
             ask(if command.is_empty() {
                 "Run a command?".to_string()
@@ -1704,13 +1641,7 @@ async fn translate_ask(asked: Asked<'_>) {
             });
         }
         "item/fileChange/requestApproval" => {
-            asks.lock().await.insert(
-                request_id.clone(),
-                PendingAsk {
-                    upstream_id: id,
-                    response: Ask::Decision,
-                },
-            );
+            asks.lock().await.insert(request_id.clone());
             ask("Apply file changes?".to_string());
         }
         // Both names: the second is what builds before 0.143 called it.
@@ -1723,15 +1654,7 @@ async fn translate_ask(asked: Asked<'_>) {
             let parsed: Vec<Question> = questions.iter().filter_map(question_in).collect();
             match parsed.len() == questions.len() && !parsed.is_empty() {
                 true => {
-                    asks.lock().await.insert(
-                        request_id.clone(),
-                        PendingAsk {
-                            upstream_id: id,
-                            response: Ask::Questions {
-                                questions: parsed.clone(),
-                            },
-                        },
-                    );
+                    asks.lock().await.insert(request_id.clone());
                     let _ = events.send(SessionEvent::PermissionRequested {
                         request: PermissionRequest {
                             id: request_id.clone(),
@@ -1808,7 +1731,7 @@ async fn resolve_ask(
     let Some(request_id) = params.get("requestId").and_then(request_key) else {
         return;
     };
-    if asks.lock().await.remove(&request_id).is_some() {
+    if asks.lock().await.remove(&request_id) {
         let _ = events.send(SessionEvent::PermissionResolved {
             request_id,
             outcome: PermissionOutcome::Canceled,
@@ -1875,48 +1798,6 @@ fn question_in(value: &Value) -> Option<Question> {
         question: text("question")?,
         options,
     })
-}
-
-fn codex_answers(
-    questions: &[Question],
-    outcome: &PermissionOutcome,
-) -> serde_json::Map<String, Value> {
-    let mut result = serde_json::Map::new();
-    let submitted = match outcome {
-        PermissionOutcome::Answered { answers } => answers.as_slice(),
-        _ => &[],
-    };
-    for question in questions {
-        let Some(answer) = submitted
-            .iter()
-            .find(|answer| answer.question_id == question.id)
-        else {
-            continue;
-        };
-        let mut values: Vec<String> = answer
-            .selected_option_ids
-            .iter()
-            .filter_map(|picked| {
-                question
-                    .options
-                    .iter()
-                    .find(|(id, _)| id == picked)
-                    .map(|(_, label)| label.clone())
-            })
-            .collect();
-        if let Some(text) = answer
-            .freeform_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-        {
-            values.push(text.to_string());
-        }
-        if !values.is_empty() {
-            result.insert(question.id.clone(), json!({ "answers": values }));
-        }
-    }
-    result
 }
 
 async fn translate(
@@ -2754,13 +2635,7 @@ mod tests {
     #[tokio::test]
     async fn server_resolution_clears_only_the_root_threads_pending_request() {
         let asks: AskMap = Arc::default();
-        asks.lock().await.insert(
-            "7".into(),
-            PendingAsk {
-                upstream_id: json!(7),
-                response: Ask::Decision,
-            },
-        );
+        asks.lock().await.insert("7".into());
         let (events, mut seen) = broadcast::channel(4);
 
         resolve_ask(
@@ -2770,7 +2645,7 @@ mod tests {
             &events,
         )
         .await;
-        assert!(asks.lock().await.contains_key("7"));
+        assert!(asks.lock().await.contains("7"));
 
         resolve_ask(
             &json!({ "threadId": "root-thread", "requestId": 7 }),
@@ -3684,33 +3559,7 @@ mod tests {
         }
     }
 
-    /// The reply shape is the whole point of splitting these: an approval takes
-    /// a decision, a question takes the label that was picked.
-    #[test]
-    fn an_approval_is_answered_with_a_decision() {
-        assert_eq!(
-            decision(&PermissionOutcome::Selected {
-                option_id: ALLOW.into()
-            }),
-            "accept"
-        );
-        assert_eq!(
-            decision(&PermissionOutcome::Selected {
-                option_id: DENY.into()
-            }),
-            "decline"
-        );
-        assert_eq!(decision(&PermissionOutcome::Canceled), "cancel");
-        // Nobody was there. Declined, and the agent is told so rather than
-        // being left waiting.
-        assert_eq!(
-            decision(&PermissionOutcome::TimedOut {
-                applied_default: "deny".into()
-            }),
-            "decline"
-        );
-    }
-
+    /// A question keeps the option labels the card has to show.
     #[test]
     fn a_question_keeps_the_labels_it_has_to_send_back() {
         let question = question_in(&json!({
@@ -3732,26 +3581,6 @@ mod tests {
         let freeform = question_in(&json!({ "id": "q", "header": "h", "question": "q" }))
             .expect("free-text questions are renderable");
         assert!(freeform.interaction().allow_freeform);
-
-        let answers = codex_answers(
-            &[question, freeform],
-            &PermissionOutcome::Answered {
-                answers: vec![
-                    genehub_proto::InteractionAnswer {
-                        question_id: "q1".into(),
-                        selected_option_ids: vec!["1".into()],
-                        freeform_text: None,
-                    },
-                    genehub_proto::InteractionAnswer {
-                        question_id: "q".into(),
-                        selected_option_ids: vec![],
-                        freeform_text: Some("Use the existing cluster".into()),
-                    },
-                ],
-            },
-        );
-        assert_eq!(answers["q1"]["answers"], json!(["SQLite"]));
-        assert_eq!(answers["q"]["answers"], json!(["Use the existing cluster"]));
     }
 
     #[test]

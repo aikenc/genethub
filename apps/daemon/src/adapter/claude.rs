@@ -11,8 +11,8 @@
 //! model, effort, resume, command and control surfaces. Claude Code's
 //! `--permission-prompt-tool stdio` routes residual tool prompts through a
 //! `control_request`/`control_response` pair on the same stdio channel used
-//! for the conversation, which is exactly the shape our own
-//! `PermissionRequested`/`respond_permission` pair already needs.
+//! for the conversation. The daemon records the request and resumes it on the
+//! next turn; this adapter does not answer it in-process.
 //!
 //! Protocol notes (there is no public spec; this was reverse-engineered
 //! against Claude Code 2.1.220, see the investigation behind this file):
@@ -44,12 +44,8 @@
 //!   "subtype":"success","response":{"behavior":"allow"|"deny","message"?}}}`.
 //!   Leaving this unanswered (e.g. because our stdin already closed) surfaces
 //!   as a denied tool call, never a hang — confirmed empirically.
-//!   There is no wire-level "always allow this tool" reply the CLI
-//!   understands (no documented `updatedPermissions` echo for this
-//!   transport), so `AllowAlways` is enforced on our side: once picked, the
-//!   tool name is remembered for the life of the process and every later
-//!   `can_use_tool` for it is answered `allow` without ever reaching the
-//!   frontend, the same short-circuit `acceptEdits` mode already uses below.
+//!   Accept-edits and bypass modes answer here. Any other prompt is recorded
+//!   for the session kernel, which closes this process and resumes later.
 //! - We interrupt with `{"type":"control_request","request":{"subtype":
 //!   "interrupt"}}`; the CLI ack's it and then emits a synthetic
 //!   `{"type":"user","message":{"content":[{"type":"text","text":
@@ -73,7 +69,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, ImportContinuation, ItemDelta, ModeInfo, ModelInfo,
-    PermissionOption, PermissionOptionKind, PermissionOutcome, PermissionRequest,
+    PermissionOption, PermissionOptionKind, PermissionRequest,
     PermissionRequestKind, ProbeState, SessionEvent, TimelineItem, ToolCallDetail, ToolImage,
     ToolKind, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
@@ -815,12 +811,6 @@ impl AgentAdapter for ClaudeAdapter {
         let native_session_id: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
         let mode = Arc::new(Mutex::new(initial_mode));
         let stdin = Arc::new(Mutex::new(stdin));
-        // `AllowAlways` has no wire-level equivalent (see module doc), so it
-        // is enforced here: tool names the user has blanket-approved, and the
-        // request id -> tool name lookup `respond_permission` needs to learn
-        // about a fresh approval once the user answers.
-        let always_allow: Arc<Mutex<HashSet<String>>> = Arc::default();
-        let pending_tools: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let awaiting: Awaiting = Arc::default();
 
         let session = ClaudeSession {
@@ -833,20 +823,13 @@ impl AgentAdapter for ClaudeAdapter {
             native_session_id: native_session_id.clone(),
             mode: mode.clone(),
             next_control_id: AtomicU64::new(1),
-            always_allow: always_allow.clone(),
-            pending_tools: pending_tools.clone(),
             awaiting: awaiting.clone(),
             models,
             efforts,
             agent_id: self.flavor.id,
         };
 
-        let control = ControlState {
-            mode,
-            stdin,
-            always_allow,
-            pending_tools,
-        };
+        let control = ControlState { mode, stdin };
         session.tasks.spawn(read_loop(
             stdout,
             events,
@@ -1200,8 +1183,6 @@ struct ClaudeSession {
     native_session_id: Arc<std::sync::Mutex<Option<String>>>,
     mode: Arc<Mutex<String>>,
     next_control_id: AtomicU64,
-    always_allow: Arc<Mutex<HashSet<String>>>,
-    pending_tools: Arc<Mutex<HashMap<String, String>>>,
     /// The thinking levels this install named, for the same reason `models` is
     /// kept: the CLI answers `success` to levels that do not exist.
     efforts: Vec<String>,
@@ -1229,8 +1210,6 @@ type Awaiting = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<Result<()
 struct ControlState {
     mode: Arc<Mutex<String>>,
     stdin: Arc<Mutex<ChildStdin>>,
-    always_allow: Arc<Mutex<HashSet<String>>>,
-    pending_tools: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl ClaudeSession {
@@ -1447,42 +1426,6 @@ impl AgentSession for ClaudeSession {
             );
         }
         *self.mode.lock().await = mode_id.to_string();
-        Ok(())
-    }
-
-    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()> {
-        let tool_name = self.pending_tools.lock().await.remove(request_id);
-        let response = match &outcome {
-            PermissionOutcome::Selected { option_id } if option_id == "allow" => {
-                json!({ "behavior": "allow" })
-            }
-            PermissionOutcome::Selected { option_id } if option_id == "allow_always" => {
-                if let Some(tool_name) = tool_name {
-                    self.always_allow.lock().await.insert(tool_name);
-                }
-                json!({ "behavior": "allow" })
-            }
-            // What the agent is told matters: it writes its own next sentence out
-            // of this. "Denied by the user" when no user was there sends it off
-            // apologising for a decision nobody made.
-            PermissionOutcome::TimedOut { .. } => json!({
-                "behavior": "deny",
-                "message": "No one was available to approve this, so it was denied.",
-            }),
-            _ => json!({ "behavior": "deny", "message": "Denied by the user." }),
-        };
-        // `request_id` here is the control request's own id: the read loop
-        // handed it straight to the timeline event, so replying is just
-        // echoing it back inside a `control_response`.
-        self.write(json!({
-            "type": "control_response",
-            "response": { "request_id": request_id, "subtype": "success", "response": response },
-        }))
-        .await?;
-        let _ = self.events.send(SessionEvent::PermissionResolved {
-            request_id: request_id.to_string(),
-            outcome,
-        });
         Ok(())
     }
 
@@ -2178,12 +2121,11 @@ async fn handle_control_request(
         .unwrap_or("a tool");
 
     let mode = control.mode.lock().await.clone();
-    let auto_allow = (mode == MODE_ACCEPT_EDITS || mode == MODE_BYPASS)
-        || control.always_allow.lock().await.contains(tool_name);
+    let auto_allow = mode == MODE_ACCEPT_EDITS || mode == MODE_BYPASS;
     if auto_allow {
-        // Auto-approve without ever bothering the frontend: either the whole
-        // session is in accept-edits mode, or the user already picked
-        // "Always Allow" for this exact tool earlier in the session.
+        // Accept-edits and bypass already decided this session may proceed.
+        // The tool name is unused in those modes; it still names the prompt
+        // when a lower mode has to ask.
         let response = json!({
             "type": "control_response",
             "response": { "request_id": request_id, "subtype": "success",
@@ -2195,11 +2137,6 @@ async fn handle_control_request(
         }
         return;
     }
-    control
-        .pending_tools
-        .lock()
-        .await
-        .insert(request_id.to_string(), tool_name.to_string());
 
     // The `assistant` snapshot that created this tool's timeline card always
     // arrives before the CLI asks permission for it, so the lookup below
@@ -3035,18 +2972,14 @@ mod tests {
         })
     }
 
-    /// There is no wire-level "always allow" Claude Code understands (see the
-    /// module doc), so this is enforced entirely on our side: the option must
-    /// be offered, and once picked, the *same* tool must stop bothering the
-    /// frontend without silently starting to allow other tools too.
+    /// Accept-edits and bypass answer without a card. A lower mode still offers
+    /// Allow, Always Allow, and Deny; the session kernel records the choice.
     #[tokio::test]
-    async fn always_allow_is_offered_then_short_circuits_only_that_tool() {
+    async fn a_tool_prompt_offers_allow_always_until_the_session_is_elevated() {
         let (mut child, stdin) = fake_stdin();
         let control = ControlState {
             mode: Arc::new(Mutex::new(MODE_DEFAULT.to_string())),
             stdin,
-            always_allow: Arc::default(),
-            pending_tools: Arc::default(),
         };
         let turn = Arc::new(Mutex::new(state()));
         let (tx, mut rx) = broadcast::channel(64);
@@ -3060,34 +2993,9 @@ mod tests {
             })
             .expect("a fresh tool must still ask the frontend");
         assert_eq!(request.options.len(), 3);
-        assert!(request
-            .options
-            .iter()
-            .any(|option| option.id == "allow_always"
-                && option.kind == PermissionOptionKind::AllowAlways));
-        assert_eq!(
-            control.pending_tools.lock().await.get("req1"),
-            Some(&"Bash".to_string())
-        );
-
-        // The user picked "Always Allow" for req1 — `respond_permission` is
-        // what would normally do this insert, exercised directly here since
-        // it lives on `ClaudeSession`, not `ControlState`.
-        control.always_allow.lock().await.insert("Bash".to_string());
-
-        handle_control_request(&can_use_tool("req2", "Bash"), &turn, &tx, &control).await;
-        assert!(
-            drain(&mut rx).is_empty(),
-            "the same tool must not ask again after Always Allow"
-        );
-
-        handle_control_request(&can_use_tool("req3", "Write"), &turn, &tx, &control).await;
-        assert!(
-            drain(&mut rx)
-                .iter()
-                .any(|event| matches!(event, SessionEvent::PermissionRequested { .. })),
-            "a different tool must still ask, Always Allow is per-tool"
-        );
+        assert!(request.options.iter().any(|option| {
+            option.id == "allow_always" && option.kind == PermissionOptionKind::AllowAlways
+        }));
 
         let _ = child.start_kill();
     }
@@ -3098,15 +3006,12 @@ mod tests {
         let control = ControlState {
             mode: Arc::new(Mutex::new(MODE_BYPASS.to_string())),
             stdin,
-            always_allow: Arc::default(),
-            pending_tools: Arc::default(),
         };
         let turn = Arc::new(Mutex::new(state()));
         let (tx, mut rx) = broadcast::channel(8);
 
         handle_control_request(&can_use_tool("req1", "Bash"), &turn, &tx, &control).await;
         assert!(drain(&mut rx).is_empty());
-        assert!(control.pending_tools.lock().await.is_empty());
         let _ = child.start_kill();
     }
 

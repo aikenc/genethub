@@ -29,7 +29,7 @@ use crate::os_process::{Child, Command};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
-    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
+    Capabilities, Catalog, ItemDelta, ModeInfo, ModelInfo, ProbeState,
     SearchMatch, SessionEvent, TimelineItem, TodoEntry, TodoStatus, ToolCallDetail, ToolKind,
     ToolStatus, TurnError, TurnErrorCode, Usage,
 };
@@ -528,14 +528,6 @@ impl AgentSession for CursorSession {
         }
         runtime.fast = fast;
         Ok(())
-    }
-
-    async fn respond_permission(
-        &self,
-        _request_id: &str,
-        _outcome: PermissionOutcome,
-    ) -> Result<()> {
-        Err(anyhow!("Cursor print mode runs without permission prompts"))
     }
 
     fn persistence(&self) -> Option<PersistHandle> {

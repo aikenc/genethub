@@ -14,7 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, CommandInfo, InteractionOption, InteractionQuestion, ItemDelta,
-    ModelInfo, PermissionOutcome, PermissionRequest, PermissionRequestKind, ProbeState,
+    ModelInfo, PermissionRequest, PermissionRequestKind, ProbeState,
     SessionEvent, TimelineItem, ToolCallDetail, ToolStatus, TurnError, TurnErrorCode, Usage,
 };
 use serde_json::{json, Map, Value};
@@ -477,12 +477,6 @@ impl AgentSession for GenetSession {
         self.command(json!({ "type": "set_thinking_level", "level": effort_id }))
             .await?;
         Ok(())
-    }
-
-    async fn respond_permission(&self, _request: &str, _outcome: PermissionOutcome) -> Result<()> {
-        Err(anyhow!(
-            "built-in Agent interactions resume as a new turn and have no live approval channel"
-        ))
     }
 
     fn persistence(&self) -> Option<super::PersistHandle> {

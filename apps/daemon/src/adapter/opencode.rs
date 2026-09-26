@@ -16,7 +16,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use genehub_proto::{
-    Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, PermissionOutcome, ProbeState,
+    Capabilities, Catalog, ImportContinuation, ModeInfo, ModelInfo, ProbeState,
     SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolStatus, TurnError, TurnErrorCode,
     Usage,
 };
@@ -534,10 +534,6 @@ impl AgentSession for OpenCodeSession {
 
     async fn set_mode(&self, _mode_id: &str) -> Result<()> {
         Err(anyhow!("OpenCode does not expose switchable modes"))
-    }
-
-    async fn respond_permission(&self, _request: &str, _outcome: PermissionOutcome) -> Result<()> {
-        Err(anyhow!("OpenCode handles approvals itself"))
     }
 
     fn persistence(&self) -> Option<super::PersistHandle> {

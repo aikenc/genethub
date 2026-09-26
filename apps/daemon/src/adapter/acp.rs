@@ -23,7 +23,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use genehub_proto::{
     Capabilities, Catalog, ImportContinuation, InteractionOption, InteractionQuestion, ItemDelta,
-    ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind, PermissionOutcome,
+    ModeInfo, ModelInfo, PermissionOption, PermissionOptionKind,
     PermissionRequest, PermissionRequestKind, ProbeState, RuntimeAxisInfo, RuntimeAxisValue,
     SessionEvent, TimelineItem, ToolCallDetail, ToolImage, ToolKind, ToolStatus, TurnError,
     TurnErrorCode, Usage,
@@ -967,16 +967,6 @@ impl AgentSession for AcpSession {
             anyhow::bail!("ACP agent did not offer runtime axis '{axis_id}'");
         }
         self.set_config_option(axis_id, json!(value_id)).await
-    }
-
-    async fn respond_permission(
-        &self,
-        _request_id: &str,
-        _outcome: PermissionOutcome,
-    ) -> Result<()> {
-        Err(anyhow!(
-            "ACP permission requests stop the turn and resume as a new turn"
-        ))
     }
 
     fn persistence(&self) -> Option<PersistHandle> {

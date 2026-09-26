@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use genehub_proto::{
-    Attachment, Capabilities, Catalog, ImportContinuation, PermissionOutcome, ProbeState,
+    Attachment, Capabilities, Catalog, ImportContinuation, ProbeState,
     SessionEvent, TimelineItem,
 };
 use tokio::sync::{broadcast, Mutex};
@@ -233,7 +233,6 @@ pub trait AgentSession: Send + Sync {
             "this agent has no runtime axis '{axis_id}' to set ({value_id})"
         ))
     }
-    async fn respond_permission(&self, request_id: &str, outcome: PermissionOutcome) -> Result<()>;
 
     /// `None` means the daemon must fall back to read-only replay of its own log.
     fn persistence(&self) -> Option<PersistHandle> {
