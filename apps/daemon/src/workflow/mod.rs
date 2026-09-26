@@ -21,6 +21,7 @@ use genehub_proto::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::session::store::now_ms;
 use crate::state::Shared;
 
 mod authoring;
@@ -5427,10 +5428,6 @@ fn flow_message_status(message: &FlowMessage) -> FlowMessageStatus {
         payload: message.payload.clone(),
         created_at_ms: message.created_at_ms,
     }
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

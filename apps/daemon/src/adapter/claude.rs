@@ -976,8 +976,8 @@ async fn claude_candidates(
             .min(i64::MAX as u128) as i64;
         output.push(ImportCandidate {
             source_id: session_id,
-            title: clip_import_text(&title, 120),
-            preview: clip_import_text(&preview, 240),
+            title: super::clip_text(&title, 120),
+            preview: super::clip_text(&preview, 240),
             updated_at_ms,
             continuation: ImportContinuation::Native,
         });
@@ -1075,7 +1075,7 @@ async fn claude_history(
         let id = format!("import-{}", uuid::Uuid::new_v4().simple());
         match entry.get("type").and_then(Value::as_str) {
             Some("user") => {
-                title.get_or_insert_with(|| clip_import_text(&text, 120));
+                title.get_or_insert_with(|| super::clip_text(&text, 120));
                 items.push(TimelineItem::UserMessage {
                     id,
                     text,
@@ -1128,15 +1128,6 @@ fn claude_message_text(message: &Value) -> Option<String> {
         _ => return None,
     };
     (!text.trim().is_empty()).then(|| text.trim().to_string())
-}
-
-fn clip_import_text(value: &str, limit: usize) -> String {
-    let trimmed = value.trim();
-    let mut output: String = trimmed.chars().take(limit).collect();
-    if trimmed.chars().count() > limit {
-        output.push('…');
-    }
-    output
 }
 
 /// Everything that changes over the life of one turn.

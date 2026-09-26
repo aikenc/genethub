@@ -7179,11 +7179,6 @@ async fn flush_turn(live: &Live, store: &Store) -> Result<()> {
     Ok(())
 }
 
-/// Tool status changes carry an implicit rule worth naming: a delta that names
-/// an item we have never seen is dropped rather than creating a phantom entry.
-#[allow(dead_code)]
-fn _doc_only(_: ToolStatus) {}
-
 /// Refuses a value the agent never offered.
 ///
 /// An empty list means the agent named nothing on that axis — not that everything

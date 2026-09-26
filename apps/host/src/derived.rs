@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use wasmtime::component::Component;
 use wasmtime::Engine;
 
+use crate::artifact::sha256_hex;
 use crate::channel;
 
 /// Metadata sidecar for one derived artifact. Serialized as JSON next to the
@@ -217,16 +218,6 @@ fn cpu_features_key() -> String {
 #[cfg(not(target_arch = "x86_64"))]
 fn cpu_features_key() -> String {
     format!("arch:{}", std::env::consts::ARCH)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        write!(hex, "{byte:02x}").expect("writing to a String");
-    }
-    hex
 }
 
 fn hex_prefix(digest: &[u8]) -> String {

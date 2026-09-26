@@ -95,7 +95,6 @@ pub async fn run() -> i32 {
         models,
         current_model,
         thinking_level,
-        auto_compaction: true,
         genehub_session_id: args.genehub_session_id,
         skills: skills::load(&cwd, &data_dir),
         additional_system_prompts: args.add_system_prompt,
@@ -262,11 +261,6 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
             guard.thinking_level = level;
             emitter.send(response(id, kind, None));
         }
-        "set_auto_compaction" => {
-            let enabled = command.bool_field("enabled").unwrap_or(true);
-            state.lock().await.auto_compaction = enabled;
-            emitter.send(response(id, kind, None));
-        }
         "compact" => {
             let busy = { state.lock().await.streaming };
             if busy {
@@ -370,7 +364,6 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
         models,
         current_model,
         thinking_level,
-        auto_compaction: false,
         genehub_session_id: session_id.clone(),
         skills,
         additional_system_prompts,
@@ -643,7 +636,6 @@ mod tests {
             models: vec![fake.clone()],
             current_model: Some(fake),
             thinking_level: "off".into(),
-            auto_compaction: true,
             genehub_session_id: None,
             skills: Vec::new(),
             additional_system_prompts: Vec::new(),

@@ -664,25 +664,16 @@ fn wrap_system_guidance(context: &str) -> String {
     )
 }
 
-fn clip(text: &str, limit: usize) -> String {
-    let text = text.trim();
-    let mut clipped: String = text.chars().take(limit).collect();
-    if text.chars().count() > limit {
-        clipped.push('…');
-    }
-    clipped
-}
-
 fn interrupted_note(prompt: &str, partial: &str) -> String {
     let mut note = String::from(
         "<genehub_interrupted_turn>\nThe user stopped the previous request before it finished; \
          it is not in this conversation's history. Take it into account, but only act on the new \
          request below.\nPrevious request:\n",
     );
-    note.push_str(&clip(prompt, INTERRUPTED_CLIP));
+    note.push_str(&super::clip_text(prompt, INTERRUPTED_CLIP));
     if !partial.trim().is_empty() {
         note.push_str("\nYour partial reply before the stop:\n");
-        note.push_str(&clip(partial, INTERRUPTED_CLIP));
+        note.push_str(&super::clip_text(partial, INTERRUPTED_CLIP));
     }
     note.push_str("\n</genehub_interrupted_turn>");
     note
@@ -1084,7 +1075,7 @@ fn grep_matches(success: &Value) -> Vec<SearchMatch> {
                         .get("lineNumber")
                         .and_then(Value::as_u64)
                         .map(|line| line as u32),
-                    preview: clip(str_at(hit, "content"), 200),
+                    preview: super::clip_text(str_at(hit, "content"), 200),
                 });
             }
         }

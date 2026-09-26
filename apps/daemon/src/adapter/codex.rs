@@ -485,8 +485,8 @@ impl AgentAdapter for CodexAdapter {
                     .to_string();
                 Some(ImportCandidate {
                     source_id,
-                    title: clipped(&title, 120),
-                    preview: clipped(&preview, 240),
+                    title: super::clip_text(&title, 120),
+                    preview: super::clip_text(&preview, 240),
                     updated_at_ms: thread
                         .get("updatedAt")
                         .and_then(Value::as_i64)
@@ -574,7 +574,7 @@ impl AgentAdapter for CodexAdapter {
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .or_else(|| preview.lines().next())
-                .map(|value| clipped(value, 120)),
+                .map(|value| super::clip_text(value, 120)),
             created_at_ms: thread
                 .get("createdAt")
                 .and_then(Value::as_i64)
@@ -651,14 +651,6 @@ async fn import_rpc(program: &Path, cwd: &Path, method: &str, params: Value) -> 
     .map_err(|_| anyhow!("codex timed out while handling {method}"))?;
     super::kill_tree(&mut child).await;
     answer
-}
-
-fn clipped(value: &str, limit: usize) -> String {
-    let mut text: String = value.trim().chars().take(limit).collect();
-    if value.trim().chars().count() > limit {
-        text.push('…');
-    }
-    text
 }
 
 /// Runs one handshake against a throwaway process and takes its answers away.

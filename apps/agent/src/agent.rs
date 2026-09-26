@@ -670,7 +670,6 @@ mod tests {
             models: Vec::new(),
             current_model: model,
             thinking_level: "medium".into(),
-            auto_compaction: true,
             genehub_session_id: None,
             additional_system_prompts: Vec::new(),
             skills: Vec::<Skill>::new(),

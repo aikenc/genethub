@@ -388,7 +388,7 @@ impl AgentAdapter for AcpAdapter {
                 );
             }
             let title = items.iter().find_map(|item| match item {
-                TimelineItem::UserMessage { text, .. } => Some(acp_clip(text, 120)),
+                TimelineItem::UserMessage { text, .. } => Some(super::clip_text(text, 120)),
                 _ => None,
             });
             let now = chrono::Utc::now().timestamp_millis();
@@ -563,14 +563,6 @@ fn acp_history_items(updates: &[Value]) -> Vec<TimelineItem> {
         });
     }
     items
-}
-
-fn acp_clip(value: &str, limit: usize) -> String {
-    let mut output: String = value.trim().chars().take(limit).collect();
-    if value.trim().chars().count() > limit {
-        output.push('…');
-    }
-    output
 }
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;

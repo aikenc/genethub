@@ -197,17 +197,6 @@ async fn unpair() -> i32 {
     }
 }
 
-/// Shared by `genet status` so the overview can attach a hub summary without
-/// inventing a second code path.
-#[allow(dead_code)]
-pub async fn status_value() -> Option<serde_json::Value> {
-    let rpc = Rpc::connect().await.ok()?;
-    match rpc.call(Request::HubStatus).await.ok()? {
-        Reply::HubStatus(status) => serde_json::to_value(status).ok(),
-        _ => None,
-    }
-}
-
 struct LoginOptions {
     hub_url: String,
     name: Option<String>,

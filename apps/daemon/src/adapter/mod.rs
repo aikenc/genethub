@@ -418,6 +418,16 @@ async fn exit_code(child: &Mutex<Option<crate::os_process::Child>>) -> Option<i3
 /// no console window; everywhere it means a process group of our own, so that
 /// ending the agent ends what the agent started rather than orphaning a
 /// language server or a dev server onto init (`crate::process`).
+/// Trim, then keep at most `limit` characters, appending `…` when cut.
+pub(super) fn clip_text(value: &str, limit: usize) -> String {
+    let trimmed = value.trim();
+    let mut text: String = trimmed.chars().take(limit).collect();
+    if trimmed.chars().count() > limit {
+        text.push('…');
+    }
+    text
+}
+
 pub fn owned_child(command: &mut crate::os_process::Command) {
     without_a_window(command);
     crate::process::own_group(command);

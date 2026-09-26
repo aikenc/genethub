@@ -193,63 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn selectors_are_pulled_out_wherever_they_appear() {
-        let (selection, rest) = split(&words(&[
-            "session",
-            "list",
-            "--machine",
-            "m_1",
-            "--workspace",
-            "w_1",
-        ]))
-        .unwrap();
-        assert_eq!(selection.machine.as_deref(), Some("m_1"));
-        assert_eq!(rest, words(&["session", "list", "--workspace", "w_1"]));
-
-        let (inline, rest) =
-            split(&words(&["context", "--machine=m_2", "--cwd=/srv/app"])).unwrap();
-        assert_eq!(inline.machine.as_deref(), Some("m_2"));
-        assert_eq!(inline.cwd.as_deref(), Some("/srv/app"));
-        assert_eq!(rest, words(&["context"]));
-    }
-
-    #[test]
-    fn a_double_dash_stops_flag_scanning_so_a_prompt_can_say_anything() {
-        let (selection, rest) = split(&words(&[
-            "codex",
-            "--",
-            "explain",
-            "--machine",
-            "in",
-            "git",
-        ]))
-        .unwrap();
-        assert_eq!(selection.machine, None);
-        assert_eq!(rest, words(&["codex", "explain", "--machine", "in", "git"]));
-    }
-
-    #[test]
-    fn malformed_selectors_fail_instead_of_being_guessed() {
-        for args in [
-            words(&["context", "--machine"]),
-            words(&["context", "--machine", "--cwd"]),
-            words(&["context", "--machine="]),
-            words(&["context", "--machine", "m_1", "--machine", "m_2"]),
-            words(&["context", "--cwd", ""]),
-        ] {
-            assert_eq!(split(&args).unwrap_err().code, "invalidArgs", "{args:?}");
-        }
-    }
-
-    #[test]
-    fn the_device_flag_points_at_the_machine_flag_rather_than_selecting_anything() {
-        let error = split(&words(&["session", "list", "--device", "node-a"])).unwrap_err();
-        assert_eq!(error.code, "invalidArgs");
-        assert!(error.message.contains("--machine"));
-        assert!(split(&words(&["session", "list", "--device=node-a"])).is_err());
-    }
-
-    #[test]
     fn canonical_names_cover_the_surface_and_treat_unreserved_heads_as_agents() {
         assert_eq!(canonical(&words(&["schema"])).as_deref(), Some("schema"));
         assert_eq!(

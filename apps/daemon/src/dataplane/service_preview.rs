@@ -51,9 +51,6 @@ fn signed(secret: &str, text: &str) -> Result<Vec<u8>> {
     mac.update(text.as_bytes());
     Ok(mac.finalize().into_bytes().to_vec())
 }
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 fn control(value: Value) -> Vec<u8> {
     let mut b = vec![0];
     b.extend(serde_json::to_vec(&value).unwrap());
@@ -92,7 +89,7 @@ async fn connect(run: &Run) -> Result<crate::transport::ws::Socket> {
     }
     let value: Value = serde_json::from_slice(&answer[1..])?;
     let actual = value["proof"].as_str().context("missing run proof")?;
-    let expected = hex(&signed(
+    let expected = crate::channel_auth::hex(&signed(
         &run.secret,
         &format!("server:{nonce}:{}", run.run_id),
     )?);
@@ -105,7 +102,7 @@ async fn connect(run: &Run) -> Result<crate::transport::ws::Socket> {
         .map_err(|_| anyhow!("service run identity changed"))?;
     socket
         .send(Message::Binary(control(
-            json!({"proof":hex(&signed(&run.secret,&format!("client:{nonce}:{}",run.run_id))?)}),
+            json!({"proof":crate::channel_auth::hex(&signed(&run.secret,&format!("client:{nonce}:{}",run.run_id))?)}),
         )))
         .await?;
     let ready = recv(&mut socket).await?;
@@ -143,7 +140,7 @@ async fn load_entry(
     } else {
         native.clone()
     };
-    let key = hex(&Sha256::digest(entry_identity.as_bytes()));
+    let key = crate::channel_auth::hex(&Sha256::digest(entry_identity.as_bytes()));
     let directory = state.paths.root.join("service-previews");
     if !directory.exists() {
         return Ok(None);

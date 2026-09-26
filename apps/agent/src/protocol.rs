@@ -251,10 +251,6 @@ impl Command {
     pub fn str_field(&self, key: &str) -> Option<String> {
         self.rest.get(key)?.as_str().map(|s| s.to_string())
     }
-
-    pub fn bool_field(&self, key: &str) -> Option<bool> {
-        self.rest.get(key)?.as_bool()
-    }
 }
 
 pub fn response(id: Option<&str>, command: &str, data: Option<Value>) -> Value {

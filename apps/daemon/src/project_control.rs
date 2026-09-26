@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, MutexGuard};
 
+use crate::session::store::now_ms;
+
 const CHALLENGE_TTL_MS: i64 = 10 * 60 * 1_000;
 const APPROVE: &str = "approve-once";
 const REJECT: &str = "reject";
@@ -863,10 +865,6 @@ fn validate_path_id(value: &str, label: &str) -> Result<()> {
         bail!("{label} is invalid");
     }
     Ok(())
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 pub(crate) fn agent_space_plan_digest(
