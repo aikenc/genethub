@@ -58,6 +58,16 @@ pub async fn stream(
     }
 }
 
+/// Named levels map to Anthropic-style token budgets. The returned budget is
+/// always at least 1024 and at least 1024 below `max_tokens`, which is what
+/// that API requires.
+pub fn capped_thinking_budget(level: &str, max_tokens: u64) -> Option<u32> {
+    let wanted = thinking_budget(level)?;
+    let room = u32::try_from(max_tokens.saturating_sub(1_024)).unwrap_or(u32::MAX);
+    let budget = wanted.min(room);
+    (budget >= 1_024).then_some(budget)
+}
+
 /// Named levels map to Anthropic-style token budgets.
 pub fn thinking_budget(level: &str) -> Option<u32> {
     match level {
@@ -130,6 +140,10 @@ mod tests {
         assert_eq!(thinking_budget("off"), None);
         assert_eq!(thinking_budget("medium"), Some(4096));
         assert_eq!(thinking_budget("max"), Some(32768));
+        assert_eq!(capped_thinking_budget("high", 65_536), Some(8192));
+        assert_eq!(capped_thinking_budget("max", 8_192), Some(7_168));
+        assert_eq!(capped_thinking_budget("high", 1_024), None);
+        assert_eq!(capped_thinking_budget("off", 65_536), None);
         assert_eq!(reasoning_effort("xhigh"), Some("high"));
         assert_eq!(reasoning_effort("off"), None);
     }

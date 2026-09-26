@@ -52,6 +52,14 @@ impl ModelConfig {
         std::env::var(var).ok().filter(|k| !k.is_empty())
     }
 
+    /// Explicit output limit, otherwise one eighth of the context window, capped
+    /// at 64k. Callers that have neither fall back to 8192.
+    pub(crate) fn output_budget(&self) -> u64 {
+        self.max_tokens
+            .or_else(|| self.context_window.map(derived_max_tokens))
+            .unwrap_or(8_192)
+    }
+
     pub fn to_ref(&self) -> ModelRef {
         ModelRef {
             provider: self.provider.clone(),

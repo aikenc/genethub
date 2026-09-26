@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{media, thinking_budget, ProviderEvent, Request, SseBuffer};
+use super::{capped_thinking_budget, media, ProviderEvent, Request, SseBuffer};
 use crate::config::ModelConfig;
 use crate::protocol::{Content, Message, StopReason, Usage};
 
@@ -161,9 +161,10 @@ pub async fn stream(
 }
 
 fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
+    let max_tokens = model.output_budget();
     let mut body = json!({
         "model": model.id,
-        "max_tokens": model.max_tokens.unwrap_or(8192),
+        "max_tokens": max_tokens,
         "stream": true,
         "system": request.system_prompt,
         "messages": convert_messages(model, &request.cwd, &request.messages)?,
@@ -185,8 +186,10 @@ fn build_body(model: &ModelConfig, request: &Request) -> anyhow::Result<Value> {
         );
     }
 
-    if let Some(budget) = thinking_budget(&request.thinking_level) {
-        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+    if model.reasoning.unwrap_or(false) {
+        if let Some(budget) = capped_thinking_budget(&request.thinking_level, max_tokens) {
+            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        }
     }
 
     Ok(body)
@@ -364,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_budget_is_attached_when_enabled() {
+    fn thinking_budget_is_attached_only_when_the_model_reasons() {
         let request = Request {
             system_prompt: "sys".into(),
             messages: vec![],
@@ -372,8 +375,29 @@ mod tests {
             thinking_level: "high".into(),
             cwd: ".".into(),
         };
-        let body = build_body(&model(), &request).unwrap();
+        let mut model = model();
+        model.max_tokens = Some(65_536);
+        let body = build_body(&model, &request).unwrap();
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
+        model.reasoning = Some(false);
+        assert!(build_body(&model, &request).unwrap().get("thinking").is_none());
+    }
+
+    #[test]
+    fn thinking_budget_stays_below_the_output_limit() {
+        let request = Request {
+            system_prompt: "sys".into(),
+            messages: vec![],
+            tools: vec![],
+            thinking_level: "max".into(),
+            cwd: ".".into(),
+        };
+        let mut model = model();
+        model.max_tokens = Some(8_192);
+        let body = build_body(&model, &request).unwrap();
+        assert_eq!(body["thinking"]["budget_tokens"], 7_168);
+        model.max_tokens = Some(1_024);
+        assert!(build_body(&model, &request).unwrap().get("thinking").is_none());
     }
 
     #[test]
