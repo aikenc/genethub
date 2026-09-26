@@ -935,3 +935,129 @@ defineSpecialty(
     );
   },
 );
+
+async function pairRelayedDevice(
+  opened: Opened,
+  url: string,
+  deviceName: string,
+): Promise<{ deviceId: string; secret: string }> {
+  const invite = await opened.client.call({ type: "device.invite", payload: null });
+  if (invite?.type !== "invite") throw new Error(`device.invite returned ${invite?.type}`);
+  const code = invite.data.code;
+  const split = code.indexOf(".");
+  if (split <= 0) throw new Error("device invite is not inviteId.secret");
+  const pairing = await connectProductClient({
+    url,
+    inviteCredential: { inviteId: code.slice(0, split), secret: code.slice(split + 1) },
+    name: `${deviceName}-pairing`,
+  });
+  try {
+    const claimed = await pairing.call({
+      type: "device.claim",
+      payload: { code: code.slice(0, split), deviceName },
+    });
+    if (claimed?.type !== "claimed") throw new Error(`device.claim returned ${claimed?.type}`);
+    return claimed.data;
+  } finally {
+    pairing.close();
+  }
+}
+
+defineSpecialty(
+  neteffMeta({
+    id: "specialty.neteff.relay-uplink-cross-client-fairness",
+    title: "One relayed client's bulk transfer does not starve another client on the shared daemon uplink",
+    oracle:
+      "two separately paired clients reach one daemon through a real rendezvous relay whose single daemon leg is shaped to 20Mbps; while client A's 24 MiB Preview is still in flight, every public workspace.list from client B completes within 1500ms and A's bytes match the source SHA-256",
+    catches: [
+      "one peer's bulk frames monopolize the daemon's single relay uplink",
+      "uplink socket buffering adds seconds of head-of-line delay for other clients",
+      "a second client's reply is routed behind or into another client's stream",
+    ],
+    relay: true,
+  }),
+  async (t) => {
+    requireWasmArtifacts(t.openRoot);
+    const file = seedImage(t, "neteff-shared-uplink-24m.png", 24 * MIB);
+    const relay = await startRelay({ openRoot: t.openRoot });
+    const daemonLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 40, bandwidthMbps: 20 } });
+    const clientLink = await startShapedTcpProxy({ targetUrl: relay.origin, profile: { rttMs: 60, bandwidthMbps: LINK_BANDWIDTH_MBPS } });
+    const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
+    const idle: number[] = [], busy: number[] = [];
+    let bulk: ProductSample | null = null;
+    let probedUnderLoad = false;
+    try {
+      const attached = await opened.client.call({
+        type: "device.remoteAttach",
+        payload: { relayUrl: daemonLink.urlFor(relay.origin), joinToken: relay.joinToken },
+      });
+      if (attached?.type !== "remoteAccess" || typeof attached.data.rendezvousUrl !== "string") {
+        throw new Error(`device.remoteAttach returned ${attached?.type}`);
+      }
+      const routed = clientLink.urlFor(attached.data.rendezvousUrl);
+      await t.tools.waitUntil(async () => {
+        const devices = await opened.client.call({ type: "device.list" });
+        return devices?.type === "devices" && devices.data.remote.online === true;
+      }, 20_000);
+      const bulkCredential = await pairRelayedDevice(opened, routed, "neteff-bulk");
+      const interactiveCredential = await pairRelayedDevice(opened, routed, "neteff-interactive");
+      const probe = new PreviewProbe();
+      const bulkClient = await connectProductClient({
+        url: routed, credential: bulkCredential, name: "neteff-bulk", onDiagnostic: probe.onDiagnostic,
+        redial: async () => ({ url: routed, credential: bulkCredential }),
+      });
+      const interactive = await connectProductClient({
+        url: routed, credential: interactiveCredential, name: "neteff-interactive",
+        redial: async () => ({ url: routed, credential: interactiveCredential }),
+      });
+      const timedList = async (): Promise<number> => {
+        const began = performance.now();
+        const reply = await interactive.call({ type: "workspace.list" });
+        t.assertions.assert(reply?.type === "workspaces", `workspace.list from client B returned ${reply?.type}`);
+        return performance.now() - began;
+      };
+      try {
+        for (let i = 0; i < 5; i++) idle.push(await timedList());
+        daemonLink.resetStats();
+        let previewFinished = false;
+        const preview = measurePreview(t, { client: bulkClient, opened, file, probe })
+          .then(result => { previewFinished = true; return result; });
+        void preview.catch(() => {});
+        // The daemon dials this proxy, so its uplink bytes are client-to-target.
+        await t.tools.waitUntil(() => daemonLink.stats().clientToTargetBytes >= 2 * MIB, 20_000);
+        for (let i = 0; i < 5; i++) {
+          busy.push(await timedList());
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        probedUnderLoad = !previewFinished;
+        bulk = await preview;
+      } finally {
+        interactive.close();
+        bulkClient.close();
+      }
+    } catch (error) {
+      const tail = relay.logTail().trim();
+      if (error instanceof Error && tail.length > 0) {
+        error.message = `${error.message}\n\nrelay log tail:\n${tail.slice(-3072)}`;
+      }
+      throw error;
+    } finally {
+      opened.client.close();
+      opened.daemon.stop();
+      await opened.mock.stop();
+      await clientLink.stop();
+      await daemonLink.stop();
+      relay.stop();
+    }
+    const worst = Math.max(...busy);
+    t.note(
+      `shared daemon uplink 20Mbps/40ms, client legs ${LINK_BANDWIDTH_MBPS}Mbps/60ms, client A Preview 24MiB\n` +
+        `client B workspace.list idle p50=${percentile(idle, 0.5).toFixed(0)}ms max=${Math.max(...idle).toFixed(0)}ms; ` +
+        `during A p50=${percentile(busy, 0.5).toFixed(0)}ms max=${worst.toFixed(0)}ms target<=1500ms\n` +
+        `samples during A: ${busy.map(ms => ms.toFixed(0)).join(",")}ms; ` +
+        `A ${bulk ? `${(bulk.elapsedMs / 1000).toFixed(1)}s ${bulk.mibPerSec.toFixed(2)}MiB/s` : "-"}`,
+    );
+    t.assertions.assert(probedUnderLoad, "client A's Preview finished before client B's probes ended");
+    t.assertions.assert(worst <= 1_500, `client B's workspace.list waited ${worst.toFixed(0)}ms behind client A's Preview on the shared uplink`);
+  },
+);
