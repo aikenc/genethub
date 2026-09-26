@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod fake;
+pub(crate) mod transform;
 // Shared with `tools::media`, which registers agent-requested attachments and
 // must enforce the same confinement and size rules before the loop injects
 // them into the conversation.

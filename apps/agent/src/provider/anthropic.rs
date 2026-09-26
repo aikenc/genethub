@@ -201,6 +201,7 @@ pub fn convert_messages(
     cwd: &Path,
     messages: &[Message],
 ) -> anyhow::Result<Value> {
+    let messages = super::transform::provider_history(messages);
     let mut out: Vec<Value> = Vec::new();
     let latest_user = messages
         .iter()

@@ -218,6 +218,7 @@ pub fn convert_messages(
     system_prompt: &str,
     messages: &[Message],
 ) -> anyhow::Result<Value> {
+    let messages = super::transform::provider_history(messages);
     let mut out = vec![json!({ "role": "system", "content": system_prompt })];
     let latest_user = messages
         .iter()
