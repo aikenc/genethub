@@ -25,7 +25,7 @@ use genehub_proto::{
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, RwLock};
 
 use super::context_seed::{
     build_context_seed, build_portable_context_seed, prompt_with_seed, seed_token_budget,
@@ -427,6 +427,9 @@ pub struct SessionManager {
     registry: Arc<Registry>,
     diagnostics: Arc<Diagnostics>,
     sessions: RwLock<HashMap<String, Arc<Live>>>,
+    /// First load of a session that is not in memory. Disk reads stay outside
+    /// `sessions` so one cold session cannot block every other lookup.
+    hydrating: Mutex<HashMap<String, watch::Sender<bool>>>,
     /// What each session's agent has left running. Owned here because that is
     /// where the ownership is: a stray process belongs to the conversation
     /// whose agent started it, and there is no such thing as one without a
@@ -465,6 +468,7 @@ impl SessionManager {
             registry,
             diagnostics,
             sessions: RwLock::new(HashMap::new()),
+            hydrating: Mutex::new(HashMap::new()),
             processes: crate::processes::Processes::new(),
             replay_window: replay_window.max(1),
             import_candidates: Mutex::new(HashMap::new()),
@@ -1506,15 +1510,48 @@ impl SessionManager {
     }
 
     async fn live(&self, session_id: &str) -> Result<Arc<Live>> {
-        if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
-            return Ok(live);
+        loop {
+            if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
+                return Ok(live);
+            }
+            let mut gates = self.hydrating.lock().await;
+            if let Some(live) = self.sessions.read().await.get(session_id).cloned() {
+                return Ok(live);
+            }
+            if let Some(sender) = gates.get(session_id) {
+                let mut done = sender.subscribe();
+                drop(gates);
+                if !*done.borrow() {
+                    let _ = done.changed().await;
+                }
+                continue;
+            }
+            let (sender, _receiver) = watch::channel(false);
+            gates.insert(session_id.to_string(), sender.clone());
+            drop(gates);
+            let loaded = self.hydrate_from_disk(session_id).await;
+            let mut sessions = self.sessions.write().await;
+            let outcome = if let Some(existing) = sessions.get(session_id).cloned() {
+                Ok(existing)
+            } else {
+                match loaded {
+                    Ok(live) => {
+                        sessions.insert(session_id.to_string(), live.clone());
+                        Ok(live)
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            drop(sessions);
+            self.hydrating.lock().await.remove(session_id);
+            let _ = sender.send(true);
+            return outcome;
         }
-        let mut sessions = self.sessions.write().await;
-        if let Some(live) = sessions.get(session_id) {
-            return Ok(live.clone());
-        }
-        // Not in memory: rehydrate from disk so a restart does not lose access
-        // to past conversations.
+    }
+
+    /// Disk load for a session that is not in the memory map. The `sessions`
+    /// lock is not held, so other conversations can still be found.
+    async fn hydrate_from_disk(&self, session_id: &str) -> Result<Arc<Live>> {
         let mut meta = self
             .store
             .list_meta()?
@@ -1583,7 +1620,6 @@ impl SessionManager {
         *live.rounds.lock().await = chat.rounds;
         *live.turn_items.lock().await = unsaved;
         *live.active_round.lock().await = restored_round;
-        sessions.insert(session_id.to_string(), live.clone());
         Ok(live)
     }
 
