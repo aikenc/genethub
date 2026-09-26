@@ -568,12 +568,14 @@ fn modes_in(help: &str) -> Vec<ModeInfo> {
         id: MODE_BYPASS.into(),
         label: "Bypass permissions".into(),
         description: Some("Never ask about tool use".into()),
+        unattended: true,
     }];
     if let Some(ask) = ask_mode_in(help) {
         modes.push(ModeInfo {
             id: ask.into(),
             label: "Default".into(),
             description: Some("Ask before every tool call".into()),
+            unattended: false,
         });
     }
     for (id, label, description) in MODES {
@@ -582,6 +584,7 @@ fn modes_in(help: &str) -> Vec<ModeInfo> {
                 id: id.into(),
                 label: label.into(),
                 description: Some(description.into()),
+                unattended: id == MODE_ACCEPT_EDITS,
             });
         }
     }

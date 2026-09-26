@@ -3089,39 +3089,45 @@ impl SessionManager {
         live: &Arc<Live>,
         providers: &ProviderMap,
         elevated: bool,
-    ) -> Result<()> {
-        if elevated {
+    ) -> Result<bool> {
+        let mode_id = if elevated {
             let agent_id = live.meta.lock().await.agent_id.clone();
-            if let Some(mode_id) = self
-                .registry
+            self.registry
                 .require(&agent_id)?
                 .catalog(providers)
                 .await
-                .default_mode
-            {
-                let changed = {
-                    let mut meta = live.meta.lock().await;
-                    if meta.mode_id.as_deref() == Some(mode_id.as_str()) {
-                        false
-                    } else {
-                        meta.mode_id = Some(mode_id.clone());
-                        meta.updated_at_ms = now_ms();
-                        self.store.save_meta(&meta)?;
-                        true
-                    }
-                };
-                if changed {
-                    live.publish(SessionEvent::ModeChanged {
-                        mode_id: mode_id.clone(),
-                    })
-                    .await;
+                .modes
+                .into_iter()
+                .find(|mode| mode.unattended)
+                .map(|mode| mode.id)
+        } else {
+            None
+        };
+        let applied = mode_id.is_some();
+        if let Some(mode_id) = mode_id {
+            let changed = {
+                let mut meta = live.meta.lock().await;
+                if meta.mode_id.as_deref() == Some(mode_id.as_str()) {
+                    false
+                } else {
+                    meta.mode_id = Some(mode_id.clone());
+                    meta.updated_at_ms = now_ms();
+                    self.store.save_meta(&meta)?;
+                    true
                 }
-                if let Some(agent) = live.agent().await {
-                    agent.set_mode(&mode_id).await?;
-                }
+            };
+            if changed {
+                live.publish(SessionEvent::ModeChanged {
+                    mode_id: mode_id.clone(),
+                })
+                .await;
+            }
+            if let Some(agent) = live.agent().await {
+                agent.set_mode(&mode_id).await?;
             }
         }
-        self.ensure_started_in_mode(live, providers, None).await
+        self.ensure_started_in_mode(live, providers, None).await?;
+        Ok(!elevated || applied)
     }
 
     /// Starts a stopped native session in the mode stored on the session.
@@ -4054,15 +4060,24 @@ impl SessionManager {
         };
         let mut cancel = execution.cancel.subscribe();
         let handover = async {
-            self.persist_elevation(live, providers, continuation.elevated)
+            let elevated = self
+                .persist_elevation(live, providers, continuation.elevated)
                 .await?;
+            let prompt = if continuation.elevated && !elevated {
+                format!(
+                    "{}\n\nThis agent has no unattended mode, so the approval cannot raise its permission mode. Tell the user that, and do not ask for elevation again.",
+                    continuation.prompt
+                )
+            } else {
+                continuation.prompt
+            };
             let agent = live
                 .agent()
                 .await
                 .ok_or_else(|| anyhow!("the resumed session has no agent"))?;
             let turn_id = agent
                 .send(PromptInput {
-                    text: continuation.prompt,
+                    text: prompt,
                     attachments: Vec::new(),
                 })
                 .await?;
@@ -12654,6 +12669,7 @@ mod tests {
                 id: "agent".into(),
                 label: "Agent".into(),
                 description: None,
+                unattended: false,
             }],
             commands: Vec::new(),
             runtime_axes: Some(vec![genehub_proto::RuntimeAxisInfo {

@@ -312,6 +312,7 @@ impl AgentAdapter for CodexAdapter {
                     id: mode.id.into(),
                     label: mode.label.into(),
                     description: Some(mode.description.into()),
+                    unattended: mode.id == "full-access",
                 })
                 .collect(),
             // Its skills are invoked as `$name` with a `{"type":"skill"}` input

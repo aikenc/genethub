@@ -5487,6 +5487,7 @@ mod tests {
                         id: (*id).into(),
                         label: (*id).into(),
                         description: None,
+                        unattended: false,
                     })
                     .collect(),
                 default_model: models.first().map(|(id, _)| (*id).into()),

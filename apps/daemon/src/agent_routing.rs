@@ -547,33 +547,11 @@ fn unrestricted_mode(agent: &AgentInfo) -> Option<String> {
     if !agent.capabilities.permissions {
         return None;
     }
-    let known = match agent.id.as_str() {
-        "codex" | "acp:codex" | "acp:codex-acp" => &["full-access"][..],
-        "claude" | "tclaude" | "acp:claude" | "acp:claude-code" => &["bypassPermissions"][..],
-        _ => &[][..],
-    };
-    known
+    agent
+        .catalog
+        .modes
         .iter()
-        .find_map(|id| {
-            agent
-                .catalog
-                .modes
-                .iter()
-                .find(|mode| mode.id.eq_ignore_ascii_case(id))
-        })
-        .or_else(|| {
-            agent.catalog.modes.iter().find(|mode| {
-                let id = mode.id.to_ascii_lowercase();
-                let label = mode.label.to_ascii_lowercase();
-                matches!(
-                    id.as_str(),
-                    "full-access" | "full_access" | "unrestricted" | "bypasspermissions"
-                ) || label.contains("full access")
-                    || label.contains("unrestricted")
-                    || mode.label.contains("完全")
-                    || mode.label.contains("全开")
-            })
-        })
+        .find(|mode| mode.unattended)
         .map(|mode| mode.id.clone())
 }
 
@@ -599,7 +577,7 @@ fn tags_equal(left: &str, right: &str) -> bool {
 mod tests {
     use super::*;
     use genehub_proto::{
-        Attachment, Capabilities, Catalog, ModelInfo, ToolCallDetail, ToolImage, ToolKind,
+        Attachment, Capabilities, Catalog, ModeInfo, ModelInfo, ToolCallDetail, ToolImage, ToolKind,
         ToolStatus,
     };
 
@@ -842,5 +820,27 @@ mod tests {
             finished_at_ms: None,
         }];
         assert_eq!(media_tags_for_timeline(&items), vec![TAG_IMAGE.to_string()]);
+    }
+
+    #[test]
+    fn elevation_follows_the_unattended_flag_and_ignores_a_permissive_label() {
+        let mut asking = agent("custom", "model", None);
+        asking.capabilities.permissions = true;
+        asking.catalog.modes = vec![ModeInfo {
+            id: "ask".into(),
+            label: "完全开放".into(),
+            description: None,
+            unattended: false,
+        }];
+        asking.catalog.default_mode = Some("ask".into());
+        assert_eq!(unrestricted_mode(&asking), None);
+
+        asking.catalog.modes.push(ModeInfo {
+            id: "open".into(),
+            label: "Open".into(),
+            description: None,
+            unattended: true,
+        });
+        assert_eq!(unrestricted_mode(&asking).as_deref(), Some("open"));
     }
 }

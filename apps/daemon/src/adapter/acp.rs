@@ -1311,6 +1311,24 @@ fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
     (Vec::new(), None)
 }
 
+fn acp_mode_unattended(mode: &Value) -> bool {
+    if mode.get("unattended").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    if mode
+        .get("_meta")
+        .and_then(|meta| meta.get("unattended"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    matches!(
+        mode.get("id").and_then(Value::as_str).unwrap_or(""),
+        "full-access" | "bypassPermissions" | "acceptEdits"
+    )
+}
+
 fn modes_in(result: &Value) -> (Vec<ModeInfo>, Option<String>) {
     if let Some(modes) = result.get("modes") {
         let current = modes
@@ -1336,6 +1354,7 @@ fn modes_in(result: &Value) -> (Vec<ModeInfo>, Option<String>) {
                             .get("description")
                             .and_then(Value::as_str)
                             .map(ToString::to_string),
+                        unattended: acp_mode_unattended(mode),
                     })
                     .collect();
                 return (list, current);
@@ -1362,6 +1381,7 @@ fn modes_in(result: &Value) -> (Vec<ModeInfo>, Option<String>) {
                 id: value,
                 label: name,
                 description,
+                unattended: false,
             })
             .collect();
         return (list, current);

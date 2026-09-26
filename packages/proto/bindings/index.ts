@@ -780,7 +780,12 @@ export type ManagedSessionInfo = { parentSessionId: string, workflowRunId: strin
  */
 role: string, userInteraction: SessionUserInteraction, evidenceScope?: SessionEvidenceScope, };
 
-export type ModeInfo = { id: string, label: string, description?: string, };
+export type ModeInfo = { id: string, label: string, description?: string, 
+/**
+ * This mode does not ask a person about tool use. Elevation selects it
+ * and stays there. Absent on older catalogs, which means it does not.
+ */
+unattended: boolean, };
 
 export type ModelInfo = { id: string, label: string, contextWindow?: number, reasoning: boolean, 
 /**

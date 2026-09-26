@@ -121,16 +121,19 @@ fn cursor_modes() -> Vec<ModeInfo> {
             id: "agent".into(),
             label: "Agent".into(),
             description: Some("Full tool access".into()),
+            unattended: false,
         },
         ModeInfo {
             id: "plan".into(),
             label: "Plan".into(),
             description: Some("Read-only planning".into()),
+            unattended: false,
         },
         ModeInfo {
             id: "ask".into(),
             label: "Ask".into(),
             description: Some("Read-only questions".into()),
+            unattended: false,
         },
     ]
 }

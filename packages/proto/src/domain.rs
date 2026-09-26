@@ -68,6 +68,10 @@ pub struct ModeInfo {
     pub label: String,
     #[ts(optional)]
     pub description: Option<String>,
+    /// This mode does not ask a person about tool use. Elevation selects it
+    /// and stays there. Absent on older catalogs, which means it does not.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 /// An Agent-owned runtime dimension beyond model, mode and thinking depth.
