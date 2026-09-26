@@ -1587,12 +1587,7 @@ impl SessionManager {
             }
         }
         let unsaved = self.recover_interrupted_turn(&meta, &mut chat).await?;
-        let restored_round = if meta.pending_permission.is_some()
-            || meta
-                .human_continuation
-                .as_ref()
-                .is_some_and(|c| !c.completed)
-        {
+        let restored_round = if meta.awaiting_human() {
             chat.rounds
                 .last()
                 .map(|record| -> Result<ActiveRound> {
@@ -1884,12 +1879,7 @@ impl SessionManager {
                     (status, live.activity_of(status))
                 }
                 None if meta.execution_retired => (SessionStatus::Closed, None),
-                None if meta.pending_permission.is_some()
-                    || meta
-                        .human_continuation
-                        .as_ref()
-                        .is_some_and(|c| !c.completed) =>
-                {
+                None if meta.awaiting_human() => {
                     (SessionStatus::Waiting, None)
                 }
                 None => (SessionStatus::Idle, None),
@@ -4985,10 +4975,7 @@ impl Live {
     fn new(meta: SessionMeta, store: Store) -> Self {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let pending = meta.pending_permission.clone();
-        let queued = meta
-            .human_continuation
-            .as_ref()
-            .is_some_and(|c| !c.completed);
+        let waiting = meta.awaiting_human();
         let retired = meta.execution_retired;
         Live {
             execution: Mutex::new(None),
@@ -5002,7 +4989,7 @@ impl Live {
             meta: Mutex::new(meta),
             status: Mutex::new(if retired {
                 SessionStatus::Closed
-            } else if pending.is_some() || queued {
+            } else if waiting {
                 SessionStatus::Waiting
             } else {
                 SessionStatus::Idle

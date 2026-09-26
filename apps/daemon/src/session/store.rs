@@ -571,6 +571,20 @@ impl SessionMeta {
         self.format <= SESSION_FORMAT
     }
 
+    /// A person still has to answer, or their answer is saved and not yet
+    /// delivered. `human_wait` is that record. The older fields cover a meta
+    /// that has not been folded yet.
+    pub fn awaiting_human(&self) -> bool {
+        if self.human_wait.is_some() {
+            return true;
+        }
+        self.pending_permission.is_some()
+            || self
+                .human_continuation
+                .as_ref()
+                .is_some_and(|continuation| !continuation.completed)
+    }
+
     pub fn summary(&self, status: SessionStatus) -> SessionSummary {
         self.summary_with_activity(status, None)
     }
@@ -2485,6 +2499,7 @@ mod project_home_tests {
             questions: None,
         });
         adopt_human_wait(&mut session);
+        assert!(session.awaiting_human());
         let wait = session.human_wait.as_ref().expect("migrated");
         assert_eq!(wait.kind, WaitKind::Question);
         assert!(matches!(wait.origin, WaitOrigin::Workflow { ref run_id } if run_id == "wr_1"));
@@ -2500,5 +2515,6 @@ mod project_home_tests {
         });
         sync_human_wait(&mut session);
         assert!(session.human_wait.is_none());
+        assert!(!session.awaiting_human());
     }
 }
