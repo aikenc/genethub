@@ -25,7 +25,6 @@ pub fn start(program: &Program, request: StartRequest) -> Result<Transition> {
         execution_id: request.execution_id,
         revision: 0,
         logical_time_ms: request.now_ms,
-        deadline_ms: request.deadline_ms,
         next_id: 2,
         operations_started: 0,
         control_steps: 0,
@@ -55,9 +54,10 @@ pub fn pending(state: &EngineState) -> PendingWork {
         operations: state.operations.values().cloned().collect(),
         wake_at_ms: if state.status == Status::Running {
             state
-                .deadline_ms
-                .into_iter()
-                .chain(state.operations.values().filter_map(|op| op.deadline_ms))
+                .operations
+                .values()
+                .filter(|op| op.phase != OperationPhase::Waiting)
+                .filter_map(|op| op.deadline_ms)
                 .min()
         } else {
             None
@@ -95,21 +95,13 @@ pub fn advance(program: &Program, previous: &EngineState, input: Input) -> Resul
             Status::Stopping,
             Outcome::failed("hostFailure", reason),
         );
-    } else if state.status == Status::Running
-        && state
-            .deadline_ms
-            .is_some_and(|d| state.logical_time_ms >= d)
-    {
-        stop(
-            &mut state,
-            Status::Stopping,
-            Outcome::failed("deadlineExceeded", "execution deadline reached"),
-        );
     }
     if state.status == Status::Running
         && state.operations.values().any(|op| {
-            op.deadline_ms
-                .is_some_and(|deadline| state.logical_time_ms >= deadline)
+            op.phase != OperationPhase::Waiting
+                && op
+                    .deadline_ms
+                    .is_some_and(|deadline| state.logical_time_ms >= deadline)
         })
     {
         stop(
@@ -144,14 +136,24 @@ pub fn advance(program: &Program, previous: &EngineState, input: Input) -> Resul
                         }
                     }
                     update => {
+                        let now = state.logical_time_ms;
                         let target = state.operations.get_mut(&id).expect("operation");
                         target.update_seq = update_seq;
                         if target.phase == OperationPhase::Requested
                             && matches!(update, ActivityUpdate::Accepted)
                         {
+                            target.deadline_ms =
+                                target.timeout_ms.map(|ms| now.saturating_add(ms));
+                        } else if matches!(update, ActivityUpdate::Waiting) {
+                            if target.phase != OperationPhase::Waiting {
+                                target.deadline_ms = target
+                                    .deadline_ms
+                                    .map(|deadline| deadline.saturating_sub(now));
+                            }
+                        } else if target.phase == OperationPhase::Waiting {
                             target.deadline_ms = target
-                                .timeout_ms
-                                .map(|ms| state.logical_time_ms.saturating_add(ms));
+                                .deadline_ms
+                                .map(|remaining| now.saturating_add(remaining));
                         }
                         if target.phase != OperationPhase::Cancelling {
                             target.phase = match update {

@@ -32,8 +32,8 @@ pub(crate) fn schema() -> Value {
         },
         "requestBudget": {
             "inputs": "none; current Run's shared request only",
-            "output": ["requestRunId", "observedAtMs", "budget", "usedRuns", "observedLlmRounds", "executionMs", "remainingRuns", "remainingLlmRounds", "remainingExecutionMs"],
-            "budget": ["revision", "maxRuns", "deadlineMs", "maxLlmRounds"],
+            "output": ["requestRunId", "observedAtMs", "budget", "usedRuns", "observedLlmRounds", "remainingRuns", "remainingLlmRounds"],
+            "budget": ["revision", "maxRuns", "maxLlmRounds"],
             "semantics": "Immutable observation, not reservation or permission. Query again to observe changes. Only PM control can adjust limits."
         },
         "include": {
@@ -238,6 +238,7 @@ pub(super) fn check_draft(
                 return report;
             }
             report.valid = true;
+            note_retired_fields(&mut report, &package.root);
             report.candidate_digest = Some(candidate.digest);
             report.executor_path = candidate.package.executor_path;
             report.workflows = candidate
@@ -252,6 +253,85 @@ pub(super) fn check_draft(
         }
     }
     report
+}
+
+fn note_retired_fields(report: &mut WorkflowDraftReport, root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root.join("flows")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str(&text) else {
+            continue;
+        };
+        let file = format!(
+            "flows/{}",
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("flow.yaml")
+        );
+        for (key, child) in map {
+            let Some(name) = key.as_str() else {
+                continue;
+            };
+            match name {
+                "pmAnswerSeconds" => push(
+                    report,
+                    retired(&file, "/pmAnswerSeconds", "info", "pmAnswerSeconds 已废弃并忽略"),
+                ),
+                "budget" => note_mapping(report, &file, "/budget", child, &["maxRuns", "maxLlmRounds"], &[("deadlineSeconds", "deadlineSeconds 已废弃并忽略")]),
+                "structure" => note_mapping(report, &file, "/structure", child, &["body", "procedures", "input", "limits"], &[("timeoutMs", "timeoutMs 已废弃并忽略")]),
+                "schema" | "id" | "version" | "entry" | "outcomes" | "include" | "nodes" => {}
+                other => push(
+                    report,
+                    retired(&file, &format!("/{other}"), "warning", "未知字段，已忽略"),
+                ),
+            }
+        }
+    }
+}
+
+fn note_mapping(
+    report: &mut WorkflowDraftReport,
+    file: &str,
+    prefix: &str,
+    value: serde_yaml::Value,
+    known: &[&str],
+    retired_keys: &[(&str, &str)],
+) {
+    let Some(map) = value.as_mapping() else {
+        return;
+    };
+    for (key, _) in map {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        if let Some((_, message)) = retired_keys.iter().find(|(key, _)| *key == name) {
+            push(report, retired(file, &format!("{prefix}/{name}"), "info", message));
+        } else if !known.contains(&name) {
+            push(report, retired(file, &format!("{prefix}/{name}"), "warning", "未知字段，已忽略"));
+        }
+    }
+}
+
+fn retired(file: &str, path: &str, severity: &str, message: &str) -> WorkflowDiagnostic {
+    WorkflowDiagnostic {
+        phase: "compile".into(),
+        code: "WF_FIELD_RETIRED".into(),
+        severity: severity.into(),
+        file: file.into(),
+        path: path.into(),
+        message: message.into(),
+        hint: "旧流程包可以继续加载；删除该字段即可消除这条提示。".into(),
+        expected: None,
+        actual: None,
+        line: None,
+        column: None,
+    }
 }
 
 fn push(report: &mut WorkflowDraftReport, mut diagnostic: WorkflowDiagnostic) {

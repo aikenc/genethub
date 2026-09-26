@@ -71,8 +71,8 @@ same serialization when both are omitted; old Runs are not rewritten.
 
 `request.budget` is a host capability with no `with` or `completion` fields.
 An ordinary task returns a persisted `output` containing `requestRunId`,
-`observedAtMs`, `budget` (revision/maxRuns/deadlineMs/maxLlmRounds), `usedRuns`,
-`observedLlmRounds`, `executionMs` and remainingRuns/remainingLlmRounds/remainingExecutionMs.
+`observedAtMs`, `budget` (revision/maxRuns/maxLlmRounds), `usedRuns`,
+`observedLlmRounds` and remainingRuns/remainingLlmRounds.
 It reads only its own shared request using the same accounting as admission and
 `workflow check`. The observation is neither a reservation nor authority to raise
 limits. It survives restart unchanged; query again to observe a budget amendment

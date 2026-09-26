@@ -1009,7 +1009,7 @@ output?: unknown,
 /**
  * Absent retains the existing successful-completion contract.
  */
-outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, deadlineSeconds?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
+outcome?: WorkflowNodeOutcome, reason?: string, } } | { "type": "workflow.cancel", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recover", "payload": { workspaceId: string, runId: string, expectedRevision: number, } } | { "type": "workflow.recovery.start", "payload": { workspaceId: string, runId: string, reason: string, } } | { "type": "workflow.human", "payload": { workspaceId: string, runId: string, expectedRevision: number, kind: string, reason: string, } } | { "type": "workflow.recovery.reset", "payload": { workspaceId: string, packageId?: string, expectedRevision: number, } } | { "type": "workflow.budget", "payload": { workspaceId: string, runId: string, expectedRevision: number, maxRuns?: number, maxLlmRounds?: number, } } | { "type": "agentSpace.configure", "payload": { workspaceId: string, expectedRevision: number, operation: AgentSpaceOperation, 
 /**
  * Required when the caller is a SessionController; omitted for a
  * direct authenticated Human UI action.
@@ -2209,14 +2209,14 @@ export type WorkflowRecoveryHandleStatus = { runId: string, triggerSeq: number, 
  * Remaining calls are based on observed usage, not reservations or a promise
  * that concurrent activities will fit. A completed query never changes.
  */
-export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, executionMs: number, remainingRuns: number, remainingLlmRounds: number, remainingExecutionMs: number, };
+export type WorkflowRequestBudgetSnapshot = { requestRunId: string, observedAtMs: number, budget: WorkflowRequestBudgetStatus, usedRuns: number, observedLlmRounds: number, remainingRuns: number, remainingLlmRounds: number, };
 
 /**
  * Mutable limits shared by one Human request and all Workflow retry Runs.
  * Its revision is separate from the graph revision so a PM can adjust a
  * running request without racing a Worker node completion.
  */
-export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, deadlineMs: number, maxLlmRounds: number, };
+export type WorkflowRequestBudgetStatus = { revision: number, maxRuns: number, maxLlmRounds: number, };
 
 /**
  * Durable status of one project Workflow run. Node meaning comes entirely
@@ -2270,16 +2270,7 @@ executorTurns: number, activeNodes: Array<string>, nodes: Array<WorkflowNodeRunS
  * the daemon publishes the clock it already keeps and its fixed silence
  * threshold, and deliberately computes no efficiency verdict from them.
  */
-export type WorkflowSupervisionStatus = { lastCheckedAtMs: number, 
-/**
- * Elapsed time excluded from execution charging because the whole Run was
- * waiting for a Human.
- */
-humanWaitMs: number, 
-/**
- * Elapsed time the Run spent recoverable, awaiting a PM continue decision.
- */
-recoveryWaitMs: number, waiting: boolean, nodeWallMs: number, };
+export type WorkflowSupervisionStatus = { lastCheckedAtMs: number, waiting: boolean, };
 
 export type WorkflowTaskSummary = { humanExit?: WorkflowHumanExitStatus, executing?: boolean, waiting?: Array<WorkflowHumanWait>, requestRunId?: string, reportPending?: boolean, runId: string, taskId: string, workflowId: string, status: string, revision: number, activeNodes: Array<string>, executorSessionId?: string, reason?: string, cleanupError?: string, updatedAtMs: number, };
 

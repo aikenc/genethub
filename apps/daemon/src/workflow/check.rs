@@ -206,7 +206,7 @@ pub(crate) async fn check(
                 activity.tokens.map(|tokens| sum.saturating_add(tokens))
             });
         let budget = &snapshot.budget;
-        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；执行耗时 {}/{} 毫秒；预算 revision {}（仅全 Run Human 等待免计时；观测不代表额度预留）", snapshot.request_run_id, snapshot.used_runs, budget.max_runs, snapshot.observed_llm_rounds, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), snapshot.execution_ms, budget.deadline_ms, budget.revision));
+        finding(None, "requestBudget", "info", format!("原请求 {}：{}/{} 次 Run；已观测 {}/{} 次 LLM 调用；token {}；预算 revision {}（观测不代表额度预留）", snapshot.request_run_id, snapshot.used_runs, budget.max_runs, snapshot.observed_llm_rounds, budget.max_llm_rounds, tokens.map(|tokens| tokens.to_string()).unwrap_or_else(|| "未知".into()), budget.revision));
         if let Some(stop) = &run.stop {
             finding(
                 None,

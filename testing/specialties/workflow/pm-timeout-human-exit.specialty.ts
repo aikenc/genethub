@@ -6,9 +6,9 @@ import { connectProductClient, daemonEndpoint, defineSpecialty, runGenetAsync } 
 
 for (const exit of ["d", "a", "e"] as const) defineSpecialty({
   id: `specialty.workflow.${exit === "d" ? "pm-timeout-human-exit" : `business-human-${exit}`}`,
-  title: exit === "d" ? "An overdue PM route decision becomes one durable Human feedback card" : `PM requests Human exit ${exit} for a blocked business Run`,
+  title: exit === "d" ? "An overdue PM route decision does not open a Human card" : `PM requests Human exit ${exit} for a blocked business Run`,
   oracle: exit === "d"
-    ? "A route block stays visible after its original PM Session is deleted, then its persisted 30-minute deadline produces Human exit d for a new PM, survives restart without another card, and records the answer"
+    ? "A route block stays visible after its original PM Session is deleted, and rewriting the persisted clock does not produce Human exit d"
     : "An explicit PM Human exit creates the correct durable options; approval a amends only this request budget and abandonment e cancels the request",
   catches: ["route block incorrectly starts recovery", "deleting PM hides an unfinished project request", "overdue PM has no Human owner", "restart duplicates Human cards", "feedback option is missing"],
   tags: ["core", "workflow", "workflow-recovery", "session-attention"],
@@ -136,29 +136,16 @@ for (const exit of ["d", "a", "e"] as const) defineSpecialty({
       opened.client = await connectProductClient(daemonEndpoint(opened.daemon));
     };
     await start();
-    const pmCard = async () => {
+    await t.tools.waitUntil(async () => {
       const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
-      if (reply?.type !== "snapshot") throw new Error("PM Session unavailable");
-      return reply.data.pendingPermissions.filter(card => card.id === `workflow-human-${original!.id}`);
-    };
-    await t.tools.waitUntil(async () => (await history())[0]?.humanExit?.kind === "d" && (await pmCard()).length === 1, 25_000);
-    const card = (await pmCard())[0]!;
-    t.assertions.assert(card.options?.map(option => option.id).join(",") === "confirmFeedback,keepOpen",
-      "Human feedback card has the wrong options");
+      return reply?.type === "snapshot" && reply.data.summary.status === "idle";
+    }, 20_000);
+    const run = (await history()).find(item => item.id === original!.id);
+    const reply = await opened.client.call({ type: "session.get", payload: { sessionId: pm } });
+    t.assertions.assert(run?.humanExit == null && reply?.type === "snapshot"
+      && !reply.data.pendingPermissions.some(card => card.id === `workflow-human-${original!.id}`),
+      "an overdue route block opened a Human card");
     t.assertions.assert((await history()).length === 1, "PM timeout launched a recovery Run for a route block");
-
-    opened.client.close();
-    const stoppedAgain = await runGenetAsync(opened.daemon.genet, ["daemon", "stop"], opened.daemon.env);
-    t.assertions.assert(stoppedAgain.code === 0, `second stop failed: ${stoppedAgain.stderr}`);
-    await start();
-    await t.tools.waitUntil(async () => (await pmCard()).length === 1, 10_000);
-    const answered = await opened.client.call({ type: "session.respondPermission", payload: {
-      sessionId: pm, requestId: card.id, outcome: { outcome: "selected", optionId: "confirmFeedback" },
-    } });
-    t.assertions.assert(answered?.type === "ack", "Human feedback choice was not accepted");
-    await t.tools.waitUntil(async () => (await history())[0]?.humanExit?.answer === "confirmFeedback", 20_000);
-    t.assertions.assert((await pmCard()).length === 0 && (await history()).length === 1,
-      "answered feedback card remained pending or changed the request lineage");
   } finally {
     opened.client.close();
     opened.daemon.stop();

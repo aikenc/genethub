@@ -115,7 +115,6 @@ enum Command {
         run_id: String,
         revision: u64,
         max_runs: Option<u32>,
-        deadline_seconds: Option<u64>,
         max_llm_rounds: Option<u64>,
     },
 }
@@ -557,7 +556,6 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             run_id,
             revision,
             max_runs,
-            deadline_seconds,
             max_llm_rounds,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
@@ -567,7 +565,6 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                     run_id,
                     expected_revision: revision,
                     max_runs,
-                    deadline_seconds,
                     max_llm_rounds,
                 })
                 .await
@@ -998,12 +995,10 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             _ => Err(CliFailure::invalid_args("usage: workflow recovery start|status|check|activate|reset ...")),
         },
         "budget" => {
-            if values.max_runs.is_none()
-                && values.deadline_seconds.is_none()
-                && values.max_llm_rounds.is_none()
-            {
+            let _retired_deadline = values.deadline_seconds;
+            if values.max_runs.is_none() && values.max_llm_rounds.is_none() {
                 return Err(CliFailure::invalid_args(
-                    "workflow budget 至少需要 --max-runs、--deadline-seconds 或 --max-llm-rounds",
+                    "没有可修改的额度",
                 ));
             }
             Ok(Command::Budget {
@@ -1011,7 +1006,6 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow budget 需要 --run <id>"))?,
                 revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow budget 需要 --revision <requestBudget.revision>"))?,
                 max_runs: values.max_runs,
-                deadline_seconds: values.deadline_seconds,
                 max_llm_rounds: values.max_llm_rounds,
             })
         }

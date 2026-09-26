@@ -2,10 +2,8 @@
 use super::*;
 
 pub(super) const DEFAULT_MAX_REQUEST_RUNS: u32 = 3;
-pub(super) const DEFAULT_REQUEST_DEADLINE_MS: u64 = 2 * 60 * 60 * 1000;
 pub(super) const DEFAULT_MAX_LLM_ROUNDS: u64 = 256;
 pub(super) const MAX_CONFIGURED_REQUEST_RUNS: u32 = 64;
-pub(super) const MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub(super) const MAX_CONFIGURED_LLM_ROUNDS: u64 = 8_192;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,8 +13,6 @@ pub(super) struct RequestBudget {
     pub revision: u64,
     #[serde(default = "default_max_runs")]
     pub max_runs: u32,
-    #[serde(default = "default_deadline_ms")]
-    pub deadline_ms: u64,
     #[serde(default = "default_max_llm_rounds")]
     pub max_llm_rounds: u64,
 }
@@ -26,7 +22,6 @@ impl Default for RequestBudget {
         Self {
             revision: 0,
             max_runs: DEFAULT_MAX_REQUEST_RUNS,
-            deadline_ms: DEFAULT_REQUEST_DEADLINE_MS,
             max_llm_rounds: DEFAULT_MAX_LLM_ROUNDS,
         }
     }
@@ -37,7 +32,6 @@ impl RequestBudget {
         WorkflowRequestBudgetStatus {
             revision: self.revision,
             max_runs: self.max_runs,
-            deadline_ms: self.deadline_ms,
             max_llm_rounds: self.max_llm_rounds,
         }
     }
@@ -45,9 +39,6 @@ impl RequestBudget {
 
 fn default_max_runs() -> u32 {
     DEFAULT_MAX_REQUEST_RUNS
-}
-fn default_deadline_ms() -> u64 {
-    DEFAULT_REQUEST_DEADLINE_MS
 }
 fn default_max_llm_rounds() -> u64 {
     DEFAULT_MAX_LLM_ROUNDS
@@ -100,7 +91,6 @@ pub(super) struct RequestRecord {
 pub(super) struct RecoveryExtra {
     pub max_runs: u32,
     pub max_llm_rounds: u64,
-    pub deadline_seconds: u64,
 }
 
 fn read_record(runtime: &RuntimeStore, root_run_id: &str) -> Result<RequestRecord> {
@@ -186,14 +176,11 @@ pub(super) fn apply_human_budget(runtime: &RuntimeStore, root_run_id: &str, requ
         "a" => {
             record.budget.max_runs = record.budget.max_runs.saturating_add(1).min(MAX_CONFIGURED_REQUEST_RUNS);
             record.budget.max_llm_rounds = record.budget.max_llm_rounds.saturating_add(128).min(MAX_CONFIGURED_LLM_ROUNDS);
-            record.budget.deadline_ms = record.budget.deadline_ms.saturating_add(3_600_000)
-                .min(MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS.saturating_mul(1000));
             record.budget.revision = record.budget.revision.saturating_add(1);
         }
         "c" => {
             record.recovery_extra.max_runs = record.recovery_extra.max_runs.saturating_add(1).min(recovery::MAX_RECOVERY_RUNS);
             record.recovery_extra.max_llm_rounds = record.recovery_extra.max_llm_rounds.saturating_add(100).min(recovery::MAX_RECOVERY_LLM_ROUNDS);
-            record.recovery_extra.deadline_seconds = record.recovery_extra.deadline_seconds.saturating_add(1800).min(recovery::MAX_RECOVERY_DEADLINE_SECONDS);
         }
         _ => bail!("Human exit {kind} does not adjust a budget"),
     }
@@ -262,30 +249,6 @@ pub(super) fn group_id(run: &RunRecord) -> &str {
         .unwrap_or(&run.id)
 }
 
-/// Charge execution and cleanup, not the time a terminal Run awaits a new request.
-/// The stored terminal timestamp is stable across notice delivery and restart.
-pub(super) fn execution_ms(run: &RunRecord, now: i64) -> i64 {
-    let end = if matches!(run.status.as_str(), "running" | "stopping" | "cancelling") {
-        now
-    } else {
-        run.updated_at_ms
-    };
-    let pending_wait = if run.status == "running"
-        && run.supervision.waiting
-        && run.supervision.last_checked_at_ms > 0
-    {
-        end.saturating_sub(run.supervision.last_checked_at_ms)
-            .max(0)
-    } else {
-        0
-    };
-    end.saturating_sub(run.created_at_ms)
-        .saturating_sub(run.supervision.human_wait_ms)
-        .saturating_sub(run.supervision.recovery_wait_ms)
-        .saturating_sub(pending_wait)
-        .max(0)
-}
-
 pub(super) fn activities(
     run: &RunRecord,
 ) -> impl Iterator<Item = &crate::session::store::ExecutionActivity> {
@@ -315,9 +278,6 @@ pub(super) fn observation(
         .find(|other| other.id == group_id(run))
         .ok_or_else(|| anyhow!("missing request root {}", group_id(run)))?;
     let budget = budget(root).status();
-    let execution_ms = group.iter().fold(0u64, |sum, other| {
-        sum.saturating_add(execution_ms(other, now) as u64)
-    });
     let observed_llm_rounds = group
         .iter()
         .flat_map(|other| activities(other))
@@ -330,11 +290,9 @@ pub(super) fn observation(
         observed_at_ms: now,
         remaining_runs: budget.max_runs.saturating_sub(used_runs),
         remaining_llm_rounds: budget.max_llm_rounds.saturating_sub(observed_llm_rounds),
-        remaining_execution_ms: budget.deadline_ms.saturating_sub(execution_ms),
         budget,
         used_runs,
         observed_llm_rounds,
-        execution_ms,
     })
 }
 
@@ -349,8 +307,7 @@ pub(super) fn snapshot(
 pub(super) fn budget_exhausted(runtime: &RuntimeStore, run: &RunRecord, now: i64) -> Result<bool> {
     if !run.handles.is_empty() { return recovery::budget_exhausted(runtime, run, now); }
     let snapshot = snapshot(runtime, run, now)?;
-    Ok(snapshot.remaining_llm_rounds == 0
-        || (!run.supervision.waiting && snapshot.remaining_execution_ms == 0))
+    Ok(snapshot.remaining_llm_rounds == 0)
 }
 
 pub(super) fn request_lock(runtime: &RuntimeStore, root: &str) -> Result<ExclusiveFileLock> {
@@ -452,9 +409,6 @@ pub(super) async fn admit(
             "requestBudgetExceeded: the original request has reached its {} Run limit",
             snapshot.budget.max_runs
         );
-    }
-    if snapshot.remaining_execution_ms == 0 {
-        bail!("requestBudgetExceeded: the original request has exceeded its execution deadline");
     }
     if snapshot.remaining_llm_rounds == 0 {
         bail!("requestBudgetExceeded: the original request has exhausted its LLM call allowance");

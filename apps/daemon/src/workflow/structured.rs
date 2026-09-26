@@ -38,16 +38,12 @@ pub(super) fn validate_snapshot(run: &RunRecord) -> Result<()> {
 }
 pub(super) fn initialize(run: &mut RunRecord) -> Result<()> {
     let program = program(run)?;
-    let transition = engine::start(
+    let transition =         engine::start(
         &program,
         engine::StartRequest {
             execution_id: run.id.clone(),
             input: program.definition().input.clone(),
             now_ms: now_ms().max(0) as u64,
-            deadline_ms: program
-                .definition()
-                .timeout_ms
-                .map(|timeout| (run.created_at_ms.max(0) as u64).saturating_add(timeout)),
         },
     )?;
     apply(run, transition)?;
@@ -544,6 +540,44 @@ pub(super) fn accepted(run: &mut RunRecord, node: &str) -> Result<bool> {
                 id: op.id.clone(),
                 update_seq: op.update_seq + 1,
                 update: engine::ActivityUpdate::Accepted,
+            },
+        },
+    )?;
+    apply(run, transition)?;
+    Ok(true)
+}
+
+/// Pause or resume a task timer while its session is waiting for a Human.
+/// Waiting stores the remaining duration; leaving Waiting starts that remainder
+/// from the current clock.
+pub(super) fn set_waiting(run: &mut RunRecord, node: &str, waiting: bool) -> Result<bool> {
+    let Some(snapshot) = run.engine.as_ref() else {
+        return Ok(false);
+    };
+    let Some(op) = snapshot
+        .operations
+        .values()
+        .find(|op| node_id(op.frame) == node)
+    else {
+        return Ok(false);
+    };
+    if (op.phase == engine::OperationPhase::Waiting) == waiting {
+        return Ok(false);
+    }
+    let transition = engine::advance(
+        &program(run)?,
+        snapshot,
+        engine::Input {
+            expected_revision: snapshot.revision,
+            now_ms: now_ms().max(0) as u64,
+            event: engine::Event::ActivityUpdate {
+                id: op.id.clone(),
+                update_seq: op.update_seq + 1,
+                update: if waiting {
+                    engine::ActivityUpdate::Waiting
+                } else {
+                    engine::ActivityUpdate::Accepted
+                },
             },
         },
     )?;

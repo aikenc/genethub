@@ -2,8 +2,7 @@ schema: genehub.workflow.definition.v1
 id: builtin-recovery
 version: 1
 entry: review
-budget: {maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600}
-pmAnswerSeconds: 1800
+budget: {maxRuns: 3, maxLlmRounds: 200}
 outcomes:
   repair: {success: true}
   resume: {success: true}

@@ -177,8 +177,6 @@ pub(super) struct Recovery {
     pub node_id: String,
     pub previous_session_id: String,
     #[serde(default)]
-    pub waiting_since_ms: i64,
-    #[serde(default)]
     pub reuse_session: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<RecoveryNode>,
@@ -323,9 +321,9 @@ pub(crate) async fn start_assigned(
         run.engine.is_some() && request::budget_exhausted(&runtime, &run, now_ms())?;
     if run.engine.is_some() && (deadline_reached || request_budget_exhausted) {
         let (reason, cause) = if request_budget_exhausted && !run.handles.is_empty() {
-            ("恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
+            ("恢复流程达到 LLM 调用上限", "recoveryBudget")
         } else if request_budget_exhausted {
-            ("原始请求达到执行期限或 LLM 调用上限", "requestBudget")
+            ("原始请求达到 LLM 调用上限", "requestBudget")
         } else {
             ("结构化流程活动达到期限", "activityDeadline")
         };
@@ -528,10 +526,6 @@ pub(crate) async fn recover(
                 record.assigned_at_ms = now_ms();
                 assignments.push((summary, message));
             }
-            run.supervision.recovery_wait_ms = run
-                .supervision
-                .recovery_wait_ms
-                .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
             run.recovery = None;
             run.stop = None;
             run.status = "running".into();
@@ -587,10 +581,6 @@ pub(crate) async fn recover(
             old.session_id = None;
             old.assigned_at_ms = 0;
             old.settled_at_ms = 0;
-            run.supervision.recovery_wait_ms = run
-                .supervision
-                .recovery_wait_ms
-                .saturating_add(now_ms().saturating_sub(recovery.waiting_since_ms));
             run.recovery = None;
             run.stop = None;
             run.status = "running".into();
@@ -629,25 +619,16 @@ pub(crate) async fn budget(
     run_id: &str,
     expected_revision: u64,
     max_runs: Option<u32>,
-    deadline_seconds: Option<u64>,
     max_llm_rounds: Option<u64>,
 ) -> Result<WorkflowRunStatus> {
     validate_id(run_id, "runId")?;
-    if max_runs.is_none() && deadline_seconds.is_none() && max_llm_rounds.is_none() {
-        bail!("workflow.budget 至少需要一个预算上限");
+    if max_runs.is_none() && max_llm_rounds.is_none() {
+        bail!("没有可修改的额度");
     }
     if max_runs.is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_REQUEST_RUNS) {
         bail!(
             "maxRuns 必须在 1..={} 之间",
             request::MAX_CONFIGURED_REQUEST_RUNS
-        );
-    }
-    if deadline_seconds
-        .is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS)
-    {
-        bail!(
-            "deadlineSeconds 必须在 1..={} 之间",
-            request::MAX_CONFIGURED_REQUEST_DEADLINE_SECONDS
         );
     }
     if max_llm_rounds.is_some_and(|value| value == 0 || value > request::MAX_CONFIGURED_LLM_ROUNDS)
@@ -688,11 +669,6 @@ pub(crate) async fn budget(
     let previous = link.budget.status();
     if let Some(value) = max_runs {
         link.budget.max_runs = value;
-    }
-    if let Some(value) = deadline_seconds {
-        link.budget.deadline_ms = value
-            .checked_mul(1000)
-            .ok_or_else(|| anyhow!("deadlineSeconds 超出范围"))?;
     }
     if let Some(value) = max_llm_rounds {
         link.budget.max_llm_rounds = value;
@@ -1376,11 +1352,6 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
             request_stop(&mut run, "cancelled", "恢复原请求的已持久化取消决定".into());
         }
         let previous_status = run.status.clone();
-        if run.status == "recoverable" && run.recovery.as_ref().is_some_and(|recovery| {
-            now_ms().saturating_sub(recovery.waiting_since_ms) >= recovery::DEFAULT_PM_ANSWER_SECONDS as i64 * 1000
-        }) {
-            request_stop(&mut run, "blocked", "PM 未在期限内续接受阻 Worker，进入恢复流程".into());
-        }
         if run.status == "running" {
             supervision::observe(state, runtime, &mut run).await?;
             let mut waiting = false;
@@ -1618,7 +1589,6 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
                 run.recovery = Some(Recovery {
                     node_id,
                     previous_session_id: session_id,
-                    waiting_since_ms: now_ms(),
                     reuse_session: true,
                     nodes: lost
                         .into_iter()
@@ -1733,13 +1703,7 @@ async fn reconcile(state: &Shared, runtime: &RuntimeStore, run_id: &str) -> Resu
             structured::retired(&mut current)?;
         }
         current.status = stop.target.clone();
-        if stop.target == "recoverable" {
-            current
-                .recovery
-                .as_mut()
-                .expect("recoverable operation")
-                .waiting_since_ms = now_ms();
-        } else {
+        if stop.target != "recoverable" {
             current.recovery = None;
         }
         current.leases.clear();

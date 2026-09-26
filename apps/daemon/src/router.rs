@@ -1566,7 +1566,6 @@ async fn dispatch(
             run_id,
             expected_revision,
             max_runs,
-            deadline_seconds,
             max_llm_rounds,
         } => {
             if let Err(error) =
@@ -1581,7 +1580,6 @@ async fn dispatch(
                 &run_id,
                 expected_revision,
                 max_runs,
-                deadline_seconds,
                 max_llm_rounds,
             )
             .await

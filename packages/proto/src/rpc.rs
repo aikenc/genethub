@@ -298,9 +298,6 @@ pub enum Request {
         max_runs: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
-        deadline_seconds: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional, type = "number")]
         max_llm_rounds: Option<u64>,
     },
     /// Mounts, configures or removes one responsibility on an already-open,

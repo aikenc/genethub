@@ -256,18 +256,16 @@ for (const scenario of ["observation", "retry", "budget-expiry", "entries", "ent
           && JSON.stringify(opened.mock.requests).includes("requestBudgetExceeded"),
         "fourth business Run bypassed the budget or PM could not see the refusal");
 
-        const usageMs = (await history()).reduce((sum, item) => sum + item.updatedAtMs - item.createdAtMs, 0);
-        const amendedDeadlineSeconds = Math.ceil(usageMs / 1000) + 120;
         seen.clear();
-        nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 0 --max-runs 4 --deadline-seconds ${amendedDeadlineSeconds} --max-llm-rounds 512`;
+        nextCommand = `"$GENEHUB_CLI" workflow budget --run ${q(original)} --revision 0 --max-runs 4 --max-llm-rounds 512`;
         await send("Raise this request budget within the existing authorization.");
         await t.tools.waitUntil(async () => (await history()).find(item => item.id === original)?.requestBudget.revision === 1, 30_000);
         nextCommand = `"$GENEHUB_CLI" workflow dispatch --workflow direct-change --task observed-4 --retry-of ${q(original)} --no-wait --message "PM approved more budget"`;
         await send("Continue the same task using the newly approved budget.");
         await t.tools.waitUntil(async () => { await current(); return run?.taskId === "observed-4" && run.status === "completed"; }, 40_000);
         t.assertions.assert(run!.requestRunId === original && run!.requestBudget.revision === 1
-          && run!.requestBudget.maxRuns === 4 && run!.requestBudget.deadlineMs === amendedDeadlineSeconds * 1000
-          && run!.requestBudget.maxLlmRounds === 512, "PM budget amendment did not carry into the successor");
+          && run!.requestBudget.maxRuns === 4 && run!.requestBudget.maxLlmRounds === 512,
+          "PM budget amendment did not carry into the successor");
         const stale = await runGenetAsync(opened.daemon.genet,
           ["workflow", "budget", "--run", original, "--revision", "0", "--max-runs", "5"],
           opened.daemon.env, { cwd: opened.workspaceRoot });

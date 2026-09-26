@@ -4,11 +4,8 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Definition {
-    /// Absolute elapsed-time limit, including user waits, fixed when started.
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
     pub body: Block,
     #[serde(default)]
     pub procedures: BTreeMap<String, Block>,
@@ -45,7 +42,7 @@ pub struct Block {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum BlockKind {
     Task {
         activity: String,
@@ -248,14 +245,13 @@ pub enum Status {
     Cancelled,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct EngineState {
     pub format_version: u32,
     pub definition_digest: String,
     pub execution_id: String,
     pub revision: u64,
     pub logical_time_ms: u64,
-    pub deadline_ms: Option<u64>,
     pub next_id: u64,
     pub operations_started: u64,
     pub control_steps: u64,
@@ -396,7 +392,6 @@ pub struct StartRequest {
     pub execution_id: String,
     pub input: Value,
     pub now_ms: u64,
-    pub deadline_ms: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

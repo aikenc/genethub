@@ -101,14 +101,6 @@ pub fn compile(mut definition: Definition) -> Result<Program> {
     {
         return Err(Error::Definition("limits exceed engine bounds".into()));
     }
-    if definition
-        .timeout_ms
-        .is_some_and(|ms| ms > 7 * 24 * 60 * 60 * 1000)
-    {
-        return Err(Error::Definition(
-            "workflow timeout exceeds seven days".into(),
-        ));
-    }
     let mut nodes = BTreeMap::new();
     let mut paths = BTreeMap::new();
     fn walk(

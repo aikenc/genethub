@@ -1346,12 +1346,11 @@ fn command_schema(name: &str) -> Value {
             json!({"runId": {"type": "string", "minLength": 1}, "revision": {"type": "integer", "minimum": 0}, "kind": {"enum": ["a", "b", "c", "d", "e", "f"]}, "reason": {"type": "string", "minLength": 1, "maxLength": 4096}}), &["runId", "revision", "kind", "reason"],
         ),
         "workflow.budget" => workflow_schema(
-            "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--deadline-seconds <n>] [--max-llm-rounds <n>]",
+            "genet workflow budget [--workspace <id>] --run <id> --revision <requestBudget.revision> [--max-runs <n>] [--max-llm-rounds <n>]",
             json!({
                 "runId": {"type": "string", "minLength": 1},
                 "revision": {"type": "integer", "minimum": 0, "description": "current requestBudget.revision from workflow get; PM authorization only. For readonly graph observations use a request.budget task (schema workflow.definition), not this mutation command."},
                 "maxRuns": {"type": "integer", "minimum": 1, "maximum": 64, "description": "--max-runs"},
-                "deadlineSeconds": {"type": "integer", "minimum": 1, "maximum": 604800, "description": "--deadline-seconds"},
                 "maxLlmRounds": {"type": "integer", "minimum": 1, "maximum": 8192, "description": "--max-llm-rounds"}
             }),
             &["runId", "revision"],

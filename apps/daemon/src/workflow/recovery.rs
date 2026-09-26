@@ -7,7 +7,6 @@ use std::{fs, io::ErrorKind, path::Path};
 const ARCHIVE_LIMIT: usize = 1024 * 1024;
 pub(super) const MAX_RECOVERY_RUNS: u32 = 10;
 pub(super) const MAX_RECOVERY_LLM_ROUNDS: u64 = 1000;
-pub(super) const MAX_RECOVERY_DEADLINE_SECONDS: u64 = 86400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -63,9 +62,9 @@ fn sync_human_exit_journal(runtime: &super::RuntimeStore, run: &super::RunRecord
 
 fn exit_options(kind: &str) -> &'static [(&'static str, &'static str)] {
     match kind {
-        "a" => &[("approve", "批准增加 1 次业务 Run、128 轮 LLM 和 1 小时"), ("reject", "拒绝，保留受阻请求")],
+        "a" => &[("approve", "批准增加 1 次业务 Run 和 128 轮 LLM"), ("reject", "拒绝，保留受阻请求")],
         "b" => &[("acceptScope", "接受缩减后的目标"), ("cancel", "取消原请求")],
-        "c" => &[("approve", "批准本请求增加 1 次恢复、100 轮 LLM 和 30 分钟"), ("reject", "拒绝，转平台反馈")],
+        "c" => &[("approve", "批准本请求增加 1 次恢复和 100 轮 LLM"), ("reject", "拒绝，转平台反馈")],
         "d" => &[("confirmFeedback", "确认并打开预填反馈"), ("keepOpen", "保留受阻请求")],
         "e" => &[("handled", "所需安装或登录已处理"), ("abandon", "放弃原请求")],
         "f" => &[("pass", "人工验收通过"), ("fail", "人工验收不通过")],
@@ -77,26 +76,13 @@ pub(super) fn classify_human_exit(run: &super::RunRecord) -> Option<&'static str
     if run.status != "blocked" { return None; }
     let cause = run.stop.as_ref().map(|stop| stop.cause_code.as_str()).unwrap_or("");
     if run.handles.is_empty() {
-        if matches!(cause, "requestBudget" | "routeUnavailable") {
-            let answer_ms = DEFAULT_PM_ANSWER_SECONDS.saturating_mul(1000).min(i64::MAX as u64) as i64;
-            return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
-        }
         return None;
     }
     if cause == "humanAcceptance" { return Some("f"); }
     if cause == "humanScope" { return Some("b"); }
     if cause == "recoveryBudget" { return Some("c"); }
-    if cause == "routeUnavailable" {
-        let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
-            .saturating_mul(1000).min(i64::MAX as u64) as i64;
-        return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
-    }
-    // A reviewer can recommend cancellation, but only PM may execute it.
-    // Keep the request visible while PM acts; a missed PM deadline is d.
-    if matches!(cause, "recoveryNoExit" | "pmCancel") {
-        let answer_ms = run.definition.pm_answer_seconds.unwrap_or(DEFAULT_PM_ANSWER_SECONDS)
-            .saturating_mul(1000).min(i64::MAX as u64) as i64;
-        return (super::now_ms().saturating_sub(run.updated_at_ms) >= answer_ms).then_some("d");
+    if matches!(cause, "routeUnavailable" | "recoveryNoExit" | "pmCancel") {
+        return None;
     }
     Some("d")
 }
@@ -416,18 +402,13 @@ mod tests {
             "roles": {}, "nodes": {}, "leases": {}, "createdAtMs": 1, "updatedAtMs": 2,
             "stop": {"target": "blocked", "reason": "budget display may change", "causeCode": "requestBudget"}
         })).unwrap();
-        run.updated_at_ms = super::super::now_ms();
-        assert_eq!(classify_human_exit(&run), None); // PM has the first 30 minutes.
-        run.updated_at_ms -= (DEFAULT_PM_ANSWER_SECONDS as i64 * 1000) + 1;
-        assert_eq!(classify_human_exit(&run), Some("d"));
-        run.stop.as_mut().unwrap().reason = "new route message".into();
-        run.stop.as_mut().unwrap().cause_code = "routeUnavailable".into();
-        assert_eq!(classify_human_exit(&run), Some("d"));
+        assert_eq!(classify_human_exit(&run), None);
         run.handles.push(Handle { run_id: "wr_business".into(), trigger_seq: 1, reason: "failed".into() });
-        run.stop.as_mut().unwrap().reason = "new recovery message".into();
+        assert_eq!(classify_human_exit(&run), Some("d"));
         run.stop.as_mut().unwrap().cause_code = "recoveryBudget".into();
         assert_eq!(classify_human_exit(&run), Some("c"));
-        run.stop.as_mut().unwrap().reason = "execution failed".into();
+        run.stop.as_mut().unwrap().cause_code = "routeUnavailable".into();
+        assert_eq!(classify_human_exit(&run), None);
         run.stop.as_mut().unwrap().cause_code = "executionException".into();
         assert_eq!(classify_human_exit(&run), Some("d"));
     }
@@ -530,9 +511,6 @@ pub(super) fn admit(runtime: &super::RuntimeStore, target: &super::RunRecord, bu
     if usage.rounds >= usage.limits.max_llm_rounds {
         bail!(RecoveryBudgetExceeded("recoveryBudgetExceeded: request has exhausted recovery LLM rounds".into()));
     }
-    if usage.execution_ms >= usage.limits.deadline_seconds.saturating_mul(1000) {
-        bail!(RecoveryBudgetExceeded("recoveryBudgetExceeded: request has exhausted recovery execution time".into()));
-    }
     Ok(usage.runs.saturating_add(1))
 }
 
@@ -549,16 +527,14 @@ struct BudgetObservation {
     limits: RecoveryBudget,
     runs: u32,
     rounds: u64,
-    execution_ms: u64,
 }
 
-fn observe_budget(runtime: &super::RuntimeStore, target: &super::RunRecord, budget: &RecoveryBudget, now: i64) -> Result<BudgetObservation> {
+fn observe_budget(runtime: &super::RuntimeStore, target: &super::RunRecord, budget: &RecoveryBudget, _now: i64) -> Result<BudgetObservation> {
     budget.validate()?;
     let extra = super::request::recovery_extra(runtime, super::request::group_id(target))?;
     let limits = RecoveryBudget {
         max_runs: budget.max_runs.saturating_add(extra.max_runs).min(MAX_RECOVERY_RUNS),
         max_llm_rounds: budget.max_llm_rounds.saturating_add(extra.max_llm_rounds).min(MAX_RECOVERY_LLM_ROUNDS),
-        deadline_seconds: budget.deadline_seconds.saturating_add(extra.deadline_seconds).min(MAX_RECOVERY_DEADLINE_SECONDS),
     };
     let group = super::request_runs(runtime, super::request::group_id(target))?;
     let recoveries = group.iter().filter(|run| !run.handles.is_empty()).collect::<Vec<_>>();
@@ -567,9 +543,6 @@ fn observe_budget(runtime: &super::RuntimeStore, target: &super::RunRecord, budg
         runs: recoveries.len().min(u32::MAX as usize) as u32,
         rounds: recoveries.iter().flat_map(|run| super::request::activities(run))
             .fold(0u64, |sum, activity| sum.saturating_add(activity.llm_rounds)),
-        execution_ms: recoveries.iter().fold(0u64, |sum, run| {
-            sum.saturating_add(super::request::execution_ms(run, now) as u64)
-        }),
     })
 }
 
@@ -584,24 +557,19 @@ pub(crate) struct Handle {
 pub(super) fn budget_exhausted(runtime: &super::RuntimeStore, run: &super::RunRecord, now: i64) -> Result<bool> {
     let budget = run.definition.budget.clone().unwrap_or_default();
     let usage = observe_budget(runtime, run, &budget, now)?;
-    Ok(usage.rounds >= usage.limits.max_llm_rounds
-        || usage.execution_ms >= usage.limits.deadline_seconds.saturating_mul(1000))
+    Ok(usage.rounds >= usage.limits.max_llm_rounds)
 }
 
-pub(super) const DEFAULT_PM_ANSWER_SECONDS: u64 = 1800;
-pub(super) const MAX_PM_ANSWER_SECONDS: u64 = 86400;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct RecoveryBudget {
     pub max_runs: u32,
     pub max_llm_rounds: u64,
-    pub deadline_seconds: u64,
 }
 
 impl Default for RecoveryBudget {
     fn default() -> Self {
-        Self { max_runs: 3, max_llm_rounds: 200, deadline_seconds: 3600 }
+        Self { max_runs: 3, max_llm_rounds: 200 }
     }
 }
 
@@ -612,9 +580,6 @@ impl RecoveryBudget {
         }
         if !(1..=MAX_RECOVERY_LLM_ROUNDS).contains(&self.max_llm_rounds) {
             bail!("recovery budget.maxLlmRounds 必须在 1..=1000 之间");
-        }
-        if !(1..=MAX_RECOVERY_DEADLINE_SECONDS).contains(&self.deadline_seconds) {
-            bail!("recovery budget.deadlineSeconds 必须在 1..=86400 之间");
         }
         Ok(())
     }

@@ -1020,8 +1020,6 @@ pub struct WorkflowRequestBudgetStatus {
     pub revision: u64,
     pub max_runs: u32,
     #[ts(type = "number")]
-    pub deadline_ms: u64,
-    #[ts(type = "number")]
     pub max_llm_rounds: u64,
 }
 
@@ -1039,13 +1037,9 @@ pub struct WorkflowRequestBudgetSnapshot {
     pub used_runs: u32,
     #[ts(type = "number")]
     pub observed_llm_rounds: u64,
-    #[ts(type = "number")]
-    pub execution_ms: u64,
     pub remaining_runs: u32,
     #[ts(type = "number")]
     pub remaining_llm_rounds: u64,
-    #[ts(type = "number")]
-    pub remaining_execution_ms: u64,
 }
 
 /// Durable parent/role binding for a Workflow-managed ordinary Session.
@@ -1540,16 +1534,7 @@ pub struct WorkflowNodeRunStatus {
 pub struct WorkflowSupervisionStatus {
     #[ts(type = "number")]
     pub last_checked_at_ms: i64,
-    /// Elapsed time excluded from execution charging because the whole Run was
-    /// waiting for a Human.
-    #[ts(type = "number")]
-    pub human_wait_ms: i64,
-    /// Elapsed time the Run spent recoverable, awaiting a PM continue decision.
-    #[ts(type = "number")]
-    pub recovery_wait_ms: i64,
     pub waiting: bool,
-    #[ts(type = "number")]
-    pub node_wall_ms: i64,
 }
 
 /// A node's settled outcome, as a bare string on the wire and on disk.

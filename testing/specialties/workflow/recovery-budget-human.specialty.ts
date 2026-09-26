@@ -7,7 +7,7 @@ import { defineSpecialty, runGenetAsync } from "../../framework/public.ts";
 defineSpecialty({
   id: "specialty.workflow.recovery-budget-human",
   title: "Human recovery budget approval extends only one request",
-  oracle: "A one-second recovery budget stops the recovery Worker, produces exit c, persists one approval in the PM request, and admits exactly one further recovery attempt",
+  oracle: "A one-round recovery budget stops the recovery Worker, produces exit c, persists one approval in the PM request, and admits exactly one further recovery attempt",
   catches: ["recovery runs spend the business budget", "recovery budget exhaustion silently stalls", "exit c approval is lost or spent twice", "a second recovery attempt ignores the approved allowance"],
   tags: ["core", "workflow", "workflow-recovery", "session-attention"],
   llm: { default: "mock" }, expectedDurationMs: 45_000, timeoutMs: 115_000,
@@ -41,7 +41,7 @@ defineSpecialty({
     }));
     writeFileSync(path.join(source, "flows/recovery.yaml"), JSON.stringify({
       schema: "genehub.workflow.definition.v1", id: "recovery", version: 1, entry: "review",
-      budget: { maxRuns: 1, maxLlmRounds: 200, deadlineSeconds: 1 },
+      budget: { maxRuns: 1, maxLlmRounds: 1 },
       outcomes: { resume: { success: true }, human: { success: false } },
       nodes: [{ id: "review", uses: "agent.session", with: { role: "recovery-worker" }, on: { resume: ["publish"], human: [] } },
         { id: "publish", uses: "result.publish" }],
@@ -60,7 +60,7 @@ defineSpecialty({
           command: '"$GENEHUB_CLI" workflow complete --outcome blocked --reason "execution failed" --evidence result=failed',
         } } };
       }
-      if (body.includes("BUDGET_RECOVERY_WORKER")) return { hang: true as const };
+      if (body.includes("BUDGET_RECOVERY_WORKER")) return { text: "Reviewed one round without a controlled exit." };
       if (!sent) {
         sent = true;
         return { tool: { name: "bash", arguments: {
@@ -108,11 +108,10 @@ defineSpecialty({
       "Human c approval did not admit exactly one new recovery Run");
     const request = JSON.parse(readFileSync(path.join(opened.workspaceRoot,
       ".genethub/components/pm/requests", root!.id, "request.json"), "utf8")) as {
-      recoveryExtra: { maxRuns: number; maxLlmRounds: number; deadlineSeconds: number };
+      recoveryExtra: { maxRuns: number; maxLlmRounds: number };
       approvedHumanExits: string[];
     };
     t.assertions.assert(request.recoveryExtra.maxRuns === 1 && request.recoveryExtra.maxLlmRounds === 100
-      && request.recoveryExtra.deadlineSeconds === 1800
       && request.approvedHumanExits.filter(id => id === card!.id).length === 1,
     "Human c approval was not applied once to this PM request");
     const journal = await runGenetAsync(opened.daemon.genet,

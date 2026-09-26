@@ -152,7 +152,7 @@ struct PackageSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 struct WorkflowDefinition {
     schema: String,
     id: String,
@@ -174,8 +174,6 @@ struct WorkflowDefinition {
     structure: Option<workflow_engine::Definition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     budget: Option<recovery::RecoveryBudget>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pm_answer_seconds: Option<u64>,
     nodes: Vec<NodeDefinition>,
 }
 
@@ -3690,8 +3688,8 @@ fn compile_candidate(package: &package::Package) -> Result<DcgCandidateRecord> {
         if is_recovery {
             recovery::validate_contract(&bundle.definition)?;
         }
-        if !is_recovery && (bundle.definition.budget.is_some() || bundle.definition.pm_answer_seconds.is_some()) {
-            bail!("只有 workflow.md 指定的恢复流程可以声明 budget 或 pmAnswerSeconds");
+        if !is_recovery && bundle.definition.budget.is_some() {
+            bail!("只有 workflow.md 指定的恢复流程可以声明 budget");
         }
         for (path, bytes) in &bundle.source_files {
             insert_candidate_source(
@@ -4211,11 +4209,6 @@ fn outcome_success(definition: &WorkflowDefinition, name: &str) -> Option<bool> 
 fn validate_definition(definition: &WorkflowDefinition) -> Result<()> {
     validate_id(&definition.id, "workflow id")?;
     if let Some(budget) = &definition.budget { budget.validate()?; }
-    if let Some(seconds) = definition.pm_answer_seconds {
-        if !(1..=recovery::MAX_PM_ANSWER_SECONDS).contains(&seconds) {
-            bail!("recovery pmAnswerSeconds 必须在 1..={} 之间", recovery::MAX_PM_ANSWER_SECONDS);
-        }
-    }
     if definition.version == 0 {
         bail!("Workflow version 必须大于 0");
     }
@@ -5345,10 +5338,7 @@ fn run_status(runtime: &RuntimeStore, run: &RunRecord) -> Result<WorkflowRunStat
         report_pending: Some(supervision::report_pending(run)),
         supervision: Some(genehub_proto::WorkflowSupervisionStatus {
             last_checked_at_ms: run.supervision.last_checked_at_ms,
-            human_wait_ms: run.supervision.human_wait_ms,
-            recovery_wait_ms: run.supervision.recovery_wait_ms,
             waiting: run.supervision.waiting,
-            node_wall_ms: supervision::NODE_WALL_MS,
         }),
         request_budget: request::budget(&root).status(),
         reason: run.stop.as_ref().map(|stop| stop.reason.clone()),
@@ -5597,18 +5587,18 @@ mod tests {
             "---\ndescription: 测试包\nrecovery: flows/recovery.yaml\n---\n");
         let source = fs::read_to_string(&path).unwrap();
         write(&path, &source.replace("version: 1\n",
-            "version: 1\nbudget: {maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600}\npmAnswerSeconds: 1800\n"));
+            "version: 1\nbudget: {maxRuns: 3, maxLlmRounds: 200}\n"));
         let valid = compile_package(root.path(), TEST_PACKAGE).unwrap();
         assert_eq!(valid.workflows["recovery"].definition.budget.as_ref().unwrap().max_runs, 3);
         write(&path, &source.replace("version: 1\n",
-            "version: 1\nbudget: {maxRuns: 11, maxLlmRounds: 200, deadlineSeconds: 3600}\n"));
+            "version: 1\nbudget: {maxRuns: 11, maxLlmRounds: 200}\n"));
         assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("maxRuns"));
         write(&path, &source.replace("version: 1\n",
-            "version: 1\npmAnswerSeconds: 86401\n"));
-        assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("pmAnswerSeconds"));
+            "version: 1\npmAnswerSeconds: 1800\n"));
+        assert!(compile_package(root.path(), TEST_PACKAGE).is_ok(), "retired pmAnswerSeconds must load");
         write(&package.join(package::MANIFEST_FILE), "---\ndescription: 测试包\n---\n");
         write(&path, &source.replace("version: 1\n",
-            "version: 1\nbudget: {maxRuns: 3, maxLlmRounds: 200, deadlineSeconds: 3600}\n"));
+            "version: 1\nbudget: {maxRuns: 3, maxLlmRounds: 200}\n"));
         assert!(compile_package(root.path(), TEST_PACKAGE).unwrap_err().to_string().contains("只有 workflow.md"));
     }
 
@@ -6942,7 +6932,6 @@ mod tests {
             structure: None,
             include: Vec::new(),
             budget: None,
-            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "anything".into(),
             version: 1,
@@ -6977,7 +6966,6 @@ mod tests {
             structure: None,
             include: Vec::new(),
             budget: None,
-            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "unsafe".into(),
             version: 1,
@@ -7003,7 +6991,6 @@ mod tests {
             structure: None,
             include: Vec::new(),
             budget: None,
-            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "fanout".into(),
             version: 1,
@@ -7050,7 +7037,6 @@ mod tests {
             structure: None,
             include: Vec::new(),
             budget: None,
-            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "custom-outcomes".into(),
             version: 1,
@@ -7172,7 +7158,6 @@ mod tests {
         definition.schema = "genehub.workflow.definition.v2".into();
         definition.entry = String::new();
         definition.structure = Some(workflow_engine::Definition {
-            timeout_ms: None,
             body: workflow_engine::Block {
                 id: "review-step".into(),
                 kind: workflow_engine::BlockKind::Task {
@@ -7220,7 +7205,6 @@ mod tests {
             structure: None,
             include: Vec::new(),
             budget: None,
-            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "publish-only".into(),
             version: 1,
@@ -7272,7 +7256,6 @@ mod tests {
             structure: None,
             include: Vec::new(),
             budget: None,
-            pm_answer_seconds: None,
             schema: DEFINITION_SCHEMA.into(),
             id: "publish-only".into(),
             version: 1,
@@ -7392,7 +7375,6 @@ mod tests {
                 structure: None,
                 include: Vec::new(),
                 budget: None,
-                pm_answer_seconds: None,
                 schema: DEFINITION_SCHEMA.into(),
                 id: "direct".into(),
                 version: 1,

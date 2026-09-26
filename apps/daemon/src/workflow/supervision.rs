@@ -8,9 +8,6 @@ pub(super) const NODE_WALL_MS: i64 = 180_000;
 #[serde(rename_all = "camelCase")]
 pub(super) struct Supervision {
     pub last_checked_at_ms: i64,
-    pub human_wait_ms: i64,
-    #[serde(default)]
-    pub recovery_wait_ms: i64,
     pub waiting: bool,
     #[serde(default)]
     pub waiting_requests: Vec<genehub_proto::WorkflowHumanWait>,
@@ -41,6 +38,8 @@ pub(super) async fn observe(
     let mut stalled = Vec::new();
     let mut activity_ms = run.created_at_ms;
     let mut running = 0;
+    let mut pause_nodes = Vec::new();
+    let mut resume_nodes = Vec::new();
     for (id, node) in &mut run.nodes {
         if let Some(session_id) = &node.session_id {
             if let Ok(activity) = state.sessions.execution_activity(session_id).await {
@@ -61,14 +60,7 @@ pub(super) async fn observe(
                 let summary = state.sessions.summary(session_id).await;
                 if summary.as_ref().is_ok_and(|summary| summary.status == SessionStatus::Waiting) {
                     waiting_count += 1;
-                    if !run.handles.is_empty() {
-                        let answer_ms = run.definition.pm_answer_seconds
-                            .unwrap_or(recovery::DEFAULT_PM_ANSWER_SECONDS)
-                            .saturating_mul(1000).min(i64::MAX as u64) as i64;
-                        if summary.as_ref().is_ok_and(|summary| now.saturating_sub(summary.updated_at_ms) >= answer_ms) {
-                            stalled.push(format!("{id}: PM 作答超过 {} 秒期限", answer_ms / 1000));
-                        }
-                    }
+                    pause_nodes.push(id.clone());
                     for request in state
                         .sessions
                         .pending_questions(session_id)
@@ -84,9 +76,9 @@ pub(super) async fn observe(
                     }
                     continue;
                 }
+                resume_nodes.push(id.clone());
                 // A live Agent can legitimately spend several minutes in a
-                // tool call. Its request budget and any declared activity
-                // deadline still apply; wall time alone is not a failure.
+                // tool call. Wall time alone is not a failure.
             }
         } else if node.status == "running" {
             running += 1;
@@ -96,6 +88,12 @@ pub(super) async fn observe(
             }
         }
     }
+    for id in pause_nodes {
+        let _ = structured::set_waiting(run, &id, true);
+    }
+    for id in resume_nodes {
+        let _ = structured::set_waiting(run, &id, false);
+    }
     // Questions remain visible while siblings work. Only a wholly waiting Run
     // pauses its execution clock; pending dispatch and cleanup are still work.
     let waiting = waiting_count > 0
@@ -104,12 +102,6 @@ pub(super) async fn observe(
             node.status == "finishing" || (run.engine.is_some() && node.status == "pending")
         })
 ;
-    if run.supervision.waiting && run.supervision.last_checked_at_ms > 0 {
-        run.supervision.human_wait_ms = run
-            .supervision
-            .human_wait_ms
-            .saturating_add((now - run.supervision.last_checked_at_ms).max(0));
-    }
     run.supervision.waiting = waiting;
     let notice_kinds = waiting_requests
         .iter()
@@ -125,9 +117,9 @@ pub(super) async fn observe(
     }
     if request::budget_exhausted(runtime, run, now)? {
         let (reason, cause) = if run.handles.is_empty() {
-            ("requestBudgetExceeded: 原始请求达到执行期限或 LLM 调用上限，交回 PM 处理", "requestBudget")
+            ("requestBudgetExceeded: 原始请求达到 LLM 调用上限，交回 PM 处理", "requestBudget")
         } else {
-            ("recoveryBudgetExceeded: 恢复流程达到执行期限或 LLM 调用上限", "recoveryBudget")
+            ("recoveryBudgetExceeded: 恢复流程达到 LLM 调用上限", "recoveryBudget")
         };
         control::request_stop_with_cause(
             run,
