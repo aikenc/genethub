@@ -15,20 +15,14 @@
 //! `https: wss:` into the shipping CSP — the tree's loopback-only CSP is the
 //! dev column).
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::StreamExt;
 use genehub_proto::{ServerFrame, UpdateDownload, UpdateStatus};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-#[cfg(target_family = "wasm")]
-use std::io::Write as _;
-#[cfg(not(target_family = "wasm"))]
-use tokio::io::AsyncWriteExt;
+use serde::Deserialize;
 
 use crate::state::Shared;
 
@@ -58,142 +52,6 @@ struct Manifest {
     /// whether to upgrade actually wants to read.
     #[serde(default)]
     page: Option<String>,
-    /// Keyed the way an updater keys them, e.g. `windows-x86_64`.
-    #[serde(default)]
-    platforms: HashMap<String, Platform>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Platform {
-    #[serde(default)]
-    url: Option<String>,
-    /// Digest and exact length of the asset named by `url`.
-    ///
-    /// Optional while reading so an old/self-hosted manifest produces a clear
-    /// fail-closed download error rather than making update checks unreadable.
-    #[serde(default)]
-    sha256: Option<String>,
-    #[serde(default)]
-    size: Option<u64>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DownloadIntegrity<'a> {
-    sha256: &'a str,
-    size: u64,
-}
-
-/// Removes an incomplete installer on every error and cancellation path.
-///
-/// Keeping this as a synchronous `Drop` guard is intentional: futures can be
-/// aborted between any two awaits, where an async cleanup block would never
-/// run. The file is closed by field drop before ordinary function returns; on
-/// Windows an in-flight cancellation may defer deletion until the handle is
-/// released, but it still never gets renamed into the executable target.
-struct PartialDownloadCleanup(Option<PathBuf>);
-
-impl PartialDownloadCleanup {
-    fn new(path: PathBuf) -> Self {
-        Self(Some(path))
-    }
-
-    fn disarm(&mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for PartialDownloadCleanup {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-#[cfg(not(target_family = "wasm"))]
-type InstallerFile = tokio::fs::File;
-#[cfg(target_family = "wasm")]
-type InstallerFile = std::fs::File;
-
-async fn installer_create_dir_all(path: &Path) -> std::io::Result<()> {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        tokio::fs::create_dir_all(path).await
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        std::fs::create_dir_all(path)
-    }
-}
-
-async fn installer_file_create(path: &Path) -> std::io::Result<InstallerFile> {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        tokio::fs::File::create(path).await
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        std::fs::File::create(path)
-    }
-}
-
-async fn installer_write(file: &mut InstallerFile, bytes: &[u8]) -> std::io::Result<()> {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        file.write_all(bytes).await
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        file.write_all(bytes)?;
-        crate::blocking::breathe().await;
-        Ok(())
-    }
-}
-
-async fn installer_flush(file: &mut InstallerFile) -> std::io::Result<()> {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        file.flush().await?;
-        file.sync_all().await
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        file.flush()?;
-        file.sync_all()
-    }
-}
-
-async fn installer_remove(path: &Path) -> std::io::Result<()> {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        tokio::fs::remove_file(path).await
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        std::fs::remove_file(path)
-    }
-}
-
-async fn installer_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(not(target_family = "wasm"))]
-    {
-        tokio::fs::rename(from, to).await
-    }
-    #[cfg(target_family = "wasm")]
-    {
-        std::fs::rename(from, to)
-    }
-}
-
-// Kept for the integrity-checked updater boundary even while automatic
-// installation remains disabled and no production caller consumes it yet.
-#[allow(dead_code)]
-pub struct DownloadCandidate {
-    pub version: String,
-    pub url: String,
-    pub(crate) sha256: String,
-    pub(crate) size: u64,
 }
 
 /// Asks, and turns whatever comes back into something a screen can show.
@@ -329,59 +187,6 @@ fn status(current: &str, manifest: &Manifest) -> UpdateStatus {
     }
 }
 
-/// Fetches the manifest again at the mutation boundary and requires download
-/// integrity metadata. The UI's earlier check is informational and may be
-/// stale; the bytes which become executable must be tied to the fresh answer.
-pub async fn download_candidate(manifest_url: &str, current: &str) -> Result<DownloadCandidate> {
-    let manifest = fetch(manifest_url).await?;
-    if !is_newer(current, &manifest.version) {
-        bail!("已经是最新的了");
-    }
-    let platform = manifest
-        .platforms
-        .get(&platform_key())
-        .ok_or_else(|| anyhow!("这个平台没有可下载的安装包"))?;
-    let url = platform
-        .url
-        .clone()
-        .ok_or_else(|| anyhow!("这个平台没有可下载的安装包"))?;
-    let (sha256, size) = integrity(platform)?;
-    // Validate the scheme and final path before starting background work.
-    let _ = target_path(Path::new("."), &url)?;
-    Ok(DownloadCandidate {
-        version: manifest.version,
-        url,
-        sha256,
-        size,
-    })
-}
-
-fn integrity(platform: &Platform) -> Result<(String, u64)> {
-    let sha256 = platform
-        .sha256
-        .as_deref()
-        .map(str::trim)
-        .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| anyhow!("更新清单没有有效的 SHA-256，拒绝下载可执行文件"))?
-        .to_ascii_lowercase();
-    let size = platform
-        .size
-        .filter(|size| *size > 0 && *size <= MOST_BYTES)
-        .ok_or_else(|| anyhow!("更新清单没有有效的安装包长度，拒绝下载可执行文件"))?;
-    Ok((sha256, size))
-}
-
-/// How an updater manifest names this machine, so one file can serve every
-/// platform.
-fn platform_key() -> String {
-    let os = match std::env::consts::OS {
-        // What Tauri calls it, and this file is shaped like Tauri's.
-        "macos" => "darwin",
-        other => other,
-    };
-    format!("{os}-{}", std::env::consts::ARCH)
-}
-
 /// Whether `latest` is a later version than `current`.
 ///
 /// Compared with the one shared Product Version implementation, because this
@@ -405,42 +210,18 @@ fn is_newer(current: &str, latest: &str) -> bool {
     theirs > mine
 }
 
-/// How long a whole download may take. Generous: an installer is tens of
-/// megabytes and the person who pressed the button has already been told this
-/// runs in the background.
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(1800);
-
-/// A ceiling on what we will write to someone's disk.
+/// Remembers the last update-download notice so the workbench can dismiss it.
 ///
-/// The manifest names the address, so this is only ever reached by a release
-/// that went wrong or a host that went hostile — and either way, filling a
-/// laptop's disk is not an outcome to leave to the other end's good behaviour.
-const MOST_BYTES: u64 = 1_024 * 1_024 * 1_024;
-
-/// How often progress is announced. Every chunk would be thousands of frames
-/// per second down a relay for a bar that moves in pixels.
-const PROGRESS_EVERY: Duration = Duration::from_millis(250);
-
-/// Fetches the installer, and remembers how far it got.
-///
-/// The machine owns this rather than the desktop shell, for the same reasons
-/// the check lives here: Linux reaches the same workbench through a browser,
-/// and the shell's CSP lists loopback and nothing else. It also means the phone
-/// that started a download can watch it finish.
+/// Fetching the installer moved to the host updater. This only keeps the
+/// dismissable state the router still publishes.
 pub struct Downloader {
-    dir: PathBuf,
     state: Mutex<UpdateDownload>,
-    /// Aborted only by finishing. Kept so a second request can tell a running
-    /// fetch from a finished one without racing the state behind it.
-    running: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Downloader {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(_dir: PathBuf) -> Self {
         Downloader {
-            dir,
             state: Mutex::new(UpdateDownload::Idle),
-            running: Mutex::new(None),
         }
     }
 
@@ -462,224 +243,6 @@ impl Downloader {
         publish(state, UpdateDownload::Idle);
         UpdateDownload::Idle
     }
-
-    /// Starts fetching `url`, unless something is already happening.
-    ///
-    /// Idempotent on purpose. Two windows are two buttons, and the second press
-    /// should join the first download rather than start a rival one writing to
-    /// the same file.
-    pub fn start(
-        &self,
-        state: &Shared,
-        version: &str,
-        url: &str,
-        sha256: &str,
-        size: u64,
-    ) -> Result<UpdateDownload> {
-        let mut current = self.state.lock().expect("download state");
-        match &*current {
-            UpdateDownload::Fetching { .. } => return Ok(current.clone()),
-            // Already on disk, and the same build. Handing back `Ready` is what
-            // makes "下载" on a second machine-wide client show the install
-            // prompt instead of fetching a file that is already there.
-            UpdateDownload::Ready { version: had, .. } if had == version => {
-                return Ok(current.clone())
-            }
-            _ => {}
-        }
-
-        let target = target_path(&self.dir, url)?;
-        let begun = UpdateDownload::Fetching {
-            version: version.to_string(),
-            received: 0,
-            total: None,
-        };
-        *current = begun.clone();
-        drop(current);
-        publish(state, begun.clone());
-
-        let handle = tokio::spawn({
-            let state = state.clone();
-            let version = version.to_string();
-            let url = url.to_string();
-            let sha256 = sha256.to_string();
-            async move {
-                let outcome = fetch_installer(&state, &version, &url, &target, &sha256, size).await;
-                let settled = match outcome {
-                    Ok(()) => UpdateDownload::Ready {
-                        version,
-                        path: target.display().to_string(),
-                    },
-                    Err(error) => {
-                        tracing::warn!("downloading the installer failed: {error:#}");
-                        UpdateDownload::Failed {
-                            version,
-                            message: format!("{error:#}"),
-                        }
-                    }
-                };
-                *state.updates.state.lock().expect("download state") = settled.clone();
-                *state.updates.running.lock().expect("download task") = None;
-                publish(&state, settled);
-            }
-        });
-        *self.running.lock().expect("download task") = Some(handle);
-
-        Ok(begun)
-    }
-}
-
-/// Where the file lands, and whether we are willing to fetch it at all.
-///
-/// Both checks were in the desktop shell before the machine did the fetching,
-/// and both still matter: a scheme that is not https is a manifest pointing at
-/// something other than a release, and a name with a separator in it is a path
-/// we never agreed to write to.
-fn target_path(dir: &Path, url: &str) -> Result<PathBuf> {
-    let parsed =
-        crate::http::Url::parse(url).with_context(|| format!("reading the address {url}"))?;
-    if parsed.scheme() != "https" {
-        bail!("拒绝下载：{} 不是 https 地址", parsed.scheme());
-    }
-    let name = parsed
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_default()
-        .to_string();
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-        bail!("下载地址里没有可用的文件名");
-    }
-    Ok(dir.join(name))
-}
-
-async fn fetch_installer(
-    state: &Shared,
-    version: &str,
-    url: &str,
-    target: &Path,
-    expected_sha256: &str,
-    expected_size: u64,
-) -> Result<()> {
-    let dir = target.parent().expect("the target has a directory");
-    installer_create_dir_all(dir)
-        .await
-        .with_context(|| format!("creating {}", dir.display()))?;
-
-    let mut response = crate::http::Client::builder()
-        .timeout(DOWNLOAD_TIMEOUT)
-        .redirect(update_redirect_policy(false))
-        .build()?
-        .get(url)
-        .header(
-            crate::http::header::USER_AGENT,
-            format!(
-                "{}/{}",
-                crate::channel::CLI_BINARY,
-                crate::version::app_version()
-            ),
-        )
-        .send()
-        .await
-        .context("下载安装包")?;
-    if !response.status().is_success() {
-        bail!("下载失败：服务器返回 {}", response.status());
-    }
-    let total = response.content_length();
-    if total.is_some_and(|bytes| bytes > MOST_BYTES) {
-        bail!("下载失败：安装包大得不像话");
-    }
-    if total.is_some_and(|bytes| bytes != expected_size) {
-        bail!("下载失败：服务器报告的安装包长度与更新清单不一致");
-    }
-
-    // Written to a sibling and renamed at the end, so an interrupted download
-    // never looks like a finished installer to the next click.
-    let partial = with_suffix(target, ".part");
-    let mut partial_cleanup = PartialDownloadCleanup::new(partial.clone());
-    let mut file = installer_file_create(&partial)
-        .await
-        .with_context(|| format!("写入 {}", partial.display()))?;
-    let mut received = 0u64;
-    let mut digest = Sha256::new();
-    let mut announced = Instant::now();
-
-    while let Some(chunk) = response.chunk().await.context("下载安装包")? {
-        received += chunk.len() as u64;
-        if received > MOST_BYTES || received > expected_size {
-            let _ = installer_remove(&partial).await;
-            bail!("下载失败：安装包超过更新清单声明的长度");
-        }
-        digest.update(&chunk);
-        installer_write(&mut file, &chunk)
-            .await
-            .context("写入安装包")?;
-        if announced.elapsed() >= PROGRESS_EVERY {
-            announced = Instant::now();
-            let progress = UpdateDownload::Fetching {
-                version: version.to_string(),
-                received,
-                total,
-            };
-            *state.updates.state.lock().expect("download state") = progress.clone();
-            publish(state, progress);
-        }
-    }
-
-    if received == 0 {
-        let _ = installer_remove(&partial).await;
-        bail!("下载失败：文件是空的");
-    }
-    let actual_sha256 = format!("{:x}", digest.finalize());
-    if let Err(error) = verify_integrity(received, &actual_sha256, expected_size, expected_sha256) {
-        drop(file);
-        let _ = installer_remove(&partial).await;
-        return Err(error);
-    }
-    // Flushed before the rename, or the name appears over a file the OS has not
-    // finished writing — and what runs then is half an installer.
-    installer_flush(&mut file).await.context("写入安装包")?;
-    drop(file);
-    installer_rename(&partial, target)
-        .await
-        .with_context(|| format!("重命名为 {}", target.display()))?;
-    partial_cleanup.disarm();
-    // The desktop verifies again immediately before executing. Download-time
-    // verification alone would leave a replace-after-check window between
-    // `Ready` and the user's click.
-    let integrity = integrity_path(target);
-    crate::config::save_private(
-        &integrity,
-        serde_json::to_string_pretty(&DownloadIntegrity {
-            sha256: expected_sha256,
-            size: expected_size,
-        })?
-        .as_bytes(),
-    )?;
-    tracing::info!("downloaded the installer to {}", target.display());
-    Ok(())
-}
-
-fn verify_integrity(
-    received: u64,
-    actual_sha256: &str,
-    expected_size: u64,
-    expected_sha256: &str,
-) -> Result<()> {
-    if received != expected_size || actual_sha256 != expected_sha256 {
-        bail!("下载失败：安装包的长度或 SHA-256 与更新清单不一致");
-    }
-    Ok(())
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(suffix);
-    path.with_file_name(name)
-}
-
-fn integrity_path(path: &Path) -> PathBuf {
-    with_suffix(path, ".integrity.json")
 }
 
 fn publish(state: &Shared, download: UpdateDownload) {
@@ -715,14 +278,6 @@ mod tests {
         Manifest {
             version: version.to_string(),
             page: Some("https://example.test/releases/tag/v9".to_string()),
-            platforms: HashMap::from([(
-                platform_key(),
-                Platform {
-                    url: Some("https://example.test/setup.exe".to_string()),
-                    sha256: Some("a".repeat(64)),
-                    size: Some(123),
-                },
-            )]),
         }
     }
 
@@ -830,25 +385,6 @@ mod tests {
     /// internet: everything about it that decides where bytes land on someone's
     /// disk gets checked here rather than trusted.
     #[test]
-    fn only_an_https_address_with_a_plain_file_name_is_fetched() {
-        let dir = Path::new("/data/updates");
-        assert_eq!(
-            target_path(dir, "https://example.test/v1/GeneHub-setup.exe").unwrap(),
-            dir.join("GeneHub-setup.exe")
-        );
-
-        // Not https: a manifest that has been tampered with should not be able
-        // to point this at anything it likes.
-        assert!(target_path(dir, "http://example.test/setup.exe").is_err());
-        assert!(target_path(dir, "file:///etc/passwd").is_err());
-        // No name to write under. A trailing slash used to mean an empty file
-        // name, which is a path that is just the directory.
-        assert!(target_path(dir, "https://example.test/").is_err());
-        // The last segment is a name and never a path. `..` is the one that
-        // matters: it would write a directory up from where we agreed to.
-        assert!(target_path(dir, "https://example.test/..").is_err());
-    }
-
     #[test]
     fn update_manifests_require_tls_except_on_exact_ip_loopback() {
         validate_manifest_url("https://releases.example/latest.json").unwrap();
@@ -892,112 +428,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_download_candidate_requires_a_strong_digest_and_exact_length() {
-        let mut manifest = manifest("0.1.18");
-        let platform = manifest.platforms.get_mut(&platform_key()).unwrap();
-        platform.sha256 = None;
-        assert!(integrity(platform)
-            .unwrap_err()
-            .to_string()
-            .contains("SHA-256"));
-        platform.sha256 = Some("not-a-digest".into());
-        assert!(integrity(platform).is_err());
-        platform.sha256 = Some("A".repeat(64));
-        platform.size = Some(0);
-        assert!(integrity(platform)
-            .unwrap_err()
-            .to_string()
-            .contains("长度"));
-        platform.size = Some(123);
-        assert_eq!(integrity(platform).unwrap(), ("a".repeat(64), 123));
-    }
-
-    #[test]
-    fn downloaded_bytes_must_match_both_manifest_length_and_digest() {
-        let digest = "a".repeat(64);
-        verify_integrity(123, &digest, 123, &digest).unwrap();
-        assert!(verify_integrity(122, &digest, 123, &digest).is_err());
-        assert!(verify_integrity(123, &"b".repeat(64), 123, &digest).is_err());
-    }
-
-    #[tokio::test]
-    async fn a_streamed_installer_is_published_only_after_exact_integrity_match() {
-        let body = b"verified installer bytes";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes()
-        .into_iter()
-        .chain(body.iter().copied())
-        .collect();
-        let url = serve_http_once(response).await;
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path()).await;
-        let target = dir.path().join("updates/setup.exe");
-        let digest = format!("{:x}", Sha256::digest(body));
-
-        fetch_installer(&state, "1.2.3", &url, &target, &digest, body.len() as u64)
-            .await
-            .unwrap();
-
-        assert_eq!(std::fs::read(&target).unwrap(), body);
-        assert!(!with_suffix(&target, ".part").exists());
-        let integrity: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(integrity_path(&target)).unwrap()).unwrap();
-        assert_eq!(integrity["sha256"], digest);
-        assert_eq!(integrity["size"], body.len() as u64);
-    }
-
-    #[tokio::test]
-    async fn a_truncated_http_body_fails_and_removes_the_partial_file() {
-        let response =
-            b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\nshort".to_vec();
-        let url = serve_http_once(response).await;
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path()).await;
-        let target = dir.path().join("updates/setup.exe");
-
-        assert!(
-            fetch_installer(&state, "1.2.3", &url, &target, &"0".repeat(64), 20,)
-                .await
-                .is_err()
-        );
-        assert!(!target.exists());
-        assert!(!with_suffix(&target, ".part").exists());
-    }
-
-    #[tokio::test]
-    async fn a_wrong_stream_digest_fails_and_removes_the_partial_file() {
-        let body = b"wrong bytes";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        )
-        .into_bytes()
-        .into_iter()
-        .chain(body.iter().copied())
-        .collect();
-        let url = serve_http_once(response).await;
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path()).await;
-        let target = dir.path().join("updates/setup.exe");
-
-        assert!(fetch_installer(
-            &state,
-            "1.2.3",
-            &url,
-            &target,
-            &"0".repeat(64),
-            body.len() as u64,
-        )
-        .await
-        .is_err());
-        assert!(!target.exists());
-        assert!(!with_suffix(&target, ".part").exists());
-    }
-
     #[tokio::test]
     async fn a_manifest_redirect_to_insecure_remote_http_is_not_followed() {
         let response = b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/evil.json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1005,21 +435,6 @@ mod tests {
         let url = serve_http_once(response).await;
         let error = fetch(&url).await.unwrap_err();
         assert!(format!("{error:#}").contains("302"));
-    }
-
-    /// The rename at the end is what makes a finished download tell itself
-    /// apart from an interrupted one, so the two names must differ.
-    #[test]
-    fn a_download_in_progress_is_not_named_like_a_finished_one() {
-        let target = Path::new("/data/updates/GeneHub-setup.exe");
-        assert_eq!(
-            with_suffix(target, ".part"),
-            Path::new("/data/updates/GeneHub-setup.exe.part")
-        );
-        assert_eq!(
-            integrity_path(target),
-            Path::new("/data/updates/GeneHub-setup.exe.integrity.json")
-        );
     }
 
     /// Reaching nothing must not read as "you are up to date".
@@ -1038,27 +453,44 @@ mod tests {
     /// manifest address and this build's version to this module, and the
     /// answer is an `Update` reply — a failure included, because a check that
     /// reached nothing is something to say out loud.
-    #[tokio::test]
-    async fn the_router_answers_an_app_check_with_this_machines_status() {
+    #[test]
+    fn the_router_answers_an_app_check_with_this_machines_status() {
+        // `router::handle` is one match over every request. In a debug build its
+        // frame is larger than the default test-thread stack, so this runs on a
+        // thread sized for that frame.
         let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path()).await;
-        let handled = crate::router::handle(
-            &state,
-            genehub_proto::TransportKind::Loopback,
-            &crate::authz::Principal::LocalUser,
-            genehub_proto::Request::UpdateAppCheck,
-        )
-        .await;
-        // The tree's manifest URL is empty (local is not on a release scale),
-        // which is the one answer that needs no network: current, nothing to
-        // compare against, no problem to report.
-        let genehub_proto::Reply::Update(status) = handled.reply.expect("an app check answers")
-        else {
-            panic!("an app check answers with an update status");
-        };
-        assert_eq!(status.current, state.version);
-        assert!(status.latest.is_none());
-        assert!(!status.newer);
-        assert!(status.problem.is_none());
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let state = test_state(dir.path()).await;
+                    let handled = crate::router::handle(
+                        &state,
+                        genehub_proto::TransportKind::Loopback,
+                        &crate::authz::Principal::LocalUser,
+                        genehub_proto::Request::UpdateAppCheck,
+                    )
+                    .await;
+                    // The tree's manifest URL is empty (local is not on a release scale),
+                    // which is the one answer that needs no network: current, nothing to
+                    // compare against, no problem to report.
+                    let genehub_proto::Reply::Update(status) =
+                        handled.reply.expect("an app check answers")
+                    else {
+                        panic!("an app check answers with an update status");
+                    };
+                    assert_eq!(status.current, state.version);
+                    assert!(status.latest.is_none());
+                    assert!(!status.newer);
+                    assert!(status.problem.is_none());
+                });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
