@@ -125,9 +125,6 @@ pub fn find(args: &Value, cwd: &Path) -> ToolResult {
         if !glob.is_match(relative) && !glob.is_match(path) {
             continue;
         }
-        if hits.len() >= limit {
-            break;
-        }
         hits.push(relative.to_string_lossy().to_string());
     }
 
@@ -136,8 +133,16 @@ pub fn find(args: &Value, cwd: &Path) -> ToolResult {
     }
 
     hits.sort();
+    let omitted = hits.len().saturating_sub(limit);
+    hits.truncate(limit);
     let truncation = truncate_head(&hits.join("\n"), usize::MAX, DEFAULT_MAX_BYTES);
-    ToolResult::ok(truncation.content.clone()).with_truncation(&truncation)
+    let mut result = ToolResult::ok(truncation.content.clone()).with_truncation(&truncation);
+    if omitted > 0 {
+        result.text.push_str(&format!(
+            "\n\n[{omitted} more matching files omitted after sorting. Narrow the pattern or raise limit.]"
+        ));
+    }
+    result
 }
 
 fn clamp_line(line: &str) -> String {
@@ -215,6 +220,16 @@ mod tests {
             find(&json!({"pattern": "**/*.rs"}), &dir).text,
             "src/lib.rs\nsrc/main.rs"
         );
+    }
+
+    #[test]
+    fn find_returns_the_sorted_prefix_when_the_limit_is_hit() {
+        let dir = fixture("find-limit");
+        std::fs::write(dir.join("src/z.rs"), "").unwrap();
+        let result = find(&json!({"pattern": "**/*.rs", "limit": 1}), &dir);
+        assert!(result.text.starts_with("src/lib.rs\n"));
+        assert!(result.text.contains("2 more matching files omitted"));
+        assert!(!result.text.contains("src/main.rs"));
     }
 
     #[test]

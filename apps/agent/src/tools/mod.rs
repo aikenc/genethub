@@ -396,6 +396,7 @@ pub fn truncate_head(source: &str, max_lines: usize, max_bytes: usize) -> Trunca
     let mut bytes = 0usize;
     let mut truncated_by = None;
     let mut first_line_exceeds_limit = false;
+    let mut last_line_partial = false;
 
     for (index, line) in lines.iter().enumerate() {
         if index >= max_lines {
@@ -405,7 +406,17 @@ pub fn truncate_head(source: &str, max_lines: usize, max_bytes: usize) -> Trunca
         let projected = bytes + line.len() + usize::from(index > 0);
         if projected > max_bytes {
             truncated_by = Some("bytes");
-            first_line_exceeds_limit = index == 0;
+            if index == 0 {
+                first_line_exceeds_limit = true;
+                let mut end = max_bytes.min(line.len());
+                while end > 0 && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end > 0 {
+                    kept.push(&line[..end]);
+                    last_line_partial = true;
+                }
+            }
             break;
         }
         bytes = projected;
@@ -418,7 +429,7 @@ pub fn truncate_head(source: &str, max_lines: usize, max_bytes: usize) -> Trunca
         max_lines,
         max_bytes,
         truncated_by,
-        false,
+        last_line_partial,
         first_line_exceeds_limit,
     )
 }
@@ -510,6 +521,11 @@ mod tests {
 
         let byte_limited = truncate_head(&text, 100, 5);
         assert_eq!(byte_limited.truncated_by, Some("bytes"));
+
+        let long = truncate_head("hello world", 10, 5);
+        assert_eq!(long.content, "hello");
+        assert!(long.first_line_exceeds_limit);
+        assert!(long.last_line_partial);
     }
 
     #[test]
