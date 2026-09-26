@@ -55,7 +55,6 @@ pub(crate) struct BootstrapSpaceRegistration {
     pub lifecycle: String,
     pub components: Vec<(String, Option<String>)>,
     pub guidance: Vec<String>,
-    pub pack: Option<crate::config::AgentSpacePackEntry>,
 }
 
 /// Empty path asks for machine roots. Elsewhere `None` still means home.
@@ -416,6 +415,39 @@ impl Workspaces {
         hydrate_entry(entry, &config.workspace_roots)
     }
 
+    /// Registration state of the Space at one project-relative path.
+    ///
+    /// `workflow list` reports "built but not authorized" and "authorized but
+    /// drifted" as distinct facts, which needs both the registration and a
+    /// fresh Builder verification of the directory as it stands now.
+    pub async fn registration_at(
+        &self,
+        project_root: &Path,
+        space_root: &Path,
+    ) -> (bool, bool) {
+        let entries = self.entries.read().await;
+        let config = self.config.read().await;
+        let Some(entry) = entries.values().find(|entry| {
+            !entry.removed
+                && entry.root.canonicalize().ok().as_deref() == space_root.canonicalize().ok().as_deref()
+        }) else {
+            return (false, false);
+        };
+        let Some(space) = config
+            .agent_spaces
+            .iter()
+            .find(|space| space.workspace_id == entry.id)
+        else {
+            return (false, false);
+        };
+        match verify_pipe_space(project_root, entry) {
+            Ok(digest) => (true, digest != space.builder_lock_digest),
+            // An unverifiable directory is not a live carrier, so it counts as
+            // drift rather than as a healthy registration.
+            Err(_) => (true, true),
+        }
+    }
+
     /// The current registration, or a revision-zero placeholder for a folder
     /// that has never been registered. Callers compare `revision` before they
     /// act, so "not registered yet" and "registered at revision 1" have to be
@@ -596,7 +628,6 @@ impl Workspaces {
                     proposed.guidance.push(prompt.clone());
                 }
             }
-            proposed.bootstrap_pack = desired.pack.clone();
             if proposed != current {
                 proposed.revision = current.revision.saturating_add(1);
             }
@@ -679,8 +710,21 @@ impl Workspaces {
             .cloned()
             .collect::<Vec<_>>();
         if matches.len() != 1 {
+            // With several Workflow packages a project legitimately has
+            // several executors, so "exactly one" is only meaningful once a
+            // package has named the product directory it expects.
             anyhow::bail!(
-                "project AgentSpace must have exactly one reusable {component_id} child; found {}",
+                "{}; found {}",
+                match selected_root {
+                    Some(root) => format!(
+                        "no single reusable {component_id} AgentSpace at {}",
+                        root.display()
+                    ),
+                    None => format!(
+                        "this project has no single reusable {component_id} child; \
+                         name the Workflow package so its executor can be resolved"
+                    ),
+                },
                 matches.len()
             );
         }
@@ -1317,7 +1361,6 @@ fn existing_or_unregistered(config: &Config, workspace_id: &str) -> AgentSpaceEn
             builder_lock_digest: String::new(),
             components: Vec::new(),
             guidance: Vec::new(),
-            bootstrap_pack: None,
         })
 }
 
@@ -2810,6 +2853,86 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("found 0"));
+    }
+
+    /// The exact registration shape `workflow build` submits: the project
+    /// root as PM, the package carrier under it, and the Workers under the
+    /// carrier, all in one plan against the project's current revision.
+    #[tokio::test]
+    async fn one_plan_registers_the_project_root_and_its_package_team() {
+        let dir = tempfile::tempdir().unwrap();
+        let (spaces, ids) = open_verified(
+            dir.path(),
+            &["project", "pkg--executor", "pkg--coder", "pkg--wm"],
+        )
+        .await;
+        let (project, executor, coder, manager) =
+            (ids[0].clone(), ids[1].clone(), ids[2].clone(), ids[3].clone());
+
+        let plan = vec![
+            BootstrapSpaceRegistration {
+                workspace_id: project.clone(),
+                parent_workspace_id: None,
+                lifecycle: "persistent".into(),
+                components: vec![(crate::agent_space::COMPONENT_PM.into(), None)],
+                guidance: Vec::new(),
+            },
+            BootstrapSpaceRegistration {
+                workspace_id: executor.clone(),
+                parent_workspace_id: Some(project.clone()),
+                lifecycle: "pooled".into(),
+                components: vec![(crate::agent_space::COMPONENT_EXECUTOR.into(), None)],
+                guidance: Vec::new(),
+            },
+            BootstrapSpaceRegistration {
+                workspace_id: coder.clone(),
+                parent_workspace_id: Some(executor.clone()),
+                lifecycle: "pooled".into(),
+                components: vec![(
+                    crate::agent_space::COMPONENT_WORKER.into(),
+                    Some("coder".into()),
+                )],
+                guidance: Vec::new(),
+            },
+            // A Worker that also mounts executor owns a subteam; it is still
+            // a child of the package carrier, never a second carrier.
+            BootstrapSpaceRegistration {
+                workspace_id: manager.clone(),
+                parent_workspace_id: Some(executor.clone()),
+                lifecycle: "persistent".into(),
+                components: vec![
+                    (
+                        crate::agent_space::COMPONENT_WORKER.into(),
+                        Some("workflow-manager".into()),
+                    ),
+                    (crate::agent_space::COMPONENT_EXECUTOR.into(), None),
+                ],
+                guidance: Vec::new(),
+            },
+        ];
+        spaces
+            .apply_bootstrap_space_plan(&project, 0, &plan)
+            .await
+            .expect("one plan registers the whole package team");
+
+        let registered = spaces.agent_space(&executor).await.unwrap();
+        assert_eq!(registered.parent_workspace_id.as_deref(), Some(project.as_str()));
+        assert_eq!(
+            spaces
+                .reusable_component_space_at(
+                    &project,
+                    crate::agent_space::COMPONENT_EXECUTOR,
+                    Some(&dir.path().join("project/spaces/pkg--executor")),
+                )
+                .await
+                .unwrap()
+                .map(|space| space.id),
+            Some(executor.clone()),
+        );
+        assert_eq!(
+            spaces.worker_space_for_role(&executor, "coder").await.unwrap().id,
+            coder
+        );
     }
 
     #[tokio::test]

@@ -19,13 +19,13 @@ for (const width of [390, 1280]) defineSpecialty({
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
     const id = await t.flows.main.createBuiltinSession(opened.client, opened.workspaceId);
     await opened.client.call({type: "session.rename", payload: {sessionId: id, title: "会话标题验收"}});
-    await opened.client.call({type: "workspace.rename", payload: {workspaceId: opened.workspaceId, name: "当前验收专家"}});
+    await opened.client.call({type: "workspace.rename", payload: {workspaceId: opened.workspaceId, name: "当前验收项目"}});
     browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, id, { hasTouch: width < 768, isMobile: width < 768, viewport: { width, height: 844 } });
     const page = browser.page;
     await page.setViewportSize({width, height: 844});
     await page.getByRole("heading", {name: "会话标题验收", exact: true}).waitFor();
     const geometry = await page.getByRole("button", {name: "修改会话标题", exact: true}).evaluate(title => {
-      const expert = document.querySelector('[aria-label="当前专家"]')!;
+      const expert = document.querySelector('[aria-label="当前项目"]')!;
       const header = title.closest("header")!;
       return { titleFont: parseFloat(getComputedStyle(title).fontSize), expertFont: parseFloat(getComputedStyle(expert).fontSize),
         height: header.getBoundingClientRect().height - parseFloat(getComputedStyle(header).paddingTop),
@@ -44,14 +44,14 @@ for (const width of [390, 1280]) defineSpecialty({
     const saved = await opened.client.call({type: "session.get", payload: {sessionId: id}});
     t.assertions.assert(saved?.type === "snapshot" && saved.data.summary.title === "修改后的会话标题", "header rename did not persist");
     await page.getByRole("heading", {name: "修改后的会话标题", exact: true}).waitFor();
-    await page.getByRole("button", {name: "当前专家", exact: true}).click();
-    const expert = page.getByRole("region", {name: "专家页面", exact: true});
-    await expert.getByRole("heading", {name: "当前验收专家", exact: true}).waitFor();
+    await page.getByRole("button", {name: "当前项目", exact: true}).click();
+    const expert = page.getByRole("region", {name: "项目页面", exact: true});
+    await expert.getByRole("heading", {name: "当前验收项目", exact: true}).waitFor();
     await expert.getByRole("button", {name: "返回", exact: true}).click();
     await page.getByRole("heading", {name: "修改后的会话标题", exact: true}).waitFor();
-    await page.getByRole("button", {name: "当前专家", exact: true}).click();
-    await expert.getByRole("button", {name: "切换专家", exact: true}).click();
-    await page.getByRole("button", {name: "新建专家", exact: true}).click();
+    await page.getByRole("button", {name: "当前项目", exact: true}).click();
+    await expert.getByRole("button", {name: "切换项目", exact: true}).click();
+    await page.getByRole("button", {name: "新建项目", exact: true}).click();
     const workspace = await opened.client.call({type: "workspace.list"});
     if (workspace?.type !== "workspaces") throw new Error("workspace list unavailable");
     const root = workspace.data.find(w => w.id === opened.workspaceId)!.root;
@@ -61,7 +61,7 @@ for (const width of [390, 1280]) defineSpecialty({
     await page.getByRole("button", {name: "创建", exact: true}).click();
     await page.getByRole("button", {name: "child-expert", exact: true}).click();
     await page.getByText(path.join(root, "child-expert"), {exact: true}).waitFor();
-    await page.getByRole("button", {name: "添加此专家", exact: true}).click();
+    await page.getByRole("button", {name: "添加此项目", exact: true}).click();
     await page.getByRole("heading", {name: "child-expert", exact: true}).waitFor();
     t.assertions.assert(existsSync(path.join(root, "child-expert")), "creation did not use the current expert directory");
 

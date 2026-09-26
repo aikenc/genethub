@@ -67,7 +67,7 @@ describe("the app as the browser loads it", () => {
     // failure mode is an empty root, not a wrong pixel.
     expect(await screen.findAllByRole("status")).not.toHaveLength(0);
     const navigation = screen.getByRole("navigation", { name: "工作台导航" });
-    for (const label of ["会话", "专家", "发现", "设置"]) {
+    for (const label of ["会话", "项目", "发现", "设置"]) {
       expect(within(navigation).getByRole("button", { name: label })).toBeInTheDocument();
     }
     await userEvent.click(within(navigation).getByRole("button", { name: "设置" }));

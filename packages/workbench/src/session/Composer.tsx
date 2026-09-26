@@ -1,4 +1,12 @@
-import type { AgentInfo, Attachment, CommandInfo, SessionDraft, SessionStatus } from "@genehub/proto";
+import type {
+  AgentInfo,
+  AgentSelectionPreferences,
+  Attachment,
+  CommandInfo,
+  SessionDraft,
+  SessionAgentTarget,
+  SessionStatus,
+} from "@genehub/proto";
 import { BookmarkPlus, Check, Loader2, Mic, Paperclip, Play, Square, X } from "lucide-react";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -27,6 +35,12 @@ import {
   VIDEO_ATTACHMENT_MIMES,
 } from "./attachments";
 import { resolveArtifactRef } from "../preview/resolveArtifactRef";
+import {
+  mediaTagsForMimes,
+  normalizeTags,
+  resolveTagRoute,
+  tagMediaInputSupport,
+} from "./capability-preferences";
 import { readLocalDraft, saveLocalDraft } from "./localConversation";
 import { ComposerControls } from "./ComposerControls";
 import { useSessionArtifact } from "./useSessionArtifact";
@@ -132,14 +146,15 @@ export function Composer({
   disabled,
   disabledReason,
   agents,
+  preferences,
+  tags,
+  mediaTags,
   agentId,
   modelId,
   modeId,
   effortId,
+  fast,
   runtimeValues,
-  agentLocked,
-  attachmentsSupported,
-  inputModalities,
   commands,
   restoreDraft,
   insertDraft,
@@ -152,11 +167,8 @@ export function Composer({
   onReplaceDrafts,
   onUpdateDraft,
   onInterrupt,
-  onPickAgent,
-  onPickModel,
-  onPickMode,
-  onPickEffort,
-  onPickRuntimeAxis,
+  onPickTarget,
+  onSavePreferences,
   onRefreshAgents,
   onHeightChange,
   onRestoreDraft,
@@ -174,16 +186,15 @@ export function Composer({
   /** Why this transcript cannot accept a new turn, when the state is durable. */
   disabledReason?: string;
   agents: AgentInfo[];
+  preferences: AgentSelectionPreferences;
+  tags?: string[];
+  mediaTags?: string[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
   effortId?: string | null;
+  fast?: boolean | null;
   runtimeValues?: Record<string, string> | null;
-  agentLocked?: boolean;
-  /** Whether the current agent accepts attachments at all. */
-  attachmentsSupported?: boolean;
-  /** Exact model media inputs; absent for external Agents with image support. */
-  inputModalities?: string[];
   /** The current agent's slash commands, if it named any. */
   commands?: CommandInfo[];
   /** A message coming back for editing after it failed to send. */
@@ -209,11 +220,8 @@ export function Composer({
   onReplaceDrafts?(drafts: SessionDraft[]): Promise<boolean>;
   onUpdateDraft?(draft: SessionDraft, videoFiles?: File[]): Promise<boolean>;
   onInterrupt(): void;
-  onPickAgent(id: string): void;
-  onPickModel(id: string): void;
-  onPickMode(id: string): void;
-  onPickEffort?(id: string): void;
-  onPickRuntimeAxis?(axisId: string, valueId: string): void;
+  onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
+  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onRefreshAgents?(): void;
   /** Reports the complete overlay height in unzoomed layout pixels. */
   onHeightChange?(height: number): void;
@@ -254,11 +262,23 @@ export function Composer({
   const activeDraftFile = useRef<string | null>(null);
   const artifact = useSessionArtifact();
   const openPreviewFloat = useWorkbench((state) => state.openPreviewFloat);
-  const imageAllowed = Boolean(attachmentsSupported && (inputModalities?.includes("image") ?? true));
-  const videoAllowed = Boolean(attachmentsSupported && inputModalities?.includes("video"));
-  const fileActionLabel = !attachmentsSupported
-    ? "添加文件（当前 Agent 不支持附件）"
-    : imageAllowed && videoAllowed
+  const effectiveTags = normalizeTags(tags?.length ? tags : preferences.selectedTags ?? []);
+  const automaticMediaTags = normalizeTags([
+    ...(mediaTags ?? []),
+    ...mediaTagsForMimes([
+      ...(forwardDraft?.attachments ?? []).map((attachment) => attachment.mime),
+      ...attachments.map((attachment) => attachment.mime),
+      ...videoFiles.map((file) => file.type),
+    ]),
+  ]);
+  const routeMedia = tagMediaInputSupport(
+    preferences,
+    [...effectiveTags, ...automaticMediaTags],
+    agents,
+  );
+  const imageAllowed = routeMedia.image;
+  const videoAllowed = routeMedia.video;
+  const fileActionLabel = imageAllowed && videoAllowed
       ? "添加图片或视频"
       : imageAllowed
         ? "添加文件（当前仅支持图片）"
@@ -478,12 +498,22 @@ export function Composer({
   }, [speechInput.result]);
 
   const addFiles = async (files: File[]) => {
-    if (!attachmentsSupported) {
-      setPasteNotice("当前 Agent 还不支持附件");
+    if (!imageAllowed && !videoAllowed) {
+      setPasteNotice("没有同时匹配当前标签与媒体输入的 Agent 和模型");
       return;
     }
     try {
       const { images, videos } = classifyAttachmentFiles(files, imageAllowed, videoAllowed);
+      const requestedMediaTags = mediaTagsForMimes(files.map((file) => file.type));
+      if (
+        !resolveTagRoute(
+          preferences,
+          [...effectiveTags, ...automaticMediaTags, ...requestedMediaTags],
+          agents,
+        )
+      ) {
+        throw new Error("没有一个 Agent 与模型能同时处理所选标签和这些媒体");
+      }
       const added = await Promise.all(images.map(fileToAttachment));
       validateInlineAttachmentBudget([...attachments, ...added]);
       setAttachments((current) => [...current, ...added]);
@@ -975,19 +1005,20 @@ export function Composer({
           >
             <ComposerControls
               agents={agents}
+              preferences={preferences}
+              tags={effectiveTags}
+              mediaTags={automaticMediaTags}
               agentId={agentId}
               modelId={modelId}
               modeId={modeId}
               effortId={effortId ?? null}
+              fast={fast ?? null}
               runtimeValues={runtimeValues}
-              disabled={disabled || phase !== "idle"}
-              agentLocked={agentLocked}
+              disabled={disabled}
+              busy={phase !== "idle"}
               onOpenChange={setSettingsOpen}
-              onPickAgent={onPickAgent}
-              onPickModel={onPickModel}
-              onPickMode={onPickMode}
-              onPickEffort={onPickEffort ?? (() => {})}
-              onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
+              onPickTarget={onPickTarget}
+              onSavePreferences={onSavePreferences}
               onRefreshAgents={onRefreshAgents}
             />
           </div>

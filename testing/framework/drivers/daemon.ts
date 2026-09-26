@@ -36,6 +36,10 @@ export function startDaemon(input: {
     ...input.lease.env,
     ...(input.wasm ? { GENEHUB_LOCAL_COMPONENT: input.wasm } : {}),
   };
+  // A test lease is a fresh local user. The harness may itself run inside a
+  // managed Agent Session, whose controller identity must not cross into it.
+  delete env.GENEHUB_SESSION_ID;
+  delete env.GENEHUB_CONTROLLER_TOKEN;
   for (const key of input.dropEnv ?? []) delete env[key];
   const started = runGenet(input.genet, ["daemon", "start"], env);
   if (started.code !== 0) {

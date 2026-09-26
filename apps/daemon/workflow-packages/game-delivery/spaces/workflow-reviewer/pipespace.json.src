@@ -1,0 +1,22 @@
+{
+  "schema": "pipespace.v1",
+  "name": "workflow-reviewer",
+  "description": "Independent workflow execution diagnosis and process evaluation.",
+  "agents": [
+    "codex",
+    "cursor",
+    "codebuddy",
+    "claude-code"
+  ],
+  "skills": [
+    "workflow-reviewer"
+  ],
+  "tags": [
+    "worker",
+    "workflow-reviewer"
+  ],
+  "skillProviders": [],
+  "children": {
+    "scanDepth": 0
+  }
+}

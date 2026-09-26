@@ -101,6 +101,7 @@ const agent: AgentInfo = {
     setModel: false,
     setMode: false,
     setEffort: false,
+    setFast: false,
     permissions: false,
     resume: true,
     fork: false,
@@ -145,14 +146,15 @@ describe("Composer segmented speech review", () => {
       <Composer
         phase="idle"
         agents={[agent]}
+        preferences={{
+          runtimes: {},
+        }}
         agentId="genet"
         modelId={null}
         modeId={null}
         onSend={vi.fn()}
         onInterrupt={vi.fn()}
-        onPickAgent={vi.fn()}
-        onPickModel={vi.fn()}
-        onPickMode={vi.fn()}
+        onSavePreferences={vi.fn()}
       />,
     );
 

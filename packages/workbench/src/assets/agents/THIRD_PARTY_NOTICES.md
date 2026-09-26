@@ -11,6 +11,7 @@ remote image URL.
   changing their geometry or colours. Refer to the product as “Cursor”.
 - The goose asset comes from the official AAIF goose repository. Apache-2.0
   section 6 does not grant trademark rights.
-Claude Code is represented by its documented `✱` text glyph. Codex, Gemini and
-GitHub Copilot fall back to their names because no suitable current compact
-product mark was identified during the 2026-08-04 review.
+Claude is represented by the Claude Code `✱` text glyph. Codex uses a neutral
+`C` monogram; Gemini and GitHub Copilot fall back to their names because no
+suitable current compact product mark was identified during the 2026-08-04
+review.

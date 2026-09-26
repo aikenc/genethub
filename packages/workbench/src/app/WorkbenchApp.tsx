@@ -3,8 +3,8 @@ import "../ui/entity-lists.css";
 import { usePageNavigation } from "./usePageNavigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
-  ForkTarget,
   ForkTransfer,
+  ForkTarget,
   HistoryCoverage,
   SessionSummary,
 } from "@genehub/proto";
@@ -43,7 +43,13 @@ import type {
 } from "../session/TimelineView";
 import type { ForkMachineOption } from "../session/ForkDialog";
 import type { MachineCatalog } from "../session/MachineCatalogPicker";
-import { defaultAgent, useWorkbench } from "../session/store";
+import { useWorkbench } from "../session/store";
+import {
+  mediaTagsForTimeline,
+  normalizeTags,
+  normalizeAgentPreferences,
+  resolveTagRoute,
+} from "../session/capability-preferences";
 import { ConversationList as Sidebar } from "./ConversationList";
 import { ToolsMenu } from "../shell/ToolsMenu";
 import { WorkbenchNavigation } from "../shell/WorkbenchNavigation";
@@ -60,6 +66,7 @@ import { OpenProject, type OpenWorkspaceHandle } from "../workspace/OpenProject"
 import { WorkspaceAffordance } from "../workspace/WorkspaceAffordance";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import type { SpeechInputProblem } from "../speech/useSpeechInput";
+import { canStartAgent } from "../presentation/catalog/resolve";
 
 /**
  * Both defaults live out here, and they have to.
@@ -160,7 +167,7 @@ export function App({
   /** Opens the embedding product's feedback flow with content-free speech metadata. */
   onReportSpeechProblem?(problem: SpeechInputProblem): void;
   /** Opens the embedding product feedback flow for this exact conversation. */
-  onReportSession?(sessionId: string): void;
+  onReportSession?(sessionId: string, initialDescription?: string): void;
 }) {
   const [endpoint, setEndpoint] = useState<Endpoint | null | "loading">(
     "loading",
@@ -244,8 +251,21 @@ export function App({
   const draft = workbench.draft;
   const agentId = session?.agentId ?? draft?.agentId ?? null;
   const currentAgent = workbench.agents.find((agent) => agent.id === agentId);
-  const currentModelId = workbench.timeline.modelId ?? draft?.modelId ?? session?.modelId ?? currentAgent?.catalog.defaultModel;
-  const currentModel = currentAgent?.catalog.models.find((model) => model.id === currentModelId);
+  const agentPreferences = normalizeAgentPreferences(
+    workbench.settings?.agentPreferences,
+    workbench.agents,
+  );
+  const selectedTags = normalizeTags(
+    session?.routingTags?.length
+      ? session.routingTags
+      : draft?.tags?.length
+        ? draft.tags
+        : agentPreferences.selectedTags ?? ["Flash"],
+  );
+  const automaticMediaTags = normalizeTags([
+    ...(session?.mediaTags ?? []),
+    ...mediaTagsForTimeline(workbench.timeline.items),
+  ]);
   const importedReadOnly = session?.imported?.continuation === "readOnly";
   const managedReadOnly = session?.managed?.userInteraction === "readOnly";
   const sessionReadOnly = importedReadOnly || managedReadOnly;
@@ -588,17 +608,30 @@ export function App({
       async loadCatalog(machine) {
         if (machine.id === sourceMachine.id) {
           const state = useWorkbench.getState();
-          return { agents: state.agents, workspaces: state.workspaces };
+          return {
+            agents: state.agents,
+            workspaces: state.workspaces,
+            agentPreferences: state.settings?.agentPreferences,
+          };
         }
         return onMachine(machine, async (client) => {
-          const [agents, workspaces] = await Promise.all([
+          const [agents, workspaces, settings] = await Promise.all([
             client.call({ type: "agent.list" }),
             client.call({ type: "workspace.list" }),
+            client.call({ type: "settings.get" }),
           ]);
-          if (agents?.type !== "agents" || workspaces?.type !== "workspaces") {
-            throw new Error("目标机器没有返回可用的执行引擎和专家列表。");
+          if (
+            agents?.type !== "agents" ||
+            workspaces?.type !== "workspaces" ||
+            settings?.type !== "settings"
+          ) {
+            throw new Error("目标机器没有返回标签配置、执行引擎和项目列表。");
           }
-          return { agents: agents.data, workspaces: workspaces.data };
+          return {
+            agents: agents.data,
+            workspaces: workspaces.data,
+            agentPreferences: settings.data.agentPreferences,
+          };
         });
       },
       async loadSessions(machine) {
@@ -624,9 +657,11 @@ export function App({
               type: "session.create",
               payload: {
                 workspaceId: target.workspaceId,
-                agentId: target.agentId,
-                modelId: null,
-                modeId: null,
+                agentId: target.target.agentId,
+                modelId: target.target.modelId ?? null,
+                ...(target.target.effortId ? { effortId: target.target.effortId } : {}),
+                modeId: target.target.modeId ?? null,
+                runtimeValues: target.target.runtimeValues,
                 title: null,
                 cwd: null,
               },
@@ -693,13 +728,7 @@ export function App({
         const source = state.sessions.find((entry) => entry.id === state.activeSessionId);
         if (!source || !state.client) return false;
         if (selection.machine.id === broker.sourceMachine.id) {
-          // Always send an explicit target. The daemon still takes the native
-          // path when the same Agent has a checkpoint; omitting target is the
-          // legacy "native only" request and would refuse Cursor-class Agents.
-          return state.forkSession(turnId, {
-            agentId: selection.agentId,
-            workspaceId: selection.workspaceId,
-          });
+          return state.forkSession(turnId, selection.target ?? undefined);
         }
 
         const exported = await state.client.call({
@@ -709,10 +738,8 @@ export function App({
         if (exported?.type !== "forkTransfer") {
           throw new Error("源机器没有返回可迁移的 Fork 历史。");
         }
-        const created = await broker.createFork(selection.machine, exported.data, {
-          agentId: selection.agentId,
-          workspaceId: selection.workspaceId,
-        });
+        if (!selection.target) throw new Error("跨机器 Fork 需要明确的 Agent 与模型");
+        const created = await broker.createFork(selection.machine, exported.data, selection.target);
         // Stay where the user is. Being yanked onto another machine the moment
         // a Fork lands is what made cross-machine Fork feel broken; the jump
         // is offered on the completion banner, not forced.
@@ -816,15 +843,15 @@ export function App({
           onNavigate={() => { rootNextPage(); setSessionsOpen(false); setSection(useWorkbench.getState().activeSessionId ? "sessions" : "spaces"); }}
         />
 
-        {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="专家列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
+        {spacesVisited && workbench.client?.identity?.machineId ? <ListPane label="项目列表面板" open={sessionsOpen} hidden={section !== "spaces"}>
           <WorkspaceBrowser host={host} endpoint={endpoint} key={workbench.client.identity.machineId} deviceName={endpoint.label}
             selectedId={starting ? draft?.workspaceId : undefined} onNewSession={id => { rootNextPage(); openOverview(id); }} />
         </ListPane> : null}
-        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备专家列表…</p>}
-        {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个专家的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一专家，请专家基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览专家</button></div></section> : null}
-        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属专家。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
+        {section === "spaces" && !workbench.client?.identity?.machineId && <p role="status" className="p-6 text-sm text-muted">正在连接，准备项目列表…</p>}
+        {section === "discover" ? <section style={{ paddingTop: "calc(1.5rem + var(--safe-area-top))" }} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-6" aria-label="发现"><div className="mx-auto max-w-2xl py-8"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-3 text-2xl font-medium">发现</h1><p className="mt-6 text-base leading-relaxed text-muted">来自各个项目的新想法，将在这里与你见面。</p><p className="mt-3 text-sm leading-relaxed text-faint">自动发现尚未启用。你现在可以进入任一项目，让它基于已有内容提出建议。</p><button type="button" className="mt-6 min-h-11 rounded-xl bg-accent px-4 text-sm text-white" onClick={() => { setSpacesVisited(true); setSessionsOpen(true); setSection("spaces"); }}>浏览项目</button></div></section> : null}
+        {section === "tools" ? <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="全局设置"><header style={{ paddingTop: "calc(1rem + var(--safe-area-top))" }} className="border-b border-line px-6 py-4"><p className="text-xs text-muted">{endpoint.label}</p><h1 className="mt-1 text-xl font-medium">设置</h1><p className="mt-2 text-xs text-muted">文件、变更和终端位于所属项目。</p></header><ToolsMenu leading={<TargetSwitcher host={host} current={endpoint} onPick={pickTarget} onNavigate={() => { setSessionsOpen(true); setSection("sessions"); }} variant="row" />} scope="global" density="phone" extraTabs={extraTabs} onNavigate={() => setSection("sessions")}><div>{sidebarMenu}</div><div className="md:hidden">{mobileTools}</div><div className="hidden md:block">{desktopTools}</div></ToolsMenu></section> : null}
 
-        {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一位专家，查看会话与配置" : "选择会话，继续话题"}</section>}
+        {((section === "spaces" && (!starting || !showChat)) || (section === "sessions" && starting && showChat)) && <section aria-label="未选择内容" className="hidden min-w-0 flex-1 items-center justify-center bg-bg p-6 text-sm text-muted md:flex">{section === "spaces" ? "选择一个项目，查看会话与配置" : "选择会话，继续话题"}</section>}
         <main className={(section === "sessions" && (!starting || !showChat)) || (section === "spaces" && starting && showChat) ? `${sessionsOpen ? "hidden md:flex" : "flex"} min-h-0 min-w-0 flex-1 flex-col` : "hidden"}>
           {/* The phone's only permanent chrome. The edges are still the
               two 44px targets — the session list and the tools drawer.
@@ -909,7 +936,7 @@ export function App({
 
           <div className="flex min-h-0 flex-1">
             <section className="relative flex min-w-0 flex-1 flex-col">
-              {showChat && session && !session.managed ? <TaskProgress key={`${workbench.client?.identity?.machineId}:${session.id}`} session={session} /> : null}
+              {showChat && session && !session.managed ? <TaskProgress key={`${workbench.client?.identity?.machineId}:${session.id}`} session={session} onReportSession={onReportSession} /> : null}
               {showChat ? (
                 composing ? (
                   <>
@@ -1000,33 +1027,26 @@ export function App({
                           managedReadOnly
                             ? "这是 Workflow 管理的只读子会话；请在根会话控制任务，或 fork 为普通会话。"
                             : importedReadOnly
-                            ? "这是只读导入历史：原专家没有提供可恢复会话。"
+                            ? "这是只读导入历史：原项目没有提供可恢复会话。"
                             : undefined
                         }
                         agents={workbench.agents}
+                        preferences={agentPreferences}
+                        tags={selectedTags}
+                        mediaTags={automaticMediaTags}
                         agentId={agentId}
                         modelId={workbench.timeline.modelId ?? draft?.modelId ?? null}
                         modeId={workbench.timeline.modeId ?? draft?.modeId ?? null}
                         effortId={
                           workbench.timeline.effortId ?? draft?.effortId ?? null
                         }
+                        fast={
+                          workbench.timeline.fast ?? draft?.fast ?? false
+                        }
                         runtimeValues={
                           workbench.activeSessionId
                             ? workbench.timeline.runtimeValues
                             : (draft?.runtimeValues ?? {})
-                        }
-                        // A message in flight locks the Agent too: switching would
-                        // open a new conversation and abandon it.
-                        agentLocked={
-                          workbench.timeline.items.length > 0 || Boolean(pending)
-                        }
-                        attachmentsSupported={
-                          currentAgent?.capabilities.attachments ?? false
-                        }
-                        inputModalities={
-                          currentAgent?.builtin
-                            ? (currentModel?.inputModalities ?? [])
-                            : currentModel?.inputModalities
                         }
                         commands={currentAgent?.catalog.commands}
                         restoreDraft={workbench.restoreDraft}
@@ -1072,17 +1092,11 @@ export function App({
                           if (!await workbench.send(text, attachments, videoFiles)) throw new Error("消息尚未发送");
                         }}
                         onInterrupt={() => void workbench.interrupt()}
-                        // Switching agent opens an empty conversation rather than
-                        // handing this one over: no adapter can pick up another's
-                        // history (`ComposerControls` on why the chip locks once
-                        // anything has been said). Nothing is written until that
-                        // conversation is used.
-                        onPickAgent={(id) => workbench.newSession(null, id)}
-                        onPickModel={(id) => void workbench.setModel(id)}
-                        onPickMode={(id) => void workbench.setMode(id)}
-                        onPickEffort={(id) => void workbench.setEffort(id)}
-                        onPickRuntimeAxis={(axisId, valueId) =>
-                          void workbench.setRuntimeAxis(axisId, valueId)
+                        onPickTarget={(target, tags) =>
+                          workbench.setAgentTarget(target, tags)
+                        }
+                        onSavePreferences={(preferences) =>
+                          workbench.setAgentPreferences(preferences)
                         }
                         onRefreshAgents={() => void workbench.refreshAgents()}
                       />
@@ -1187,8 +1201,8 @@ function importCoverageLabel(coverage: HistoryCoverage): string {
   const source = coverage.sourceItemCount ?? coverage.retainedItemCount + coverage.omittedItemCount;
   const recovery = {
     genehub: "可在 GeneHub 继续检索",
-    external: "需从原专家继续检索",
-    nativeOnly: "仅原专家原生会话可找回",
+    external: "需从原项目继续检索",
+    nativeOnly: "仅原项目原生会话可找回",
     unavailable: "省略部分不可找回",
   }[coverage.retrieval];
   return `保留 ${coverage.retainedItemCount}/${source} 条，省略 ${coverage.omittedItemCount} 条 · ${recovery}`;
@@ -1264,13 +1278,16 @@ function FirstRun({
     workspaces,
     activeWorkspaceId,
     agents,
+    settings,
     newSession,
     connection,
     client,
   } = useWorkbench();
   const workspace =
     workspaces.find((entry) => entry.id === activeWorkspaceId) ?? workspaces[0];
-  const agent = defaultAgent(agents);
+  const preferences = normalizeAgentPreferences(settings?.agentPreferences, agents);
+  const route = resolveTagRoute(preferences, preferences.selectedTags ?? ["Flash"], agents);
+  const hasUsableAgent = agents.some(canStartAgent);
 
   // An empty catalog while the socket is still coming up (or already dead) is
   // not "no workspace" — saying that sends people hunting for a folder when the
@@ -1305,16 +1322,16 @@ function FirstRun({
   if (!workspace) {
     return (
       <Splash>
-        <p className="text-sm">先打开一个专家。</p>
+        <p className="text-sm">先打开一个项目。</p>
         <p className="mb-3 text-xs text-muted">
-          为专家选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
+          为项目选择一个文件夹或 .code-workspace，执行引擎将在这些目录中工作。
         </p>
         <OpenProject host={host} endpoint={endpoint} />
       </Splash>
     );
   }
 
-  if (!agent) {
+  if (!hasUsableAgent) {
     return (
       <Splash>
         <p className="text-sm">还差一个模型密钥。</p>
@@ -1338,13 +1355,15 @@ function FirstRun({
         <WorkspaceIcon workspace={workspace} />
         <span>{workspace.name} 已就绪。</span>
       </p>
-      <p className="mb-3 text-xs text-muted">开一个会话，直接说你想做什么。</p>
+      <p className="mb-3 text-xs text-muted">
+        {route ? "开一个会话，直接说你想做什么。" : "当前标签没有匹配项；进入会话后可编辑这台机器的 Agent 配置。"}
+      </p>
       <button
         type="button"
         className="min-h-11 rounded-xl bg-accent px-4 text-sm text-white md:min-h-0 md:rounded-md md:px-3 md:py-1.5 md:text-xs"
-        onClick={() => newSession(workspace.id, agent.id)}
+        onClick={() => newSession(workspace.id, null, { tags: preferences.selectedTags ?? ["Flash"] })}
       >
-        新建会话
+        {route ? "新建会话" : "配置 Agent 并新建会话"}
       </button>
     </Splash>
   );

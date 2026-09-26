@@ -14,6 +14,8 @@ import type {
   Usage,
 } from "@genehub/proto";
 
+import { definedRuntimeValues } from "./capability-preferences";
+
 /**
  * A message that has left the composer but that the daemon has not echoed yet.
  *
@@ -49,6 +51,7 @@ export interface TimelineState {
   /** The turn currently in flight, if any. */
   activeTurn: string | null;
   activeTurnStartedAtMs?: number | null;
+  activeTurnModelId?: string | null;
   pendingPermission: PermissionRequest | null;
   /** Human-visible acknowledgement between answering a card and turn end. */
   permissionProgress: PermissionProgress | null;
@@ -60,6 +63,7 @@ export interface TimelineState {
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast: boolean | null;
   runtimeValues: Record<string, string>;
   seq: number;
   /** Every round of this session, in order, unexpanded. */
@@ -81,6 +85,7 @@ export function emptyTimeline(): TimelineState {
     status: "idle",
     activeTurn: null,
     activeTurnStartedAtMs: null,
+    activeTurnModelId: undefined,
     pendingPermission: null,
     permissionProgress: null,
     pending: null,
@@ -89,6 +94,7 @@ export function emptyTimeline(): TimelineState {
     modelId: null,
     modeId: null,
     effortId: null,
+    fast: null,
     runtimeValues: {},
     seq: 0,
     rounds: [],
@@ -144,6 +150,7 @@ export function fromSnapshot(
     modelId: snapshot.summary.modelId ?? null,
     modeId: snapshot.summary.modeId ?? null,
     effortId: snapshot.summary.effortId ?? null,
+    fast: snapshot.summary.fast ?? null,
     runtimeValues: Object.fromEntries(
       Object.entries(snapshot.summary.runtimeValues ?? {}).filter(
         (entry): entry is [string, string] => entry[1] !== undefined,
@@ -204,6 +211,8 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: event.turnId,
         activeTurnStartedAtMs: event.startedAtMs || Date.now(),
+        activeTurnModelId:
+          state.activeTurnModelId !== undefined ? state.activeTurnModelId : (state.modelId ?? null),
         status: "running",
         lastError: null,
         usage: null,
@@ -217,6 +226,10 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         inputOutbox: event.item.type === "userMessage" ? state.inputOutbox?.filter(input => input.messageId !== event.item.id) : state.inputOutbox,
         // A durable admission is a session item, with no adapter turn yet.
         status: event.item.type === "userMessage" && event.turnId && state.status === "idle" ? "running" : state.status,
+        activeTurnModelId:
+          event.item.type === "userMessage" && event.turnId && state.activeTurnModelId === undefined
+            ? (state.modelId ?? null)
+            : state.activeTurnModelId,
         permissionProgress: state.permissionProgress,
       };
 
@@ -232,6 +245,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: null,
         activeTurnStartedAtMs: null,
+        activeTurnModelId: undefined,
         status: "idle",
         usage: event.usage,
         permissionProgress: null,
@@ -242,6 +256,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: null,
         activeTurnStartedAtMs: null,
+        activeTurnModelId: undefined,
         status: "failed",
         lastError: event.error,
         permissionProgress: null,
@@ -252,6 +267,7 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
         ...state,
         activeTurn: null,
         activeTurnStartedAtMs: null,
+        activeTurnModelId: undefined,
         status: "idle",
         permissionProgress: null,
       };
@@ -281,11 +297,24 @@ export function apply(state: TimelineState, event: SessionEvent): TimelineState 
     case "modelChanged":
       return { ...state, modelId: event.modelId };
 
+    case "agentChanged":
+      return {
+        ...state,
+        modelId: event.modelId ?? null,
+        modeId: event.modeId ?? null,
+        effortId: event.effortId ?? null,
+        fast: event.fast ?? null,
+        runtimeValues: definedRuntimeValues(event.runtimeValues),
+      };
+
     case "modeChanged":
       return { ...state, modeId: event.modeId };
 
     case "effortChanged":
       return { ...state, effortId: event.effortId };
+
+    case "fastChanged":
+      return { ...state, fast: event.fast };
 
     case "runtimeAxisChanged":
       return {

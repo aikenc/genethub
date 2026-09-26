@@ -2,6 +2,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 export interface ScriptedTurn {
   text?: string;
+  /** OpenAI-compatible reasoning stream; omit text to end without a visible answer. */
+  reasoning?: string;
   tool?: { name: string; arguments: Record<string, unknown> };
   tools?: Array<{ name: string; arguments: Record<string, unknown> }>;
   status?: number;
@@ -69,10 +71,13 @@ function openaiChat(turn: ScriptedTurn): string[] {
     }
     send({}, "tool_calls");
   } else {
-    const text = turn.text ?? "ok";
-    const split = Math.max(1, Math.ceil(text.length / 2));
-    send({ content: text.slice(0, split) });
-    send({ content: text.slice(split) });
+    if (turn.reasoning) send({ reasoning_content: turn.reasoning });
+    const text = turn.text ?? (turn.reasoning ? "" : "ok");
+    if (text) {
+      const split = Math.max(1, Math.ceil(text.length / 2));
+      send({ content: text.slice(0, split) });
+      send({ content: text.slice(split) });
+    }
     send({}, "stop");
   }
   frames.push(

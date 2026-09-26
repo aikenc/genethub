@@ -112,8 +112,10 @@ pub(crate) async fn build(
     let canonical_root = project_root.display().to_string();
     if planning {
         if let Some(session) = controller {
-            if !state.project_control.is_bound(project_id, session) && !recovery_authorized {
-                bail!("projectControlRequired: this PM does not hold the project's management binding");
+            if !crate::router::session_may_manage_project(state, project_id, session).await
+                && !recovery_authorized
+            {
+                bail!("projectControlRequired: applying a Builder plan needs a taken-over project and a main Session that belongs to it");
             }
             let approval = state.project_control.issue_management(crate::project_control::ChallengeSpec {
                 controller_session_id: session.into(), workspace_id: project_id.into(),
@@ -122,7 +124,9 @@ pub(crate) async fn build(
                 expected_revision: revision, git_head: None, status_digest: input_digest,
                 title: "应用 AgentSpace Builder 计划".into(),
                 detail: format!("Build {} at project revision {revision}; only the previewed projections are written", root.display()),
-            }, project_id, recovery_authorized).await?;
+            }, project_id,
+                crate::router::session_may_manage_project(state, project_id, session).await,
+                recovery_authorized).await?;
             if approval.is_some() {
                 bail!("projectControlRequired: project management binding changed; inspect the current authority");
             }
@@ -178,6 +182,7 @@ pub(crate) async fn build(
                     None,
                     &input_digest,
                     action,
+                    crate::router::session_may_manage_project(state, project_id, session).await,
                     recovery_authorized,
                 )
                 .await?,

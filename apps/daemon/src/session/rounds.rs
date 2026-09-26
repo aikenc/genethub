@@ -508,6 +508,27 @@ pub fn item_timing(item: &TimelineItem) -> ItemTiming {
     }
 }
 
+/// A final reasoning stream may run for minutes without creating another
+/// timeline item. Close the last batch at the terminal event rather than at
+/// the first reasoning token, or its displayed duration omits that work.
+pub fn extend_last_span(trunk: &mut RoundTrunk, finished_at_ms: i64) {
+    if let Some(start) = trunk.summary.started_at_ms {
+        let elapsed = finished_at_ms.saturating_sub(start).max(0) as u64;
+        trunk.summary.duration_ms = Some(trunk.summary.duration_ms.unwrap_or(0).max(elapsed));
+    }
+    if let Some(batch) = trunk
+        .batches
+        .iter_mut()
+        .rev()
+        .find(|batch| batch.summary.marker.is_none())
+    {
+        if let Some(start) = batch.summary.started_at_ms {
+            let elapsed = finished_at_ms.saturating_sub(start).max(0) as u64;
+            batch.summary.duration_ms = Some(batch.summary.duration_ms.unwrap_or(0).max(elapsed));
+        }
+    }
+}
+
 /// Subtracts the round's blocked intervals (permission and guidance waits)
 /// from the trunk's and every batch's wall-clock duration, so the displayed
 /// span is time spent working, not time spent waiting on a human.
@@ -1234,6 +1255,23 @@ mod tests {
         assert_eq!(summary.batches[0].started_at_ms, Some(1_000));
         assert_eq!(summary.batches[0].duration_ms, Some(8_500));
         assert_eq!(summary.batches[0].tool_duration_ms, Some(7_500));
+    }
+
+    #[test]
+    fn terminal_extends_a_reasoning_only_tail_without_inventing_tool_time() {
+        let mut trunks = trunks_from_items(&[TimelineItem::Reasoning {
+            id: "thinking".into(),
+            text: "checking".into(),
+            received_at_ms: Some(1_000),
+        }]);
+        let trunk = trunks.first_mut().expect("a reasoning trunk");
+        assert_eq!(trunk.summary.duration_ms, Some(0));
+
+        extend_last_span(trunk, 9_000);
+        exclude_blocked(trunk, &[(3_000, 4_000)]);
+        assert_eq!(trunk.summary.duration_ms, Some(7_000));
+        assert_eq!(trunk.batches[0].summary.duration_ms, Some(7_000));
+        assert_eq!(trunk.summary.tool_duration_ms, Some(0));
     }
 
     #[test]

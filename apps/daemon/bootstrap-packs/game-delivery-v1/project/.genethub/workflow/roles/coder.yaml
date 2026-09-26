@@ -1,5 +1,0 @@
-schema: genehub.workflow.role.v1
-id: coder
-agentId: {{AGENT_ID}}
-{{MODEL_ID_YAML}}userInteraction: readOnly
-prompt: prompts/coder.md

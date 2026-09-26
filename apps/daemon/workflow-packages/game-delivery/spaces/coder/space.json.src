@@ -1,0 +1,6 @@
+{
+  "lifecycle": "pooled",
+  "components": [{ "componentId": "worker", "role": "coder" }],
+  "folders": [{ "name": "project", "path": "../.." }],
+  "guidance": ["这是 Coder WorkerSpace；普通调试 Session 不会自动获得受管 assignment"]
+}

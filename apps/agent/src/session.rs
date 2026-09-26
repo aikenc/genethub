@@ -81,6 +81,19 @@ impl Session {
         self.append_entry("message", json!({ "message": value }));
     }
 
+    /// Removes a failed, side-effect-free turn from future model context while
+    /// keeping its original append-only entries on disk for diagnosis.
+    pub fn rollback_failed_turn(&mut self, retain_messages: usize) {
+        if retain_messages >= self.messages.len() {
+            return;
+        }
+        self.messages.truncate(retain_messages);
+        self.append_entry(
+            "failed_turn_rollback",
+            json!({ "retainMessages": retain_messages }),
+        );
+    }
+
     pub fn append_model_change(&mut self, provider: &str, model_id: &str) {
         self.append_entry(
             "model_change",
@@ -200,6 +213,16 @@ impl Session {
                         self.messages.push(message);
                     }
                 }
+                Some("failed_turn_rollback") => {
+                    if let Some(retain) = entry
+                        .get("retainMessages")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .filter(|retain| *retain <= self.messages.len())
+                    {
+                        self.messages.truncate(retain);
+                    }
+                }
                 Some("session_info") => {
                     self.name = entry
                         .get("name")
@@ -226,7 +249,7 @@ fn short_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Content, StopReason, Usage};
+    use crate::protocol::{Content, MediaAttachment, StopReason, Usage};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir =
@@ -328,5 +351,54 @@ mod tests {
             .unwrap()
             .lines()
             .any(|line| line.contains("\"type\":\"compaction\"")));
+    }
+
+    #[test]
+    fn failed_turn_rollback_excludes_media_after_reopen() {
+        let dir = temp_dir("failed-turn-rollback");
+        let file = dir.join("s.jsonl");
+        let mut session = Session::open(file.clone(), dir.clone());
+        session.append_message(Message::user("successful context"));
+        let retain = session.messages.len();
+        session.append_message(Message::user_with_attachments(
+            "oversized video",
+            vec![MediaAttachment {
+                name: "large.mp4".into(),
+                mime: "video/mp4".into(),
+                path: None,
+                data_base64: Some("b2xkLXZpZGVv".into()),
+            }],
+        ));
+        session.append_message(Message::Assistant {
+            content: vec![Content::text("payload too large")],
+            api: "openai".into(),
+            provider: "mock".into(),
+            model: "video".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Error,
+            error_message: Some("payload too large".into()),
+            timestamp: 0,
+        });
+
+        session.rollback_failed_turn(retain);
+        session.append_message(Message::user("small video instead"));
+
+        let reopened = Session::open(file.clone(), dir);
+        assert_eq!(reopened.messages.len(), 2);
+        assert!(matches!(
+            &reopened.messages[0],
+            Message::User { content, .. } if content == "successful context"
+        ));
+        assert!(matches!(
+            &reopened.messages[1],
+            Message::User { content, attachments, .. }
+                if content == "small video instead" && attachments.is_empty()
+        ));
+        let persisted = std::fs::read_to_string(file).unwrap();
+        assert!(persisted.contains("\"type\":\"failed_turn_rollback\""));
+        assert!(
+            persisted.contains("b2xkLXZpZGVv"),
+            "the audit trail lost the rejected input"
+        );
     }
 }

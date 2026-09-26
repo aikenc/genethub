@@ -346,6 +346,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkflowInspect { .. }
         | Request::WorkflowCheck { .. }
         | Request::WorkflowGet { .. }
+        | Request::WorkflowJournal { .. }
         | Request::WorkflowHistory { .. }
         | Request::SessionImportList { .. }
         | Request::RoundTrunkList { .. }
@@ -355,7 +356,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::BlobBatchGet { .. }
         | Request::WorkspaceList
         | Request::AgentSpaceChildren { .. }
-        | Request::BootstrapPackList
+        | Request::WorkflowList { .. }
         | Request::SessionComponents { .. }
         | Request::SessionFlow { .. }
         | Request::DirectoryList { .. }
@@ -381,15 +382,18 @@ pub fn required(request: &Request) -> Capability {
         }
 
         Request::SessionCreate { .. }
+        | Request::SessionCreateRouted { .. }
         | Request::AgentSpaceBuilder { .. }
-        | Request::ProjectBootstrap { .. }
         | Request::ProjectApprovalRequest { .. }
-        | Request::WorkflowInitialize { .. }
+        | Request::WorkflowBuild { .. }
         | Request::WorkflowActivate { .. }
         | Request::WorkflowDispatch { .. }
         | Request::WorkflowComplete { .. }
         | Request::WorkflowCancel { .. }
         | Request::WorkflowRecover { .. }
+        | Request::WorkflowRecoveryStart { .. }
+        | Request::WorkflowHuman { .. }
+        | Request::WorkflowRecoveryReset { .. }
         | Request::WorkflowBudget { .. }
         | Request::SessionSend { .. }
         | Request::SessionArtifactBegin { .. }
@@ -397,8 +401,10 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionArtifactFinish { .. }
         | Request::SessionArtifactAbort { .. }
         | Request::SessionFork { .. }
+        | Request::SessionForkRouted { .. }
         | Request::SessionForkExport { .. }
         | Request::SessionForkImport { .. }
+        | Request::SessionForkImportRouted { .. }
         | Request::SessionImport { .. }
         | Request::SessionInterrupt { .. }
         | Request::SessionClose { .. }
@@ -408,8 +414,11 @@ pub fn required(request: &Request) -> Capability {
         | Request::SessionDraftsReplace { .. }
         | Request::SessionDelete { .. }
         | Request::SessionSetModel { .. }
+        | Request::SessionSwitchAgent { .. }
+        | Request::SessionRoute { .. }
         | Request::SessionSetMode { .. }
         | Request::SessionSetEffort { .. }
+        | Request::SessionSetFast { .. }
         | Request::SessionSetRuntimeAxis { .. }
         | Request::SessionRespondPermission { .. } => Capability::Session,
 
@@ -443,6 +452,7 @@ pub fn required(request: &Request) -> Capability {
         | Request::WorkspaceRemove { .. }
         | Request::SettingsGet
         | Request::SettingsSetProvider { .. }
+        | Request::SettingsSetAgentPreferences { .. }
         | Request::SettingsForgetProvider { .. }
         | Request::SpeechSettingsSetQwen3 { .. }
         | Request::SpeechRuntimeProbe

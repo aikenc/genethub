@@ -3,7 +3,8 @@
   "agents": [
     {
       "ids": ["genet"],
-      "label": "GeneHub Agent",
+      "label": "Genet",
+      "canonicalLabel": true,
       "assetId": "genet",
       "modeKind": "unknown",
       "startWithoutModelCatalog": false
@@ -17,7 +18,8 @@
     },
     {
       "ids": ["claude", "acp:claude", "acp:claude-code"],
-      "label": "Claude Code",
+      "label": "Claude",
+      "canonicalLabel": true,
       "glyph": "✱",
       "modeKind": "permission",
       "startWithoutModelCatalog": true
@@ -32,6 +34,7 @@
     {
       "ids": ["codex", "acp:codex", "acp:codex-acp"],
       "label": "Codex",
+      "glyph": "C",
       "modeKind": "permission",
       "startWithoutModelCatalog": true
     },

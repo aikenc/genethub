@@ -3,6 +3,13 @@
 //! One implementation covers every ACP-speaking agent, which is why this is in
 //! the MVP rather than later: it is the cheapest way to stop the abstraction
 //! from being a description of our own agent.
+//!
+//! Deprecated. Cursor, its main user, now runs through `adapter::cursor`:
+//! Cursor's ACP ignores the launch `--model` and offers one fixed variant per
+//! model, so effort and Fast cannot be chosen per session through it
+//! (fb_eVSh3fuuyrv6). Only the generic `acp` entry and user-declared
+//! `extends = "acp"` agents still use this module; do not add new agents here.
+#![allow(deprecated)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +32,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
+use super::cursor::list_raw_models_from_cli as list_models_from_cli;
 use super::stdio::write_json_line;
 use super::usage;
 use super::{
@@ -42,11 +50,12 @@ const PROTOCOL_VERSION: i64 = 1;
 /// claiming a turn that never started. That budget, not the patience of a slow
 /// CLI, is what sets this: twice this plus the work around it has to fit.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
-/// `cursor-agent --list-models` is a file/network read, not a session.
-const LIST_MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 /// Asking whether this install is logged in. Short: it reads a file.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[deprecated(
+    note = "ACP cannot pin a model variant per session; Cursor uses adapter::cursor. Kept only for generic and user-declared ACP agents."
+)]
 pub struct AcpAdapter {
     id: String,
     label: String,
@@ -54,9 +63,10 @@ pub struct AcpAdapter {
     extra_dirs: Vec<PathBuf>,
     /// When set, probe also asks this CLI whether it is logged in.
     login_status: bool,
-    /// What `session/new` told us about models and modes, read once per daemon
-    /// run so the picker can be drawn before anyone opens a session.
-    hello: tokio::sync::OnceCell<Option<Hello>>,
+    /// What `session/new` told us about models and modes. Remembered so the
+    /// picker can be drawn before anyone opens a session; `agent.refresh`
+    /// clears it so a later Cursor catalog (new models) can appear.
+    hello: tokio::sync::RwLock<Option<Hello>>,
 }
 
 /// What one `session/new` told us about this install.
@@ -91,7 +101,7 @@ impl AcpAdapter {
             command,
             extra_dirs: Vec::new(),
             login_status: false,
-            hello: tokio::sync::OnceCell::new(),
+            hello: tokio::sync::RwLock::new(None),
         }
     }
 
@@ -110,16 +120,15 @@ impl AcpAdapter {
     }
 
     async fn hello(&self, program: &Path) -> Option<Hello> {
-        // A failed handshake must not be remembered for the rest of the
-        // daemon's life: Cursor's ACP model table is sometimes empty on the
-        // first try, and a timeout while the CLI is updating used to hide the
-        // picker until someone restarted us.
-        if let Some(cached) = self.hello.get() {
-            return cached.clone();
+        // A failed handshake is not remembered: Cursor's ACP model table is
+        // sometimes empty on the first try, and a timeout while the CLI is
+        // updating used to hide the picker until someone restarted us.
+        if let Some(cached) = self.hello.read().await.clone() {
+            return Some(cached);
         }
         let found = discover(program, &self.command).await;
         if let Some(hello) = found.clone() {
-            let _ = self.hello.set(Some(hello));
+            *self.hello.write().await = Some(hello);
         }
         found
     }
@@ -138,6 +147,7 @@ impl AgentAdapter for AcpAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             set_effort: false,
+            set_fast: false,
             interrupt: true,
             // Cursor exposes models through `session/new`,
             // `session/set_config_option`, and — when those come back empty —
@@ -175,6 +185,10 @@ impl AgentAdapter for AcpAdapter {
             // is sitting right there.
             _ => ProbeState::Ready,
         }
+    }
+
+    async fn invalidate_catalog(&self) {
+        *self.hello.write().await = None;
     }
 
     async fn catalog(&self, _providers: &ProviderMap) -> Catalog {
@@ -983,7 +997,7 @@ impl AgentSession for AcpSession {
     }
 }
 
-async fn logged_in(program: &Path) -> Option<bool> {
+pub(super) async fn logged_in(program: &Path) -> Option<bool> {
     if let Some(answer) = run_status(program, &["status", "--format", "json"]).await {
         return Some(answer);
     }
@@ -1279,45 +1293,6 @@ fn spawn_args(command: &[String], model_id: Option<&str>) -> Vec<String> {
     args
 }
 
-fn models_from_cli_list(text: &str) -> (Vec<ModelInfo>, Option<String>) {
-    let mut models = Vec::new();
-    let mut default_model = None;
-    for line in text.lines() {
-        let line = line.trim();
-        let Some((id, rest)) = line.split_once(" - ") else {
-            continue;
-        };
-        let id = id.trim();
-        if id.is_empty() || id.contains(char::is_whitespace) {
-            continue;
-        }
-        let default = rest.contains("(default)");
-        let label = rest.replace("(default)", "").trim().to_string();
-        if default {
-            default_model = Some(id.to_string());
-        }
-        models.push(ModelInfo {
-            id: id.to_string(),
-            label: if label.is_empty() {
-                id.to_string()
-            } else {
-                label
-            },
-            context_window: None,
-            reasoning: false,
-            efforts: Vec::new(),
-            input_modalities: None,
-        });
-    }
-    if default_model.is_none() {
-        default_model = models
-            .iter()
-            .find(|model| model.id == "auto")
-            .map(|model| model.id.clone());
-    }
-    (models, default_model)
-}
-
 fn merge_cli_models(hello: &mut Hello, listed: (Vec<ModelInfo>, Option<String>)) {
     if !hello.models.is_empty() {
         return;
@@ -1326,32 +1301,6 @@ fn merge_cli_models(hello: &mut Hello, listed: (Vec<ModelInfo>, Option<String>))
     if hello.default_model.is_none() {
         hello.default_model = listed.1;
     }
-}
-
-async fn list_models_from_cli(program: &Path) -> Option<(Vec<ModelInfo>, Option<String>)> {
-    for args in [["--list-models"].as_slice(), ["models"].as_slice()] {
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        super::owned_child(&mut command);
-        let output = match tokio::time::timeout(LIST_MODELS_TIMEOUT, command.output()).await {
-            Ok(Ok(output)) => output,
-            _ => continue,
-        };
-        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-        if text.trim().is_empty() {
-            text = String::from_utf8_lossy(&output.stderr).to_string();
-        }
-        let listed = models_from_cli_list(&text);
-        if !listed.0.is_empty() {
-            return Some(listed);
-        }
-    }
-    None
 }
 
 fn resume_method_in(initialized: &Value) -> Option<ResumeMethod> {
@@ -1483,6 +1432,7 @@ fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
                         reasoning: false,
                         efforts: Vec::new(),
                         input_modalities: None,
+                        supports_fast: false,
                     })
                     .collect();
                 return (list, current);
@@ -1512,6 +1462,7 @@ fn models_in(result: &Value) -> (Vec<ModelInfo>, Option<String>) {
                 reasoning: false,
                 efforts: Vec::new(),
                 input_modalities: None,
+                supports_fast: false,
             })
             .collect();
         return (list, current);
@@ -2529,6 +2480,7 @@ mod tests {
     use genehub_proto::{Attachment, ToolKind};
 
     use super::*;
+    use crate::adapter::cursor::models_from_cli_list;
 
     fn state() -> TurnState {
         TurnState {
@@ -3267,25 +3219,6 @@ mod tests {
     }
 
     #[test]
-    fn cursor_cli_model_list_parses_ids_and_the_default_marker() {
-        let (models, default) = models_from_cli_list(
-            "Available models\n\n\
-             auto - Auto (default)\n\
-             composer-2.5 - Composer 2.5\n\
-             composer-2.5-fast - Composer 2.5 Fast\n",
-        );
-        assert_eq!(
-            models
-                .iter()
-                .map(|model| model.id.as_str())
-                .collect::<Vec<_>>(),
-            ["auto", "composer-2.5", "composer-2.5-fast"]
-        );
-        assert_eq!(models[1].label, "Composer 2.5");
-        assert_eq!(default.as_deref(), Some("auto"));
-    }
-
-    #[test]
     fn cli_models_fill_an_empty_acp_catalog_only() {
         let listed = models_from_cli_list("auto - Auto (default)\ncomposer-2.5 - Composer 2.5\n");
         let mut empty = Hello::default();
@@ -3301,6 +3234,7 @@ mod tests {
                 reasoning: false,
                 efforts: Vec::new(),
                 input_modalities: None,
+                supports_fast: false,
             }],
             default_model: Some("composer-2.5[fast=true]".into()),
             ..Hello::default()
@@ -3399,6 +3333,31 @@ mod tests {
             Some(true)
         );
         assert_eq!(login_from_status_output(b"usage: cursor-agent", b""), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_forgets_a_successful_handshake() {
+        let adapter = AcpAdapter::new("t", "T", vec!["true".into(), "acp".into()]);
+        *adapter.hello.write().await = Some(Hello {
+            models: vec![ModelInfo {
+                id: "stale".into(),
+                label: "stale".into(),
+                context_window: None,
+                reasoning: false,
+                efforts: Vec::new(),
+                input_modalities: None,
+                supports_fast: false,
+            }],
+            default_model: Some("stale".into()),
+            ..Hello::default()
+        });
+        let before = adapter.catalog(&Default::default()).await;
+        assert_eq!(before.default_model.as_deref(), Some("stale"));
+        adapter.invalidate_catalog().await;
+        let after = adapter.catalog(&Default::default()).await;
+        assert!(after.models.is_empty());
+        assert!(after.default_model.is_none());
     }
 
     #[test]

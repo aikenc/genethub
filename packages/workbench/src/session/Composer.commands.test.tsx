@@ -1,4 +1,4 @@
-import type { CommandInfo } from "@genehub/proto";
+import type { AgentSelectionPreferences, CommandInfo } from "@genehub/proto";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -21,21 +21,27 @@ const COMMANDS: CommandInfo[] = [
   { name: "context", description: undefined, argumentHint: undefined },
 ];
 
+const PREFERENCES: AgentSelectionPreferences = {
+  selectedTags: ["Pro"],
+  modelProfiles: [{ agentId: "claude", tags: ["Pro"], cost: "medium" }],
+  runtimes: {},
+};
+
 function composer(overrides: Partial<Parameters<typeof Composer>[0]> = {}) {
   const onSend = vi.fn();
   render(
     <Composer
       phase="idle"
       agents={[]}
+      preferences={PREFERENCES}
+      tags={["Pro"]}
       agentId="claude"
       modelId={null}
       modeId={null}
       commands={COMMANDS}
       onSend={onSend}
       onInterrupt={vi.fn()}
-      onPickAgent={vi.fn()}
-      onPickModel={vi.fn()}
-      onPickMode={vi.fn()}
+      onSavePreferences={vi.fn()}
       {...overrides}
     />,
   );
@@ -123,10 +129,10 @@ describe("the slash command menu", () => {
     await userEvent.type(input, "/");
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /执行引擎：claude/ }));
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "关闭运行设置" }));
-    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /模型：/ }));
+    expect(screen.queryByRole("listbox", { name: "命令" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "关闭设置" }));
+    expect(screen.queryByRole("listbox", { name: "命令" })).not.toBeInTheDocument();
 
     await userEvent.click(input);
     expect(screen.getByRole("listbox", { name: "命令" })).toBeInTheDocument();

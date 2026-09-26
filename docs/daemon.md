@@ -156,15 +156,17 @@ DataEndpoint method 只有四个：
 
 ## 4. 存储
 
+业务状态放在 Space 根下的 `.genethub/`，跟着项目走；`<data>` 只放机器本地、可丢弃的东西（本节 4.2–4.4）。放置规则见 [storage-layout.md](./storage-layout.md)。
+
 ### 4.1 会话
 
 ```
-<data>/sessions/<workspace-hash>/<session-id>.jsonl
+<Space 根>/.genethub/sessions/<session-id>/
 ```
 
-- 一行一个 `TimelineItem`，追加写，永不改写既有行
-- 同目录 `meta.json`：agent id、模型、cwd、创建时间、`PersistHandle`
-- 恢复时优先让 agent 自己 resume（用 `PersistHandle`）；agent 不支持恢复的，daemon 用本地记录**只读回放**，并在 UI 上标明"历史只读"
+- 一个会话一个目录，布局、写入锁和跨 channel 规则见 [session-storage.md](./session-storage.md)
+- `meta.json`：agent id、模型、cwd、创建时间、`PersistHandle`
+- 恢复时优先让 agent 自己 resume（用 `PersistHandle`）；句柄失效时退回新开线程，并在时间线上说明它不再记得之前的内容
 
 流式增量（`ItemDelta`）**不落盘**，只落最终态，否则文件大小会失控。
 

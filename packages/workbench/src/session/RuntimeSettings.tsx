@@ -1,461 +1,575 @@
-import type { AgentInfo, ModeInfo, ModelInfo } from "@genehub/proto";
-import { Eye, Info, Sparkles } from "lucide-react";
-import { useId, useState } from "react";
+import type {
+  AgentInfo,
+  AgentModelProfile,
+  AgentSelectionPreferences,
+  ModelInfo,
+} from "@genehub/proto";
+import { Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 
 import { AgentMark } from "../presentation/AgentMark";
-import { EffortMeter } from "../presentation/EffortMeter";
 import {
   canStartAgent,
-  resolveAgentAvailability,
   resolveAgentPresentation,
   resolveAgentProfile,
-  resolveEffortBadge,
   resolveModeBadge,
   resolveModelPresentation,
-  resolveModelTraits,
 } from "../presentation/catalog/resolve";
+import {
+  availableAgentTags,
+  BUILTIN_TAG_GROUP,
+  BUILTIN_TAGS,
+  COST_LEVELS,
+  effectiveTagGroups,
+  inferredModelProfile,
+  isAutoModel,
+  normalizeAgentPreferences,
+  normalizeGroupedTags,
+  toggleGroupedTag,
+  withModelProfile,
+  withoutModelProfile,
+  withTagGroups,
+} from "./capability-preferences";
 import type { RuntimeSelection } from "./runtime-selection";
 
-/**
- * How many models a catalog shows before the rest are folded away.
- *
- * A Genet install with an OpenAI key lists dozens, and the panel is opened to
- * change one setting, not to read a provider's inventory. Four is two rows of
- * the two-column grid.
- */
-export const RUNTIME_MODEL_PREVIEW_LIMIT = 4;
-
-/**
- * How many Agents the tab row shows before the rest are folded away.
- *
- * Every configured Agent is a tab, including the ones that are not installed,
- * and on a phone that ran past one row. Four keeps the row single-height at the
- * narrowest width we support.
- */
-export const RUNTIME_AGENT_PREVIEW_LIMIT = 4;
-
-/**
- * Everything about how the next turn runs, in one column.
- *
- * Shared verbatim by the composer's modal and by the panel a new conversation
- * opens with, because those are the same question asked at two moments — and
- * when they were two components, only one of them ever got the fix.
- *
- * Nothing in here scrolls sideways. The tab row used to be one `overflow-x-auto`
- * line, which on a phone is indistinguishable from the page itself sliding
- * under your thumb; it wraps instead, and what does not fit is folded behind
- * one button rather than hidden past an edge with no scrollbar to hint at it.
- */
-export function RuntimeSettings({
+export function CompactRuntimeControls({
   selection,
   disabled,
-  agentLocked,
-  onPickAgent,
-  onPickModel,
   onPickMode,
   onPickEffort,
+  onPickFast,
   onPickRuntimeAxis,
-  onRefreshAgents,
 }: {
   selection: RuntimeSelection;
   disabled?: boolean;
-  /** A conversation with history keeps its Agent; only the axes stay live. */
-  agentLocked?: boolean;
-  onPickAgent(id: string): void;
-  onPickModel(id: string): void;
   onPickMode(id: string): void;
   onPickEffort(id: string): void;
+  onPickFast?(fast: boolean): void;
   onPickRuntimeAxis(axisId: string, valueId: string): void;
-  onRefreshAgents?(): void;
 }) {
-  const generatedId = useId();
-  const bodyId = `runtime-axes-${generatedId}`;
-  const [showAllAgents, setShowAllAgents] = useState(false);
-  const [showAllModels, setShowAllModels] = useState(false);
-  const [detailModeId, setDetailModeId] = useState<string | null>(null);
   const current = selection.current;
-  const agents = readyFirst(selection.agents);
-  const models = current
-    ? withMissing(current.catalog.models, selection.model, selection.modelAvailable)
-    : [];
-  const modes = current
-    ? withMissing(current.catalog.modes, selection.mode, selection.modeAvailable)
-    : [];
-  const runtimeAxes = current?.catalog.runtimeAxes ?? [];
-  const currentProfile = current ? resolveAgentProfile(current.id) : null;
+  const efforts = selection.model?.efforts ?? [];
+  const modes = current?.catalog.modes ?? [];
   const permissionAxis = Boolean(
-    current?.capabilities.permissions && currentProfile?.modeKind === "permission",
+    current?.capabilities.permissions &&
+      resolveAgentProfile(current.id).modeKind === "permission",
   );
-  const hasRuntimeChoices = Boolean(
-    (current?.capabilities.setModel && models.length > 0) ||
-      (current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0) ||
-      (current?.capabilities.setMode && modes.length > 0) ||
-      runtimeAxes.some((axis) => axis.values.length > 0),
+  const selectClass =
+    "h-8 min-w-0 rounded-lg border border-line bg-raised px-2 text-xs text-fg outline-none focus:border-accent disabled:opacity-50";
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {current?.capabilities.setEffort && efforts.length > 0 ? (
+        <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-faint">
+          <span>思考</span>
+          <select
+            aria-label="思考强度"
+            value={selection.effortId ?? efforts[0]}
+            disabled={disabled}
+            className={selectClass}
+            onChange={(event) => onPickEffort(event.currentTarget.value)}
+          >
+            {efforts.map((effort) => (
+              <option key={effort} value={effort}>
+                {effortLabel(effort)}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+
+      {onPickFast && (selection.model?.supportsFast || current?.capabilities.setFast) ? (
+        <button
+          type="button"
+          aria-label="极速模式"
+          disabled={disabled || !selection.model?.supportsFast}
+          onClick={() => onPickFast(!selection.fast)}
+          className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+            selection.fast
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
+              : "border-line bg-raised text-faint hover:text-fg disabled:opacity-40"
+          }`}
+          title={
+            selection.model?.supportsFast
+              ? selection.fast
+                ? "极速模式（⚡ Fast）：已开启，点击关闭"
+                : "极速模式（⚡ Fast）：已关闭，点击开启"
+              : "当前模型不支持极速模式"
+          }
+        >
+          <span className="text-[13px] leading-none">⚡</span>
+          <span>Fast</span>
+        </button>
+      ) : null}
+
+      {current?.capabilities.setMode && modes.length > 0 ? (
+        <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-faint">
+          <span>{permissionAxis ? "权限" : "模式"}</span>
+          <select
+            aria-label={permissionAxis ? "权限" : "模式"}
+            value={selection.mode?.id ?? modes[0]?.id}
+            disabled={disabled}
+            className={selectClass}
+            onChange={(event) => onPickMode(event.currentTarget.value)}
+          >
+            {modes.map((mode) => {
+              const badge = resolveModeBadge({
+                agentId: current.id,
+                permissions: permissionAxis,
+                modeId: mode.id,
+                modeLabel: mode.label,
+              });
+              return (
+                <option key={mode.id} value={mode.id}>
+                  {badge.emoji} {badge.fullLabel}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      ) : null}
+
+      {(current?.catalog.runtimeAxes ?? []).map((axis) =>
+        axis.values.length > 0 ? (
+          <label key={axis.id} className="flex min-w-0 items-center gap-1.5 text-[11px] text-faint">
+            <span>{axis.label}</span>
+            <select
+              aria-label={axis.label}
+              title={axis.description}
+              value={selection.runtimeValues[axis.id] ?? axis.values[0]?.id}
+              disabled={disabled}
+              className={selectClass}
+              onChange={(event) => onPickRuntimeAxis(axis.id, event.currentTarget.value)}
+            >
+              {axis.values.map((value) => (
+                <option key={value.id} value={value.id}>
+                  {value.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null,
+      )}
+    </div>
   );
-  const settingsDisabled = Boolean(disabled);
-  const visibleAgents = showAllAgents
-    ? agents
-    : preview(agents, current?.id ?? null, RUNTIME_AGENT_PREVIEW_LIMIT);
-  const visibleModels = showAllModels
-    ? models
-    : preview(models, selection.model?.id ?? null, RUNTIME_MODEL_PREVIEW_LIMIT);
-  const detailMode = modes.find((mode) => mode.id === detailModeId);
+}
+
+/** Machine-global exact model, cost and tag configuration. */
+export function RuntimeSettings({
+  agents,
+  preferences,
+  disabled,
+  onSave,
+}: {
+  agents: AgentInfo[];
+  preferences: AgentSelectionPreferences;
+  disabled?: boolean;
+  onSave(preferences: AgentSelectionPreferences): Promise<void> | void;
+}) {
+  const [draft, setDraft] = useState(() => normalizeAgentPreferences(preferences, agents));
+  const [customTag, setCustomTag] = useState<Record<string, string>>({});
+  const [addingAgent, setAddingAgent] = useState<string | null>(null);
+  const [renamingProfile, setRenamingProfile] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [newGroup, setNewGroup] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    // Agent refreshes often return a fresh array after the editor opens. Merge
+    // catalog/availability changes into the live draft instead of replacing a
+    // Human's unsaved edits with the last machine snapshot. A reopened editor
+    // mounts from the latest saved preferences, so an open draft stays owned
+    // by the Human until they save or leave it.
+    setDraft((current) => normalizeAgentPreferences(current, agents));
+  }, [agents]);
+  const tags = useMemo(() => availableAgentTags(draft), [draft]);
+  const customTags = tags.filter(
+    (tag) => !BUILTIN_TAGS.some((builtin) => builtin.toLocaleLowerCase() === tag.toLocaleLowerCase()),
+  );
+  const rows = draft.modelProfiles ?? [];
+  const configurableAgents = agents.filter(canStartAgent);
+  const groupedTags = effectiveTagGroups(draft)
+    .map((group) => ({
+      ...group,
+      tags: group.tags.filter((tag) =>
+        tags.some((candidate) => candidate.toLocaleLowerCase() === tag.toLocaleLowerCase()),
+      ),
+    }))
+    .filter((group) => group.tags.length > 0);
+  const groupedTagKeys = new Set(
+    groupedTags.flatMap((group) => group.tags.map((tag) => tag.toLocaleLowerCase())),
+  );
+  const independentTags = tags.filter((tag) => !groupedTagKeys.has(tag.toLocaleLowerCase()));
+
+  const assignTagGroup = (tag: string, groupId: string) => {
+    const groups = (draft.tagGroups ?? []).map((group) => ({
+      ...group,
+      tags: group.tags.filter((member) => member.toLocaleLowerCase() !== tag.toLocaleLowerCase()),
+    }));
+    const next = groupId
+      ? groups.map((group) => group.id === groupId ? { ...group, tags: [...group.tags, tag] } : group)
+      : groups;
+    setDraft(withTagGroups(draft, next));
+  };
 
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-1">
-        <div role="tablist" aria-label="执行引擎" className="contents">
-          {visibleAgents.map((agent) => {
-            const presentation = resolveAgentPresentation(agent);
-            const availability = resolveAgentAvailability(agent);
-            const chosen = agent.id === current?.id;
-            return (
+      <details className="rounded-xl border border-line bg-raised/25 px-3 py-2">
+        <summary className="cursor-pointer text-xs font-medium text-fg">标签组</summary>
+        <div className="mt-3 space-y-3">
+          <div
+            role="group"
+            aria-label={BUILTIN_TAG_GROUP.label}
+            className="inline-flex gap-0.5 rounded-lg border border-line bg-surface p-0.5"
+          >
+            {BUILTIN_TAG_GROUP.tags.map((tag) => (
+              <span key={tag} className="rounded-md px-2 py-1 text-[10px] text-muted">{tag}</span>
+            ))}
+          </div>
+          {(draft.tagGroups ?? []).map((group) => (
+            <div key={group.id} role="group" aria-label={group.label} className="inline-flex max-w-full items-center gap-0.5 rounded-lg border border-line bg-surface p-0.5">
+              <span className="truncate rounded-md px-2 py-1 text-[10px] text-fg">{group.label}</span>
+              {group.tags.map((tag) => (
+                <span key={tag} className="truncate rounded-md bg-raised px-2 py-1 text-[10px] text-muted">{tag}</span>
+              ))}
               <button
-                key={agent.id}
                 type="button"
-                role="tab"
-                aria-selected={chosen}
-                aria-controls={bodyId}
-                aria-label={`${presentation.label}${availability ? ` ${availability.fullLabel}` : ""}`}
-                title={availability?.fullLabel}
-                disabled={settingsDisabled || agentLocked || !canStartAgent(agent)}
-                onClick={() => onPickAgent(agent.id)}
-                className={`flex h-8 min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs disabled:cursor-not-allowed disabled:opacity-40 ${
-                  chosen
-                    ? "bg-accent/15 text-fg ring-1 ring-inset ring-accent"
-                    : "text-muted hover:bg-raised hover:text-fg"
-                }`}
+                aria-label={`删除标签组 ${group.label}`}
+                disabled={disabled}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-faint hover:bg-raised hover:text-danger disabled:opacity-40"
+                onClick={() => setDraft(withTagGroups(draft, (draft.tagGroups ?? []).filter((item) => item.id !== group.id)))}
               >
-                <AgentMark agent={agent} className="h-4 w-4" fallbackToText={false} />
-                <span className="max-w-24 truncate">{presentation.label}</span>
-                {availability ? (
-                  <span className="shrink-0 text-[10px] text-danger">{availability.shortLabel}</span>
-                ) : null}
+                <Trash2 size={13} />
               </button>
-            );
-          })}
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <input
+              aria-label="新标签组名称"
+              value={newGroup}
+              maxLength={40}
+              placeholder="新建标签组"
+              disabled={disabled}
+              className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-surface px-2 text-xs text-fg outline-none focus:border-accent"
+              onChange={(event) => setNewGroup(event.currentTarget.value)}
+            />
+            <button
+              type="button"
+              disabled={disabled || !newGroup.trim()}
+              className="h-8 rounded-lg border border-line px-3 text-xs text-accent disabled:opacity-40"
+              onClick={() => {
+                const label = newGroup.trim();
+                if (!label) return;
+                setDraft(withTagGroups(draft, [
+                  ...(draft.tagGroups ?? []),
+                  { id: `custom-${Date.now().toString(36)}`, label, tags: [] },
+                ]));
+                setNewGroup("");
+              }}
+            >
+              添加
+            </button>
+          </div>
+          {customTags.length > 0 ? (
+            <div className="space-y-1.5 border-t border-line pt-2">
+              {customTags.map((tag) => {
+                const owner = (draft.tagGroups ?? []).find((group) =>
+                  group.tags.some((member) => member.toLocaleLowerCase() === tag.toLocaleLowerCase()),
+                );
+                return (
+                  <label key={tag} className="flex items-center gap-2 text-xs">
+                    <span className="min-w-0 flex-1 truncate text-fg">{tag}</span>
+                    <select
+                      aria-label={`${tag} 标签组`}
+                      value={owner?.id ?? ""}
+                      disabled={disabled}
+                      className="h-8 rounded-lg border border-line bg-surface px-2 text-xs text-fg"
+                      onChange={(event) => assignTagGroup(tag, event.currentTarget.value)}
+                    >
+                      <option value="">不分组</option>
+                      {(draft.tagGroups ?? []).map((group) => (
+                        <option key={group.id} value={group.id}>{group.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
-        {agents.length > visibleAgents.length || showAllAgents ? (
-          <button
-            type="button"
-            aria-expanded={showAllAgents}
-            className="h-8 shrink-0 rounded-lg px-2 text-xs text-accent hover:bg-raised"
-            onClick={() => setShowAllAgents((shown) => !shown)}
-          >
-            {showAllAgents ? "收起" : `更多 ${agents.length - visibleAgents.length}`}
-          </button>
-        ) : null}
-        {onRefreshAgents ? (
-          <button
-            type="button"
-            className="h-8 shrink-0 rounded-lg px-2 text-xs text-accent hover:bg-raised"
-            onClick={() => onRefreshAgents()}
-          >
-            重新检测
-          </button>
-        ) : null}
+      </details>
+
+      <div className="space-y-3" aria-label="Agent 与模型配置">
+        {configurableAgents.map((agent) => {
+          const agentRows = rows.filter((profile) => profile.agentId === agent.id);
+          const catalogModels = agent.catalog.models.filter((model) => !isAutoModel(model));
+          const availableModels: Array<ModelInfo | null> = catalogModels.length > 0
+            ? catalogModels
+            : resolveAgentProfile(agent.id).startWithoutModelCatalog
+              ? [null]
+              : [];
+          const remaining = availableModels.filter(
+            (model) =>
+              !agentRows.some(
+                (profile) => (profile.modelId ?? null) === (model?.id ?? null),
+              ),
+          );
+          if (agentRows.length === 0 && remaining.length === 0) return null;
+          const agentLabel = resolveAgentPresentation(agent).label;
+          return (
+            <section key={agent.id} className="space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <AgentMark agent={agent} className="h-5 w-5" fallbackToText={false} />
+                  <h3 className="truncate text-xs font-medium text-fg">{agentLabel}</h3>
+                </div>
+                <span className="text-[10px] text-faint">{agentRows.length} 个模型</span>
+              </div>
+              <div role="list" className="space-y-2">
+                {agentRows.map((profile) => {
+                  const key = `${profile.agentId}\u0000${profile.modelId ?? ""}`;
+                  const model = agent.catalog.models.find((candidate) => candidate.id === profile.modelId);
+                  const modelLabel = profile.modelId
+                    ? resolveModelPresentation({
+                        agentId: profile.agentId,
+                        modelId: profile.modelId,
+                        modelLabel: model?.label,
+                      }).fullLabel
+                    : "Agent 默认";
+                  const displayName = profile.displayName?.trim() || modelLabel;
+                  const selected = normalizeGroupedTags(profile.tags, draft);
+                  const updateProfile = (change: Partial<AgentModelProfile>) => {
+                    setDraft((current) => {
+                      const latest = (current.modelProfiles ?? []).find(
+                        (candidate) =>
+                          candidate.agentId === profile.agentId &&
+                          (candidate.modelId ?? null) === (profile.modelId ?? null),
+                      );
+                      return latest
+                        ? withModelProfile(current, { ...latest, ...change })
+                        : current;
+                    });
+                  };
+                  const updateTags = (next: string[]) => {
+                    const normalized = normalizeGroupedTags(next, draft).slice(0, 4);
+                    if (normalized.length === 0) return;
+                    updateProfile({ tags: normalized });
+                  };
+                  return (
+                    <article key={key} role="listitem" className="rounded-xl border border-line bg-raised/35 px-3 py-2.5">
+                      <div className="flex items-center gap-2">
+                        {renamingProfile === key ? (
+                          <input
+                            autoFocus
+                            aria-label={`${agentLabel} ${modelLabel} 新名称`}
+                            value={renameValue}
+                            maxLength={80}
+                            className="h-8 min-w-0 flex-1 rounded-lg border border-accent bg-surface px-2 text-xs font-medium text-fg outline-none"
+                            onChange={(event) => setRenameValue(event.currentTarget.value)}
+                            onBlur={() => {
+                              const renamed = renameValue.trim();
+                              updateProfile({
+                                displayName: renamed && renamed !== modelLabel ? renamed : undefined,
+                              });
+                              setRenamingProfile(null);
+                              setRenameValue("");
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") event.currentTarget.blur();
+                              if (event.key === "Escape") {
+                                event.preventDefault();
+                                setRenamingProfile(null);
+                                setRenameValue("");
+                              }
+                            }}
+                          />
+                        ) : (
+                          <div className="min-w-0 flex-1 truncate text-xs font-medium text-fg" title={displayName}>
+                            {displayName}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          aria-label={`重命名 ${agentLabel} ${displayName}`}
+                          title="重命名"
+                          disabled={disabled || renamingProfile === key}
+                          className="shrink-0 text-faint hover:text-accent disabled:opacity-30"
+                          onClick={() => {
+                            setRenamingProfile(key);
+                            setRenameValue(displayName);
+                          }}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-faint">
+                          <span>成本</span>
+                          <select
+                            aria-label={`${agentLabel} ${modelLabel} 成本`}
+                            value={profile.cost ?? "medium"}
+                            disabled={disabled}
+                            className="h-8 rounded-lg border border-line bg-surface px-2 text-xs text-fg"
+                            onChange={(event) => {
+                              const cost = event.currentTarget.value as NonNullable<typeof profile.cost>;
+                              updateProfile({ cost });
+                            }}
+                          >
+                            {COST_LEVELS.map((level) => <option key={level.id} value={level.id}>{level.label}</option>)}
+                          </select>
+                        </label>
+                        <button
+                          type="button"
+                          aria-label={`移除 ${agentLabel} ${modelLabel}`}
+                          title="移除模型"
+                          disabled={disabled}
+                          className="text-faint hover:text-danger disabled:opacity-25"
+                          onClick={() => setDraft((current) => withoutModelProfile(current, profile.agentId, profile.modelId))}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5" aria-label={`${agentLabel} ${modelLabel} 标签`}>
+                        {groupedTags.map((group) => (
+                          <span
+                            key={group.id}
+                            role="group"
+                            aria-label={group.label}
+                            className="inline-flex flex-wrap gap-0.5 rounded-lg border border-line bg-surface/60 p-0.5"
+                          >
+                            {group.tags.map((tag) => {
+                              const checked = selected.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase());
+                              return (
+                                <button
+                                  key={tag}
+                                  type="button"
+                                  aria-pressed={checked}
+                                  disabled={disabled || (checked && selected.length === 1) || (!checked && selected.length >= 4)}
+                                  onClick={() => updateTags(toggleGroupedTag(selected, tag, draft))}
+                                  className={`rounded-md border border-transparent px-2 py-1 text-[10px] ${checked ? "border-accent/60 bg-accent/10 text-accent disabled:opacity-100" : "text-faint hover:bg-raised hover:text-fg disabled:opacity-35"}`}
+                                >
+                                  {tag}
+                                </button>
+                              );
+                            })}
+                          </span>
+                        ))}
+                        {independentTags.map((tag) => {
+                          const checked = selected.some((item) => item.toLocaleLowerCase() === tag.toLocaleLowerCase());
+                          return (
+                            <button
+                              key={tag}
+                              type="button"
+                              aria-pressed={checked}
+                              disabled={disabled || (checked && selected.length === 1) || (!checked && selected.length >= 4)}
+                              onClick={() => updateTags(toggleGroupedTag(selected, tag, draft))}
+                              className={`rounded-full border px-2 py-1 text-[10px] ${checked ? "border-accent/60 bg-accent/10 text-accent disabled:opacity-100" : "border-line text-faint hover:text-fg disabled:opacity-35"}`}
+                            >
+                              {tag}
+                            </button>
+                          );
+                        })}
+                        <span className="flex h-7 items-center rounded-full border border-dashed border-line px-1">
+                          <input
+                            aria-label={`${agentLabel} ${modelLabel} 自定义标签`}
+                            value={customTag[key] ?? ""}
+                            disabled={disabled || selected.length >= 4}
+                            placeholder="自定义"
+                            maxLength={40}
+                            className="w-14 bg-transparent px-1 text-[10px] text-fg outline-none placeholder:text-faint"
+                            onChange={(event) => {
+                              const value = event.currentTarget.value;
+                              setCustomTag((current) => ({ ...current, [key]: value }));
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key !== "Enter") return;
+                              event.preventDefault();
+                              const value = customTag[key]?.trim();
+                              if (!value) return;
+                              updateTags([...selected, value]);
+                              setCustomTag((current) => ({ ...current, [key]: "" }));
+                            }}
+                          />
+                          <button
+                            type="button"
+                            aria-label="添加自定义标签"
+                            disabled={disabled || selected.length >= 4 || !customTag[key]?.trim()}
+                            className="flex h-5 w-5 items-center justify-center rounded-full text-faint hover:text-accent disabled:opacity-30"
+                            onClick={() => {
+                              const value = customTag[key]?.trim();
+                              if (!value) return;
+                              updateTags([...selected, value]);
+                              setCustomTag((current) => ({ ...current, [key]: "" }));
+                            }}
+                          >
+                            <Plus size={11} />
+                          </button>
+                        </span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+
+              {remaining.length > 0 ? (
+                <div>
+                  <button
+                    type="button"
+                    aria-expanded={addingAgent === agent.id}
+                    disabled={disabled}
+                    className="flex h-8 items-center gap-1 rounded-lg px-2 text-xs text-accent hover:bg-raised disabled:opacity-40"
+                    onClick={() => setAddingAgent((current) => current === agent.id ? null : agent.id)}
+                  >
+                    <Plus size={13} /> 添加模型
+                  </button>
+                  {addingAgent === agent.id ? (
+                    <div className="mt-1 grid grid-cols-1 gap-1 rounded-xl border border-line p-1 sm:grid-cols-2">
+                      {remaining.map((model) => (
+                        <button
+                          key={model?.id ?? "agent-default"}
+                          type="button"
+                          className="truncate rounded-lg px-2 py-2 text-left text-xs text-muted hover:bg-raised hover:text-fg"
+                          onClick={() => {
+                            setDraft((current) => withModelProfile(current, inferredModelProfile(agent, model)));
+                            setAddingAgent(null);
+                          }}
+                        >
+                          {model
+                            ? resolveModelPresentation({ agentId: agent.id, modelId: model.id, modelLabel: model.label }).fullLabel
+                            : "Agent 默认"}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+          );
+        })}
       </div>
 
-      {agentLocked ? (
-        <p className="text-xs text-muted">当前会话已有内容；新建会话后可以切换执行引擎。</p>
-      ) : null}
-
-      <div id={bodyId} role="tabpanel" className="flex min-w-0 flex-col gap-3">
-        {current?.probe.state === "ready" && !hasRuntimeChoices ? (
-          <p className="rounded-lg border border-line bg-raised/40 px-2.5 py-2 text-xs text-muted">
-            {currentProfile?.startWithoutModelCatalog
-              ? "这个执行引擎 没有返回可切换的模型、思考强度或模式，将使用它自身的默认配置。"
-              : "已接入，但当前没有可用模型；请先在设置中配置模型服务。"}
-          </p>
-        ) : null}
-
-        {current?.capabilities.setModel && models.length > 0 ? (
-          <fieldset disabled={settingsDisabled} className="min-w-0">
-            <legend className="text-[10px] font-medium uppercase tracking-wide text-faint">
-              模型
-            </legend>
-            <div className="mt-1 grid grid-cols-2 gap-x-1">
-              {visibleModels.map((model) => (
-                <ModelOption
-                  key={model.id}
-                  agentId={current.id}
-                  model={model}
-                  checked={model.id === selection.model?.id}
-                  unavailable={model === selection.model && !selection.modelAvailable}
-                  onPick={onPickModel}
-                />
-              ))}
-            </div>
-            {models.length > visibleModels.length || showAllModels ? (
-              <button
-                type="button"
-                aria-expanded={showAllModels}
-                className="mt-0.5 h-7 rounded px-2 text-xs text-accent hover:bg-raised"
-                onClick={() => setShowAllModels((shown) => !shown)}
-              >
-                {showAllModels ? "收起" : `更多 ${models.length - visibleModels.length}`}
-              </button>
-            ) : null}
-          </fieldset>
-        ) : null}
-
-        {current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0 ? (
-          <fieldset disabled={settingsDisabled} className="min-w-0">
-            <legend className="text-[10px] font-medium uppercase tracking-wide text-faint">
-              思考强度
-            </legend>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {selection.model!.efforts.map((effortId) => {
-                const badge = resolveEffortBadge(effortId);
-                return (
-                  <label
-                    key={effortId}
-                    className="flex h-8 cursor-pointer items-center gap-1 rounded-full border border-line px-2.5 text-xs text-muted has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:checked]:text-fg has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-                  >
-                    <input
-                      type="radio"
-                      name="runtime-effort"
-                      value={effortId}
-                      checked={effortId === selection.effortId}
-                      onChange={() => onPickEffort(effortId)}
-                      className="sr-only"
-                    />
-                    <EffortMeter level={badge.level} />
-                    {badge.fullLabel}
-                  </label>
-                );
-              })}
-            </div>
-            {!selection.effortId ? (
-              <p className="mt-1 text-[11px] text-faint">当前由执行引擎 使用默认强度。</p>
-            ) : null}
-          </fieldset>
-        ) : null}
-
-        {runtimeAxes.map((axis) =>
-          axis.values.length > 0 ? (
-            <fieldset key={axis.id} disabled={settingsDisabled} className="min-w-0">
-              <legend
-                className="text-[10px] font-medium uppercase tracking-wide text-faint"
-                title={axis.description}
-              >
-                {axis.label}
-              </legend>
-              <div className="mt-1 flex flex-wrap gap-1">
-                {axis.values.map((value) => (
-                  <label
-                    key={value.id}
-                    title={value.description}
-                    className="flex h-8 cursor-pointer items-center rounded-full border border-line px-2.5 text-xs text-muted has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:checked]:text-fg has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-                  >
-                    <input
-                      type="radio"
-                      name={`runtime-axis-${axis.id}`}
-                      value={value.id}
-                      checked={selection.runtimeValues[axis.id] === value.id}
-                      onChange={() => onPickRuntimeAxis(axis.id, value.id)}
-                      className="sr-only"
-                    />
-                    {value.label}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          ) : null,
-        )}
-
-        {current?.capabilities.setMode && modes.length > 0 ? (
-          <fieldset disabled={settingsDisabled} className="min-w-0">
-            <legend className="text-[10px] font-medium uppercase tracking-wide text-faint">
-              {permissionAxis ? "权限" : "模式"}
-            </legend>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {modes.map((mode) => {
-                const badge = resolveModeBadge({
-                  agentId: current.id,
-                  permissions: permissionAxis,
-                  modeId: mode.id,
-                  modeLabel: mode.label,
-                });
-                const unavailable = mode === selection.mode && !selection.modeAvailable;
-                const detail = describeMode(mode, unavailable);
-                return (
-                  <span
-                    key={mode.id}
-                    className="flex h-8 items-center rounded-full border border-line pr-0.5 text-xs has-[:checked]:border-accent has-[:checked]:bg-accent/10"
-                  >
-                    <label className="flex h-full cursor-pointer items-center gap-1 rounded-full pl-2.5 pr-1 text-muted has-[:checked]:text-fg has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50">
-                      <input
-                        type="radio"
-                        name="runtime-mode"
-                        value={mode.id}
-                        checked={mode.id === selection.mode?.id}
-                        disabled={unavailable}
-                        onChange={() => onPickMode(mode.id)}
-                        className="sr-only"
-                      />
-                      <span aria-hidden>{badge.emoji}</span>
-                      {mode.label}
-                    </label>
-                    {detail ? (
-                      <button
-                        type="button"
-                        aria-label={`${mode.label} 说明`}
-                        aria-expanded={detailModeId === mode.id}
-                        onClick={() =>
-                          setDetailModeId((shown) => (shown === mode.id ? null : mode.id))
-                        }
-                        className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full hover:bg-raised ${
-                          unavailable ? "text-danger" : "text-faint hover:text-fg"
-                        }`}
-                      >
-                        <Info className="h-3.5 w-3.5" aria-hidden />
-                      </button>
-                    ) : null}
-                  </span>
-                );
-              })}
-            </div>
-            {detailMode ? (
-              <p className="mt-1 text-[11px] text-muted">
-                {describeMode(detailMode, detailMode === selection.mode && !selection.modeAvailable)}
-              </p>
-            ) : null}
-          </fieldset>
-        ) : null}
+      <div className="sticky bottom-0 flex justify-end border-t border-line bg-surface pt-3">
+        <button
+          type="button"
+          disabled={disabled || saving || rows.some((row) => row.tags.length === 0)}
+          onClick={() => {
+            setSaving(true);
+            Promise.resolve(onSave(draft)).finally(() => setSaving(false));
+          }}
+          className="h-9 rounded-lg bg-accent px-4 text-xs font-medium text-on-accent disabled:opacity-50"
+        >
+          {saving ? "保存中…" : "保存到这台机器"}
+        </button>
       </div>
     </div>
   );
 }
 
-/**
- * One model, one cell.
- *
- * The id, the context window and the words "支持推理" used to take three lines
- * each, which turned a four-model catalog into a page. What is left is the name
- * plus the two things a name does not say — whether it thinks, and whether it
- * can see — and both are icons with the words behind them for anyone reading
- * this with something other than their eyes.
- */
-function ModelOption({
-  agentId,
-  model,
-  checked,
-  unavailable,
-  onPick,
-}: {
-  agentId: string;
-  model: ModelInfo;
-  checked: boolean;
-  unavailable: boolean;
-  onPick(id: string): void;
-}) {
-  const display = resolveModelPresentation({
-    agentId,
-    modelId: model.id,
-    modelLabel: model.label,
-  });
-  const traits = resolveModelTraits(model);
-  const accessibleName = [
-    display.fullLabel,
-    traits.reasoning ? "推理" : null,
-    traits.multimodal ? "多模态" : null,
-    unavailable ? "当前目录已不再提供" : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return (
-    <label
-      title={
-        unavailable
-          ? `${model.id}（当前目录已不再提供）`
-          : display.fullLabel === model.id
-            ? model.id
-            : `${display.fullLabel}（${model.id}）`
-      }
-      className="flex h-8 min-w-0 cursor-pointer items-center gap-1 rounded-lg px-2 text-sm hover:bg-raised has-[:checked]:bg-accent/10 has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-accent has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-    >
-      <input
-        type="radio"
-        name="runtime-model"
-        value={model.id}
-        checked={checked}
-        disabled={unavailable}
-        onChange={() => onPick(model.id)}
-        aria-label={accessibleName}
-        className="sr-only"
-      />
-      <span
-        aria-hidden
-        className={`min-w-0 flex-1 truncate ${unavailable ? "text-danger" : "text-fg"}`}
-      >
-        {display.shortLabel}
-      </span>
-      {traits.reasoning ? (
-        <Sparkles className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-      ) : null}
-      {traits.multimodal ? (
-        <Eye className="h-3.5 w-3.5 shrink-0 text-muted" aria-hidden />
-      ) : null}
-      {unavailable ? <span className="sr-only">当前目录已不再提供</span> : null}
-      <Tick checked={checked} />
-    </label>
-  );
-}
-
-function Tick({ checked }: { checked: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      className={`h-3.5 w-3.5 shrink-0 text-accent ${checked ? "" : "invisible"}`}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="m3 8.5 3.5 3.5L13 4.5" />
-    </svg>
-  );
-}
-
-function describeMode(mode: ModeInfo, unavailable: boolean): string | null {
-  if (unavailable) return "当前目录已不再提供此模式";
-  return mode.description?.trim() || null;
-}
-
-/**
- * The Agents that can actually be started, then the rest.
- *
- * The list arrives in daemon configuration order, so an uninstalled Agent could
- * sit between two working ones and take the row's first position — the place a
- * reader looks first for the thing they can use.
- */
-function readyFirst(agents: AgentInfo[]): AgentInfo[] {
-  const startable = agents.filter((agent) => canStartAgent(agent));
-  if (startable.length === agents.length) return agents;
-  return [...startable, ...agents.filter((agent) => !canStartAgent(agent))];
-}
-
-/**
- * The first few entries, with the chosen one always among them.
- *
- * Folding away the setting that is currently in force would make the panel
- * report a different Agent or model than the one the next turn will use.
- */
-function preview<T extends { id: string }>(items: T[], selectedId: string | null, limit: number): T[] {
-  if (items.length <= limit) return items;
-  const head = items.slice(0, limit);
-  if (head.some((item) => item.id === selectedId)) return head;
-  const selected = items.find((item) => item.id === selectedId);
-  return selected ? [...head.slice(0, limit - 1), selected] : head;
-}
-
-function withMissing<T extends { id: string }>(
-  catalog: T[],
-  selected: T | undefined,
-  available: boolean,
-): T[] {
-  return selected && !available ? [selected, ...catalog] : catalog;
+function effortLabel(id: string): string {
+  const normalized = id.toLowerCase();
+  if (normalized === "none") return "关闭";
+  if (normalized === "low" || normalized === "minimal") return "低";
+  if (normalized === "medium") return "中";
+  if (normalized === "high") return "高";
+  if (normalized === "xhigh" || normalized === "extra-high" || normalized === "max") return "超高";
+  return id;
 }

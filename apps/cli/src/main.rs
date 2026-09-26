@@ -194,10 +194,13 @@ pub fn usage() -> i32 {
   genet speech runtime register --command <absolute-path> [--arg <value>...]
                                     probe and register a community adapter
   genet speech runtime unregister  remove the adapter registration only
-  genet workflow init              initialize .genethub/workflow in this project
+  genet workflow list              the Workflow packages cloned into this project
+  genet workflow build --package <id> [--apply --plan-digest <digest> --action-id <id> --revision <n>]
+                                    materialize one package's Spaces; applying needs approval
   genet workflow inspect           validate and list project workflows
-  genet workflow dispatch [--kind <kind>] [--complexity <level>] \"<task>\"
-                                    route through the project workflow catalog
+  genet workflow dispatch [--package <id>] [--workflow <id>] [--root <dir>] \"<task>\"
+                                    run one flow from one package; both are
+                                    inferred only when the project has exactly one
   genet workflow get --run <id>    read one durable workflow run
   genet workflow check [--run <id> | --draft]
   genet schema workflow.definition
@@ -208,6 +211,16 @@ pub fn usage() -> i32 {
                                     share the original request bounds; recovery needs new user input
   genet workflow history [--limit <n>]
                                     list recent Runs for Workflow analysis
+  genet workflow journal --run <id> [--since <seq>] [--limit <n>]
+                                    read committed Run events and references
+  genet workflow recovery start --run <id> --reason <text>
+                                    PM starts the package's recovery flow
+  genet workflow recovery status --run <id>
+                                    inspect one recovery Run
+  genet workflow recovery check|activate|reset ...
+                                    validate, authorize or reset recovery configuration
+  genet workflow human --run <id> --revision <n> --kind <a|b|c|d|e|f> --reason <text>
+                                    PM asks for a classified Human decision
   genet workflow complete --run <id> --node <id> --revision <n> --evidence <key=value>...
                                     submit exact node evidence from its managed session
                               [--outcome <name> --reason <text>]
@@ -225,10 +238,6 @@ pub fn usage() -> i32 {
   genet space lifecycle set --lifecycle <persistent|pooled|ephemeral> [--revision <n>]
   genet space builder init|check|explain|build|verify|clean --name <agent-space>
                                     run the daemon-owned AgentSpaceBuilder inside this project
-  genet space bootstrap list       discover versioned project team/workflow packs
-  genet space bootstrap plan --pack <id> [--agent <id>] [--model <id>]
-  genet space bootstrap apply --pack <id> --plan-digest <digest> --action-id <id> --expected-revision <n> [--agent <id>] [--model <id>]
-                                    install a versioned project team and workflow pack
   genet space approval request --challenge <id>
                                     ask the Human to approve one daemon-authored plan; never approves it
   genet session components <id>     which responsibilities are live in this session

@@ -1,6 +1,8 @@
 export interface AgentVisualRule {
   ids: string[];
   label: string;
+  /** Ignore channel/vendor-expanded runtime labels and always use this name. */
+  canonicalLabel?: boolean;
   assetId?: string;
   glyph?: string;
   /** Whether a mode picker changes access policy or the Agent's workflow. */

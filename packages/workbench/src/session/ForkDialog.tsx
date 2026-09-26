@@ -1,15 +1,15 @@
+import type { ForkTarget } from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  AgentGrid,
   MachineGrid,
   useMachineCatalog,
   WorkspaceList,
   type MachineCatalog,
   type MachineOption,
 } from "./MachineCatalogPicker";
+import { ModelPicker } from "./ModelPicker";
 
 export type ForkMachineOption = MachineOption;
 export type ForkCatalog = MachineCatalog;
@@ -17,13 +17,16 @@ export type ForkCatalog = MachineCatalog;
 export interface ForkSelection {
   machine: ForkMachineOption;
   workspaceId: string;
-  agentId: string;
+  target: ForkTarget | null;
 }
 
 export function ForkDialog({
   sourceMachine,
   sourceWorkspaceId,
   sourceAgentId,
+  sourceModelId,
+  sourceTags,
+  sourceMediaTags = [],
   sourceCatalog,
   hasNativeCheckpoint,
   listMachines,
@@ -34,6 +37,9 @@ export function ForkDialog({
   sourceMachine: ForkMachineOption;
   sourceWorkspaceId: string;
   sourceAgentId: string;
+  sourceModelId: string | null;
+  sourceTags?: string[];
+  sourceMediaTags?: string[];
   sourceCatalog: ForkCatalog;
   hasNativeCheckpoint: boolean;
   listMachines?(): Promise<ForkMachineOption[]>;
@@ -47,8 +53,11 @@ export function ForkDialog({
     catalog,
     workspaceId: selectedWorkspaceId,
     setWorkspaceId: setSelectedWorkspaceId,
-    agentId: selectedAgentId,
-    setAgentId: setSelectedAgentId,
+    tags: selectedTags,
+    setTags: setSelectedTags,
+    preferences,
+    route: selectedRoute,
+    pickRoute,
     loadingMachines,
     loadingCatalog,
     problem,
@@ -58,7 +67,10 @@ export function ForkDialog({
     sourceMachine,
     sourceCatalog,
     sourceWorkspaceId,
+    sourceTags,
+    automaticTags: sourceMediaTags,
     sourceAgentId,
+    sourceModelId,
     listMachines,
     loadCatalog,
   });
@@ -85,22 +97,21 @@ export function ForkDialog({
     };
   }, [busy, onClose]);
 
-  const selectedAgent = catalog.agents.find((agent) => agent.id === selectedAgentId);
   const selectedWorkspace = catalog.workspaces.find(
     (workspace) => workspace.id === selectedWorkspaceId,
   );
   const unchanged =
     selectedMachine.id === sourceMachine.id &&
     selectedWorkspaceId === sourceWorkspaceId &&
-    selectedAgentId === sourceAgentId;
+    selectedRoute?.agent.id === sourceAgentId &&
+    selectedRoute?.modelId === sourceModelId;
   const native = Boolean(
-    unchanged && hasNativeCheckpoint && selectedAgent?.capabilities.fork,
+    unchanged && hasNativeCheckpoint && selectedRoute?.agent.capabilities.fork,
   );
   const valid = Boolean(
     selectedMachine.online !== false &&
       selectedWorkspace &&
-      selectedAgent &&
-      canStartAgent(selectedAgent),
+      selectedRoute,
   );
 
   if (typeof document === "undefined") return null;
@@ -155,15 +166,24 @@ export function ForkDialog({
             onSelect={setSelectedWorkspaceId}
           />
 
-          <AgentGrid
+          <fieldset disabled={busy || loadingCatalog}>
+            <legend className="text-xs font-medium uppercase tracking-wide text-faint">模型选择</legend>
+            <div className="mt-2">
+          <ModelPicker
             agents={catalog.agents}
-            selectedAgentId={selectedAgentId}
+            preferences={preferences}
+            filterTags={selectedTags}
+            automaticTags={sourceMediaTags}
             disabled={busy || loadingCatalog}
-            onSelect={setSelectedAgentId}
-            currentAgentId={
-              selectedMachine.id === sourceMachine.id ? sourceAgentId : undefined
-            }
+            selected={{
+              agentId: selectedRoute?.agent.id ?? null,
+              modelId: selectedRoute?.modelId ?? null,
+            }}
+            onFilterTags={setSelectedTags}
+            onSelect={pickRoute}
           />
+            </div>
+          </fieldset>
 
           {problem ? <p role="alert" className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">{problem}</p> : null}
 
@@ -195,12 +215,23 @@ export function ForkDialog({
             disabled={busy || loadingCatalog || !valid}
             className="rounded-lg bg-accent px-4 py-2 text-sm font-medium text-on-accent disabled:cursor-not-allowed disabled:opacity-50"
             onClick={() => {
+              if (!selectedRoute) return;
+              const target = native
+                ? null
+                : {
+                    agentId: selectedRoute.agent.id,
+                    workspaceId: selectedWorkspaceId,
+                    ...(selectedRoute.modelId ? { modelId: selectedRoute.modelId } : {}),
+                    ...(selectedRoute.modeId ? { modeId: selectedRoute.modeId } : {}),
+                    ...(selectedRoute.effortId ? { effortId: selectedRoute.effortId } : {}),
+                    runtimeValues: selectedRoute.runtimeValues,
+                  };
               setBusy(true);
               setProblem(null);
               void onConfirm({
                 machine: selectedMachine,
                 workspaceId: selectedWorkspaceId,
-                agentId: selectedAgentId,
+                target,
               })
                 .then((created) => {
                   if (created) onClose();

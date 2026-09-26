@@ -1,10 +1,12 @@
 import type {
+  AgentInfo,
   BlobOverview,
   RoundBatch,
   RoundBatchSummary,
   RoundSummary,
   RoundTrunk,
   RoundTrunkSummary,
+  SessionAgentTarget,
   SessionSummary,
   TimelineItem,
   ToolCallDetail,
@@ -14,7 +16,11 @@ import type {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { stringify as toYaml } from "yaml";
 
-import { canStartAgent } from "../presentation/catalog/resolve";
+import {
+  canStartAgent,
+  resolveAgentPresentation,
+  resolveModelPresentation,
+} from "../presentation/catalog/resolve";
 import {
   ForkDialog,
   type ForkCatalog,
@@ -26,6 +32,7 @@ import { ExecutorFlow } from "./ExecutorFlow";
 import { ImageThumbStrip } from "./ImageStrip";
 import { CURRENT_MACHINE } from "./MachineCatalogPicker";
 import { Markdown } from "./Markdown";
+import { mediaTagsForTimeline, normalizeTags } from "./capability-preferences";
 
 import { attachmentPreviewUrl } from "./attachments";
 import {
@@ -182,7 +189,11 @@ export interface ForwardController {
 
 export type ForwardTarget =
   | { kind: "session"; sessionId: string }
-  | { kind: "new"; workspaceId: string; agentId: string };
+  | {
+      kind: "new";
+      workspaceId: string;
+      target: SessionAgentTarget;
+    };
 
 
 export function TimelineView({
@@ -231,9 +242,6 @@ export function TimelineView({
   const content = useRef<HTMLDivElement>(null);
   const bottom = useRef<HTMLDivElement>(null);
   const scrollRun = useRef(idleTimelineScroll());
-  const press = useRef<{timer: ReturnType<typeof setTimeout>; x: number; y: number} | null>(null);
-  const cancelPress = () => { if (press.current) clearTimeout(press.current.timer); press.current = null; };
-  useEffect(() => cancelPress, []);
   const [savedReading] = useState(() => readingKey ? localValue<ReadingPosition>(`position:${readingKey}`) : null);
   const restorePending = useRef(Boolean(savedReading && !savedReading.bottom));
   const pinnedRef = useRef(!restorePending.current);
@@ -287,14 +295,28 @@ export function TimelineView({
     messages: CapsuleMessage[];
     rounds: RoundSummary[];
   } | null>(null);
-  const forkSession = useWorkbench((workbench) => workbench.forkSession);
   const rounds = useWorkbench((workbench) => workbench.timeline.rounds);
   const roundLayers = useWorkbench((workbench) => workbench.timeline.roundLayers);
   const activeSessionId = useWorkbench((workbench) => workbench.activeSessionId);
   const sessions = useWorkbench((workbench) => workbench.sessions);
   const agents = useWorkbench((workbench) => workbench.agents);
   const workspaces = useWorkbench((workbench) => workbench.workspaces);
+  const settings = useWorkbench((workbench) => workbench.settings);
   const activeSession = sessions.find((entry) => entry.id === activeSessionId);
+  const activeModelId = state.modelId ?? activeSession?.modelId ?? null;
+  const liveTurnModelId =
+    state.activeTurnModelId !== undefined ? state.activeTurnModelId : activeModelId;
+  const liveTurnRuntimeLabels = runtimeLabels(
+    agents,
+    activeSession?.agentId ?? null,
+    liveTurnModelId,
+  );
+  const forkMediaTags = forkRequest
+    ? normalizeTags([
+        ...(activeSession?.mediaTags ?? []),
+        ...mediaTagsForTimeline(state.items.slice(0, forkTurnEnd(state.items, forkRequest.turnId))),
+      ])
+    : [];
   const hasExecutor = !activeSession?.managed && workspaces.find((space) => space.id === activeSession?.workspaceId)
     ?.agentSpace?.components?.some((component) => component.componentId === "executor" && component.enabled);
   const canFork = Boolean(activeSession && agents.some(canStartAgent));
@@ -520,16 +542,26 @@ export function TimelineView({
             const liveTurn =
               index === turns.length - 1 && Boolean(state.activeTurn) && !turn.stats;
             const processItems = processItemsOf(turn);
+            const provisional =
+              startedRounds.length === 0 &&
+              shouldOccupyProcessCard(turn, liveTurn, layerReady);
             const narrative = turnNarrativeItems(
               turn,
               hasRound,
               layerReady,
               absorbedCompactions,
-            );
+            ).filter((item) => !(provisional && item.type === "compaction"));
             // A turn still in flight is not selectable: its items are still
             // being written, and a capsule built from them would go stale
             // before it was ever reviewed.
             const turnSelectable = selectableByTurn[index] ?? [];
+            const completedRuntimeLabels = turn.stats
+              ? runtimeLabels(
+                  agents,
+                  turn.stats.agentId ?? activeSession?.agentId ?? null,
+                  turn.stats.agentId ? (turn.stats.modelId ?? null) : activeModelId,
+                )
+              : liveTurnRuntimeLabels;
             const renderItem = (item: TimelineItem) => {
               if (state.historyExcerptIds?.includes(item.id)) return <div key={item.id}><Item item={item} /><button type="button" disabled={state.status === "running"} className="min-h-11 text-sm text-accent disabled:text-muted" onClick={() => void useWorkbench.getState().loadNarrativeItem(item.id).catch(error => setHistoryError(String(error)))}>长消息仅显示摘要 · 加载完整内容与附件</button></div>;
               if (!selection || !selectableSet.has(item.id)) {
@@ -580,20 +612,7 @@ export function TimelineView({
               );
             };
             return (
-              <section key={turnSectionKey(turn, index)} data-reading-anchor={turnSectionKey(turn, index)} className="space-y-4"
-                onPointerDown={event => {
-                  if (event.pointerType !== "touch" || liveTurn || state.historyExcerptIds?.length || selection) return;
-                  const target = event.target as HTMLElement;
-                  if (target.closest("button,a,input,textarea")) return;
-                  const id = target.closest<HTMLElement>("[data-message-id]")?.dataset.messageId;
-                  if (!id || !selectableSet.has(id)) return;
-                  cancelPress();
-                  press.current = {x:event.clientX,y:event.clientY,timer:setTimeout(() => { setSelection(applySelectionAddMany(emptySelection(),[id]).next); press.current = null; }, 550)};
-                }}
-                onPointerMove={event => { if(press.current && Math.hypot(event.clientX-press.current.x,event.clientY-press.current.y)>8) cancelPress(); }}
-                onPointerUp={cancelPress} onPointerCancel={cancelPress}
-                onContextMenu={event => { if(selection) event.preventDefault(); }}
-              >
+              <section key={turnSectionKey(turn, index)} data-reading-anchor={turnSectionKey(turn, index)} className="space-y-4">
                 {selection && turnSelectable.length > 0 ? (
                   <div className="flex justify-end">
                     <button
@@ -617,7 +636,7 @@ export function TimelineView({
                 {startedRounds.map((startedRound) => (
                   <RoundProgress
                     key={startedRound.roundId}
-                    round={startedRound}
+                    round={settledRound(startedRound, state.items)}
                     finalSummaryText={roundFinalText}
                     processItems={processItems}
                     live={liveTurn}
@@ -625,10 +644,13 @@ export function TimelineView({
                     turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
                   />
                 ))}
-                {startedRounds.length === 0 &&
-                shouldOccupyProcessCard(turn, liveTurn, layerReady) ? (
+                {provisional ? (
                   <ProvisionalProcess
                     items={processItems}
+                    compactions={turn.items.filter(
+                      (item): item is Extract<TimelineItem, { type: "compaction" }> =>
+                        item.type === "compaction",
+                    )}
                     live={liveTurn}
                     usage={state.usage ?? undefined}
                     turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
@@ -646,6 +668,8 @@ export function TimelineView({
                 {turn.stats ? (
                   <TurnFooter
                     stats={turn.stats}
+                    agentLabel={completedRuntimeLabels.agent}
+                    modelLabel={completedRuntimeLabels.model}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -675,6 +699,9 @@ export function TimelineView({
                     liveUsage={state.usage ?? undefined}
                     liveTools={countTools(turn.items)}
                     liveItems={turn.items}
+                    hideElapsed={provisional}
+                    agentLabel={liveTurnRuntimeLabels.agent}
+                    modelLabel={liveTurnRuntimeLabels.model}
                     canFork={canFork}
                     onFork={() =>
                       setForkRequest({
@@ -699,7 +726,14 @@ export function TimelineView({
                 (item) => item.type === "userMessage" && item.id === round.userItemId,
               ),
           )
-          .map((round) => <RoundProgress key={round.roundId} round={round} />)}
+          .map((round) => (
+            <RoundProgress
+              key={round.roundId}
+              round={settledRound(round, state.items)}
+              liveUsage={state.usage ?? undefined}
+              turnStartedAtMs={state.activeTurnStartedAtMs ?? undefined}
+            />
+          ))}
 
         {state.inputOutbox?.map(input => <PendingBubble key={input.messageId} pending={input} agentLabel={agentLabel} />)}
         {state.pending ? (
@@ -835,17 +869,23 @@ export function TimelineView({
           sourceMachine={forkController?.sourceMachine ?? CURRENT_MACHINE}
           sourceWorkspaceId={activeSession.workspaceId}
           sourceAgentId={activeSession.agentId}
-          sourceCatalog={{ agents, workspaces }}
+          sourceModelId={activeSession.modelId ?? null}
+          sourceTags={activeSession.routingTags ?? []}
+          sourceMediaTags={forkMediaTags}
+          sourceCatalog={{
+            agents,
+            workspaces,
+            agentPreferences: settings?.agentPreferences,
+          }}
           hasNativeCheckpoint={forkRequest.hasNativeCheckpoint}
           listMachines={forkController?.listMachines}
           loadCatalog={forkController?.loadCatalog}
           onClose={() => setForkRequest(null)}
           onConfirm={(selection) => {
             if (forkController) return forkController.fork(forkRequest.turnId, selection);
-            return forkSession(forkRequest.turnId, {
-              agentId: selection.agentId,
-              workspaceId: selection.workspaceId,
-            });
+            return useWorkbench
+              .getState()
+              .forkSession(forkRequest.turnId, selection.target ?? undefined);
           }}
         />
       ) : null}
@@ -1144,6 +1184,16 @@ function processItemsOf(
  * daemon's trunk grouping may arrive later; until then the same chrome holds
  * the event-stream items so they never paint as a flat narrative first.
  */
+/** A still-running round belongs to an earlier request once a later user message exists. */
+function settledRound(round: RoundSummary, items: TimelineItem[]): RoundSummary {
+  if (round.outcome !== "running" || !round.userItemId) return round;
+  const at = items.findIndex((item) => item.id === round.userItemId);
+  if (at < 0) return round;
+  const followed = items.slice(at + 1).some((item) => item.type === "userMessage");
+  if (!followed) return round;
+  return { ...round, outcome: "completed", endedAtMs: round.endedAtMs || round.startedAtMs };
+}
+
 function shouldOccupyProcessCard(
   turn: TurnBlock,
   liveTurn: boolean,
@@ -1279,6 +1329,13 @@ function turnBlocks(items: TimelineItem[]): TurnBlock[] {
   return turns;
 }
 
+function forkTurnEnd(items: TimelineItem[], turnId: string): number {
+  const summary = items.findIndex(
+    (item) => item.type === "turnSummary" && item.stats.turnId === turnId,
+  );
+  return summary < 0 ? items.length : summary + 1;
+}
+
 interface ContextualTurn {
   turn: TurnBlock;
   startedRounds: RoundSummary[];
@@ -1402,11 +1459,13 @@ function TurnBodyGallery({
 
 function ProvisionalProcess({
   items,
+  compactions = [],
   live,
   usage,
   turnStartedAtMs,
 }: {
   items: TimelineItem[];
+  compactions?: Extract<TimelineItem, { type: "compaction" }>[];
   live: boolean;
   usage?: Usage;
   turnStartedAtMs?: number;
@@ -1415,6 +1474,12 @@ function ProvisionalProcess({
   const title = provisionalProcessTitle(items, live);
   const { open, toggle } = useCardOpen(live);
   const summary = liveProcessSummary(items, blobs.length, usage, turnStartedAtMs);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!live || turnStartedAtMs == null) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [live, turnStartedAtMs]);
   return (
     <div className="space-y-2" data-testid="round-progress">
       <div
@@ -1438,12 +1503,20 @@ function ProvisionalProcess({
           ) : (
             <span className="shrink-0 text-xs text-muted">{blobs.length} 项</span>
           )}
+          {live && turnStartedAtMs != null ? (
+            <span className="shrink-0 text-xs text-muted">
+              耗时 {formatDuration(Math.max(0, now - turnStartedAtMs))}
+            </span>
+          ) : null}
           <span className="shrink-0 text-xs text-accent" aria-hidden="true">
             {open ? "▴" : "▾"}
           </span>
         </button>
         {open ? (
           <div className="space-y-2 px-2 pb-2">
+            {compactions.map((item) => (
+              <CompactionMarker key={item.id} reason={item.reason} />
+            ))}
             <LiveTail blobs={blobs} />
           </div>
         ) : null}
@@ -1452,12 +1525,7 @@ function ProvisionalProcess({
   );
 }
 
-/**
- * Builds the synthetic summary a still-running process card shows, from the
- * items in flight and the live turn's usage. `undefined` when neither rounds
- * nor a start time exist yet, so the card keeps the old blob count until
- * there is something meaningful to say.
- */
+/** A live process has not yet been written to the round layer. */
 function liveProcessSummary(
   items: TimelineItem[],
   blobCount: number,
@@ -1572,12 +1640,6 @@ function RoundProgress({
   );
 }
 
-/**
- * Right-side two-line metrics for a trunk/batch header: LLM rounds and
- * wall-clock span on top, relative start time and summed tool time below in
- * smaller type. Rows persisted before these fields existed keep the old blob
- * count rather than showing zeros.
- */
 function SummaryMetrics({
   summary,
   live = false,
@@ -1585,7 +1647,6 @@ function SummaryMetrics({
 }: {
   summary: RoundTrunkSummary | RoundBatchSummary;
   live?: boolean;
-  /** The card is still running: the span is `now - startedAtMs`, not a stored duration. */
   liveSpan?: boolean;
 }) {
   const [now, setNow] = useState(Date.now());
@@ -2124,12 +2185,35 @@ function estimateToolOutputTokens(items: TimelineItem[]): number {
   return items.reduce((total, item) => total + Math.floor((textOf(item).length + 3) / 4), 0);
 }
 
+function runtimeLabels(
+  agents: AgentInfo[],
+  agentId: string | null,
+  modelId: string | null,
+): { agent: string; model: string } {
+  const agent = agents.find((candidate) => candidate.id === agentId);
+  const resolvedModelId = modelId ?? agent?.catalog.defaultModel ?? null;
+  const model = agent?.catalog.models.find((candidate) => candidate.id === resolvedModelId);
+  return {
+    agent: agent ? resolveAgentPresentation(agent).label : agentId ?? "未知 Agent",
+    model: resolvedModelId
+      ? resolveModelPresentation({
+          agentId: agentId ?? "",
+          modelId: resolvedModelId,
+          modelLabel: model?.label,
+        }).fullLabel
+      : "默认模型",
+  };
+}
+
 function TurnFooter({
   stats,
   liveUsage,
   liveStartedAtMs,
   liveTools = 0,
   liveItems,
+  hideElapsed = false,
+  agentLabel,
+  modelLabel,
   canFork,
   onFork,
   onSelect,
@@ -2139,6 +2223,10 @@ function TurnFooter({
   liveStartedAtMs?: number;
   liveTools?: number;
   liveItems?: TimelineItem[];
+  /** The process card already shows elapsed time, so the footer does not repeat it. */
+  hideElapsed?: boolean;
+  agentLabel: string;
+  modelLabel: string;
   canFork: boolean;
   onFork?: () => void;
   /** Enters selection mode with this turn checked; absent while selecting. */
@@ -2163,15 +2251,15 @@ function TurnFooter({
   const forkTitle = canFork
     ? live
       ? "从当前进行中的内容重建分支"
-      : "从这个 turn 创建分支并选择 Agent"
-    : "当前没有可用的目标 Agent";
+      : "从这个 turn 创建分支并选择标签"
+    : "当前没有匹配所选标签的可用 Agent 与模型";
 
   return (
     <footer className="ml-auto max-w-full text-xs text-muted" data-testid="turn-footer">
       <div className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1">
-        <span>{stats ? relativeTime(stats.finishedAtMs, now) : "进行中"}</span>
+        <span title={`Agent：${agentLabel}`}>{agentLabel}</span>
         <span aria-hidden="true">·</span>
-        <span>耗时 {formatDuration(duration)}</span>
+        <span title={`模型：${modelLabel}`}>{modelLabel}</span>
         <span aria-hidden="true">·</span>
         <button
           type="button"
@@ -2204,6 +2292,11 @@ function TurnFooter({
       </div>
       {details ? (
         <div className="mt-1 flex flex-wrap justify-end gap-x-3 rounded-md bg-raised px-2 py-1">
+          {hideElapsed ? null : (
+            <span data-testid="turn-timing">
+              {stats ? relativeTime(stats.finishedAtMs, now) : "进行中"} · 耗时 {formatDuration(duration)}
+            </span>
+          )}
           <span data-testid="usage-summary">
             {usage
               ? `本 Turn · input(cached:${reportedTokens(usage.cacheReadTokens)}, uncached:${reportedTokens(uncachedTokens(usage))}) output ${reportedTokens(usage.outputTokens)} · 工具 ${tools} 次 · 模型 ${rounds} 轮 · 工具输出约 ${reportedTokens(toolOut)} tokens`

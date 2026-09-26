@@ -17,7 +17,7 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
     let browser: Awaited<ReturnType<typeof openWorkbenchPage>> | undefined;
     try {
       await t.flows.main.configureMockProvider(opened.client, opened.mock);
-      await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: "提示验收专家" } });
+      await opened.client.call({ type: "workspace.rename", payload: { workspaceId: opened.workspaceId, name: "提示验收项目" } });
       let calls = 0;
       const respond = () => {
         const call = calls++;
@@ -47,16 +47,16 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
       for (let index = 0; index < (scenario === "pending-entry" ? 12 : 1); index++) landing = await create(`普通会话 ${index}`);
       browser = await openWorkbenchPage(t.openRoot, () => daemonEndpoint(opened.daemon), opened.workspaceId, landing);
       const page = browser.page;
-      await page.getByRole("button", { name: "当前专家", exact: true }).waitFor();
+      await page.getByRole("button", { name: "当前项目", exact: true }).waitFor();
       const nav = page.getByRole("navigation", { name: "工作台导航" });
-      await nav.getByRole("button", { name: "专家", exact: true }).click();
+      await nav.getByRole("button", { name: "项目", exact: true }).click();
       if (scenario === "pending-entry") {
-        await page.getByRole("button", { name: "查看 提示验收专家 的 1 项待办", exact: true }).waitFor();
+        await page.getByRole("button", { name: "查看 提示验收项目 的 1 项待办", exact: true }).waitFor();
         t.assertions.assert(await nav.locator(".bg-danger, [aria-label='有未读新回复']").count() === 0, "pending session bubbled into navigation");
-        await page.getByRole("button", { name: "查看 提示验收专家 的 1 项待办", exact: true }).click();
-        const panel = page.getByRole("region", { name: "专家页面" });
+        await page.getByRole("button", { name: "查看 提示验收项目 的 1 项待办", exact: true }).click();
+        const panel = page.getByRole("region", { name: "项目页面" });
         await panel.getByRole("button", { name: "待你处理", exact: true }).waitFor();
-        await panel.getByRole("button", { name: "专家菜单", exact: true }).click();
+        await panel.getByRole("button", { name: "项目菜单", exact: true }).click();
         await page.getByRole("menuitem", { name: "资料与头像", exact: true }).click();
         await panel.getByRole("button", { name: "返回", exact: true }).click();
         await panel.getByRole("button", { name: "待你处理", exact: true }).waitFor();
@@ -75,9 +75,9 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
         await page.getByRole("button", { name: "提交答案", exact: true }).click();
         await t.tools.waitUntil(async () => (await snapshot()).summary.interactionSummary?.count === 0, 30_000);
         await page.setViewportSize({ width: 1280, height: 800 });
-        await nav.getByRole("button", { name: "专家", exact: true }).click();
-        await page.getByRole("button", { name: "提示验收专家", exact: true }).waitFor();
-        await t.tools.waitUntil(async () => await page.getByRole("button", { name: /查看 提示验收专家 的 .* 项待办/ }).count() === 0, 15_000);
+        await nav.getByRole("button", { name: "项目", exact: true }).click();
+        await page.getByRole("button", { name: "提示验收项目", exact: true }).waitFor();
+        await t.tools.waitUntil(async () => await page.getByRole("button", { name: /查看 提示验收项目 的 .* 项待办/ }).count() === 0, 15_000);
       } else {
         await nav.getByRole("button", { name: "会话", exact: true }).click();
         const list = page.getByRole("complementary", { name: "会话列表", exact: true });
@@ -86,7 +86,7 @@ for (const scenario of ["pending-entry", "reply-read"] as const) {
         t.assertions.assert(await row.getByLabel("有未读新回复").count() === 0, "first-load history was marked unread");
         const second = await browser.context.newPage();
         await second.goto(page.url());
-        await second.getByRole("button", { name: "当前专家", exact: true }).waitFor();
+        await second.getByRole("button", { name: "当前项目", exact: true }).waitFor();
         await second.getByRole("navigation", { name: "工作台导航" }).getByRole("button", { name: "会话", exact: true }).click();
         const secondRow = second.getByRole("complementary", { name: "会话列表", exact: true }).locator(".conversation-row").filter({ hasText: "需要关注的会话" });
         await secondRow.waitFor();

@@ -92,6 +92,13 @@ mod tests {
             json!({"type": "pty.resize", "payload": {"ptyId": "p", "cols": 80, "rows": 24}}),
             json!({"type": "workspace.rename", "payload": {"workspaceId": "w", "name": "demo"}}),
             json!({"type": "session.fork", "payload": {"sessionId": "s", "turnId": "t"}}),
+            json!({"type": "session.forkRouted", "payload": {
+                "sessionId": "s", "turnId": "t", "workspaceId": "w", "tags": ["Max"]
+            }}),
+            json!({"type": "session.switchAgent", "payload": {
+                "sessionId": "s",
+                "target": {"agentId": "codex", "modelId": "gpt"}
+            }}),
             json!({"type": "session.artifact.begin", "payload": {
                 "sessionId": "s",
                 "files": [{"name": "events.jsonl", "mime": "application/x-ndjson", "bytes": 0}],
@@ -115,9 +122,13 @@ mod tests {
         .expect("parse");
         match request {
             Request::SessionCreate {
-                model_id, title, ..
+                model_id,
+                effort_id,
+                title,
+                ..
             } => {
                 assert!(model_id.is_none());
+                assert!(effort_id.is_none());
                 assert!(title.is_none());
             }
             other => panic!("wrong variant: {other:?}"),
@@ -155,6 +166,8 @@ mod tests {
                 model_id: Some("sonnet".into()),
                 mode_id: None,
                 effort_id: None,
+                fast: None,
+                runtime_values: Default::default(),
             }),
         });
     }

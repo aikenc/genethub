@@ -1,5 +1,6 @@
 import type {
   AgentInfo,
+  AgentSelectionPreferences,
   Reply,
   Request,
   SessionSummary,
@@ -28,6 +29,12 @@ import { useWorkbench } from "../session/store";
 
 const REMOTE =
   "wss://relay.example.com/fabric/v2?ticket=client%3Aabc&route=abc";
+
+const preferencesFor = (agentId: string): AgentSelectionPreferences => ({
+  selectedTags: ["Flash"],
+  modelProfiles: [{ agentId, tags: ["Flash"], cost: "medium" }],
+  runtimes: {},
+});
 
 const paired = (machineId: string, name: string, endpoint = REMOTE) =>
   rememberMachine({
@@ -468,6 +475,7 @@ describe("switching from the sidebar", () => {
         setModel: false,
         setMode: false,
         setEffort: false,
+        setFast: false,
         permissions: false,
         resume: false,
         fork,
@@ -524,6 +532,15 @@ describe("switching from the sidebar", () => {
               return { type: "agents", data: [agent(remote ? "claude" : "codex", !remote)] };
             case "workspace.list":
               return { type: "workspaces", data: [remote ? remoteWorkspace : sourceWorkspace] };
+            case "settings.get":
+              return {
+                type: "settings",
+                data: {
+                  providers: [],
+                  lanEnabled: false,
+                  agentPreferences: preferencesFor(remote ? "claude" : "codex"),
+                },
+              };
             case "session.list":
               return { type: "sessions", data: [summary] };
             case "session.forkExport":
@@ -605,7 +622,11 @@ describe("switching from the sidebar", () => {
       type: "session.forkImport",
       payload: {
         transfer: expect.objectContaining({ sourceSessionId: "source-session" }),
-        target: { agentId: "claude", workspaceId: "remote-workspace" },
+        target: {
+          agentId: "claude",
+          workspaceId: "remote-workspace",
+          runtimeValues: {},
+        },
       },
     }));
     // The fork lands without yanking the user onto the other machine: the
@@ -624,7 +645,7 @@ describe("switching from the sidebar", () => {
     expect(openTarget).toHaveBeenCalledWith("m_far");
   });
 
-  it("sends an explicit target so a non-native Agent can Fork back to itself", async () => {
+  it("sends an exact target so a non-native Agent can Fork back through a fresh route", async () => {
     const sourceSession: SessionSummary = {
       id: "cursor-session",
       workspaceId: "source-workspace",
@@ -658,6 +679,7 @@ describe("switching from the sidebar", () => {
         setModel: false,
         setMode: false,
         setEffort: false,
+        setFast: false,
         permissions: false,
         resume: false,
         fork: false,
@@ -709,6 +731,15 @@ describe("switching from the sidebar", () => {
             return { type: "agents", data: [cursor] };
           case "workspace.list":
             return { type: "workspaces", data: [workspace] };
+          case "settings.get":
+            return {
+              type: "settings",
+              data: {
+                providers: [],
+                lanEnabled: false,
+                agentPreferences: preferencesFor("cursor"),
+              },
+            };
           case "session.list":
             return { type: "sessions", data: [sourceSession] };
           case "session.fork":
@@ -762,7 +793,11 @@ describe("switching from the sidebar", () => {
       payload: {
         sessionId: "cursor-session",
         turnId: "turn-1",
-        target: { agentId: "cursor", workspaceId: "source-workspace" },
+        target: {
+          agentId: "cursor",
+          workspaceId: "source-workspace",
+          runtimeValues: {},
+        },
       },
     }));
     await waitFor(() => expect(useWorkbench.getState().activeSessionId).toBe("cursor-fork"));

@@ -6,7 +6,7 @@
 //! challenge. Agents receive only plan and action ids; the grant never leaves
 //! daemon memory or its owner-only binding store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -75,8 +75,19 @@ struct ProjectControlBinding {
     schema: String,
     workspace_id: String,
     controller_session_id: String,
+    /// The package whose build most recently established this takeover.
+    /// Identity of the takeover, not the set of things approved by it.
     pack_id: String,
     pack_digest: String,
+    /// Approved source digest per package id.
+    ///
+    /// A project may hold several packages, and each is approved separately
+    /// by its own build challenge. One pair could only ever record the most
+    /// recent one, which made approving a second package silently withdraw
+    /// the first package's executable capability. Approvals accumulate here
+    /// and are looked up by id.
+    #[serde(default)]
+    approved_packages: BTreeMap<String, String>,
     issued_at_ms: i64,
 }
 
@@ -136,11 +147,14 @@ impl Broker {
         &self,
         spec: ChallengeSpec,
         project_workspace_id: &str,
+        may_manage: bool,
         recovery_authorized: bool,
     ) -> Result<Option<BootstrapApprovalChallenge>> {
-        let controller = spec.controller_session_id.clone();
         let challenge = self.issue(spec).await?;
-        if !self.is_bound(project_workspace_id, &controller) && !recovery_authorized {
+        // Whether the caller may manage this project is a question about
+        // Sessions and Workspaces, which this broker cannot see; the router
+        // answers it (`session_may_manage_project`) and passes the verdict in.
+        if !may_manage && !recovery_authorized {
             return Ok(Some(challenge));
         }
         let mut guard = self.state.lock().await;
@@ -418,6 +432,7 @@ impl Broker {
         git_head: Option<&str>,
         status_digest: &str,
         action_id: &str,
+        may_manage: bool,
         recovery_authorized: bool,
     ) -> Result<String> {
         validate_action_id(action_id)?;
@@ -427,13 +442,14 @@ impl Broker {
             .challenges
             .values_mut()
             .find(|challenge| {
+                // A management-bound plan is still re-verified here: holding
+                // it at issue time does not prove the caller still may act.
+                // The authority question itself is answered by the caller
+                // (`session_may_manage_project`) because this broker cannot
+                // see Sessions or Workspaces.
                 (challenge.approved
-                    || challenge
-                        .management_binding
-                        .as_ref()
-                        .is_some_and(|project| {
-                            self.is_bound(project, controller_session_id) || recovery_authorized
-                        }))
+                    || (challenge.management_binding.is_some()
+                        && (may_manage || recovery_authorized)))
                     && !challenge.rejected
                     && !challenge.consumed
                     && challenge.spec.controller_session_id == controller_session_id
@@ -538,6 +554,10 @@ impl Broker {
         self.save(&mut guard, state)
     }
 
+    /// Records an approved package build as this project's takeover.
+    ///
+    /// Earlier packages' approvals are carried forward: approving `b` says
+    /// nothing about `a`, so it must not revoke it.
     pub fn bind(
         &self,
         workspace_id: &str,
@@ -546,13 +566,44 @@ impl Broker {
         pack_digest: &str,
     ) -> Result<()> {
         validate_path_id(workspace_id, "workspace id")?;
+        let mut approved_packages = self
+            .load_binding(workspace_id)
+            .map(|existing| existing.approved_packages)
+            .unwrap_or_default();
+        if !pack_digest.is_empty() {
+            approved_packages.insert(pack_id.into(), pack_digest.into());
+        }
         let binding = ProjectControlBinding {
             schema: "genehub.project-control-binding.v1".into(),
             workspace_id: workspace_id.into(),
             controller_session_id: controller_session_id.into(),
             pack_id: pack_id.into(),
             pack_digest: pack_digest.into(),
+            approved_packages,
             issued_at_ms: now_ms(),
+        };
+        crate::config::save_private(
+            &self.binding_path(workspace_id),
+            &serde_json::to_vec_pretty(&binding)?,
+        )
+    }
+
+    /// Moves an existing project binding to a new controller Session, keeping
+    /// the package identity it was established with.
+    ///
+    /// A fresh main Session in a PM project inherits control; it does not
+    /// establish it. Re-deriving the identity here would mean guessing which
+    /// package took the project over, so the recorded one is carried forward.
+    /// Handing the conversation to someone else is not an approval decision,
+    /// so every package's approval survives it unchanged.
+    pub fn rebind(&self, workspace_id: &str, controller_session_id: &str) -> Result<()> {
+        let Ok(existing) = self.load_binding(workspace_id) else {
+            return Ok(());
+        };
+        let binding = ProjectControlBinding {
+            controller_session_id: controller_session_id.into(),
+            issued_at_ms: now_ms(),
+            ..existing
         };
         crate::config::save_private(
             &self.binding_path(workspace_id),
@@ -564,6 +615,34 @@ impl Broker {
     /// Configuration management remains tied to the controller Session.
     pub fn has_binding(&self, workspace_id: &str) -> bool {
         self.load_binding(workspace_id).is_ok()
+    }
+
+    /// The source digest `pack_id` was approved at in this project, if it
+    /// has been approved at all.
+    ///
+    /// Executable package content is anchored to it: a package upgrades by
+    /// `git pull`, which changes its source without passing any challenge,
+    /// so "the user approved this package once" must not become "the author
+    /// may change what runs afterwards".
+    ///
+    /// Answered per package. Comparing one package's source against another
+    /// package's approval would be comparing unrelated quantities that merely
+    /// share a type, so an unapproved package gets `None` rather than a
+    /// neighbour's digest. `None` means "no recorded approval", which callers
+    /// must treat as refusal rather than as permission — the grant in
+    /// question is permission to execute code.
+    pub fn bound_pack_digest(&self, workspace_id: &str, pack_id: &str) -> Option<String> {
+        let binding = self.load_binding(workspace_id).ok()?;
+        binding
+            .approved_packages
+            .get(pack_id)
+            .cloned()
+            // Bindings written before approvals were recorded per package
+            // carry only the pair. Reading it for the package it actually
+            // describes keeps an existing project working across the upgrade
+            // without inferring anything about its other packages.
+            .or_else(|| (binding.pack_id == pack_id).then_some(binding.pack_digest))
+            .filter(|digest| !digest.is_empty())
     }
 
     pub fn is_bound(&self, workspace_id: &str, controller_session_id: &str) -> bool {
@@ -912,6 +991,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap-before-human",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -959,6 +1039,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_1",
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -975,6 +1056,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
                 false,
             )
             .await
@@ -993,6 +1075,7 @@ mod tests {
                 None,
                 "sha256:clean",
                 "bootstrap_2",
+                false,
                 false,
             )
             .await
@@ -1034,9 +1117,55 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_after_remove",
                 false,
+                false,
             )
             .await
             .is_err());
+    }
+
+    /// J2 is per package. Approving one must not answer for another, in
+    /// either direction: it must not vouch for it, and it must not revoke
+    /// it.
+    #[test]
+    fn each_package_carries_its_own_approved_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = Broker::new(root.path()).unwrap();
+
+        broker
+            .bind("w_project", "s_pm", "formal", "sha256:formal")
+            .unwrap();
+        assert_eq!(
+            broker.bound_pack_digest("w_project", "formal").as_deref(),
+            Some("sha256:formal")
+        );
+        // An unapproved package gets no answer rather than a neighbour's.
+        assert_eq!(broker.bound_pack_digest("w_project", "trial"), None);
+
+        broker
+            .bind("w_project", "s_pm", "trial", "sha256:trial")
+            .unwrap();
+        assert_eq!(
+            broker.bound_pack_digest("w_project", "trial").as_deref(),
+            Some("sha256:trial")
+        );
+        assert_eq!(
+            broker.bound_pack_digest("w_project", "formal").as_deref(),
+            Some("sha256:formal"),
+            "approving a second package must not withdraw the first one's approval"
+        );
+
+        // Handing the conversation to someone else is not an approval
+        // decision and changes nothing about what was approved.
+        broker.rebind("w_project", "s_successor").unwrap();
+        assert!(broker.is_bound("w_project", "s_successor"));
+        assert_eq!(
+            broker.bound_pack_digest("w_project", "formal").as_deref(),
+            Some("sha256:formal")
+        );
+        assert_eq!(
+            broker.bound_pack_digest("w_project", "trial").as_deref(),
+            Some("sha256:trial")
+        );
     }
 
     #[test]
@@ -1098,6 +1227,7 @@ mod tests {
                 "sha256:clean",
                 "rejected_action",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -1130,6 +1260,7 @@ mod tests {
                 None,
                 "sha256:changed",
                 "stale_action",
+                false,
                 false,
             )
             .await
@@ -1203,6 +1334,7 @@ mod tests {
                 "sha256:clean",
                 "expired_action",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -1241,6 +1373,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_1",
                 false,
+                false,
             )
             .await
             .unwrap();
@@ -1262,6 +1395,7 @@ mod tests {
                 "sha256:clean",
                 "bootstrap_2",
                 false,
+                false,
             )
             .await
             .is_err());
@@ -1279,6 +1413,7 @@ mod tests {
                     None,
                     "sha256:clean",
                     "bootstrap_1",
+                    false,
                     false,
                 )
                 .await

@@ -16,11 +16,15 @@ import badgeConfig from "./runtime-badges.json";
 
 describe("Agent presentation catalog", () => {
   it("covers every built-in registry Agent with an icon, glyph, or name", () => {
-    expect(resolveAgentPresentation({ id: "genet", label: "GeneHub Agent" }).kind).toBe("icon");
+    expect(resolveAgentPresentation({ id: "genet", label: "GeneHub Dev Agent" })).toMatchObject({
+      kind: "icon",
+      label: "Genet",
+    });
     expect(resolveAgentPresentation({ id: "opencode", label: "OpenCode" }).kind).toBe("icon");
     expect(resolveAgentPresentation({ id: "acp:goose", label: "goose" }).kind).toBe("icon");
     expect(resolveAgentPresentation({ id: "claude", label: "Claude Code" })).toMatchObject({
       kind: "glyph",
+      label: "Claude",
       glyph: "✱",
     });
     expect(resolveAgentPresentation({ id: "tclaude", label: "TClaude" })).toMatchObject({
@@ -28,8 +32,9 @@ describe("Agent presentation catalog", () => {
       glyph: "T",
     });
     expect(resolveAgentPresentation({ id: "codex", label: "Codex" })).toEqual({
-      kind: "text",
+      kind: "glyph",
       label: "Codex",
+      glyph: "C",
     });
     expect(resolveAgentPresentation({ id: "cursor", label: "Cursor" }).kind).toBe("icon");
     expect(resolveAgentPresentation({ id: "acp", label: "ACP agent" }).kind).toBe("icon");

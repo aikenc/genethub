@@ -282,6 +282,8 @@ fn build_context_seed_with_source_access(
         seed: ContextSeed {
             state: ContextSeedState::Pending,
             text,
+            target_agent_id: None,
+            target_model_id: None,
         },
         stats: ForkContextStats {
             source_item_count: u32::try_from(items.len()).unwrap_or(u32::MAX),
@@ -419,6 +421,8 @@ mod tests {
                 duration_ms: 1,
                 usage: Usage::default(),
                 tool_calls: 2,
+                agent_id: None,
+                model_id: None,
                 fork_checkpoint: None,
             },
         }

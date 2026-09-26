@@ -28,13 +28,14 @@ pub async fn run_prompt_with_attachments(
     text: String,
     attachments: Vec<MediaAttachment>,
 ) {
-    let (emitter, prompt_message) = {
+    let (emitter, prompt_message, retained_context_len) = {
         let mut guard = state.lock().await;
         guard.streaming = true;
         guard.abort.reset();
+        let retained_context_len = guard.session.messages.len();
         let message = Message::user_with_attachments(text, attachments);
         guard.session.append_message(message.clone());
-        (guard.emitter.clone(), message)
+        (guard.emitter.clone(), message, retained_context_len)
     };
 
     let mut produced: Vec<Value> = Vec::new();
@@ -45,6 +46,7 @@ pub async fn run_prompt_with_attachments(
     emitter.send(json!({ "type": "message_start", "message": prompt_value }));
     emitter.send(json!({ "type": "message_end", "message": prompt_value }));
     produced.push(prompt_value);
+    let mut retry_without_answer = false;
 
     loop {
         let snapshot = {
@@ -54,21 +56,22 @@ pub async fn run_prompt_with_attachments(
                 finish_without_model(&state, &emitter, &mut produced).await;
                 return;
             };
+            let mut system_prompt =
+                crate::prompt::build(&guard.cwd, &guard.skills, &guard.additional_system_prompts);
+            if retry_without_answer {
+                system_prompt.push_str("\n\nThe previous model response contained no user-visible answer or tool call. Continue from the existing facts and provide a visible answer or a valid tool call. Inspect current state before any side effect; do not repeat an action merely because this is a continuation.");
+            }
             Snapshot {
                 model,
                 messages: guard.session.messages.clone(),
-                system_prompt: crate::prompt::build(
-                    &guard.cwd,
-                    &guard.skills,
-                    &guard.additional_system_prompts,
-                ),
+                system_prompt,
                 tools_enabled: guard.tools_enabled,
                 thinking_level: guard.thinking_level.clone(),
                 cwd: guard.cwd.clone(),
             }
         };
 
-        let assistant = stream_assistant(&state, &emitter, &snapshot).await;
+        let assistant = stream_assistant(&state, &emitter, &snapshot, retry_without_answer).await;
         let assistant_value = to_value(&assistant.message);
         produced.push(assistant_value.clone());
 
@@ -76,7 +79,32 @@ pub async fn run_prompt_with_attachments(
             let mut guard = state.lock().await;
             guard.session.append_message(assistant.message.clone());
             guard.stats.add(&assistant.usage);
+            // A provider rejection before any tool call has no side effects to
+            // preserve. Keep its emitted transcript and append-only audit, but
+            // do not make the rejected prompt (especially large native media)
+            // part of every later provider request.
+            if assistant.stop_reason == StopReason::Error && produced.len() == 2 {
+                guard.session.rollback_failed_turn(retained_context_len);
+            }
         }
+
+        if matches!(assistant.stop_reason, StopReason::Stop | StopReason::Length)
+            && !has_visible_answer_or_tool(&assistant.message)
+        {
+            // This response had no side effects and is dropped from provider
+            // history by the converters. One bounded continuation can turn a
+            // reasoning-only completion into an actual answer without replaying
+            // any tool call or the user's prompt as a new request.
+            emitter.send(json!({
+                "type": "turn_end",
+                "message": assistant_value,
+                "toolResults": [],
+            }));
+            emitter.send(json!({ "type": "turn_start" }));
+            retry_without_answer = true;
+            continue;
+        }
+        retry_without_answer = false;
 
         if matches!(
             assistant.stop_reason,
@@ -190,10 +218,22 @@ struct StreamedAssistant {
     usage: Usage,
 }
 
+fn has_visible_answer_or_tool(message: &Message) -> bool {
+    let Message::Assistant { content, .. } = message else {
+        return false;
+    };
+    content.iter().any(|part| match part {
+        Content::Text { text } => !text.trim().is_empty(),
+        Content::ToolCall { .. } => true,
+        Content::Thinking { .. } => false,
+    })
+}
+
 async fn stream_assistant(
     state: &Arc<Mutex<State>>,
     emitter: &Emitter,
     snapshot: &Snapshot,
+    retry_without_answer: bool,
 ) -> StreamedAssistant {
     let mut draft = AssistantDraft::new(
         snapshot.model.api(),
@@ -346,6 +386,15 @@ async fn stream_assistant(
         if draft.content.is_empty() {
             draft.content.push(Content::text(error));
         }
+    } else if retry_without_answer
+        && matches!(stop_reason, StopReason::Stop | StopReason::Length)
+        && !has_visible_answer_or_tool(&draft.to_message())
+    {
+        draft.stop_reason = StopReason::Error;
+        draft.error_message = Some(
+            "模型连续两次仅返回思考内容或空内容，没有可见答复或工具调用；本回合未完成，请重试或切换模型。"
+                .into(),
+        );
     } else {
         draft.stop_reason = stop_reason;
     }
@@ -411,8 +460,7 @@ async fn execute_calls(
     let abort = { state.lock().await.abort.clone() };
     let tools_enabled = snapshot.tools_enabled;
     let interaction_is_valid = calls.len() == 1 && calls[0].1 == "request_user_input";
-    let requested_input = !tools::evidence::enabled()
-        && interaction_is_valid
+    let requested_input = interaction_is_valid
         && tools::user_input(&calls[0].2).is_ok();
     let futures = calls.iter().map(|(id, name, arguments)| {
         let emitter = emitter.clone();
@@ -424,7 +472,7 @@ async fn execute_calls(
                 tools::ToolResult::error(
                     "request_user_input must be the only tool call in this assistant message",
                 )
-            } else if name == "request_user_input" && !tools::evidence::enabled() {
+            } else if name == "request_user_input" {
                 match tools::user_input(arguments) {
                     Ok(payload) => {
                         emitter.send(json!({
@@ -740,6 +788,71 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("No model is configured"));
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_completion_continues_once_and_produces_a_visible_answer() {
+        let (emitter, rx) = capture();
+        let mut model = fake_model();
+        model.id = "reasoning-only-once".into();
+        let state = state_with(Some(model), emitter, std::env::temp_dir());
+        run_prompt(state, "resolve this".into()).await;
+
+        let frames = drain(rx).await;
+        let assistants: Vec<_> = frames
+            .iter()
+            .filter(|frame| {
+                frame["type"] == "message_end" && frame["message"]["role"] == "assistant"
+            })
+            .collect();
+        assert_eq!(assistants.len(), 2, "one bounded continuation was needed");
+        assert_eq!(assistants[1]["message"]["stopReason"], "stop");
+        assert!(assistants[1]["message"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|part| part["text"] == "Here is the result."));
+        assert_eq!(
+            kinds(&frames)
+                .iter()
+                .filter(|kind| *kind == "turn_start")
+                .count(),
+            2
+        );
+        assert_eq!(
+            kinds(&frames)
+                .iter()
+                .filter(|kind| *kind == "turn_end")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_reasoning_only_completion_fails_instead_of_silently_succeeding() {
+        let (emitter, rx) = capture();
+        let mut model = fake_model();
+        model.id = "reasoning-only-always".into();
+        let state = state_with(Some(model), emitter, std::env::temp_dir());
+        run_prompt(state, "resolve this".into()).await;
+
+        let frames = drain(rx).await;
+        let assistants: Vec<_> = frames
+            .iter()
+            .filter(|frame| {
+                frame["type"] == "message_end" && frame["message"]["role"] == "assistant"
+            })
+            .collect();
+        assert_eq!(
+            assistants.len(),
+            2,
+            "a third silent model call must not be made"
+        );
+        assert_eq!(assistants[1]["message"]["stopReason"], "error");
+        assert!(assistants[1]["message"]["errorMessage"]
+            .as_str()
+            .unwrap()
+            .contains("没有可见答复"));
     }
 
     #[tokio::test]

@@ -1,59 +1,88 @@
+import type {
+  AgentInfo,
+  AgentSelectionPreferences,
+  SessionAgentTarget,
+} from "@genehub/proto";
+import { ChevronLeft, Settings2 } from "lucide-react";
 import type { RefObject } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { RuntimeSettings } from "./RuntimeSettings";
-import type { RuntimeSelection } from "./runtime-selection";
+import { definedRuntimeValues, normalizeGroupedTags, routeTarget } from "./capability-preferences";
+import { ModelPicker } from "./ModelPicker";
+import { CompactRuntimeControls, RuntimeSettings } from "./RuntimeSettings";
+import { resolveRuntimeSelection, type RuntimeSelection } from "./runtime-selection";
 
 export function RuntimeSettingsPanel({
   id,
   selection,
+  agents,
+  preferences,
+  tags,
+  mediaTags = [],
   disabled,
-  agentLocked,
+  busy,
   returnFocusRef,
   onClose,
-  onPickAgent,
-  onPickModel,
-  onPickMode,
-  onPickEffort,
-  onPickRuntimeAxis,
+  onPickTarget,
+  onSavePreferences,
   onRefreshAgents,
 }: {
   id: string;
   selection: RuntimeSelection;
+  agents: AgentInfo[];
+  preferences: AgentSelectionPreferences;
+  tags: string[];
+  mediaTags?: string[];
   disabled?: boolean;
-  agentLocked?: boolean;
+  /** A turn is in flight. Same-Agent runtime picks apply to the next turn; a cross-Agent rebind has to wait. */
+  busy?: boolean;
   returnFocusRef: RefObject<HTMLButtonElement>;
   onClose(): void;
-  onPickAgent(id: string): void;
-  onPickModel(id: string): void;
-  onPickMode(id: string): void;
-  onPickEffort(id: string): void;
-  onPickRuntimeAxis(axisId: string, valueId: string): void;
+  onPickTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
+  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onRefreshAgents?(): void;
 }) {
   const panel = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
+  const [view, setView] = useState<"quick" | "preferences">("quick");
+  const [filters, setFilters] = useState(() => normalizeGroupedTags(tags, preferences));
+  const [target, setTarget] = useState<SessionAgentTarget | null>(() => targetFrom(selection));
+  const [saving, setSaving] = useState(false);
+  // While a turn runs, the daemon can retarget everything the current Agent
+  // already owns — model, mode, effort, runtime axes — and each lands on the
+  // next turn. Rebinding to a different Agent rebuilds the Agent-native
+  // context, so that one genuinely has to wait for the turn to end.
+  const currentAgentId = selection.current?.id ?? null;
+  const crossAgent = target ? target.agentId !== currentAgentId : false;
+  const runtimeLocked = Boolean(busy) && crossAgent;
+  const targetSelection = target
+    ? resolveRuntimeSelection({
+        agents,
+        agentId: target.agentId,
+        modelId: target.modelId ?? null,
+        modeId: target.modeId ?? null,
+        effortId: target.effortId ?? null,
+        fast: target.fast ?? null,
+        runtimeValues: definedRuntimeValues(target.runtimeValues),
+      })
+    : selection;
 
   useEffect(() => {
     const dismiss = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      onClose();
+      if (view === "preferences") setView("quick");
+      else onClose();
     };
     document.addEventListener("keydown", dismiss);
-    const frame = window.requestAnimationFrame(() => {
-      const chosen = panel.current?.querySelector<HTMLElement>(
-        '[role="tab"][aria-selected="true"]:not(:disabled)',
-      );
-      (chosen ?? close.current)?.focus();
-    });
+    const frame = window.requestAnimationFrame(() => close.current?.focus());
     return () => {
       document.removeEventListener("keydown", dismiss);
       window.cancelAnimationFrame(frame);
       returnFocusRef.current?.focus();
     };
-  }, [onClose, returnFocusRef]);
+  }, [onClose, returnFocusRef, view]);
 
   if (typeof document === "undefined") return null;
 
@@ -70,24 +99,29 @@ export function RuntimeSettingsPanel({
         role="dialog"
         aria-modal="true"
         aria-labelledby={`${id}-title`}
-        className="flex max-h-[min(78dvh,44rem)] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
+        className="flex h-[min(88dvh,52rem)] w-full max-w-xl flex-col overflow-hidden rounded-t-2xl border border-line-strong bg-surface shadow-2xl md:rounded-2xl"
         onKeyDown={(event) => {
-          if (event.key === "Tab") {
-            trapTab(event, panel.current);
-          }
+          if (event.key === "Tab") trapTab(event, panel.current);
         }}
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-line px-3 py-2">
-          <div className="min-w-0 flex-1">
-            <h2 id={`${id}-title`} className="text-sm font-medium text-fg">
-              Agent 与运行设置
-            </h2>
-            <p className="text-[11px] text-faint">设置会用于下一条消息</p>
-          </div>
+        <header className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+          {view === "preferences" ? (
+            <button
+              type="button"
+              aria-label="返回模型选择"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-muted hover:bg-raised hover:text-fg"
+              onClick={() => setView("quick")}
+            >
+              <ChevronLeft size={17} />
+            </button>
+          ) : null}
+          <h2 id={`${id}-title`} className="min-w-0 flex-1 truncate text-sm font-medium text-fg">
+            {view === "quick" ? "模型选择" : "Agent 配置"}
+          </h2>
           <button
             ref={close}
             type="button"
-            aria-label="关闭运行设置"
+            aria-label="关闭设置"
             className="flex h-8 w-8 items-center justify-center rounded-full text-lg text-muted hover:bg-raised hover:text-fg"
             onClick={onClose}
           >
@@ -96,22 +130,104 @@ export function RuntimeSettingsPanel({
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <RuntimeSettings
-            selection={selection}
-            disabled={disabled}
-            agentLocked={agentLocked}
-            onPickAgent={onPickAgent}
-            onPickModel={onPickModel}
-            onPickMode={onPickMode}
-            onPickEffort={onPickEffort}
-            onPickRuntimeAxis={onPickRuntimeAxis}
-            onRefreshAgents={onRefreshAgents}
-          />
+          {view === "quick" ? (
+            <div className="space-y-3">
+              <ModelPicker
+                agents={agents}
+                preferences={preferences}
+                filterTags={filters}
+                automaticTags={mediaTags}
+                selected={{
+                  agentId: target?.agentId ?? null,
+                  modelId: target?.modelId ?? null,
+                }}
+                disabled={disabled || saving}
+                pinnedAgentId={busy && currentAgentId ? currentAgentId : null}
+                onFilterTags={setFilters}
+                onSelect={(route) => setTarget(routeTarget(route))}
+              />
+
+              {target ? (
+                <div className="rounded-xl border border-line bg-raised/35 p-2.5">
+                  <CompactRuntimeControls
+                    selection={targetSelection}
+                    disabled={disabled || saving || runtimeLocked}
+                    onPickMode={(modeId) => setTarget((current) => current ? { ...current, modeId } : current)}
+                    onPickEffort={(effortId) => setTarget((current) => current ? { ...current, effortId } : current)}
+                    onPickFast={(fast) => setTarget((current) => current ? { ...current, fast } : current)}
+                    onPickRuntimeAxis={(axisId, valueId) =>
+                      setTarget((current) => current ? {
+                        ...current,
+                        runtimeValues: { ...current.runtimeValues, [axisId]: valueId },
+                      } : current)
+                    }
+                  />
+                </div>
+              ) : null}
+
+              {busy ? (
+                <p className="text-[11px] leading-4 text-faint" role="note">
+                  {crossAgent
+                    ? "会话进行中：切换 Agent 需要重建对话上下文，本轮结束后可用"
+                    : "会话进行中：修改将在下一轮生效"}
+                </p>
+              ) : null}
+              <div className="flex items-center justify-between border-t border-line pt-2">
+                <button
+                  type="button"
+                  className="flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs text-accent hover:bg-raised"
+                  onClick={() => {
+                    onRefreshAgents?.();
+                    setView("preferences");
+                  }}
+                >
+                  <Settings2 size={14} /> Agent 配置
+                </button>
+                <button
+                  type="button"
+                  disabled={disabled || saving || !target || runtimeLocked}
+                  className="h-9 rounded-lg bg-accent px-4 text-xs font-medium text-on-accent disabled:opacity-50"
+                  onClick={() => {
+                    if (!target) return;
+                    setSaving(true);
+                    Promise.resolve(onPickTarget(target, filters))
+                      .then(onClose)
+                      .finally(() => setSaving(false));
+                  }}
+                >
+                  {saving ? "切换中…" : "使用此模型"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <RuntimeSettings
+              agents={agents}
+              preferences={preferences}
+              disabled={disabled}
+              onSave={async (next) => {
+                await onSavePreferences(next);
+                setFilters(normalizeGroupedTags(filters, next));
+                setView("quick");
+              }}
+            />
+          )}
         </div>
       </section>
     </div>,
     document.body,
   );
+}
+
+function targetFrom(selection: RuntimeSelection): SessionAgentTarget | null {
+  if (!selection.current) return null;
+  return {
+    agentId: selection.current.id,
+    ...(selection.model ? { modelId: selection.model.id } : {}),
+    ...(selection.mode ? { modeId: selection.mode.id } : {}),
+    ...(selection.effortId ? { effortId: selection.effortId } : {}),
+    ...(typeof selection.fast === "boolean" ? { fast: selection.fast } : {}),
+    runtimeValues: selection.runtimeValues,
+  };
 }
 
 function trapTab(event: React.KeyboardEvent, container: HTMLElement | null) {

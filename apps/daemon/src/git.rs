@@ -10,28 +10,50 @@ use std::time::Duration;
 use crate::os_process::Command;
 use anyhow::{anyhow, Context, Result};
 use genehub_proto::{GitChange, GitChangeKind, GitStatus};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STDOUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
-/// Resolve an explicitly selected worktree without inheriting a parent repo.
-/// A worktree's private Git directory and common repository can differ.
-pub(crate) async fn repository_directories(root: &Path) -> Result<(PathBuf, PathBuf)> {
+/// Whether a directory can reach Git state outside `bounds`.
+///
+/// A trial runs a Candidate nobody has approved yet, so it must not be able
+/// to touch the formal repository. Directory containment cannot answer this:
+/// a `.git` file holding `gitdir: /formal/.git` and an
+/// `objects/info/alternates` entry both leave the directory itself perfectly
+/// inside its bounds while the *repository* they resolve to is the formal
+/// one. Only something that understands Git can see the difference, so the
+/// question is answered here and the Workflow kernel asks it without
+/// learning what a gitdir is.
+///
+/// Not a provenance probe: a failure to decide is a refusal, never an
+/// "unknown". A directory that is not a Git repository at all is fine and
+/// returns `Ok(())` — the check constrains repositories, it does not
+/// require one.
+pub(crate) async fn reaches_git_state_outside(root: &Path, bounds: &Path) -> Result<()> {
     let marker = root.join(".git");
-    let metadata = crate::config::sensitive_metadata(&marker)
-        .context("gitRepositoryRequired: select an actual Git worktree root")?;
-    crate::config::reject_link_or_reparse(&marker, &metadata)?;
-    if !metadata.is_dir() && !metadata.is_file() {
-        anyhow::bail!("gitRepositoryRequired: .git must be a directory or worktree file");
+    if let Ok(metadata) = crate::config::sensitive_metadata(&marker) {
+        crate::config::reject_link_or_reparse(&marker, &metadata)?;
+        if !metadata.is_dir() && !metadata.is_file() {
+            anyhow::bail!("experimentIsolation: .git must be a directory or a worktree file");
+        }
     }
+    // Deliberately asked of every directory, marker or not. Git searches
+    // upwards, so a directory with no `.git` of its own is the *parent
+    // traversal* case: it silently belongs to whatever repository encloses
+    // it, which for a trial is the formal project. Returning early on a
+    // missing marker would wave through the plainest escape of the three.
+    let Ok(private) = git(root, &["rev-parse", "--git-dir"]).await else {
+        // Git resolves nothing here, so there is no repository to escape
+        // through — including none above. This is the pure-directory
+        // project, and it is allowed.
+        return Ok(());
+    };
+    let bounds = bounds
+        .canonicalize()
+        .with_context(|| format!("reading the isolation boundary: {}", bounds.display()))?;
     let canonical = root.canonicalize()?;
-    let top = git(root, &["rev-parse", "--show-toplevel"]).await?;
-    if crate::guest_paths::guest_path(Path::new(top.trim())).canonicalize()? != canonical {
-        anyhow::bail!("wrongProjectRoot: task directory is not the selected Git worktree root");
-    }
     let resolve = |value: &str| -> Result<PathBuf> {
         let path = crate::guest_paths::guest_path(Path::new(value.trim()));
         Ok(if path.is_absolute() {
@@ -41,9 +63,34 @@ pub(crate) async fn repository_directories(root: &Path) -> Result<(PathBuf, Path
         }
         .canonicalize()?)
     };
-    let private = resolve(&git(root, &["rev-parse", "--git-dir"]).await?)?;
+    // `--git-dir` is where this worktree keeps its own metadata and
+    // `--git-common-dir` is the repository it belongs to. A worktree file
+    // makes them differ, which is legitimate; both still have to live inside
+    // the boundary.
+    let private = resolve(&private)?;
     let common = resolve(&git(root, &["rev-parse", "--git-common-dir"]).await?)?;
-    Ok((private, common))
+    for (label, directory) in [("metadata", &private), ("repository", &common)] {
+        if !directory.starts_with(&bounds) {
+            anyhow::bail!(
+                "experimentIsolation: this task directory's Git {label} is {}, outside its own boundary {}",
+                directory.display(),
+                bounds.display()
+            );
+        }
+    }
+    // A `--shared` clone keeps its metadata local while reading objects from
+    // whatever it points at, so the two checks above can both pass while the
+    // formal object store is still in use.
+    let alternates = common.join("objects/info/alternates");
+    if crate::config::sensitive_metadata(&alternates).is_ok()
+        && !std::fs::read_to_string(&alternates)?.trim().is_empty()
+    {
+        anyhow::bail!(
+            "experimentIsolation: this task directory borrows Git objects through {}; copy them instead of sharing",
+            alternates.display()
+        );
+    }
+    Ok(())
 }
 
 async fn git(root: &Path, args: &[&str]) -> Result<String> {
@@ -76,297 +123,6 @@ async fn git(root: &Path, args: &[&str]) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&stdout).to_string())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BootstrapState {
-    pub direct: bool,
-    pub head: Option<String>,
-    pub status_digest: String,
-    pub changes: Vec<String>,
-    pub commit_identity: GitIdentity,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GitIdentity {
-    pub name: String,
-    pub email: String,
-    pub product_fallback: bool,
-}
-
-impl GitIdentity {
-    fn product() -> Self {
-        Self {
-            name: "GeneHub Bootstrap".into(),
-            email: "bootstrap@genehub.local".into(),
-            product_fallback: true,
-        }
-    }
-
-    pub(crate) fn display(&self) -> String {
-        format!("{} <{}>", self.name, self.email)
-    }
-}
-
-/// Git facts safe to pin in a PM bootstrap plan.
-///
-/// Session-owned runtime paths are deliberately excluded: the Human may leave
-/// a plan card open while the stopped interaction updates its own metadata,
-/// and that is not a project-source drift. `--untracked-files=all` prevents a
-/// top-level `?? .genethub/` row from hiding which child caused the change.
-pub(crate) async fn bootstrap_state(root: &Path) -> Result<BootstrapState> {
-    let marker = root.join(".git");
-    let direct = match crate::config::sensitive_metadata(&marker) {
-        Ok(metadata) => {
-            crate::config::reject_link_or_reparse(&marker, &metadata)?;
-            metadata.is_dir() || metadata.is_file()
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error.into()),
-    };
-    if !direct {
-        // A nested ordinary folder must not inherit the enclosing repository's
-        // local identity. Only the user's global identity applies before this
-        // folder becomes its own repository.
-        let commit_identity = bootstrap_identity(root, true).await;
-        return Ok(BootstrapState {
-            direct: false,
-            head: None,
-            status_digest: directory_status_digest(root)?,
-            changes: non_session_entries(root)?,
-            commit_identity,
-        });
-    }
-    let top = git(root, &["rev-parse", "--show-toplevel"])
-        .await?
-        .trim()
-        .to_string();
-    let canonical = root.canonicalize()?;
-    if crate::guest_paths::guest_path(Path::new(&top)).canonicalize()? != canonical {
-        anyhow::bail!("wrongProjectRoot: current Workspace is not the direct Git top-level");
-    }
-    let head = git(root, &["rev-parse", "--verify", "HEAD"])
-        .await
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let raw = git(
-        root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )
-    .await?;
-    let changes = parse_status(&raw)
-        .into_iter()
-        .map(|change| change.path)
-        .filter(|path| !session_runtime_path(path))
-        .collect::<Vec<_>>();
-    let mut digest = Sha256::new();
-    digest.update(b"genehub.bootstrap-git-status.v1\0");
-    digest.update(head.as_deref().unwrap_or("unborn").as_bytes());
-    for path in &changes {
-        digest.update((path.len() as u64).to_le_bytes());
-        digest.update(path.as_bytes());
-    }
-    Ok(BootstrapState {
-        direct: true,
-        head,
-        status_digest: format!("sha256:{:x}", digest.finalize()),
-        changes,
-        commit_identity: bootstrap_identity(root, false).await,
-    })
-}
-
-async fn bootstrap_identity(root: &Path, global_only: bool) -> GitIdentity {
-    let args = |key: &'static str| {
-        if global_only {
-            vec!["config", "--global", "--get", key]
-        } else {
-            vec!["config", "--get", key]
-        }
-    };
-    let name = git(root, &args("user.name"))
-        .await
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| safe_identity_value(value));
-    let email = git(root, &args("user.email"))
-        .await
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| safe_identity_value(value));
-    match (name, email) {
-        (Some(name), Some(email)) => GitIdentity {
-            name,
-            email,
-            product_fallback: false,
-        },
-        _ => GitIdentity::product(),
-    }
-}
-
-fn safe_identity_value(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 320
-        && !value.chars().any(char::is_control)
-        && !value.contains(['<', '>'])
-}
-
-pub(crate) async fn init(root: &Path) -> Result<()> {
-    git(root, &["init", "-q"]).await.map(|_| ())
-}
-
-pub(crate) async fn bootstrap_commit(
-    root: &Path,
-    message: &str,
-    paths: &[String],
-    identity: &GitIdentity,
-) -> Result<String> {
-    if paths.is_empty() {
-        anyhow::bail!("bootstrap commit requires explicit paths");
-    }
-    let mut add = vec!["add", "--"];
-    add.extend(paths.iter().map(String::as_str));
-    git(root, &add).await?;
-    let staged = git(root, &["diff", "--cached", "--name-only"]).await?;
-    if staged.trim().is_empty() {
-        anyhow::bail!("nothing staged to commit");
-    }
-    git(
-        root,
-        &[
-            "-c",
-            &format!("user.name={}", identity.name),
-            "-c",
-            &format!("user.email={}", identity.email),
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-m",
-            message,
-        ],
-    )
-    .await?;
-    resolve_ref(root, "HEAD").await
-}
-
-/// Returns the index/ref to the exact state pinned by a Bootstrap plan.
-/// Worktree files are intentionally retained for the caller's path-scoped
-/// compensation. Refusing a moved HEAD protects user commits made outside the
-/// transaction from being rewritten as part of rollback.
-pub(crate) async fn rollback_bootstrap_git(
-    root: &Path,
-    previous_head: Option<&str>,
-    bootstrap_commit: Option<&str>,
-) -> Result<()> {
-    if let Some(expected) = bootstrap_commit {
-        let current = resolve_ref(root, "HEAD").await?;
-        if current != expected {
-            anyhow::bail!(
-                "rollback refused because HEAD moved from bootstrap commit {expected} to {current}"
-            );
-        }
-    }
-
-    match previous_head {
-        Some(previous) => {
-            git(root, &["reset", "--mixed", previous]).await?;
-        }
-        None => {
-            if bootstrap_commit.is_some() {
-                let reference = git(root, &["symbolic-ref", "-q", "HEAD"])
-                    .await?
-                    .trim()
-                    .to_string();
-                if reference.is_empty() {
-                    anyhow::bail!("rollback refused because bootstrap HEAD is detached");
-                }
-                git(root, &["update-ref", "-d", &reference]).await?;
-            }
-            git(root, &["read-tree", "--empty"]).await?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) async fn bootstrap_paths(root: &Path) -> Result<Vec<String>> {
-    let raw = git(
-        root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )
-    .await?;
-    let mut paths = parse_status(&raw)
-        .into_iter()
-        .map(|change| change.path)
-        // The Session store creates this exact ignore file before bootstrap.
-        // It is project-safe, deterministic bootstrap infrastructure and must
-        // become tracked; otherwise the brand-new repository is immediately
-        // dirty and cannot grant the first Worker a direct-write lease.
-        .filter(|path| path == ".genethub/.gitignore" || !session_runtime_path(path))
-        .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    Ok(paths)
-}
-
-fn session_runtime_path(path: &str) -> bool {
-    let Some(relative) = path.strip_prefix(".genethub/") else {
-        return false;
-    };
-    let first = relative.split('/').next().unwrap_or_default();
-    session_home_entry(first)
-}
-
-/// Entries owned by the Session store rather than by project source.
-///
-/// A normal Session necessarily creates these before its Agent can ask the
-/// Human whether to bootstrap. Treating them as user project content makes
-/// the advertised "empty folder + normal Session" entry journey impossible.
-fn session_home_entry(name: &str) -> bool {
-    matches!(
-        name,
-        ".gitignore"
-            | "owner.lock"
-            | "owner"
-            | "sessions"
-            | "tombstones"
-            | "artifacts"
-            | "components"
-    )
-}
-
-fn non_session_entries(root: &Path) -> Result<Vec<String>> {
-    let mut entries = Vec::new();
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == ".genethub" {
-            let disallowed = std::fs::read_dir(entry.path())?
-                .filter_map(Result::ok)
-                .map(|child| child.file_name().to_string_lossy().to_string())
-                .filter(|child| !session_home_entry(child))
-                .collect::<Vec<_>>();
-            entries.extend(
-                disallowed
-                    .into_iter()
-                    .map(|child| format!(".genethub/{child}")),
-            );
-        } else {
-            entries.push(name);
-        }
-    }
-    entries.sort();
-    Ok(entries)
-}
-
-fn directory_status_digest(root: &Path) -> Result<String> {
-    let entries = non_session_entries(root)?;
-    let mut digest = Sha256::new();
-    digest.update(b"genehub.bootstrap-directory-status.v1\0");
-    for entry in entries {
-        digest.update((entry.len() as u64).to_le_bytes());
-        digest.update(entry.as_bytes());
-    }
-    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 async fn read_bounded(
@@ -411,47 +167,18 @@ pub(crate) async fn resolve_ref(root: &Path, reference: &str) -> Result<String> 
         .to_string())
 }
 
-pub(crate) async fn current_ref(root: &Path) -> Result<String> {
-    let reference = git(root, &["symbolic-ref", "-q", "HEAD"]).await?;
-    let reference = reference.trim();
-    if reference.is_empty() {
-        anyhow::bail!("当前仓库处于 detached HEAD，不能取得独占目标 ref 租约");
-    }
-    Ok(reference.to_string())
-}
-
-pub(crate) async fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let mut child = Command::new("git")
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .context("running git merge-base")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("capturing git merge-base stderr")?;
-    let (stderr, status) = tokio::time::timeout(GIT_TIMEOUT, async move {
-        tokio::try_join!(
-            read_bounded(stderr, MAX_STDERR_BYTES, "git merge-base error output"),
-            async { child.wait().await.context("waiting for git merge-base") },
-        )
-    })
-    .await
-    .map_err(|_| anyhow!("git merge-base timed out"))??;
-    if status.success() {
-        return Ok(true);
-    }
-    if status.code() == Some(1) {
-        return Ok(false);
-    }
-    Err(anyhow!(
-        "git merge-base failed: {}",
-        String::from_utf8_lossy(&stderr).trim()
-    ))
+/// The `origin` URL of a checkout, when it has one.
+///
+/// This is a read, not a network capability: the daemon still never clones,
+/// fetches or authenticates. It exists so `workflow list` can report where a
+/// Workflow package came from without the platform storing a receipt that
+/// would drift from the checkout it describes.
+pub(crate) async fn remote_url(root: &Path) -> Result<Option<String>> {
+    let Ok(url) = git(root, &["remote", "get-url", "origin"]).await else {
+        return Ok(None);
+    };
+    let url = url.trim();
+    Ok((!url.is_empty()).then(|| url.to_string()))
 }
 
 /// Parses `--porcelain=v1 -z`.
@@ -600,36 +327,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ordinary_folder_with_only_session_storage_is_bootstrap_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join(".genethub");
-        std::fs::create_dir_all(home.join("sessions/s_pm")).unwrap();
-        std::fs::create_dir_all(home.join("tombstones")).unwrap();
-        for (name, body) in [
-            (".gitignore", "*\n"),
-            ("owner.lock", ""),
-            ("owner", "local\n"),
-        ] {
-            std::fs::write(home.join(name), body).unwrap();
-        }
-        std::fs::write(home.join("sessions/s_pm/meta.json"), "{}\n").unwrap();
-
-        let state = bootstrap_state(dir.path()).await.unwrap();
-        assert!(!state.direct);
-        assert!(state.changes.is_empty(), "{:?}", state.changes);
-    }
-
-    #[tokio::test]
-    async fn project_content_beside_session_storage_is_not_bootstrap_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".genethub/sessions/s_pm")).unwrap();
-        std::fs::write(dir.path().join("README.md"), "user content\n").unwrap();
-
-        let state = bootstrap_state(dir.path()).await.unwrap();
-        assert_eq!(state.changes, vec!["README.md"]);
-    }
-
-    #[tokio::test]
     async fn a_new_file_shows_up_as_untracked_then_commits() {
         let dir = repo().await;
         std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
@@ -672,54 +369,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bootstrap_plan_and_commit_use_the_existing_user_identity() {
-        let dir = repo().await;
-        git(dir.path(), &["config", "user.name", "Project Author"])
-            .await
-            .unwrap();
-        git(dir.path(), &["config", "user.email", "author@example.com"])
-            .await
-            .unwrap();
-        std::fs::write(dir.path().join("pack.txt"), "owned by the pack\n").unwrap();
-
-        let state = bootstrap_state(dir.path()).await.unwrap();
-        assert_eq!(
-            state.commit_identity.display(),
-            "Project Author <author@example.com>"
-        );
-        assert!(!state.commit_identity.product_fallback);
-        bootstrap_commit(
-            dir.path(),
-            "bootstrap",
-            &["pack.txt".into()],
-            &state.commit_identity,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            git(dir.path(), &["log", "-1", "--format=%an <%ae>"])
-                .await
-                .unwrap()
-                .trim(),
-            state.commit_identity.display()
-        );
-    }
-
-    #[test]
-    fn unsafe_or_incomplete_identity_falls_back_to_the_product_pair() {
-        assert!(!safe_identity_value("Agent\nInjected"));
-        assert!(!safe_identity_value("Agent <other>"));
-        let identity = GitIdentity::product();
-        assert!(identity.product_fallback);
-        assert_eq!(
-            identity.display(),
-            "GeneHub Bootstrap <bootstrap@genehub.local>"
-        );
-    }
-
-    /// Before the first commit there is no HEAD; a diff must still work rather
-    /// than surfacing a git error to the user.
-    #[tokio::test]
     async fn diffing_before_the_first_commit_still_works() {
         let dir = repo().await;
         std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
@@ -738,6 +387,88 @@ mod tests {
         let diff = diff(dir.path(), None).await.unwrap();
         assert!(diff.contains("-one"));
         assert!(diff.contains("+two"));
+    }
+
+    /// The three escapes the boundary exists for. Each one leaves the task
+    /// directory itself inside its bounds, which is exactly why a path check
+    /// cannot replace this.
+    #[tokio::test]
+    async fn a_trial_cannot_reach_the_formal_repository_through_git_indirection() {
+        let formal = repo().await;
+        std::fs::write(formal.path().join("a.txt"), "one\n").unwrap();
+        commit(formal.path(), "first", &[]).await.unwrap();
+
+        let trial = tempfile::tempdir().unwrap();
+
+        // A plain directory with no repository anywhere above it. This is
+        // the pure-directory project and it is allowed.
+        let plain = trial.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        reaches_git_state_outside(&plain, trial.path())
+            .await
+            .expect("a directory with no repository above it is not an escape");
+
+        // The plainest escape and the one a path check is least able to
+        // see: no `.git` at all, because Git searches upwards and this
+        // directory silently belongs to the repository enclosing it.
+        let nested = formal.path().join("nested/deep");
+        std::fs::create_dir_all(&nested).unwrap();
+        let refused = reaches_git_state_outside(&nested, &nested)
+            .await
+            .expect_err("a directory inside an enclosing repository must be refused");
+        assert!(
+            format!("{refused:#}").contains("experimentIsolation"),
+            "unhelpful refusal: {refused:#}"
+        );
+
+        // Its own repository, wholly inside the boundary.
+        let contained = trial.path().join("contained");
+        std::fs::create_dir(&contained).unwrap();
+        for args in [vec!["init", "-q"]] {
+            git(&contained, &args).await.unwrap();
+        }
+        reaches_git_state_outside(&contained, trial.path())
+            .await
+            .expect("a self-contained repository stays inside its boundary");
+
+        // A `.git` file pointing at the formal repository's metadata.
+        let pointer = trial.path().join("pointer");
+        std::fs::create_dir(&pointer).unwrap();
+        std::fs::write(
+            pointer.join(".git"),
+            format!("gitdir: {}\n", formal.path().join(".git").display()),
+        )
+        .unwrap();
+        let refused = reaches_git_state_outside(&pointer, trial.path())
+            .await
+            .expect_err("a gitdir pointer out of the boundary must be refused");
+        assert!(
+            format!("{refused:#}").contains("experimentIsolation"),
+            "unhelpful refusal: {refused:#}"
+        );
+
+        // A `--shared` clone keeps local metadata but reads the formal
+        // object store, so the directory checks alone would pass it.
+        let shared = trial.path().join("shared");
+        git(
+            formal.path(),
+            &[
+                "clone",
+                "--shared",
+                "-q",
+                &formal.path().display().to_string(),
+                &shared.display().to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        let refused = reaches_git_state_outside(&shared, trial.path())
+            .await
+            .expect_err("borrowed Git objects must be refused");
+        assert!(
+            format!("{refused:#}").contains("experimentIsolation"),
+            "unhelpful refusal: {refused:#}"
+        );
     }
 
     #[tokio::test]

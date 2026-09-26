@@ -1,4 +1,5 @@
 //! Which agents exist on this machine, and what they can do.
+#![allow(deprecated)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use tokio::sync::RwLock;
 use super::acp::AcpAdapter;
 use super::claude::ClaudeAdapter;
 use super::codex::CodexAdapter;
+use super::cursor::CursorAdapter;
 use super::genet::GenetAdapter;
 use super::opencode::OpenCodeAdapter;
 use super::{ImportCandidate, ImportedHistory, ProviderMap, SharedAdapter};
@@ -78,15 +80,16 @@ impl Registry {
             // nobody could guess at — this entry used to report "not
             // installed" to anyone who had `codex` but not the bridge.
             Arc::new(CodexAdapter::default()),
-            // Cursor, spoken as ACP (`cursor-agent acp`): the protocol its CLI
-            // publishes for exactly this kind of embedding. Launch flags give
-            // the CLI maximum authority; any residual ACP permission request
-            // becomes a durable stopped interaction in the session manager.
-            Arc::new(
-                AcpAdapter::new("cursor", "Cursor", cursor_command())
-                    .with_extra_dirs(cursor_install_dirs())
-                    .checking_login(),
-            ),
+            // Cursor runs in print mode (`adapter::cursor`), one process per
+            // turn pinned to the exact model slug; its ACP server cannot pin
+            // effort or Fast (fb_eVSh3fuuyrv6). The ACP command is kept only
+            // for importing Cursor's own session history.
+            Arc::new(CursorAdapter::new(
+                "cursor",
+                "Cursor",
+                cursor_command(),
+                cursor_install_dirs(),
+            )),
             // A generic ACP entry so any other ACP-speaking CLI on PATH works
             // with no configuration at all.
             Arc::new(AcpAdapter::new(
@@ -171,8 +174,14 @@ impl Registry {
         // sequence, which looked like a dead connection on a cold install.
         // `join_all` preserves registry order while bounding the wait to the
         // slowest probe instead of the sum of all of them.
+        //
+        // Drop handshake caches first. Probe already ran on every refresh;
+        // catalog used to replay the first successful `session/new` /
+        // `initialize` / `model/list` for the rest of the daemon's life, so
+        // Cursor adding a model never appeared until restart.
         let infos =
             futures_util::future::join_all(self.adapters.iter().map(|adapter| async move {
+                adapter.invalidate_catalog().await;
                 let probe = adapter.probe().await;
                 // Cataloguing an absent agent would spawn a process that is not
                 // there; skip straight to an empty catalog.
@@ -273,18 +282,20 @@ mod tests {
     }
 
     /// Cursor ships in the default set too (`docs/desktop-client.md` promises
-    /// the picker detects a locally installed Cursor CLI), spoken as ACP rather
-    /// than through a hand-written config entry.
+    /// the picker detects a locally installed Cursor CLI), spoken in print mode
+    /// rather than through a hand-written config entry.
     #[tokio::test]
     async fn cursor_is_registered_out_of_the_box() {
         let registry = Registry::new(&BTreeMap::new());
         let cursor = registry.get("cursor").expect("cursor is registered");
         assert!(!cursor.builtin());
         assert_eq!(cursor.label(), "Cursor");
-        // Mode switching and pasted images both come through ACP. Residual
-        // permission requests are supported as durable stopped interactions.
-        assert!(cursor.capabilities().permissions);
+        // Print mode pins model, effort and Fast per turn and runs with
+        // `--force`, so there are no permission prompts to relay.
+        assert!(!cursor.capabilities().permissions);
         assert!(cursor.capabilities().set_model);
+        assert!(cursor.capabilities().set_effort);
+        assert!(cursor.capabilities().set_fast);
         assert!(cursor.capabilities().set_mode);
         assert!(cursor.capabilities().attachments);
         // Probing is honest either way: ready when `cursor-agent` is on PATH
@@ -393,5 +404,79 @@ mod tests {
     async fn requiring_an_unknown_adapter_is_an_error_not_a_panic() {
         let registry = Registry::new(&BTreeMap::new());
         assert!(registry.require("nope").is_err());
+    }
+
+    /// `agent.refresh` must drop adapter handshake caches. Registry used to
+    /// re-call `catalog()` while Cursor/Claude/Codex replayed the first
+    /// successful hello for the rest of the daemon run.
+    #[tokio::test]
+    async fn refresh_asks_each_adapter_for_a_new_catalog() {
+        struct Cached {
+            latest: tokio::sync::RwLock<String>,
+            remembered: tokio::sync::RwLock<Option<genehub_proto::Catalog>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::adapter::AgentAdapter for Cached {
+            fn id(&self) -> &str {
+                "cached"
+            }
+            fn label(&self) -> &str {
+                "Cached"
+            }
+            fn capabilities(&self) -> genehub_proto::Capabilities {
+                Default::default()
+            }
+            async fn probe(&self) -> ProbeState {
+                ProbeState::Ready
+            }
+            async fn invalidate_catalog(&self) {
+                *self.remembered.write().await = None;
+            }
+            async fn catalog(&self, _providers: &ProviderMap) -> genehub_proto::Catalog {
+                if let Some(cached) = self.remembered.read().await.clone() {
+                    return cached;
+                }
+                let id = self.latest.read().await.clone();
+                let catalog = genehub_proto::Catalog {
+                    models: vec![genehub_proto::ModelInfo {
+                        id: id.clone(),
+                        label: id,
+                        context_window: None,
+                        reasoning: false,
+                        efforts: Vec::new(),
+                        input_modalities: None,
+                        supports_fast: false,
+                    }],
+                    ..Default::default()
+                };
+                *self.remembered.write().await = Some(catalog.clone());
+                catalog
+            }
+            async fn start(
+                &self,
+                _config: crate::adapter::SessionConfig,
+            ) -> Result<Box<dyn crate::adapter::AgentSession>> {
+                anyhow::bail!("not started")
+            }
+        }
+
+        let adapter = Arc::new(Cached {
+            latest: tokio::sync::RwLock::new("old".into()),
+            remembered: tokio::sync::RwLock::new(None),
+        });
+        let registry = Registry::of(vec![adapter.clone()]);
+        let providers = ProviderMap::new();
+        let first = registry.list(&providers).await;
+        assert_eq!(first[0].catalog.models[0].id, "old");
+
+        *adapter.latest.write().await = "new".into();
+        let listed = registry.list(&providers).await;
+        assert_eq!(
+            listed[0].catalog.models[0].id, "old",
+            "list keeps the registry cache"
+        );
+        let refreshed = registry.refresh(&providers).await;
+        assert_eq!(refreshed[0].catalog.models[0].id, "new");
     }
 }

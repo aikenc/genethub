@@ -35,7 +35,11 @@ export function resolveAgentPresentation(
   agent: Pick<AgentInfo, "id" | "label">,
 ): AgentPresentation {
   const rule = agentRules.find((candidate) => candidate.ids.includes(agent.id));
-  const label = agent.label.trim() || rule?.label || agent.id;
+  // Known product names are deliberately canonical across channel-specific
+  // runtime labels (for example GeneHub Dev/Beta Agent).
+  const label = rule?.canonicalLabel
+    ? rule.label
+    : agent.label.trim() || rule?.label || agent.id;
   if (rule?.assetId && isAssetId(rule.assetId)) {
     return { kind: "icon", label, asset: agentAssets[rule.assetId] };
   }

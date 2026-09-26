@@ -26,7 +26,7 @@ fn scope() -> Result<Scope, String> {
 pub fn definition() -> Value {
     json!({
         "name": "genet",
-        "description": "Read bounded GeneHub session evidence or current project workflow facts, and submit your own managed completion report. Pass argv directly, without a shell or executable. Session reads automatically use the granted historical boundary. Supported: session inspect/context/narrative/rounds/flow, workflow get/history/check/complete, capabilities and schema. Other commands and target overrides are denied.",
+        "description": "Read bounded GeneHub session evidence or current project workflow facts, and submit your own managed completion report. Pass argv directly, without a shell or executable. Session reads automatically use the granted historical boundary. Supported: session inspect/context/narrative/rounds/flow, workflow get/history/check/journal/complete, capabilities and schema. Other commands and target overrides are denied.",
         "parameters": {"type":"object", "properties":{"args":{"type":"array","items":{"type":"string"}}},"required":["args"]}
     })
 }
@@ -108,7 +108,7 @@ async fn run_inner(args: &Value, cwd: &Path) -> Result<ToolResult, String> {
             }
         }
         Some("workflow") if argv.len() >= 2 => match argv[1].as_str() {
-            "get" | "check" | "history" | "complete" => 2,
+            "get" | "check" | "history" | "journal" | "complete" => 2,
             _ => return Err("workflow mutation is not available to evidence-only analysis".into()),
         },
         _ => return Err("command is not available to evidence-only analysis".into()),

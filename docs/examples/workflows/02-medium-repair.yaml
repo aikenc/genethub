@@ -7,10 +7,10 @@ nodes:
     uses: agent.session
     with:
       role: coder
-      writeLease: {targetRef: current, ttlSeconds: 900}
+      writeLease: {ttlSeconds: 900}
     completion:
       all:
-        - {key: commit, verify: git.commitOnTarget}
+        - {key: commit, verify: value.nonEmpty}
         - {key: checks, verify: value.nonEmpty}
   - id: review
     uses: agent.session

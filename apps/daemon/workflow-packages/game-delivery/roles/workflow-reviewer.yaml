@@ -1,0 +1,6 @@
+schema: genehub.workflow.role.v3
+id: workflow-reviewer
+tags: [Pro]
+evidenceOnly: true
+userInteraction: readOnly
+prompt: prompts/workflow-reviewer.md

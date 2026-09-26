@@ -22,11 +22,10 @@ defineSpecialty({
   };
   try {
     await t.flows.main.configureMockProvider(opened.client, opened.mock);
-    await cli(["workflow", "init", "--agent", "genet", "--model", "deepseek/deepseek-v4-flash"]);
-    const source = path.join(opened.workspaceRoot, ".genethub/workflow");
+        const source = t.flows.main.seedWorkflowPackage({ projectRoot: opened.workspaceRoot });
     writeFileSync(path.join(source, "roles/worker.yaml"), JSON.stringify({ schema: "genehub.workflow.role.v1", id: "worker", agentId: "genet", modelId: "deepseek/deepseek-v4-flash", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" }));
     writeFileSync(path.join(source, "prompts/direct-worker.md"), "EVIDENCE_PATH_WORKER: inspect bounded evidence, then report completion.");
-    writeFileSync(path.join(source, "workflows/direct-change.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
+    writeFileSync(path.join(source, "flows/direct-change.yaml"), JSON.stringify({ schema: "genehub.workflow.definition.v2", id: "direct-change", version: 2,
       nodes: [{ id: "inspect", uses: "agent.session", with: { role: "worker" }, completion: { all: [{ key: "report", verify: "value.nonEmpty" }] } }],
       structure: { body: { id: "inspect-step", type: "task", activity: "inspect" } } }));
     const inspected = await opened.client.call({ type: "workflow.inspect", payload: { workspaceId: opened.workspaceId } });

@@ -237,7 +237,7 @@ export function FilesPanel({ workspaceId }: { workspaceId?: string } = {}) {
     }
 
     const label =
-      paths.length === 1 ? `「${baseName(paths[0]!)}」` : `${paths.length} 个项目`;
+      paths.length === 1 ? `「${baseName(paths[0]!)}」` : `${paths.length} 个文件/文件夹`;
     if (!window.confirm(`确定删除${label}？此操作不可撤销。`)) return;
     await run("file.delete", async () => {
       const reply = await client!.call({

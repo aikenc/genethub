@@ -218,6 +218,19 @@ pub struct SessionMeta {
     #[serde(default = "format_before_versions", skip_deserializing)]
     pub format: u32,
     pub agent_id: String,
+    /// Whether ordinary sends should resolve this conversation through the
+    /// machine-global tag router. Concrete `session.create` conversations keep
+    /// their explicit Agent/model, even when they contain media.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tag_routing: bool,
+    /// Human-selected routing tags. Concrete Agent/model identity is derived
+    /// afresh from these tags before every ordinary dispatch.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routing_tags: Vec<String>,
+    /// Daemon-owned requirements accumulated from image/video attachments in
+    /// this conversation. Kept separate so a client cannot deselect history.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media_tags: Vec<String>,
     /// `None` until it has been named. Metas written before this was optional
     /// read back as `Some`, which is the right answer for them.
     #[serde(default)]
@@ -234,6 +247,8 @@ pub struct SessionMeta {
     /// answer for them: no level was ever chosen.
     #[serde(default)]
     pub effort_id: Option<String>,
+    #[serde(default)]
+    pub fast: Option<bool>,
     /// Agent-declared runtime axes. Unknown keys survive storage for history,
     /// but are filtered against the live catalog before an Agent starts.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -304,6 +319,14 @@ pub enum ContextSeedState {
 pub struct ContextSeed {
     pub state: ContextSeedState,
     pub text: String,
+    /// Present for an in-place Agent migration. A staged seed only becomes
+    /// active after metadata names this exact destination; this makes a crash
+    /// between the two atomic file writes fail closed instead of replaying
+    /// history into the old Agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_model_id: Option<String>,
 }
 
 pub(super) fn interaction_summary<'a>(
@@ -342,12 +365,16 @@ impl SessionMeta {
             workspace_id,
             format: header.format,
             agent_id: String::new(),
+            tag_routing: false,
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title: header.title,
             title_locked: false,
             cwd,
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
             created_at_ms: header.created_at_ms,
             updated_at_ms: header.updated_at_ms,
@@ -409,12 +436,15 @@ impl SessionMeta {
             id: self.id.clone(),
             workspace_id: self.workspace_id.clone(),
             agent_id: self.agent_id.clone(),
+            routing_tags: self.routing_tags.clone(),
+            media_tags: self.media_tags.clone(),
             managed: self.managed.clone(),
             title: self.title.clone(),
             status,
             model_id: self.model_id.clone(),
             mode_id: self.mode_id.clone(),
             effort_id: self.effort_id.clone(),
+            fast: self.fast,
             runtime_values: (!self.runtime_values.is_empty()).then(|| self.runtime_values.clone()),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
@@ -2058,12 +2088,16 @@ mod project_home_tests {
             workspace_id: workspace_id.into(),
             format: SESSION_FORMAT,
             agent_id: "genet".into(),
+            tag_routing: false,
+            routing_tags: Vec::new(),
+            media_tags: Vec::new(),
             title: Some(id.into()),
             title_locked: false,
             cwd: cwd.to_path_buf(),
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
             created_at_ms: 1,
             updated_at_ms: 1,

@@ -1,4 +1,10 @@
-import type { AgentInfo, RoundSummary, SessionSummary, WorkspaceInfo } from "@genehub/proto";
+import type {
+  AgentInfo,
+  AgentSelectionPreferences,
+  RoundSummary,
+  SessionSummary,
+  WorkspaceInfo,
+} from "@genehub/proto";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,6 +27,7 @@ function agent(id: string, label: string): AgentInfo {
       interrupt: false,
       setModel: false,
       setEffort: false,
+      setFast: false,
       setMode: false,
       permissions: false,
       resume: false,
@@ -33,6 +40,17 @@ function agent(id: string, label: string): AgentInfo {
 
 function workspace(id: string, name: string): WorkspaceInfo {
   return { id, name, root: `/work/${id}`, isGitRepo: true, folders: [] };
+}
+
+function preferences(
+  agentId: string,
+  selectedTags: string[] = ["Flash"],
+): AgentSelectionPreferences {
+  return {
+    selectedTags,
+    modelProfiles: [{ agentId, tags: selectedTags, cost: "medium" }],
+    runtimes: {},
+  };
 }
 
 function session(
@@ -106,6 +124,7 @@ beforeEach(() => {
     sessions: [session("s1", "源会话"), session("s2", "既有会话")],
     activeSessionId: "s1",
     activeWorkspaceId: "w1",
+    settings: { providers: [], lanEnabled: false, agentPreferences: preferences("codex") },
     draft: null,
     tabs: [],
     activeTabId: null,
@@ -184,6 +203,7 @@ describe("ForwardDialog", () => {
       loadCatalog: async () => ({
         agents: [agent("claude", "Claude Code")],
         workspaces: [workspace("rw", "远程项目")],
+        agentPreferences: preferences("claude"),
       }),
       loadSessions: async () => [session("remote-s", "远端会话", "claude", "rw")],
       deliver,
@@ -305,6 +325,7 @@ describe("ForwardDialog", () => {
       loadCatalog: async () => ({
         agents: [agent("claude", "Claude Code")],
         workspaces: [workspace("rw", "远程项目")],
+        agentPreferences: preferences("claude", ["Flash"]),
       }),
       loadSessions: async () => [],
       deliver,
@@ -329,7 +350,11 @@ describe("ForwardDialog", () => {
     await waitFor(() =>
       expect(deliver).toHaveBeenCalledWith(
         remoteMachine,
-        { kind: "new", workspaceId: "rw", agentId: "claude" },
+        {
+          kind: "new",
+          workspaceId: "rw",
+          target: { agentId: "claude", runtimeValues: {} },
+        },
         expect.stringContaining("你好"),
       ),
     );

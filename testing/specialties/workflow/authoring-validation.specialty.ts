@@ -77,7 +77,7 @@ defineSpecialty(
     id: "specialty.workflow.authoring-validation.contract",
     title: "Workflow authors receive one authoritative schema and actionable draft diagnostics",
     oracle:
-      "The public CLI exposes the parser schema, validates only catalog-referenced source through the production compiler, returns file/path/type guidance, and does not activate or execute the draft",
+      "The public CLI exposes the parser schema, validates only the package's compiled flows and the roles they reference through the production compiler, returns file/path/type guidance, and does not activate or execute the draft",
     catches: [
       "documented schema command is rejected",
       "WM derives roles by scanning YAML text",
@@ -89,8 +89,8 @@ defineSpecialty(
     ],
     tags: ["core", "workflow", "workflow-authoring"],
     llm: { default: "mock" },
-    expectedDurationMs: 8_000,
-    timeoutMs: 60_000,
+    expectedDurationMs: 20_000,
+    timeoutMs: 120_000,
     resources: { environments: 1, cpu: 1, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
     surfaces: ["daemon", "genet-cli", "workbench-client", "git"],
     productInterfaces: [
@@ -106,8 +106,16 @@ defineSpecialty(
     const cli = async (args: string[]) =>
       runGenetAsync(opened.daemon.genet, args, opened.daemon.env, { cwd: opened.workspaceRoot });
     try {
-      const initialized = await cli(["workflow", "init", "--agent", "genet"]);
-      t.assertions.assert(initialized.code === 0, initialized.stderr || initialized.stdout);
+      // The authoring contract is exercised against the same directory shape
+      // a cloned community package has: one package, its flows, its roles.
+      const packageRoot = t.flows.main.seedDirectChangePackage({
+        projectRoot: opened.workspaceRoot,
+      });
+      // Activate the clean source first: a project with an active Candidate is
+      // what makes a later broken draft a reported `candidateError` instead of
+      // an unusable project, and that distinction is what this case checks.
+      const genesis = await cli(["workflow", "activate", "--revision", "0"]);
+      t.assertions.assert(genesis.code === 0, genesis.stderr || genesis.stdout);
 
       const schemaResult = await cli(["schema", "workflow.definition"]);
       t.assertions.assert(schemaResult.code === 0, schemaResult.stderr || schemaResult.stdout);
@@ -131,7 +139,7 @@ defineSpecialty(
         proceduresSchema?.["$id"] === "urn:genehub:workflow:procedures:authoring:v1" &&
           !!proceduresProperties?.procedures &&
           (extension?.include as Record<string, unknown> | undefined)?.file ===
-            "procedures/<id>.yaml beside workflows/, schema genehub.workflow.procedures.v1",
+            "procedures/<id>.yaml beside the package's flows/, schema genehub.workflow.procedures.v1",
         `procedure library schema is not published with the definition: ${schemaResult.stdout}`,
       );
 
@@ -140,15 +148,18 @@ defineSpecialty(
         payload: { workspaceId: opened.workspaceId },
       });
       if (before?.type !== "workflowProject") throw new Error("initial workflow inspection failed");
-      const workflowFile = path.join(
-        opened.workspaceRoot,
-        ".genethub/workflow/workflows/direct-change.yaml",
-      );
+      const workflowFile = path.join(packageRoot, "flows/direct-change.yaml");
       writeFileSync(workflowFile, validSource);
-      // An authoring tool must consume compiler metadata, not grep every YAML file in the directory.
+      // An authoring tool must consume compiler metadata, not grep every file
+      // in the directory: only `flows/*.yaml` are flows, and an unreferenced
+      // role file cannot enter the inventory either.
       writeFileSync(
-        path.join(opened.workspaceRoot, ".genethub/workflow/workflows/not-in-catalog.yaml"),
-        "this: file is deliberately not a catalog entry\n",
+        path.join(packageRoot, "flows/notes.txt"),
+        "this is deliberately not a flow definition\n",
+      );
+      writeFileSync(
+        path.join(packageRoot, "roles/unreferenced.yaml"),
+        "schema: genehub.workflow.role.v1\nid: unreferenced\nagentId: genet\nuserInteraction: readOnly\nprompt: prompts/worker.md\n",
       );
 
       const validResult = await cli(["workflow", "check", "--draft"]);
@@ -162,9 +173,10 @@ defineSpecialty(
       t.assertions.assert(
         draft?.valid === true &&
           draft.diagnostics.length === 0 &&
-          draft.defaultWorkflow === "direct-change" &&
+          draft.packageId === "local" &&
           draft.workflows.length === 1 &&
-          draft.workflows[0]?.path === "direct-change.yaml" &&
+          draft.workflows[0]?.id === "direct-change" &&
+          draft.workflows[0]?.path === "flows/direct-change.yaml" &&
           JSON.stringify(draft.workflows[0]?.roles) === JSON.stringify(["worker"]) &&
           afterValid?.type === "workflowProject" &&
           draft.candidateDigest === afterValid.data.candidateDigest &&
@@ -175,13 +187,8 @@ defineSpecialty(
 
       // A library shared by several Workflows is source of the same Candidate:
       // editing it must produce a new pinned identity, not reuse the old one.
-      mkdirSync(path.join(opened.workspaceRoot, ".genethub/workflow/procedures"), {
-        recursive: true,
-      });
-      const libraryFile = path.join(
-        opened.workspaceRoot,
-        ".genethub/workflow/procedures/shared.yaml",
-      );
+      mkdirSync(path.join(packageRoot, "procedures"), { recursive: true });
+      const libraryFile = path.join(packageRoot, "procedures/shared.yaml");
       const libraryBody = (activity: string) => ({
         schema: "genehub.workflow.procedures.v1",
         id: "shared",
@@ -231,7 +238,7 @@ defineSpecialty(
           parseEnvelope.error?.code === "workflowValidationFailed" &&
           parseDiagnostic.phase === "parse" &&
           parseDiagnostic.code === "WF_SOURCE_PARSE" &&
-          parseDiagnostic.file === "workflows/direct-change.yaml" &&
+          parseDiagnostic.file === "flows/direct-change.yaml" &&
           parseDiagnostic.path.startsWith("/nodes/0") &&
           parseDiagnostic.line !== null &&
           parseDiagnostic.column !== null &&
@@ -278,7 +285,7 @@ defineSpecialty(
         t.assertions.assert(invalidCapability.code !== 0 && invalidCapability.stdout.includes("request.budget"), "budget capability accepted Worker inputs or completion overrides");
       }
       writeFileSync(workflowFile, validSource);
-      const roleFile = path.join(opened.workspaceRoot, ".genethub/workflow/roles/worker.yaml");
+      const roleFile = path.join(packageRoot, "roles/worker.yaml");
       const roleBefore = readFileSync(roleFile, "utf8");
       const role = { schema: "genehub.workflow.role.v1", id: "worker", agentId: "tclaude", evidenceOnly: true, userInteraction: "readOnly", prompt: "prompts/direct-worker.md" };
       writeFileSync(roleFile, JSON.stringify(role));

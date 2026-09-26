@@ -8,6 +8,7 @@
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod genet;
 pub mod opencode;
 pub mod registry;
@@ -40,6 +41,7 @@ pub struct SessionConfig {
     /// the same reason the model is: the process only starts on the first prompt,
     /// so a level chosen before that would otherwise be recorded and dropped.
     pub effort_id: Option<String>,
+    pub fast: Option<bool>,
     /// Agent-declared runtime dimensions. Keys and values are opaque and have
     /// already been checked against the current catalog by the session layer.
     pub runtime_values: std::collections::BTreeMap<String, String>,
@@ -144,7 +146,19 @@ pub trait AgentAdapter: Send + Sync {
 
     async fn catalog(&self, providers: &ProviderMap) -> Catalog;
 
+    /// Forget process-lifetime handshake caches so `agent.refresh` can ask the
+    /// CLI again. Default is a no-op: adapters that always live-query have
+    /// nothing to drop.
+    async fn invalidate_catalog(&self) {}
+
     async fn start(&self, config: SessionConfig) -> Result<Box<dyn AgentSession>>;
+
+    /// Whether `start` can continue from this saved handle. A handle written
+    /// by an earlier implementation of the same Agent may name a store this
+    /// one cannot read; the session layer then seeds from its own log.
+    fn accepts_resume(&self, _handle: &PersistHandle) -> bool {
+        true
+    }
 
     /// `None` means this Agent does not publish an import surface. Listing is
     /// deliberately lightweight; full history belongs only in `import_history`.
@@ -206,6 +220,13 @@ pub trait AgentSession: Send + Sync {
         Err(anyhow::anyhow!(
             "this agent has no effort levels to set ({effort_id})"
         ))
+    }
+    async fn set_fast(&self, fast: bool) -> Result<()> {
+        if fast {
+            Err(anyhow::anyhow!("this agent does not support fast mode"))
+        } else {
+            Ok(())
+        }
     }
     async fn set_runtime_axis(&self, axis_id: &str, value_id: &str) -> Result<()> {
         Err(anyhow::anyhow!(
@@ -693,6 +714,7 @@ mod tests {
             model_id: None,
             mode_id: None,
             effort_id: None,
+            fast: None,
             runtime_values: Default::default(),
             additional_system_prompt: None,
             skills_dir: None,

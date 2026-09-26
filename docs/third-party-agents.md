@@ -87,7 +87,7 @@ npm install -g @openai/codex
 codex login
 ```
 
-装好、能被探测到，选择器里就可以点；没装或没登录的条目仍在，但会标成「未安装」或「不可用」，不影响其他 agent。`codex` 和 `cursor` 多一种中间状态：装了但没登录时标成不可用，理由里分别是 `codex login` 和 `cursor-agent login`。Codex 未登录时不会拒绝一个回合，只会不回话（§4）；Cursor 还多搜官方安装目录，因为 Windows 桌面从开始菜单启动时，进程 `PATH` 常常还没有 `%LOCALAPPDATA%\cursor-agent`。打开选择器或点「重新检测」会重新探测，装完不必重启 GeneHub。
+装好、能被探测到，选择器里就可以点；没装或没登录的条目仍在，但会标成「未安装」或「不可用」，不影响其他 agent。`codex` 和 `cursor` 多一种中间状态：装了但没登录时标成不可用，理由里分别是 `codex login` 和 `cursor-agent login`。Codex 未登录时不会拒绝一个回合，只会不回话（§4）；Cursor 还多搜官方安装目录，因为 Windows 桌面从开始菜单启动时，进程 `PATH` 常常还没有 `%LOCALAPPDATA%\cursor-agent`。在模型选择面板点「Agent 配置」会重新探测安装状态，并重新拉取每个 Agent 的模型/模式目录，装完或目录更新不必重启 GeneHub。
 
 ---
 

@@ -8,24 +8,32 @@ use genehub_proto::{Reply, Request, WorkflowRunStatus};
 use serde_json::json;
 
 use super::output::{self, CliFailure};
-use super::rpc::Rpc;
+use super::rpc::{Rpc, RpcError};
 use super::target::Selection;
 use super::{query, EXIT_FAILED, EXIT_OK};
 
 #[derive(Debug)]
 enum Command {
-    Init {
+    List {
         workspace_id: Option<String>,
-        agent_id: String,
-        model_id: Option<String>,
+    },
+    Build {
+        workspace_id: Option<String>,
+        package_id: String,
+        apply: bool,
+        plan_digest: Option<String>,
+        action_id: Option<String>,
+        expected_revision: Option<u64>,
     },
     Activate {
         workspace_id: Option<String>,
+        package_id: Option<String>,
         candidate_digest: Option<String>,
         revision: Option<u64>,
     },
     Inspect {
         workspace_id: Option<String>,
+        package_id: Option<String>,
         candidate_digest: Option<String>,
     },
     Dispatch {
@@ -33,9 +41,9 @@ enum Command {
         resume_cancelled: bool,
         candidate_digest: Option<String>,
         workspace_id: Option<String>,
+        package_id: Option<String>,
         workflow_id: Option<String>,
-        kind: Option<String>,
-        complexity: Option<String>,
+        execution_root: Option<String>,
         task_id: String,
         prompt: String,
         wait: bool,
@@ -44,6 +52,7 @@ enum Command {
     Check {
         workspace_id: Option<String>,
         run_id: Option<String>,
+        package_id: Option<String>,
         draft: bool,
     },
     Get {
@@ -53,6 +62,12 @@ enum Command {
     History {
         workspace_id: Option<String>,
         limit: Option<u32>,
+    },
+    Journal {
+        workspace_id: Option<String>,
+        run_id: String,
+        since: u64,
+        limit: u32,
     },
     Complete {
         workspace_id: Option<String>,
@@ -72,6 +87,27 @@ enum Command {
     Recover {
         workspace_id: Option<String>,
         run_id: String,
+        revision: u64,
+    },
+    RecoveryStart {
+        workspace_id: Option<String>,
+        run_id: String,
+        reason: String,
+    },
+    Human {
+        workspace_id: Option<String>,
+        run_id: String,
+        revision: u64,
+        kind: String,
+        reason: String,
+    },
+    RecoveryStatus {
+        workspace_id: Option<String>,
+        run_id: String,
+    },
+    RecoveryReset {
+        workspace_id: Option<String>,
+        package_id: Option<String>,
         revision: u64,
     },
     Budget {
@@ -106,33 +142,59 @@ pub async fn workflow(args: &[String], selection: &Selection) -> i32 {
 
 async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
     match command {
-        Command::Init {
-            workspace_id,
-            agent_id,
-            model_id,
-        } => {
+        Command::List { workspace_id } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
-            let Reply::WorkflowProject(project) = rpc
-                .call(Request::WorkflowInitialize {
-                    workspace_id,
-                    agent_id,
-                    model_id,
-                })
+            let Reply::WorkflowPackages(list) = rpc
+                .call(Request::WorkflowList { workspace_id })
                 .await
                 .map_err(query::rpc_error)?
             else {
                 return Err(CliFailure::protocol(
-                    "the daemon answered workflow.initialize with the wrong reply",
+                    "the daemon answered workflow.list with the wrong reply",
+                ));
+            };
+            output::succeed("workflow.list", serde_json::to_value(list).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Build {
+            workspace_id,
+            package_id,
+            apply,
+            plan_digest,
+            action_id,
+            expected_revision,
+        } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let failure_plan_digest = plan_digest.clone();
+            let Reply::WorkflowBuild(report) = rpc
+                .call(Request::WorkflowBuild {
+                    workspace_id,
+                    package_id,
+                    apply,
+                    plan_digest,
+                    action_id,
+                    expected_revision,
+                })
+                .await
+                .map_err(|error| build_rpc_error(error, failure_plan_digest.as_deref()))?
+            else {
+                return Err(CliFailure::protocol(
+                    "the daemon answered workflow.build with the wrong reply",
                 ));
             };
             output::succeed(
-                "workflow.initialized",
-                serde_json::to_value(project).unwrap(),
+                if apply {
+                    "workflow.built"
+                } else {
+                    "workflow.build.plan"
+                },
+                serde_json::to_value(report).unwrap(),
             );
             Ok(EXIT_OK)
         }
         Command::Activate {
             workspace_id,
+            package_id,
             candidate_digest,
             revision,
         } => {
@@ -143,6 +205,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             let Reply::WorkflowProject(project) = rpc
                 .call(Request::WorkflowActivate {
                     workspace_id,
+                    package_id,
                     candidate_digest,
                     expected_revision,
                 })
@@ -158,12 +221,14 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
         }
         Command::Inspect {
             workspace_id,
+            package_id,
             candidate_digest,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
             let Reply::WorkflowProject(project) = rpc
                 .call(Request::WorkflowInspect {
                     workspace_id,
+                    package_id,
                     candidate_digest,
                 })
                 .await
@@ -181,45 +246,26 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             resume_cancelled,
             candidate_digest,
             workspace_id,
+            package_id,
             workflow_id,
-            kind,
-            complexity,
+            execution_root,
             task_id,
             prompt,
             wait,
             timeout,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
-            let Reply::WorkflowProject(project) = rpc
-                .call(Request::WorkflowInspect {
-                    workspace_id: workspace_id.clone(),
-                    candidate_digest: candidate_digest.clone(),
-                })
-                .await
-                .map_err(query::rpc_error)?
-            else {
-                return Err(CliFailure::protocol(
-                    "the daemon answered workflow.inspect with the wrong reply",
-                ));
-            };
-            if candidate_digest
-                .as_ref()
-                .is_some_and(|digest| project.selected_digest.as_ref() != Some(digest))
-            {
-                return Err(CliFailure::business(
-                    "workflowVersionUnavailable",
-                    "daemon 未返回所选 Candidate 的 catalog；更新 daemon 后再试",
-                    None,
-                ));
-            }
-            let workflow_id = select_workflow(&project, workflow_id, kind, complexity)?;
+            // Package and flow selection are resolved by the daemon, which owns
+            // the directory facts; the CLI stays a thin forwarder.
             let Reply::WorkflowRun(started) = rpc
                 .call(Request::WorkflowDispatch {
                     retry_of,
                     resume_cancelled: Some(resume_cancelled),
                     candidate_digest,
                     workspace_id: workspace_id.clone(),
+                    package_id,
                     workflow_id,
+                    execution_root,
                     task_id,
                     prompt,
                 })
@@ -245,6 +291,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
         Command::Check {
             workspace_id,
             run_id,
+            package_id,
             draft,
         } => {
             let workspace_id = resolve_workspace(rpc, workspace_id).await?;
@@ -252,6 +299,7 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 .call(Request::WorkflowCheck {
                     workspace_id,
                     run_id,
+                    package_id,
                     draft: draft.then_some(true),
                 })
                 .await
@@ -327,6 +375,16 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
                 "workflow.history",
                 json!({"workspaceId": workspace_id, "runs": runs}),
             );
+            Ok(EXIT_OK)
+        }
+        Command::Journal { workspace_id, run_id, since, limit } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowJournal(events) = rpc.call(Request::WorkflowJournal {
+                workspace_id: workspace_id.clone(), run_id: run_id.clone(), since, limit,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.journal with the wrong reply"));
+            };
+            output::succeed("workflow.journal", json!({"workspaceId": workspace_id, "runId": run_id, "events": events}));
             Ok(EXIT_OK)
         }
         Command::Complete {
@@ -454,6 +512,46 @@ async fn execute(rpc: &Rpc, command: Command) -> Result<i32, CliFailure> {
             output::succeed("workflow.recovered", serde_json::to_value(run).unwrap());
             Ok(EXIT_OK)
         }
+        Command::RecoveryStart { workspace_id, run_id, reason } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowRecoveryStart {
+                workspace_id, run_id, reason,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.recovery.start with the wrong reply"));
+            };
+            output::succeed("workflow.recovery.started", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::Human { workspace_id, run_id, revision, kind, reason } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowHuman {
+                workspace_id, run_id, expected_revision: revision, kind, reason,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.human with the wrong reply"));
+            };
+            output::succeed("workflow.human.requested", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::RecoveryStatus { workspace_id, run_id } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowRun(run) = rpc.call(Request::WorkflowGet {
+                workspace_id, run_id,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.recovery.status with the wrong reply"));
+            };
+            output::succeed("workflow.recovery.status", serde_json::to_value(run).unwrap());
+            Ok(EXIT_OK)
+        }
+        Command::RecoveryReset { workspace_id, package_id, revision } => {
+            let workspace_id = resolve_workspace(rpc, workspace_id).await?;
+            let Reply::WorkflowProject(project) = rpc.call(Request::WorkflowRecoveryReset {
+                workspace_id, package_id, expected_revision: revision,
+            }).await.map_err(query::rpc_error)? else {
+                return Err(CliFailure::protocol("the daemon answered workflow.recovery.reset with the wrong reply"));
+            };
+            output::succeed("workflow.recovery.reset", serde_json::to_value(project).unwrap());
+            Ok(EXIT_OK)
+        }
         Command::Budget {
             workspace_id,
             run_id,
@@ -562,61 +660,96 @@ async fn binding_for_missing(needed: bool) -> Result<Option<ManagedBinding>, Cli
     }))
 }
 
-fn select_workflow(
-    project: &genehub_proto::WorkflowProjectStatus,
-    explicit: Option<String>,
-    kind: Option<String>,
-    complexity: Option<String>,
-) -> Result<String, CliFailure> {
-    if let Some(explicit) = explicit {
-        return Ok(explicit);
-    }
-    if kind.is_none() && complexity.is_none() {
-        return Ok(project.default_workflow.clone());
-    }
-    let mut matches = project
-        .workflows
-        .iter()
-        .filter_map(|workflow| {
-            let kind_matches = workflow
-                .match_kind
-                .as_deref()
-                .is_none_or(|expected| kind.as_deref() == Some(expected));
-            let complexity_matches = workflow
-                .match_complexity
-                .as_deref()
-                .is_none_or(|expected| complexity.as_deref() == Some(expected));
-            (kind_matches && complexity_matches).then_some((
-                usize::from(workflow.match_kind.is_some())
-                    + usize::from(workflow.match_complexity.is_some()),
-                workflow.id.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    let Some(best_score) = matches.iter().map(|(score, _)| *score).max() else {
-        return Err(CliFailure::business(
-            "workflowRouteNotFound",
-            "项目 catalog 没有匹配该需求分类的 Workflow；请调整分类或项目配置",
-            Some(json!({
-                "kind": kind,
-                "complexity": complexity,
-                "available": project.workflows.iter().map(|workflow| &workflow.id).collect::<Vec<_>>(),
-            })),
-        ));
+/// Maps a `workflow build` failure to a stable machine-readable recovery
+/// contract, so an Agent can tell "nothing happened, ask again" apart from
+/// "the project changed and needs inspection" without parsing prose.
+///
+/// The old Pack installer's Git-preflight codes are gone with it: build never
+/// initializes a repository or writes a commit, so the only stages left are
+/// approval, materialization and registration.
+fn build_rpc_error(error: RpcError, plan_digest: Option<&str>) -> CliFailure {
+    let failure = query::rpc_error(error);
+    let message = failure.message.clone();
+    let known = [
+        "builderVerifyFailed",
+        "activationFailed",
+        "revisionConflict",
+        "activeRunConflict",
+        "approvalRejected",
+        "approvalStale",
+        "approvalConsumed",
+        "approvalRequired",
+        "actionInProgress",
+    ];
+    let code = known
+        .into_iter()
+        .find(|candidate| message.contains(&format!("{candidate}:")))
+        .unwrap_or(failure.code);
+    let (stage, changed, retryable, recovery) = match code {
+        "approvalRejected" => (
+            "approval",
+            false,
+            false,
+            "No changes were made. Ask again only if the user requests this package's team.",
+        ),
+        "approvalRequired" | "approvalStale" | "approvalConsumed" => (
+            "approval",
+            false,
+            false,
+            "Create a fresh `workflow build` plan and ask the user to approve that exact plan.",
+        ),
+        "actionInProgress" => (
+            "approval",
+            false,
+            true,
+            "Wait for the same action id to finish, then inspect its receipt.",
+        ),
+        "activeRunConflict" => (
+            "preflight",
+            false,
+            true,
+            "Finish or cancel the listed Runs, then plan the build again.",
+        ),
+        "builderVerifyFailed" => (
+            "materialize",
+            true,
+            false,
+            "Fix the reported package Space source or ownership conflict and plan again. Product directories are rebuildable; rerun the build after fixing the source.",
+        ),
+        "revisionConflict" => (
+            "registryCommit",
+            false,
+            false,
+            "Refresh the AgentSpace tree and create a new plan from the current revision.",
+        ),
+        "activationFailed" => (
+            "workflowActivation",
+            true,
+            false,
+            "Fix the package's flow source and plan again; `workflow check --draft` reports the exact diagnostic.",
+        ),
+        _ => (
+            "request",
+            false,
+            failure.retryable,
+            "Inspect the error and create a new plan after its cause is resolved.",
+        ),
     };
-    matches.retain(|(score, _)| *score == best_score);
-    if matches.len() != 1 {
-        return Err(CliFailure::business(
-            "workflowRouteAmbiguous",
-            "项目 catalog 中有多条同等匹配的 Workflow；请使用 --workflow 明确选择",
-            Some(json!({
-                "kind": kind,
-                "complexity": complexity,
-                "matches": matches.iter().map(|(_, id)| id).collect::<Vec<_>>(),
-            })),
-        ));
+    CliFailure {
+        code,
+        message,
+        retryable,
+        details: Some(json!({
+            "schema": "genehub.workflow-build-failure.v1",
+            "stage": stage,
+            "code": code,
+            "changed": changed,
+            "retryable": retryable,
+            "planDigest": plan_digest,
+            "recoveryAction": recovery,
+        })),
+        exit: failure.exit,
     }
-    Ok(matches.pop().expect("exactly one route remained").1)
 }
 
 async fn wait_for_run(
@@ -736,28 +869,35 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
     let Some(verb) = args.first().map(String::as_str) else {
         return Err(CliFailure::invalid_args(USAGE));
     };
-    let mut values = Values::parse(&args[1..])?;
+    let mut values = Values::parse(if verb == "recovery" { args.get(2..).unwrap_or(&[]) } else { &args[1..] })?;
     if values.draft && (verb != "check" || values.run.is_some()) {
         return Err(CliFailure::invalid_args(
             "--draft 只用于 workflow check，不能与 --run 同用",
         ));
     }
     match verb {
-        "init" => Ok(Command::Init {
+        "list" => Ok(Command::List {
             workspace_id: values.workspace.take(),
-            agent_id: values.agent.take().unwrap_or_else(|| "opencode".into()),
-            model_id: values
-                .model
-                .take()
-                .or_else(|| Some("bailian-token-plan-personal/qwen3.8-flash".into())),
+        }),
+        "build" => Ok(Command::Build {
+            workspace_id: values.workspace.take(),
+            package_id: values.package.take().ok_or_else(|| {
+                CliFailure::invalid_args("workflow build 需要 --package <id>")
+            })?,
+            apply: values.apply,
+            plan_digest: values.plan_digest.take(),
+            action_id: values.action_id.take(),
+            expected_revision: values.revision,
         }),
         "activate" => Ok(Command::Activate {
             workspace_id: values.workspace.take(),
+            package_id: values.package.take(),
             candidate_digest: values.candidate.take(),
             revision: values.revision,
         }),
         "inspect" => Ok(Command::Inspect {
             workspace_id: values.workspace.take(),
+            package_id: values.package.take(),
             candidate_digest: values.candidate.take(),
         }),
         "dispatch" => {
@@ -772,9 +912,9 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 resume_cancelled: values.resume_cancelled,
                 candidate_digest: values.candidate.take(),
                 workspace_id: values.workspace.take(),
+                package_id: values.package.take(),
                 workflow_id: values.workflow.take(),
-                kind: values.kind.take(),
-                complexity: values.complexity.take(),
+                execution_root: values.root.take(),
                 task_id: values
                     .task
                     .take()
@@ -784,7 +924,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
                 timeout: values.timeout,
             })
         }
-        "check" => Ok(Command::Check { workspace_id: values.workspace.take(), run_id: values.run.take(), draft: values.draft }),
+        "check" => Ok(Command::Check { workspace_id: values.workspace.take(), run_id: values.run.take(), package_id: values.package.take(), draft: values.draft }),
         "get" => Ok(Command::Get {
             workspace_id: values.workspace.take(),
             run_id: values.run.take(),
@@ -792,6 +932,12 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
         "history" => Ok(Command::History {
             workspace_id: values.workspace.take(),
             limit: values.limit,
+        }),
+        "journal" => Ok(Command::Journal {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow journal 需要 --run <id>"))?,
+            since: values.since.unwrap_or(0),
+            limit: values.limit.unwrap_or(100).min(1024),
         }),
         "complete" => Ok(Command::Complete {
             workspace_id: values.workspace.take(),
@@ -813,6 +959,44 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
             run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --run <id>"))?,
             revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recover 需要 --revision <current>"))?,
         }),
+        "human" => Ok(Command::Human {
+            workspace_id: values.workspace.take(),
+            run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --run <id>"))?,
+            revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --revision <current>"))?,
+            kind: values.kind.take().ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --kind <a|b|c|d|e|f>"))?,
+            reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
+                .ok_or_else(|| CliFailure::invalid_args("workflow human 需要 --reason <text>"))?,
+        }),
+        "recovery" => match args.get(1).map(String::as_str) {
+            Some("start") => Ok(Command::RecoveryStart {
+                workspace_id: values.workspace.take(),
+                run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recovery start 需要 --run <id>"))?,
+                reason: values.reason.take().filter(|reason| !reason.trim().is_empty())
+                    .ok_or_else(|| CliFailure::invalid_args("workflow recovery start 需要 --reason <text>"))?,
+            }),
+            Some("status") => Ok(Command::RecoveryStatus {
+                workspace_id: values.workspace.take(),
+                run_id: values.run.take().ok_or_else(|| CliFailure::invalid_args("workflow recovery status 需要 --run <id>"))?,
+            }),
+            Some("check") => Ok(Command::Check {
+                workspace_id: values.workspace.take(),
+                run_id: None,
+                package_id: values.package.take(),
+                draft: true,
+            }),
+            Some("activate") => Ok(Command::Activate {
+                workspace_id: values.workspace.take(),
+                package_id: values.package.take(),
+                candidate_digest: values.candidate.take(),
+                revision: values.revision,
+            }),
+            Some("reset") => Ok(Command::RecoveryReset {
+                workspace_id: values.workspace.take(),
+                package_id: values.package.take(),
+                revision: values.revision.ok_or_else(|| CliFailure::invalid_args("workflow recovery reset 需要 --revision <current>"))?,
+            }),
+            _ => Err(CliFailure::invalid_args("usage: workflow recovery start|status|check|activate|reset ...")),
+        },
         "budget" => {
             if values.max_runs.is_none()
                 && values.deadline_seconds.is_none()
@@ -836,7 +1020,7 @@ fn parse(args: &[String]) -> Result<Command, CliFailure> {
 }
 
 const USAGE: &str =
-    "usage: genet workflow init|inspect|activate|dispatch|get|history|check|complete|cancel|recover|continue|budget ...";
+    "usage: genet workflow list|build|inspect|activate|dispatch|get|history|journal|check|complete|cancel|recover|continue|recovery|human|budget ...";
 
 #[derive(Default)]
 struct Values {
@@ -845,20 +1029,23 @@ struct Values {
     resume_cancelled: bool,
     outcome: Option<genehub_proto::WorkflowNodeOutcome>,
     reason: Option<String>,
-    positionals: Vec<String>,
-    agent: Option<String>,
-    model: Option<String>,
-    workspace: Option<String>,
-    workflow: Option<String>,
     kind: Option<String>,
-    complexity: Option<String>,
+    positionals: Vec<String>,
+    workspace: Option<String>,
+    package: Option<String>,
+    workflow: Option<String>,
+    root: Option<String>,
     candidate: Option<String>,
+    apply: bool,
+    plan_digest: Option<String>,
+    action_id: Option<String>,
     task: Option<String>,
     run: Option<String>,
     node: Option<String>,
     revision: Option<u64>,
     timeout: Option<u64>,
     limit: Option<u32>,
+    since: Option<u64>,
     max_runs: Option<u32>,
     deadline_seconds: Option<u64>,
     max_llm_rounds: Option<u64>,
@@ -892,12 +1079,15 @@ impl Values {
                     values.outcome = Some(genehub_proto::WorkflowNodeOutcome(value));
                 }
                 "--reason" => values.reason = Some(next(&mut index)?),
-                "--agent" => values.agent = Some(next(&mut index)?),
-                "--model" => values.model = Some(next(&mut index)?),
+                "--kind" => values.kind = Some(next(&mut index)?),
+
                 "--workspace" => values.workspace = Some(next(&mut index)?),
                 "--workflow" => values.workflow = Some(next(&mut index)?),
-                "--kind" => values.kind = Some(next(&mut index)?),
-                "--complexity" => values.complexity = Some(next(&mut index)?),
+                "--package" => values.package = Some(next(&mut index)?),
+                "--root" => values.root = Some(next(&mut index)?),
+                "--apply" => values.apply = true,
+                "--plan-digest" => values.plan_digest = Some(next(&mut index)?),
+                "--action-id" => values.action_id = Some(next(&mut index)?),
                 "--candidate" => values.candidate = Some(next(&mut index)?),
                 "--task" => values.task = Some(next(&mut index)?),
                 "--run" => values.run = Some(next(&mut index)?),
@@ -929,6 +1119,11 @@ impl Values {
                     if values.limit == Some(0) {
                         return Err(CliFailure::invalid_args("--limit 需要正整数"));
                     }
+                }
+                "--since" => {
+                    values.since = Some(next(&mut index)?.parse::<u64>().map_err(|_| {
+                        CliFailure::invalid_args("--since 需要非负日志序号")
+                    })?);
                 }
                 "--max-runs" => {
                     let value = next(&mut index)?;
@@ -1003,24 +1198,21 @@ mod tests {
     }
 
     #[test]
-    fn direct_dispatch_does_not_invent_review_or_approval_flags() {
+    fn direct_dispatch_names_its_package_and_flow_without_inventing_routing_axes() {
         let command = parse(&[
             "dispatch".into(),
+            "--package".into(),
+            "studio/game-build".into(),
             "--workflow".into(),
             "direct-change".into(),
             "--task".into(),
             "small-fix".into(),
-            "--kind".into(),
-            "business".into(),
-            "--complexity".into(),
-            "simple".into(),
             "修复按钮".into(),
         ])
         .unwrap();
         let Command::Dispatch {
+            package_id,
             workflow_id,
-            kind,
-            complexity,
             task_id,
             prompt,
             ..
@@ -1028,11 +1220,56 @@ mod tests {
         else {
             panic!("wrong command")
         };
+        assert_eq!(package_id.as_deref(), Some("studio/game-build"));
         assert_eq!(workflow_id.as_deref(), Some("direct-change"));
-        assert_eq!(kind.as_deref(), Some("business"));
-        assert_eq!(complexity.as_deref(), Some("simple"));
         assert_eq!(task_id, "small-fix");
         assert_eq!(prompt, "修复按钮");
+    }
+
+    #[test]
+    fn a_build_plan_and_its_apply_carry_the_same_explicit_package() {
+        let Command::Build {
+            package_id, apply, ..
+        } = parse(&["build".into(), "--package".into(), "solo".into()]).unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(package_id, "solo");
+        assert!(!apply, "a bare build is a plan, never a mutation");
+
+        let Command::Build {
+            package_id,
+            apply,
+            plan_digest,
+            action_id,
+            expected_revision,
+            ..
+        } = parse(&[
+            "build".into(),
+            "--package".into(),
+            "solo".into(),
+            "--apply".into(),
+            "--plan-digest".into(),
+            "sha256:plan".into(),
+            "--action-id".into(),
+            "act_1".into(),
+            "--revision".into(),
+            "3".into(),
+        ])
+        .unwrap()
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(package_id, "solo");
+        assert!(apply);
+        assert_eq!(plan_digest.as_deref(), Some("sha256:plan"));
+        assert_eq!(action_id.as_deref(), Some("act_1"));
+        assert_eq!(expected_revision, Some(3));
+
+        assert!(
+            parse(&["build".into()]).is_err(),
+            "build must name the package it authorizes"
+        );
     }
 
     #[test]
@@ -1081,25 +1318,6 @@ mod tests {
     }
 
     #[test]
-    fn initializer_defaults_to_opencode_qwen() {
-        let command = parse(&["init".into()]).unwrap();
-        let Command::Init {
-            workspace_id,
-            agent_id,
-            model_id,
-        } = command
-        else {
-            panic!("wrong command")
-        };
-        assert_eq!(workspace_id, None);
-        assert_eq!(agent_id, "opencode");
-        assert_eq!(
-            model_id.as_deref(),
-            Some("bailian-token-plan-personal/qwen3.8-flash")
-        );
-    }
-
-    #[test]
     fn activation_requires_an_explicit_revision_and_accepts_rollback_identity() {
         let command = parse(&[
             "activate".into(),
@@ -1113,6 +1331,7 @@ mod tests {
             workspace_id,
             candidate_digest,
             revision,
+            ..
         } = command
         else {
             panic!("wrong command")
@@ -1122,42 +1341,4 @@ mod tests {
         assert_eq!(revision, Some(7));
     }
 
-    #[test]
-    fn project_catalog_routes_the_two_typed_classification_axes() {
-        let root = tempfile::tempdir().unwrap();
-        crate::workflow::initialize_project(root.path(), "genet", Some("qwen3.8-flash")).unwrap();
-        let runtime =
-            crate::workflow::RuntimeStore::new(root.path(), "workspace", root.path()).unwrap();
-        let project = crate::workflow::inspect(root.path(), &runtime).unwrap();
-
-        assert_eq!(
-            select_workflow(
-                &project,
-                None,
-                Some("business".into()),
-                Some("simple".into()),
-            )
-            .unwrap(),
-            "direct-change"
-        );
-        assert!(select_workflow(
-            &project,
-            None,
-            Some("workflow".into()),
-            Some("complex".into()),
-        )
-        .unwrap_err()
-        .message
-        .contains("没有匹配"));
-        assert_eq!(
-            select_workflow(
-                &project,
-                Some("manual-override".into()),
-                Some("workflow".into()),
-                Some("complex".into()),
-            )
-            .unwrap(),
-            "manual-override"
-        );
-    }
 }

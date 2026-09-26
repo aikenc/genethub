@@ -1,14 +1,18 @@
-import type { AgentInfo, WorkspaceInfo } from "@genehub/proto";
+import type {
+  AgentInfo,
+  AgentSelectionPreferences,
+  WorkspaceInfo,
+} from "@genehub/proto";
 import { useEffect, useRef, useState } from "react";
 
-import { AgentMark } from "../presentation/AgentMark";
-import {
-  canStartAgent,
-  resolveAgentAvailability,
-  resolveAgentPresentation,
-} from "../presentation/catalog/resolve";
 import { WorkspaceIcon } from "../workspace/WorkspaceIcon";
 import { buildAgentSpaceTree, flattenAgentSpaceTree } from "../workspace/agent-space-tree";
+import {
+  matchingTagRoutes,
+  normalizeAgentPreferences,
+  normalizeGroupedTags,
+  type ResolvedCapabilityRoute,
+} from "./capability-preferences";
 
 export interface MachineOption {
   /** Daemon identity. Unlike routeId, this is stable across connection paths. */
@@ -23,6 +27,8 @@ export interface MachineOption {
 export interface MachineCatalog {
   agents: AgentInfo[];
   workspaces: WorkspaceInfo[];
+  /** Machine-global routing belongs to the target machine, never the workspace. */
+  agentPreferences?: AgentSelectionPreferences | null;
 }
 
 /** Stand-in for the machine on screen when the host cannot name others. */
@@ -35,23 +41,29 @@ export const CURRENT_MACHINE: MachineOption = {
 };
 
 /**
- * The machine + workspace + Agent picking state shared by Fork and Forward:
+ * The machine + workspace + exact-model picking state shared by Fork and Forward:
  * the machine grid drives a catalog load, and switching machines re-seeds the
- * workspace/Agent choices from what the target actually has. Presentational
+ * workspace/filter choices from what the target actually has. Presentational
  * pieces below stay dumb so each dialog composes only the fieldsets it needs.
  */
 export function useMachineCatalog({
   sourceMachine,
   sourceCatalog,
   sourceWorkspaceId,
+  sourceTags,
+  automaticTags = [],
   sourceAgentId,
+  sourceModelId,
   listMachines,
   loadCatalog,
 }: {
   sourceMachine: MachineOption;
   sourceCatalog: MachineCatalog;
   sourceWorkspaceId: string;
+  sourceTags?: string[];
+  automaticTags?: string[];
   sourceAgentId?: string;
+  sourceModelId?: string | null;
   listMachines?(): Promise<MachineOption[]>;
   loadCatalog?(machine: MachineOption): Promise<MachineCatalog>;
 }) {
@@ -59,7 +71,19 @@ export function useMachineCatalog({
   const [selectedMachineId, setSelectedMachineId] = useState(sourceMachine.id);
   const [catalog, setCatalog] = useState<MachineCatalog>(sourceCatalog);
   const [workspaceId, setWorkspaceId] = useState(sourceWorkspaceId);
-  const [agentId, setAgentId] = useState(sourceAgentId ?? "");
+  const [selectedRouteKey, setSelectedRouteKey] = useState(
+    sourceAgentId ? routeKey(sourceAgentId, sourceModelId ?? null) : null,
+  );
+  const sourcePreferences = normalizeAgentPreferences(
+    sourceCatalog.agentPreferences,
+    sourceCatalog.agents,
+  );
+  const [tags, setTags] = useState<string[]>(
+    normalizeGroupedTags(
+      sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flash"],
+      sourcePreferences,
+    ),
+  );
   const [loadingMachines, setLoadingMachines] = useState(Boolean(listMachines));
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -97,13 +121,19 @@ export function useMachineCatalog({
     if (machine.id === sourceMachine.id) {
       setCatalog(sourceCatalog);
       setWorkspaceId(sourceWorkspaceId);
-      setAgentId(sourceAgentId ?? "");
+      setTags(
+        normalizeGroupedTags(
+          sourceTags?.length ? sourceTags : sourcePreferences.selectedTags ?? ["Flash"],
+          sourcePreferences,
+        ),
+      );
+      setSelectedRouteKey(sourceAgentId ? routeKey(sourceAgentId, sourceModelId ?? null) : null);
       setLoadingCatalog(false);
       return;
     }
     if (!loadCatalog) return;
     setLoadingCatalog(true);
-    setCatalog({ agents: [], workspaces: [] });
+    setCatalog({ agents: [], workspaces: [], agentPreferences: null });
     void loadCatalog(machine)
       .then((loaded) => {
         if (catalogRequest.current !== request) return;
@@ -113,11 +143,10 @@ export function useMachineCatalog({
             ? sourceWorkspaceId
             : (loaded.workspaces[0]?.id ?? ""),
         );
-        setAgentId(
-          loaded.agents.some((agent) => agent.id === sourceAgentId && canStartAgent(agent))
-            ? (sourceAgentId as string)
-            : (loaded.agents.find(canStartAgent)?.id ?? ""),
+        setTags(
+          normalizeAgentPreferences(loaded.agentPreferences, loaded.agents).selectedTags ?? ["Flash"],
         );
+        setSelectedRouteKey(null);
       })
       .catch((error: unknown) => {
         if (catalogRequest.current === request) setProblem(message(error));
@@ -129,6 +158,10 @@ export function useMachineCatalog({
 
   const selectedMachine =
     machines.find((machine) => machine.id === selectedMachineId) ?? sourceMachine;
+  const preferences = normalizeAgentPreferences(catalog.agentPreferences, catalog.agents);
+  const routes = matchingTagRoutes(preferences, [...tags, ...automaticTags], catalog.agents);
+  const route = routes.find((candidate) =>
+    routeKey(candidate.agent.id, candidate.modelId) === selectedRouteKey) ?? routes[0] ?? null;
 
   return {
     machines,
@@ -136,8 +169,12 @@ export function useMachineCatalog({
     catalog,
     workspaceId,
     setWorkspaceId,
-    agentId,
-    setAgentId,
+    tags,
+    setTags,
+    preferences,
+    route,
+    pickRoute: (next: ResolvedCapabilityRoute) =>
+      setSelectedRouteKey(routeKey(next.agent.id, next.modelId)),
     loadingMachines,
     loadingCatalog,
     problem,
@@ -215,13 +252,13 @@ export function WorkspaceList({
   const ordered = flattenAgentSpaceTree(tree);
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标专家</legend>
+      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标项目</legend>
       {loading ? (
         <p className="mt-2 text-xs text-faint">正在读取目标机器…</p>
       ) : workspaces.length > 0 ? (
         <div
           role="listbox"
-          aria-label="目标专家"
+          aria-label="目标项目"
           className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl border border-line p-1"
         >
           {ordered.map((workspace) => {
@@ -253,66 +290,13 @@ export function WorkspaceList({
         </div>
       ) : (
         <p className="mt-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
-          目标机器没有可用专家。
+          目标机器没有可用项目。
         </p>
       )}
     </fieldset>
   );
 }
 
-export function AgentGrid({
-  agents,
-  selectedAgentId,
-  disabled,
-  onSelect,
-  currentAgentId,
-}: {
-  agents: AgentInfo[];
-  selectedAgentId: string;
-  disabled?: boolean;
-  onSelect(agentId: string): void;
-  /** Shown as "当前执行引擎" when it is also the selection's machine default. */
-  currentAgentId?: string;
-}) {
-  return (
-    <fieldset disabled={disabled}>
-      <legend className="text-xs font-medium uppercase tracking-wide text-faint">目标执行引擎</legend>
-      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-        {agents.map((agent) => {
-          const presentation = resolveAgentPresentation(agent);
-          const availability = resolveAgentAvailability(agent);
-          return (
-            <label
-              key={agent.id}
-              className="flex min-h-16 cursor-pointer items-center gap-2 rounded-xl border border-line px-3 py-2 text-sm has-[:checked]:border-accent has-[:checked]:bg-accent/10 has-[:disabled]:cursor-not-allowed has-[:disabled]:opacity-50"
-            >
-              <input
-                type="radio"
-                name="machine-catalog-agent"
-                value={agent.id}
-                aria-label={`${presentation.label}${availability ? ` ${availability.fullLabel}` : ""}`}
-                checked={agent.id === selectedAgentId}
-                disabled={!canStartAgent(agent)}
-                onChange={() => onSelect(agent.id)}
-                className="sr-only"
-              />
-              {presentation.kind === "text" ? null : (
-                <AgentMark agent={agent} className="h-6 w-6" fallbackToText={false} />
-              )}
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-fg">{presentation.label}</span>
-                <span className={`block text-[10px] ${availability ? "text-danger" : "text-faint"}`}>
-                  {agent.id === currentAgentId
-                    ? "当前执行引擎"
-                    : availability?.fullLabel ?? "已就绪"}
-                </span>
-              </span>
-            </label>
-          );
-        })}
-      </div>
-    </fieldset>
-  );
-}
+const routeKey = (agentId: string, modelId: string | null) => `${agentId}\u0000${modelId ?? ""}`;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));

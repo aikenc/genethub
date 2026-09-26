@@ -11,10 +11,24 @@ use crate::config::ModelConfig;
 use crate::protocol::{Message, StopReason, Usage};
 
 pub async fn stream(
-    _model: &ModelConfig,
+    model: &ModelConfig,
     request: Request,
     events: UnboundedSender<ProviderEvent>,
 ) -> anyhow::Result<()> {
+    if model.id == "reasoning-only-once" || model.id == "reasoning-only-always" {
+        let _ = events.send(ProviderEvent::ThinkingStart);
+        let _ = events.send(ProviderEvent::ThinkingDelta("checking".into()));
+        let _ = events.send(ProviderEvent::ThinkingEnd);
+        if model.id == "reasoning-only-once"
+            && request.system_prompt.contains("previous model response")
+        {
+            let _ = events.send(ProviderEvent::TextStart);
+            let _ = events.send(ProviderEvent::TextDelta("Here is the result.".into()));
+            let _ = events.send(ProviderEvent::TextEnd);
+        }
+        let _ = events.send(ProviderEvent::Done(StopReason::Stop));
+        return Ok(());
+    }
     let already_used_tools = request
         .messages
         .iter()

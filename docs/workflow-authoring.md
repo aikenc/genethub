@@ -20,13 +20,16 @@ create/persist a Candidate, Run, lease, session, Worker, or change Active. Norma
 its runtime-check behavior. `--run` and `--draft` are mutually exclusive. Authorization and project
 boundaries are unchanged. An older daemon omitting the draft report is an explicit capability error.
 
-On success, `data.draft` contains `valid: true`, the exact source Candidate digest, default Workflow,
-execution binding and **catalog-referenced** workflows/roles. These come from the final compiled snapshot,
-not regexes or a scan of every YAML file in a directory. They do not prove carrier readiness.
+`--draft` validates one package; name it with `--package <id>` when the project has more than one.
+
+On success, `data.draft` contains `valid: true`, the exact source Candidate digest, the package id, its
+derived executor product path, and the **flows actually compiled** with their referenced roles. These come
+from the final compiled snapshot, not regexes or a scan of every YAML file in a directory. They do not
+prove carrier readiness.
 
 On invalid source, the CLI exits nonzero with `error.code: workflowValidationFailed` and
-`error.details.draft`: `valid: false`, no runnable metadata, and at most 64 diagnostics. Parsing a broken
-project/catalog stops dependency traversal. Otherwise the first causal failure per catalog entry is
+`error.details.draft`: `valid: false`, no runnable metadata, and at most 64 diagnostics. An unreadable
+manifest or package directory stops dependency traversal. Otherwise the first causal failure per flow is
 collected and duplicate diagnostics are suppressed. This is not an exhaustive error list inside each
 malformed file; repair then rerun. `truncated` reports the output cap.
 
@@ -128,9 +131,9 @@ reader that wants those derives them, so that what counts as healthy stays polic
 ## Shared procedure libraries
 
 A workflow may reuse `call` targets written in another file. `include: [<id>]`
-names libraries at `procedures/<id>.yaml`, beside `workflows/`, each carrying
-`procedures` plus the nodes they use and nothing else: no entry, no catalog
-match and no `include` of its own, so one resolution step makes cycles
+names libraries at `procedures/<id>.yaml`, beside the package's `flows/`, each
+carrying `procedures` plus the nodes they use and nothing else: no entry and no
+`include` of its own, so one resolution step makes cycles
 impossible instead of bounding them at runtime.
 
 The include is resolved while the bundle loads, before any validation. The
@@ -150,7 +153,8 @@ the definition schema.
 WM uses schema → edit → draft check → bounded correction → evaluation. The built-in Skill stops after
 three unsuccessful repair passes and returns remaining evidence to PM; the platform runs no LLM or
 repair loop. `evaluate.mjs` consumes compiled roles/execution and checks the digest again before evaluation.
-Quoted values, inline mappings and uncataloged scratch files cannot falsify its role inventory.
+Quoted values, inline mappings and unreferenced scratch files cannot falsify its role inventory: a role is
+loaded because a compiled flow names it, never because it sits in `roles/`.
 
 PM uses the same minimal facts to correct its interpretation/delegation and routes method edits to WM.
 The Executor still closes the complete configured workflow. No PM milestone scheduler or reflection

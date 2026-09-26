@@ -14,7 +14,7 @@ defineSpecialty({
   resources: { environments: 1, cpu: 1, memoryMb: 128, io: 1, browser: 0, pool: "standard" },
   surfaces: ["bootstrap-pack", "filesystem"], productInterfaces: ["game-reviewer/scripts/check-review.mjs"],
 }, async t => {
-  const script = path.join(t.openRoot, "apps/daemon/bootstrap-packs/game-delivery-v1/spaces/reviewer/skills/game-reviewer/scripts/check-review.mjs");
+  const script = path.join(t.openRoot, "apps/daemon/workflow-packages/game-delivery/spaces/reviewer/skills/game-reviewer/scripts/check-review.mjs");
   const digest = (bytes: string | Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   const contractFile = path.join(t.env.workspace, "contract.json"), reportFile = path.join(t.env.workspace, "report.json");
   const previousFile = path.join(t.env.workspace, "previous.json");

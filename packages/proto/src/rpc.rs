@@ -72,6 +72,12 @@ pub enum Request {
         #[serde(default)]
         model_id: Option<String>,
         #[serde(default)]
+        #[ts(optional)]
+        effort_id: Option<String>,
+        #[serde(default)]
+        #[ts(optional)]
+        fast: Option<bool>,
+        #[serde(default)]
         mode_id: Option<String>,
         #[serde(default)]
         #[ts(optional)]
@@ -87,38 +93,75 @@ pub enum Request {
         #[serde(default)]
         cwd: Option<String>,
     },
-    /// Reads and validates the project-owned source under
-    /// `.genethub/workflow/`. The target must be a non-worker project entry;
-    /// its optional PM marker is irrelevant. This is a pure projection and
-    /// starts no Agent.
+    /// Creates a Session by resolving AND-match tags against live machine
+    /// configuration. No concrete route is cached by the client.
+    #[serde(rename = "session.createRouted", rename_all = "camelCase")]
+    SessionCreateRouted {
+        workspace_id: String,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        media_tags: Vec<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /// Reads and validates one Workflow package's source under
+    /// `.genethub/workflows/<id>/`. The target must be a non-worker project
+    /// entry; its optional PM marker is irrelevant. This is a pure projection
+    /// and starts no Agent.
     #[serde(rename = "workflow.inspect", rename_all = "camelCase")]
     WorkflowInspect {
         workspace_id: String,
+        /// Required once a project holds more than one package.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         candidate_digest: Option<String>,
     },
-    /// Applies the deterministic genesis pack and activates its first
-    /// Candidate. Only a local user or an ordinary main Session in this
-    /// project may request the mutation.
-    #[serde(rename = "workflow.initialize", rename_all = "camelCase")]
-    WorkflowInitialize {
+    /// Read-only facts about every Workflow package cloned into this project:
+    /// provenance, compile state, product drift and authorization. It never
+    /// executes package content.
+    #[serde(rename = "workflow.list", rename_all = "camelCase")]
+    WorkflowList { workspace_id: String },
+    /// Materializes one package's Space sources into product Spaces and
+    /// authorizes their component topology. `apply` without an approved plan
+    /// is refused; this is the only path by which a cloned package gains
+    /// scheduling rights.
+    #[serde(rename = "workflow.build", rename_all = "camelCase")]
+    WorkflowBuild {
         workspace_id: String,
-        agent_id: String,
+        package_id: String,
+        apply: bool,
+        /// Required for apply and copied verbatim from the preceding plan.
         #[serde(default)]
-        model_id: Option<String>,
+        plan_digest: Option<String>,
+        /// Stable id chosen by the Agent for idempotent apply replay.
+        #[serde(default)]
+        action_id: Option<String>,
+        /// CAS value copied from the preceding plan.
+        #[serde(default)]
+        #[ts(type = "number | null")]
+        expected_revision: Option<u64>,
     },
     /// Promotes the current source Candidate or rolls back to a persisted one.
     /// `expectedRevision` is the activation CAS and is never optional.
     #[serde(rename = "workflow.activate", rename_all = "camelCase")]
     WorkflowActivate {
         workspace_id: String,
+        /// Required once a project holds more than one package.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         #[serde(default)]
         candidate_digest: Option<String>,
         #[ts(type = "number")]
         expected_revision: u64,
     },
-    /// Starts one project-defined Workflow. The durable parent Session comes
+    /// Starts one package-defined flow. The durable parent Session comes
     /// from the authenticated session-bound CLI identity, never this payload.
     #[serde(rename = "workflow.dispatch", rename_all = "camelCase")]
     WorkflowDispatch {
@@ -132,7 +175,19 @@ pub enum Request {
         #[ts(optional)]
         candidate_digest: Option<String>,
         workspace_id: String,
-        workflow_id: String,
+        /// Required once a project holds more than one package.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
+        /// Flow id inside the package. Optional when the package has one flow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        workflow_id: Option<String>,
+        /// Project-relative task directory for this Run. Defaults to the
+        /// project root; a trial pins its own material directory here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        execution_root: Option<String>,
         task_id: String,
         prompt: String,
     },
@@ -140,6 +195,11 @@ pub enum Request {
     WorkflowCheck {
         workspace_id: String,
         run_id: Option<String>,
+        /// Which package `--draft` validates. Required once a project holds
+        /// more than one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         /// Validate current source without creating a Candidate, Run or Worker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -149,6 +209,13 @@ pub enum Request {
     WorkflowGet {
         workspace_id: String,
         run_id: String,
+    },
+    #[serde(rename = "workflow.journal", rename_all = "camelCase")]
+    WorkflowJournal {
+        workspace_id: String,
+        run_id: String,
+        since: u64,
+        limit: u32,
     },
     /// Lists recent Runs for project-side Workflow analysis. This is a
     /// read-only projection; detailed structured messages remain Session-owned.
@@ -200,6 +267,34 @@ pub enum Request {
     WorkflowRecover {
         workspace_id: String,
         run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+    },
+    /// Start a new recovery Run for one blocked business Run. The actor is
+    /// bound to the authenticated ordinary PM Session by the daemon.
+    #[serde(rename = "workflow.recovery.start", rename_all = "camelCase")]
+    WorkflowRecoveryStart {
+        workspace_id: String,
+        run_id: String,
+        reason: String,
+    },
+    /// Ask the Human to decide one classified exit for a blocked Run.
+    #[serde(rename = "workflow.human", rename_all = "camelCase")]
+    WorkflowHuman {
+        workspace_id: String,
+        run_id: String,
+        #[ts(type = "number")]
+        expected_revision: u64,
+        kind: String,
+        reason: String,
+    },
+    /// Override only future recovery Runs to use the built-in flow.
+    #[serde(rename = "workflow.recovery.reset", rename_all = "camelCase")]
+    WorkflowRecoveryReset {
+        workspace_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        package_id: Option<String>,
         #[ts(type = "number")]
         expected_revision: u64,
     },
@@ -280,30 +375,6 @@ pub enum Request {
         #[ts(optional, type = "number")]
         expected_revision: Option<u64>,
     },
-    /// Plans or applies a versioned project-owned team/DCG asset bundle.
-    #[serde(rename = "project.bootstrap", rename_all = "camelCase")]
-    ProjectBootstrap {
-        workspace_id: String,
-        pack_id: String,
-        apply: bool,
-        #[serde(default)]
-        agent_id: Option<String>,
-        #[serde(default)]
-        model_id: Option<String>,
-        /// Required for apply and copied verbatim from the preceding plan.
-        #[serde(default)]
-        plan_digest: Option<String>,
-        /// Stable id chosen by the Agent for idempotent apply replay.
-        #[serde(default)]
-        action_id: Option<String>,
-        /// CAS value copied from the preceding plan.
-        #[serde(default)]
-        #[ts(type = "number | null")]
-        expected_revision: Option<u64>,
-    },
-    /// Lists the versioned Bootstrap Packs available in this daemon build.
-    #[serde(rename = "project.bootstrap.list")]
-    BootstrapPackList,
     /// Presents one daemon-authored project mutation plan to the Human and
     /// waits for their answer. A SessionController may request this card but
     /// cannot answer it; approval authority remains Human-only and the
@@ -496,12 +567,32 @@ pub enum Request {
         #[ts(optional)]
         target: Option<ForkTarget>,
     },
+    /// Forks by an AND-match tag contract. The daemon resolves the concrete
+    /// Agent/model from fresh machine-global costs only when this executes.
+    #[serde(rename = "session.forkRouted", rename_all = "camelCase")]
+    SessionForkRouted {
+        session_id: String,
+        turn_id: String,
+        workspace_id: String,
+        #[serde(default)]
+        tags: Vec<String>,
+    },
     #[serde(rename = "session.forkExport", rename_all = "camelCase")]
     SessionForkExport { session_id: String, turn_id: String },
     #[serde(rename = "session.forkImport", rename_all = "camelCase")]
     SessionForkImport {
         transfer: ForkTransfer,
         target: ForkTarget,
+    },
+    /// Cross-machine counterpart of `session.forkRouted`. The destination
+    /// daemon owns route resolution, so source-machine costs never leak into
+    /// the decision.
+    #[serde(rename = "session.forkImportRouted", rename_all = "camelCase")]
+    SessionForkImportRouted {
+        transfer: ForkTransfer,
+        workspace_id: String,
+        #[serde(default)]
+        tags: Vec<String>,
     },
     /// Lists lightweight, workspace-scoped candidates from every installed
     /// Agent. Full histories are not read until `session.import` selects one.
@@ -545,12 +636,33 @@ pub enum Request {
         session_id: String,
         model_id: String,
     },
+    /// Reconstructs the current conversation into a different Agent/model
+    /// while preserving the GeneHub Session id and visible timeline.
+    #[serde(rename = "session.switchAgent", rename_all = "camelCase")]
+    SessionSwitchAgent {
+        session_id: String,
+        target: SessionAgentTarget,
+    },
+    /// Resolves all tags with AND semantics against the latest machine-global
+    /// costs, then migrates this same Session when the winning route changes.
+    #[serde(rename = "session.route", rename_all = "camelCase")]
+    SessionRoute {
+        session_id: String,
+        tags: Vec<String>,
+        #[serde(default)]
+        media_tags: Vec<String>,
+    },
     #[serde(rename = "session.setMode", rename_all = "camelCase")]
     SessionSetMode { session_id: String, mode_id: String },
     #[serde(rename = "session.setEffort", rename_all = "camelCase")]
     SessionSetEffort {
         session_id: String,
         effort_id: String,
+    },
+    #[serde(rename = "session.setFast", rename_all = "camelCase")]
+    SessionSetFast {
+        session_id: String,
+        fast: bool,
     },
     #[serde(rename = "session.setRuntimeAxis", rename_all = "camelCase")]
     SessionSetRuntimeAxis {
@@ -594,6 +706,13 @@ pub enum Request {
         #[serde(default)]
         #[ts(optional)]
         model_inputs: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    },
+
+    /// Replaces machine-global Agent/model tag, cost and remembered runtime
+    /// choices. These preferences are deliberately independent of workspaces.
+    #[serde(rename = "settings.setAgentPreferences", rename_all = "camelCase")]
+    SettingsSetAgentPreferences {
+        preferences: AgentSelectionPreferences,
     },
 
     /// Removes a provider the user added, key and all.
@@ -987,13 +1106,14 @@ pub enum Reply {
     SessionArtifactUpload(SessionArtifactUpload),
     SessionArtifact(SessionArtifactBundle),
     WorkflowProject(WorkflowProjectStatus),
+    WorkflowPackages(WorkflowPackageList),
+    WorkflowBuild(WorkflowBuildReport),
     WorkflowRun(WorkflowRunStatus),
+    WorkflowJournal(Vec<serde_json::Value>),
     WorkflowCheck(WorkflowCheckReport),
     WorkflowRuns(Vec<WorkflowRunStatus>),
     AgentSpaceBuilder(AgentSpaceBuilderReport),
     AgentSpaceChangePlan(AgentSpaceChangePlan),
-    BootstrapPack(BootstrapPackReport),
-    BootstrapPacks(Vec<BootstrapPackInfo>),
     Workspace(WorkspaceInfo),
     Workspaces(Vec<WorkspaceInfo>),
     Directory(DirectoryListing),

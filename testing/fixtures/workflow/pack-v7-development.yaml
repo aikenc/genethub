@@ -8,12 +8,11 @@ nodes:
     with:
       role: coder
       writeLease:
-        targetRef: current
         ttlSeconds: 900
     completion:
       all:
         - key: commit
-          verify: git.commitOnTarget
+          verify: value.nonEmpty
         - key: checks
           verify: value.nonEmpty
   - id: review

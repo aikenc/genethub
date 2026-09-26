@@ -3,7 +3,7 @@ import {
   defineSpecialty, connectProductClient, daemonEndpoint, runGenet, parseJson,
 } from "../../framework/public.ts";
 
-for (const scenario of ["busy", "restart", "manual-stop", "human", "human-continuation"] as const) {
+for (const scenario of ["busy", "restart", "manual-stop", "human", "human-continuation", "human-direct"] as const) {
   defineSpecialty({
     id: `specialty.pm-input.${scenario}`,
     title: `Durable PM input across ${scenario}`,
@@ -72,6 +72,19 @@ for (const scenario of ["busy", "restart", "manual-stop", "human", "human-contin
         let paused: SessionSnapshot | undefined;
         await t.tools.waitUntil(async () => { paused = await snapshot(); return Boolean(paused.pendingPermissions?.length); }, 30_000);
         const request = paused!.pendingPermissions![0]!;
+        if (scenario === "human-direct") {
+          const outcome: PermissionOutcome = { outcome: "answered", answers: request.questions!.map(question => ({
+            questionId: question.id, selectedOptionIds: [question.options[0]!.id],
+          })) };
+          const decided = await client.call({ type: "session.respondPermission", payload: { sessionId, requestId: request.id, outcome } });
+          t.assertions.assert(decided?.type === "ack", "ordinary Question answer was not accepted");
+          await t.tools.waitUntil(async () => calls >= 2 && (await snapshot()).summary.status === "idle", 30_000);
+          const resumed = await snapshot();
+          t.assertions.assert(resumed.pendingPermissions?.length === 0, "answered Question stayed pending");
+          t.assertions.assert(opened.mock.requests.slice(1).some(input => JSON.stringify(input).includes("The user answered the interrupted questions")),
+            "ordinary Question answer did not resume the original task without a new chat message");
+          return;
+        }
         const ack = await send("u_consult", "这两个颜色有什么区别？先解释，保留原问题。");
         t.assertions.assert(ack?.type === "ack", "consultation was not durably accepted");
         await t.tools.waitUntil(() => calls >= 2, 30_000);

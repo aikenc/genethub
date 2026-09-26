@@ -4,6 +4,8 @@ import type {
   AgentSpaceBuilderReport,
   AgentSpaceOperation,
   AgentInfo,
+  AgentRuntimePreference,
+  AgentSelectionPreferences,
   Attachment,
   BackgroundProcess,
   DeviceInfo,
@@ -25,6 +27,7 @@ import type {
   SessionSnapshot,
   SessionImportListing,
   SessionDraft,
+  SessionAgentTarget,
   SessionSummary,
   Settings,
   SpeechRuntimeStatus,
@@ -47,10 +50,17 @@ import { uploadSessionArtifact } from "../preview/sessionArtifactUpload";
 import { ClientRequestTimeoutError, ConnectionOutcomeUnknownError, ProtocolError_ } from "../protocol/client";
 import { canStartAgent } from "../presentation/catalog/resolve";
 import {
-  recallRuntimeChoice,
-  rememberRuntimeChoice,
-  type AgentRuntimeMemory,
-} from "./runtime-memory";
+  configuredMediaInputSupport,
+  definedRuntimeValues,
+  IMAGE_TAG,
+  normalizeGroupedTags,
+  normalizeAgentPreferences,
+  resolveAgentRuntime,
+  resolveTagRoute,
+  VIDEO_TAG,
+  withRuntimePreference,
+  withSelectedTags,
+} from "./capability-preferences";
 import {
   applySequenced,
   emptyTimeline,
@@ -117,10 +127,12 @@ export interface Draft {
   /** Local identity, never a daemon Session ID. */
   localId?: string;
   workspaceId: string;
+  tags?: string[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast?: boolean | null;
   runtimeValues: Record<string, string>;
 }
 
@@ -399,7 +411,12 @@ interface WorkbenchState {
   newSession(
     workspaceId?: string | null,
     agentId?: string | null,
-    options?: { addressScope?: AddressScope; localId?: string },
+    options?: {
+      addressScope?: AddressScope;
+      localId?: string;
+      tags?: string[];
+      target?: SessionAgentTarget;
+    },
   ): void;
   selectSession(sessionId: string): Promise<void>;
   archiveSession(sessionId: string, archived: boolean): Promise<void>;
@@ -454,14 +471,20 @@ interface WorkbenchState {
   fetchBlobPayloads(sessionId: string, refs: BlobRef[]): Promise<BlobPayload[] | null>;
   /** Creates an independent Agent context through one completed turn. */
   forkSession(turnId: string, target?: ForkTarget): Promise<boolean>;
+  /** Resolves a Fork target from fresh machine-global tag costs on the daemon. */
+  forkSessionRouted(turnId: string, workspaceId: string, tags: string[]): Promise<boolean>;
   /** Lightweight provider discovery; full history is read only after selection. */
   listImportableSessions(workspaceId: string): Promise<SessionImportListing | null>;
   /** Imports one expiring candidate and opens the resulting GeneHub session. */
   importSessionCandidate(workspaceId: string, candidateId: string): Promise<boolean>;
   interrupt(): Promise<void>;
   setModel(modelId: string): Promise<void>;
+  setAgentTarget(target: SessionAgentTarget, filterTags: string[]): Promise<void>;
+  setTags(tags: string[]): Promise<void>;
+  setAgentPreferences(preferences: AgentSelectionPreferences): Promise<void>;
   setMode(modeId: string): Promise<void>;
   setEffort(effortId: string): Promise<void>;
+  setFast(fast: boolean): Promise<void>;
   setRuntimeAxis(axisId: string, valueId: string): Promise<void>;
   answerPermission(outcome: PermissionOutcome): Promise<void>;
   /**
@@ -881,7 +904,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         payload: { workspaceId, name: wanted },
       }),
     );
-    if (reply?.type !== "workspace") throw new Error("专家重命名失败，请检查连接或错误提示。");
+    if (reply?.type !== "workspace") throw new Error("项目重命名失败，请检查连接或错误提示。");
     // The rename reply is the authority for this action. A follow-up list can
     // lag behind it (and older daemons may not answer that request at all), so
     // applying the returned Workspace locally also updates every derived
@@ -895,7 +918,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const client = require_(get().client);
     // Plan from current public facts; never infer membership from names or paths.
     const catalog = await client.call({ type: "workspace.list" });
-    if (catalog?.type !== "workspaces") throw new Error("无法读取专家列表，未执行移除。");
+    if (catalog?.type !== "workspaces") throw new Error("无法读取项目列表，未执行移除。");
     const planned = new Set<string>();
     const order: string[] = [];
     const visit = (id: string) => {
@@ -908,7 +931,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const summary = await client.call({ type: "session.list", payload: { workspaceId: null, includeArchived: true } });
     if (summary?.type !== "sessions") throw new Error("无法确认会话状态，未执行移除。");
     if (summary.data.some(s => planned.has(s.workspaceId) && ["running", "waiting"].includes(s.status))) {
-      throw new Error("专家或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
+      throw new Error("项目或其成员仍有运行中、等待交互的会话，请先处理后再移除。");
     }
     let remaining = catalog.data;
     let failure: unknown;
@@ -971,7 +994,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
         type: "agentSpace.configure",
         payload: { workspaceId, expectedRevision, operation },
       });
-    if (reply?.type !== "workspace") throw new Error("未收到专家配置更新结果");
+    if (reply?.type !== "workspace") throw new Error("未收到项目配置更新结果");
     await get().refreshWorkspaces();
   },
 
@@ -993,30 +1016,55 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     const state = get();
     const target = workspaceId ?? currentWorkspace(state);
     if (!target) return;
-    // What this project was last worked on with, before what is on screen: a
-    // conversation open in another project is not evidence about this one, and
-    // switching projects is exactly when the Agent usually changes too. Only a
-    // project's own history outranks the conversation in front of the user;
-    // an inherited last-used choice does not.
     const localId = options?.localId ?? crypto.randomUUID();
     const cachedDraft = state.client?.identity ? draftIdentities(state.client.identity.machineId).find(item => item.localId === localId) : undefined;
-    const own = recallRuntimeChoice(target, state.agents);
-    const chosenAgentId =
-      agentId ?? cachedDraft?.agentId ??
-      (own.scoped ? own.agentId : null) ??
-      state.draft?.agentId ??
-      state.sessions.find((entry) => entry.id === state.activeSessionId)?.agentId ??
-      own.agentId ??
-      null;
-    // Scoped to the Agent actually being opened: Claude's `sonnet` would be an
-    // id Codex has never heard of, and `session.create` would refuse it.
-    const remembered =
-      chosenAgentId === own.agentId
-        ? own
-        : recallRuntimeChoice(target, state.agents, chosenAgentId);
-    if (agentId) rememberRuntimeChoice(target, agentId);
-    const draftRuntime = cachedDraft?.runtimeValues ? {modelId:cachedDraft.modelId ?? null, modeId:cachedDraft.modeId ?? null, effortId:cachedDraft.effortId ?? null, runtimeValues:cachedDraft.runtimeValues} : remembered;
-    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, runtimeValues:draftRuntime.runtimeValues});
+    const normalizedPreferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
+    );
+    const tags = normalizeGroupedTags(
+      options?.tags?.length
+        ? options.tags
+        : cachedDraft?.tags?.length
+          ? cachedDraft.tags
+          : normalizedPreferences.selectedTags ?? ["Flash"],
+      normalizedPreferences,
+    );
+    const explicitTarget = options?.target;
+    const preferences = normalizedPreferences;
+    const resolvedRoute = resolveTagRoute(preferences, tags, state.agents);
+    const chosenAgentId = explicitTarget?.agentId ?? agentId ?? cachedDraft?.agentId ?? resolvedRoute?.agent.id ?? null;
+    const chosenAgent = state.agents.find((candidate) => candidate.id === chosenAgentId);
+    const resolvedRuntime =
+      chosenAgent && chosenAgent.id === resolvedRoute?.agent.id
+        ? resolvedRoute
+        : chosenAgent
+          ? resolveAgentRuntime(preferences, chosenAgent, cachedDraft?.modelId)
+          : null;
+    const draftRuntime = explicitTarget
+      ? {
+          modelId: explicitTarget.modelId ?? null,
+          modeId: explicitTarget.modeId ?? null,
+          effortId: explicitTarget.effortId ?? null,
+          fast: explicitTarget.fast ?? null,
+          runtimeValues: definedRuntimeValues(explicitTarget.runtimeValues),
+        }
+      : cachedDraft
+      ? {
+          modelId: cachedDraft.modelId ?? resolvedRuntime?.modelId ?? null,
+          modeId: cachedDraft.modeId ?? resolvedRuntime?.modeId ?? null,
+          effortId: cachedDraft.effortId ?? resolvedRuntime?.effortId ?? null,
+          fast: cachedDraft.fast ?? resolvedRuntime?.fast ?? null,
+          runtimeValues: cachedDraft.runtimeValues ?? resolvedRuntime?.runtimeValues ?? {},
+        }
+      : {
+          modelId: resolvedRuntime?.modelId ?? null,
+          modeId: resolvedRuntime?.modeId ?? null,
+          effortId: resolvedRuntime?.effortId ?? null,
+          fast: resolvedRuntime?.fast ?? null,
+          runtimeValues: resolvedRuntime?.runtimeValues ?? {},
+        };
+    if (state.client?.identity) rememberDraftIdentity(state.client.identity.machineId, {localId, workspaceId: target, tags, agentId: chosenAgentId, title: "新会话草稿", modelId:draftRuntime.modelId, modeId:draftRuntime.modeId, effortId:draftRuntime.effortId, fast:draftRuntime.fast, runtimeValues:draftRuntime.runtimeValues});
     const opened = state.tabs.some((tab) => tab.id === DRAFT_TAB)
       ? state.tabs
       : [
@@ -1034,10 +1082,12 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       draft: {
         localId,
         workspaceId: target,
+        tags,
         agentId: chosenAgentId,
         modelId: draftRuntime.modelId,
         modeId: draftRuntime.modeId,
         effortId: draftRuntime.effortId,
+        fast: draftRuntime.fast,
         runtimeValues: draftRuntime.runtimeValues,
       },
       activeWorkspaceId: target,
@@ -1600,6 +1650,7 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     if (originKey && originKey !== sentKey) saveLocalValue(originKey, null);
     if (machine && originDraft && !active) forgetDraftIdentity(machine, originDraft);
     try {
+      await ensureWorkbenchTagRoute(get, set, require_(originClient), sessionId, pending);
       // Artifact storage requires ASCII file names. Keep the original names in
       // chat while using fixed names for the files the Agent reads.
       const stagedVideos = videoFiles.map((file, index) => ({
@@ -1907,6 +1958,21 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     return true;
   },
 
+  async forkSessionRouted(turnId, workspaceId, tags) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) return false;
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "session.forkRouted",
+        payload: { sessionId, turnId, workspaceId, tags },
+      }),
+    );
+    if (reply?.type !== "session") return false;
+    set((state) => ({ sessions: [reply.data, ...state.sessions] }));
+    await get().selectSession(reply.data.id);
+    return true;
+  },
+
   async listImportableSessions(workspaceId) {
     const reply = await asked(set, () =>
       require_(get().client).call({
@@ -1943,7 +2009,6 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
   // applied at `session.create`. Dropping it — which is what happened before —
   // meant picking a model in a new chat did nothing at all.
   async setModel(modelId) {
-    remember(get(), { modelId });
     const sessionId = get().activeSessionId;
     if (!sessionId) return void onDraft(get, set, { modelId });
     await switched(get, set, sessionId, "modelId", modelId, () =>
@@ -1951,33 +2016,183 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
     );
   },
 
+  async setAgentTarget(target, filterTags) {
+    const state = get();
+    const preferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
+    );
+    const tags = normalizeGroupedTags(filterTags, preferences).slice(0, 4);
+    const runtimeValues = definedRuntimeValues(target.runtimeValues);
+    const exact: SessionAgentTarget = { ...target, runtimeValues };
+    const remembered = withRuntimePreference(
+      withSelectedTags(preferences, tags),
+      target.agentId,
+      {
+        effortId: target.effortId,
+        fast: target.fast,
+        modeId: target.modeId,
+        runtimeValues,
+      },
+    );
+    if (state.draft) {
+      onDraft(get, set, {
+        tags,
+        agentId: target.agentId,
+        modelId: target.modelId ?? null,
+        modeId: target.modeId ?? null,
+        effortId: target.effortId ?? null,
+        fast: target.fast ?? null,
+        runtimeValues,
+      });
+      await get().setAgentPreferences(remembered);
+      return;
+    }
+    const sessionId = state.activeSessionId;
+    if (!sessionId) return;
+    const session = state.sessions.find((entry) => entry.id === sessionId);
+    if (
+      session &&
+      session.agentId === target.agentId &&
+      (target.modelId != null || session.modelId == null)
+    ) {
+      // Same Agent on a live session: the daemon retargets model, mode,
+      // effort and runtime axes without rebinding the Agent-native context,
+      // so these are safe while a turn runs and land on the next turn. A
+      // cross-Agent pick — or clearing a model the session still has — has to
+      // keep waiting for the turn to finish, which is the switchAgent path.
+      if (target.modelId != null && target.modelId !== session.modelId) {
+        await get().setModel(target.modelId);
+      }
+      if (target.modeId != null && target.modeId !== session.modeId) {
+        await get().setMode(target.modeId);
+      }
+      if (target.effortId != null && target.effortId !== session.effortId) {
+        await get().setEffort(target.effortId);
+      }
+      for (const [axisId, valueId] of Object.entries(runtimeValues)) {
+        if (session.runtimeValues?.[axisId] !== valueId) {
+          await get().setRuntimeAxis(axisId, valueId);
+        }
+      }
+      await get().setAgentPreferences(remembered);
+      return;
+    }
+    const reply = await asked(set, () =>
+      require_(state.client).call({
+        type: "session.switchAgent",
+        payload: { sessionId, target: exact },
+      }),
+    );
+    if (reply?.type !== "session") return;
+    adoptRoutedSession(reply.data, set);
+    await get().setAgentPreferences(remembered);
+  },
+
+  async setTags(input) {
+    const state = get();
+    const preferences = normalizeAgentPreferences(
+      state.settings?.agentPreferences,
+      state.agents,
+    );
+    const tags = normalizeGroupedTags(input, preferences).slice(0, 4);
+    if (state.draft) {
+      onDraft(get, set, { tags });
+    }
+    await get().setAgentPreferences(withSelectedTags(preferences, tags));
+  },
+
+  async setAgentPreferences(preferences) {
+    const before = get().settings;
+    if (before) {
+      set({ settings: { ...before, agentPreferences: preferences } });
+    }
+    const reply = await asked(set, () =>
+      require_(get().client).call({
+        type: "settings.setAgentPreferences",
+        payload: { preferences },
+      }),
+    );
+    // A newer preference write owns the screen even if this request finishes
+    // later. Object identity is intentional: the optimistic value above is
+    // retained verbatim until another write replaces it.
+    const stillCurrent = !before || get().settings?.agentPreferences === preferences;
+    if (reply?.type === "settings" && stillCurrent) {
+      set({ settings: reply.data });
+    } else if (before && stillCurrent) {
+      set({ settings: before });
+    }
+  },
+
   async setMode(modeId) {
-    remember(get(), { modeId });
     const sessionId = get().activeSessionId;
-    if (!sessionId) return void onDraft(get, set, { modeId });
-    await switched(get, set, sessionId, "modeId", modeId, () =>
+    if (!sessionId) {
+      onDraft(get, set, { modeId });
+      await rememberMachineRuntime(get, { modeId });
+      return;
+    }
+    const applied = await switched(get, set, sessionId, "modeId", modeId, () =>
       require_(get().client).call({ type: "session.setMode", payload: { sessionId, modeId } }),
     );
+    if (
+      applied &&
+      get().activeSessionId === sessionId &&
+      get().timeline.modeId === modeId
+    ) {
+      await rememberMachineRuntime(get, { modeId });
+    }
   },
 
   async setEffort(effortId) {
-    remember(get(), { effortId });
     const sessionId = get().activeSessionId;
-    if (!sessionId) return void onDraft(get, set, { effortId });
-    await switched(get, set, sessionId, "effortId", effortId, () =>
+    if (!sessionId) {
+      onDraft(get, set, { effortId });
+      await rememberMachineRuntime(get, { effortId });
+      return;
+    }
+    const applied = await switched(get, set, sessionId, "effortId", effortId, () =>
       require_(get().client).call({ type: "session.setEffort", payload: { sessionId, effortId } }),
     );
+    if (
+      applied &&
+      get().activeSessionId === sessionId &&
+      get().timeline.effortId === effortId
+    ) {
+      await rememberMachineRuntime(get, { effortId });
+    }
+  },
+
+  async setFast(fast) {
+    const sessionId = get().activeSessionId;
+    if (!sessionId) {
+      onDraft(get, set, { fast });
+      await rememberMachineRuntime(get, { fast });
+      return;
+    }
+    const applied = await switched(get, set, sessionId, "fast", fast, () =>
+      require_(get().client).call({ type: "session.setFast", payload: { sessionId, fast } }),
+    );
+    if (
+      applied &&
+      get().activeSessionId === sessionId &&
+      get().timeline.fast === fast
+    ) {
+      await rememberMachineRuntime(get, { fast });
+    }
   },
 
   async setRuntimeAxis(axisId, valueId) {
-    remember(get(), { runtimeValues: { [axisId]: valueId } });
     const sessionId = get().activeSessionId;
     if (!sessionId) {
       const draft = get().draft;
       if (!draft) return;
-      return void onDraft(get, set, {
+      onDraft(get, set, {
         runtimeValues: { ...draft.runtimeValues, [axisId]: valueId },
       });
+      await rememberMachineRuntime(get, {
+        runtimeValues: { [axisId]: valueId },
+      });
+      return;
     }
     const before = get().timeline.runtimeValues[axisId];
     set((state) => ({
@@ -1990,6 +2205,9 @@ export const useWorkbench = create<WorkbenchState>((set, get) => ({
       await require_(get().client).call({
         type: "session.setRuntimeAxis",
         payload: { sessionId, axisId, valueId },
+      });
+      await rememberMachineRuntime(get, {
+        runtimeValues: { [axisId]: valueId },
       });
     } catch (error) {
       const state = get();
@@ -2386,10 +2604,14 @@ async function refreshCatalog(
     (reply) => ({ reply } as const),
     (error: unknown) => ({ error } as const),
   );
+  const settings = client.call({ type: "settings.get" }).then(
+    (reply) => ({ reply } as const),
+    (error: unknown) => ({ error } as const),
+  );
   const workspaces = await client.call({ type: "workspace.list" });
   if (useWorkbench.getState().client !== client) return;
   if (workspaces?.type !== "workspaces") {
-    throw new Error("专家目录暂不可用，请重新连接后再试。");
+    throw new Error("项目列表暂不可用，请重新连接后再试。");
   }
   set({ workspaces: workspaces.data });
   const first = workspaces.data[0];
@@ -2407,9 +2629,12 @@ async function refreshCatalog(
   }
   const listedAgentsResult = await agents;
   if ("error" in listedAgentsResult) throw listedAgentsResult.error;
+  const settingsResult = await settings;
+  if ("error" in settingsResult) throw settingsResult.error;
   const listedAgents = listedAgentsResult.reply;
   if (useWorkbench.getState().client !== client) return;
   if (listedAgents?.type === "agents") set({ agents: listedAgents.data });
+  if (settingsResult.reply?.type === "settings") set({ settings: settingsResult.reply.data });
   // A project with no saved conversation needs an Agent before it can land on
   // its draft. A named session already opened above without waiting for this.
   if (mayLand()) await land(get);
@@ -2469,12 +2694,17 @@ async function land(get: () => WorkbenchState): Promise<void> {
     return;
   }
 
-  const agent = defaultAgent(state.agents);
-  if (!agent) return;
+  // Catalog probing runs beside workspace loading. Do not manufacture a draft
+  // before it has answered, or a machine with no configured model is pulled
+  // past FirstRun's actionable key prompt into an unusable composer. A usable
+  // Agent with no matching tag is different: that draft is where the person
+  // can open the global Agent configuration and repair the route.
+  if (!state.agents.some(canStartAgent)) return;
+
   // An empty conversation, not a stored one. Landing somewhere used to write a
   // session on every first visit to a project, whether or not anything was ever
   // said in it.
-  get().newSession(workspaceId, agent.id, { addressScope: "machine" });
+  get().newSession(workspaceId, null, { addressScope: "machine" });
   finishLanding(get, intent);
 }
 
@@ -2588,6 +2818,7 @@ async function sendDurableInput(get: () => WorkbenchState, set: Setter, text: st
       }
       if (input.missingAttachments) throw new Error("本地附件已失效，原消息仍待核对；请检查服务端记录并重新附加图片。");
     }
+    await ensureWorkbenchTagRoute(get, set, client, sessionId, input);
     let sentAttachments = input.attachments;
     if ((input.videoFiles?.length ?? 0) > 0) {
       const uploaded = await uploadChatVideos(get, sessionId, input.videoFiles ?? []);
@@ -2614,22 +2845,22 @@ async function start(
 ): Promise<string | null> {
   const state = get();
   if (state.activeSessionId) return state.activeSessionId;
-  const draft = state.draft;
+  let draft = state.draft;
   if (!draft) return null;
 
-  const agentId =
-    draft.agentId ??
-    defaultAgent(state.agents)?.id ??
-    null;
-  if (!agentId) return null;
-
+  if (!draft.agentId) {
+    set({ notice: "请先在模型选择中选择一个可用的 Agent 与模型。" });
+    return null;
+  }
   const reply = await asked(set, () =>
     require_(state.client).call({
       type: "session.create",
       payload: {
         workspaceId: draft.workspaceId,
-        agentId,
+        agentId: draft.agentId!,
         modelId: draft.modelId,
+        ...(draft.effortId ? { effortId: draft.effortId } : {}),
+        ...(draft.fast ? { fast: true } : {}),
         modeId: draft.modeId,
         runtimeValues: draft.runtimeValues,
         title: null,
@@ -2639,16 +2870,6 @@ async function start(
   );
   if (reply?.type !== "session" || get().client !== state.client) return null;
 
-  // The choice that actually started a conversation, not merely one that was
-  // looked at: this is what the next new chat in this project opens with.
-  rememberRuntimeChoice(draft.workspaceId, agentId, {
-    ...(draft.modelId ? { modelId: draft.modelId } : {}),
-    ...(draft.modeId ? { modeId: draft.modeId } : {}),
-    ...(draft.effortId ? { effortId: draft.effortId } : {}),
-    ...(Object.keys(draft.runtimeValues).length > 0
-      ? { runtimeValues: draft.runtimeValues }
-      : {}),
-  });
   set((current) => ({
     sessions: [reply.data, ...current.sessions],
     // A forward capsule parked on the unstarted conversation belongs to the
@@ -2676,13 +2897,80 @@ async function start(
   if (!pending && draft.localId && state.client?.identity) forgetDraftIdentity(state.client.identity.machineId, draft.localId);
   // Only the originating draft may follow this late create response.
   if (get().draft?.localId === draft.localId && !get().activeSessionId) await get().selectSession(reply.data.id);
-  // Before `setEffort`, which is another round trip: the first message of a new
-  // conversation should not be the one message that waits longest to appear.
   if (pending) patchTimeline(reply.data.id, set, () => ({ pending }));
-  // `session.create` has no field for it, so the one choice that cannot ride
-  // along is made immediately afterwards instead of being lost.
-  if (draft.effortId) await asked(set, () => require_(state.client).call({type:"session.setEffort", payload:{sessionId:reply.data.id, effortId:draft.effortId!}}));
   return reply.data.id;
+}
+
+function mediaRequiredBy(pending: PendingMessage | null): Array<"image" | "video"> {
+  if (!pending) return [];
+  const image = pending.attachments.some((attachment) => attachment.mime.startsWith("image/"));
+  const video =
+    (pending.videoFiles?.length ?? 0) > 0 ||
+    pending.attachments.some((attachment) => attachment.mime.startsWith("video/"));
+  return [...(image ? ["image" as const] : []), ...(video ? ["video" as const] : [])];
+}
+
+/**
+ * Interactive sessions keep their exact Human-picked model. Only an incoming
+ * medium the current configured profile cannot handle opts the conversation
+ * into automatic routing, preserving seamless image/video migration without
+ * turning every ordinary chat back into a cost-selected route.
+ */
+async function ensureWorkbenchTagRoute(
+  get: () => WorkbenchState,
+  set: Setter,
+  client: Client,
+  sessionId: string,
+  pending: PendingMessage,
+): Promise<void> {
+  if (!client.identity?.features?.includes("agent-tag-routing.v1")) return;
+  const requiredMedia = mediaRequiredBy(pending);
+  if (requiredMedia.length === 0) return;
+  const session = get().sessions.find((candidate) => candidate.id === sessionId);
+  if (!session) return;
+  const preferences = normalizeAgentPreferences(
+    get().settings?.agentPreferences,
+    get().agents,
+  );
+  const support = configuredMediaInputSupport(
+    preferences,
+    session.agentId,
+    session.modelId ?? null,
+  );
+  if (requiredMedia.every((medium) => support[medium])) return;
+  const tags = normalizeGroupedTags(
+    preferences.selectedTags?.length ? preferences.selectedTags : ["Flash"],
+    preferences,
+  );
+  const mediaTags = requiredMedia.map((medium) =>
+    medium === "image" ? IMAGE_TAG : VIDEO_TAG,
+  );
+  const reply = await client.call({
+    type: "session.route",
+    payload: { sessionId, tags, mediaTags },
+  });
+  if (reply?.type !== "session") {
+    throw new Error("没有可处理当前图片或视频的模型，请检查模型配置");
+  }
+  adoptRoutedSession(reply.data, set);
+}
+
+function adoptRoutedSession(summary: SessionSummary, set: Setter): void {
+  set((current) => ({
+    sessions: current.sessions.map((session) =>
+      session.id === summary.id ? summary : session,
+    ),
+    timeline:
+      current.activeSessionId === summary.id
+        ? {
+            ...current.timeline,
+            modelId: summary.modelId ?? null,
+            modeId: summary.modeId ?? null,
+            effortId: summary.effortId ?? null,
+            runtimeValues: definedRuntimeValues(summary.runtimeValues),
+          }
+        : current.timeline,
+  }));
 }
 
 /** Marks a message as definitely not sent, keeping its text where it can be reused. */
@@ -2716,39 +3004,49 @@ function onDraft(get: () => WorkbenchState, set: Setter, change: Partial<Draft>)
  * still the one on screen and still showing the value we put there — a later
  * pick, or an event, has already answered the question this one asked.
  */
-async function switched(
+async function switched<T extends "modelId" | "modeId" | "effortId" | "fast">(
   get: () => WorkbenchState,
   set: Setter,
   sessionId: string,
-  axis: "modelId" | "modeId" | "effortId",
-  value: string,
+  axis: T,
+  value: WorkbenchState["timeline"][T],
   run: () => Promise<unknown>,
-): Promise<void> {
+): Promise<boolean> {
   const before = get().timeline[axis];
   set((state) => ({ timeline: { ...state.timeline, [axis]: value } }));
   try {
     await run();
+    return true;
   } catch (error) {
     const state = get();
     if (state.activeSessionId === sessionId && state.timeline[axis] === value) {
       set({ timeline: { ...state.timeline, [axis]: before } });
     }
     reportError(set, error);
+    return false;
   }
 }
 
-/**
- * Carries a runtime choice into the next conversation in this project.
- *
- * Written on the way out rather than read back here: the daemon owns what the
- * live session is doing, and this only answers "what should the next new chat
- * in this project start as".
- */
-function remember(state: WorkbenchState, axes: AgentRuntimeMemory): void {
+/** Persists compact runtime choices once for the whole machine. */
+function rememberMachineRuntime(
+  get: () => WorkbenchState,
+  change: Partial<AgentRuntimePreference>,
+): Promise<void> {
+  const state = get();
+  // Do not manufacture and write a partial machine configuration while the
+  // initial settings request is still in flight. The picker is unavailable in
+  // that state in the real UI, and preserving the daemon-owned value is safer
+  // than replacing it with defaults derived from an incomplete catalog.
+  if (!state.settings) return Promise.resolve();
   const session = state.sessions.find((entry) => entry.id === state.activeSessionId);
-  const workspaceId = session?.workspaceId ?? state.draft?.workspaceId ?? state.activeWorkspaceId;
   const agentId = session?.agentId ?? state.draft?.agentId ?? null;
-  rememberRuntimeChoice(workspaceId ?? null, agentId, axes);
+  if (!agentId) return Promise.resolve();
+  const preferences = withRuntimePreference(
+    normalizeAgentPreferences(state.settings?.agentPreferences, state.agents),
+    agentId,
+    change,
+  );
+  return state.setAgentPreferences(preferences);
 }
 
 /**
@@ -2876,6 +3174,34 @@ function applySessionStatus(
   event: import("@genehub/proto").SessionEvent,
   set: Setter,
 ): void {
+  if (event.type === "agentChanged") {
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              agentId: event.agentId,
+              modelId: event.modelId,
+              modeId: event.modeId,
+              effortId: event.effortId,
+              fast: event.fast,
+              runtimeValues: event.runtimeValues,
+              routingTags: event.routingTags ?? session.routingTags,
+              mediaTags: event.mediaTags ?? session.mediaTags,
+            }
+          : session,
+      ),
+    }));
+    return;
+  }
+  if (event.type === "fastChanged") {
+    set((state) => ({
+      sessions: state.sessions.map((session) =>
+        session.id === sessionId ? { ...session, fast: event.fast } : session,
+      ),
+    }));
+    return;
+  }
   const status =
     event.type === "turnStarted"
       ? "running"

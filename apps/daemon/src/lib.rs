@@ -4,11 +4,11 @@
 //! real daemon in-process instead of asserting against a mock of one.
 
 pub mod adapter;
+pub(crate) mod agent_routing;
 pub mod agent_space;
 pub mod agent_space_builder;
 pub mod authz;
 pub(crate) mod blocking;
-pub mod bootstrap_pack;
 pub mod channel_auth;
 pub mod cli_front;
 pub mod client_debug;
@@ -112,7 +112,7 @@ impl Daemon {
         let workflow_control = tokio::spawn({
             let state = state.clone();
             async move {
-                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(2));
+                let mut ticks = tokio::time::interval(std::time::Duration::from_secs(5));
                 ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     ticks.tick().await;

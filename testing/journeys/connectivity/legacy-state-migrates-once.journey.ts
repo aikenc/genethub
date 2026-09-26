@@ -101,11 +101,11 @@ defineJourney(
       t.assertions.assert(devices?.type === "devices", `device.list returned ${devices?.type}`);
       if (devices?.type !== "devices") throw new Error("device.list failed");
       const remote = devices.data.remote;
-      t.assertions.assert(remote.relayUrl === "ws://127.0.0.1:1", `Relay URL ${remote.relayUrl}`);
+      t.assertions.assert(remote.relayUrl === "http://127.0.0.1:1", `Relay URL ${remote.relayUrl}`);
       t.assertions.assert(Boolean(remote.rendezvousUrl), "legacy rendezvous URL is missing");
       const rendezvous = new URL(remote.rendezvousUrl!);
       t.assertions.assert(
-        rendezvous.searchParams.get("route") === expectedRoute,
+        rendezvous.protocol === "ws:" && rendezvous.searchParams.get("route") === expectedRoute,
         `legacy route changed to ${rendezvous.searchParams.get("route")}`,
       );
 
@@ -113,13 +113,8 @@ defineJourney(
       const machines = (listed.data as { machines?: Array<{ machineId?: string }> } | undefined)?.machines ?? [];
       t.assertions.assert(machines.some((machine) => machine.machineId === "m_peer"), "legacy peer was not imported");
 
-      const portable = path.join(t.env.data, "portable");
-      const configBytes = readFileSync(path.join(portable, "config.json"), "utf8");
+      const configBytes = readFileSync(path.join(t.env.data, "config.json"), "utf8");
       t.assertions.assert(!configBytes.includes(nativeSecret), "native machine secret entered guest config");
-      for (const name of ["legacy-connectivity.json", "legacy-machines.json"]) {
-        const marker = JSON.parse(readFileSync(path.join(portable, name), "utf8")) as { migrated?: boolean };
-        t.assertions.assert(marker.migrated === true, `${name} is not a durable tombstone`);
-      }
 
       const forgotten = cli(["machine", "forget", "m_peer"]);
       t.assertions.assert(

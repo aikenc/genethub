@@ -1,7 +1,5 @@
 import type { AgentInfo, ModeInfo, ModelInfo } from "@genehub/proto";
 
-import { defaultAgent } from "./store";
-
 export interface RuntimeSelection {
   current: AgentInfo | undefined;
   agents: AgentInfo[];
@@ -10,6 +8,7 @@ export interface RuntimeSelection {
   mode: ModeInfo | undefined;
   modeAvailable: boolean;
   effortId: string | null;
+  fast: boolean;
   runtimeValues: Record<string, string>;
 }
 
@@ -25,6 +24,7 @@ export function resolveRuntimeSelection({
   modelId,
   modeId,
   effortId,
+  fast,
   runtimeValues,
 }: {
   agents: AgentInfo[];
@@ -32,19 +32,23 @@ export function resolveRuntimeSelection({
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast?: boolean | null;
   runtimeValues?: Record<string, string> | null;
 }): RuntimeSelection {
-  const ready = agents.filter((agent) => agent.probe.state === "ready");
   const selected = agents.find((agent) => agent.id === agentId);
   const removed = agentId && !selected ? removedAgent(agentId) : undefined;
-  const current = selected ?? removed ?? defaultAgent(agents) ?? ready[0];
+  // Capability routing has already resolved the exact Agent before this
+  // presentation helper runs. When no route exists, keep the selection empty
+  // so the editor can explain the missing capability instead of silently
+  // showing an unrelated default Agent.
+  const current = selected ?? removed;
   const catalogModel = current?.catalog.models.find((candidate) => candidate.id === modelId);
   const fallbackModel =
     current?.catalog.models.find((candidate) => candidate.id === current.catalog.defaultModel) ??
     current?.catalog.models[0];
   const missingModel =
     modelId && !catalogModel
-      ? { id: modelId, label: modelId, contextWindow: undefined, reasoning: false, efforts: [] }
+      ? { id: modelId, label: modelId, contextWindow: undefined, reasoning: false, efforts: [], supportsFast: false }
       : undefined;
   const model = catalogModel ?? missingModel ?? fallbackModel;
   const catalogMode = current?.catalog.modes.find((candidate) => candidate.id === modeId);
@@ -76,6 +80,7 @@ export function resolveRuntimeSelection({
     mode: catalogMode ?? missingMode ?? fallbackMode,
     modeAvailable: Boolean(catalogMode ?? (!modeId && fallbackMode)),
     effortId: effortId ?? current?.catalog.defaultEffort ?? null,
+    fast: model?.supportsFast ? Boolean(fast) : false,
     runtimeValues: resolvedRuntimeValues,
   };
 }
@@ -93,6 +98,7 @@ function removedAgent(id: string): AgentInfo {
       interrupt: false,
       setModel: false,
       setEffort: false,
+      setFast: false,
       setMode: false,
       permissions: false,
       resume: false,

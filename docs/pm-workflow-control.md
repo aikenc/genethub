@@ -145,13 +145,18 @@ Diagnosis resolves its Worker within the Run's pinned Executor and execution
 root, including isolated trial material. The Worker's own directory remains its
 Session cwd; the project evidence root and bounded Session references do not
 change. Do not mount the whole formal project merely to work around a diagnostic
-startup error. `workflow check --draft` reports `WF_ROLE_CAPABILITY` at the role's
-`agentId` if `evidenceOnly` requires a boundary the adapter cannot enforce.
-Restricted Session creation and restart enforce the same adapter declaration;
-currently the built-in Agent supports it. Select a compatible Agent/model in a
-new Candidate, not a weaker prompt or disabled evidence boundary. Existing Runs
-retain their pinned role; updating source does not rewrite or retry a failed
-diagnosis. These boundaries are covered by
+startup error. A `genehub.workflow.role.v3` role declares one to four built-in
+`tags` (`Max`, `Pro`, `Flash`, `视频理解`, `图片理解`); it cannot pin `agentId`, `modelId`,
+permission mode or runtime values. Each dispatch resolves the currently
+available Agent/model whose machine-global tags contain every requested tag,
+choosing the current lowest cost at dispatch time. No resolved cost or route is
+cached. An `evidenceOnly` role skips routes whose adapter cannot enforce the
+boundary. If
+no route remains, the Run blocks with the rejected routes and asks a Human to
+repair machine-level setup. Restricted Session creation and restart enforce the
+same adapter declaration. Legacy role.v1/v2 Candidates remain readable but new
+source should use role.v3. Existing Runs retain their pinned role intent;
+updating source does not rewrite or retry a failed diagnosis. These boundaries are covered by
 `specialty.workflow.trial-materials.silence-wr` and
 `specialty.workflow.authoring-validation.contract`.
 
@@ -184,11 +189,12 @@ Older observation files are left untouched and are not recovery inputs. Use
 only a locator. CLI waiting follows the Run through cleanup until a terminal state
 or its explicit timeout, rather than inferring completion from a Worker turn.
 
-The legacy direct-workflow initializer and team Bootstrap Packs share the same
-no-overwrite asset writer. The legacy source lives in
-`apps/daemon/workflow-templates/direct-change/`; its file order, bytes and digest
-remain compatible. It still initializes a direct workflow without taking over the
-project or creating a PM team. Team topology and Pack upgrades remain explicit.
+A project becomes Workflow-enabled by cloning a package under
+`.genethub/workflows/`, not by an initializer that writes assets into it.
+`workflow list` reports what a project has cloned and `workflow build`
+materializes one package's Spaces through the same no-overwrite writer. Neither
+takes over the project: materializing Spaces and upgrading a package stay
+explicit, approved actions.
 
 ## Business delegation and configuration control
 

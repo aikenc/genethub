@@ -47,7 +47,7 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
   llm: { default: "mock" }, expectedDurationMs: 45_000, timeoutMs: 240_000,
   resources: { environments: 1, cpu: 2, memoryMb: 768, io: 1, browser: 0, pool: "standard" },
   surfaces: ["daemon", "agent", "genet-cli", "workbench-client", "git"],
-  productInterfaces: ["genet space bootstrap", "genet workflow", "session.send", "session.respondPermission", "workflow.history"],
+  productInterfaces: ["genet workflow build", "genet workflow", "session.send", "session.respondPermission", "workflow.history"],
 }, async t => {
   const opened = await t.flows.main.openWorkspace({ openRoot: t.openRoot, lease: t.env });
   const root = path.join(opened.workspaceRoot, "example-project");
@@ -58,6 +58,7 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
   };
   try {
     mkdirSync(root); t.data.git.init(root);
+    t.flows.main.clonePackage({ openRoot: t.openRoot, projectRoot: root });
     // Fixture preparation is outside product actions; all Workflow mutations below
     // are issued by real Worker CLI commands under the installed execution policy.
     writeFileSync(path.join(root, "README.md"), "# Sample project\nStart: inspect the committed source.\n");
@@ -69,7 +70,9 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
     const sources = examples.map(name => ({ name, id: `example-${name.slice(3)}`,
       text: readFileSync(path.join(t.openRoot, "docs/examples/workflows", `${name}.yaml`), "utf8") }));
     const selected = sources[scenario === "simple" ? 0 : scenario.startsWith("medium") ? 1 : scenario.startsWith("complex") ? 2 : 3]!;
-    const install = `const fs=require('fs');const dir='.genethub/workflow/workflows/';const sources=${JSON.stringify(sources)};for(const s of sources){fs.writeFileSync(dir+s.name+'.yaml',s.text);fs.appendFileSync(dir+'catalog.yaml','  - id: '+s.id+'\\n    path: '+s.name+'.yaml\\n');}`;
+    // A flow enters the package by being a file in `flows/` whose name
+    // matches its own id. There is no registry to append to.
+    const install = `const fs=require('fs');const dir='.genethub/workflows/game-delivery/flows/';const sources=${JSON.stringify(sources)};for(const s of sources){fs.writeFileSync(dir+s.id+'.yaml',s.text);}`;
     const contracts: Contract[] = [1, 2, 3, 4].map(n => ({ id: `m${n}`, goal: `Deliver module ${n}`,
       criteria: [{ id: "exists", requirement: "The artifact is committed" }, { id: "correct", requirement: "The artifact contains :ok:" }] }));
     const events: Assignment[] = [], seen = new Set<string>(), attempts = new Map<string, number>();
@@ -113,10 +116,10 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
         return { tool: { name: "bash", arguments: { command: `cd ${q(root)} && "$GENEHUB_CLI" workflow complete --output "$(node -e ${q(script)})"` } } };
       }
       switch (pmStage++) {
-        case 0: return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" space bootstrap plan --pack game-delivery-v1' } } };
+        case 0: return { tool: { name: "bash", arguments: { command: '"$GENEHUB_CLI" workflow build --package game-delivery' } } };
         case 1: return { tool: { name: "request_user_input", arguments: { questions: [{ id: field(request, "challengeId"), header: "接管", question: "确认接管隔离示例项目", options: [{ label: "yes", description: "接管" }, { label: "no", description: "拒绝" }] }] } } };
-        case 2: return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" space bootstrap apply --pack game-delivery-v1 --plan-digest ${field(request, "planDigest")} --expected-revision ${field(request, "expectedRevision")} --action-id install-examples-pack` } } };
-        case 3: return { tool: { name: "bash", arguments: { command: `node -e ${q(install)} && git add .genethub/workflow/workflows && git commit -m 'install documented example definitions' && "$GENEHUB_CLI" workflow inspect` } } };
+        case 2: return { tool: { name: "bash", arguments: { command: `"$GENEHUB_CLI" workflow build --package game-delivery --apply --plan-digest ${field(request, "planDigest")} --revision ${field(request, "expectedRevision")} --action-id install-examples-pack` } } };
+        case 3: return { tool: { name: "bash", arguments: { command: `node -e ${q(install)} && git add -A && git commit -m 'install documented example definitions and the built team' && "$GENEHUB_CLI" workflow inspect` } } };
         case 4: {
           const revision = field(request, "activationRevision");
           if (typeof revision !== "number") throw new Error("inspect did not return activation revision");
@@ -145,7 +148,7 @@ for (const scenario of ["simple", "medium-repair", "medium-rejected", "complex-s
     }, 180_000).catch(async error => { throw new Error(`${scenario}: ${error}; events=${JSON.stringify(events)}; run=${JSON.stringify(run)}; pm=${JSON.stringify((await snapshot()).items).slice(-6000)}`); });
     t.assertions.assert(run!.workflowId === selected.id && !!run!.executorSessionId && run!.executorTurns === 0, "example bypassed deterministic Executor");
     t.assertions.assert(run!.status === (scenario.endsWith("exhausted") ? "blocked" : "completed"), `unexpected Run outcome: ${JSON.stringify(run)}`);
-    for (const source of sources) t.assertions.assert(readFileSync(path.join(root, ".genethub/workflow/workflows", `${source.name}.yaml`), "utf8") === source.text, "tested example differs from published YAML");
+    for (const source of sources) t.assertions.assert(readFileSync(path.join(root, ".genethub/workflows/game-delivery/flows", `${source.id}.yaml`), "utf8") === source.text, "tested example differs from published YAML");
     const writes = events.filter(e => e.phase === "implement").map(e => e.contract!.id);
     const noWork = scenario === "simple" || ["very-complex-no-go", "very-complex-authorization", "very-complex-empty-plan"].includes(scenario);
     const expected = noWork ? [] : scenario.startsWith("medium") ? ["feature", "feature"]

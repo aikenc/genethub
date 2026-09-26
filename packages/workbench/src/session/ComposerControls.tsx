@@ -1,55 +1,54 @@
-import type { AgentInfo } from "@genehub/proto";
+import type { AgentInfo, AgentSelectionPreferences, SessionAgentTarget } from "@genehub/proto";
+import { Boxes } from "lucide-react";
 import { useCallback, useId, useRef, useState } from "react";
 
-import { AgentMark } from "../presentation/AgentMark";
 import { EffortMeter } from "../presentation/EffortMeter";
 import {
-  resolveAgentAvailability,
   resolveAgentPresentation,
   resolveAgentProfile,
   resolveEffortBadge,
   resolveModeBadge,
   resolveModelPresentation,
 } from "../presentation/catalog/resolve";
+import { normalizeTags } from "./capability-preferences";
 import { resolveRuntimeSelection } from "./runtime-selection";
 import { RuntimeSettingsPanel } from "./RuntimeSettingsPanel";
 
-/** One quiet, non-wrapping summary in the composer footer.
- *
- * The full catalog remains available in `RuntimeSettingsPanel`; focusing the
- * textarea no longer unfolds four native selects into the conversation.
- */
+/** Compact route summary plus the tag/runtime configuration entry. */
 export function ComposerControls({
   agents,
+  preferences,
+  tags,
+  mediaTags,
   agentId,
   modelId,
   modeId,
   effortId,
+  fast,
   runtimeValues,
   disabled,
-  agentLocked,
+  busy,
   onOpenChange,
-  onPickAgent,
-  onPickModel,
-  onPickMode,
-  onPickEffort,
-  onPickRuntimeAxis,
+  onPickTarget,
+  onSavePreferences,
   onRefreshAgents,
 }: {
   agents: AgentInfo[];
+  preferences: AgentSelectionPreferences;
+  tags?: string[];
+  mediaTags?: string[];
   agentId: string | null;
   modelId: string | null;
   modeId: string | null;
   effortId: string | null;
+  fast?: boolean | null;
   runtimeValues?: Record<string, string> | null;
   disabled?: boolean;
-  agentLocked?: boolean;
+  /** A turn is in flight: same-Agent runtime picks stay live, cross-Agent ones wait. */
+  busy?: boolean;
   onOpenChange?(open: boolean): void;
-  onPickAgent(id: string): void;
-  onPickModel(id: string): void;
-  onPickMode(id: string): void;
-  onPickEffort(id: string): void;
-  onPickRuntimeAxis?(axisId: string, valueId: string): void;
+  onPickTarget?(target: SessionAgentTarget, filterTags: string[]): Promise<void> | void;
+  onSavePreferences(preferences: AgentSelectionPreferences): Promise<void> | void;
   onRefreshAgents?(): void;
 }) {
   const [open, setOpen] = useState(false);
@@ -62,61 +61,62 @@ export function ComposerControls({
     modelId,
     modeId,
     effortId,
+    fast,
     runtimeValues,
   });
-  const agentPresentation = selection.current
-    ? resolveAgentPresentation(selection.current)
-    : null;
-  const agentProfile = selection.current
-    ? resolveAgentProfile(selection.current.id)
-    : null;
+  const selectedTags = normalizeTags(
+    tags?.length ? tags : preferences.selectedTags?.length ? preferences.selectedTags : ["Flash"],
+  );
+  const automaticTags = normalizeTags(mediaTags ?? []);
+  const agentProfile = selection.current ? resolveAgentProfile(selection.current.id) : null;
   const permissionAxis = Boolean(
     selection.current?.capabilities.permissions && agentProfile?.modeKind === "permission",
   );
-  const model = selection.model
-    ? resolveModelPresentation({
-        agentId: selection.current?.id ?? null,
-        modelId: selection.model.id,
-        modelLabel: selection.model.label,
-      })
-    : null;
-  const agentAvailability = selection.current
-    ? resolveAgentAvailability(selection.current)
-    : null;
   const effort =
     selection.current?.capabilities.setEffort && (selection.model?.efforts.length ?? 0) > 0
-    ? resolveEffortBadge(selection.effortId)
-    : null;
-  const mode = selection.current?.capabilities.setMode && selection.mode
-    ? resolveModeBadge({
-        agentId: selection.current.id,
-        permissions: permissionAxis,
-        modeId: selection.mode?.id,
-        modeLabel: selection.mode?.label,
-      })
-    : null;
-  const runtimeBadges = (selection.current?.catalog.runtimeAxes ?? []).flatMap((axis) => {
-    const value = axis.values.find((candidate) => candidate.id === selection.runtimeValues[axis.id]);
-    return value ? [{ axis, value }] : [];
-  });
+      ? resolveEffortBadge(selection.effortId)
+      : null;
+  const mode =
+    selection.current?.capabilities.setMode && selection.mode
+      ? resolveModeBadge({
+          agentId: selection.current.id,
+          permissions: permissionAxis,
+          modeId: selection.mode.id,
+          modeLabel: selection.mode.label,
+        })
+      : null;
+  const configuredProfile = preferences.modelProfiles?.find(
+    (profile) =>
+      profile.agentId === selection.current?.id &&
+      (profile.modelId ?? null) === (selection.model?.id ?? modelId ?? null),
+  );
+  const routeLabel = selection.current
+    ? `${resolveAgentPresentation(selection.current).label} · ${
+        configuredProfile?.displayName?.trim() || (selection.model
+          ? resolveModelPresentation({
+              agentId: selection.current.id,
+              modelId: selection.model.id,
+              modelLabel: selection.model.label,
+            }).fullLabel
+          : modelId ?? "默认")
+      }`
+    : "未匹配 Agent";
   const summary = [
-    selection.current
-      ? `执行引擎：${agentPresentation?.label ?? selection.current.id}${agentAvailability ? `（${agentAvailability.fullLabel}）` : ""}`
-      : "执行引擎：未选择",
-    model ? `模型：${model.fullLabel}` : null,
+    `模型：${routeLabel}`,
+    `筛选：${[...selectedTags, ...automaticTags].join(" + ") || "无"}`,
     effort ? `思考强度：${effort.fullLabel}` : null,
-    ...runtimeBadges.map(({ axis, value }) => `${axis.label}：${value.label}`),
-    mode
-      ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`
-      : null,
+    mode ? `${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}` : null,
+    selection.fast && selection.model?.supportsFast ? "极速模式：已开启" : null,
   ]
     .filter(Boolean)
     .join("；");
-  const setPanelOpen = useCallback((next: boolean) => {
-    setOpen(next);
-    onOpenChange?.(next);
-    if (next) onRefreshAgents?.();
-  }, [onOpenChange, onRefreshAgents]);
+  const setPanelOpen = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      onOpenChange?.(next);
+    },
+    [onOpenChange],
+  );
   const closePanel = useCallback(() => setPanelOpen(false), [setPanelOpen]);
 
   return (
@@ -132,32 +132,9 @@ export function ComposerControls({
         onClick={() => setPanelOpen(true)}
         className="flex h-9 !min-h-0 !min-w-0 flex-1 items-center rounded-md px-1.5 text-left text-[14px] leading-9 text-muted hover:bg-raised hover:text-fg focus-visible:outline focus-visible:outline-1 focus-visible:outline-muted/60 md:h-6 md:text-[12px] md:leading-6"
       >
-        <span className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden opacity-75 md:gap-1.5">
-          {selection.current ? (
-            <AgentMark
-              agent={selection.current}
-              className="h-5 w-5 md:h-4 md:w-4"
-              textClassName="max-w-24 text-[14px] md:text-[12px]"
-              glyphClassName="text-[18px] md:text-[14px]"
-            />
-          ) : null}
-          {agentAvailability ? (
-            <span
-              className="shrink-0 whitespace-nowrap text-danger"
-              title={agentAvailability.fullLabel}
-            >
-              {agentAvailability.shortLabel}
-            </span>
-          ) : null}
-          {model ? (
-            <span className="min-w-0 truncate text-muted" title={model.fullLabel}>
-              {model.shortLabel}
-            </span>
-          ) : selection.current && agentPresentation && agentPresentation.kind !== "text" ? (
-            <span className="min-w-0 truncate text-muted" title={agentPresentation.label}>
-              {agentPresentation.label}
-            </span>
-          ) : null}
+        <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden opacity-80">
+          <Boxes className="h-4 w-4 shrink-0 text-accent" aria-hidden />
+          <span className="truncate text-fg">{routeLabel}</span>
           {effort ? (
             <span
               className="flex shrink-0 items-center gap-0.5 whitespace-nowrap text-muted"
@@ -167,21 +144,22 @@ export function ComposerControls({
               <span aria-hidden>{effort.shortLabel}</span>
             </span>
           ) : null}
-          {runtimeBadges.map(({ axis, value }) => (
-            <span
-              key={axis.id}
-              className="shrink-0 whitespace-nowrap text-muted"
-              title={`${axis.label}：${value.label}`}
-            >
-              {value.label}
-            </span>
-          ))}
           {mode ? (
             <span
               className="shrink-0 whitespace-nowrap text-muted"
               title={`${permissionAxis ? "权限" : "模式"}：${mode.fullLabel}`}
+              aria-hidden
             >
-              <span aria-hidden>{mode.emoji}</span>
+              {mode.emoji}
+            </span>
+          ) : null}
+          {selection.fast && selection.model?.supportsFast ? (
+            <span
+              className="flex shrink-0 items-center gap-0.5 whitespace-nowrap text-amber-500 font-medium"
+              title="极速模式（⚡ Fast）：已开启"
+            >
+              <span className="text-[12px] leading-none" aria-hidden>⚡</span>
+              <span aria-hidden>Fast</span>
             </span>
           ) : null}
           <span className="ml-auto shrink-0 text-[12px] text-faint md:text-[8px]" aria-hidden>
@@ -194,15 +172,18 @@ export function ComposerControls({
         <RuntimeSettingsPanel
           id={panelId}
           selection={selection}
+          agents={agents}
+          preferences={preferences}
+          tags={selectedTags}
+          mediaTags={automaticTags}
           disabled={disabled}
-          agentLocked={agentLocked}
+          busy={busy}
           returnFocusRef={trigger}
           onClose={closePanel}
-          onPickAgent={onPickAgent}
-          onPickModel={onPickModel}
-          onPickMode={onPickMode}
-          onPickEffort={onPickEffort}
-          onPickRuntimeAxis={onPickRuntimeAxis ?? (() => {})}
+          onPickTarget={async (target, filters) => {
+            await onPickTarget?.(target, filters);
+          }}
+          onSavePreferences={onSavePreferences}
           onRefreshAgents={onRefreshAgents}
         />
       ) : null}

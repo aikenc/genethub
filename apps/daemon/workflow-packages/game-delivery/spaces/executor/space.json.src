@@ -1,0 +1,6 @@
+{
+  "lifecycle": "pooled",
+  "components": [{ "componentId": "executor" }],
+  "folders": [{ "name": "project", "path": "../.." }],
+  "guidance": ["查看当前 Run 的流程状态、预算和阻塞原因"]
+}

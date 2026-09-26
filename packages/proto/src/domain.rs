@@ -20,6 +20,9 @@ pub struct Capabilities {
     /// and which levels exist is the model's own business (`ModelInfo::efforts`).
     #[serde(default)]
     pub set_effort: bool,
+    /// The agent supports fast / turbo accelerated execution mode.
+    #[serde(default)]
+    pub set_fast: bool,
     pub set_mode: bool,
     pub permissions: bool,
     /// The agent can rehydrate a past session itself. When false the daemon
@@ -52,6 +55,9 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub input_modalities: Option<Vec<String>>,
+    /// Supports fast / turbo / accelerated execution variant.
+    #[serde(default)]
+    pub supports_fast: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -249,24 +255,11 @@ pub struct AgentSpaceInfo {
     /// Worker should suggest to the user.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guidance: Vec<String>,
-    /// The Bootstrap Pack that last established this Space, when any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub bootstrap_pack: Option<AgentSpacePackIdentity>,
     /// Builder/tree facts checked by the daemon. Business health remains a DCG
     /// concern; this field reports only structural reasons the UI can display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub health: Option<AgentSpaceHealth>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct AgentSpacePackIdentity {
-    pub id: String,
-    pub version: u32,
-    pub digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -407,67 +400,6 @@ pub struct AgentSpaceBuilderReport {
     pub details: Option<serde_json::Value>,
 }
 
-/// Result of planning or applying one versioned project Bootstrap Pack.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapPackReport {
-    #[serde(default)]
-    pub conflict_runs: Vec<String>,
-    #[serde(default)]
-    pub recovery_actions: Vec<String>,
-    pub schema: String,
-    pub status: String,
-    pub pack_id: String,
-    pub pack_version: u32,
-    pub pack_digest: String,
-    pub project_workspace_id: String,
-    /// Project-relative Skill the initiating Agent reads immediately after
-    /// apply. This keeps bootstrap discovery generic while the Pack owns the
-    /// actual PM method.
-    pub entry_skill: String,
-    /// Relative project paths owned by this pack, in stable order.
-    pub files: Vec<String>,
-    /// The four configured AgentSpaces after apply; empty for a pure plan.
-    pub spaces: Vec<WorkspaceInfo>,
-    /// Whether applying the same pack again would be a no-op.
-    pub current: bool,
-    /// Digest of the complete immutable mutation plan. Apply must echo it.
-    pub plan_digest: String,
-    /// AgentSpace CAS value observed while the plan was made.
-    #[ts(type = "number")]
-    pub expected_revision: u64,
-    /// Git/root facts included in `planDigest` and shown before approval.
-    pub git: BootstrapGitPlan,
-    /// Present only when a SessionController asked for a mutating plan. This
-    /// challenge has no authority; a Human response may turn it into one
-    /// daemon-private, single-use grant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub approval: Option<BootstrapApprovalChallenge>,
-    /// Exact bootstrap commit produced by a successful apply.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub bootstrap_commit: Option<String>,
-    /// True only after the initiating Session owns a project-scoped control
-    /// binding. A `pm` component alone never grants this authority.
-    #[serde(default)]
-    pub project_control_bound: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapGitPlan {
-    /// `create` for a new repository, `reuse` for a direct clean repository.
-    pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub head: Option<String>,
-    pub status_digest: String,
-    pub commit_identity: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
@@ -493,23 +425,6 @@ pub struct AgentSpaceChangePlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub approval: Option<BootstrapApprovalChallenge>,
-}
-
-/// One immutable Bootstrap Pack embedded in this product build. The list is
-/// discovery only; choosing a pack remains a PM/Skill decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct BootstrapPackInfo {
-    pub id: String,
-    pub version: u32,
-    pub description: String,
-    pub digest: String,
-    /// Project-relative method entry point installed by this Pack.
-    pub entry_skill: String,
-    /// Stable, product-neutral intent categories advertised by the Pack.
-    #[serde(default)]
-    pub intent_matches: Vec<String>,
 }
 
 /// How a child session obtained the context that precedes its first new turn.
@@ -579,6 +494,38 @@ pub struct ForkTarget {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fast: Option<bool>,
+    /// Runtime axes selected for this exact Agent. Routed forks fill these
+    /// from the machine-global remembered choices at execution time.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
+}
+
+/// One complete runtime destination for changing the Agent behind an existing
+/// GeneHub Session. Unlike a Fork target it cannot change workspace identity:
+/// the conversation stays put while its Agent-native context is reconstructed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct SessionAgentTarget {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fast: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
 }
 
 /// Portable, untrusted material exported by the source daemon for a fork on a
@@ -872,6 +819,16 @@ pub struct SessionSummary {
     pub id: String,
     pub workspace_id: String,
     pub agent_id: String,
+    /// Human-selected AND-match tags for this conversation. The concrete
+    /// Agent/model may change whenever current machine costs change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub routing_tags: Vec<String>,
+    /// Media requirements accumulated from the visible conversation. These
+    /// tags are daemon-owned and cannot be removed by the composer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub media_tags: Vec<String>,
     /// Present only when a project Workflow created this otherwise ordinary
     /// Session. There is no parallel WorkSession runtime: timeline, storage,
     /// recovery, fork and Workspace membership remain the normal ones.
@@ -891,6 +848,9 @@ pub struct SessionSummary {
     #[ts(optional)]
     #[serde(default)]
     pub effort_id: Option<String>,
+    #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub runtime_values: Option<std::collections::BTreeMap<String, String>>,
@@ -930,7 +890,7 @@ pub struct SessionSummary {
 }
 
 /// A content cursor independent of status, rename and transport sequence numbers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct SessionMessagePreview {
@@ -1005,6 +965,9 @@ pub struct SessionInputSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowTaskSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub human_exit: Option<WorkflowHumanExitStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub executing: Option<bool>,
@@ -1159,17 +1122,115 @@ pub struct WorkflowDraftReport {
     pub truncated: bool,
     pub diagnostics: Vec<WorkflowDiagnostic>,
     pub candidate_digest: Option<String>,
-    pub default_workflow: Option<String>,
-    pub execution: Option<WorkflowDraftExecution>,
+    /// Package this draft compiled, absent when compilation never got that far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub package_id: Option<String>,
+    /// Project-relative executor product directory derived from the package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executor_path: Option<String>,
     pub workflows: Vec<WorkflowDraftEntry>,
 }
 
+/// One discovered Workflow package and the mechanical facts about it.
+///
+/// Everything here is computed by the daemon from the project side or from the
+/// package's own Git checkout. Nothing is taken from the package's prose: an
+/// untrusted clone must not be able to assert a platform fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
-pub struct WorkflowDraftExecution {
-    pub executor_path: String,
+pub struct WorkflowPackageStatus {
+    /// Path below `.genethub/workflows/`, which is the package's identity.
+    pub id: String,
+    /// Frontmatter summary, or the first prose line. Untrusted display text.
+    pub description: String,
+    /// The package's own experiment marker.
+    pub dev: bool,
+    /// Git remote of the package's checkout, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_url: Option<String>,
+    /// Commit of the package's checkout; the package's version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_commit: Option<String>,
+    /// True when the package checkout has uncommitted changes, which includes
+    /// unresolved merge markers left by an upgrade.
+    pub source_dirty: bool,
+    /// Content identity of the package source right now.
+    pub source_digest: String,
+    /// Flow ids from `flows/*.yaml`.
+    pub flows: Vec<String>,
+    /// Compilation result of the current source; `null` when it compiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub compile_error: Option<String>,
+    /// Product Space directories this package owns once built.
+    pub spaces: Vec<WorkflowPackageSpaceStatus>,
+    /// True when every declared Space is registered with matching digests.
+    pub built: bool,
+    /// True when a built Space no longer matches its registered lock digest.
+    pub drifted: bool,
+    /// Flow ids also declared by another package in this project.
+    pub conflicting_flows: Vec<String>,
+}
+
+/// One product Space of a package and whether it is live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowPackageSpaceStatus {
+    pub name: String,
+    /// Project-relative product directory.
+    pub path: String,
+    pub components: Vec<String>,
+    /// True when the directory exists and the Builder verifies it.
+    pub materialized: bool,
+    /// True when the AgentSpace is registered with an authorized topology.
+    pub registered: bool,
+}
+
+/// Result of `workflow list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowPackageList {
+    /// Absolute `.genethub/workflows/` path packages are discovered under.
     pub root: String,
+    pub packages: Vec<WorkflowPackageStatus>,
+    /// `spaces/<name>--<space>` directories with no package left to own them.
+    pub orphan_spaces: Vec<String>,
+}
+
+/// Plan or result of `workflow build`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowBuildReport {
+    pub schema: String,
+    /// `planned` for a read-only plan, `applied` once the build wrote it.
+    pub status: String,
+    pub package_id: String,
+    pub source_digest: String,
+    /// Product directories this build writes.
+    pub spaces: Vec<String>,
+    /// Component topology being authorized, one entry per Space.
+    pub components: Vec<String>,
+    pub plan_digest: String,
+    #[ts(type = "number")]
+    pub expected_revision: u64,
+    /// Runs that must finish before a rebuild may replace shared carriers.
+    pub conflict_runs: Vec<String>,
+    /// Present when a human challenge is required and was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub approval: Option<BootstrapApprovalChallenge>,
+    /// Active Candidate digest after the build activated the package source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub active_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -1200,18 +1261,21 @@ pub struct WorkflowDiagnostic {
     pub column: Option<u32>,
 }
 
-/// Project-owned Workflow catalog projected by the daemon after validation.
+/// Project-owned Workflow package projected by the daemon after validation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowProjectStatus {
-    /// The catalog/default below belong to this exact version, not necessarily Active.
+    /// The flow list below belongs to this exact version, not necessarily Active.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub selected_digest: Option<String>,
-    pub schema: String,
+    /// Path below `.genethub/workflows/` identifying the package.
+    pub package_id: String,
+    /// The package's own "still an experiment" marker. It gates nothing; it
+    /// tells PM to weigh the health facts more carefully.
+    pub dev: bool,
     pub root: String,
-    pub default_workflow: String,
     pub workflows: Vec<WorkflowCatalogEntryStatus>,
     /// Digest of the project source as it exists now, whether or not it has
     /// been promoted for execution.
@@ -1228,15 +1292,12 @@ pub struct WorkflowProjectStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub active_digest: Option<String>,
+    /// This executor uses the built-in recovery flow for new recovery Runs.
+    pub recovery_builtin_override: bool,
     #[ts(type = "number")]
     pub activation_revision: u64,
-    /// True when project source has changed since the active Candidate.
+    /// True when package source has changed since the active Candidate.
     pub source_changed: bool,
-    /// Provenance of the deterministic genesis pack, when the active
-    /// Candidate was created by one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub bootstrap_pack_digest: Option<String>,
     /// Ordered immutable activation history. Reusing an already-active digest
     /// is a no-op and therefore does not append an entry.
     pub activation_history: Vec<WorkflowActivationStatus>,
@@ -1263,10 +1324,6 @@ pub struct WorkflowCatalogEntryStatus {
     pub id: String,
     pub path: String,
     pub digest: String,
-    #[serde(default)]
-    pub match_kind: Option<String>,
-    #[serde(default)]
-    pub match_complexity: Option<String>,
 }
 
 /// Durable status of one project Workflow run. Node meaning comes entirely
@@ -1276,13 +1333,16 @@ pub struct WorkflowCatalogEntryStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "index.ts")]
 pub struct WorkflowRunStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub human_exit: Option<WorkflowHumanExitStatus>,
+    /// Immutable business Run references owned by a recovery Run.
+    #[serde(default)]
+    pub handles: Vec<WorkflowRecoveryHandleStatus>,
     /// Versioned read-only projection of the pinned structure and instances, or legacy DAG nodes and edges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "unknown")]
     pub structure: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub diagnostics: Option<Vec<WorkflowDiagnosticStatus>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub request_run_id: Option<String>,
@@ -1345,6 +1405,30 @@ pub struct WorkflowRunStatus {
     pub created_at_ms: i64,
     #[ts(type = "number")]
     pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowHumanExitStatus {
+    pub kind: String,
+    pub request_id: String,
+    pub pm_session_id: String,
+    pub reason: String,
+    #[ts(type = "number")]
+    pub created_at_ms: i64,
+    #[ts(optional)]
+    pub answer: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct WorkflowRecoveryHandleStatus {
+    pub run_id: String,
+    #[ts(type = "number")]
+    pub trigger_seq: u64,
+    pub reason: String,
 }
 
 /// One structured, replayable control-plane message owned by an Executor
@@ -1467,21 +1551,7 @@ pub struct WorkflowSupervisionStatus {
     pub recovery_wait_ms: i64,
     pub waiting: bool,
     #[ts(type = "number")]
-    pub silence_threshold_ms: i64,
-}
-
-/// Finishing a review is distinct from approving its subject.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "index.ts")]
-pub struct WorkflowDiagnosticStatus {
-    pub session_id: String,
-    pub status: String,
-    #[ts(type = "number")]
-    pub created_at_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub error: Option<String>,
+    pub node_wall_ms: i64,
 }
 
 /// A node's settled outcome, as a bare string on the wire and on disk.
@@ -2026,6 +2096,119 @@ pub enum UpdateDownload {
     Failed { version: String, message: String },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentCapability {
+    #[default]
+    Planning,
+    Coding,
+    Multimodal,
+}
+
+/// A deliberately coarse, comparable five-step cost level used by the
+/// machine-global tag router. It is intentionally independent of provider
+/// billing units so local and hosted Agents remain comparable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub enum AgentCostLevel {
+    VeryLow,
+    Low,
+    #[default]
+    Medium,
+    High,
+    VeryHigh,
+}
+
+/// Machine-global routing configuration for one exact Agent + model pair.
+/// Every route has one to four AND-match tags and one live cost level.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentModelProfile {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_id: Option<String>,
+    /// Human-owned display override. Routing always continues to use
+    /// `agent_id + model_id`, so shortening a long catalog label is cosmetic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cost: Option<AgentCostLevel>,
+}
+
+/// One machine-global mutually-exclusive tag group. Built-in Max/Pro/Flash
+/// membership is fixed by the product; these rows describe Human-created
+/// groups for custom tags only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentTagGroup {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Last runtime choices for one Agent. Values are checked against the live
+/// catalog by the client before they are used; stale ids remain harmless.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentRuntimePreference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fast: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub runtime_values: std::collections::BTreeMap<String, String>,
+}
+
+/// Machine-global configured models, tag/cost metadata and compact runtime
+/// defaults. Automatic dispatch never caches its resolved route: every run
+/// re-evaluates the requested tags against these current costs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "index.ts")]
+pub struct AgentSelectionPreferences {
+    #[serde(default)]
+    pub runtimes: std::collections::BTreeMap<String, AgentRuntimePreference>,
+    /// Exact models enabled on this machine. New configurations start with the
+    /// first three non-auto catalog models for every Agent; models outside this
+    /// list are neither shown in Human pickers nor eligible for Workflow
+    /// routing until explicitly added.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub model_profiles: Vec<AgentModelProfile>,
+    /// Agents whose last model was explicitly removed by the Human. Keeping
+    /// this separate from an empty profile list distinguishes opt-out from a
+    /// newly discovered Agent that should receive first-run defaults.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub disabled_agent_ids: Vec<String>,
+    /// Human-created mutually-exclusive groups. Tags absent from every group
+    /// are ordinary independent filters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub tag_groups: Vec<AgentTagGroup>,
+    /// Tags preselected for a new chat on this machine. Session-specific tags
+    /// are persisted with each conversation once it starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<_>")]
+    pub selected_tags: Vec<String>,
+}
+
 /// The machine-level settings a client may see and change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -2039,6 +2222,12 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub speech: Option<crate::speech::SpeechSettings>,
+    /// Absent means this machine has never saved a preference. Clients may
+    /// derive a useful first-run proposal; `Some` with empty lists is an
+    /// intentional user configuration and must stay empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_preferences: Option<AgentSelectionPreferences>,
 }
 
 /// A provider's configuration, minus the secret.
@@ -2122,6 +2311,18 @@ pub struct SupportDiagnostics {
     pub uptime_seconds: u64,
     pub hub_state: String,
     pub remote_state: String,
+    /// Milliseconds since the Workflow scheduler last completed a scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub workflow_patrol_lag_ms: Option<u64>,
+    /// Queued and running Workflow patrol jobs on this daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workflow_patrol_active_jobs: Option<u32>,
+    /// Age of the oldest queued or running patrol job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub workflow_patrol_oldest_job_ms: Option<u64>,
     pub events: Vec<SupportDiagnosticEvent>,
     #[ts(type = "number")]
     pub dropped_events: u64,

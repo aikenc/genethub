@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use genehub_proto::{ProviderInfo, ServerFrame, Settings, SpeechCapabilities, SpeechRuntimeStatus};
+use genehub_proto::{
+    AgentSelectionPreferences, ProviderInfo, ServerFrame, Settings, SpeechCapabilities,
+    SpeechRuntimeStatus,
+};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 use crate::adapter::registry::Registry;
@@ -273,9 +276,13 @@ impl AppState {
     }
 
     pub async fn settings(&self) -> Settings {
-        let (stored, speech) = {
+        let (stored, speech, agent_preferences) = {
             let config = self.config.read().await;
-            (config.agents.providers.clone(), config.speech.clone())
+            (
+                config.agents.providers.clone(),
+                config.speech.clone(),
+                config.agent_preferences.clone(),
+            )
         };
         let discovered = self.discover(&stored).await;
         Settings {
@@ -315,7 +322,25 @@ impl AppState {
                 .collect(),
             lan_enabled: config_lan(&self.config).await,
             speech: Some(crate::speech::settings(&speech)),
+            agent_preferences,
         }
+    }
+
+    /// Replaces tag/cost routing as one machine-level value. Keeping this
+    /// beside provider and speech settings means every workspace and client on
+    /// the machine sees the same profiles and last runtime choices.
+    pub async fn set_agent_preferences(
+        &self,
+        preferences: AgentSelectionPreferences,
+    ) -> Result<Settings> {
+        validate_agent_preferences(&preferences)?;
+        {
+            let mut config = self.config.write().await;
+            config.agent_preferences = Some(preferences);
+            config.save(&self.paths.config_file())?;
+        }
+        crate::config::restrict_to_owner(&self.paths.config_file())?;
+        Ok(self.settings().await)
     }
 
     pub async fn speech_capabilities(&self) -> SpeechCapabilities {
@@ -584,10 +609,251 @@ impl AppState {
     }
 }
 
+fn validate_agent_preferences(preferences: &AgentSelectionPreferences) -> Result<()> {
+    if preferences.runtimes.len() > 64 {
+        anyhow::bail!("最多记住 64 个 Agent 的运行设置");
+    }
+    for (agent_id, runtime) in &preferences.runtimes {
+        validate_id("Agent", agent_id, 128)?;
+        if let Some(effort_id) = &runtime.effort_id {
+            validate_id("思考强度", effort_id, 128)?;
+        }
+        if let Some(mode_id) = &runtime.mode_id {
+            validate_id("权限", mode_id, 128)?;
+        }
+        if runtime.runtime_values.len() > 16 {
+            anyhow::bail!("一个 Agent 最多记住 16 个运行参数");
+        }
+        for (axis_id, value_id) in &runtime.runtime_values {
+            validate_id("运行参数", axis_id, 128)?;
+            validate_id("运行参数值", value_id, 128)?;
+        }
+    }
+    if preferences.model_profiles.len() > 512 {
+        anyhow::bail!("最多保存 512 组 Agent 与模型画像");
+    }
+    if preferences.disabled_agent_ids.len() > 64 {
+        anyhow::bail!("最多停用 64 个 Agent");
+    }
+    let mut disabled_agents = std::collections::BTreeSet::new();
+    for agent_id in &preferences.disabled_agent_ids {
+        validate_id("Agent", agent_id, 128)?;
+        if !disabled_agents.insert(agent_id.trim().to_lowercase()) {
+            anyhow::bail!("不能重复停用同一个 Agent");
+        }
+    }
+    validate_tag_groups(preferences)?;
+    let mut profiles = std::collections::BTreeSet::new();
+    for profile in &preferences.model_profiles {
+        validate_id("Agent", &profile.agent_id, 128)?;
+        if disabled_agents.contains(&profile.agent_id.trim().to_lowercase()) {
+            anyhow::bail!("已停用的 Agent 不能保留模型画像");
+        }
+        if let Some(model_id) = &profile.model_id {
+            validate_id("模型", model_id, 512)?;
+        }
+        if let Some(display_name) = &profile.display_name {
+            let display_name = display_name.trim();
+            if display_name.is_empty()
+                || display_name.chars().count() > 80
+                || display_name.chars().any(char::is_control)
+            {
+                anyhow::bail!("模型显示名不能为空、不能包含控制字符且不能超过 80 个字符");
+            }
+        }
+        validate_tags(&profile.tags, true)?;
+        validate_tag_group_selection(&profile.tags, preferences)?;
+        if !profiles.insert((&profile.agent_id, &profile.model_id)) {
+            anyhow::bail!("不能重复保存同一个 Agent 与模型画像");
+        }
+    }
+    validate_tags(&preferences.selected_tags, false)?;
+    validate_tag_group_selection(&preferences.selected_tags, preferences)?;
+    Ok(())
+}
+
+fn validate_tag_groups(preferences: &AgentSelectionPreferences) -> Result<()> {
+    if preferences.tag_groups.len() > 32 {
+        anyhow::bail!("最多配置 32 个标签组");
+    }
+    let builtins = ["max", "pro", "flash", "视频理解", "图片理解"];
+    let mut ids = std::collections::BTreeSet::new();
+    let mut grouped_tags = std::collections::BTreeSet::new();
+    for group in &preferences.tag_groups {
+        validate_id("标签组", &group.id, 64)?;
+        validate_id("标签组名称", &group.label, 40)?;
+        if group.id.trim().eq_ignore_ascii_case("builtin-intelligence") {
+            anyhow::bail!("自定义标签组不能使用内置标签组标识");
+        }
+        if !ids.insert(group.id.trim().to_lowercase()) {
+            anyhow::bail!("标签组标识不能重复");
+        }
+        if group.tags.len() > 64 {
+            anyhow::bail!("一个标签组最多包含 64 个标签");
+        }
+        validate_tags(&group.tags, false)?;
+        for tag in &group.tags {
+            let key = tag.trim().to_lowercase();
+            let key = if key == "flush" { "flash".to_string() } else { key };
+            if builtins.contains(&key.as_str()) {
+                anyhow::bail!("内置标签不能加入自定义标签组");
+            }
+            if !grouped_tags.insert(key) {
+                anyhow::bail!("同一个标签只能属于一个标签组");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tag_group_selection(
+    tags: &[String],
+    preferences: &AgentSelectionPreferences,
+) -> Result<()> {
+    let mut claimed = std::collections::BTreeSet::new();
+    for tag in tags {
+        let key = tag.trim().to_lowercase();
+        let key = if key == "flush" { "flash" } else { key.as_str() };
+        let group = if ["max", "pro", "flash"].contains(&key) {
+            Some("builtin-intelligence")
+        } else {
+            preferences.tag_groups.iter().find_map(|group| {
+                group
+                    .tags
+                    .iter()
+                    .any(|member| member.trim().eq_ignore_ascii_case(tag.trim()))
+                    .then_some(group.id.as_str())
+            })
+        };
+        if let Some(group) = group {
+            if !claimed.insert(group) {
+                anyhow::bail!("同一个标签组只能选择一个标签");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tags(tags: &[String], required: bool) -> Result<()> {
+    if required && tags.is_empty() {
+        anyhow::bail!("每组 Agent 与模型至少需要 1 个标签");
+    }
+    if tags.len() > 4 {
+        anyhow::bail!("最多选择 4 个标签");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for tag in tags {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.chars().count() > 40 || tag.chars().any(char::is_control) {
+            anyhow::bail!("标签不能为空、不能包含控制字符且不能超过 40 个字符");
+        }
+        if !seen.insert(tag.to_lowercase()) {
+            anyhow::bail!("同一组设置不能重复标签");
+        }
+    }
+    Ok(())
+}
+
+fn validate_id(label: &str, value: &str, max_chars: usize) -> Result<()> {
+    if value.trim().is_empty() || value.chars().count() > max_chars {
+        anyhow::bail!("{label} 标识不能为空且不能超过 {max_chars} 个字符");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod machine_state_tests {
     use super::*;
     use crate::config::{Enrollment, Rendezvous};
+
+    #[test]
+    fn tag_settings_enforce_profile_identity_and_tag_bounds() {
+        let profile =
+            |agent: &str, model: &str, tags: Vec<&str>| genehub_proto::AgentModelProfile {
+                agent_id: agent.into(),
+                model_id: Some(model.into()),
+                display_name: None,
+                tags: tags.into_iter().map(str::to_string).collect(),
+                cost: Some(genehub_proto::AgentCostLevel::Medium),
+            };
+        let mut preferences = AgentSelectionPreferences::default();
+        preferences.model_profiles = vec![profile(
+            "codex",
+            "model",
+            vec!["Max", "图片理解", "视频理解", "私有"],
+        )];
+        validate_agent_preferences(&preferences).expect("four distinct tags are valid");
+
+        preferences.model_profiles[0].tags.push("第五个".into());
+        let too_many = validate_agent_preferences(&preferences)
+            .expect_err("a fifth tag must be rejected")
+            .to_string();
+        assert!(too_many.contains("最多选择 4"), "{too_many}");
+
+        preferences.model_profiles = vec![
+            profile("codex", "model", vec!["Flash"]),
+            profile("codex", "model", vec!["Pro"]),
+        ];
+        let duplicate = validate_agent_preferences(&preferences)
+            .expect_err("the same exact profile cannot be saved twice")
+            .to_string();
+        assert!(duplicate.contains("不能重复"), "{duplicate}");
+
+        preferences.model_profiles = vec![profile("codex", "model", vec!["Flash"])];
+        preferences.disabled_agent_ids = vec!["codex".into()];
+        let disabled = validate_agent_preferences(&preferences)
+            .expect_err("a disabled Agent cannot retain a route")
+            .to_string();
+        assert!(disabled.contains("已停用"), "{disabled}");
+
+        preferences.disabled_agent_ids.clear();
+        preferences.model_profiles[0].display_name = Some("bad\nname".into());
+        let display_name = validate_agent_preferences(&preferences)
+            .expect_err("a display name cannot contain controls")
+            .to_string();
+        assert!(display_name.contains("模型显示名"), "{display_name}");
+    }
+
+    #[test]
+    fn tag_settings_enforce_builtin_and_custom_group_exclusivity() {
+        let profile = |tags: Vec<&str>| genehub_proto::AgentModelProfile {
+            agent_id: "codex".into(),
+            model_id: Some("model".into()),
+            display_name: None,
+            tags: tags.into_iter().map(str::to_string).collect(),
+            cost: Some(genehub_proto::AgentCostLevel::Medium),
+        };
+        let mut preferences = AgentSelectionPreferences {
+            model_profiles: vec![profile(vec!["Max", "Pro"])],
+            ..Default::default()
+        };
+        let builtin = validate_agent_preferences(&preferences)
+            .expect_err("Max and Pro belong to one exclusive group")
+            .to_string();
+        assert!(builtin.contains("只能选择一个"), "{builtin}");
+
+        preferences.tag_groups = vec![genehub_proto::AgentTagGroup {
+            id: "quality".into(),
+            label: "质量".into(),
+            tags: vec!["审慎".into(), "快速".into()],
+        }];
+        preferences.model_profiles = vec![profile(vec!["Flash", "审慎", "快速"])];
+        let custom = validate_agent_preferences(&preferences)
+            .expect_err("a custom group is exclusive too")
+            .to_string();
+        assert!(custom.contains("只能选择一个"), "{custom}");
+
+        preferences.tag_groups = vec![genehub_proto::AgentTagGroup {
+            id: "builtin-intelligence".into(),
+            label: "冲突".into(),
+            tags: vec!["自定义".into()],
+        }];
+        preferences.model_profiles.clear();
+        let reserved = validate_agent_preferences(&preferences)
+            .expect_err("the built-in group id is reserved")
+            .to_string();
+        assert!(reserved.contains("内置标签组标识"), "{reserved}");
+    }
 
     #[tokio::test]
     async fn independent_machine_state_updates_merge_instead_of_overwriting() {
