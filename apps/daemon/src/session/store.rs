@@ -163,6 +163,145 @@ where
     })
 }
 
+/// One durable Human wait. A session holds at most one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanWait {
+    pub id: String,
+    pub kind: WaitKind,
+    pub title: String,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub author: WaitAuthor,
+    pub options: Vec<WaitOption>,
+    pub origin: WaitOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<HumanDecision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WaitKind {
+    Elevation,
+    Question,
+    PlanApproval,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WaitAuthor {
+    Daemon,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub elevate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum WaitOrigin {
+    Agent { tool_call_id: Option<String> },
+    Workflow { run_id: String },
+    Project { challenge_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanDecision {
+    #[serde(deserialize_with = "outcome_without_timer")]
+    pub outcome: genehub_proto::PermissionOutcome,
+    pub decided_at_ms: i64,
+}
+
+fn plain_text(value: &str, limit: usize) -> String {
+    let flat: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    flat.chars().take(limit).collect()
+}
+
+/// Fold a pre-`human_wait` meta into the single record. Existing fields stay
+/// so current readers keep working until they move over.
+pub fn adopt_human_wait(meta: &mut SessionMeta) {
+    if meta.human_wait.is_some() {
+        return;
+    }
+    let (request, decision, project) = if let Some(continuation) = meta.human_continuation.clone() {
+        let project = continuation.project_approval || meta.pending_project_approval;
+        (
+            continuation.request,
+            Some(HumanDecision {
+                outcome: continuation.outcome,
+                decided_at_ms: continuation.decided_at_ms,
+            }),
+            project,
+        )
+    } else if let Some(request) = meta.pending_permission.clone() {
+        (request, None, meta.pending_project_approval)
+    } else {
+        return;
+    };
+    let workflow = request
+        .id
+        .strip_prefix("workflow-human-")
+        .map(str::to_string);
+    let kind = if project || request.kind == genehub_proto::PermissionRequestKind::PlanApproval {
+        WaitKind::PlanApproval
+    } else if request.kind == genehub_proto::PermissionRequestKind::Question {
+        WaitKind::Question
+    } else {
+        WaitKind::Elevation
+    };
+    let origin = if let Some(run_id) = workflow {
+        WaitOrigin::Workflow { run_id }
+    } else if project {
+        WaitOrigin::Project {
+            challenge_id: request.id.clone(),
+        }
+    } else {
+        WaitOrigin::Agent {
+            tool_call_id: request.tool_call_id.clone(),
+        }
+    };
+    let author = if matches!(origin, WaitOrigin::Agent { .. }) {
+        WaitAuthor::Agent
+    } else {
+        WaitAuthor::Daemon
+    };
+    let summary = plain_text(request.detail.as_deref().unwrap_or(&request.title), 300);
+    let description = request.detail.clone().filter(|detail| detail != &summary);
+    meta.human_wait = Some(HumanWait {
+        id: request.id.clone(),
+        kind,
+        title: plain_text(&request.title, 120),
+        summary,
+        description,
+        author,
+        options: request
+            .options
+            .iter()
+            .map(|option| WaitOption {
+                id: option.id.clone(),
+                label: option.label.clone(),
+                elevate: matches!(
+                    option.kind,
+                    genehub_proto::PermissionOptionKind::AllowOnce
+                        | genehub_proto::PermissionOptionKind::AllowAlways
+                ),
+            })
+            .collect(),
+        origin,
+        decision,
+    });
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionActivity {
@@ -287,6 +426,10 @@ pub struct SessionMeta {
     pub pending_project_approval: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_continuation: Option<HumanContinuation>,
+    /// Single Human wait. Older metas are folded into this on load; the three
+    /// fields above stay until every reader uses this record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_wait: Option<HumanWait>,
     /// The Agent this session runs remains `agent_id`; lineage only describes
     /// where inherited history came from and how it reached this Agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +543,7 @@ impl SessionMeta {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,
@@ -1173,6 +1317,7 @@ impl Store {
         }
         meta.workspace_id = workspace_id.to_string();
         meta.format = header.format;
+        adopt_human_wait(&mut meta);
         Ok(meta)
     }
 
@@ -2123,6 +2268,7 @@ mod project_home_tests {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,
@@ -2290,5 +2436,29 @@ mod project_home_tests {
                 "missing structured {event} diagnostic"
             );
         }
+    }
+
+    #[test]
+    fn an_old_pending_permission_becomes_one_human_wait() {
+        let mut session = meta("s1", "w1", Path::new("/tmp"));
+        session.pending_permission = Some(PermissionRequest {
+            id: "workflow-human-wr_1".into(),
+            kind: genehub_proto::PermissionRequestKind::Question,
+            title: "Approve the budget".into(),
+            detail: Some("The request used its runs.".into()),
+            tool_call_id: None,
+            options: vec![genehub_proto::PermissionOption {
+                id: "a".into(),
+                label: "Add one run".into(),
+                kind: genehub_proto::PermissionOptionKind::AllowOnce,
+            }],
+            questions: None,
+        });
+        adopt_human_wait(&mut session);
+        let wait = session.human_wait.expect("migrated");
+        assert_eq!(wait.kind, WaitKind::Question);
+        assert!(matches!(wait.origin, WaitOrigin::Workflow { ref run_id } if run_id == "wr_1"));
+        assert!(wait.decision.is_none());
+        assert!(wait.options[0].elevate);
     }
 }

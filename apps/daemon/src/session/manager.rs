@@ -544,6 +544,7 @@ impl SessionManager {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,
@@ -716,6 +717,7 @@ impl SessionManager {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: None,
             managed: Some(managed),
             managed_system_prompt: Some(managed_system_prompt),
@@ -973,6 +975,7 @@ impl SessionManager {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: Some(SessionLineage {
                 source_session_id: session_id.to_string(),
                 source_turn_id: turn_id.to_string(),
@@ -1233,6 +1236,7 @@ impl SessionManager {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: Some(SessionLineage {
                 source_session_id: transfer.source_session_id,
                 source_turn_id: transfer.source_turn_id,
@@ -1452,6 +1456,7 @@ impl SessionManager {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,
@@ -3261,38 +3266,8 @@ impl SessionManager {
             *meta = next;
         }
         let _interaction = live.interaction_lock.lock().await;
-        // Fieldless clients retain their historical stop-waiting contract.
-        // A durable-input PM instead preserves the Human card during a stop.
-        if live.meta.lock().await.inbox.entries.is_empty() {
-            let had_interaction = {
-                let meta = live.meta.lock().await;
-                meta.pending_permission.is_some()
-                    || meta
-                        .human_continuation
-                        .as_ref()
-                        .is_some_and(|c| !c.completed)
-            };
-            if had_interaction {
-                cancel_human_continuation(&live, &self.store).await?;
-                if let Some(broker) = &self.project_control {
-                    broker.revoke_session(session_id).await?;
-                }
-                if live.execution.lock().await.is_none() {
-                    if let Some(round) = live
-                        .settle_round(Settling::Kernel, RoundOutcome::Canceled)
-                        .await
-                    {
-                        persist_round(&live, round).await;
-                    }
-                    *live.status.lock().await = SessionStatus::Idle;
-                    live.publish(SessionEvent::SessionStatusChanged {
-                        status: SessionStatus::Idle,
-                    })
-                    .await;
-                    return Ok(());
-                }
-            }
-        }
+        // An interrupt stops execution and pauses the inbox. It does not
+        // decide a waiting Human card; cancel is an explicit response.
         self.interrupt_execution(&live).await
     }
 
@@ -7278,6 +7253,7 @@ mod tests {
             pending_permission: None,
             pending_project_approval: false,
             human_continuation: None,
+            human_wait: None,
             lineage: None,
             managed: None,
             managed_system_prompt: None,
