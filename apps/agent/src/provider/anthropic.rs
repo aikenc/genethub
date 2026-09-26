@@ -306,16 +306,16 @@ fn flatten_text(content: &[Content]) -> String {
 
 fn apply_usage(usage: &mut Usage, value: &Value) {
     if let Some(input) = value["input_tokens"].as_u64() {
-        usage.input += input;
+        usage.input = input;
     }
     if let Some(output) = value["output_tokens"].as_u64() {
-        usage.output += output;
+        usage.output = output;
     }
     if let Some(cache_read) = value["cache_read_input_tokens"].as_u64() {
-        usage.cache_read += cache_read;
+        usage.cache_read = cache_read;
     }
     if let Some(cache_write) = value["cache_creation_input_tokens"].as_u64() {
-        usage.cache_write += cache_write;
+        usage.cache_write = cache_write;
     }
 }
 
@@ -427,14 +427,15 @@ mod tests {
     }
 
     #[test]
-    fn usage_fields_accumulate_from_both_events() {
+    fn usage_fields_are_replaced_when_the_event_carries_them() {
         let mut usage = Usage::default();
         apply_usage(
             &mut usage,
             &json!({"input_tokens": 10, "cache_read_input_tokens": 4}),
         );
         apply_usage(&mut usage, &json!({"output_tokens": 7}));
-        assert_eq!(usage.input, 10);
+        apply_usage(&mut usage, &json!({"input_tokens": 3}));
+        assert_eq!(usage.input, 3);
         assert_eq!(usage.cache_read, 4);
         assert_eq!(usage.output, 7);
     }

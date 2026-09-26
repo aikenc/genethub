@@ -98,6 +98,7 @@ pub async fn run() -> i32 {
         additional_system_prompts: args.add_system_prompt,
         cwd,
         stats: Usage::default(),
+        last_request: None,
         streaming: false,
         compacting: false,
         tools_enabled: true,
@@ -296,27 +297,68 @@ async fn handle(state: &Arc<Mutex<State>>, command: Command) {
 struct ContextMaterial {
     text: String,
     source_index: String,
+    fallback_error: Option<String>,
 }
 
 async fn run_compaction(state: Arc<Mutex<State>>) {
-    let emitter = { state.lock().await.emitter.clone() };
-    emitter.send(json!({ "type": "compaction_start", "reason": "manual:capsule" }));
+    capsule_replace(state, "manual:capsule", None).await;
+}
 
-    let (session_id, fallback_messages, abort, budget) = {
+/// Replaces provider context with the deterministic capsule. `open_round_from`
+/// is the index of the current round; `None` keeps no tail (manual `/compact`).
+/// Automatic calls no-op until usage reaches 80% of the configured window, and
+/// run at most once per invocation.
+pub(crate) async fn capsule_replace(
+    state: Arc<Mutex<State>>,
+    reason: &str,
+    open_round_from: Option<usize>,
+) -> bool {
+    let idle = open_round_from.is_none();
+    let (session_id, fallback_messages, tail, abort, budget, tokens_before) = {
         let guard = state.lock().await;
-        let budget = capsule_token_budget(
-            guard
-                .current_model
-                .as_ref()
-                .and_then(|model| model.context_window),
-        );
+        let window = guard
+            .current_model
+            .as_ref()
+            .and_then(|model| model.context_window)
+            .filter(|window| *window > 0);
+        if !idle {
+            let Some(window) = window else {
+                return false;
+            };
+            if !state::exceeds_capsule_threshold(guard.context_tokens(), window) {
+                return false;
+            }
+        }
+        let budget = capsule_token_budget(window);
+        let tail = match open_round_from {
+            Some(index) => {
+                let messages = &guard.session.messages;
+                let start = index.min(messages.len());
+                let room = window
+                    .unwrap_or(0)
+                    .saturating_mul(4)
+                    .saturating_div(5)
+                    .saturating_sub(budget);
+                fit_open_round(messages[start..].to_vec(), room)
+            }
+            None => Vec::new(),
+        };
         (
             guard.genehub_session_id.clone(),
             guard.session.messages.clone(),
+            tail,
             guard.abort.clone(),
             budget,
+            guard.context_tokens(),
         )
     };
+
+    let emitter = { state.lock().await.emitter.clone() };
+    {
+        let mut guard = state.lock().await;
+        guard.compacting = true;
+    }
+    emitter.send(json!({ "type": "compaction_start", "reason": reason }));
 
     let material = match session_id.as_deref() {
         Some(session_id) => fetch_context_material(session_id, budget)
@@ -334,24 +376,124 @@ async fn run_compaction(state: Arc<Mutex<State>>) {
     if abort.requested() {
         emitter.send(json!({
             "type": "compaction_end",
-            "reason": "manual:capsule",
+            "reason": reason,
             "aborted": true
         }));
         let mut guard = state.lock().await;
-        guard.streaming = false;
         guard.compacting = false;
-        guard.abort.reset();
-        return;
+        if idle {
+            guard.streaming = false;
+            guard.abort.reset();
+        }
+        return false;
     }
     let summary = format!("{}\n\n{}", material.text, material.source_index);
-    {
+    let end_reason = if material.fallback_error.is_some() {
+        format!("{reason}-fallback")
+    } else {
+        reason.to_string()
+    };
+    let tokens_after = {
         let mut guard = state.lock().await;
-        guard.session.replace_with_compaction(summary);
-        guard.streaming = false;
+        guard.session.replace_with_capsule(summary, tail);
+        guard.last_request = None;
         guard.compacting = false;
-        guard.abort.reset();
+        if idle {
+            guard.streaming = false;
+            guard.abort.reset();
+        }
+        guard.context_tokens()
+    };
+    let mut end = json!({
+        "type": "compaction_end",
+        "reason": end_reason,
+        "tokensBefore": tokens_before,
+        "tokensAfter": tokens_after,
+    });
+    if let Some(error) = material.fallback_error {
+        end["error"] = json!(error);
     }
-    emitter.send(json!({ "type": "compaction_end", "reason": "manual:capsule" }));
+    emitter.send(end);
+    true
+}
+
+fn fit_open_round(tail: Vec<Message>, room: u64) -> Vec<Message> {
+    if state::estimate_message_tokens(&tail) <= room {
+        return tail;
+    }
+    let mut leading = Vec::new();
+    let mut groups: Vec<Vec<Message>> = Vec::new();
+    for message in tail {
+        if matches!(message, Message::Assistant { .. }) {
+            groups.push(vec![message]);
+        } else if let Some(group) = groups.last_mut() {
+            group.push(message);
+        } else {
+            leading.push(message);
+        }
+    }
+    let mut omitted = Vec::new();
+    while groups.len() > 1 {
+        let dropped = groups.remove(0);
+        omitted.extend(tool_names(&dropped));
+        let fitted = assemble_round(&leading, &omitted, &groups);
+        if state::estimate_message_tokens(&fitted) <= room {
+            return fitted;
+        }
+    }
+    if groups.len() == 1 {
+        let fitted = assemble_round(&leading, &omitted, &groups);
+        if state::estimate_message_tokens(&fitted) <= room || omitted.is_empty() {
+            return fitted;
+        }
+        // The newest group alone still overflows. Keep it paired rather than
+        // splitting a tool call from its result; the request is sent anyway.
+        return fitted;
+    }
+    assemble_round(&leading, &omitted, &groups)
+}
+
+fn assemble_round(leading: &[Message], omitted: &[String], groups: &[Vec<Message>]) -> Vec<Message> {
+    let mut out = leading.to_vec();
+    if !omitted.is_empty() {
+        out.push(Message::user(format!(
+            "Earlier tool results in this round were omitted to fit the context window: {}. Use `genet session rounds` to inspect them.",
+            omitted.join(", ")
+        )));
+    }
+    for group in groups {
+        out.extend(group.iter().cloned());
+    }
+    out
+}
+
+fn tool_names(group: &[Message]) -> Vec<String> {
+    let calls = group
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|block| match block {
+                        protocol::Content::ToolCall { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    if !calls.is_empty() {
+        return calls;
+    }
+    group
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn capsule_token_budget(window: Option<u64>) -> u64 {
@@ -394,7 +536,11 @@ async fn fetch_context_material(session_id: &str, budget: u64) -> Result<Context
         .ok_or_else(|| "genet context text is empty".to_string())?
         .to_string();
     let source_index = format_source_index(session_id, context);
-    Ok(ContextMaterial { text, source_index })
+    Ok(ContextMaterial {
+        text,
+        source_index,
+        fallback_error: None,
+    })
 }
 
 fn format_source_index(session_id: &str, context: &Value) -> String {
@@ -446,6 +592,7 @@ fn fallback_context(
              Retrieval command: genet session inspect {session_id}\n\
              </genehub-source-index>"
         ),
+        fallback_error: Some(error.to_string()),
     }
 }
 
@@ -575,6 +722,7 @@ mod tests {
             additional_system_prompts: Vec::new(),
             cwd: dir.clone(),
             stats: Usage::default(),
+            last_request: None,
             streaming: true,
             compacting: true,
             tools_enabled: true,
@@ -628,6 +776,7 @@ mod tests {
             additional_system_prompts: Vec::new(),
             cwd: dir,
             stats: Usage::default(),
+            last_request: None,
             streaming: true,
             compacting: true,
             tools_enabled: true,
@@ -640,6 +789,72 @@ mod tests {
         match &guard.session.messages[0] {
             Message::User { content, .. } => assert_eq!(content, "keep this"),
             other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_oversized_round_drops_older_tool_groups_without_splitting_the_newest() {
+        let prompt = Message::user("do the work");
+        let tail = vec![
+            prompt,
+            assistant_call("old_tool"),
+            tool_result("old_tool", &"x".repeat(4_000)),
+            assistant_call("new_tool"),
+            tool_result("new_tool", "ok"),
+        ];
+        let fitted = fit_open_round(tail, 0);
+        match &fitted[0] {
+            Message::User { content, .. } => assert_eq!(content, "do the work"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let note = fitted
+            .iter()
+            .find_map(|message| match message {
+                Message::User { content, .. } if content.contains("omitted") => Some(content),
+                _ => None,
+            })
+            .expect("omission note");
+        assert!(note.contains("old_tool"));
+        assert!(note.contains("genet session rounds"));
+        assert!(fitted.iter().any(|message| message
+            .tool_calls()
+            .iter()
+            .any(|(_, name, _)| name == "new_tool")));
+        assert!(!fitted.iter().any(|message| message
+            .tool_calls()
+            .iter()
+            .any(|(_, name, _)| name == "old_tool")));
+        assert!(fitted.iter().any(|message| matches!(
+            message,
+            Message::ToolResult { tool_name, .. } if tool_name == "new_tool"
+        )));
+    }
+
+    fn assistant_call(name: &str) -> Message {
+        Message::Assistant {
+            content: vec![crate::protocol::Content::ToolCall {
+                id: name.into(),
+                name: name.into(),
+                arguments: json!({}),
+            }],
+            api: "fake".into(),
+            provider: "fake".into(),
+            model: "echo".into(),
+            usage: Usage::default(),
+            stop_reason: crate::protocol::StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    fn tool_result(name: &str, body: &str) -> Message {
+        Message::ToolResult {
+            tool_call_id: name.into(),
+            tool_name: name.into(),
+            content: vec![crate::protocol::Content::text(body)],
+            details: None,
+            is_error: false,
+            timestamp: 0,
         }
     }
 }

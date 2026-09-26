@@ -107,19 +107,26 @@ impl Session {
 
     /// Replaces provider context with a cited summary while preserving the
     /// append-only audit trail. Reopening the file replays the same reset at
-    /// this entry; the private analysis session that produced it is never
-    /// written here.
+    /// this entry.
     pub fn replace_with_compaction(&mut self, summary: String) {
+        self.replace_with_capsule(summary, Vec::new());
+    }
+
+    /// Same reset as [`Self::replace_with_compaction`], then restores `tail`
+    /// (the open round) so tool calls stay paired with their results.
+    pub fn replace_with_capsule(&mut self, summary: String, tail: Vec<Message>) {
         let message = Message::user(format!(
             "<genehub-compacted-context>\n{summary}\n</genehub-compacted-context>"
         ));
         self.messages.clear();
         self.messages.push(message.clone());
+        self.messages.extend(tail.iter().cloned());
         self.append_entry(
             "compaction",
             json!({
                 "summary": summary,
-                "message": serde_json::to_value(message).unwrap_or(Value::Null),
+                "message": serde_json::to_value(&message).unwrap_or(Value::Null),
+                "tail": serde_json::to_value(&tail).unwrap_or(Value::Null),
             }),
         );
     }
@@ -211,6 +218,13 @@ impl Session {
                     if let Some(message) = message {
                         self.messages.clear();
                         self.messages.push(message);
+                    }
+                    if let Some(tail) = entry.get("tail").and_then(Value::as_array) {
+                        for item in tail {
+                            if let Ok(message) = serde_json::from_value::<Message>(item.clone()) {
+                                self.messages.push(message);
+                            }
+                        }
                     }
                 }
                 Some("failed_turn_rollback") => {
@@ -351,6 +365,23 @@ mod tests {
             .unwrap()
             .lines()
             .any(|line| line.contains("\"type\":\"compaction\"")));
+    }
+
+    #[test]
+    fn capsule_replays_the_open_round_after_reopen() {
+        let dir = temp_dir("capsule-tail");
+        let file = dir.join("s.jsonl");
+        let mut session = Session::open(file.clone(), dir.clone());
+        session.append_message(Message::user("old detail"));
+        session.replace_with_capsule("summary".into(), vec![Message::user("keep this round")]);
+        assert_eq!(session.messages.len(), 2);
+
+        let reopened = Session::open(file, dir);
+        assert_eq!(reopened.messages.len(), 2);
+        assert!(matches!(
+            &reopened.messages[1],
+            Message::User { content, .. } if content == "keep this round"
+        ));
     }
 
     #[test]

@@ -47,8 +47,18 @@ pub async fn run_prompt_with_attachments(
     emitter.send(json!({ "type": "message_end", "message": prompt_value }));
     produced.push(prompt_value);
     let mut retry_without_answer = false;
+    let mut open_round = retained_context_len;
 
     loop {
+        if crate::capsule_replace(state.clone(), "auto:capsule", Some(open_round)).await {
+            // The capsule message is now at index 0 and the open round follows it.
+            open_round = 1;
+        }
+        if state.lock().await.abort.requested() {
+            eprintln!("event=turn_cancelled_before_model");
+            break;
+        }
+
         let snapshot = {
             let guard = state.lock().await;
             let Some(model) = guard.current_model.clone() else {
@@ -79,6 +89,18 @@ pub async fn run_prompt_with_attachments(
             let mut guard = state.lock().await;
             guard.session.append_message(assistant.message.clone());
             guard.stats.add(&assistant.usage);
+            if !matches!(
+                assistant.stop_reason,
+                StopReason::Error | StopReason::Aborted
+            ) {
+                guard.last_request = Some(crate::state::AccountedUsage {
+                    input: assistant.usage.input,
+                    output: assistant.usage.output,
+                    cache_read: assistant.usage.cache_read,
+                    cache_write: assistant.usage.cache_write,
+                    accounted_messages: guard.session.messages.len(),
+                });
+            }
             // A provider rejection before any tool call has no side effects to
             // preserve. Keep its emitted transcript and append-only audit, but
             // do not make the rejected prompt (especially large native media)
@@ -675,6 +697,7 @@ mod tests {
             skills: Vec::<Skill>::new(),
             cwd,
             stats: Usage::default(),
+            last_request: None,
             streaming: false,
             compacting: false,
             tools_enabled: true,
@@ -731,6 +754,48 @@ mod tests {
         // Two turns: the tool call turn and the closing turn.
         assert_eq!(order.iter().filter(|k| *k == "turn_start").count(), 2);
         assert_eq!(order.iter().filter(|k| *k == "turn_end").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_full_window_is_capsuled_before_the_request_and_the_prompt_stays() {
+        let dir = std::env::temp_dir().join(format!("genet-capsule-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (emitter, rx) = capture();
+        let mut model = fake_model();
+        model.context_window = Some(200);
+        let state = state_with(Some(model), emitter, dir);
+        {
+            let mut guard = state.lock().await;
+            guard
+                .session
+                .append_message(Message::user("x".repeat(4_000)));
+        }
+        run_prompt(state.clone(), "please continue".into()).await;
+
+        let frames = drain(rx).await;
+        let start = frames
+            .iter()
+            .find(|frame| frame["type"] == "compaction_start")
+            .expect("compaction start");
+        assert_eq!(start["reason"], "auto:capsule");
+        let end = frames
+            .iter()
+            .find(|frame| frame["type"] == "compaction_end")
+            .expect("compaction end");
+        assert_eq!(end["reason"], "auto:capsule-fallback");
+        assert!(kinds(&frames).contains(&"agent_end".to_string()));
+
+        let guard = state.lock().await;
+        match &guard.session.messages[0] {
+            Message::User { content, .. } => {
+                assert!(content.contains("<genehub-compacted-context>"))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(guard.session.messages.iter().any(|message| matches!(
+            message,
+            Message::User { content, .. } if content == "please continue"
+        )));
     }
 
     #[tokio::test]

@@ -42,6 +42,17 @@ impl Abort {
     }
 }
 
+/// Tokens from the latest successful model request, plus how many session
+/// messages that request already covered. Later messages are estimated.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AccountedUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub accounted_messages: usize,
+}
+
 pub struct State {
     pub emitter: Emitter,
     pub session: Session,
@@ -53,6 +64,9 @@ pub struct State {
     pub additional_system_prompts: Vec<String>,
     pub cwd: PathBuf,
     pub stats: Usage,
+    /// Latest successful request. Absent until one completes, and cleared when
+    /// a capsule replaces the context those tokens described.
+    pub last_request: Option<AccountedUsage>,
     pub streaming: bool,
     pub compacting: bool,
     pub tools_enabled: bool,
@@ -139,18 +153,35 @@ impl State {
     }
 
     /// Omitted entirely when no model or context window is known, which is what
-    /// the daemon expects rather than nulls.
+    /// the daemon expects rather than nulls. The count is the latest request's
+    /// real tokens plus an estimate of messages added since, not the session's
+    /// cumulative total.
     fn context_usage(&self) -> Option<Value> {
         let window = self.current_model.as_ref()?.context_window?;
         if window == 0 {
             return None;
         }
-        let tokens = self.stats.input + self.stats.output;
+        let tokens = self.context_tokens();
         Some(json!({
             "tokens": tokens,
             "contextWindow": window,
             "percent": ((tokens as f64 / window as f64) * 100.0).round(),
         }))
+    }
+
+    pub(crate) fn context_tokens(&self) -> u64 {
+        match self.last_request {
+            Some(last) => {
+                let base = last
+                    .input
+                    .saturating_add(last.cache_read)
+                    .saturating_add(last.cache_write)
+                    .saturating_add(last.output);
+                let start = last.accounted_messages.min(self.session.messages.len());
+                base.saturating_add(estimate_message_tokens(&self.session.messages[start..]))
+            }
+            None => estimate_message_tokens(&self.session.messages),
+        }
     }
 
     /// Skills double as `/skill:<name>` slash commands.
@@ -184,6 +215,16 @@ impl State {
     }
 }
 
+/// Four characters per token, matching the capsule trigger's estimate.
+pub(crate) fn estimate_message_tokens(messages: &[Message]) -> u64 {
+    let raw = serde_json::to_string(messages).unwrap_or_default();
+    (raw.chars().count() as u64) / 4
+}
+
+pub(crate) fn exceeds_capsule_threshold(used: u64, window: u64) -> bool {
+    window > 0 && used >= window.saturating_mul(4) / 5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +256,7 @@ mod tests {
             skills: Vec::new(),
             cwd,
             stats: Usage::default(),
+            last_request: None,
             streaming: false,
             compacting: false,
             tools_enabled: true,
@@ -287,6 +329,23 @@ mod tests {
         assert!(abort.requested());
         abort.reset();
         assert!(!abort.requested());
+    }
+
+    #[tokio::test]
+    async fn context_usage_follows_the_latest_request_not_the_session_total() {
+        let mut state = state();
+        state.stats.input = 50_000;
+        state.stats.output = 50_000;
+        state.session.append_message(Message::user("hello"));
+        state.last_request = Some(AccountedUsage {
+            input: 100,
+            output: 20,
+            cache_read: 5,
+            cache_write: 0,
+            accounted_messages: 1,
+        });
+        let usage = state.state_value()["contextUsage"].clone();
+        assert_eq!(usage["tokens"], 125);
     }
 
     #[tokio::test]
