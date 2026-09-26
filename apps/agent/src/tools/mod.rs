@@ -265,7 +265,12 @@ pub(crate) fn media_attachment_detail_key() -> &'static str {
     media::ATTACHMENT_DETAIL
 }
 
-pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
+pub async fn execute(
+    name: &str,
+    args: &Value,
+    cwd: &Path,
+    cancel: impl Fn() -> bool + Send + 'static,
+) -> ToolResult {
     if evidence::enabled() {
         match name {
             "genet" => return evidence::run(args, cwd).await,
@@ -273,15 +278,30 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
             _ => return ToolResult::error("tool is unavailable to evidence-only analysis"),
         }
     }
+    if name == "bash" {
+        if cancel() {
+            return ToolResult::error("Operation aborted");
+        }
+        return bash::run(args, cwd).await;
+    }
+    let name = name.to_string();
+    let args = args.clone();
+    let cwd = cwd.to_path_buf();
+    run_blocking(move || dispatch_sync(&name, &args, &cwd, &cancel)).await
+}
+
+fn dispatch_sync(name: &str, args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> ToolResult {
+    if cancel() {
+        return ToolResult::error("Operation aborted");
+    }
     let mut result = match name {
         "read" => fs_tools::read(args, cwd),
         "read_media" => media::read(args, cwd),
-        "write" => fs_tools::write(args, cwd),
-        "edit" => fs_tools::edit(args, cwd),
+        "write" => fs_tools::write_cancellable(args, cwd, cancel),
+        "edit" => fs_tools::edit_cancellable(args, cwd, cancel),
         "ls" => fs_tools::ls(args, cwd),
-        "grep" => search::grep(args, cwd),
-        "find" => search::find(args, cwd),
-        "bash" => bash::run(args, cwd).await,
+        "grep" => search::grep_cancellable(args, cwd, cancel),
+        "find" => search::find_cancellable(args, cwd, cancel),
         other => ToolResult::error(format!("Tool {other} not found")),
     };
     if evidence::enabled() && matches!(name, "read" | "ls" | "read_media") {
@@ -290,6 +310,25 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> ToolResult {
         }
     }
     result
+}
+
+#[cfg(not(target_family = "wasm"))]
+async fn run_blocking<F>(work: F) -> ToolResult
+where
+    F: FnOnce() -> ToolResult + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) => ToolResult::error(format!("tool task failed: {error}")),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+async fn run_blocking<F>(work: F) -> ToolResult
+where
+    F: FnOnce() -> ToolResult + Send + 'static,
+{
+    work()
 }
 
 /// Validates the built-in Agent's stopped-interaction payload before it is

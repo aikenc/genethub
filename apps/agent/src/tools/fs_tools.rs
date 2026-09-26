@@ -38,6 +38,14 @@ pub fn read(args: &Value, cwd: &Path) -> ToolResult {
 }
 
 pub fn write(args: &Value, cwd: &Path) -> ToolResult {
+    write_cancellable(args, cwd, &|| false)
+}
+
+pub(crate) fn write_cancellable(
+    args: &Value,
+    cwd: &Path,
+    cancel: &dyn Fn() -> bool,
+) -> ToolResult {
     let Some(raw_path) = arg_str(args, "path") else {
         return ToolResult::error("write: 'path' is required");
     };
@@ -45,6 +53,9 @@ pub fn write(args: &Value, cwd: &Path) -> ToolResult {
         return ToolResult::error("write: 'content' is required");
     };
     let path = resolve_path(cwd, &raw_path);
+    if cancel() {
+        return ToolResult::error("Operation aborted");
+    }
 
     if let Some(parent) = path.parent() {
         if let Err(err) = std::fs::create_dir_all(parent) {
@@ -65,6 +76,14 @@ pub fn write(args: &Value, cwd: &Path) -> ToolResult {
 /// partially edited buffer, so overlapping edits are rejected rather than
 /// silently applied in sequence.
 pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
+    edit_cancellable(args, cwd, &|| false)
+}
+
+pub(crate) fn edit_cancellable(
+    args: &Value,
+    cwd: &Path,
+    cancel: &dyn Fn() -> bool,
+) -> ToolResult {
     let Some(raw_path) = arg_str(args, "path") else {
         return ToolResult::error("edit: 'path' is required");
     };
@@ -140,6 +159,9 @@ pub fn edit(args: &Value, cwd: &Path) -> ToolResult {
         updated.replace_range(start..end, new_text);
     }
 
+    if cancel() {
+        return ToolResult::error("Operation aborted");
+    }
     if let Err(err) = std::fs::write(&path, &updated) {
         return ToolResult::error(format!("Failed to write {}: {err}", path.display()));
     }

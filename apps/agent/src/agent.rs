@@ -559,17 +559,18 @@ async fn execute_one(
         tools::ToolResult::error(format!(
             "tool arguments are not valid JSON, so {name} was not run: {raw}"
         ))
-    } else if abort.requested() {
-        tools::ToolResult::error("Operation aborted")
-    } else {
-        tokio::select! {
-            result = tools::execute(name, arguments, cwd) => result,
-            () = abort.cancelled() => {
-                eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
-                tools::ToolResult::error("Operation aborted")
+        } else if abort.requested() {
+            tools::ToolResult::error("Operation aborted")
+        } else {
+            let cancel = abort.poll();
+            tokio::select! {
+                result = tools::execute(name, arguments, cwd, cancel) => result,
+                () = abort.cancelled() => {
+                    eprintln!("event=tool_cancelled tool={name} tool_call_id={id}");
+                    tools::ToolResult::error("Operation aborted")
+                }
             }
-        }
-    };
+        };
     let result = enforce_media_modality(result, model);
     emitter.send(json!({
         "type": "tool_execution_end",

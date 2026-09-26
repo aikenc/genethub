@@ -36,6 +36,11 @@ impl Abort {
         *self.changed.borrow()
     }
 
+    pub fn poll(&self) -> impl Fn() -> bool + Send + 'static {
+        let changed = self.changed.subscribe();
+        move || *changed.borrow()
+    }
+
     pub async fn cancelled(&self) {
         let mut changed = self.changed.subscribe();
         let _ = changed.wait_for(|requested| *requested).await;

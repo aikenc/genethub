@@ -17,6 +17,10 @@ pub const GREP_DEFAULT_LIMIT: usize = 100;
 pub const FIND_DEFAULT_LIMIT: usize = 1000;
 
 pub fn grep(args: &Value, cwd: &Path) -> ToolResult {
+    grep_cancellable(args, cwd, &|| false)
+}
+
+pub fn grep_cancellable(args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> ToolResult {
     let Some(pattern) = arg_str(args, "pattern") else {
         return ToolResult::error("grep: 'pattern' is required");
     };
@@ -54,6 +58,9 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolResult {
     let mut matches = 0usize;
 
     'files: for entry in WalkBuilder::new(&root).hidden(false).build().flatten() {
+        if cancel() {
+            return ToolResult::error("Operation aborted");
+        }
         if !entry.file_type().is_some_and(|file| file.is_file()) {
             continue;
         }
@@ -101,6 +108,10 @@ pub fn grep(args: &Value, cwd: &Path) -> ToolResult {
 }
 
 pub fn find(args: &Value, cwd: &Path) -> ToolResult {
+    find_cancellable(args, cwd, &|| false)
+}
+
+pub fn find_cancellable(args: &Value, cwd: &Path, cancel: &dyn Fn() -> bool) -> ToolResult {
     let Some(pattern) = arg_str(args, "pattern") else {
         return ToolResult::error("find: 'pattern' is required");
     };
@@ -117,6 +128,9 @@ pub fn find(args: &Value, cwd: &Path) -> ToolResult {
 
     let mut hits: Vec<String> = Vec::new();
     for entry in WalkBuilder::new(&root).hidden(false).build().flatten() {
+        if cancel() {
+            return ToolResult::error("Operation aborted");
+        }
         if !entry.file_type().is_some_and(|file| file.is_file()) {
             continue;
         }
@@ -230,6 +244,19 @@ mod tests {
         assert!(result.text.starts_with("src/lib.rs\n"));
         assert!(result.text.contains("2 more matching files omitted"));
         assert!(!result.text.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn find_stops_when_cancelled() {
+        let dir = fixture("find-cancel");
+        let seen = std::cell::Cell::new(0u32);
+        let result = find_cancellable(&json!({"pattern": "**/*"}), &dir, &|| {
+            let next = seen.get() + 1;
+            seen.set(next);
+            next > 1
+        });
+        assert!(result.is_error);
+        assert!(result.text.contains("Operation aborted"));
     }
 
     #[test]
