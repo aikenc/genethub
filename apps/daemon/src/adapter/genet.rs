@@ -559,6 +559,22 @@ async fn translate_stream(
     }
 }
 
+fn frame_line(frame: &Value, key: &str, limit: usize) -> Option<String> {
+    let flat: String = frame
+        .get(key)?
+        .as_str()?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text: String = flat.chars().take(limit).collect();
+    (!text.is_empty()).then_some(text)
+}
+
+fn frame_text(frame: &Value, key: &str) -> Option<String> {
+    let text = frame.get(key)?.as_str()?.trim();
+    (!text.is_empty()).then(|| text.chars().take(8_000).collect())
+}
+
 fn builtin_questions(frame: &Value) -> Option<Vec<InteractionQuestion>> {
     let raw = frame.get("questions")?.as_array()?;
     if !(1..=3).contains(&raw.len()) {
@@ -655,12 +671,15 @@ fn translate_frame(frame: &Value, state: &mut TurnState, events: &crate::adapter
                 .and_then(Value::as_str)
                 .unwrap_or("user-input")
                 .to_string();
+            let title = frame_line(frame, "title", 120)
+                .unwrap_or_else(|| questions[0].prompt.clone());
+            let detail = frame_text(frame, "description").or_else(|| frame_line(frame, "summary", 300));
             emit(SessionEvent::PermissionRequested {
                 request: PermissionRequest {
                     id: request_id.clone(),
                     kind: PermissionRequestKind::Question,
-                    title: questions[0].prompt.clone(),
-                    detail: None,
+                    title,
+                    detail,
                     tool_call_id: Some(request_id),
                     options: Vec::new(),
                     questions: Some(questions),
@@ -1308,9 +1327,68 @@ mod tests {
             [SessionEvent::PermissionRequested { request }] => {
                 assert_eq!(request.id, "ask_takeover");
                 assert_eq!(request.kind, PermissionRequestKind::Question);
+                assert_eq!(request.title, "是否转换为 PM 项目？");
+                assert_eq!(request.detail, None);
                 let questions = request.questions.as_ref().expect("structured questions");
                 assert_eq!(questions[0].id, "pm-bootstrap-challenge");
                 assert_eq!(questions[0].options[0].label, "确认");
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn built_in_user_input_keeps_the_title_and_the_longer_note() {
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        let mut state = state_with_turn();
+        translate_frame(
+            &json!({
+                "type": "user_input_requested",
+                "toolCallId": "ask_takeover",
+                "title": "是否接管这个项目",
+                "summary": "应用共享的工作流包。",
+                "description": "会在项目里登记一个 Workflow。\n已有文件不会被覆盖。",
+                "questions": [{
+                    "id": "pm-bootstrap-challenge",
+                    "header": "项目接管",
+                    "question": "是否转换为 PM 项目？",
+                    "options": [{"label": "确认", "description": "apply once"}]
+                }]
+            }),
+            &mut state,
+            &tx,
+        );
+        match drain(&mut rx).as_slice() {
+            [SessionEvent::PermissionRequested { request }] => {
+                assert_eq!(request.title, "是否接管这个项目");
+                assert_eq!(
+                    request.detail.as_deref(),
+                    Some("会在项目里登记一个 Workflow。\n已有文件不会被覆盖。")
+                );
+            }
+            other => panic!("unexpected events: {other:?}"),
+        }
+
+        let (tx, mut rx) = crate::adapter::EventTx::channel(64);
+        translate_frame(
+            &json!({
+                "type": "user_input_requested",
+                "toolCallId": "ask_summary",
+                "title": "是否接管这个项目",
+                "summary": "应用共享的工作流包。",
+                "questions": [{
+                    "id": "pm-bootstrap-challenge",
+                    "header": "项目接管",
+                    "question": "是否转换为 PM 项目？",
+                    "options": [{"label": "确认", "description": "apply once"}]
+                }]
+            }),
+            &mut state,
+            &tx,
+        );
+        match drain(&mut rx).as_slice() {
+            [SessionEvent::PermissionRequested { request }] => {
+                assert_eq!(request.detail.as_deref(), Some("应用共享的工作流包。"));
             }
             other => panic!("unexpected events: {other:?}"),
         }
